@@ -4,22 +4,15 @@ use std::{
     sync::Arc,
 };
 
-use crate::AssetId;
+use base::AssetId;
 
-/// Number of avatar texture slots carried by the legacy TextureEntry format.
 pub const MAX_AVATAR_TEXTURE_SLOTS: usize = 45;
-/// Maximum number of positional visual-parameter values in one LLUDP block sequence.
 pub const MAX_AVATAR_VISUAL_PARAMS: usize = u8::MAX as usize;
 
-/// A position in the receiver's avatar visual-parameter catalog.
-///
-/// AvatarAppearance transmits weights by position and omits parameter IDs. This index therefore
-/// identifies a wire position; it is not a stable visual-parameter ID across avatar catalogs.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AvatarVisualParamIndex(u8);
 
 impl AvatarVisualParamIndex {
-    /// Creates a visual-parameter position that can occur in a U8-counted block sequence.
     pub const fn new(index: u8) -> Option<Self> {
         if index < u8::MAX { Some(Self(index)) } else { None }
     }
@@ -29,7 +22,6 @@ impl AvatarVisualParamIndex {
     }
 }
 
-/// An avatar TextureEntry slot, distinct from a prim face identity.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct AvatarTextureSlot(u8);
 
@@ -80,7 +72,6 @@ impl AvatarTextureSlot {
     pub const AUX_BAKED_2: Self = Self(43);
     pub const AUX_BAKED_3: Self = Self(44);
 
-    /// Creates a slot in the official avatar TextureEntry range 0–44.
     pub const fn new(index: u8) -> Option<Self> {
         if index < MAX_AVATAR_TEXTURE_SLOTS as u8 { Some(Self(index)) } else { None }
     }
@@ -89,7 +80,6 @@ impl AvatarTextureSlot {
         self.0
     }
 
-    /// Returns the baked output represented by this TextureEntry slot, if any.
     pub const fn baked_slot(self) -> Option<AvatarBakeSlot> {
         match self.0 {
             8 => Some(AvatarBakeSlot::Head),
@@ -108,7 +98,6 @@ impl AvatarTextureSlot {
     }
 }
 
-/// A server-baked output slot, separate from its TextureEntry slot number.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AvatarBakeSlot {
     Head,
@@ -125,7 +114,6 @@ pub enum AvatarBakeSlot {
 }
 
 impl AvatarBakeSlot {
-    /// Returns the TextureEntry slot that carries this baked output.
     pub const fn texture_slot(self) -> AvatarTextureSlot {
         match self {
             Self::Head => AvatarTextureSlot::HEAD_BAKED,
@@ -143,7 +131,6 @@ impl AvatarBakeSlot {
     }
 }
 
-/// All 45 avatar texture slots from a successfully decoded TextureEntry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AvatarTextureSlots {
     values: [Option<AssetId>; MAX_AVATAR_TEXTURE_SLOTS],
@@ -156,11 +143,6 @@ impl Default for AvatarTextureSlots {
 }
 
 impl AvatarTextureSlots {
-    /// Creates a complete slot table. `None` means the simulator supplied a nil UUID for that slot.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AvatarAppearanceError::NilTextureId`] if a non-cleared slot contains a nil asset.
     pub fn new(values: [Option<AssetId>; MAX_AVATAR_TEXTURE_SLOTS]) -> Result<Self, AvatarAppearanceError> {
         if values.iter().flatten().any(|asset| asset.uuid().is_nil()) {
             return Err(AvatarAppearanceError::NilTextureId);
@@ -172,7 +154,6 @@ impl AvatarTextureSlots {
         self.values[usize::from(slot.index())]
     }
 
-    /// Returns all slots in TextureEntry order, including cleared slots.
     pub fn iter(&self) -> impl Iterator<Item = (AvatarTextureSlot, Option<AssetId>)> + '_ {
         self.values
             .iter()
@@ -182,7 +163,6 @@ impl AvatarTextureSlots {
     }
 }
 
-/// A complete avatar appearance state retained by World.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AvatarAppearance {
     appearance_version: Option<u8>,
@@ -192,29 +172,29 @@ pub struct AvatarAppearance {
 }
 
 impl AvatarAppearance {
-    /// Returns the latest supplied AppearanceData version byte.
     pub const fn appearance_version(&self) -> Option<u8> {
         self.appearance_version
     }
 
-    /// Returns the latest supplied COF version.
     pub const fn cof_version(&self) -> Option<i32> {
         self.cof_version
     }
 
-    /// Returns the last received weight for a wire position, if one has been supplied.
     pub fn visual_param(&self, index: AvatarVisualParamIndex) -> Option<u8> {
         self.visual_params.binary_search_by_key(&index, |(id, _)| *id).ok().map(|at| self.visual_params[at].1)
     }
 
-    /// Returns all known wire positions in ascending order.
     pub fn visual_params(&self) -> impl Iterator<Item = (AvatarVisualParamIndex, u8)> + '_ {
         self.visual_params.iter().copied()
     }
 
-    /// Returns the last complete avatar texture table, if one was decoded.
     pub fn texture_slots(&self) -> Option<&AvatarTextureSlots> {
         self.texture_slots.as_deref()
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.visual_params.capacity() * size_of::<(AvatarVisualParamIndex, u8)>()
+            + self.texture_slots.as_ref().map_or(0, |_| size_of::<AvatarTextureSlots>())
     }
 
     pub(crate) fn apply(&mut self, update: AvatarAppearanceUpdate) {
@@ -236,7 +216,6 @@ impl AvatarAppearance {
     }
 }
 
-/// One decoded AvatarAppearance message, with absent fields represented as no update.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AvatarAppearanceUpdate {
     appearance_version: Option<u8>,
@@ -246,15 +225,6 @@ pub struct AvatarAppearanceUpdate {
 }
 
 impl AvatarAppearanceUpdate {
-    /// Creates a partial update, rejecting duplicate visual positions.
-    ///
-    /// Visual positions are sorted before storage. A texture table, when supplied, replaces all
-    /// avatar texture slots; `None` leaves the existing table unchanged.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AvatarAppearanceError::DuplicateVisualParam`] for duplicate positions or
-    /// [`AvatarAppearanceError::TooManyVisualParams`] for more values than a U8 count can carry.
     pub fn new(
         appearance_version: Option<u8>,
         cof_version: Option<i32>,
@@ -288,14 +258,10 @@ impl AvatarAppearanceUpdate {
     }
 }
 
-/// Why a bounded avatar appearance value could not be constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AvatarAppearanceError {
-    /// A visual-parameter position was supplied more than once.
     DuplicateVisualParam,
-    /// A non-cleared texture slot contained a nil UUID.
     NilTextureId,
-    /// More visual-parameter values were supplied than fit the wire count.
     TooManyVisualParams,
 }
 
@@ -316,7 +282,7 @@ mod tests {
     use base::UUID;
 
     use super::{AvatarAppearance, AvatarAppearanceUpdate, AvatarBakeSlot, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex};
-    use crate::AssetId;
+    use base::AssetId;
 
     #[test]
     fn avatar_slot_bounds_hold() {

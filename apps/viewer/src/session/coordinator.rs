@@ -1,5 +1,3 @@
-//! Coordinates network events, session workflows, and presentation updates.
-
 use std::{
     collections::{HashMap, VecDeque},
     future::pending,
@@ -9,7 +7,7 @@ use std::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ::world::{Applied, Entity, LocalAddress, ObjectObservation, OrderEvidence, OrderEvidence::Ordered, RegionHandle, UpdateSource};
@@ -17,28 +15,36 @@ use base::UUID;
 use futures::{
     FutureExt,
     channel::{mpsc, oneshot},
+    executor::block_on,
     pin_mut,
     stream::StreamExt,
 };
-use gpui::BackgroundExecutor;
 use network::{
     AgentSession, CoverageLoss, CoverageSource, Delivery, Event, Grid, MfaChallenge, PacketOrder, SimulatorId, capabilities::Client,
 };
 use protocol::lludp::Message;
+use scene::Camera;
+use tokio::runtime::Handle;
+use tokio::sync::watch;
 
 use crate::{
+    asset_coordinator::{AssetCoordinator, AssetHandle},
     inventory::{FavoriteLocation, favorite_store, favorites::load_favorites},
     remembered_login::{self, RememberedLogin},
     session::{
         ChatMessage, RegionLookup, Session, SessionHandle, agent, display_message,
+        environment::EnvironmentIntake,
+        experience_environment::{self, EnvironmentCommand, EnvironmentInbox},
         inbound::{
             AvatarAppearanceMessage, ObjectBatch, ObjectOperation, SitTargetUpdate, decode_avatar_appearance_update, decode_object_message,
             decode_sit_target_update, object_media_requests,
         },
         object_media::{ObjectMediaFetcher, ObjectMediaResult, ObjectMediaTarget, response_is_stale},
         recovery::{self, RecoveryScheduler},
+        terrain::TerrainDecodeQueue,
         world::{IngestStatus, IngestSummary, MAX_WORLD_ENTITIES, RegistrationError, SessionWorld, viewer_world_limits},
     },
+    world_reader::{WorldReadHost, WorldReader},
 };
 
 const MAX_PENDING_CHAT_MESSAGES: usize = 64;
@@ -49,6 +55,8 @@ const MAX_MEDIA_FLUSH_BATCH: usize = 64;
 const PRESENTATION_WAKE_BUFFER: usize = 0;
 const QUERY_STATE_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(25);
 const QUERY_STATE_MAINTENANCE_RETRY: Duration = Duration::from_millis(1);
+const CAMERA_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+const CAMERA_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 fn next_query_state_maintenance_delay(elapsed: Duration, has_dirty_pressure: bool) -> Duration {
     if has_dirty_pressure {
@@ -258,9 +266,13 @@ pub(crate) enum AuthenticationUpdate {
 }
 
 pub(crate) struct SessionReadyUpdate {
+    pub(crate) environments: EnvironmentInbox,
+    pub(crate) camera: watch::Sender<Option<Camera>>,
+    pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,
     pub(crate) region_lookup: RegionLookup,
     pub(crate) region_name: Option<String>,
+    pub(crate) world_reader: WorldReader,
 }
 
 pub(crate) struct FavoritesUpdate {
@@ -403,7 +415,7 @@ impl PresentationSnapshot {
 pub(crate) async fn drain_session(
     mut session: Session,
     session_handle: SessionHandle,
-    background: BackgroundExecutor,
+    runtime: Handle,
     mailbox: PresentationMailbox,
     cancellation: oneshot::Receiver<()>,
     grid: Grid,
@@ -412,7 +424,6 @@ pub(crate) async fn drain_session(
     remember_login: bool,
     credential_write_lock: WriteLock,
 ) {
-    use Delivery::Reliable;
     use Event::{
         CapabilityError, CapabilityEvent, CapabilityEventBatch, CaptureFinished, CaptureInterrupted, CoverageLost, EventQueueCoverageLost,
         Failed, LoginAccepted, MfaRequired, SendFailed, SessionReady, SimulatorCapabilities, SimulatorConnectFailed, SimulatorConnected,
@@ -425,38 +436,100 @@ pub(crate) async fn drain_session(
     .shared();
     let world_limits = viewer_world_limits();
     let mut session_world = SessionWorld::new(world_limits);
+    let mut reads = WorldReadHost::new(session_world.world(), runtime.clone());
+    let mut terrain = TerrainDecodeQueue::default();
+    let mut environments = EnvironmentIntake::new(runtime.clone());
+    let (environment_pushes, environment_inbox) = EnvironmentInbox::channel();
+    let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone());
+    let mut terrain_received = false;
     let mut primary_simulator_id = None;
     let mut world_primary_simulator_id = None;
     let mut promoted_world_target = None;
     let mut handoff_observations = HashMap::new();
-    let mut active_session = None;
+    let mut active_session: Option<AgentSession> = None;
     let mut active_login_data = None;
+    let (camera, observations) = watch::channel(None::<Camera>);
+    let mut last_camera = None;
+    let mut camera_sent: Option<Instant> = None;
     let mut region_lookup = None;
-    let query_state_maintenance_started = background.now();
-    let mut query_state_maintenance = background.timer(Duration::ZERO).fuse();
-    let mut media = ObjectMediaIntake::new(ObjectMediaFetcher::new(background.clone(), cancellation.clone()));
+    let query_state_maintenance_started = tokio::time::Instant::now().into_std();
+    let mut query_state_maintenance = futures::future::ready(()).boxed().fuse();
+    let mut media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
     let recovery_queue = Arc::new(Mutex::new(RecoveryScheduler::new()));
     let (mut recovery_wake, recovery_wake_receiver) = mpsc::channel(1);
-    background
-        .clone()
-        .spawn(recovery::run_recovery_retries(
-            recovery_wake_receiver,
-            Arc::clone(&recovery_queue),
-            session_handle.clone(),
-            background.clone(),
-            cancellation.clone(),
-        ))
-        .detach();
+    drop(runtime.clone().spawn(recovery::run_recovery_retries(
+        recovery_wake_receiver,
+        Arc::clone(&recovery_queue),
+        session_handle.clone(),
+        cancellation.clone(),
+    )));
 
     loop {
+        if cancellation.clone().now_or_never().is_some() {
+            break;
+        }
+        reads.publish(session_world.world());
         media.flush(&session_world);
-        let input = select_drain_input(session.recv_event(), media.next_result(), cancellation.clone(), &mut query_state_maintenance).await;
+        let terrain_full = terrain.is_full();
+        let event = async { if terrain_full { pending().await } else { session.recv_event().await } };
+        let input = select_drain_input(event, media.next_result(), cancellation.clone(), &mut query_state_maintenance);
+        let input = match reads.select(terrain.select(environments.select(input))).await {
+            Ok(Err(decoded)) => {
+                let applied = session_world.apply_terrain(decoded);
+                if !terrain_received && applied > 0 {
+                    terrain_received = true;
+                    tracing::info!(patches = applied, "initial terrain patches received");
+                }
+                continue;
+            }
+            Ok(Ok(Ok(input))) => input,
+            Ok(Ok(Err(completion))) => {
+                if let Some(completion) = completion {
+                    environments.complete(&mut session_world, *completion);
+                }
+                continue;
+            }
+            Err(request) => {
+                request.serve(session_world.world());
+                continue;
+            }
+        };
         let event = match input {
             DrainInput::Cancelled => break,
             DrainInput::QueryStateMaintenance => {
+                if let (Some(simulator), Some(session), Some(view)) = (primary_simulator_id, &active_session, *observations.borrow())
+                    && let Some(origin) = session_world
+                        .region_for(simulator)
+                        .and_then(|region| session_world.world().region(region))
+                        .and_then(|info| info.resolved_origin())
+                {
+                    let state = (simulator, origin, view);
+                    let interval = if last_camera == Some(state) { CAMERA_HEARTBEAT_INTERVAL } else { CAMERA_UPDATE_INTERVAL };
+                    let now = tokio::time::Instant::now().into_std();
+                    if camera_sent.is_none_or(|sent| now.saturating_duration_since(sent) >= interval)
+                        && let Some(update) = agent::camera(session.agent_id, session.session_id, view, origin)
+                    {
+                        camera_sent = Some(now);
+                        match session_handle.send(update, Delivery::Unreliable) {
+                            Ok(()) => {
+                                if last_camera.is_none_or(|(previous, _, camera): (SimulatorId, _, Camera)| {
+                                    previous != simulator || camera.draw_distance() != view.draw_distance()
+                                }) {
+                                    tracing::debug!(draw_distance = view.draw_distance(), "simulator viewing distance updated");
+                                }
+                                last_camera = Some(state);
+                            }
+                            Err(error) => {
+                                last_camera = None;
+                                tracing::debug!(%error, "camera update deferred");
+                            }
+                        }
+                    }
+                }
                 let has_dirty_pressure = session_world.maintain_query_state();
-                let elapsed = background.now().duration_since(query_state_maintenance_started);
-                query_state_maintenance = background.timer(next_query_state_maintenance_delay(elapsed, has_dirty_pressure)).fuse();
+                let elapsed = tokio::time::Instant::now().into_std().duration_since(query_state_maintenance_started);
+                query_state_maintenance =
+                    tokio::time::sleep(next_query_state_maintenance_delay(elapsed, has_dirty_pressure)).boxed().fuse();
                 continue;
             }
             DrainInput::Event(event) => event,
@@ -525,6 +598,27 @@ pub(crate) async fn drain_session(
             break;
         };
 
+        if let SimulatorDisconnected { simulator_id, .. } | SimulatorFailed { simulator_id, .. } = &event
+            && let Some(region) = session_world.region_for(*simulator_id)
+        {
+            environments.observe(&event, &mut session_world, primary_simulator_id);
+            assets.retire(region);
+        }
+
+        if let SimulatorMessage { simulator_id, message, packet_order: PacketOrder::Ordered(_), .. } = &event
+            && Some(*simulator_id) == primary_simulator_id
+            && let (Some(agent), Some(region)) = (active_session.as_ref(), session_world.region_for(*simulator_id))
+        {
+            match experience_environment::decode(message, agent.agent_id) {
+                Ok(Some(push)) => match environment_pushes.try_send(EnvironmentCommand { region, push }) {
+                    Ok(()) => {}
+                    Err(error) => tracing::warn!(%error, "experience environment push could not be admitted"),
+                },
+                Ok(None) => {}
+                Err(error) => tracing::warn!(?error, "invalid experience environment push"),
+            }
+        }
+
         let media_requests = match &event {
             SimulatorMessage { simulator_id, sequence, packet_order, message, .. } => session_world
                 .region_for(*simulator_id)
@@ -554,6 +648,12 @@ pub(crate) async fn drain_session(
             event => event,
         };
 
+        if let SimulatorMessage { simulator_id, sequence, packet_order, message, .. } = &event
+            && let Some(region) = session_world.region_for(*simulator_id)
+        {
+            terrain.enqueue(message, UpdateSource::new(region, *sequence, order_evidence(*packet_order), 0), &runtime);
+        }
+
         let mut process_object_chunk = |_simulator_id,
                                         _summary: &IngestSummary,
                                         recovery_targets: Vec<(Option<SimulatorId>, LocalAddress)>,
@@ -580,6 +680,19 @@ pub(crate) async fn drain_session(
                 &mut recovery_wake,
             );
         }
+        if let SimulatorPromoted { simulator_id, .. } = &event
+            && let Some(region) = session_world.region_for(*simulator_id)
+        {
+            let push = scene::EnvironmentPush::Clear { experience: None, transition: Duration::ZERO };
+            if let Err(error) = environment_pushes.try_send(EnvironmentCommand { region, push }) {
+                tracing::error!(%error, "experience environment crossing reset could not be admitted");
+                mailbox.publish(ViewerUpdate::Failed("The environment update queue is unavailable.".into()));
+                break;
+            }
+        }
+        if !matches!(event, SimulatorDisconnected { .. } | SimulatorFailed { .. }) {
+            environments.observe(&event, &mut session_world, primary_simulator_id);
+        }
         if let SimulatorMessage { simulator_id, .. } = &event {
             for request in media_requests {
                 if let Some(target) = session_world.prepare_object_media(*simulator_id, request) {
@@ -601,75 +714,75 @@ pub(crate) async fn drain_session(
                 let write_lock = credential_write_lock.clone();
                 let username = username.clone();
                 let password = password.clone();
-                background
-                    .spawn(async move {
-                        let _guard = write_lock.lock().await;
-                        let mut warning = None;
-                        let remembered_login = if remember_login {
-                            let saved = RememberedLogin { username, password, mfa_hash: mfa_hash.unwrap_or_default() };
-                            match remembered_login::save(grid, &saved) {
-                                Ok(()) => Some(saved),
-                                Err(error) => {
-                                    warning = Some(error);
-                                    None
-                                }
-                            }
-                        } else {
-                            if let Err(error) = remembered_login::clear(grid) {
+                drop(runtime.spawn_blocking(move || {
+                    let _guard = block_on(write_lock.lock());
+                    let mut warning = None;
+                    let remembered_login = if remember_login {
+                        let saved = RememberedLogin { username, password, mfa_hash: mfa_hash.unwrap_or_default() };
+                        match remembered_login::save(grid, &saved) {
+                            Ok(()) => Some(saved),
+                            Err(error) => {
                                 warning = Some(error);
+                                None
                             }
-                            None
-                        };
-                        mailbox
-                            .publish(ViewerUpdate::Authentication(AuthenticationUpdate::CredentialsUpdated { remembered_login, warning }));
-                    })
-                    .detach();
+                        }
+                    } else {
+                        if let Err(error) = remembered_login::clear(grid) {
+                            warning = Some(error);
+                        }
+                        None
+                    };
+                    mailbox.publish(ViewerUpdate::Authentication(AuthenticationUpdate::CredentialsUpdated { remembered_login, warning }));
+                }));
             }
             SessionReady { simulator_id, session, capabilities, login_data } => {
+                if let Some(region) = session_world.region_for(simulator_id) {
+                    assets.register(region, capabilities.clone());
+                }
                 let session = *session;
                 media.set_client(simulator_id, capabilities.clone());
                 primary_simulator_id = Some(simulator_id);
                 active_session = Some(session.clone());
                 active_login_data = Some(login_data.clone());
-                let lookup = RegionLookup::new(session_handle.clone(), simulator_id, &session, background.clone());
+                let lookup = RegionLookup::new(session_handle.clone(), simulator_id, &session, runtime.clone());
                 region_lookup = Some(lookup.clone());
                 mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
+                    environments: environment_inbox.clone(),
+                    camera: camera.clone(),
+                    assets: assets.handle(),
                     session: session.clone(),
                     region_lookup: lookup.clone(),
                     region_name: session_world.region_name(simulator_id).map(str::to_owned),
+                    world_reader: reads.reader(),
                 }));
-
-                let _ = session_handle.send(agent::idle(session.agent_id, session.session_id), Reliable);
 
                 let mailbox = mailbox.clone();
                 let username = username.clone();
-                let background = background.clone();
+                let runtime = runtime.clone();
                 let cancelled = cancellation.clone();
-                background
-                    .spawn(async move {
-                        let load = load_favorites(&capabilities, &lookup, &session, &login_data).fuse();
-                        pin_mut!(load);
-                        let cancelled = cancelled.fuse();
-                        pin_mut!(cancelled);
-                        futures::select! {
-                            result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
-                                grid: session.grid,
-                                agent_id: session.agent_id,
-                                session_id: session.session_id,
-                                username,
-                                result,
-                            })),
-                            _ = cancelled => {}
-                        }
-                    })
-                    .detach();
+                drop(runtime.spawn(async move {
+                    let load = load_favorites(&capabilities, &lookup, &session, &login_data).fuse();
+                    pin_mut!(load);
+                    let cancelled = cancelled.fuse();
+                    pin_mut!(cancelled);
+                    futures::select! {
+                        result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
+                            grid: session.grid,
+                            agent_id: session.agent_id,
+                            session_id: session.session_id,
+                            username,
+                            result,
+                        })),
+                        _ = cancelled => {}
+                    }
+                }));
             }
             SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
                 let session = *session;
                 media.set_client(simulator_id, capabilities.clone());
                 primary_simulator_id = Some(simulator_id);
                 active_session = Some(session.clone());
-                let lookup = RegionLookup::new(session_handle.clone(), simulator_id, &session, background.clone());
+                let lookup = RegionLookup::new(session_handle.clone(), simulator_id, &session, runtime.clone());
                 region_lookup = Some(lookup.clone());
                 let previous_target = promoted_world_target.map(|handoff| handoff.target);
                 if begin_world_handoff(&mut world_primary_simulator_id, &mut promoted_world_target, previous_simulator_id, simulator_id) {
@@ -701,33 +814,34 @@ pub(crate) async fn drain_session(
                 let favorites_session = session.clone();
                 let favorites_lookup = lookup.clone();
                 mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
+                    environments: environment_inbox.clone(),
+                    camera: camera.clone(),
+                    assets: assets.handle(),
                     session: session.clone(),
                     region_lookup: lookup,
                     region_name: session_world.region_name(simulator_id).map(str::to_owned),
+                    world_reader: reads.reader(),
                 }));
                 if let Some(login_data) = active_login_data.clone() {
                     let mailbox = mailbox.clone();
                     let username = username.clone();
                     let cancelled = cancellation.clone();
-                    background
-                        .clone()
-                        .spawn(async move {
-                            let load = load_favorites(&capabilities, &favorites_lookup, &favorites_session, &login_data).fuse();
-                            pin_mut!(load);
-                            let cancelled = cancelled.fuse();
-                            pin_mut!(cancelled);
-                            futures::select! {
-                                result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
-                                    grid: favorites_session.grid,
-                                    agent_id: favorites_session.agent_id,
-                                    session_id: favorites_session.session_id,
-                                    username,
-                                    result,
-                                })),
-                                _ = cancelled => {}
-                            }
-                        })
-                        .detach();
+                    drop(runtime.clone().spawn(async move {
+                        let load = load_favorites(&capabilities, &favorites_lookup, &favorites_session, &login_data).fuse();
+                        pin_mut!(load);
+                        let cancelled = cancelled.fuse();
+                        pin_mut!(cancelled);
+                        futures::select! {
+                            result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
+                                grid: favorites_session.grid,
+                                agent_id: favorites_session.agent_id,
+                                session_id: favorites_session.session_id,
+                                username,
+                                result,
+                            })),
+                            _ = cancelled => {}
+                        }
+                    }));
                 }
             }
             SimulatorConnected { simulator_id, region_handle, .. } => {
@@ -736,6 +850,15 @@ pub(crate) async fn drain_session(
                 }
             }
             SimulatorMessage { simulator_id, source, message, .. } => {
+                if Some(simulator_id) == primary_simulator_id
+                    && observations.borrow().is_none()
+                    && let Message::AgentMovementComplete(movement) = &message
+                    && let Some(session) = &active_session
+                    && let Some(update) = agent::arrival(session.agent_id, session.session_id, movement)
+                    && let Err(error) = session_handle.send(update, Delivery::Reliable)
+                {
+                    tracing::debug!(%error, "arrival camera update deferred");
+                }
                 let scope = if Some(simulator_id) == primary_simulator_id { SimulatorScope::Primary } else { SimulatorScope::Neighbor };
                 let region_name = session_world.region_name(simulator_id);
                 handle_simulator_message(scope, source, message, active_session.as_ref(), region_lookup.as_ref(), region_name, &mailbox);
@@ -769,12 +892,19 @@ pub(crate) async fn drain_session(
             }
             CapabilityEvent { .. } | CapabilityEventBatch { .. } | CapabilityError { .. } | SimulatorConnectFailed { .. } => {}
             SimulatorCapabilities { simulator_id, capabilities, .. } => {
+                if let Some(region) = session_world.region_for(simulator_id) {
+                    assets.register(region, capabilities.clone());
+                }
                 media.set_client(simulator_id, capabilities);
             }
             CoverageLost { .. } => unreachable!("coverage loss events are reconciled before world intake"),
         }
     }
 
+    reads.finish();
+    drop(environments);
+    drop(terrain);
+    assets.stop().await;
     for (_, error) in session_world.retire_all() {
         tracing::warn!(?error, "could not retire simulator world region on session shutdown");
     }
@@ -800,6 +930,11 @@ fn decode_simulator_world_update(
 ) -> Option<DecodedWorldUpdate> {
     let region = world.region_for(simulator_id)?;
     if let Message::RegionHandshake(handshake) = message {
+        if let Err(error) = world
+            .update_water_height(UpdateSource::new(region, sequence, order_evidence(packet_order), 0), handshake.region_info1.water_height)
+        {
+            tracing::debug!(?error, "could not update region water height");
+        }
         let region_id = handshake.region_info2.as_ref().map(|info| info.region_id).filter(|id| !id.is_nil());
         if let Err(error) = world.update_handshake_metadata(
             UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
@@ -1241,6 +1376,7 @@ mod tests {
         },
         time::Duration,
     };
+    use tokio::runtime::Handle;
 
     use ::world::{
         Appearance,
@@ -1250,7 +1386,6 @@ mod tests {
     };
     use base::UUID;
     use futures::{FutureExt, StreamExt, channel::oneshot, executor::block_on, stream};
-    use gpui::TestAppContext;
     use math::{Quat, Vec3};
     use network::{
         Event,
@@ -1303,6 +1438,107 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn floods_preserve_reads_and_intake() {
+        use crate::world_reader::{MAX_INTAKE_TURNS, WorldReadHost};
+        use futures::poll;
+        use std::{collections::VecDeque, time::Instant};
+
+        const EVENTS: u32 = 512;
+        let simulator = simulator_id();
+        let events = (1..=EVENTS).map(|sequence| agent_update(UUID::from_u128(u128::from(sequence)), sequence, 0)).collect::<Vec<_>>();
+        let mut baseline = SessionWorld::new(viewer_world_limits());
+        baseline.register_simulator(simulator, None).unwrap();
+        let mut primary = Some(simulator);
+        let mut promoted = None;
+        let mut observations = HashMap::new();
+        let started = Instant::now();
+        for (index, message) in events.iter().enumerate() {
+            let event = simulator_message(simulator, index as u32 + 1, message.clone());
+            super::apply_world_event_cooperatively(
+                &mut baseline,
+                &event,
+                &mut primary,
+                &mut promoted,
+                &mut observations,
+                None,
+                &mut |_, _, _, _| {},
+            )
+            .await;
+        }
+        let baseline_time = started.elapsed();
+
+        let mut world = SessionWorld::new(viewer_world_limits());
+        world.register_simulator(simulator, None).unwrap();
+        let mut reads = WorldReadHost::new(world.world(), Handle::current());
+        let reader = reads.reader();
+        let mut queued_reads = VecDeque::new();
+        for _ in 0..8 {
+            let mut read = Box::pin(reader.objects(None, 256));
+            assert!(poll!(read.as_mut()).is_pending());
+            queued_reads.push_back((0, Instant::now(), read));
+        }
+        let mut completed = 0;
+        let mut processed = 0;
+        let mut since_read = 0;
+        let mut latencies = Vec::new();
+        let started = Instant::now();
+        while processed < events.len() {
+            reads.publish(world.world());
+            let event = simulator_message(simulator, processed as u32 + 1, events[processed].clone());
+            let input = super::select_drain_input(ready(Some(event)), pending(), pending(), pending());
+            match reads.select(input).await {
+                Ok(super::DrainInput::Event(Some(event))) => {
+                    super::apply_world_event_cooperatively(
+                        &mut world,
+                        &event,
+                        &mut primary,
+                        &mut promoted,
+                        &mut observations,
+                        None,
+                        &mut |_, _, _, _| {},
+                    )
+                    .await;
+                    processed += 1;
+                    since_read += 1;
+                    assert!(since_read <= MAX_INTAKE_TURNS, "a ready read must receive its reserved turn");
+                }
+                Err(request) => {
+                    assert_eq!(since_read, MAX_INTAKE_TURNS, "reader floods must not displace ready intake turns");
+                    request.serve(world.world());
+                    since_read = 0;
+                    let (at_event, queued, read) = queued_reads.pop_front().unwrap();
+                    let page = read.await.unwrap();
+                    latencies.push(queued.elapsed());
+                    assert!(processed - at_event <= 8 * MAX_INTAKE_TURNS, "each admitted FIFO request has bounded turn latency");
+                    assert_eq!(page.hydration_revision, world.world().revision());
+                    assert_eq!(page.objects.len(), processed.min(256));
+                    assert_eq!(page.objects[0].id, UUID::from_u128(1));
+                    assert_eq!(page.objects.last().unwrap().id, UUID::from_u128(processed.min(256) as u128));
+                    assert_eq!(reader.revision().unwrap(), page.hydration_revision);
+                    completed += 1;
+                    let mut read = Box::pin(reader.objects(None, 256));
+                    assert!(poll!(read.as_mut()).is_pending());
+                    queued_reads.push_back((processed, Instant::now(), read));
+                }
+                _ => panic!("only simulator intake and reader requests are ready"),
+            }
+        }
+        let flooded_time = started.elapsed();
+        assert_eq!(completed, EVENTS as usize / MAX_INTAKE_TURNS - 1);
+        assert_eq!(world.world().object_count(), EVENTS as usize);
+        assert_eq!(world.world().object_count(), baseline.world().object_count());
+        drop(queued_reads);
+        reads.finish();
+        latencies.sort();
+        eprintln!(
+            "World intake: {EVENTS} updates, baseline {baseline_time:?}, with {completed} reads {flooded_time:?}; read latency p50 {:?}, p95 {:?}, max {:?}",
+            latencies[latencies.len() / 2],
+            latencies[latencies.len() * 95 / 100],
+            latencies.last().unwrap()
+        );
+    }
+
     fn object_media_target(world: &mut SessionWorld, simulator_id: SimulatorId, order: u32, version: u32) -> ObjectMediaTarget {
         let region = world.register_simulator(simulator_id, None).expect("register simulator");
         let local_id = NonZeroU32::new(7).expect("nonzero local ID");
@@ -1329,12 +1565,12 @@ mod tests {
         ObjectMediaTarget { simulator_id, binding, source, version }
     }
 
-    #[gpui::test]
-    async fn media_worker_exit_does_not_stop_world_intake(cx: &TestAppContext) {
+    #[tokio::test]
+    async fn media_exit_preserves_intake() {
         let simulator = simulator_id();
         let mut world = SessionWorld::new(viewer_world_limits());
         let target = object_media_target(&mut world, simulator, 1, 1);
-        let mut media = ObjectMediaIntake::new(ObjectMediaFetcher::new(cx.executor(), ready(())));
+        let mut media = ObjectMediaIntake::new(ObjectMediaFetcher::new(Handle::current(), ready(())));
         media.queue(target, &world);
         assert!(matches!(&media, ObjectMediaIntake::Enabled { waiting, .. } if waiting.len() == 1));
         assert!(media.next_result().await.is_none());
@@ -1457,20 +1693,20 @@ mod tests {
         assert_eq!(super::next_query_state_maintenance_delay(elapsed, true), Duration::from_millis(1));
     }
 
-    #[gpui::test]
-    async fn query_state_maintenance_keeps_phase(cx: &TestAppContext) {
-        let background = cx.executor();
-        let maintenance_started = background.now();
-        let mut maintenance = background.timer(Duration::ZERO).fuse();
+    #[tokio::test(start_paused = true)]
+    async fn query_state_maintenance_keeps_phase() {
+        let maintenance_started = tokio::time::Instant::now().into_std();
+        let mut maintenance = ready(()).boxed().fuse();
         assert_eq!(super::next_query_state_maintenance_delay(Duration::ZERO, false), Duration::from_millis(25));
 
         let result = select_drain_input(std::future::pending(), std::future::pending(), std::future::pending(), &mut maintenance).await;
         assert!(matches!(result, super::DrainInput::QueryStateMaintenance));
 
-        background.advance_clock(Duration::from_millis(30));
-        let delay = super::next_query_state_maintenance_delay(background.now().duration_since(maintenance_started), false);
+        tokio::time::advance(Duration::from_millis(30)).await;
+        let delay =
+            super::next_query_state_maintenance_delay(tokio::time::Instant::now().into_std().duration_since(maintenance_started), false);
         assert_eq!(delay, Duration::from_millis(20));
-        maintenance = background.timer(delay).fuse();
+        maintenance = tokio::time::sleep(delay).boxed().fuse();
         let simulator_id = simulator_id();
         let mut events = stream::iter([SimulatorConnected {
             simulator_id,
@@ -1482,15 +1718,14 @@ mod tests {
                 .await;
         assert!(matches!(result, super::DrainInput::Event(Some(_))));
 
-        background.run_until_parked();
         let result = select_drain_input(std::future::pending(), std::future::pending(), std::future::pending(), &mut maintenance).await;
         assert!(matches!(result, super::DrainInput::QueryStateMaintenance));
 
-        background.advance_clock(Duration::from_millis(45));
-        let delay = super::next_query_state_maintenance_delay(background.now().duration_since(maintenance_started), false);
+        tokio::time::advance(Duration::from_millis(45)).await;
+        let delay =
+            super::next_query_state_maintenance_delay(tokio::time::Instant::now().into_std().duration_since(maintenance_started), false);
         assert_eq!(delay, Duration::from_millis(5));
-        maintenance = background.timer(delay).fuse();
-        background.run_until_parked();
+        maintenance = tokio::time::sleep(delay).boxed().fuse();
         let result = select_drain_input(std::future::pending(), std::future::pending(), std::future::pending(), &mut maintenance).await;
 
         assert!(matches!(result, super::DrainInput::QueryStateMaintenance));

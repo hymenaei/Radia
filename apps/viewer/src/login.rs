@@ -1,10 +1,7 @@
 use crate::chat::ChatScreen;
-use std::{
-    sync::{
-        Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc, Mutex, PoisonError,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use crate::inventory::{
@@ -21,7 +18,6 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     select::{Select, SelectEvent, SelectItem, SelectState},
 };
-use network::Delivery::Unreliable;
 use network::{AgentSession, CaptureConfig, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
 
 #[cfg(target_os = "linux")]
@@ -29,12 +25,14 @@ use crate::window_chrome::linux_titlebar;
 #[cfg(target_os = "windows")]
 use crate::window_chrome::windows_titlebar;
 use crate::{
+    asset_coordinator::AssetHandle,
     remembered_login::{self, RememberedLogin},
     session::{
         AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, RegionLookup, Session, SessionReadyUpdate,
-        ViewerUpdate, WriteLock, agent, drain_session, save_favorite_store, write_lock,
+        ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
     },
     window_geometry::observe,
+    world_reader::WorldReader,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,6 +80,8 @@ pub struct LoginScreen {
     remembered_login: Option<RememberedLogin>,
     chat_screen: gpui::Entity<ChatScreen>,
     session_handle: Option<SessionHandle>,
+    world_reader: Option<WorldReader>,
+    assets: Option<AssetHandle>,
     status: Option<String>,
     session: Option<AgentSession>,
     is_connecting: bool,
@@ -129,7 +129,7 @@ impl LoginScreen {
                 screen.refresh_favorites(cx);
             }
         });
-        let window_geometry_subscription = observe("main", window, cx);
+        let window_geometry_subscription = observe("login", window, cx);
         let chat_screen = cx.new(|cx| ChatScreen::new(window, cx));
 
         let screen = Self {
@@ -151,6 +151,8 @@ impl LoginScreen {
             remembered_login: None,
             chat_screen,
             session_handle: None,
+            world_reader: None,
+            assets: None,
             status: Some("Loading saved login…".into()),
             session: None,
             is_connecting: false,
@@ -364,7 +366,7 @@ impl LoginScreen {
         self.presentation_mailbox = Some(mailbox.clone());
         let (cancel_sender, cancel_receiver) = futures::channel::oneshot::channel();
         self.session_cancel = Some(cancel_sender);
-        let background = cx.background_executor().clone();
+        let background = crate::app::service_runtime(cx);
         let credential_write_lock = self.credential_write_lock.clone();
         let grid = self.grid;
 
@@ -387,20 +389,18 @@ impl LoginScreen {
         })
         .detach();
 
-        background
-            .spawn(drain_session(
-                network_session,
-                session_handle,
-                background.clone(),
-                mailbox,
-                cancel_receiver,
-                grid,
-                remembered_username,
-                remembered_password,
-                remember_login,
-                credential_write_lock,
-            ))
-            .detach();
+        drop(background.spawn(drain_session(
+            network_session,
+            session_handle,
+            background.clone(),
+            mailbox,
+            cancel_receiver,
+            grid,
+            remembered_username,
+            remembered_password,
+            remember_login,
+            credential_write_lock,
+        )));
 
         cx.notify();
     }
@@ -443,11 +443,13 @@ impl LoginScreen {
         }
 
         if let Some(ready) = session_ready {
-            let SessionReadyUpdate { session, region_lookup, region_name } = ready;
+            let SessionReadyUpdate { session, region_lookup, region_name, world_reader, assets, camera, environments } = ready;
+            self.assets = Some(assets.clone());
+            self.world_reader = Some(world_reader.clone());
             self.is_connecting = false;
             self.awaiting_mfa = false;
             self.mfa_challenge = None;
-            let connected = format!("Connected to {} at {}", session.grid.label(), session.simulator_address);
+            tracing::info!(grid = %session.grid.label(), simulator = %session.simulator_address, "connected to simulator");
             let mut warnings = Vec::new();
             if let Some(warning) = self.credential_warning.take() {
                 warnings.push(warning);
@@ -461,7 +463,7 @@ impl LoginScreen {
             if let Some(warning) = self.favorite_storage_warning.clone() {
                 warnings.push(warning);
             }
-            self.status = Some(if warnings.is_empty() { connected } else { format!("{connected}\n{}", warnings.join("\n")) });
+            self.status = (!warnings.is_empty()).then(|| warnings.join("\n"));
             self.region_lookup = Some(region_lookup);
             self.session = Some(session.clone());
             self.current_region_name = region_name;
@@ -473,29 +475,15 @@ impl LoginScreen {
                 }
             });
 
-            if let Some(session_handle) = self.session_handle.clone() {
-                let update_session = session.clone();
-                let heartbeat_handle = session_handle;
-                let heartbeat_agent = session.agent_id;
-                let heartbeat_session = session.session_id;
-                cx.spawn(async move |this, cx| {
-                    loop {
-                        cx.background_executor().timer(Duration::from_secs(5)).await;
-                        let active = this
-                            .update(cx, |view, _| {
-                                view.session_handle.is_some()
-                                    && view.session.as_ref().is_some_and(|session| {
-                                        session.agent_id == heartbeat_agent && session.session_id == heartbeat_session
-                                    })
-                            })
-                            .unwrap_or(false);
-                        if !active {
-                            break;
-                        }
-                        let _ = heartbeat_handle.send(agent::idle(update_session.agent_id, update_session.session_id), Unreliable);
-                    }
-                })
-                .detach();
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            if crate::app::start_scene(self.session_generation, cx) {
+                crate::app::connect_world(
+                    self.session_generation,
+                    crate::scene_feed::SceneSources { reader: world_reader, environments, assets },
+                    session.agent_id,
+                    camera,
+                    cx,
+                );
             }
         }
 
@@ -526,23 +514,49 @@ impl LoginScreen {
         }
 
         if let Some(error) = failure {
-            let was_connected = self.session.is_some();
-            tracing::warn!(was_connected, %error, "Viewer session ended after a failure");
-            self.is_connecting = false;
-            self.awaiting_mfa = false;
-            self.mfa_challenge = None;
-            self.session = None;
-            self.session_handle = None;
-            self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner).take();
-            self.region_lookup = None;
-            self.current_region_name = None;
-            self.session_cancel = None;
-            self.presentation_mailbox = None;
-            self.status = Some(error);
-            self.chat_screen.update(cx, |chat, cx| chat.clear_session(cx));
+            self.end_session(error, cx);
         }
 
         cx.notify();
+    }
+
+    fn end_session(&mut self, error: String, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        crate::app::end_scene(self.session_generation, cx);
+        let was_connected = self.session.is_some();
+        tracing::warn!(was_connected, %error, "Viewer session ended after a failure");
+        self.is_connecting = false;
+        self.awaiting_mfa = false;
+        self.mfa_challenge = None;
+        self.session = None;
+        self.session_handle = None;
+        self.world_reader = None;
+        self.assets = None;
+        self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner).take();
+        self.region_lookup = None;
+        self.current_region_name = None;
+        self.session_cancel = None;
+        self.presentation_mailbox = None;
+        self.session_generation = self.session_generation.wrapping_add(1);
+        self.status = Some(error);
+        self.chat_screen.update(cx, |chat, cx| chat.clear_session(cx));
+        cx.notify();
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn scene_failed(&mut self, error: String, cx: &mut Context<Self>) {
+        tracing::error!(%error, "scene renderer stopped");
+        self.end_session("Unable to display the world.".into(), cx);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self._window_geometry_subscription = observe("login", window, cx);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn chat_view(&self) -> gpui::Entity<ChatScreen> {
+        self.chat_screen.clone()
     }
 
     fn apply_favorites(&mut self, update: FavoritesUpdate, cx: &mut Context<Self>) {
@@ -670,22 +684,12 @@ impl Render for LoginScreen {
         let content = div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground);
 
         #[cfg(target_os = "windows")]
-        let content = {
-            let (titlebar_content, titlebar_action) = if self.session.is_some() {
-                self.chat_screen.update(cx, |chat, cx| (chat.titlebar_content(cx), chat.titlebar_action(cx)))
-            } else {
-                (div().into_any_element(), div().into_any_element())
-            };
-            content.child(windows_titlebar(window.is_maximized(), titlebar_content, titlebar_action, theme))
-        };
+        let content = content.child(windows_titlebar(window.is_maximized(), div().into_any_element(), div().into_any_element(), theme));
 
         #[cfg(target_os = "linux")]
         let content = {
-            let (titlebar_content, titlebar_action) = if self.session.is_some() {
-                self.chat_screen.update(cx, |chat, cx| (chat.titlebar_content(cx), chat.titlebar_action(cx)))
-            } else {
-                (div().text_sm().font_semibold().text_color(theme.foreground).child("Radia").into_any_element(), div().into_any_element())
-            };
+            let titlebar_content = div().text_sm().font_semibold().text_color(theme.foreground).child("Radia").into_any_element();
+            let titlebar_action = div().into_any_element();
 
             if let Some(titlebar) = linux_titlebar(window, titlebar_content, titlebar_action) { content.child(titlebar) } else { content }
         };
@@ -889,11 +893,14 @@ impl Render for LoginScreen {
             ),
         );
 
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         if self.session.is_some() {
             content.child(div().flex_1().min_h_0().child(self.chat_screen.clone()))
         } else {
             content.child(login_body)
         }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        content.child(login_body)
     }
 }
 

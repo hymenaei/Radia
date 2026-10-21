@@ -1,13 +1,18 @@
-//! Cross-checks authoritative storage and every derived World index.
-
-use super::World;
+use super::{MAX_ENVIRONMENT_BYTES, MAX_TERRAIN_PATCHES, World};
 use crate::{Entity, LocalAddress, ObjectMedia, Parent};
 use base::UUID;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 impl World {
-    /// Checks the World storage and all derived indexes when the `invariants` feature is enabled.
     pub fn check_invariants(&self) -> Result<(), &'static str> {
+        let environment_bytes: usize = self.regions.values().map(|state| state.environment.source_bytes()).sum();
+        if environment_bytes != self.environment_bytes || environment_bytes > MAX_ENVIRONMENT_BYTES {
+            return Err("environment source accounting is inconsistent");
+        }
+        let terrain_patches: usize = self.regions.values().map(|state| state.terrain.patch_count()).sum();
+        if terrain_patches != self.terrain_patches || terrain_patches > MAX_TERRAIN_PATCHES {
+            return Err("terrain patch accounting is inconsistent");
+        }
         self.store.check_invariants()?;
         if self.store.len() > self.limits.max_entities
             || self.regions.len().saturating_add(self.retired.len()) > self.limits.max_region_registrations

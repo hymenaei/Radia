@@ -29,7 +29,6 @@ cargo nextest run -p <crate>
 cargo nextest list --workspace
 cargo test --workspace
 cargo test -p <crate>
-cargo test --workspace --doc
 
 
 # Run specific tests
@@ -38,22 +37,15 @@ cargo nextest run -p <crate> --run-ignored only
 cargo test -p <crate> <name>
 cargo test -p <crate> -- --nocapture
 
-# Documentation
-cargo docs
-cargo doc --workspace --no-deps --document-private-items --open
-
 # Run app
 cargo run
 cargo run --release
 cargo run -p <crate> --release
 cargo run -p <crate> -- <args>
-
 ```
 
 - `cargo lint` checks all targets and features with warnings denied.
 - `cargo xtest` runs Nextest with all features, but does not explicitly select the workspace. Add `--workspace` when needed.
-- Nextest does not run documentation tests; use `cargo test --workspace --doc`.
-- `cargo docs` generates and opens private API documentation.
 - Replace `<crate>`, `<name>`, and `<args>` with the relevant values.
 - Optional features may require platform-specific dependencies.
 
@@ -157,7 +149,7 @@ cargo llvm-cov --workspace --json --summary-only
 
 Report: `target/llvm-cov/html/index.html`
 
-Start with the affected package when investigating a test gap. Workspace missing-line reports can be large. Coverage reflects the features and test targets selected by the command; `cargo llvm-cov` does not include doctests by default. `--summary-only` requires an export format such as `--json`, `--lcov`, or `--cobertura`.
+Start with the affected package when investigating a test gap. Workspace missing-line reports can be large. Coverage reflects the features and test targets selected by the command; `--summary-only` requires an export format such as `--json`, `--lcov`, or `--cobertura`.
 
 ## Benchmarks
 

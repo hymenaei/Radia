@@ -1,6 +1,6 @@
 use std::num::{NonZeroU8, NonZeroU32};
 
-use base::UUID;
+use base::{AssetId, UUID};
 use protocol::{
     lludp::{
         Message,
@@ -16,7 +16,7 @@ use protocol::{
     types::{ObjectShape, TextureEntry, TextureFace, decode_render_material_bindings},
 };
 use world::{
-    Appearance, AssetId, AttachmentPoint, FaceAppearance, FieldUpdate, Kind, LinearMotion, LocalAddress, MotionPatch, ObjectObservation,
+    Appearance, AttachmentPoint, FaceAppearance, FieldUpdate, Kind, LinearMotion, LocalAddress, MotionPatch, ObjectObservation,
     ObjectPatch, OrderEvidence, ParentUpdate, Pose, PrimShape, Region, RegionHandle, RenderMaterials, SculptFlags, SculptType, Shape,
     SurfaceAppearance, UpdateSource,
 };
@@ -35,7 +35,6 @@ const SCULPT_FLAG_INVERT: u8 = 0x40;
 const SCULPT_FLAG_MIRROR: u8 = 0x80;
 const SCULPT_DEFAULT_TEXTURE: u128 = 0xbe29_3869_d0d9_0a69_5989_ad27_f194_6fd4;
 
-/// Object operations decoded from one simulator message, in packet block order.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ObjectBatch {
     pub(crate) region: Region,
@@ -81,10 +80,6 @@ impl ObjectOperation {
     }
 }
 
-/// Converts a decoded LLUDP object message into ordered world-domain operations.
-///
-/// This function does not inspect or mutate World state. Invalid object blocks are
-/// represented by `None` at their original packet index.
 pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderEvidence, message: &Message) -> Option<ObjectBatch> {
     let mut invalid_blocks = 0;
     let mut invalid_fields = 0;

@@ -9,6 +9,9 @@ members = [
     "crates/network",
     "crates/protocol",
     "crates/world",
+    "crates/render",
+    "crates/assets",
+    "crates/scene",
 ]
 default-members = ["apps/viewer"]
 
@@ -18,37 +21,75 @@ version = "0.0.1"
 license = "LGPL-2.1-only"
 
 [workspace.dependencies]
+assets = { path = "crates/assets" }
+base = { path = "crates/common/base" }
+llsd = { path = "crates/common/llsd" }
+math = { path = "crates/common/math" }
+testing = { path = "crates/common/testing" }
+network = { path = "crates/network" }
+protocol = { path = "crates/protocol" }
+render = { path = "crates/render" }
+scene = { path = "crates/scene" }
+world = { path = "crates/world" }
+
+base64 = "=0.22.1"
+block_compression = { version = "=0.9.0", default-features = false }
 criterion = "0.8"
+dirs = "=5.0.1"
+dxr = "=0.9.0"
+egui = { version = "=0.37.0", default-features = false, features = [
+    "default_fonts",
+] }
+egui-wgpu = { version = "=0.37.0", default-features = false }
+egui-winit = { version = "=0.37.0", default-features = false }
+flate2 = "=1.1.10"
 futures = "0.3"
-hecs = "0.11"
+glam = "0.34.1"
 gpui = { package = "gpui-ce", version = "=0.2.2" }
 gpui-component = { package = "gpui_ce_components", version = "=0.2.0" }
 gpui-component-assets = { package = "gpui_ce_components_assets", version = "=0.2.0" }
 gpui-platform = { package = "gpui_ce_platform", version = "=0.1.0" }
-quick-xml = "=0.42.0"
+hecs = "0.11"
+httpdate = "=1.0.3"
+intel_tex_2 = "=0.5.0"
+jpeg2k = { version = "=0.10.1", default-features = false }
+keyring = { version = "=3.6.3", default-features = false }
+md-5 = "=0.10.6"
 proptest = "=1.11.0"
+quick-xml = "=0.42.0"
+reqwest = { version = "=0.12.28", default-features = false, features = [
+    "rustls-tls",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls"] }
-httpdate = "=1.0.3"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
-tracing = "0.1"
-glam = "0.34.1"
-tracing-subscriber = { version = "0.3", features = ["chrono"] }
-tracing-log = "0.2"
-tracing-tracy = { version = "=0.12.0", default-features = false, features = ["enable", "ondemand", "only-localhost"] }
-url = "2"
-uuid = "1"
+sha2 = "0.10.9"
 tempfile = "3"
 time = { version = "=0.3.55", features = ["formatting", "parsing"] }
-testing = { path = "crates/common/testing" }
-base = { path = "crates/common/base" }
-llsd = { path = "crates/common/llsd" }
-math = { path = "crates/common/math" }
-network = { path = "crates/network" }
-protocol = { path = "crates/protocol" }
-world = { path = "crates/world" }
-base64 = "=0.22.1"
+tokio = { version = "1", features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+tracing = "0.1"
+tracing-appender = "=0.2.5"
+tracing-subscriber = { version = "0.3", features = ["json", "chrono"] }
+tracing-tracy = { version = "=0.12.0", default-features = false, features = [
+    "enable",
+    "ondemand",
+    "only-localhost",
+] }
+url = "2"
+uuid = "1"
+wgpu = { version = "=30.0.1", default-features = false, features = [
+    "std",
+    "vulkan",
+    "wgsl",
+] }
+winit = { version = "=0.30.13", default-features = false, features = [
+    "rwh_06",
+] }
 zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 
 [workspace.lints.clippy]

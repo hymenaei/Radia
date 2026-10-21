@@ -1,15 +1,11 @@
-//! Renderer-independent observed volume parameters and sculpt or mesh references.
+use base::AssetId;
 
-use crate::AssetId;
-
-/// Flags carried by sculpt and mesh volume parameters.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct SculptFlags {
     pub invert: bool,
     pub mirror: bool,
 }
 
-/// A recognized sculpt geometry subtype.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SculptType {
     Sphere,
@@ -18,21 +14,9 @@ pub enum SculptType {
     Cylinder,
 }
 
-/// Quantized path and profile parameters observed for a regular volume.
-///
-/// These are lossless simulator values, not validated geometry. Unknown curve codes and
-/// out-of-range combinations remain representable; geometry consumers must constrain them
-/// before generating meshes. Keeping the integers preserves exact equality and avoids
-/// rounding observed values through floating-point conversions.
-///
-/// Cut beginnings and hollow use units of 1/50,000. Cut endings store the distance from
-/// one in the same units. Path scale is `2 - value / 100`; shear, twist, radius offset,
-/// taper, and skew use units of 1/100. Revolutions is `1 + value * 0.015`.
-/// Twist is a curve-dependent fraction, not an angle in radians.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PrimShape {
     pub path_curve: u8,
-    /// Low nibble selects the profile; high nibble selects the hollow profile.
     pub profile_curve: u8,
     pub path_begin: u16,
     pub path_end: u16,
@@ -53,7 +37,6 @@ pub struct PrimShape {
 }
 
 impl Default for PrimShape {
-    /// An uncut square profile extruded along a straight path, forming a box.
     fn default() -> Self {
         Self {
             path_curve: 0x10,
@@ -78,27 +61,10 @@ impl Default for PrimShape {
     }
 }
 
-/// The object's shape and any verified sculpt or mesh asset data.
-///
-/// Sculpt and mesh variants carry asset data; matches should use struct patterns such as
-/// `Shape::Sculpt { .. }` and `Shape::Mesh { .. }`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Shape {
-    /// A regular volume without a sculpt or mesh asset.
     Prim(PrimShape),
-    Sculpt {
-        /// Sculpt texture asset; distinct from the object's identity.
-        asset_id: AssetId,
-        /// Recognized sculpt geometry subtype.
-        sculpt_type: SculptType,
-        /// Invert and mirror bits from the sculpt parameter.
-        flags: SculptFlags,
-    },
-    Mesh {
-        /// Mesh asset; distinct from the object's identity.
-        asset_id: AssetId,
-        /// Invert and mirror bits from the sculpt parameter.
-        flags: SculptFlags,
-    },
+    Sculpt { asset_id: AssetId, sculpt_type: SculptType, flags: SculptFlags },
+    Mesh { asset_id: AssetId, flags: SculptFlags },
     Avatar,
 }

@@ -1,12 +1,12 @@
 use std::hint::black_box;
 
-use base::UUID;
+use base::{AssetId, UUID};
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
 use math::{Quat, Vec3};
 use world::{
     Appearance,
     ApplyOutcome::{IgnoredStale, Unchanged},
-    AssetId, AvatarAppearanceUpdate, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance, FieldUpdate, GltfMaterialOverride,
+    AvatarAppearanceUpdate, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance, FieldUpdate, GltfMaterialOverride,
     GltfMaterialOverrides, MotionPatch, ObjectPatch,
     ParentUpdate::Root,
     Pose, PropertiesPatch, RenderMaterials, SurfaceAppearance,

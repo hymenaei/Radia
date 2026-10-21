@@ -1,5 +1,3 @@
-//! Bounded scheduling and retry for object recovery requests.
-
 use std::{
     collections::HashMap,
     future::{Future, pending},
@@ -105,10 +103,6 @@ impl RecoveryEntry {
     }
 }
 
-/// Owns recovery admission, retry progress, and suppression after exhaustion.
-///
-/// Degraded entries retain their admission slot until an object update or simulator retirement
-/// clears them. This bounds both retry work and the memory used to suppress repeated requests.
 pub(super) struct RecoveryScheduler {
     entries: HashMap<LocalAddress, RecoveryEntry>,
     max_targets: usize,
@@ -315,7 +309,6 @@ pub(super) async fn run_recovery_retries(
     mut wake_receiver: mpsc::Receiver<()>,
     queue: Arc<Mutex<RecoveryScheduler>>,
     session_handle: SessionHandle,
-    background: gpui::BackgroundExecutor,
     cancellation: impl Future<Output = ()> + Clone + Send + 'static,
 ) {
     use Delivery::Reliable;
@@ -327,7 +320,7 @@ pub(super) async fn run_recovery_retries(
         let deadline = queue_deadline.map(|deadline| next_send_at.map_or(deadline, |send_at| deadline.max(send_at)));
         let wait = deadline.map_or(RECOVERY_IDLE_WAIT, |deadline| deadline.saturating_duration_since(now));
         let can_wake_early = next_send_at.is_none_or(|send_at| now >= send_at);
-        let timer = background.timer(wait).fuse();
+        let timer = tokio::time::sleep(wait).fuse();
         let wake = async { if can_wake_early { wake_receiver.next().await } else { pending::<Option<()>>().await } }.fuse();
         let cancelled = cancellation.clone().fuse();
         pin_mut!(timer, wake, cancelled);
@@ -488,7 +481,6 @@ mod tests {
         assert!(scheduler.schedule(simulator, agent_data(), target, now).is_some());
 
         for _ in 0..RECOVERY_MAX_SENDS {
-            // Repeated cache misses must not reset the send limit or postpone dispatch.
             assert!(scheduler.schedule(simulator, agent_data(), target, now + Duration::from_secs(1)).is_some());
             let due = scheduler.take_due(now);
             assert_eq!(due.len(), 1);
@@ -703,7 +695,6 @@ mod tests {
         assert_eq!(request.objects.iter().map(|object| object.local_id).collect::<Vec<_>>(), [10, 11]);
         assert!(request.objects.iter().all(|object| object.cache_miss_type == Full));
 
-        // Alternating zero and nonzero bytes exercise zero-coding expansion.
         let targets = vec![address(7, 0xff00_ff00); MAX_RECOVERY_OBJECTS_PER_REQUEST];
         let agent_data = RequestAgentData {
             agent_id: UUID::from_bytes([0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255]),

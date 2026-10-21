@@ -1,5 +1,4 @@
-//! Typed payload values embedded in protocol messages.
-
+pub mod layer_data;
 pub mod object_shape;
 pub mod render_material;
 pub mod texture_entry;

@@ -1,6 +1,4 @@
-//! Committed domain changes, revision barriers, and bounded journal retention.
-
-use crate::{Entity, LocalAddress, Region, WorldRevision};
+use crate::{Entity, LocalAddress, Region, TerrainPatchId, WorldRevision};
 use base::UUID;
 use std::{
     collections::VecDeque,
@@ -10,7 +8,6 @@ use std::{
 #[cfg(test)]
 use crate::{OrderEvidence, ParentUpdate};
 
-/// Why an entity left the current World.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorldEntityRemovalReason {
     Killed,
@@ -19,29 +16,23 @@ pub enum WorldEntityRemovalReason {
     RegionRetired,
 }
 
-/// Coarse categories used to decide which consumer-side values need hydration.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WorldChangeClasses(u8);
 
 impl WorldChangeClasses {
-    /// Position, rotation, or the coordinate frame used to resolve a pose changed.
     pub const POSE: Self = Self(1 << 0);
-    /// Linear velocity, acceleration, or angular velocity changed.
     pub const MOTION: Self = Self(1 << 1);
     pub const SCALE: Self = Self(1 << 2);
     pub const RELATIONSHIP: Self = Self(1 << 3);
     pub const SHAPE: Self = Self(1 << 4);
     pub const APPEARANCE: Self = Self(1 << 5);
     pub const PROPERTIES: Self = Self(1 << 6);
-    /// ObjectMedia version or face data changed; hydrate through [`crate::World::object_media`].
     pub const MEDIA: Self = Self(1 << 7);
 
-    /// Returns whether no categories are present.
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
-    /// Returns whether every category in `classes` is present.
     pub const fn contains(self, classes: Self) -> bool {
         self.0 & classes.0 == classes.0
     }
@@ -61,51 +52,20 @@ impl BitOrAssign for WorldChangeClasses {
     }
 }
 
-/// Ordered World invalidations and lifecycle facts retained by the journal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorldChange {
-    EntityAdded {
-        id: UUID,
-        entity: Entity,
-        address: LocalAddress,
-    },
-    EntityUpdated {
-        id: UUID,
-        entity: Entity,
-        classes: WorldChangeClasses,
-    },
-    /// The root and its descendants need pose hydration. Descendants are not enumerated here.
-    /// Consumers must expand their cached dependencies in bounded work or invalidate a broader scope.
-    SubtreeInvalidated {
-        id: UUID,
-        entity: Entity,
-    },
-    EntityRemoved {
-        id: UUID,
-        entity: Entity,
-        address: LocalAddress,
-        reason: WorldEntityRemovalReason,
-    },
-    /// An entity kept its UUID and moved to a different simulator-local address.
-    EntityRebound {
-        id: UUID,
-        entity: Entity,
-        from: LocalAddress,
-        to: LocalAddress,
-    },
-    EntityTransferred {
-        id: UUID,
-        entity: Entity,
-        from: LocalAddress,
-        to: LocalAddress,
-    },
+    EntityAdded { id: UUID, entity: Entity, address: LocalAddress },
+    EntityUpdated { id: UUID, entity: Entity, classes: WorldChangeClasses },
+    SubtreeInvalidated { id: UUID, entity: Entity },
+    EntityRemoved { id: UUID, entity: Entity, address: LocalAddress, reason: WorldEntityRemovalReason },
+    EntityRebound { id: UUID, entity: Entity, from: LocalAddress, to: LocalAddress },
+    EntityTransferred { id: UUID, entity: Entity, from: LocalAddress, to: LocalAddress },
     RegionAdopted(Region),
-    /// Region metadata changed. A changed origin also invalidates the region's derived poses.
     RegionUpdated(Region),
-    RegionRetired {
-        region: Region,
-        entities_removed: usize,
-    },
+    EnvironmentUpdated(Region),
+    TerrainPatchUpdated { region: Region, patch: TerrainPatchId },
+    WaterHeightUpdated(Region),
+    RegionRetired { region: Region, entities_removed: usize },
 }
 
 #[derive(Debug)]
@@ -207,9 +167,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        Appearance, AssetId, FaceAppearance, FieldUpdate, Kind, LocalAddress, ObjectObservation, ObjectPatch, Pose, PropertiesPatch,
-        RegionInfo, RegionOutcome, RenderMaterials, SculptFlags, Shape, SurfaceAppearance, UpdateSource, WorldLimits,
+        Appearance, FaceAppearance, FieldUpdate, Kind, LocalAddress, ObjectObservation, ObjectPatch, Pose, PropertiesPatch, RegionInfo,
+        RegionOutcome, RenderMaterials, SculptFlags, Shape, SurfaceAppearance, UpdateSource, WorldLimits,
     };
+    use base::AssetId;
 
     fn limits(max_journal_entries: usize) -> WorldLimits {
         WorldLimits {

@@ -1,114 +1,90 @@
-Radia is a Second Life viewer written in Rust. Its goal is to interoperate with the Second Life ecosystem.
+Radia is a Second Life viewer written in Rust. It is a redesign, not a port. It must interoperate fully with the Second Life ecosystem while being simpler, safer, and faster than the legacy viewer.
 
-Use the legacy viewer as a reference for protocol behavior, content compatibility, and externally visible behavior. Treat its internal abstractions, ownership and threading models, rendering design, workarounds, and hardware constraints as implementation choices. Preserve compatibility requirements, and redesign the implementation wherever compatibility allows. Prefer simple, safe, explicit Rust designs over ports of legacy C++ patterns.
+The legacy viewer is a reference for protocol behavior, content compatibility, and externally visible behavior only. Its abstractions, ownership and threading models, rendering design, and workarounds are not requirements. Keep the compatibility requirement a pattern serves and redesign the rest. Do not port C++ patterns.
 
-Radia must stay responsive while processing simulator traffic, streaming assets, updating scenes, running the UI, and rendering. Account for latency, frame time, allocations, copies, synchronization, cache locality, and scheduling as workloads and sessions grow.
+## Non-negotiables
 
-Treat simulator data, assets, and user-created content as untrusted. Handle malformed, unusual, legacy, and high-complexity content without sacrificing stability or ecosystem compatibility.
+1. **Responsive**. Radia handles simulator traffic, streams assets, updates scenes, runs the gui, and renders without any workload starving the others. Budget latency, frame time, allocations, copies, and synchronization. Design for long sessions and large scenes.
+2. **Hostile input**. Simulator data, assets, and user-created content are untrusted. Malformed, unusual, and very complex content must not crash, stall, or exhaust the memory of the viewer. Valid but strange legacy content must still work.
+3. **Simple**. The smallest model that makes correct behavior unsurprising wins.
 
-## Guidelines
+## Working style
 
-- Write idiomatic, pragmatic Rust. Prioritize correctness, clarity, simplicity, and maintainability. Follow Rust and project conventions without forcing or avoiding language features.
-- Prefer clear ownership, straightforward control flow, and cohesive responsibilities. Avoid speculative generality, unnecessary indirection, and abstractions without a concrete benefit.
-- Express meaningful invariants through types where practical. Validate untrusted input, minimize visibility, and use `unsafe` only when necessary, with documented safety invariants.
-- Add dependencies only when they provide a concrete benefit. Prefer existing dependencies and standard-library functionality when appropriate.
-- Write labels and messages in plain words with standard punctuation. Do not use decorative symbols as text; use words or icon components instead.
+- Do not preserve complexity because it exists. Do not add machinery because it looks impressive.
+- Measure twice, cut once. YAGNI. Fight scope creep. Do what was asked, minimally and realistically, and add nothing creative.
+- Put code in existing files. Create a file only for a new logical component.
+- These are defaults. The developer's instructions override them. If a rule fights the task, say so and get sign-off before breaking it.
+
+## Code
+
+- Correctness and clarity first, then the budgets above.
+- Add dependencies only for a concrete benefit; prefer existing ones and std.
+- Minimize visibility. Use `unsafe` only when necessary.
+- Propagate with `?`. `unwrap`, `expect`, indexing, slicing, and unchecked arithmetic are for invariants you can prove, never for wire, asset, or user data.
+- Handle every fallible result. `let _ =` on a `Result` hides a failure; propagate it, handle it, or log it where it is handled.
+- Newtypes for easily confused IDs and values with domain rules; counts and sizes stay primitive.
+- Enums for exclusive states, with data in the variants. Type-state only for fixed lifecycles.
+- `Option<T>` for absence, `Result<Option<T>, E>` for absence vs failure.
+- Typed domain errors. Log where handled, not at every propagation layer. Stale updates and deferred recovery are outcomes, not errors. Failures that affect the user reach the gui as typed outcomes it can show.
+- World mutations: validate and plan before committing. Never leave state or indexes inconsistent on failure.
+- Packet blocks: validate framing, shared context, and ordering first. Isolate independent failures, keep earlier valid changes, report partial outcomes, and stop when a failure invalidates later blocks.
+- Choose storage by access and update patterns. Keep layout and index invariants private.
+
+## Concurrency
+
+- One owner for authoritative mutable state, including `World`. Cross threads with immutable snapshots or change streams, not broad locks.
+- No blocking or expensive work on gui or render paths. Redraw on change, with no continuously repainting animations.
+- Bound queues and in-flight work. Apply backpressure, cancellation, coalescing, and prioritization while preserving protocol ordering and acks.
+- Add subsystem schedulers or budgets only when a workload justifies them; no global scheduling infrastructure.
+- Scope clones by shadowing inside the spawn block (`let ctx = ctx.clone();`) so handles drop with the task.
+
+## Cover the whole path
+
+Before calling work done, say which of these applied:
+
+- **Update paths**. Full, compressed, cached, and terse object updates reach the same `World` invariants.
+- **Reverse transitions**. Every way in has a way out and a way to observe it: kill, derez, unlink, detach, region leave, cache eviction.
+- **Regions**. Root and neighbor regions behave differently, and so do crossing and teardown.
+- **Scale**. Exercise the large scene and the long session, not one object.
+- **Docs**. Update the doc that owns the fact in the same change.
 
 ## Naming
 
-- Prefer concise, natural names that remain clear in context. Avoid redundant qualifiers and repeated context, particularly in public APIs.
-- Use short locals and parameters when context makes them clear: `pkt`, `req`, `obj`, `ctx`, `r`, `e`, and `d` are fine when unambiguous. Match name specificity to scope and usage.
-- Use familiar or contextually clear abbreviations, not obscure shorthand. Keep meanings consistent within a function or module; never expand names solely for verbosity.
-- Import types, traits, functions, constants, and enum variants with `use` rather than writing fully qualified paths at use sites, including single-use items.
-- Keep a module-qualified path only when the bare name would be ambiguous or collide with another import (e.g. `fmt::Result` vs `io::Result`). Do not rename imports with `as` to avoid a collision; qualify through the parent module instead.
-- `use Trait as _` is allowed for trait-only imports.
-- Import enum variants by name only when the name is distinctive and does not match a prelude item (`Some`, `None`, `Ok`, `Err`). Otherwise keep `Enum::Variant`. Do not glob-import variants, except `use super::*` in test modules.
-- In Rust identifiers and diagnostics, use `Udp` for generic transport and `LLUdp` for Second Life's protocol. Preserve exact external and wire-template spellings.
+- Concise names; no redundant qualifiers in public APIs. Short locals are fine when context is clear (`pkt`, `req`, `obj`, `ctx`, `r`, `e`, `d`).
+- Import items with `use`, even single-use ones. Qualify through the parent module only on ambiguity (`fmt::Result`); never rename with `as`. `use Trait as _` is allowed.
+- Use `super` at most once in a path. Never write `super::super`; use `crate::` for anything above the parent module.
+- Import enum variants by name only if distinctive and not a prelude name. No glob imports except `use super::*` in tests.
+- `Udp` is the generic transport; `LLUdp` is Second Life's protocol. Keep wire-template and external spellings exact.
 
-## API and Data Modeling
+## Comments
 
-- Keep APIs semantically consistent without forcing identical signatures. Prefer direct arguments; use operation structs for meaningful grouped data or invariants. Use methods for behavior belonging to a type and free functions for independent operations.
-- Prefer concrete types and inherent methods. Add traits or generics for useful contracts, real boundaries, or justified reuse—not hypothetical flexibility.
-- Use newtypes for easily confused identities or values with domain rules; keep ordinary counts and sizes primitive. Use enums for exclusive states, with state-specific data in their variants, and separate fields for facts that can coexist. Use type-state only when a fixed lifecycle benefits from compile-time checks.
-- Match return types to caller needs: `Option<T>` for ordinary absence, `Result<Option<T>, E>` for distinct absence and failure, and domain enums for meaningful alternatives. Put outcome-specific data in its variant; use structured results when effects can coexist. Avoid redundant wrappers.
-- Expose useful domain APIs while keeping storage and invariant-sensitive state private. Prefer public fields for plain data, meaningful accessors for encapsulated state, and lightweight borrowed views where useful. Avoid getters that only mirror fields.
-- Choose storage by real access and update patterns, not entity counts alone. Encapsulate indexing and alignment invariants; keep consumers independent of layout.
-
-## Control Flow and State Changes
-
-- Prefer explicit loops and `match` for mutations and meaningful branches, `?` for propagation, and iterators or combinators for simple transformations. Avoid chains that hide decisions.
-- Keep domain errors typed and add reporting context at application boundaries. Represent expected states, such as stale updates or deferred recovery, as outcomes. Log where errors are handled, not at every propagation layer; avoid noisy per-block warnings.
-- Validate framing, shared context, and ordering before applying blocks. Isolate independent failures, preserve earlier valid changes, and report partial outcomes. Stop when a failure invalidates later processing.
-- Preserve invariants per world mutation: validate and plan dependent changes before committing, without leaving state or indexes inconsistent on failure. Use rollback only when simpler steps cannot guarantee correctness.
-
-## Ownership and Concurrency
-
-- Give authoritative mutable state, including `World`, one clear owner. Borrow locally; use immutable snapshots or change streams across thread boundaries. Avoid broad shared locks; keep necessary synchronization narrow and bounded.
-- Keep blocking or expensive work off UI and render paths. Bound queues and in-flight work; apply backpressure, safe cancellation, coalescing, and prioritization while preserving protocol ordering and acknowledgments.
-- Add subsystem-specific schedulers or resource budgets when workloads justify them; avoid speculative global scheduling infrastructure.
-
-## Organization and Refactoring
-
-- Keep cohesive logic together. Extract helpers for real operations, important rules, or useful reuse, even with one caller. Do not split functions merely to reduce line count.
-- Split modules by cohesive responsibility when useful, not by line count. Avoid excessive nesting or a file per type or operation.
-- Refactor nearby code when it helps the task. Reconsider architecture when a concrete problem exposes a simpler, safer design. Keep unrelated cleanup separate; explain architectural, public API, or schema changes before implementing.
-- Keep types in their natural owning crates. Extract narrowly shared concepts only across real dependency boundaries. Avoid dependency cycles and catch-all crates; map distinct domain identities in application adapters.
+No comments or doc comments in source, without exception. If code needs one, refactor names, types, or structure instead. Remove existing comments from code you touch.
 
 ## Testing
 
-- Use `$rust-testing` for Rust test design, names, implementation, review, execution, coverage analysis, and test-suite audits. Favor behavior-focused tests through meaningful APIs, asserting observable results and invariants; use focused unit tests where needed.
-- Use property-based or stateful sequences when interacting operations threaten invariants, such as reordering, reparenting, stale updates, and ID reuse. Keep generators domain-valid and failures reproducible; retain important regressions.
-
-## Rustdoc
-
-- Prefer clear code, rustdoc, and maintained documentation over implementation comments. Add comments only for critical local constraints that cannot be made clear otherwise, and document `unsafe` safety invariants.
-- Document non-obvious public contracts, including units, ordering, ownership, threading, invariants, and failures. Skip boilerplate for obvious fields, getters, and variants.
-- Provide brief `//!` overviews for library crates and important modules. Use rustdoc links, runnable `# Examples`, and `# Errors`, `# Panics`, or `# Safety` sections when useful.
-- Follow official Rustdoc conventions. Update existing docs when behavior or contracts change; create new documentation files only when explicitly requested.
-
-## Validation
-
-Must use Cargo's default `target/` directory. Set `CARGO_TARGET_DIR` or pass `--target-dir` only when the user explicitly requests a custom directory.
-
-Use existing project paths and tool defaults for validation. Create task-specific scratch directories or copied inputs only when explicitly requested.
-
-Use the Rust Analyzer MCP for semantic navigation and diagnostics. Confirm public signatures and documented behavior before coding.
-
-After changing public rustdoc, run `cargo doc --workspace --no-deps` and fix rustdoc warnings and broken links.
-
-Before finishing substantial changes, run the relevant checks:
-
-```sh
-cargo fmt --all
-cargo check --workspace
-cargo lint
-cargo xtest --workspace
-```
-
-Do not claim a check passed unless it was actually run.
-
-## Profiling
-
-- Treat hot-path budgets as design constraints. Avoid obvious overhead when equally clear alternatives exist; profile representative workloads and justify complex optimizations with measurements or explicit requirements.
-- Keep tracing low-noise by default: prefer structured spans and meaningful events over frequent informational logging.
-- Instrument coarse subsystem boundaries and meaningful hot operations by default. Add fine-grained or high-frequency instrumentation only when investigating a specific problem.
-- Keep Tracy opt-in and prefer feeding existing tracing spans into Tracy rather than maintaining separate instrumentation.
-- Keep credentials, session-specific identifiers, capability URLs, and user content out of trace fields. Avoid per-packet, per-frame, and other high-volume events by default.
+- Use `$rust-testing` for all Rust test work.
+- Smallest proof first. Run tests and clippy for the crates you touched. Run the workspace-wide suite only when asked, because CI owns it.
+- Test behavior through public APIs. Skip tests that assert callback wiring or mirror the implementation.
+- Use property-based or stateful tests where operations interact (reordering, reparenting, stale updates, ID reuse). Generators must be domain-valid and failures reproducible.
+- Wait on completion signals, never on sleeps or polling. A test that needs a timeout to pass is wrong.
+- Ask before launching the gui viewer, driving a browser, or any computer use.
 
 ## Versioning
 
-- Follow Semantic Versioning (SemVer).
-- Before finalizing each PR, evaluate whether it completes a release-worthy milestone or otherwise establishes a release boundary.
-- At release boundaries, autonomously determine the appropriate version bump from changes since the previous release.
-- Do not bump versions for routine merges, individual issues, or internal refactors unless they constitute a release.
-- Maintain the shared Cargo workspace version and update `Cargo.lock` consistently.
-- Include version changes in the relevant PR, verify the workspace, and explain the bump in the PR description.
-- Do not create Git tags, publish packages, or create GitHub releases without explicit approval.
+- SemVer with a single shared workspace version; keep `Cargo.lock` in sync.
+- Before finalizing a PR, decide whether it is a release boundary. If so, bump the version and explain it in the PR description. No bumps for routine merges or internal refactors.
+- No git tags, publishing, or GitHub releases without approval.
 
-## Agent Instructions
+## Documentation
 
-Keep this file high-signal. Add rules only for recurring, non-obvious project conventions or common mistakes. Do not turn `AGENTS.md` into documentation for the entire codebase.
+- `docs/vision.md`: product direction and architectural principles. Follow when making architectural and product decisions.
+- `docs/architecture.md`: high-level architecture, subsystem responsibilities, state ownership, data flow, crate boundaries, and dependencies.
+- `docs/reference.md`: guidance for consulting the official Second Life viewer, including which systems to study, which to reference only for behavior, and which implementations to ignore.
+- `docs/tooling.md`: commands, testing, fuzzing, benchmarks, profiling, analysis.
 
-- Read `docs/context.md` when work touches Second Life terminology, simulator lifecycle, entity identity, or protocol and event ordering.
-- Read `docs/architecture.md` when changing workspace membership, internal crate dependencies, or package ownership.
-- Consult `docs/tooling.md` for development commands, testing, fuzzing, benchmarks, profiling, and code analysis.
+Durable architecture and decisions go in these docs. Do not describe crate layout or data flow in this file.
+
+## Keeping this file sharp
+
+- A rule earns its place only if it is non-obvious, came up more than once, and is concrete enough to act on.
+- Write traps to avoid, not maps to follow.

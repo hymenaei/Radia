@@ -120,6 +120,7 @@ pub(super) enum Command {
     },
     GetBytes {
         url: CapabilityUrl,
+        max_response_bytes: usize,
         reply: oneshot::Sender<Result<AdmittedResponse, CapabilityFailure>>,
         deadline: RequestDeadline,
         _permit: OwnedSemaphorePermit,
@@ -225,20 +226,20 @@ pub(super) async fn run(
                     let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
                     let _ = reply.send(result);
                 }
-                Command::GetBytes { url, mut reply, deadline, _permit } => {
+                Command::GetBytes { url, max_response_bytes, mut reply, deadline, _permit } => {
                     let result = tokio::select! {
                         biased;
                         _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
                         _ = reply.closed() => return,
                         _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
-                        result = get_bytes(&client, &url.url, url.capture_endpoint.as_deref()) => result.map_err(CapabilityFailure::Http),
+                        result = get_bytes(&client, &url.url, url.capture_endpoint.as_deref(), max_response_bytes) => result.map_err(CapabilityFailure::Http),
                     };
                     if let Err(error) = &result
                         && !error.is_session_closed()
                     {
                         status.record_error(error.to_string());
                     }
-                    let result = result.map(|response| into_admitted_response(response, MAX_CAPABILITY_RESPONSE_BYTES, _permit));
+                    let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
                     let _ = reply.send(result);
                 }
             }
@@ -410,10 +411,6 @@ const CAPABILITY_URL_PARSE_BASE_BYTES: usize = 2048;
 const CAPABILITY_URL_RETAINED_BYTES_PER_SERIALIZED_BYTE: usize = 2;
 const CAPABILITY_URL_RETAINED_BASE_BYTES: usize = 128;
 
-/// Returns a corpus-calibrated reservation estimate for parsing the requested URLs and building their grant map.
-///
-/// The estimate covers the tested escaped-path, dotted-host, IDNA, query, and grant-count cases. It can undercount unseen URL parser
-/// behavior and is not a heap ceiling.
 fn capability_url_parse_memory_estimate(response: &Value, names: &[String]) -> Result<usize, CapabilityDecodeError> {
     let fields = response
         .as_map()
@@ -500,9 +497,6 @@ fn capability_map_retained_memory_estimate(capabilities: &HashMap<String, SeedCa
     bytes
 }
 
-/// Estimates memory retained by a discovered URL from its input and serialized sizes.
-///
-/// This is a budget charge calibrated against the current URL parser, not a heap upper bound.
 pub(super) fn url_retained_memory_estimate(url: &Url, input_bytes: usize) -> usize {
     url.as_str()
         .len()
@@ -604,8 +598,13 @@ async fn post(
     Ok(response)
 }
 
-async fn get_bytes(client: &http::Client, url: &Url, capture_endpoint: Option<&str>) -> Result<Response, http::Error> {
-    let response = client.get_bounded_classified("capability_get", capture_endpoint, url, MAX_CAPABILITY_RESPONSE_BYTES).await?;
+async fn get_bytes(
+    client: &http::Client,
+    url: &Url,
+    capture_endpoint: Option<&str>,
+    max_response_bytes: usize,
+) -> Result<Response, http::Error> {
+    let response = client.get_bounded_classified("capability_get", capture_endpoint, url, max_response_bytes).await?;
     if !response.status.is_success() {
         return Err(http::Error::http_status(
             response.status,
@@ -1004,7 +1003,6 @@ pub(crate) mod allocation_measurement {
     #[global_allocator]
     static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-    // SAFETY: layouts and pointers are forwarded unchanged to System. Thread-local accounting observes allocation sizes only.
     unsafe impl GlobalAlloc for CountingAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             let ptr = unsafe { System.alloc(layout) };

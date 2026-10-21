@@ -18,7 +18,6 @@ use crate::{
 
 use OrderEvidence::{Ambiguous, Degraded, Ordered};
 
-/// Source order is extended by the owning circuit. World never interprets raw wraparound.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OrderEvidence {
     Ordered(u64),
@@ -26,19 +25,12 @@ pub enum OrderEvidence {
     Degraded,
 }
 
-/// Trust level assigned to an update source by the caller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UpdateAuthority {
-    /// This source may replace data from an untracked source, regardless of order.
     Tracked,
-    /// This source cannot replace data from a tracked source, even at a newer order.
     Untracked,
 }
 
-/// Source evidence attached to a decoded simulator update by the session owner.
-///
-/// World compares extended order and block ordinal. The packet sequence is retained as provenance,
-/// and does not establish ordering on its own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UpdateSource {
     pub(super) region: Region,
@@ -49,18 +41,15 @@ pub struct UpdateSource {
 }
 
 impl UpdateSource {
-    /// Creates a source whose ordering evidence is tracked.
     pub const fn new(region: Region, sequence: u32, order: OrderEvidence, block_ordinal: u32) -> Self {
         Self { region, sequence, order, block_ordinal, authority: UpdateAuthority::Tracked }
     }
 
-    /// Sets the source's trust independently from its ordering evidence.
     pub const fn with_authority(mut self, authority: UpdateAuthority) -> Self {
         self.authority = authority;
         self
     }
 
-    /// Returns the source's trust level.
     pub const fn authority(self) -> UpdateAuthority {
         self.authority
     }
@@ -101,9 +90,6 @@ pub(crate) struct FieldStamp {
     pub(super) stamp: Stamp,
 }
 
-/// A field group that World validates and accepts atomically.
-///
-/// Ordering follows declaration order and determines rejection reporting order.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum FieldGroup {
     Pose,
@@ -113,32 +99,21 @@ pub enum FieldGroup {
     Parent,
     AttachmentPoint,
     Shape,
-    /// Surface or avatar appearance category.
     Appearance,
-    /// Per-face surface appearance values.
     TextureEntry,
-    /// Per-face PBR RenderMaterials bindings.
     RenderMaterials,
-    /// Per-face ObjectMedia values and their fetched version.
     ObjectMedia,
     SitTarget,
-    /// Owner and creator properties.
     Properties,
-    /// Avatar texture slots and positional visual-parameter values.
     AvatarAppearance,
-    /// Per-face GLTF material overrides.
     GltfMaterialOverrides,
 }
 
-/// Describes whether an update leaves a field alone, sets it, or clears it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FieldUpdate<T> {
-    /// Preserve the current value.
     #[default]
     Keep,
-    /// Replace the current value.
     Set(T),
-    /// Remove the current value.
     Clear,
 }
 
@@ -148,37 +123,24 @@ impl<T> FieldUpdate<T> {
     }
 }
 
-/// Why World rejected one field group.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FieldRejectionReason {
-    /// A supplied numeric value was invalid.
     InvalidValue { field: &'static str },
-    /// The field would exceed a World-owned resource budget.
     ResourceLimit { field: &'static str },
-    /// The quaternion was non-finite, degenerate, or outside decoder tolerance.
     InvalidRotation,
-    /// Applying the proposed parent would create a cycle.
     ParentCycle,
-    /// The pose was supplied with a parent proposal that was rejected for a cycle.
     ParentDependsOnRejectedParent,
-    /// The pose predates the relationship or attachment frame it would describe.
     StaleFrame,
-    /// The update would replace a value established by a tracked source.
     UntrustedSource,
-    /// The self avatar appearance message has an older COF version.
     StaleVersion,
 }
 
-/// A rejected field group and its cause.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FieldRejection {
     pub group: FieldGroup,
     pub reason: FieldRejectionReason,
 }
 
-/// Rejections from one update, with at most one entry for each field group.
-///
-/// Empty results allocate no storage. Entries retain the first rejection for each group.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rejections {
     entries: Vec<FieldRejection>,
@@ -197,7 +159,6 @@ impl Rejections {
         self.entries.is_empty()
     }
 
-    /// Returns the rejections in [`FieldGroup`] order.
     pub fn iter(&self) -> impl Iterator<Item = &FieldRejection> {
         self.entries.iter()
     }
@@ -215,7 +176,6 @@ impl Default for Rejections {
     }
 }
 
-/// Identity-bearing observation. Parent is always declared, including root.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectObservation {
     pub source: UpdateSource,
@@ -230,14 +190,11 @@ pub struct ObjectObservation {
     pub attachment_point: FieldUpdate<AttachmentPoint>,
     pub shape: FieldUpdate<Shape>,
     pub appearance: FieldUpdate<Appearance>,
-    /// `None` leaves face data unchanged; a successful entry replaces all decoded face values.
     pub surface_appearance: Option<SurfaceAppearance>,
-    /// `None` leaves PBR bindings unchanged; `Some(empty)` clears every face binding.
     pub render_materials: Option<RenderMaterials>,
 }
 
 impl ObjectObservation {
-    /// Creates an observation with no optional fields populated.
     pub const fn new(source: UpdateSource, id: UUID, local_id: NonZeroU32, kind: Kind, parent: ParentUpdate) -> Self {
         Self {
             source,
@@ -258,7 +215,6 @@ impl ObjectObservation {
     }
 }
 
-/// A source-local patch. It cannot introduce an object.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectPatch {
     pub source: UpdateSource,
@@ -271,16 +227,10 @@ pub struct ObjectPatch {
     pub attachment_point: FieldUpdate<AttachmentPoint>,
     pub shape: FieldUpdate<Shape>,
     pub appearance: FieldUpdate<Appearance>,
-    /// `None` leaves face data unchanged; a successful entry replaces all decoded face values.
     pub surface_appearance: Option<SurfaceAppearance>,
-    /// `None` leaves PBR bindings unchanged; `Some(empty)` clears every face binding.
     pub render_materials: Option<RenderMaterials>,
-    /// `None` leaves GLTF overrides unchanged; `Some(empty)` clears the complete snapshot.
     pub gltf_material_overrides: Option<GltfMaterialOverrides>,
-    /// `None` leaves fetched media unchanged; a newer response patches its supplied face prefix.
     pub object_media: Option<ObjectMediaUpdate>,
-    /// `None` leaves avatar data unchanged. Positional visual parameters update supplied indices;
-    /// a supplied texture table replaces all 45 avatar slots, with nil textures represented as clears.
     pub avatar_appearance: Option<AvatarAppearanceUpdate>,
 }
 
@@ -306,7 +256,6 @@ impl ObjectPatch {
     }
 }
 
-/// Data for transferring the authenticated agent between region lifetimes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AgentHandoff {
     pub source: UpdateSource,
@@ -336,16 +285,11 @@ pub enum ApplyOutcome {
     Deferred(DeferredReason),
 }
 
-/// Result of changing a simulator connection's region lifetime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegionOutcome {
-    /// The requested lifecycle operation made no change.
     Unchanged,
-    /// A new region instance was registered.
     Adopted { revision: WorldRevision },
-    /// Metadata for an active region instance changed.
     Patched { revision: WorldRevision },
-    /// A region instance was retired and its live objects removed.
     Retired { revision: WorldRevision, entities_removed: usize },
 }
 
@@ -355,6 +299,8 @@ pub enum ApplyError {
     RegionRetired,
     RegistrationBudgetExhausted,
     EntityBudgetExhausted,
+    TerrainBudgetExhausted,
+    EnvironmentBudgetExhausted,
     RevisionExhausted,
     FrameGenerationExhausted,
     AddressGenerationExhausted,
@@ -369,6 +315,8 @@ impl Display for ApplyError {
             Self::RegionRetired => f.write_str("region lifetime is retired"),
             Self::RegistrationBudgetExhausted => f.write_str("region registration budget is exhausted"),
             Self::EntityBudgetExhausted => f.write_str("object budget is exhausted"),
+            Self::TerrainBudgetExhausted => f.write_str("terrain patch budget is exhausted"),
+            Self::EnvironmentBudgetExhausted => f.write_str("environment source budget is exhausted"),
             Self::RevisionExhausted => f.write_str("World revision space is exhausted"),
             Self::FrameGenerationExhausted => f.write_str("coordinate-frame generation space is exhausted"),
             Self::AddressGenerationExhausted => f.write_str("object address generation space is exhausted"),
@@ -380,21 +328,13 @@ impl Display for ApplyError {
 
 impl Error for ApplyError {}
 
-/// Effects and diagnostics from one authoritative object mutation.
-///
-/// Rejected field groups can coexist with accepted changes and recovery intents. Inspect these
-/// fields independently of the outcome. `revision` describes observable changes; accepting newer
-/// ordering evidence alone does not create a revision.
 #[must_use]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Applied {
     pub outcome: ApplyOutcome,
-    /// Journal revision created by this operation, or `None` when it made no observable change.
     pub revision: Option<WorldRevision>,
     pub recovery: Recovery,
-    /// Addresses whose pending recovery requests this operation made obsolete.
     pub recovery_cancellations: Vec<LocalAddress>,
-    /// Bounded diagnostics for rejected groups. Other groups may still apply.
     pub rejections: Rejections,
 }
 
@@ -435,13 +375,10 @@ impl Applied {
     }
 }
 
-/// Result of a region-lifecycle operation, which has no object-field rejections or requests.
 #[must_use]
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegionApplied {
-    /// Result of the region lifecycle operation.
     pub outcome: RegionOutcome,
-    /// Addresses whose pending recovery requests this operation made obsolete.
     pub recovery_cancellations: Vec<LocalAddress>,
 }
 
@@ -456,9 +393,7 @@ impl WorldRevision {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Recovery {
-    /// Object addresses for which the caller should request fresh simulator data.
     pub requests: Vec<LocalAddress>,
-    /// Whether this operation made an existing recovery request obsolete.
     pub satisfied: bool,
 }
 
@@ -478,22 +413,15 @@ pub struct WorldLimits {
     pub max_entities_per_region: usize,
     pub max_tombstones_per_region: usize,
     pub max_tombstones: usize,
-    /// Charged bytes for retained tombstone address and stamp data in one region.
     pub max_tombstone_bytes_per_region: usize,
-    /// Charged bytes for all retained tombstone address and stamp data.
     pub max_tombstone_bytes: usize,
     pub max_journal_entries: usize,
-    /// Maximum fixed-size change records retained across journal entries.
     pub max_journal_changes: usize,
     pub max_region_name_bytes: usize,
     pub max_recovery_targets: usize,
 }
 
 impl WorldLimits {
-    /// Returns the deterministic byte charge for `count` retained tombstones.
-    ///
-    /// This counts the address and source stamp. Callers should also set count limits, which
-    /// bound map and eviction-index overhead that this accounting charge does not include.
     pub const fn tombstone_bytes_for_count(count: usize) -> usize {
         count.saturating_mul(size_of::<LocalAddress>() + size_of::<Stamp>())
     }

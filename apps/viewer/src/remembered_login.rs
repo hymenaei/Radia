@@ -1,7 +1,9 @@
 use network::Grid;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "windows")]
 use serde_json::{from_str, to_string};
 
+#[cfg(target_os = "windows")]
 const SERVICE: &str = "radia.login";
 
 #[derive(Clone, Deserialize, Serialize)]

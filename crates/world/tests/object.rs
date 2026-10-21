@@ -1,6 +1,6 @@
 use std::{collections::HashSet, num::NonZeroU32};
 
-use base::UUID;
+use base::{AssetId, UUID};
 use math::{Quat, Vec3};
 use world::ApplyError::{InvalidValue, KindMismatch};
 use world::ApplyOutcome::{AgentHandedOff, Deferred, IgnoredStale, Introduced, Removed, TombstoneRecorded, Unchanged, Updated};
@@ -14,11 +14,11 @@ use world::Parent;
 use world::Parent::{Pending, Resolved};
 use world::ParentUpdate::{Local, Root};
 use world::{
-    AgentHandoff, AssetId, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance,
-    FieldRejection, FieldRejectionReason, FieldUpdate, Kind, LinearMotion, LocalAddress, MAX_AVATAR_TEXTURE_SLOTS,
-    MAX_RENDER_MATERIAL_BINDINGS, MediaEntry, MotionPatch, ObjectMediaUpdate, ObjectObservation, ObjectPatch, ParentUpdate, Pose,
-    PropertiesPatch, Region, RegionInfo, RenderMaterials, RenderMaterialsError, SculptFlags, SculptType, SitTarget, SurfaceAppearance,
-    SurfaceAppearanceError, UpdateAuthority, UpdateSource, World, WorldLimits,
+    AgentHandoff, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance, FieldRejection,
+    FieldRejectionReason, FieldUpdate, Kind, LinearMotion, LocalAddress, MAX_AVATAR_TEXTURE_SLOTS, MAX_RENDER_MATERIAL_BINDINGS,
+    MediaEntry, MotionPatch, ObjectMediaUpdate, ObjectObservation, ObjectPatch, ParentUpdate, Pose, PropertiesPatch, Region, RegionInfo,
+    RenderMaterials, RenderMaterialsError, SculptFlags, SculptType, SitTarget, SurfaceAppearance, SurfaceAppearanceError, UpdateAuthority,
+    UpdateSource, World, WorldLimits,
 };
 use world::{Appearance, Shape};
 

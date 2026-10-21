@@ -9,14 +9,14 @@ workspace = true
 
 [dependencies]
 base.workspace = true
-dxr = { version = "=0.9.0", features = ["i8"] }
-md-5 = "=0.10.6"
+dxr = { workspace = true, features = ["i8"] }
+md-5.workspace = true
 quick-xml.workspace = true
 math.workspace = true
 tracing.workspace = true
 
 [build-dependencies]
-sha2 = "0.10.9"
+sha2.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

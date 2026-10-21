@@ -1,33 +1,62 @@
 use std::{
     env::args_os,
     process::exit,
-    sync::{
-        Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex, PoisonError, atomic::AtomicBool},
 };
 
-use crate::{diagnostics, login::LoginScreen, window_geometry::restore_bounds};
+use tokio::runtime::{Builder, Handle};
+
+use crate::{logging, login::LoginScreen, window_geometry::restore_bounds};
 use gpui::{
-    App, AppContext, ColorExt, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions, px, rgb, rgb_to_hsla, size,
+    AnyWindowHandle, App, AppContext, ColorExt, Entity, Global, QuitMode, Subscription, TitlebarOptions, WindowBounds, WindowOptions, px,
+    rgb, rgb_to_hsla, size,
 };
 use gpui_component::{Root, Theme, ThemeMode};
 use gpui_component_assets::Assets;
 use gpui_platform::application;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use scene::Camera;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use tokio::sync::watch;
+
+#[cfg(test)]
+#[path = "app_tests.rs"]
+mod tests;
 
 struct AppLifecycle {
     _window_closed: Subscription,
+    controller: Option<Entity<LoginScreen>>,
+    login_window: Option<AnyWindowHandle>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    chat_window: Option<AnyWindowHandle>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    main: MainWindow,
+    quitting: bool,
+    session: Arc<Mutex<Option<network::SessionHandle>>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    viewport: Option<crate::viewport::Viewport>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+enum MainWindow {
+    Login,
+    Starting(u64),
+    Scene(u64),
 }
 
 impl Global for AppLifecycle {}
 
-/// Runs the viewer until its main window closes.
-///
-/// # Panics
-///
-/// Panics if the application cannot open its main window.
+struct ServiceRuntime(Handle);
+
+impl Global for ServiceRuntime {}
+
+pub(crate) fn service_runtime(cx: &App) -> Handle {
+    cx.global::<ServiceRuntime>().0.clone()
+}
+
 pub fn run() {
-    diagnostics::init();
+    let _logging = logging::init();
 
     let capture_enabled = match args_os().skip(1).collect::<Vec<_>>().as_slice() {
         [] => false,
@@ -38,80 +67,303 @@ pub fn run() {
         }
     };
 
+    let runtime = match Builder::new_multi_thread().enable_all().thread_name("radia-service").build() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Could not start viewer services: {error}");
+            exit(1);
+        }
+    };
+    let services = runtime.handle().clone();
     let capture_on_login = Arc::new(AtomicBool::new(capture_enabled));
     let shutdown_session: Arc<Mutex<Option<network::SessionHandle>>> = Arc::new(Mutex::new(None));
-    let main_window_id = Arc::new(Mutex::new(None));
-    let shutdown_started = Arc::new(AtomicBool::new(false));
 
     application().with_assets(Assets).run(move |cx: &mut App| {
+        cx.set_global(ServiceRuntime(services));
         cx.set_quit_mode(QuitMode::Explicit);
 
         gpui_component::init(cx);
         set_dark_theme(cx);
 
-        let session_slot = Arc::clone(&shutdown_session);
-        let main_window_id_on_close = Arc::clone(&main_window_id);
-        let shutdown_started_on_close = Arc::clone(&shutdown_started);
-        let window_closed = cx.on_window_closed(move |cx, closed_window_id| {
-            let main_window_id = *main_window_id_on_close.lock().unwrap_or_else(PoisonError::into_inner);
-            let closing_main_window = main_window_id == Some(closed_window_id.as_u64());
-            let open_windows = cx.windows();
-            if !should_shutdown(closing_main_window, open_windows.len()) {
-                return;
-            }
-            if shutdown_started_on_close.swap(true, Ordering::Relaxed) {
-                return;
-            }
+        install_lifecycle(Arc::clone(&shutdown_session), cx);
 
-            if closing_main_window {
-                for handle in open_windows {
-                    if handle.window_id() != closed_window_id {
-                        let _ = handle.update(cx, |_, window, _| window.remove_window());
-                    }
-                }
-            }
-
-            let session_slot = Arc::clone(&session_slot);
-            cx.spawn(async move |cx| {
-                let interrupted_capture = disconnect_session(session_slot).await;
-                if interrupted_capture {
-                    println!("Capture interrupted and saved locally.");
-                }
-                cx.update(|app| app.quit());
-            })
-            .detach();
-        });
-        cx.set_global(AppLifecycle { _window_closed: window_closed });
-
-        let minimum_size = size(px(460.), px(420.));
-        let bounds = restore_bounds("main", None, size(px(720.), px(480.)), minimum_size, cx);
         let main_window = cx
-            .open_window(
-                WindowOptions {
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Radia".into()),
-                        appears_transparent: cfg!(target_os = "windows"),
-                        ..Default::default()
-                    }),
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(minimum_size),
-                    ..Default::default()
-                },
-                move |window, cx| {
-                    cx.new(|cx| {
-                        let login = cx.new(|cx| LoginScreen::new(window, cx, capture_on_login, shutdown_session));
-                        Root::new(login, window, cx)
-                    })
-                },
-            )
+            .open_window(login_options(cx), move |window, cx| {
+                cx.new(|cx| {
+                    let login = cx.new(|cx| LoginScreen::new(window, cx, capture_on_login, shutdown_session));
+                    cx.global_mut::<AppLifecycle>().controller = Some(login.clone());
+                    Root::new(login, window, cx)
+                })
+            })
             .expect("failed to open the main window");
-        *main_window_id.lock().unwrap_or_else(PoisonError::into_inner) = Some(main_window.window_id().as_u64());
+        cx.global_mut::<AppLifecycle>().login_window = Some(main_window.into());
         cx.activate(true);
     });
+    runtime.shutdown_background();
+}
+
+fn install_lifecycle(session: Arc<Mutex<Option<network::SessionHandle>>>, cx: &mut App) {
+    let window_closed = cx.on_window_closed(|cx, closed_window_id| {
+        let lifecycle = cx.global_mut::<AppLifecycle>();
+        let closing_main = lifecycle.login_window.is_some_and(|window| window.window_id() == closed_window_id);
+        if closing_main {
+            lifecycle.login_window = None;
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            if lifecycle.chat_window.is_some_and(|window| window.window_id() == closed_window_id) {
+                lifecycle.chat_window = None;
+            }
+            if matches!(lifecycle.main, MainWindow::Scene(_)) {
+                return;
+            }
+        }
+        if should_shutdown(closing_main, cx.windows().len()) {
+            shutdown(cx);
+        }
+    });
+    cx.set_global(AppLifecycle {
+        _window_closed: window_closed,
+        controller: None,
+        login_window: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        chat_window: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        main: MainWindow::Login,
+        quitting: false,
+        session,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        viewport: None,
+    });
+}
+
+fn login_options(cx: &App) -> WindowOptions {
+    let minimum = size(px(460.), px(420.));
+    WindowOptions {
+        titlebar: Some(TitlebarOptions {
+            title: Some("Radia".into()),
+            appears_transparent: cfg!(target_os = "windows"),
+            ..Default::default()
+        }),
+        window_bounds: Some(WindowBounds::Windowed(restore_bounds("login", None, size(px(720.), px(480.)), minimum, cx))),
+        window_min_size: Some(minimum),
+        ..Default::default()
+    }
 }
 
 fn should_shutdown(closing_main_window: bool, open_windows: usize) -> bool {
     closing_main_window || open_windows == 0
+}
+
+fn shutdown(cx: &mut App) {
+    let lifecycle = cx.global_mut::<AppLifecycle>();
+    if lifecycle.quitting {
+        return;
+    }
+    lifecycle.quitting = true;
+    let session = Arc::clone(&lifecycle.session);
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let viewport = lifecycle.viewport.take();
+    for window in cx.windows() {
+        let _ = window.update(cx, |_, window, _| window.remove_window());
+    }
+    cx.spawn(async move |cx| {
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let worker = cx.background_executor().spawn(async move {
+            if let Some(viewport) = viewport {
+                viewport.shutdown();
+            }
+        });
+        if disconnect_session(session).await {
+            println!("Capture interrupted and saved locally.");
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        worker.await;
+        cx.update(|app| app.quit());
+    })
+    .detach();
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(crate) fn start_scene(generation: u64, cx: &mut App) -> bool {
+    use crate::viewport::Viewport;
+    use futures::StreamExt;
+
+    if !cx.has_global::<AppLifecycle>()
+        || matches!(cx.global::<AppLifecycle>().main, MainWindow::Starting(g) | MainWindow::Scene(g) if g >= generation)
+    {
+        return false;
+    }
+    if cx.global::<AppLifecycle>().viewport.is_none() {
+        match Viewport::start() {
+            Ok((viewport, mut events)) => {
+                cx.global_mut::<AppLifecycle>().viewport = Some(viewport);
+                cx.spawn(async move |cx| {
+                    while let Some(event) = events.next().await {
+                        cx.update(|cx| viewport_event(event, cx));
+                    }
+                    cx.update(|cx| {
+                        let main = cx.global::<AppLifecycle>().main;
+                        if let MainWindow::Starting(generation) | MainWindow::Scene(generation) = main {
+                            scene_failed(generation, "The scene window stopped unexpectedly.".into(), cx);
+                        }
+                    });
+                })
+                .detach();
+            }
+            Err(error) => {
+                cx.global_mut::<AppLifecycle>().main = MainWindow::Starting(generation);
+                cx.defer(move |cx| scene_failed(generation, error.to_string(), cx));
+                return false;
+            }
+        }
+    }
+    let lifecycle = cx.global_mut::<AppLifecycle>();
+    lifecycle.main = MainWindow::Starting(generation);
+    if !lifecycle.viewport.as_ref().is_some_and(|v| v.show(generation)) {
+        cx.defer(move |cx| scene_failed(generation, "The scene window worker is unavailable.".into(), cx));
+        return false;
+    }
+    true
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(crate) fn connect_world(
+    generation: u64,
+    sources: crate::scene_feed::SceneSources,
+    agent_id: base::UUID,
+    camera: watch::Sender<Option<Camera>>,
+    cx: &mut App,
+) {
+    let lifecycle = cx.global::<AppLifecycle>();
+    if !lifecycle.quitting
+        && matches!(lifecycle.main, MainWindow::Starting(g) | MainWindow::Scene(g) if g == generation)
+        && let Some(viewport) = &lifecycle.viewport
+    {
+        viewport.connect_world(generation, sources, agent_id, camera, service_runtime(cx));
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(crate) fn end_scene(generation: u64, cx: &mut App) {
+    if !cx.has_global::<AppLifecycle>() {
+        return;
+    }
+    let lifecycle = cx.global_mut::<AppLifecycle>();
+    if !matches!(lifecycle.main, MainWindow::Starting(g) | MainWindow::Scene(g) if g == generation) {
+        return;
+    }
+    lifecycle.main = MainWindow::Login;
+    if let Some(viewport) = &lifecycle.viewport {
+        viewport.clear(generation);
+    }
+    cx.defer(show_login);
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn viewport_event(event: crate::viewport::ViewportEvent, cx: &mut App) {
+    use crate::viewport::ViewportEvent;
+    let main = cx.global::<AppLifecycle>().main;
+    if matches!(event, ViewportEvent::Chat(_))
+        && let Some(viewport) = &cx.global::<AppLifecycle>().viewport
+    {
+        viewport.chat_received();
+    }
+    match event {
+        ViewportEvent::Ready(generation) if main == MainWindow::Starting(generation) => {
+            cx.global_mut::<AppLifecycle>().main = MainWindow::Scene(generation);
+            show_chat(false, cx);
+            if let Some(window) = cx.global_mut::<AppLifecycle>().login_window.take() {
+                let _ = window.update(cx, |_, window, _| window.remove_window());
+            }
+        }
+        ViewportEvent::Chat(generation) if main == MainWindow::Scene(generation) => show_chat(true, cx),
+        ViewportEvent::Closed(generation) if main == MainWindow::Scene(generation) || main == MainWindow::Starting(generation) => {
+            shutdown(cx)
+        }
+        ViewportEvent::Failed(generation, error) => scene_failed(generation, error, cx),
+        _ => {}
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn scene_failed(generation: u64, error: String, cx: &mut App) {
+    let lifecycle = cx.global::<AppLifecycle>();
+    if lifecycle.quitting || !matches!(lifecycle.main, MainWindow::Starting(g) | MainWindow::Scene(g) if g == generation) {
+        return;
+    }
+    let controller = lifecycle.controller.clone();
+    if let Some(controller) = controller {
+        controller.update(cx, |login, cx| login.scene_failed(error, cx));
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn show_login(cx: &mut App) {
+    let lifecycle = cx.global::<AppLifecycle>();
+    if lifecycle.quitting {
+        return;
+    }
+    if let Some(handle) = lifecycle.login_window {
+        let _ = handle.update(cx, |_, window, _| {
+            window.activate_window();
+        });
+    } else {
+        let Some(controller) = lifecycle.controller.clone() else {
+            return;
+        };
+        match cx.open_window(login_options(cx), move |window, cx| {
+            controller.update(cx, |login, cx| login.attach_window(window, cx));
+            cx.new(|cx| Root::new(controller, window, cx))
+        }) {
+            Ok(handle) => cx.global_mut::<AppLifecycle>().login_window = Some(handle.into()),
+            Err(error) => {
+                tracing::error!(%error, "could not reopen login window");
+                return;
+            }
+        }
+    }
+    if let Some(chat) = cx.global_mut::<AppLifecycle>().chat_window.take() {
+        let _ = chat.update(cx, |_, window, _| window.remove_window());
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn show_chat(focus: bool, cx: &mut App) {
+    use crate::chat::ChatWindow;
+    let lifecycle = cx.global::<AppLifecycle>();
+    if lifecycle.quitting {
+        return;
+    }
+    if let Some(window) = lifecycle.chat_window {
+        if focus {
+            let _ = window.update(cx, |_, window, _| window.activate_window());
+        }
+        return;
+    }
+    let Some(controller) = &lifecycle.controller else {
+        return;
+    };
+    let chat = controller.read(cx).chat_view();
+    let minimum = size(px(460.), px(300.));
+    let options = WindowOptions {
+        titlebar: Some(TitlebarOptions {
+            title: Some("Nearby chat".into()),
+            appears_transparent: cfg!(target_os = "windows"),
+            ..Default::default()
+        }),
+        window_bounds: Some(WindowBounds::Windowed(restore_bounds("chat", None, size(px(640.), px(520.)), minimum, cx))),
+        window_min_size: Some(minimum),
+        focus,
+        ..Default::default()
+    };
+    match cx.open_window(options, move |window, cx| {
+        let view = cx.new(|cx| ChatWindow::new(chat, window, cx));
+        cx.new(|cx| Root::new(view, window, cx))
+    }) {
+        Ok(window) => cx.global_mut::<AppLifecycle>().chat_window = Some(window.into()),
+        Err(error) => tracing::error!(%error, "could not open nearby chat window"),
+    }
 }
 
 async fn disconnect_session(session_slot: Arc<Mutex<Option<network::SessionHandle>>>) -> bool {
@@ -177,33 +429,4 @@ fn set_dark_theme(cx: &mut App) {
     theme.table_active_border = theme.table_active.opacity(0.0);
     theme.tokens.table_active = theme.table_active.into();
     Theme::sync_base(cx);
-}
-
-#[cfg(test)]
-mod tests {
-    use gpui::AssetSource;
-
-    use super::{Assets, should_shutdown};
-
-    #[test]
-    fn closing_a_tool_window_keeps_the_main_app_open() {
-        assert!(!should_shutdown(false, 1));
-    }
-
-    #[test]
-    fn sortable_icons_are_embedded() {
-        for path in ["icons/check.svg", "icons/chevrons-up-down.svg", "icons/sort-ascending.svg", "icons/sort-descending.svg"] {
-            assert!(Assets.load(path).expect("icon assets should load").is_some(), "missing {path}");
-        }
-    }
-
-    #[test]
-    fn closing_the_main_window_shuts_down_with_tools_open() {
-        assert!(should_shutdown(true, 1));
-    }
-
-    #[test]
-    fn closing_the_last_window_shuts_down() {
-        assert!(should_shutdown(false, 0));
-    }
 }

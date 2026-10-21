@@ -1,5 +1,3 @@
-//! Registration, metadata, and atomic retirement of simulator region lifetimes.
-
 use super::super::journal::WorldChange::{RegionAdopted, RegionRetired, RegionUpdated};
 use super::super::{RecentBatch, RegionState, World, newer_field};
 use super::lifecycle::RemovalCause;
@@ -7,13 +5,6 @@ use crate::update::FieldStamp;
 use crate::{ApplyError, Region, RegionApplied, RegionInfo, RegionOutcome, UpdateSource};
 
 impl World {
-    /// Registers a simulator connection lifetime before accepting its object updates.
-    ///
-    /// Repeated adoption of an active region is unchanged. A retired lifetime cannot be reused.
-    ///
-    /// # Errors
-    /// Returns an [`ApplyError`] for a retired lifetime or exhausted registration or revision
-    /// capacity. The World remains unchanged on error.
     pub fn adopt_region(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
         if self.retired.contains(&region) {
             return Err(ApplyError::RegionRetired);
@@ -30,15 +21,6 @@ impl World {
         Ok(RegionApplied { outcome: RegionOutcome::Adopted { revision }, recovery_cancellations: Vec::new() })
     }
 
-    /// Adds non-conflicting metadata to an active simulator region lifetime.
-    ///
-    /// Missing fields leave stored metadata unchanged. Changing the resolved origin invalidates
-    /// derived spatial state for the region. Names supplied here seed unknown metadata; use
-    /// [`Self::observe_region_metadata`] to apply source-ordered name changes.
-    ///
-    /// # Errors
-    /// Returns an [`ApplyError`] for invalid or conflicting metadata, an inactive region, or
-    /// exhausted revision capacity. The World remains unchanged on error.
     pub fn patch_region(&mut self, region: Region, info: RegionInfo) -> Result<RegionApplied, ApplyError> {
         self.require_active_region(region)?;
         self.validate_region_info(&info)?;
@@ -47,16 +29,6 @@ impl World {
         self.commit_region_metadata(region, merged, current.name_fence)
     }
 
-    /// Applies observed region metadata, accepting name changes in source order.
-    ///
-    /// UUID, handle, and origin must remain consistent within the region lifetime. Missing fields
-    /// preserve stored values. A supplied name replaces the current name only with newer ordered
-    /// evidence; ambiguous or degraded evidence cannot change it. Source authority follows
-    /// [`crate::UpdateAuthority`]. Repeating a name can advance ordering without a new revision.
-    ///
-    /// # Errors
-    /// Returns an [`ApplyError`] for invalid or conflicting metadata, an inactive region, or
-    /// exhausted revision capacity. Neither metadata nor ordering evidence changes on error.
     pub fn observe_region_metadata(&mut self, source: UpdateSource, mut info: RegionInfo) -> Result<RegionApplied, ApplyError> {
         let region = source.region();
         self.require_active_region(region)?;
@@ -88,7 +60,9 @@ impl World {
         }
         let origin_changed = current.info.resolved_origin() != info.resolved_origin();
         self.ensure_revision_available()?;
-        self.regions.insert(region, RegionState { info, name_fence });
+        let current = self.regions.get_mut(&region).expect("active region remains registered");
+        current.info = info;
+        current.name_fence = name_fence;
         if origin_changed {
             self.mark_spatial_region(region);
         }
@@ -96,15 +70,6 @@ impl World {
         Ok(RegionApplied { outcome: RegionOutcome::Patched { revision }, recovery_cancellations: Vec::new() })
     }
 
-    /// Atomically retires a region lifetime and removes its live objects.
-    ///
-    /// Identity, relationships, ordering evidence, and recovery cancellations are updated before
-    /// publishing one revision. Repeated retirement is unchanged. Work is proportional to the
-    /// region's live objects and affected relationships; this operation does not yield midway.
-    ///
-    /// # Errors
-    /// Returns an [`ApplyError`] for an unknown region or exhausted revision capacity. The World
-    /// remains unchanged on error.
     pub fn retire_region(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
         if self.retired.contains(&region) {
             return Ok(RegionApplied { outcome: RegionOutcome::Unchanged, recovery_cancellations: Vec::new() });
@@ -128,7 +93,9 @@ impl World {
             );
         }
         self.recent.apply_batch(recent);
-        self.regions.remove(&region);
+        let removed_region = self.regions.remove(&region).expect("active region remains registered");
+        self.terrain_patches -= removed_region.terrain.patch_count();
+        self.environment_bytes -= removed_region.environment.source_bytes();
         self.retired.insert(region);
         self.tombstones.remove_region(region);
         self.floors.remove(&region);

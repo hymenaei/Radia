@@ -1,5 +1,3 @@
-//! World-scoped identities, simulator addresses, and region metadata.
-
 use base::UUID;
 use math::DVec3;
 use std::{
@@ -9,8 +7,6 @@ use std::{
 
 static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
-/// A generational handle to one object in the World that created it.
-/// Removing an object invalidates its handle, even if the simulator later reuses its UUID or address.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Entity(pub(super) hecs::Entity, pub(super) WorldId);
 
@@ -30,7 +26,6 @@ impl WorldId {
 pub struct Region(u64);
 
 impl Region {
-    /// Wraps the network connection identifier used for this region lifetime.
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
@@ -40,14 +35,12 @@ impl Region {
     }
 }
 
-/// A simulator-local object address scoped to one connection lifetime.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct LocalAddress {
     pub(super) region: Region,
     pub(super) local_id: NonZeroU32,
 }
 
-/// Identifies one object binding for asynchronous operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectBindingTarget {
     pub(super) entity: Entity,
@@ -84,7 +77,6 @@ impl LocalAddress {
     }
 }
 
-/// A packed Second Life region handle.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RegionHandle(u64);
 
@@ -102,39 +94,16 @@ impl RegionHandle {
     }
 }
 
-/// Observed metadata for a registered region.
-///
-/// Missing fields preserve stored values. [`crate::World::patch_region`] adds non-conflicting
-/// facts; [`crate::World::observe_region_metadata`] also accepts source-ordered name changes.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RegionInfo {
-    /// Second Life region UUID, when known.
     pub region_id: Option<UUID>,
-    /// Global region handle, when known.
     pub handle: Option<RegionHandle>,
-    /// Region name, when known.
     pub name: Option<String>,
-    /// Explicit region origin in global meters. [`Self::resolved_origin`] also uses a known handle.
     pub origin: Option<DVec3>,
 }
 
 impl RegionInfo {
-    /// Returns the explicit origin, or derives it from the region handle, in global meters.
     pub fn resolved_origin(&self) -> Option<DVec3> {
         self.origin.or_else(|| self.handle.map(RegionHandle::origin))
-    }
-}
-
-/// An asset identity, distinct from the identity of an object using that asset.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct AssetId(UUID);
-
-impl AssetId {
-    pub const fn new(uuid: UUID) -> Self {
-        Self(uuid)
-    }
-
-    pub const fn uuid(self) -> UUID {
-        self.0
     }
 }

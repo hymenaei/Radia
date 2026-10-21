@@ -1,5 +1,3 @@
-//! Authoritative World ownership, coherent mutations, and bounded read models.
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use base::UUID;
@@ -10,6 +8,7 @@ use crate::{ApplyError, Entity, LocalAddress, ObjectBindingTarget, Region, Regio
 
 mod address;
 mod components;
+mod environment;
 #[cfg(feature = "invariants")]
 mod invariants;
 mod journal;
@@ -21,7 +20,17 @@ mod recent;
 mod relationships;
 mod spatial;
 mod storage;
+mod terrain;
 mod view;
+
+pub use environment::{
+    EnvironmentAssignment, EnvironmentRead, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_BYTES,
+    MAX_ENVIRONMENT_READ_BYTES, MAX_ENVIRONMENT_SOURCE_BYTES, ParcelEnvironment, ParcelId,
+};
+pub use terrain::{
+    MAX_TERRAIN_PAGE_PATCHES, MAX_TERRAIN_PATCHES, TERRAIN_PATCH_SAMPLES, TERRAIN_PATCH_SIZE, TERRAIN_REGION_SIZE, TerrainPage,
+    TerrainPageCursor, TerrainPatch, TerrainPatchError, TerrainPatchId,
+};
 
 use address::Tombstones;
 use components::{
@@ -52,11 +61,12 @@ pub use view::{Object, Objects};
 struct RegionState {
     info: RegionInfo,
     name_fence: Option<FieldStamp>,
+    terrain: terrain::Terrain,
+    environment: environment::Environments,
 }
 
 const MAX_OBJECT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 
-/// One authoritative world for a login session.
 pub struct World {
     id: WorldId,
     store: ObjectStore,
@@ -68,6 +78,8 @@ pub struct World {
     tombstones: Tombstones,
     floors: HashMap<Region, Stamp>,
     object_media_bytes: usize,
+    terrain_patches: usize,
+    environment_bytes: usize,
     limits: WorldLimits,
     journal: Journal,
     spatial: SpatialIndex,
@@ -88,6 +100,8 @@ impl World {
             tombstones: Tombstones::default(),
             floors: HashMap::new(),
             object_media_bytes: 0,
+            terrain_patches: 0,
+            environment_bytes: 0,
             limits,
             journal: Journal::new(),
             spatial: SpatialIndex::default(),
@@ -95,7 +109,6 @@ impl World {
         }
     }
 
-    /// Sets the authenticated agent UUID supplied by login/session setup.
     pub fn set_self_agent(&mut self, id: UUID) -> Result<(), ApplyError> {
         if id.is_nil() {
             return Err(ApplyError::InvalidValue { field: "agent_id" });
@@ -107,7 +120,6 @@ impl World {
         Ok(())
     }
 
-    /// The latest committed observable change. Updates that only advance ordering evidence do not increment the revision.
     pub const fn revision(&self) -> WorldRevision {
         self.journal.revision
     }
@@ -120,7 +132,6 @@ impl World {
         self.store.entity_at(address)
     }
 
-    /// Captures the current object binding for an asynchronous operation.
     pub fn object_binding_target(&self, entity: Entity) -> Option<ObjectBindingTarget> {
         let object = self.store.record(entity)?;
         Some(ObjectBindingTarget {
@@ -131,7 +142,6 @@ impl World {
         })
     }
 
-    /// Returns whether a target still names the same live object binding.
     pub fn object_binding_target_is_current(&self, target: ObjectBindingTarget) -> bool {
         if target.entity.1 != self.id || self.entity(target.id) != Some(target.entity) {
             return false;
@@ -147,12 +157,10 @@ impl World {
         Some(Object { entity, record, world: self })
     }
 
-    /// Borrows live object state for scans in unspecified storage order.
     pub fn objects(&self) -> Objects<'_> {
         Objects { records: self.store.objects(), world: self }
     }
 
-    /// Returns the number of live objects in the world.
     pub fn object_count(&self) -> usize {
         self.store.len()
     }
@@ -168,7 +176,6 @@ impl World {
         self.children.get(&entity).into_iter().flat_map(|children| children.values()).filter_map(|child| self.object(*child))
     }
 
-    /// Iterates live avatars in unspecified order without scanning other objects.
     pub fn avatars(&self) -> impl Iterator<Item = Object<'_>> {
         self.store.avatar_ids().iter().map(|id| {
             let entity = self.entity(*id).expect("avatar index contains only live entities");

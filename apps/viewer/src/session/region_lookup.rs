@@ -1,5 +1,3 @@
-//! Asynchronous region-name lookup by UUID or map cell.
-
 use std::{
     collections::HashMap,
     future::Future,
@@ -11,7 +9,6 @@ use std::{
 
 use base::UUID;
 use futures::{channel::oneshot, future::select, pin_mut};
-use gpui::BackgroundExecutor;
 use network::{AgentSession, Delivery, Error, SessionHandle, SimulatorId};
 use protocol::{
     lludp::Message,
@@ -21,6 +18,7 @@ use protocol::{
         region_handle_request::RequestBlock,
     },
 };
+use tokio::runtime::Handle;
 #[cfg(test)]
 use tokio::spawn;
 use world::RegionHandle;
@@ -71,11 +69,6 @@ type TimeoutFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 type MakeTimeout = dyn Fn(Duration) -> TimeoutFuture + Send + Sync;
 type BackgroundTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 type SpawnBackground = dyn Fn(BackgroundTask) + Send + Sync;
-
-/// Resolves simulator region IDs and grid cells to region names.
-///
-/// Concurrent lookups for the same key share one request and time out after 15 seconds. Dropping a caller cancels only its waiter.
-/// Queue-full send failures retry the idempotent map request a bounded number of times.
 #[derive(Clone)]
 pub struct RegionLookup {
     inner: Arc<Inner>,
@@ -129,11 +122,7 @@ impl Drop for WaiterGuard {
 }
 
 impl RegionLookup {
-    /// Creates a lookup for the session's primary simulator connection.
-    ///
-    /// Pass session messages to [`handle_message`](Self::handle_message) so replies can complete pending lookups.
-    /// `simulator_id` must identify the same primary simulator as `session`.
-    pub fn new(session_handle: SessionHandle, simulator_id: SimulatorId, session: &AgentSession, executor: BackgroundExecutor) -> Self {
+    pub fn new(session_handle: SessionHandle, simulator_id: SimulatorId, session: &AgentSession, executor: Handle) -> Self {
         let send_message = Arc::new(move |request, delivery| -> SendFuture {
             let session_handle = session_handle.clone();
             Box::pin(async move {
@@ -144,16 +133,17 @@ impl RegionLookup {
             })
         });
         let timer_executor = executor.clone();
-        let make_timeout = Arc::new(move |timeout| Box::pin(timer_executor.timer(timeout)) as TimeoutFuture);
+        let make_timeout = Arc::new(move |timeout| {
+            Box::pin({
+                let _entered = timer_executor.enter();
+                tokio::time::sleep(timeout)
+            }) as TimeoutFuture
+        });
         let spawn_background = Arc::new(move |future| {
-            executor.spawn(future).detach();
+            drop(executor.spawn(future));
         });
         Self::new_inner(session, make_timeout, send_message, spawn_background, LOOKUP_TIMEOUT)
     }
-
-    /// # Errors
-    ///
-    /// Returns an error if sending fails, the reply is invalid, or it times out.
     pub async fn lookup_region_by_id(&self, region_id: UUID) -> Result<String, String> {
         self.lookup(
             LookupKey::RegionId(region_id),
@@ -161,18 +151,10 @@ impl RegionLookup {
         )
         .await
     }
-
-    /// Resolves a 256-meter map-grid cell to its region name.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the cell cannot be encoded in a map request, sending fails, or the reply times out.
     pub(crate) async fn lookup_region_at(&self, cell: RegionGridCell) -> Result<String, String> {
         let request = self.map_block_request(cell).ok_or_else(|| "The region grid cell is outside the map request range.".to_string())?;
         self.lookup(LookupKey::MapCell(cell), request).await
     }
-
-    /// Call this in the session message flow. Replies from another simulator or agent are ignored.
     pub fn handle_message(&self, source: SocketAddr, message: &Message) {
         if source != self.inner.simulator_address {
             return;

@@ -8,12 +8,9 @@ use crate::{
 };
 use math::{Vec3, Vec4};
 
-/// Largest improved-terse TextureEntry field copied by the viewer.
 pub const MAX_TEXTURE_ENTRY_FIELD_BYTES: usize = 1024;
-/// Largest TextureEntry payload after unwrapping the improved-terse binary-data value.
 pub const MAX_TEXTURE_ENTRY_BYTES: usize = 1020;
 
-/// Unwraps the improved-terse TextureEntry value and decodes its bounded payload.
 pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpError> {
     if bytes.is_empty() {
         return Ok(None);
@@ -35,14 +32,12 @@ pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpE
     decode_texture_entry_payload(payload).map_err(|_| LLUdpError::InvalidMessage)
 }
 
-/// A packet of partial object motion updates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImprovedTerseObjectUpdate {
     pub region_data: RegionData,
     pub objects: Vec<ObjectBlock>,
 }
 
-/// One independently framed object update in an improved-terse message.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ObjectBlock {
     Decoded(ObjectData),
@@ -50,7 +45,6 @@ pub enum ObjectBlock {
 }
 
 impl ObjectBlock {
-    /// Returns decoded values for a structurally valid object block.
     pub const fn as_decoded(&self) -> Option<&ObjectData> {
         match self {
             Self::Decoded(object) => Some(object),
@@ -58,7 +52,6 @@ impl ObjectBlock {
         }
     }
 
-    /// Returns mutable decoded values for a structurally valid object block.
     pub fn as_decoded_mut(&mut self) -> Option<&mut ObjectData> {
         match self {
             Self::Decoded(object) => Some(object),
@@ -122,7 +115,6 @@ fn decode_object_data(packed_data: &[u8], texture_entry: &[u8]) -> Result<Object
     let acceleration = decode_vector3(&mut data, -64.0, 64.0)?;
     let rotation = rotation_from_u16([data.u16()?, data.u16()?, data.u16()?, data.u16()?]);
     let angular_velocity = decode_vector3(&mut data, -64.0, 64.0)?;
-    // The packed value is length-delimited, so unknown tail bytes can be skipped safely.
     Ok(ObjectData {
         local_id,
         state,

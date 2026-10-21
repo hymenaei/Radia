@@ -32,7 +32,6 @@ use super::{
 };
 
 #[derive(Clone)]
-/// An opaque handle for an authenticated simulator capability URL.
 pub struct CapabilityUrl {
     pub(super) url: Url,
     pub(super) capture_endpoint: Option<String>,
@@ -43,23 +42,23 @@ impl CapabilityUrl {
         Self { url, capture_endpoint: logical_endpoint_label(name) }
     }
 
-    /// Parses and validates an HTTP or HTTPS capability URL.
-    ///
-    /// The URL must have a host and must not contain user information or a fragment.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the URL is malformed or violates these constraints.
     pub fn parse(value: &str) -> Result<Self, Error> {
         let url = Url::parse(value).map_err(|_| Error::Capability("Capability URL is invalid.".into()))?;
         validate_http_url(&url).map_err(Error::Capability)?;
         Ok(Self { url, capture_endpoint: None })
     }
 
-    /// Returns a new handle with one additional URL-encoded query pair.
     pub fn with_query_pair(&self, name: &str, value: &str) -> Self {
         let mut url = self.url.clone();
         url.query_pairs_mut().append_pair(name, value);
+        Self { url, capture_endpoint: self.capture_endpoint.clone() }
+    }
+
+    pub fn with_trailing_slash(&self) -> Self {
+        let mut url = self.url.clone();
+        if !url.path().ends_with('/') {
+            url.set_path(&format!("{}/", url.path()));
+        }
         Self { url, capture_endpoint: self.capture_endpoint.clone() }
     }
 }
@@ -71,12 +70,6 @@ impl fmt::Debug for CapabilityUrl {
 }
 
 #[derive(Clone)]
-/// Makes bounded requests to a simulator's discovered capabilities.
-///
-/// [`Client::get`] and [`Client::post`] return built-in LLSD [`Value`](llsd::Value) values. Network reserves the raw response,
-/// scanner workspace, and the LLSD value decoder's allocation estimate while decoding. The guarantee ends when the value is returned;
-/// caller-side typed conversion, caller-owned values, HTTP/TLS buffers, allocator metadata, and fragmentation are outside that budget.
-/// Use [`Client::get_bytes`] for binary resources; it returns caller-owned bytes after the Network response admission is released.
 pub struct Client {
     seed: Arc<Url>,
     runtime: Handle,
@@ -94,7 +87,6 @@ struct RequestWorker {
 }
 
 impl RequestWorker {
-    /// Joins once across client clones; cancelled calls leave the join available.
     async fn wait(&self) -> Result<(), JoinError> {
         let mut task = self.task.lock().await;
         let result = match task.as_mut() {
@@ -121,14 +113,6 @@ impl fmt::Debug for Client {
 }
 
 impl Client {
-    /// Creates a client for the login response's seed capability URL.
-    ///
-    /// The current thread must be inside a Tokio runtime. The client starts a bounded request worker on that runtime.
-    /// Request operations run on the owning runtime and can be awaited from other executors.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the seed URL is invalid or no Tokio runtime is active.
     pub fn new(seed: Url) -> Result<Self, Error> {
         Self::new_with_capture(seed, None).map_err(Error::Capability)
     }
@@ -171,14 +155,6 @@ impl Client {
         })
     }
 
-    /// Resolves capability names into opaque URL handles.
-    ///
-    /// The request accepts up to 256 names and 16 KiB of name data. A name may use up to 128 UTF-8 bytes.
-    /// The returned map contains only names granted by the server.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for invalid request sizes, a closed session, or a failed capability request.
     #[tracing::instrument(
         name = "capabilities.discover", level = "debug", skip_all,
         fields(capability_count = names.len())
@@ -217,18 +193,6 @@ impl Client {
         Ok(capabilities)
     }
 
-    /// Sends an LLSD XML request and decodes the response into an LLSD [`Value`](llsd::Value).
-    ///
-    /// The encoded request body is limited to 1 MiB and the response body to 32 MiB. Network admits the raw response, bounded LLSD scan
-    /// workspace, and the LLSD `Value` decoder's allocation estimate before decoding. This estimate excludes allocator metadata and
-    /// fragmentation. The request slot and decode-memory admission remain held until decoding completes, including if the awaiting task
-    /// is canceled. The admission estimate includes the decoded `Value`'s construction peak. After this method returns, the caller
-    /// owns the value; its retained memory and any typed conversion are outside Network's budget.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if encoding exceeds its limit, the capability request fails, response memory cannot be admitted, or the LLSD
-    /// response is malformed or exceeds a decoder limit.
     pub async fn post<Request>(&self, url: &CapabilityUrl, payload: &Request) -> Result<llsd::Value, Error>
     where
         Request: Serialize + ?Sized,
@@ -236,18 +200,6 @@ impl Client {
         self.post_with_response_limit(url, payload, MAX_CAPABILITY_RESPONSE_BYTES).await
     }
 
-    /// Sends an LLSD XML request with a caller-selected response-body limit.
-    ///
-    /// The response limit must be between 1 byte and the built-in 32 MiB capability limit. Network admits the raw response,
-    /// bounded LLSD scan workspace, and the LLSD `Value` decoder's allocation estimate before decoding. This estimate excludes
-    /// allocator metadata and fragmentation. The request slot and decode-memory admission remain held until decoding completes,
-    /// including if the awaiting task is canceled. After this method returns, the caller owns the value; typed conversion and retained
-    /// memory are outside Network's budget.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the response limit is invalid, encoding exceeds its limit, the capability request fails, response memory
-    /// cannot be admitted, or the LLSD response is malformed or exceeds a decoder limit.
     pub async fn post_with_response_limit<Request>(
         &self,
         url: &CapabilityUrl,
@@ -301,59 +253,73 @@ impl Client {
             .map_err(capability_error)
     }
 
-    /// Fetches an LLSD XML response and decodes it into an LLSD [`Value`](llsd::Value).
-    ///
-    /// The response body is limited to 32 MiB. Network admits the raw response, bounded LLSD scan workspace, and the LLSD `Value` decoder's
-    /// allocation estimate before decoding. This estimate excludes allocator metadata and fragmentation. The request slot and decode-memory
-    /// admission remain held until decoding completes, including if the awaiting task is canceled. The admission estimate includes the
-    /// decoded `Value`'s construction peak. After this method returns, the caller owns the value; its retained memory and any typed
-    /// conversion are outside Network's budget.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the request fails, response memory cannot be admitted, or the LLSD response is malformed or exceeds a decoder
-    /// limit.
+    pub async fn post_bytes_with_response_limit<Request>(
+        &self,
+        url: &CapabilityUrl,
+        payload: &Request,
+        max_response_bytes: usize,
+    ) -> Result<Vec<u8>, Error>
+    where
+        Request: Serialize + ?Sized,
+    {
+        if max_response_bytes == 0 || max_response_bytes > MAX_CAPABILITY_RESPONSE_BYTES {
+            return Err(Error::Capability(format!(
+                "Capability response limit must be between 1 and {MAX_CAPABILITY_RESPONSE_BYTES} bytes."
+            )));
+        }
+        let deadline = RequestDeadline::new(self.request_timeout);
+        let permit = self.acquire_request_permit(deadline).await?;
+        let body = xml::to_vec_with_max_bytes(payload, MAX_CAPABILITY_REQUEST_BODY_BYTES)
+            .map_err(|error| Error::Capability(format!("Could not encode an LLSD request: {error}")))?;
+        if deadline.expired() {
+            return Err(deadline.error());
+        }
+        let client = self.clone();
+        let url = url.clone();
+        let response = self.on_runtime(async move { client.post_admitted(url, body, max_response_bytes, deadline, permit).await }).await?;
+        Ok(response.body)
+    }
+
     pub async fn get(&self, url: &CapabilityUrl) -> Result<llsd::Value, Error> {
         let deadline = RequestDeadline::new(self.request_timeout);
         let permit = self.acquire_request_permit(deadline).await?;
         let client = self.clone();
         let url = url.clone();
         self.on_runtime(async move {
-            let response = client.get_bytes_admitted_with_permit(url, deadline, permit).await?;
+            let response = client.get_bytes_admitted_with_permit(url, MAX_CAPABILITY_RESPONSE_BYTES, deadline, permit).await?;
             decode_admitted_response(response, client.http.clone(), deadline).await
         })
         .await
     }
 
-    /// Fetches the raw body for binary or otherwise non-LLSD capability resources.
-    ///
-    /// The response body is limited to 32 MiB. Network holds request and response-memory
-    /// admission through delivery. After return, the caller owns the bytes outside Network's
-    /// memory budget and must account for their retention and any decoding.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the request fails or the response body exceeds its limit.
     pub async fn get_bytes(&self, url: &CapabilityUrl) -> Result<Vec<u8>, Error> {
-        Ok(self.get_bytes_admitted(url).await?.body)
+        self.get_bytes_with_response_limit(url, MAX_CAPABILITY_RESPONSE_BYTES).await
     }
 
-    async fn get_bytes_admitted(&self, url: &CapabilityUrl) -> Result<AdmittedResponse, Error> {
+    pub async fn get_bytes_with_response_limit(&self, url: &CapabilityUrl, max_response_bytes: usize) -> Result<Vec<u8>, Error> {
+        if max_response_bytes == 0 || max_response_bytes > MAX_CAPABILITY_RESPONSE_BYTES {
+            return Err(Error::Capability(format!(
+                "Capability response limit must be between 1 and {MAX_CAPABILITY_RESPONSE_BYTES} bytes."
+            )));
+        }
         let deadline = RequestDeadline::new(self.request_timeout);
         let permit = self.acquire_request_permit(deadline).await?;
         let client = self.clone();
         let url = url.clone();
-        self.on_runtime(async move { client.get_bytes_admitted_with_permit(url, deadline, permit).await }).await
+        let response =
+            self.on_runtime(async move { client.get_bytes_admitted_with_permit(url, max_response_bytes, deadline, permit).await }).await?;
+        Ok(response.body)
     }
 
     async fn get_bytes_admitted_with_permit(
         &self,
         url: CapabilityUrl,
+        max_response_bytes: usize,
         deadline: RequestDeadline,
         permit: OwnedSemaphorePermit,
     ) -> Result<AdmittedResponse, Error> {
         let (reply, response) = oneshot::channel();
-        time::timeout_at(deadline.at, self.commands.send(Command::GetBytes { url, reply, deadline, _permit: permit }))
+        time::timeout_at(deadline.at, self.commands.send(Command::GetBytes { url, max_response_bytes, reply, deadline, _permit: permit }))
             .await
             .map_err(|_| deadline.error())?
             .map_err(|_| Error::CapabilitySessionClosed)?;
@@ -1090,6 +1056,42 @@ pub(crate) mod tests {
         let payload: Value = xml::from_str(post_body).expect("POST body is valid LLSD XML");
         assert_eq!(payload.as_map().and_then(|map| map.get("count")), Some(&Value::Integer(7)));
         assert!(str::from_utf8(&requests[1]).expect("GET is UTF-8").starts_with("GET /capability HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn raw_body_limits_apply_to_declared_and_unknown_lengths() {
+        let server = LocalServer::start(vec![
+            response(200, "OK", "application/octet-stream", None, "12345"),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\n123\r\n3\r\n456\r\n0\r\n\r\n".to_vec(),
+            response(200, "OK", "application/octet-stream", None, "123456"),
+            response(200, "OK", "application/octet-stream", None, "12345"),
+        ]);
+        let client = Client::new(server.url("/seed")).unwrap();
+        let url = CapabilityUrl::parse(server.url("/raw").as_str()).unwrap();
+        assert_eq!(client.get_bytes_with_response_limit(&url, 5).await.unwrap(), b"12345");
+        assert!(matches!(client.get_bytes_with_response_limit(&url, 5).await, Err(CapabilityHttp(http::Error::ResourceExhausted { .. }))));
+        assert!(matches!(
+            client.post_bytes_with_response_limit(&url, &Value::Undefined, 5).await,
+            Err(CapabilityHttp(http::Error::ResourceExhausted { .. }))
+        ));
+        assert_eq!(client.post_bytes_with_response_limit(&url, &Value::Undefined, 5).await.unwrap(), b"12345");
+        for limit in [0, MAX_CAPABILITY_RESPONSE_BYTES + 1] {
+            assert!(matches!(client.get_bytes_with_response_limit(&url, limit).await, Err(Capability(_))));
+            assert!(matches!(client.post_bytes_with_response_limit(&url, &Value::Undefined, limit).await, Err(Capability(_))));
+        }
+        let requests = server.finish();
+        assert_eq!(requests.len(), 4, "invalid limits never reach the peer");
+        assert!(requests[2].starts_with(b"POST /raw HTTP/1.1"));
+    }
+
+    #[test]
+    fn asset_directory_urls_preserve_opaque_path_and_query() {
+        let url = CapabilityUrl::parse("https://example.test/cap%2Ftoken?grant=opaque")
+            .unwrap()
+            .with_trailing_slash()
+            .with_query_pair("texture_id", "content");
+        assert_eq!(url.url.as_str(), "https://example.test/cap%2Ftoken/?grant=opaque&texture_id=content");
+        assert!(!format!("{url:?}").contains("token"));
     }
 
     #[tokio::test]

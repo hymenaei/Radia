@@ -5,14 +5,16 @@ use network::SimulatorId;
 use world::{
     AgentHandoff, Appearance, Applied, ApplyError,
     ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded},
-    FieldRejectionReason, Kind, LocalAddress, MAX_QUERY_STATE_MAINTENANCE_WORK, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
-    OrderEvidence, Region, RegionHandle, RegionInfo, UpdateSource, World, WorldLimits,
+    EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, MAX_QUERY_STATE_MAINTENANCE_WORK,
+    ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, ParcelId, Region, RegionApplied, RegionHandle, RegionInfo,
+    RegionOutcome, UpdateSource, World, WorldLimits,
 };
 
 use super::{
     inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation, SitTargetUpdate},
     object_media::ObjectMediaTarget,
     recovery::MAX_RECOVERY_OBJECTS_PER_REQUEST,
+    terrain::DecodedTerrain,
 };
 
 pub(super) const MAX_WORLD_ENTITIES: usize = 65_536;
@@ -126,8 +128,8 @@ impl IngestSummary {
 
     pub(super) fn log_incomplete_data(&self, simulator_id: SimulatorId) {
         use ApplyError::{
-            AddressGenerationExhausted, EntityBudgetExhausted, FrameGenerationExhausted, InvalidValue, KindMismatch, RegionRetired,
-            RegistrationBudgetExhausted, RevisionExhausted, StaleRegion,
+            AddressGenerationExhausted, EntityBudgetExhausted, EnvironmentBudgetExhausted, FrameGenerationExhausted, InvalidValue,
+            KindMismatch, RegionRetired, RegistrationBudgetExhausted, RevisionExhausted, StaleRegion, TerrainBudgetExhausted,
         };
         use FieldRejectionReason::{
             InvalidRotation, InvalidValue as RejectedValue, ParentCycle, ParentDependsOnRejectedParent, ResourceLimit, StaleFrame,
@@ -153,6 +155,8 @@ impl IngestSummary {
                 }
                 Err(
                     EntityBudgetExhausted
+                    | TerrainBudgetExhausted
+                    | EnvironmentBudgetExhausted
                     | RegistrationBudgetExhausted
                     | RevisionExhausted
                     | FrameGenerationExhausted
@@ -200,7 +204,6 @@ impl IngestSummary {
     }
 }
 
-/// Owns the observed World and the simulator connection lifetimes for one session.
 pub(super) struct SessionWorld {
     world: World,
     regions: HashMap<SimulatorId, Region>,
@@ -212,9 +215,21 @@ impl SessionWorld {
         Self { world, regions: HashMap::new() }
     }
 
-    #[cfg(test)]
     pub(super) fn world(&self) -> &World {
         &self.world
+    }
+
+    pub(super) fn observe_agent_parcel(&mut self, source: UpdateSource, parcel: Option<ParcelId>) -> Result<RegionApplied, ApplyError> {
+        self.world.observe_agent_parcel(source, parcel)
+    }
+
+    pub(super) fn observe_environment(
+        &mut self,
+        target: EnvironmentTarget,
+        source: UpdateSource,
+        assignment: EnvironmentAssignment,
+    ) -> Result<RegionApplied, ApplyError> {
+        self.world.observe_environment(target, source, assignment)
     }
 
     pub(super) fn maintain_query_state(&mut self) -> bool {
@@ -233,8 +248,6 @@ impl SessionWorld {
         }
     }
 
-    /// Records a connection lifetime, then applies any supplied handle through World.
-    /// A metadata failure retains the adopted lifetime so it can be retried or retired.
     pub(super) fn register_simulator(
         &mut self,
         simulator_id: SimulatorId,
@@ -275,6 +288,31 @@ impl SessionWorld {
 
     pub(super) fn update_region_metadata(&mut self, region: Region, info: RegionInfo) -> Result<(), ApplyError> {
         self.world.patch_region(region, info).map(|_| ())
+    }
+
+    pub(super) fn update_water_height(&mut self, source: UpdateSource, height: f32) -> Result<(), ApplyError> {
+        self.world.observe_water_height(source, height).map(|_| ())
+    }
+
+    pub(super) fn apply_terrain(&mut self, decoded: DecodedTerrain) -> usize {
+        if self.simulator_for_region(decoded.source.region()).is_none() {
+            return 0;
+        }
+        let mut rejected = decoded.rejected;
+        let mut applied = 0;
+        for (ordinal, patch) in decoded.patches {
+            let source = UpdateSource::new(decoded.source.region(), decoded.source.sequence(), decoded.source.order(), ordinal)
+                .with_authority(decoded.source.authority());
+            match self.world.observe_terrain_patch(source, patch) {
+                Ok(result) if matches!(result.outcome, RegionOutcome::Patched { .. }) => applied += 1,
+                Ok(_) => {}
+                Err(_) => rejected += 1,
+            }
+        }
+        if rejected > 0 {
+            tracing::debug!(rejected, "terrain packet was partially rejected");
+        }
+        applied
     }
 
     pub(super) fn update_handshake_metadata(
@@ -591,14 +629,15 @@ mod tests {
         },
     };
 
+    use base::AssetId;
     use base::UUID;
     use math::{DVec3, Vec3};
     use network::{SimulatorId, testing::simulator_id};
     use tokio::sync::oneshot::channel;
     use world::{
-        Appearance, AssetId, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FieldUpdate, Kind,
-        LocalAddress, MAX_AVATAR_TEXTURE_SLOTS, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, Parent,
-        ParentUpdate, Pose, Region, RegionHandle, RegionInfo, RenderMaterials, Shape, UpdateSource,
+        Appearance, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FieldUpdate, Kind, LocalAddress,
+        MAX_AVATAR_TEXTURE_SLOTS, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, Parent, ParentUpdate, Pose,
+        Region, RegionHandle, RegionInfo, RenderMaterials, Shape, UpdateSource,
     };
 
     use crate::session::inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation};

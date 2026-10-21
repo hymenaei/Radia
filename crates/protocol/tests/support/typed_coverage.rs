@@ -1,4 +1,3 @@
-// Inventory fixtures are synthetic and are not independent wire evidence.
 typed_message_coverage! {
     "UseCircuitCode" => UseCircuitCode, USE_CIRCUIT_CODE, vectors::USE_CIRCUIT_CODE,
         NoAlloc, SchemaConforming, [

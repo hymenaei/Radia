@@ -7,12 +7,12 @@ use std::{
 
 use base::UUID;
 use futures::{FutureExt, channel::mpsc, pin_mut, sink::SinkExt, stream::StreamExt};
-use gpui::BackgroundExecutor;
 use llsd::{Map, Value};
 use network::{
     SimulatorId,
     capabilities::{CapabilityUrl, Client},
 };
+use tokio::runtime::Handle;
 use tokio::sync::watch;
 use world::{
     LocalAddress, MAX_MEDIA_DIMENSION, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_MEDIA_WHITELIST_ENTRIES, MAX_SURFACE_FACES,
@@ -117,8 +117,6 @@ impl RetirementState {
 pub(super) fn response_is_stale(response_version: u32, requested_version: u32) -> bool {
     response_version < requested_version
 }
-
-/// Fetches ObjectMedia for a session and tracks in-flight work and simulator retirement.
 pub(super) struct ObjectMediaFetcher {
     requests: mpsc::Sender<FetchRequest>,
     results: mpsc::Receiver<ObjectMediaResult>,
@@ -128,7 +126,7 @@ pub(super) struct ObjectMediaFetcher {
 }
 
 impl ObjectMediaFetcher {
-    pub(super) fn new<F>(background: BackgroundExecutor, cancellation: F) -> Self
+    pub(super) fn new<F>(runtime: Handle, cancellation: F) -> Self
     where
         F: Future<Output = ()> + Clone + Send + 'static,
     {
@@ -136,10 +134,7 @@ impl ObjectMediaFetcher {
         let (result_sender, result_receiver) = mpsc::channel(RESULT_QUEUE_CAPACITY);
         let retirement = Arc::new(Mutex::new(RetirementState::default()));
         let (retirement_generation, retirement_updates) = watch::channel(0);
-        background
-            .clone()
-            .spawn(run(request_receiver, result_sender, background, retirement.clone(), retirement_updates, cancellation))
-            .detach();
+        drop(runtime.spawn(run(request_receiver, result_sender, retirement.clone(), retirement_updates, cancellation)));
         Self { requests: request_sender, results: result_receiver, pending: HashMap::new(), retirement, retirement_generation }
     }
 
@@ -182,7 +177,6 @@ impl ObjectMediaFetcher {
 async fn run<F>(
     mut requests: mpsc::Receiver<FetchRequest>,
     mut results: mpsc::Sender<ObjectMediaResult>,
-    background: BackgroundExecutor,
     retirement: Arc<Mutex<RetirementState>>,
     mut retirement_updates: watch::Receiver<u64>,
     cancellation: F,
@@ -206,7 +200,7 @@ async fn run<F>(
         }
 
         let outcome = {
-            let fetch = fetch_with_retries(&request, &mut capabilities, &mut cache_order, &background).fuse();
+            let fetch = fetch_with_retries(&request, &mut capabilities, &mut cache_order).fuse();
             pin_mut!(fetch);
             loop {
                 let cancelled = cancellation.clone().fuse();
@@ -265,7 +259,6 @@ async fn fetch_with_retries(
     request: &FetchRequest,
     capabilities: &mut HashMap<SimulatorId, CapabilityUrl>,
     cache_order: &mut VecDeque<SimulatorId>,
-    background: &BackgroundExecutor,
 ) -> Result<ObjectMediaUpdate, FetchError> {
     let mut last_error = None;
     for attempt in 0..MAX_FETCH_ATTEMPTS {
@@ -286,7 +279,7 @@ async fn fetch_with_retries(
             }
         }
         if attempt + 1 < MAX_FETCH_ATTEMPTS {
-            background.timer(RETRY_DELAY).await;
+            tokio::time::sleep(RETRY_DELAY).await;
         }
     }
     Err(last_error.expect("ObjectMedia fetch attempts are non-empty"))

@@ -1,11 +1,11 @@
 use std::num::NonZeroU32;
 
-use base::UUID;
+use base::{AssetId, UUID};
 use world::{
     Appearance,
     ApplyOutcome::{Introduced, Unchanged, Updated},
-    AssetId, FieldGroup, FieldRejectionReason, FieldUpdate, GltfMaterialOverride, GltfMaterialOverrides, Kind, ObjectObservation,
-    ObjectPatch, OrderEvidence, ParentUpdate, Region, RenderMaterials, UpdateAuthority, UpdateSource, World, WorldLimits,
+    FieldGroup, FieldRejectionReason, FieldUpdate, GltfMaterialOverride, GltfMaterialOverrides, Kind, ObjectObservation, ObjectPatch,
+    OrderEvidence, ParentUpdate, Region, RenderMaterials, UpdateAuthority, UpdateSource, World, WorldLimits,
 };
 
 fn source(region: Region, order: u64) -> UpdateSource {

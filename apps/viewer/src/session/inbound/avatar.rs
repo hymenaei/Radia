@@ -1,11 +1,11 @@
-use base::UUID;
+use base::{AssetId, UUID};
 use protocol::{
     FieldValue, SchemaMessage,
     lludp::Message,
     types::{MAX_TEXTURE_FACES, decode_texture_entry},
 };
 use world::{
-    AssetId, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, MAX_AVATAR_TEXTURE_SLOTS,
+    AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, MAX_AVATAR_TEXTURE_SLOTS,
     MAX_AVATAR_VISUAL_PARAMS, SitTarget,
 };
 
@@ -157,10 +157,11 @@ fn decode_avatar_textures(bytes: &[u8]) -> Result<Option<AvatarTextureSlots>, ()
 
 #[cfg(test)]
 mod tests {
+    use base::AssetId;
     use base::UUID;
     use math::{Quat, Vec3};
     use protocol::{BlockValues, FieldValue, SchemaMessage, lludp::Message, types::decode_texture_entry};
-    use world::{AssetId, AvatarTextureSlot, AvatarVisualParamIndex};
+    use world::{AvatarTextureSlot, AvatarVisualParamIndex};
 
     use super::{decode_avatar_appearance_update, decode_sit_target_update};
 

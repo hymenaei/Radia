@@ -531,13 +531,6 @@ impl Client {
             }
         };
         let elapsed = started.elapsed();
-        tracing::trace!(
-            operation = %operation,
-            http_status = status.as_u16(),
-            response_bytes = body.0.len(),
-            elapsed_ms = elapsed.as_millis(),
-            "HTTP response received"
-        );
         if let (Some(capture), Some(request_id)) = (&self.capture, request_id) {
             let capture_memory = (capture.is_active() && !body.0.is_empty())
                 .then(|| self.try_reserve_memory(ResponseMemoryClass::Capture, body.0.len()).ok())
@@ -642,13 +635,6 @@ impl Client {
                 return Err(error.with_response(status, retry_after, started.elapsed()));
             }
         };
-        tracing::trace!(
-            operation = %operation,
-            http_status = status.as_u16(),
-            response_bytes = body.0.len(),
-            elapsed_ms = started.elapsed().as_millis(),
-            "HTTP response received"
-        );
         if let (Some(capture), Some(request_id)) = (&self.capture, request_id) {
             let capture_memory = (capture.is_active() && !body.0.is_empty())
                 .then(|| self.try_reserve_memory(ResponseMemoryClass::Capture, body.0.len()).ok())

@@ -1,8 +1,3 @@
-//! Ordered simulator mutations and publication.
-//!
-//! Operations validate and plan changes before committing state, indexes, and one revision.
-//! Field rejections do not invalidate eligible sibling updates.
-
 use super::World;
 use crate::{Applied, ApplyError, ApplyOutcome, Recovery, Rejections, WorldChange, WorldRevision};
 
@@ -13,11 +8,11 @@ mod patch;
 mod region;
 
 impl World {
-    fn ensure_revision_available(&self) -> Result<(), ApplyError> {
+    pub(super) fn ensure_revision_available(&self) -> Result<(), ApplyError> {
         self.journal.revision.0.checked_add(1).map(|_| ()).ok_or(ApplyError::RevisionExhausted)
     }
 
-    fn publish_changes(&mut self, changes: Vec<WorldChange>) -> Option<WorldRevision> {
+    pub(super) fn publish_changes(&mut self, changes: Vec<WorldChange>) -> Option<WorldRevision> {
         self.update_spatial_state(&changes);
         self.journal.append(changes, self.limits.max_journal_entries, self.limits.max_journal_changes)
     }

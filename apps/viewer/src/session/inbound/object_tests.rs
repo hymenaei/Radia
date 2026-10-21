@@ -1,4 +1,4 @@
-use base::UUID;
+use base::{AssetId, UUID};
 use math::{Quat, Vec3};
 use protocol::{
     lludp::{Message, Message::ImprovedTerseObjectUpdate, Message::ObjectUpdate, Message::ObjectUpdateCompressed, Packet},
@@ -11,7 +11,7 @@ use testing::{lludp::vectors, parse_hex_fixture};
 use world::{
     Appearance,
     ApplyOutcome::{Introduced, Updated},
-    AssetId, AttachmentPoint,
+    AttachmentPoint,
     FieldRejectionReason::InvalidRotation,
     FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence, ParentUpdate, Pose, PrimShape, Region, RenderMaterials, SculptFlags,
     SculptType, Shape, UpdateSource, World, WorldLimits,

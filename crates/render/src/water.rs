@@ -10,21 +10,21 @@ use wgpu::{
 pub(crate) const COLOR: Vec4 = Vec4::new(0.025, 0.09, 0.14, 1.0);
 const UNIFORM_BYTES: usize = 160 + MAX_REGIONS * 16;
 
-pub(crate) struct Ocean {
+pub(crate) struct Water {
     pipeline: RenderPipeline,
     uniform: Buffer,
     binding: BindGroup,
     pub(crate) active: bool,
 }
 
-impl Ocean {
+impl Water {
     pub(crate) fn new(device: &Device, format: TextureFormat) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Ocean"),
-            source: ShaderSource::Wgsl(include_str!("water.wgsl").into()),
+            label: Some("water"),
+            source: ShaderSource::Wgsl(include_str!("shaders/water.wgsl").into()),
         });
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Ocean"),
+            label: Some("water"),
             entries: &[BindGroupLayoutEntry {
                 binding: 0,
                 visibility: ShaderStages::FRAGMENT,
@@ -33,12 +33,12 @@ impl Ocean {
             }],
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Ocean"),
+            label: Some("water"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("Ocean"),
+            label: Some("water"),
             layout: Some(&pipeline_layout),
             vertex: VertexState { module: &shader, entry_point: Some("vertex"), compilation_options: Default::default(), buffers: &[] },
             primitive: PrimitiveState { cull_mode: Some(Face::Back), ..Default::default() },
@@ -60,13 +60,13 @@ impl Ocean {
             cache: None,
         });
         let uniform = device.create_buffer(&BufferDescriptor {
-            label: Some("Ocean"),
+            label: Some("water"),
             size: UNIFORM_BYTES as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let binding = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("Ocean"),
+            label: Some("water"),
             layout: &layout,
             entries: &[BindGroupEntry { binding: 0, resource: BindingResource::Buffer(uniform.as_entire_buffer_binding()) }],
         });

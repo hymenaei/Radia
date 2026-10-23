@@ -1,3 +1,9 @@
+mod compression;
+mod job;
+mod upload;
+
+pub use compression::CompressionQuality;
+
 use std::{
     collections::{HashMap, VecDeque},
     mem::{replace, take},
@@ -7,11 +13,8 @@ use std::{
     },
 };
 
-use crate::texture_compression::{self, CompressionQuality};
-
 use assets::{
-    Failure, Filter, Image, MinFilter, PixelFormat, Priority, Sampler, TextureDecodeJob, TextureEvents, TextureHandle, TextureId,
-    WeakTexture, Wrap,
+    Failure, Filter, Image, MinFilter, Priority, Sampler, TextureDecodeJob, TextureEvents, TextureHandle, TextureId, WeakTexture, Wrap,
 };
 use wgpu::{
     AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
@@ -22,10 +25,6 @@ use wgpu::{
     TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
     TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension, VertexState,
 };
-
-#[cfg(test)]
-#[path = "texture_tests.rs"]
-mod tests;
 
 const DEFAULT_SOFT_CAP: usize = 1024 * 1024 * 1024;
 const STAGING_BYTES: usize = 48 * 1024 * 1024;
@@ -40,11 +39,6 @@ struct Accounting {
     jobs: AtomicUsize,
 }
 
-struct Lease {
-    memory: Arc<Accounting>,
-    bytes: usize,
-}
-
 impl Accounting {
     fn reserve(self: &Arc<Self>, bytes: usize) -> Option<Lease> {
         self.staging
@@ -57,6 +51,11 @@ impl Accounting {
         self.jobs.try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_JOBS).then_some(n + 1)).ok()?;
         Some(Work(self.clone()))
     }
+}
+
+struct Lease {
+    memory: Arc<Accounting>,
+    bytes: usize,
 }
 
 impl Drop for Lease {
@@ -129,19 +128,6 @@ struct UploadPixels {
     _work: Work,
 }
 
-enum UploadData {
-    Rgba(RgbaPixels),
-    Bcn(texture_compression::Image),
-}
-
-struct UploadLevel<'a> {
-    bytes: &'a [u8],
-    row_bytes: usize,
-    rows: u32,
-    block: u32,
-    width: u32,
-}
-
 impl UploadPixels {
     fn format(&self) -> TextureFormat {
         match &self.data {
@@ -174,6 +160,19 @@ impl UploadPixels {
     }
 }
 
+enum UploadData {
+    Rgba(RgbaPixels),
+    Bcn(compression::Image),
+}
+
+struct UploadLevel<'a> {
+    bytes: &'a [u8],
+    row_bytes: usize,
+    rows: u32,
+    block: u32,
+    width: u32,
+}
+
 enum PixelSource {
     Image(Image),
     Decode(TextureDecodeJob),
@@ -190,65 +189,6 @@ impl RgbaPixels {
             Self::Image(image) => image.pixels(),
             Self::Converted(bytes) => bytes,
         }
-    }
-}
-
-impl TextureJob {
-    pub fn run(self, quality: CompressionQuality) -> TextureCompletion {
-        let result = if self.cancelled.load(Ordering::Acquire) || !self.texture.is_alive() {
-            Err(Failure::Cancelled)
-        } else {
-            match self.input {
-                PixelSource::Image(image) => Ok(image),
-                PixelSource::Decode(job) => job.run(),
-            }
-        };
-        let result = result.and_then(|image| {
-            let size = image.size();
-            if image.format() == PixelFormat::Rgba8 {
-                return Ok((size, RgbaPixels::Image(image)));
-            }
-            let mut rgba = vec![0; size[0] as usize * size[1] as usize * 4];
-            let channels = image.format().channels();
-            for (dest, src) in rgba.chunks_exact_mut(size[0] as usize * 4).zip(image.pixels().chunks_exact(size[0] as usize * channels)) {
-                if self.cancelled.load(Ordering::Acquire) || !self.texture.is_alive() {
-                    return Err(Failure::Cancelled);
-                }
-                expand(src, image.format(), dest);
-            }
-            Ok((size, RgbaPixels::Converted(rgba)))
-        });
-        let result = result.and_then(|(size, rgba)| {
-            let data = if self.compress {
-                UploadData::Bcn(texture_compression::encode(rgba.bytes(), size, quality, || {
-                    self.cancelled.load(Ordering::Acquire) || !self.texture.is_alive()
-                })?)
-            } else {
-                UploadData::Rgba(rgba)
-            };
-            Ok((size, data))
-        });
-        let data = match result {
-            Ok((size, data)) => Conversion::Ready(UploadPixels { size, data, _staging: self.staging, _work: self.work }),
-            Err(failure) => Conversion::Failed { failure, _work: self.work },
-        };
-        TextureCompletion { id: self.id, revision: self.revision, cancelled: self.cancelled, life: self.life, data }
-    }
-}
-
-fn expand(src: &[u8], format: PixelFormat, dest: &mut [u8]) {
-    if format == PixelFormat::Rgba8 {
-        dest.copy_from_slice(src);
-        return;
-    }
-    for (src, dest) in src.chunks_exact(format.channels()).zip(dest.as_chunks_mut::<4>().0) {
-        let pixel = match format {
-            PixelFormat::Gray8 => [src[0], src[0], src[0], 255],
-            PixelFormat::GrayAlpha8 => [src[0], src[0], src[0], src[1]],
-            PixelFormat::Rgb8 => [src[0], src[1], src[2], 255],
-            PixelFormat::Rgba8 => unreachable!("RGBA copied above"),
-        };
-        dest.copy_from_slice(&pixel);
     }
 }
 
@@ -379,7 +319,7 @@ impl Textures {
         });
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Color mipmaps"),
-            source: ShaderSource::Wgsl(include_str!("mipmap.wgsl").into()),
+            source: ShaderSource::Wgsl(include_str!("../shaders/mipmap.wgsl").into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Mipmap"),
@@ -451,8 +391,8 @@ impl Textures {
             return;
         }
         let Some(work) = self.memory.work() else { return };
-        let compress = self.bcn && texture_compression::supported(info.size);
-        let bytes = if compress { texture_compression::work_bytes(info.size) } else { info.size[0] as usize * info.size[1] as usize * 4 };
+        let compress = self.bcn && compression::supported(info.size);
+        let bytes = if compress { compression::work_bytes(info.size) } else { info.size[0] as usize * info.size[1] as usize * 4 };
         let Some(staging) = self.memory.reserve(bytes) else { return };
         let input = if let Some(image) = texture.image()
             && !entry.evicted
@@ -533,10 +473,11 @@ impl Textures {
     }
 
     fn releases(&mut self) {
-        if self.event_revision() == self.lifecycle {
+        let lifecycle = self.event_revision();
+        if lifecycle == self.lifecycle {
             return;
         }
-        self.lifecycle = self.event_revision();
+        self.lifecycle = lifecycle;
         let dead: Vec<_> = self.entries.iter().filter(|(_, entry)| !entry.owner.is_alive()).map(|(id, _)| *id).collect();
         for id in dead {
             self.retire_entry(id, false);
@@ -569,179 +510,6 @@ impl Textures {
                 projected = projected.saturating_sub(bytes);
             }
         }
-    }
-
-    pub(crate) fn upload(&mut self, device: &Device, encoder: &mut CommandEncoder, epoch: u64) {
-        self.releases();
-        let abandoned: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|(_, entry)| matches!(&entry.state, TextureUploadState::Preparing { life, .. } if life.upgrade().is_none()))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in abandoned {
-            self.retire_entry(id, false);
-        }
-        self.trim(epoch);
-        let prepared: Vec<_> = self
-            .entries
-            .iter()
-            .filter_map(|(id, e)| match &e.state {
-                TextureUploadState::Prepared(pixels) => Some((*id, pixels.size)),
-                _ => None,
-            })
-            .collect();
-        for (id, size) in prepared {
-            let entry = self.entries.remove(&id).expect("prepared texture");
-            let TextureUploadState::Prepared(pixels) = entry.state else { unreachable!("prepared texture") };
-            let descriptor = TextureDescriptor {
-                label: Some("Scene image"),
-                size: Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
-                mip_level_count: mip_count(size),
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: pixels.format(),
-                usage: TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::COPY_DST
-                    | if matches!(pixels.data, UploadData::Rgba(_)) { TextureUsages::RENDER_ATTACHMENT } else { TextureUsages::empty() },
-                view_formats: &[],
-            };
-            let charge = GpuCharge::new(self.memory.clone(), self.cap_bytes.clone(), &descriptor);
-            let texture = device.create_texture(&descriptor);
-            let view = texture.create_view(&TextureViewDescriptor::default());
-            self.entries.insert(
-                id,
-                TextureEntry {
-                    used: entry.used,
-                    fallback: entry.fallback,
-                    owner: entry.owner,
-                    revision: entry.revision,
-                    evicted: false,
-                    state: TextureUploadState::Uploading {
-                        gpu: GpuTexture { texture, view, bindings: HashMap::new(), charge },
-                        pixels,
-                        row: 0,
-                        mip: 0,
-                    },
-                },
-            );
-        }
-        self.uploaded = 0;
-        let mut mip_work = 0;
-        let mut mip_passes = 0;
-        let mut ready = Vec::new();
-        for (id, entry) in &mut self.entries {
-            let TextureUploadState::Uploading { gpu, pixels, row, mip } = &mut entry.state else { continue };
-            let [width, height] = pixels.size;
-            while *mip < mip_count(pixels.size) {
-                if let Some(level) = pixels.level(*mip) {
-                    let pitch = (level.row_bytes as u32).next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
-                    let rows = ((UPLOAD_BYTES - self.uploaded) / pitch as usize).min((level.rows - *row) as usize) as u32;
-                    if rows == 0 {
-                        break;
-                    }
-                    let length = rows as usize * pitch as usize;
-                    let Some(staging) = self.memory.reserve(length) else { break };
-                    let buffer = device.create_buffer(&BufferDescriptor {
-                        label: Some("Texture staging"),
-                        size: length as u64,
-                        usage: BufferUsages::MAP_WRITE | BufferUsages::COPY_SRC,
-                        mapped_at_creation: true,
-                    });
-                    {
-                        let mut mapped = buffer.get_mapped_range_mut(..).expect("new staging buffer is mapped and unborrowed");
-                        let start = *row as usize * level.row_bytes;
-                        let end = start + rows as usize * level.row_bytes;
-                        for (index, src) in level.bytes[start..end].chunks_exact(level.row_bytes).enumerate() {
-                            let offset = index * pitch as usize;
-                            mapped.slice(offset..offset + src.len()).copy_from_slice(src);
-                        }
-                    }
-                    buffer.unmap();
-                    encoder.copy_buffer_to_texture(
-                        TexelCopyBufferInfo {
-                            buffer: &buffer,
-                            layout: TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(pitch), rows_per_image: Some(rows) },
-                        },
-                        TexelCopyTextureInfo {
-                            mip_level: *mip,
-                            origin: Origin3d { x: 0, y: *row * level.block, z: 0 },
-                            ..gpu.texture.as_image_copy()
-                        },
-                        Extent3d { width: level.width, height: rows * level.block, depth_or_array_layers: 1 },
-                    );
-                    self.staged.push(Upload { _buffer: buffer, _lease: staging });
-                    self.uploaded += length;
-                    *row += rows;
-                    if *row != level.rows {
-                        break;
-                    }
-                    *row = 0;
-                    *mip += 1;
-                    continue;
-                }
-                let texels = (width >> *mip).max(1) as usize * (height >> *mip).max(1) as usize;
-                if mip_work + texels > 1_400_000 || mip_passes == 16 {
-                    break;
-                }
-                let source = gpu.texture.create_view(&TextureViewDescriptor {
-                    base_mip_level: *mip - 1,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                });
-                let dest = gpu.texture.create_view(&TextureViewDescriptor {
-                    base_mip_level: *mip,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                });
-                let binding = device.create_bind_group(&BindGroupDescriptor {
-                    label: Some("Mipmap"),
-                    layout: &self.mip_layout,
-                    entries: &[BindGroupEntry { binding: 0, resource: BindingResource::TextureView(&source) }],
-                });
-                let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                    label: Some("Mipmap"),
-                    color_attachments: &[Some(RenderPassColorAttachment {
-                        view: &dest,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: Operations { load: LoadOp::Clear(Color::TRANSPARENT), store: StoreOp::Store },
-                    })],
-                    ..Default::default()
-                });
-                pass.set_pipeline(&self.mip_pipeline);
-                pass.set_bind_group(0, &binding, &[]);
-                pass.draw(0..3, 0..1);
-                *mip += 1;
-                mip_work += texels;
-                mip_passes += 1;
-            }
-            if *mip == mip_count(pixels.size) {
-                ready.push(*id);
-            }
-        }
-        for id in ready {
-            let entry = self.entries.remove(&id).expect("completed upload");
-            let TextureUploadState::Uploading { gpu, pixels, .. } = entry.state else { unreachable!("upload completed") };
-            self.pixels.push(pixels);
-            if let Some(old) = entry.fallback {
-                self.retired.push(old);
-            }
-            self.completed.push((entry.owner.clone(), entry.revision));
-            self.entries.insert(
-                id,
-                TextureEntry {
-                    used: entry.used,
-                    fallback: None,
-                    owner: entry.owner,
-                    revision: entry.revision,
-                    evicted: false,
-                    state: TextureUploadState::Ready(gpu),
-                },
-            );
-            self.changed();
-        }
-        self.trim(epoch);
     }
 
     pub(crate) fn resident(&mut self, device: &Device, key: TextureKey) -> Option<TextureKey> {
@@ -924,4 +692,79 @@ fn binding(device: &Device, layout: &BindGroupLayout, view: &TextureView, settin
             BindGroupEntry { binding: 1, resource: BindingResource::Sampler(&sampler) },
         ],
     })
+}
+
+#[cfg(test)]
+mod fixtures {
+    use super::*;
+    use assets::{Budget, Content, Kind, Request, Resource, Status};
+    use std::time::Instant;
+    use test_support::texture::{GRAY_ALPHA_J2C, RGBA_J2C};
+    use utils::AssetId;
+    use uuid::Uuid;
+
+    pub(super) fn loaded(id: u128, rgba: bool) -> TextureHandle {
+        let bytes: &[u8] = if rgba { RGBA_J2C } else { GRAY_ALPHA_J2C };
+        loaded_fixture(id, bytes)
+    }
+
+    pub(super) fn loaded_fixture(id: u128, bytes: &[u8]) -> TextureHandle {
+        let mut store = assets::Store::new(Budget::default());
+        let route = store.register_route().unwrap();
+        let now = Instant::now();
+        let resource = Resource { id: AssetId::new(Uuid::from_u128(id)), kind: Kind::Texture };
+        let demand = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
+        let mut job = store.next_job(now).unwrap();
+        assert!(store.try_start_decode(&mut job));
+        let result = job.prepare(bytes.to_vec());
+        store.complete(job, result, now);
+        let Status::Ready(Content::Texture(texture)) = demand.status() else { panic!("fixture must decode") };
+        texture
+    }
+
+    pub(super) fn descriptor(size: [u32; 2], format: TextureFormat) -> TextureDescriptor<'static> {
+        TextureDescriptor {
+            label: None,
+            size: Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: mip_count(size),
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::fixtures::descriptor;
+    use super::*;
+
+    #[test]
+    fn descriptor_storage_includes_mips() {
+        for (size, levels, bytes) in [([1, 1], 1, 4), ([1, 8], 4, 60), ([7, 3], 3, 100), ([2048, 2048], 12, 22_369_620)] {
+            assert_eq!(mip_count(size), levels);
+            assert_eq!(allocation_bytes(&descriptor(size, TextureFormat::Rgba8UnormSrgb)), Some(bytes));
+        }
+        for (format, bytes) in
+            [(TextureFormat::Bc1RgbaUnormSrgb, 56), (TextureFormat::Bc3RgbaUnormSrgb, 112), (TextureFormat::Bc7RgbaUnormSrgb, 112)]
+        {
+            assert_eq!(allocation_bytes(&descriptor([8, 8], format)), Some(bytes), "block-compressed mip tails still occupy whole blocks");
+        }
+        let mut array = descriptor([8, 8], TextureFormat::Rgba8Unorm);
+        array.size.depth_or_array_layers = 3;
+        assert_eq!(allocation_bytes(&array), Some(1020));
+        array.sample_count = 4;
+        assert_eq!(allocation_bytes(&array), Some(4080));
+    }
+
+    #[test]
+    fn staging_release_restores_admission() {
+        let memory = Arc::new(Accounting::default());
+        let held = memory.reserve(STAGING_BYTES).unwrap();
+        assert!(memory.reserve(1).is_none());
+        assert!(memory.reserve(usize::MAX).is_none());
+        drop(held);
+        assert!(memory.reserve(STAGING_BYTES).is_some());
+    }
 }

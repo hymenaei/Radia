@@ -35,11 +35,12 @@ pub(crate) struct ScenePipelines {
     camera: Buffer,
     binding: BindGroup,
 }
+
 impl ScenePipelines {
     pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Scene preview"),
-            source: ShaderSource::Wgsl(include_str!("studio.wgsl").into()),
+            source: ShaderSource::Wgsl(include_str!("shaders/studio.wgsl").into()),
         });
         let attributes = [
             VertexAttribute { format: VertexFormat::Float32x4, offset: 0, shader_location: 3 },
@@ -189,6 +190,7 @@ impl ScenePipelines {
         pass.set_bind_group(0, &self.binding, &[]);
     }
 }
+
 pub(crate) fn projection(camera: Camera, size: [u32; 2]) -> Mat4 {
     perspective(camera.vertical_fov() as f32, size[0] as f32 / size[1] as f32, camera.draw_distance() as f32, 0.05) * camera_view(camera)
 }

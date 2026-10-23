@@ -4,7 +4,7 @@ use block_compression::{BC7Settings, CompressionVariant, encode::compress_rgba8}
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use intel_tex_2::{RgbaSurface, bc1, bc3, bc7};
 
-#[path = "../src/texture_compression.rs"]
+#[path = "../src/texture/compression.rs"]
 #[allow(unused_imports)]
 mod texture_compression;
 

@@ -1,5 +1,15 @@
+mod appearance;
+mod geometry;
+mod studio;
+mod texture;
+mod water;
+
+pub use geometry::{Instance, PickFace, Stats};
+pub use texture::CompressionQuality;
+pub use texture::{TextureCompletion, TextureJob};
+
 use std::{
-    fmt,
+    error, fmt,
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -17,16 +27,7 @@ use wgpu::{
     RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureViewDescriptor,
 };
 
-mod appearance;
-mod geometry;
-mod studio;
-mod texture;
-mod texture_compression;
-mod water;
 use geometry::GeometryRenderer;
-pub use geometry::{Instance, PickFace, Stats};
-pub use texture::{TextureCompletion, TextureJob};
-pub use texture_compression::CompressionQuality;
 
 #[derive(Debug)]
 pub enum Error {
@@ -59,7 +60,22 @@ impl fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl error::Error for Error {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            Self::Surface(error) => Some(error),
+            Self::Adapter(error) => Some(error),
+            Self::Device(error) => Some(error),
+            Self::Poll(error) => Some(error),
+            Self::Gpu(error) => Some(error),
+            Self::UnsupportedSurface
+            | Self::UnsupportedColorFormat
+            | Self::UnsupportedSurfaceSize
+            | Self::DeviceLost
+            | Self::SurfaceLost => None,
+        }
+    }
+}
 
 pub struct Renderer {
     surface: Surface<'static>,
@@ -72,34 +88,6 @@ pub struct Renderer {
     failure: Arc<Mutex<Option<wgpu::Error>>>,
     overlay: egui_wgpu::Renderer,
     geometry: GeometryRenderer,
-}
-
-pub struct Overlay {
-    pub primitives: Vec<ClippedPrimitive>,
-    pub textures: TexturesDelta,
-    pub pixels_per_point: f32,
-}
-
-pub struct Progress {
-    pub redraw: bool,
-    pub pending: bool,
-}
-
-pub struct Retirement {
-    device: Device,
-}
-
-impl Retirement {
-    pub fn poll(&self) -> Result<bool, Error> {
-        self.device.poll(PollType::Poll).map(|status| status.is_queue_empty()).map_err(Error::Poll)
-    }
-
-    pub fn wait(self) -> Result<(), Error> {
-        self.device
-            .poll(PollType::Wait { submission_index: None, timeout: Some(Duration::from_millis(500)) })
-            .map(|_| ())
-            .map_err(Error::Poll)
-    }
 }
 
 impl Renderer {
@@ -314,5 +302,53 @@ impl Renderer {
             self.resize(self.size[0], self.size[1]);
         }
         Ok(true)
+    }
+}
+
+pub struct Overlay {
+    pub primitives: Vec<ClippedPrimitive>,
+    pub textures: TexturesDelta,
+    pub pixels_per_point: f32,
+}
+
+pub struct Progress {
+    pub redraw: bool,
+    pub pending: bool,
+}
+
+pub struct Retirement {
+    device: Device,
+}
+
+impl Retirement {
+    pub fn poll(&self) -> Result<bool, Error> {
+        self.device.poll(PollType::Poll).map(|status| status.is_queue_empty()).map_err(Error::Poll)
+    }
+
+    pub fn wait(self) -> Result<(), Error> {
+        self.device
+            .poll(PollType::Wait { submission_index: None, timeout: Some(Duration::from_millis(500)) })
+            .map(|_| ())
+            .map_err(Error::Poll)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wgpu::naga::{
+        front::wgsl,
+        valid::{Capabilities, ValidationFlags, Validator},
+    };
+
+    #[test]
+    fn shaders_validate() {
+        for (name, source) in [
+            ("studio", include_str!("shaders/studio.wgsl")),
+            ("water", include_str!("shaders/water.wgsl")),
+            ("mipmap", include_str!("shaders/mipmap.wgsl")),
+        ] {
+            let module = wgsl::parse_str(source).unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
+            Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
     }
 }

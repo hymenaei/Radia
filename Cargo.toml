@@ -33,7 +33,7 @@ scene = { path = "crates/scene" }
 world = { path = "crates/world" }
 
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
-block_compression = { version = "=0.9.0", default-features = false }
+block_compression = { version = "=0.10.1", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 criterion = "0.8"
 dirs = "=5.0.1"

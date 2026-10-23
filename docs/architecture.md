@@ -66,6 +66,8 @@ The vendored template is pinned to upstream commit d5445ef1ccb26864236653bbe91d6
 
 ### `crates/render`
 
+Render consumes scene snapshots and owns the presentation surface, GPU resources, bounded uploads, and resource retirement. CPU texture preparation runs through worker jobs. Typed errors preserve underlying GPU errors through the standard error source chain.
+
 ### `crates/scene`
 
 Scene groups material appearance by legacy and PBR behavior, scene objects and views under model, and reconciliation reads, scheduling, and publication under reconcile. Reconciler remains the sole owner of its mutable state; extracting methods into child modules does not add shared ownership or synchronization.

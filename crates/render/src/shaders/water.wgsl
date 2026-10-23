@@ -1,11 +1,11 @@
-struct Ocean {
+struct WaterUniform {
     projection: mat4x4<f32>,
     inverse: mat4x4<f32>,
     plane: vec4<f32>,
     color: vec4<f32>,
     regions: array<vec4<f32>, 33>,
 }
-@group(0) @binding(0) var<uniform> ocean: Ocean;
+@group(0) @binding(0) var<uniform> water: WaterUniform;
 
 struct Ray {
     @builtin(position) position: vec4<f32>,
@@ -26,18 +26,18 @@ struct Water {
 }
 
 @fragment fn fragment(ray: Ray) -> Water {
-    let near = ocean.inverse * vec4<f32>(ray.ndc, 1.0, 1.0);
+    let near = water.inverse * vec4<f32>(ray.ndc, 1.0, 1.0);
     let direction = normalize(near.xyz / near.w);
     if direction.z >= 0.0 { discard; }
-    let point = vec4<f32>(direction * -ocean.plane.x, -direction.z);
-    for (var i = 0u; i < u32(ocean.plane.y); i += 1u) {
-        let region = ocean.regions[i];
+    let point = vec4<f32>(direction * -water.plane.x, -direction.z);
+    for (var i = 0u; i < u32(water.plane.y); i += 1u) {
+        let region = water.regions[i];
         if all(point.xy >= region.xy * point.w) && all(point.xy < (region.xy + region.zw) * point.w) { discard; }
     }
-    let clip = ocean.projection * point;
+    let clip = water.projection * point;
     if clip.w < 0.05 * point.w { discard; }
-    var water: Water;
-    water.color = ocean.color;
-    water.depth = clamp(clip.z / clip.w, 0.0, 1.0);
-    return water;
+    var output: Water;
+    output.color = water.color;
+    output.depth = clamp(clip.z / clip.w, 0.0, 1.0);
+    return output;
 }

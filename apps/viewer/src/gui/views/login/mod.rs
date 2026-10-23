@@ -18,11 +18,11 @@ use gpui_component::{
 use network::{AgentSession, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
 
 use self::spawn::{SpawnChoice, SpawnOption, favorites_for_username, spawn_options};
-use crate::gui::chat::ChatScreen;
 #[cfg(target_os = "linux")]
 use crate::gui::components::window_chrome::linux_titlebar;
 #[cfg(target_os = "windows")]
 use crate::gui::components::window_chrome::windows_titlebar;
+use crate::gui::views::chat::ChatScreen;
 use crate::inventory::{
     FavoriteLocation,
     favorite_store::{self, FavoriteStore, FavoriteStoreError},

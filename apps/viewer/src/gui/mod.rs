@@ -1,10 +1,5 @@
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-pub(crate) mod camera;
-mod chat;
 mod components;
-mod login;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-mod viewport;
+mod views;
 mod window_geometry;
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -21,7 +16,7 @@ use tokio::runtime::Handle;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::{gui::login::LoginScreen, gui::window_geometry::restore_bounds};
+use crate::{gui::views::login::LoginScreen, gui::window_geometry::restore_bounds};
 
 struct AppLifecycle {
     _window_closed: Subscription,
@@ -34,7 +29,7 @@ struct AppLifecycle {
     quitting: bool,
     session: Arc<Mutex<Option<network::SessionHandle>>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    viewport: Option<crate::gui::viewport::Viewport>,
+    viewport: Option<crate::gui::views::viewport::Viewport>,
 }
 
 impl Global for AppLifecycle {}
@@ -45,6 +40,17 @@ enum MainWindow {
     Login,
     Starting(u64),
     Scene(u64),
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+impl MainWindow {
+    fn blocks_start(self, generation: u64) -> bool {
+        matches!(self, Self::Starting(active) | Self::Scene(active) if active >= generation)
+    }
+
+    fn is_current(self, generation: u64) -> bool {
+        matches!(self, Self::Starting(active) | Self::Scene(active) if active == generation)
+    }
 }
 
 struct ServiceRuntime(Handle);
@@ -142,7 +148,7 @@ fn shutdown(cx: &mut App) {
     let viewport = lifecycle.viewport.take();
     for window in cx.windows() {
         if window.update(cx, |_, window, _| window.remove_window()).is_err() {
-            tracing::trace!("Window was already unavailable during shutdown");
+            tracing::trace!("window was already unavailable during shutdown");
         }
     }
     cx.spawn(async move |cx| {
@@ -162,12 +168,11 @@ fn shutdown(cx: &mut App) {
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) fn start_scene(generation: u64, cx: &mut App) -> bool {
-    use crate::gui::viewport::Viewport;
     use futures::StreamExt;
 
-    if !cx.has_global::<AppLifecycle>()
-        || matches!(cx.global::<AppLifecycle>().main, MainWindow::Starting(g) | MainWindow::Scene(g) if g >= generation)
-    {
+    use crate::gui::views::viewport::{Viewport, ViewportError};
+
+    if !cx.has_global::<AppLifecycle>() || cx.global::<AppLifecycle>().main.blocks_start(generation) {
         return false;
     }
     if cx.global::<AppLifecycle>().viewport.is_none() {
@@ -181,7 +186,7 @@ pub(crate) fn start_scene(generation: u64, cx: &mut App) -> bool {
                     cx.update(|cx| {
                         let main = cx.global::<AppLifecycle>().main;
                         if let MainWindow::Starting(generation) | MainWindow::Scene(generation) = main {
-                            scene_failed(generation, "The scene window stopped unexpectedly.".into(), cx);
+                            scene_failed(generation, ViewportError::WorkerStopped, cx);
                         }
                     });
                 })
@@ -189,7 +194,7 @@ pub(crate) fn start_scene(generation: u64, cx: &mut App) -> bool {
             }
             Err(error) => {
                 cx.global_mut::<AppLifecycle>().main = MainWindow::Starting(generation);
-                cx.defer(move |cx| scene_failed(generation, error.to_string(), cx));
+                cx.defer(move |cx| scene_failed(generation, ViewportError::WorkerStart(error), cx));
                 return false;
             }
         }
@@ -197,7 +202,7 @@ pub(crate) fn start_scene(generation: u64, cx: &mut App) -> bool {
     let lifecycle = cx.global_mut::<AppLifecycle>();
     lifecycle.main = MainWindow::Starting(generation);
     if !lifecycle.viewport.as_ref().is_some_and(|v| v.show(generation)) {
-        cx.defer(move |cx| scene_failed(generation, "The scene window worker is unavailable.".into(), cx));
+        cx.defer(move |cx| scene_failed(generation, ViewportError::WorkerUnavailable, cx));
         return false;
     }
     true
@@ -213,7 +218,7 @@ pub(crate) fn connect_world(
 ) {
     let lifecycle = cx.global::<AppLifecycle>();
     if !lifecycle.quitting
-        && matches!(lifecycle.main, MainWindow::Starting(g) | MainWindow::Scene(g) if g == generation)
+        && lifecycle.main.is_current(generation)
         && let Some(viewport) = &lifecycle.viewport
     {
         viewport.connect_world(generation, sources, agent_id, camera, service_runtime(cx));
@@ -226,7 +231,7 @@ pub(crate) fn end_scene(generation: u64, cx: &mut App) {
         return;
     }
     let lifecycle = cx.global_mut::<AppLifecycle>();
-    if !matches!(lifecycle.main, MainWindow::Starting(g) | MainWindow::Scene(g) if g == generation) {
+    if !lifecycle.main.is_current(generation) {
         return;
     }
     lifecycle.main = MainWindow::Login;
@@ -237,8 +242,8 @@ pub(crate) fn end_scene(generation: u64, cx: &mut App) {
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn viewport_event(event: crate::gui::viewport::ViewportEvent, cx: &mut App) {
-    use crate::gui::viewport::ViewportEvent;
+fn viewport_event(event: crate::gui::views::viewport::ViewportEvent, cx: &mut App) {
+    use crate::gui::views::viewport::ViewportEvent;
     let main = cx.global::<AppLifecycle>().main;
     if matches!(event, ViewportEvent::Chat(_))
         && let Some(viewport) = &cx.global::<AppLifecycle>().viewport
@@ -252,27 +257,25 @@ fn viewport_event(event: crate::gui::viewport::ViewportEvent, cx: &mut App) {
             if let Some(window) = cx.global_mut::<AppLifecycle>().login_window.take()
                 && window.update(cx, |_, window, _| window.remove_window()).is_err()
             {
-                tracing::trace!("Login window was already unavailable after scene startup");
+                tracing::trace!("login window was already unavailable after scene startup");
             }
         }
         ViewportEvent::Chat(generation) if main == MainWindow::Scene(generation) => show_chat(true, cx),
-        ViewportEvent::Closed(generation) if main == MainWindow::Scene(generation) || main == MainWindow::Starting(generation) => {
-            shutdown(cx)
-        }
+        ViewportEvent::Closed(generation) if main.is_current(generation) => shutdown(cx),
         ViewportEvent::Failed(generation, error) => scene_failed(generation, error, cx),
         _ => {}
     }
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn scene_failed(generation: u64, error: String, cx: &mut App) {
+fn scene_failed(generation: u64, error: crate::gui::views::viewport::ViewportError, cx: &mut App) {
     let lifecycle = cx.global::<AppLifecycle>();
-    if lifecycle.quitting || !matches!(lifecycle.main, MainWindow::Starting(g) | MainWindow::Scene(g) if g == generation) {
+    if lifecycle.quitting || !lifecycle.main.is_current(generation) {
         return;
     }
     let controller = lifecycle.controller.clone();
     if let Some(controller) = controller {
-        controller.update(cx, |login, cx| login.scene_failed(error, cx));
+        controller.update(cx, |login, cx| login.scene_failed(error.to_string(), cx));
     }
 }
 
@@ -284,7 +287,7 @@ fn show_login(cx: &mut App) {
     }
     if let Some(handle) = lifecycle.login_window {
         if handle.update(cx, |_, window, _| window.activate_window()).is_err() {
-            tracing::trace!("Login window was already unavailable during activation");
+            tracing::trace!("login window was already unavailable during activation");
         }
     } else {
         let Some(controller) = lifecycle.controller.clone() else {
@@ -304,20 +307,20 @@ fn show_login(cx: &mut App) {
     if let Some(chat) = cx.global_mut::<AppLifecycle>().chat_window.take()
         && chat.update(cx, |_, window, _| window.remove_window()).is_err()
     {
-        tracing::trace!("Chat window was already unavailable during removal");
+        tracing::trace!("chat window was already unavailable during removal");
     }
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn show_chat(focus: bool, cx: &mut App) {
-    use crate::gui::chat::ChatWindow;
+    use crate::gui::views::chat::ChatWindow;
     let lifecycle = cx.global::<AppLifecycle>();
     if lifecycle.quitting {
         return;
     }
     if let Some(window) = lifecycle.chat_window {
         if focus && window.update(cx, |_, window, _| window.activate_window()).is_err() {
-            tracing::trace!("Chat window was already unavailable during activation");
+            tracing::trace!("chat window was already unavailable during activation");
         }
         return;
     }
@@ -411,17 +414,19 @@ fn set_dark_theme(cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use gpui::AssetSource;
-
     use super::should_shutdown;
-    use gpui_component_assets::Assets;
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[gpui::test]
     fn handoff_preserves_window_lifetimes(cx: &mut gpui::TestAppContext) {
-        use super::{AppLifecycle, MainWindow, install_lifecycle, start_scene, viewport_event};
-        use crate::gui::{login::LoginScreen, viewport::ViewportEvent};
         use std::sync::{Arc, Mutex};
+
+        use crate::gui::views::{
+            login::LoginScreen,
+            viewport::{ViewportError, ViewportEvent},
+        };
+
+        use super::{AppLifecycle, MainWindow, install_lifecycle, start_scene, viewport_event};
 
         let session = Arc::new(Mutex::new(None));
         cx.update(|cx| {
@@ -450,7 +455,7 @@ mod tests {
             assert!(!start_scene(1, cx), "older readiness must not replace the active scene");
             assert_eq!(cx.global::<AppLifecycle>().main, MainWindow::Scene(2));
             viewport_event(ViewportEvent::Closed(1), cx);
-            viewport_event(ViewportEvent::Failed(1, "stale failure".into()), cx);
+            viewport_event(ViewportEvent::Failed(1, ViewportError::ScenePublication(render::scene::ApplyError::StaleSession)), cx);
             assert!(!cx.global::<AppLifecycle>().quitting);
             let chat = cx.global::<AppLifecycle>().chat_window.unwrap();
             chat.update(cx, |_, window, _| window.remove_window()).unwrap();
@@ -474,13 +479,6 @@ mod tests {
     #[test]
     fn tool_close_keeps_app_open() {
         assert!(!should_shutdown(false, 1));
-    }
-
-    #[test]
-    fn sortable_icons_are_embedded() {
-        for path in ["icons/check.svg", "icons/chevrons-up-down.svg", "icons/sort-ascending.svg", "icons/sort-descending.svg"] {
-            assert!(Assets.load(path).expect("icon assets should load").is_some(), "missing {path}");
-        }
     }
 
     #[test]

@@ -1,0 +1,685 @@
+use std::{
+    error::Error,
+    fmt,
+    sync::{Arc, mpsc},
+    time::{Duration, Instant},
+};
+
+use egui::{Context, DragValue, Slider, ViewportId};
+use futures::executor::block_on;
+use render::scene;
+use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
+use tracing::Instrument;
+use crate::DEFAULT_DRAW_DISTANCE;
+use winit::{
+    dpi::{LogicalSize, PhysicalPosition},
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow},
+    keyboard::{Key, ModifiersState, NamedKey},
+    window::{CursorGrabMode, Window, WindowId},
+};
+
+use super::{FRAME_INTERVAL, InputCapture, SharedWindowState};
+use crate::{camera::OrbitCamera, scene_feed::SceneFeed};
+
+const RECOVERY_DELAY: Duration = Duration::from_millis(500);
+pub(super) const MAX_RECOVERIES: u32 = 3;
+
+#[derive(Debug)]
+pub(crate) enum SceneWindowError {
+    WindowCreation(winit::error::OsError),
+    Renderer(render::Error),
+    RecoveryExhausted,
+}
+
+impl fmt::Display for SceneWindowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WindowCreation(error) => fmt::Display::fmt(error, f),
+            Self::Renderer(error) => fmt::Display::fmt(error, f),
+            Self::RecoveryExhausted => f.write_str("The scene GPU could not recover after three attempts."),
+        }
+    }
+}
+
+impl Error for SceneWindowError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::WindowCreation(error) => Some(error),
+            Self::Renderer(error) => Some(error),
+            Self::RecoveryExhausted => None,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct DrawActions {
+    pub(super) first_frame: bool,
+    pub(super) request_chat: bool,
+}
+
+struct DebugUiFrame {
+    overlay: Overlay,
+    request_chat: bool,
+    recreate_renderer: bool,
+}
+
+pub(super) struct SceneWindow {
+    wake: Arc<SharedWindowState>,
+    dirty: bool,
+    retired: Option<Retirement>,
+    texture_sender: mpsc::SyncSender<TextureCompletion>,
+    texture_receiver: mpsc::Receiver<TextureCompletion>,
+    feed: Option<SceneFeed>,
+    renderer: Option<Renderer>,
+    texture_soft_cap: u32,
+    egui: Context,
+    platform: egui_winit::State,
+    next_ui: Option<Instant>,
+    window: Arc<Window>,
+    generation: u64,
+    frame_work: Duration,
+    next_frame: Instant,
+    dpi: f64,
+    occluded: bool,
+    ready: bool,
+    recoveries: u32,
+    recovery: PresentationRecovery,
+    camera: Option<OrbitCamera>,
+    last_camera: Option<scene::Camera>,
+    cursor: PhysicalPosition<f64>,
+    modifiers: ModifiersState,
+    drag: Option<DragState>,
+}
+
+impl SceneWindow {
+    pub(super) fn new(event_loop: &ActiveEventLoop, generation: u64, wake: Arc<SharedWindowState>) -> Result<Self, SceneWindowError> {
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("Radia")
+                        .with_inner_size(LogicalSize::new(1280, 720))
+                        .with_min_inner_size(LogicalSize::new(460, 300))
+                        .with_visible(false),
+                )
+                .map_err(SceneWindowError::WindowCreation)?,
+        );
+        let (egui, platform) = debug_ui(&window);
+        let dpi = window.scale_factor();
+        let size = window.inner_size();
+        let renderer = block_on(Renderer::new(Arc::clone(&window), size.width, size.height)).map_err(SceneWindowError::Renderer)?;
+        let info = renderer.adapter_info();
+        tracing::info!(backend = ?info.backend, gpu = %info.name, driver = %info.driver, driver_info = %info.driver_info, "scene GPU initialized");
+        window.set_visible(true);
+        let now = Instant::now();
+        let texture_soft_cap = renderer.texture_soft_cap_mib();
+        let (texture_sender, texture_receiver) = mpsc::sync_channel(2);
+        Ok(Self {
+            wake,
+            dirty: true,
+            retired: None,
+            texture_sender,
+            texture_receiver,
+            feed: None,
+            renderer: Some(renderer),
+            texture_soft_cap,
+            egui,
+            platform,
+            next_ui: None,
+            window,
+            generation,
+            frame_work: Duration::ZERO,
+            next_frame: now,
+            dpi,
+            occluded: false,
+            ready: false,
+            recoveries: 0,
+            recovery: PresentationRecovery::default(),
+            camera: None,
+            last_camera: None,
+            cursor: PhysicalPosition::new(0.0, 0.0),
+            modifiers: ModifiersState::empty(),
+            drag: None,
+        })
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(super) fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub(super) fn matches_window(&self, id: WindowId) -> bool {
+        self.window.id() == id
+    }
+
+    pub(super) fn on_window_event(&mut self, event: &WindowEvent) -> bool {
+        self.platform.on_window_event(&self.window, event).consumed
+    }
+
+    pub(super) fn wants_pointer_input(&self) -> bool {
+        self.egui.egui_wants_pointer_input()
+    }
+
+    pub(super) fn wants_keyboard_input(&self) -> bool {
+        self.egui.egui_wants_keyboard_input()
+    }
+
+    pub(super) fn handle_scene_input(&mut self, event: &WindowEvent, capture: InputCapture) -> bool {
+        match event {
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::Focused(false) => {
+                self.release_drag(false);
+                self.modifiers = ModifiersState::empty();
+            }
+            WindowEvent::CursorMoved { position, .. } => self.cursor = *position,
+            WindowEvent::MouseInput { button: MouseButton::Left, state, .. } => {
+                self.handle_left_click(*state, capture);
+            }
+            WindowEvent::MouseWheel { delta, .. } if !capture.consumed && !capture.pointer => {
+                if let Some(camera) = &mut self.camera {
+                    let clicks = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+                        MouseScrollDelta::PixelDelta(position) => position.y / (40.0 * self.dpi),
+                    };
+                    camera.zoom(2.0f64.powf(-clicks / 4.0));
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && event.logical_key == Key::Named(NamedKey::Escape)
+                    && !capture.consumed
+                    && !capture.keyboard =>
+            {
+                self.release_drag(true);
+                if let Some(camera) = &mut self.camera {
+                    camera.reset();
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    pub(super) fn resize(&mut self, width: u32, height: u32) {
+        if let Some(renderer) = &mut self.renderer {
+            renderer.resize(width, height);
+        }
+    }
+
+    pub(super) fn set_occluded(&mut self, occluded: bool) {
+        self.occluded = occluded;
+    }
+
+    pub(super) fn update_feed(&mut self, incoming: Option<(u64, SceneFeed)>) -> Result<(), scene::ApplyError> {
+        if let Some((generation, feed)) = incoming
+            && generation == self.generation
+        {
+            self.feed = Some(feed);
+            self.dirty = true;
+        }
+        if let Some(feed) = &mut self.feed {
+            let before = feed.view.version();
+            feed.drain()?;
+            self.dirty |= before != feed.view.version();
+        }
+        Ok(())
+    }
+
+    pub(super) fn take_retirements(&mut self) -> [Option<Retirement>; 2] {
+        [self.renderer.take().map(Renderer::retire), self.retired.take()]
+    }
+
+    pub(super) fn take_retired(&mut self) -> Option<Retirement> {
+        self.retired.take()
+    }
+
+    fn release_drag(&mut self, restore: bool) {
+        if let Some(drag) = self.drag.take() {
+            if let Err(error) = self.window.set_cursor_grab(CursorGrabMode::None) {
+                tracing::warn!(%error, "could not release scene cursor capture");
+            }
+            self.window.set_cursor_visible(true);
+            if restore && let Err(error) = self.window.set_cursor_position(drag.origin) {
+                tracing::warn!(%error, "could not restore scene cursor position");
+            }
+        }
+    }
+
+    fn handle_left_click(&mut self, state: ElementState, capture: InputCapture) {
+        if state == ElementState::Released {
+            self.release_drag(true);
+            return;
+        }
+        if !self.modifiers.alt_key() || capture.consumed || capture.pointer {
+            return;
+        }
+        let (Some(renderer), Some(observation), Some(camera)) = (&self.renderer, self.last_camera, &mut self.camera) else {
+            return;
+        };
+        let size = self.window.inner_size();
+        match renderer.pick(observation, observation.ray([self.cursor.x, self.cursor.y], [size.width, size.height])) {
+            Ok(Some(point)) => {
+                camera.focus(point, Instant::now());
+                let origin = self.cursor;
+                let center = PhysicalPosition::new(f64::from(size.width) * 0.5, f64::from(size.height) * 0.5);
+                match self.window.set_cursor_grab(CursorGrabMode::Confined) {
+                    Ok(()) => {
+                        self.window.set_cursor_visible(false);
+                        self.drag = Some(DragState { origin, travel: [0.0; 2] });
+                        if let Err(error) = self.window.set_cursor_position(center) {
+                            self.release_drag(false);
+                            tracing::warn!(%error, "could not position scene cursor");
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "could not capture scene cursor"),
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::debug!(%error, "scene focus pick exceeded its work limit"),
+        }
+    }
+
+    pub(super) fn drag_camera(&mut self, (dx, dy): (f64, f64)) {
+        let (Some(drag), Some(camera)) = (&mut self.drag, &mut self.camera) else {
+            return;
+        };
+        drag.travel[0] += dx.abs() / self.dpi;
+        drag.travel[1] += dy.abs() / self.dpi;
+        if drag.travel[0] >= 4.0 || drag.travel[1] >= 4.0 {
+            self.dirty = true;
+            camera.drag(
+                [dx, if drag.travel[1] >= 4.0 { dy } else { 0.0 }],
+                f64::from(self.window.inner_size().width),
+                self.modifiers.control_key(),
+                self.modifiers.shift_key(),
+            );
+        }
+    }
+
+    fn ensure_camera(&mut self) {
+        if self.camera.is_none()
+            && let Some(feed) = &self.feed
+            && let Some(object) = feed.agent()
+            && let Ok(world::WorldTransformState::Resolved(transform)) = object.detail().world_transform
+        {
+            self.camera = Some(OrbitCamera::new(transform.pose.position));
+        }
+    }
+
+    fn camera_observation(&self, now: Instant) -> Option<scene::Camera> {
+        self.camera.as_ref().and_then(|camera| camera.scene_camera(self.window.inner_size().into(), now))
+    }
+
+    pub(super) fn draw(&mut self) -> Result<DrawActions, SceneWindowError> {
+        self.ensure_camera();
+        let observation = self.camera_observation(Instant::now());
+        if let (Some(feed), Some(camera)) = (&self.feed, observation) {
+            feed.set_camera(camera);
+        }
+        let now = Instant::now();
+        if now < self.next_frame {
+            return Ok(DrawActions::default());
+        }
+        self.dirty = false;
+        if !self.ensure_renderer(now)? {
+            return Ok(DrawActions::default());
+        }
+        self.complete_texture_jobs();
+        let debug_ui = self.draw_debug_ui(now);
+        Ok(self.submit_frame(observation, now, debug_ui))
+    }
+
+    fn ensure_renderer(&mut self, now: Instant) -> Result<bool, SceneWindowError> {
+        if self.renderer.is_some() {
+            return Ok(true);
+        }
+        match self.recovery.begin_attempt(now) {
+            RecoveryAttempt::Start => {}
+            RecoveryAttempt::WaitUntil(retry_at) => {
+                self.next_frame = retry_at;
+                self.dirty = true;
+                return Ok(false);
+            }
+            RecoveryAttempt::Exhausted => return Err(SceneWindowError::RecoveryExhausted),
+        }
+        let size = self.window.inner_size();
+        match block_on(Renderer::new(Arc::clone(&self.window), size.width, size.height)) {
+            Ok(renderer) => {
+                (self.texture_sender, self.texture_receiver) = mpsc::sync_channel(2);
+                let info = renderer.adapter_info();
+                tracing::info!(backend = ?info.backend, gpu = %info.name, driver = %info.driver, driver_info = %info.driver_info, "scene GPU recovered");
+                (self.egui, self.platform) = debug_ui(&self.window);
+                self.renderer = Some(renderer);
+                self.recoveries += 1;
+                Ok(true)
+            }
+            Err(error) => {
+                tracing::warn!(%error, attempt = self.recovery.attempts, "scene GPU recovery failed");
+                self.schedule_recovery(now);
+                Ok(false)
+            }
+        }
+    }
+
+    fn complete_texture_jobs(&mut self) {
+        if let Some(renderer) = &mut self.renderer {
+            while let Ok(completion) = self.texture_receiver.try_recv() {
+                renderer.complete_texture(completion);
+            }
+        }
+    }
+
+    fn draw_debug_ui(&mut self, now: Instant) -> DebugUiFrame {
+        let stats = self.renderer.as_ref().expect("renderer ensured before debug UI").stats();
+        self.dpi = self.window.scale_factor();
+        let input = self.platform.take_egui_input(&self.window);
+        let mut request_chat = false;
+        let mut recreate_renderer = false;
+        let output = self.egui.run_ui(input, |root| {
+            egui::Window::new("Rendering").default_width(400.0).show(root.ctx(), |ui| {
+                if let Some(camera) = &mut self.camera {
+                    ui.add(Slider::new(&mut camera.draw_distance, 32.0..=1024.0).text("Draw distance").suffix(" m"));
+                    ui.add(Slider::new(&mut camera.lod_factor, 0.25..=4.0).text("LOD factor"))
+                        .on_hover_text("Higher values keep more detailed prim geometry at a distance.");
+                    if ui.button("Reset settings").clicked() {
+                        camera.draw_distance = DEFAULT_DRAW_DISTANCE;
+                        camera.lod_factor = 1.0;
+                    }
+                }
+                ui.label(format!("CPU frame: {:.2} ms", self.frame_work.as_secs_f64() * 1000.0));
+                ui.label(format!("Draws: {}, instances: {}", stats.draw_calls, stats.instances));
+                ui.collapsing("Diagnostics", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(DragValue::new(&mut self.texture_soft_cap).speed(16).suffix(" MiB"))
+                            .on_hover_text("Soft GPU backstop. Textures used by the current frame stay resident, even above this value.");
+                        ui.label("Texture soft cap");
+                    });
+                    ui.label(format!("CPU prepare: {:.2} ms", stats.prepare_ms));
+                    ui.label(format!("GPU meshes: {:.1} MiB, pending: {}", stats.mesh_bytes as f64 / 1048576.0, stats.pending_meshes));
+                    ui.label(format!(
+                        "GPU textures: {}, {:.1} MiB, pending: {}",
+                        stats.texture_count,
+                        stats.texture_bytes as f64 / 1048576.0,
+                        stats.pending_textures
+                    ));
+                    ui.label(format!(
+                        "Texture staging: {:.1} MiB, upload: {:.1} MiB",
+                        stats.staging_bytes as f64 / 1048576.0,
+                        stats.texture_upload_bytes as f64 / 1048576.0
+                    ));
+                    if stats.omitted_faces > 0 {
+                        ui.label(format!("Faces over draw budget: {}", stats.omitted_faces));
+                    }
+                    ui.label(format!("GPU depth: {:.1} MiB", stats.depth_bytes as f64 / 1048576.0));
+                    if let Some(feed) = &self.feed {
+                        ui.label(format!(
+                            "Objects: {}, regions: {}, terrain patches: {}",
+                            feed.view.object_count(),
+                            feed.view.region_count(),
+                            feed.view.patch_count()
+                        ));
+                        if let Some(revision) = feed.view.revision() {
+                            ui.label(format!("World revision: {}", revision.get()));
+                        }
+                        ui.label(format!(
+                            "Scene: {:.1} MiB, peak {:.1} MiB",
+                            feed.budget.charged_bytes() as f64 / 1048576.0,
+                            feed.budget.high_water_bytes() as f64 / 1048576.0
+                        ));
+                    }
+                    if self.recoveries > 0 {
+                        ui.label(format!("GPU recreations: {}", self.recoveries));
+                    }
+                    recreate_renderer = ui.button("Recreate GPU resources").clicked();
+                });
+                request_chat = ui.button("Nearby chat (F6)").clicked();
+            });
+        });
+        self.next_ui = output.viewport_output.get(&ViewportId::ROOT).and_then(|viewport| now.checked_add(viewport.repaint_delay));
+        self.platform.handle_platform_output(&self.window, output.platform_output);
+        if self.drag.is_some() {
+            self.window.set_cursor_visible(false);
+        }
+        DebugUiFrame {
+            overlay: Overlay {
+                primitives: self.egui.tessellate(output.shapes, output.pixels_per_point),
+                textures: output.textures_delta,
+                pixels_per_point: output.pixels_per_point,
+            },
+            request_chat,
+            recreate_renderer,
+        }
+    }
+
+    fn submit_frame(&mut self, observation: Option<scene::Camera>, now: Instant, ui: DebugUiFrame) -> DrawActions {
+        let scene = self.feed.as_ref().zip(observation).map(|(feed, camera)| (&feed.view, camera));
+        let water_height = self.feed.as_ref().and_then(|feed| feed.water_height);
+        let result = {
+            let renderer = self.renderer.as_mut().expect("renderer ensured before frame submission");
+            renderer.set_texture_soft_cap(self.texture_soft_cap);
+            renderer.draw(ui.overlay, scene, water_height, || self.window.pre_present_notify())
+        };
+        self.dispatch_texture_jobs();
+        self.next_frame = Instant::now();
+        self.frame_work = self.next_frame.duration_since(now);
+        match result {
+            Ok(presented) => {
+                self.dirty |= !presented || self.camera.as_ref().is_some_and(|camera| camera.moving(Instant::now()));
+                self.dirty |= self.camera_observation(Instant::now()) != observation;
+                if presented {
+                    self.last_camera = observation;
+                    self.recovery.presented();
+                } else {
+                    self.next_frame += FRAME_INTERVAL;
+                }
+                let first_frame = presented && !self.ready;
+                self.ready |= presented;
+                if ui.recreate_renderer {
+                    self.retire_renderer();
+                    self.schedule_recovery(now);
+                }
+                DrawActions { first_frame, request_chat: ui.request_chat }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "scene presentation failed; scheduling GPU recovery");
+                self.retire_renderer();
+                self.schedule_recovery(now);
+                DrawActions { first_frame: false, request_chat: ui.request_chat }
+            }
+        }
+    }
+
+    fn dispatch_texture_jobs(&mut self) {
+        if let Some(feed) = &self.feed {
+            let Some(renderer) = &mut self.renderer else {
+                return;
+            };
+            while let Some(job) = renderer.next_texture_job() {
+                let sender = self.texture_sender.clone();
+                let wake = Arc::clone(&self.wake);
+                let span = tracing::Span::current();
+                let work = feed.runtime.spawn_blocking(move || span.in_scope(|| job.run(CompressionQuality::Fast)));
+                drop(
+                    feed.runtime.spawn(
+                        async move {
+                            match work.await {
+                                Ok(completion) => match sender.try_send(completion) {
+                                    Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
+                                    Err(mpsc::TrySendError::Full(_)) => tracing::warn!("texture completion queue is full"),
+                                },
+                                Err(error) => tracing::error!(%error, "texture worker stopped unexpectedly"),
+                            }
+                            wake.wake();
+                        }
+                        .in_current_span(),
+                    ),
+                );
+            }
+        }
+    }
+
+    pub(super) fn poll_renderer(&mut self, now: Instant) -> bool {
+        let Some(renderer) = &mut self.renderer else {
+            return false;
+        };
+        match renderer.poll() {
+            Ok(progress) => {
+                self.dirty |= progress.redraw;
+                progress.pending
+            }
+            Err(error) => {
+                tracing::warn!(%error, "scene GPU failed; scheduling recovery");
+                self.retire_renderer();
+                self.schedule_recovery(now);
+                true
+            }
+        }
+    }
+
+    fn schedule_recovery(&mut self, now: Instant) {
+        self.next_frame = self.recovery.schedule_retry(now);
+        self.dirty = true;
+    }
+
+    pub(super) fn schedule_redraw(&mut self, event_loop: &ActiveEventLoop, pending: bool, can_redraw: bool) {
+        if self.occluded || self.window.inner_size().width == 0 || self.window.inner_size().height == 0 {
+            event_loop.set_control_flow(if pending { ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL) } else { ControlFlow::Wait });
+            return;
+        }
+        let now = Instant::now();
+        if self.next_ui.is_some_and(|at| now >= at) {
+            self.next_ui = None;
+            self.dirty = true;
+        }
+        if self.dirty && now >= self.next_frame && can_redraw {
+            self.window.request_redraw();
+            event_loop.set_control_flow(ControlFlow::Wait);
+        } else {
+            let redraw = (self.dirty && can_redraw).then_some(self.next_frame.max(now + Duration::from_millis(1)));
+            let poll = pending.then_some(now + FRAME_INTERVAL);
+            event_loop.set_control_flow(match redraw.into_iter().chain(poll).chain(self.next_ui).min() {
+                Some(at) => ControlFlow::WaitUntil(at),
+                None => ControlFlow::Wait,
+            });
+        }
+    }
+
+    fn retire_renderer(&mut self) {
+        if let Some(renderer) = self.renderer.take() {
+            self.retired = Some(renderer.retire());
+        }
+    }
+}
+
+impl Drop for SceneWindow {
+    fn drop(&mut self) {
+        self.release_drag(false);
+    }
+}
+
+struct DragState {
+    origin: PhysicalPosition<f64>,
+    travel: [f64; 2],
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RecoveryAttempt {
+    Start,
+    WaitUntil(Instant),
+    Exhausted,
+}
+
+#[derive(Default)]
+struct PresentationRecovery {
+    attempts: u32,
+    retry_at: Option<Instant>,
+}
+
+impl PresentationRecovery {
+    fn begin_attempt(&mut self, now: Instant) -> RecoveryAttempt {
+        if let Some(retry_at) = self.retry_at
+            && now < retry_at
+        {
+            return RecoveryAttempt::WaitUntil(retry_at);
+        }
+        if self.attempts == MAX_RECOVERIES {
+            return RecoveryAttempt::Exhausted;
+        }
+        self.attempts += 1;
+        self.retry_at = None;
+        RecoveryAttempt::Start
+    }
+
+    fn schedule_retry(&mut self, now: Instant) -> Instant {
+        let retry_at = now + RECOVERY_DELAY;
+        self.retry_at = Some(retry_at);
+        retry_at
+    }
+
+    fn presented(&mut self) {
+        self.attempts = 0;
+        self.retry_at = None;
+    }
+}
+
+fn debug_ui(window: &Window) -> (Context, egui_winit::State) {
+    let ctx = Context::default();
+    ctx.global_style_mut(|style| style.animation_time = 0.0);
+    let state = egui_winit::State::new(ctx.clone(), ViewportId::ROOT, window, Some(window.scale_factor() as f32), window.theme(), None);
+    (ctx, state)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        error::Error,
+        time::{Duration, Instant},
+    };
+
+    use super::{PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError};
+
+    #[test]
+    fn presentation_resets_recovery_limit() {
+        let mut recovery = PresentationRecovery::default();
+        let mut now = Instant::now();
+        for _ in 0..6 {
+            assert_eq!(recovery.begin_attempt(now), RecoveryAttempt::Start);
+            recovery.presented();
+        }
+        for _ in 0..3 {
+            assert_eq!(recovery.begin_attempt(now), RecoveryAttempt::Start);
+            now = recovery.schedule_retry(now);
+        }
+        assert_eq!(recovery.begin_attempt(now), RecoveryAttempt::Exhausted, "three attempts without a presented frame exhaust recovery");
+        recovery.presented();
+        assert_eq!(recovery.begin_attempt(now), RecoveryAttempt::Start, "a presented frame makes recovery available again");
+    }
+
+    #[test]
+    fn recovery_retries_after_delay() {
+        let mut recovery = PresentationRecovery::default();
+        let now = Instant::now();
+
+        assert_eq!(recovery.begin_attempt(now), RecoveryAttempt::Start);
+        let retry_at = recovery.schedule_retry(now);
+        assert_eq!(retry_at, now + RECOVERY_DELAY);
+        assert_eq!(recovery.begin_attempt(retry_at - Duration::from_nanos(1)), RecoveryAttempt::WaitUntil(retry_at));
+        assert_eq!(recovery.begin_attempt(retry_at), RecoveryAttempt::Start);
+    }
+
+    #[test]
+    fn recovery_error_keeps_user_message() {
+        assert_eq!(SceneWindowError::RecoveryExhausted.to_string(), "The scene GPU could not recover after three attempts.");
+    }
+
+    #[test]
+    fn renderer_creation_error_has_source() {
+        let error = SceneWindowError::Renderer(render::Error::UnsupportedSurface);
+        let source = Error::source(&error).expect("renderer creation error must retain its source");
+        assert!(source.downcast_ref::<render::Error>().is_some());
+    }
+}

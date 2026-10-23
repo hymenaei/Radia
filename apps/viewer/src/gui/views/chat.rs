@@ -155,7 +155,7 @@ impl ChatScreen {
                 cx.notify();
             }
             Err(error) => {
-                tracing::warn!(operation = "nearby_chat_send", %error, "Send failed");
+                tracing::warn!(%error, "nearby chat send failed");
             }
         }
     }

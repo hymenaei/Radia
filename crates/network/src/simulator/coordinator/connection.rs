@@ -39,7 +39,6 @@ use crate::transport::SendGate;
 use crate::transport::pacing::ProbeConnection;
 use crate::{
     AgentSession,
-    capture::CaptureRecorder,
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
     error::Error,
     event::{Event, EventEnvelope, SimulatorId},
@@ -87,7 +86,6 @@ pub(super) struct NeighborConnection {
     pub(super) initial_movement_sent: bool,
     primary_state: PrimaryState,
     agent_throttle_sent: bool,
-    pub(super) capture: Option<CaptureRecorder>,
     pub(super) coverage_losses: CoverageLossLedger,
     pub(super) pacer: ConnectionPacer,
     _owned_budget: Option<OutboundBudget>,
@@ -129,10 +127,9 @@ impl NeighborConnection {
         simulator_id: SimulatorId,
         session: AgentSession,
         region_handle: u64,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
     ) -> Result<Self, String> {
-        Self::connect_with_coverage(simulator_id, session, region_handle, capture, status, CoverageLossLedger::new()).await
+        Self::connect_with_coverage(simulator_id, session, region_handle, status, CoverageLossLedger::new()).await
     }
 
     #[cfg(test)]
@@ -140,7 +137,6 @@ impl NeighborConnection {
         simulator_id: SimulatorId,
         session: AgentSession,
         region_handle: u64,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
         coverage_losses: CoverageLossLedger,
     ) -> Result<Self, String> {
@@ -151,7 +147,6 @@ impl NeighborConnection {
             session,
             Some(region_handle),
             ConnectionRole::Neighbor,
-            capture,
             status,
             coverage_losses,
             None,
@@ -167,7 +162,6 @@ impl NeighborConnection {
         simulator_id: SimulatorId,
         session: AgentSession,
         region_handle: u64,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
         coverage_losses: CoverageLossLedger,
         primary_state_receiver: watch::Receiver<PrimaryState>,
@@ -179,7 +173,6 @@ impl NeighborConnection {
             session,
             Some(region_handle),
             ConnectionRole::Neighbor,
-            capture,
             status,
             coverage_losses,
             Some(primary_state_receiver),
@@ -194,7 +187,6 @@ impl NeighborConnection {
     pub(super) async fn connect_primary_with_state(
         simulator_id: SimulatorId,
         session: AgentSession,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
         coverage_losses: CoverageLossLedger,
         primary_state_receiver: watch::Receiver<PrimaryState>,
@@ -207,7 +199,6 @@ impl NeighborConnection {
             session,
             None,
             ConnectionRole::Primary,
-            capture,
             status,
             coverage_losses,
             Some(primary_state_receiver),
@@ -223,7 +214,6 @@ impl NeighborConnection {
     pub(super) async fn connect_primary_with_coverage(
         simulator_id: SimulatorId,
         session: AgentSession,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
         coverage_losses: CoverageLossLedger,
     ) -> Result<Self, String> {
@@ -234,7 +224,6 @@ impl NeighborConnection {
             session,
             None,
             ConnectionRole::Primary,
-            capture,
             status,
             coverage_losses,
             None,
@@ -251,7 +240,6 @@ impl NeighborConnection {
         session: AgentSession,
         region_handle: Option<u64>,
         role: ConnectionRole,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
         coverage_losses: CoverageLossLedger,
         primary_state: Option<watch::Receiver<PrimaryState>>,
@@ -264,8 +252,7 @@ impl NeighborConnection {
                 if role == ConnectionRole::Primary { PrimaryState::Connecting } else { PrimaryState::Neighbor { generation: 0 } };
             watch::channel(initial_state).1
         });
-        let socket =
-            UdpTransport::connect_with_status(session.simulator_address, session.circuit_code, capture.clone(), status.clone()).await?;
+        let socket = UdpTransport::connect_with_status(session.simulator_address, status.clone()).await?;
         #[cfg(test)]
         let socket = {
             let mut socket = socket;
@@ -305,7 +292,6 @@ impl NeighborConnection {
                 PrimaryState::Neighbor { generation: 0 }
             },
             agent_throttle_sent: false,
-            capture,
             coverage_losses,
             pacer,
             _owned_budget: owned_budget,
@@ -313,7 +299,7 @@ impl NeighborConnection {
         })
     }
 
-    #[tracing::instrument(name = "simulator.neighbor", level = "info", skip_all)]
+    #[tracing::instrument(name = "simulator.connection", level = "info", skip_all, fields(simulator = self.simulator_id.get(), initial_role = ?self.initial_role))]
     pub(super) async fn run(
         mut self,
         events: mpsc::Sender<NeighborEvent>,
@@ -742,7 +728,6 @@ impl NeighborConnection {
                                 CoverageSource::Lludp,
                                 CoverageLossReason::PreflightRejected,
                             );
-                            self.socket.record_received(&receive_buffer[..size], None);
                             continue;
                         }
                     };
@@ -761,7 +746,6 @@ impl NeighborConnection {
                                 CoverageSource::Lludp,
                                 CoverageLossReason::AcknowledgementAdmission,
                             );
-                            self.socket.record_received(&receive_buffer[..size], None);
                             continue;
                         }
                     };
@@ -772,7 +756,6 @@ impl NeighborConnection {
                             &self.circuit,
                             ack_timer_due || finish_after_ack,
                         )?;
-                        self.socket.record_received(&receive_buffer[..size], None);
                         last_udp_received = Instant::now();
                         continue;
                     }
@@ -785,7 +768,6 @@ impl NeighborConnection {
                                 CoverageSource::Lludp,
                                 CoverageLossReason::PreflightRejected,
                             );
-                            self.socket.record_received(&receive_buffer[..size], None);
                             continue;
                         }
                     };
@@ -801,7 +783,6 @@ impl NeighborConnection {
                                 CoverageSource::Lludp,
                                 CoverageLossReason::DecodeAdmission,
                             );
-                            self.socket.record_received(&receive_buffer[..size], None);
                             continue;
                         };
                         Some(permit)
@@ -818,7 +799,6 @@ impl NeighborConnection {
                                 CoverageSource::Lludp,
                                 preflight_loss_reason(error, message_id),
                             );
-                            self.socket.record_received(&receive_buffer[..size], None);
                             drop(decode_permit);
                             continue;
                         }
@@ -833,7 +813,6 @@ impl NeighborConnection {
                                 CoverageSource::Lludp,
                                 CoverageLossReason::DecodeAdmission,
                             );
-                            self.socket.record_received(&receive_buffer[..size], None);
                             drop(decode_permit);
                             continue;
                         };
@@ -854,7 +833,6 @@ impl NeighborConnection {
                                     CoverageSource::Lludp,
                                     CoverageLossReason::RetainedMemoryAdmission,
                                 );
-                                self.socket.record_received(&receive_buffer[..size], None);
                                 drop(decode_permit);
                                 continue;
                             }
@@ -874,7 +852,6 @@ impl NeighborConnection {
                                 CoverageSource::Lludp,
                                 reason,
                             );
-                            self.socket.record_received(&receive_buffer[..size], None);
                             drop(memory_reservation);
                             drop(decode_permit);
                             continue;
@@ -890,7 +867,6 @@ impl NeighborConnection {
                             CoverageSource::Lludp,
                             CoverageLossReason::AllocationEstimateMismatch,
                         );
-                        self.socket.record_received(&receive_buffer[..size], None);
                         drop(memory_reservation);
                         drop(decode_permit);
                         continue;
@@ -926,13 +902,11 @@ impl NeighborConnection {
                             CoverageSource::Lludp,
                             CoverageLossReason::EventAdmission,
                         );
-                        self.socket.record_received(&receive_buffer[..size], Some(&packet));
                         last_udp_received = Instant::now();
                         drop(memory_reservation);
                         drop(decode_permit);
                         continue;
                     }
-                    self.socket.record_received(&receive_buffer[..size], Some(&packet));
                     last_udp_received = Instant::now();
                     self.circuit.acknowledge_message(packet.message());
                     let receive_outcome = self.circuit.commit_receive(admission);
@@ -1014,9 +988,6 @@ impl NeighborConnection {
                             }
                         }
                         if self.initial_role == ConnectionRole::Primary {
-                            if let Some(capture) = &self.capture {
-                                capture.circuit_lifecycle("use_circuit_code_acked", self.session.circuit_code);
-                            }
                             queue_internal(
                                 &mut outbound,
                                 Message::CompleteAgentMovement(CompleteAgentMovement {
@@ -2073,7 +2044,6 @@ mod tests {
         let connection = NeighborConnection::connect_primary_with_state(
             simulator_id,
             agent_session.clone(),
-            None,
             NetworkStatusHandle::default(),
             CoverageLossLedger::new(),
             primary_state_receiver,
@@ -2137,7 +2107,6 @@ mod tests {
         let connection = NeighborConnection::connect_primary_with_state(
             simulator_id,
             session(simulator.local_addr().expect("simulator address")),
-            None,
             NetworkStatusHandle::default(),
             CoverageLossLedger::new(),
             primary_state_receiver,
@@ -2204,7 +2173,6 @@ mod tests {
             agent_session,
             Some(42),
             ConnectionRole::Neighbor,
-            None,
             NetworkStatusHandle::default(),
             CoverageLossLedger::new(),
             Some(primary_state_receiver),
@@ -2335,7 +2303,6 @@ mod tests {
             simulator_id,
             session(simulator_address),
             42,
-            None,
             NetworkStatusHandle::default(),
             CoverageLossLedger::new(),
         )
@@ -2443,7 +2410,6 @@ mod tests {
             simulator_id,
             session(simulator_address),
             42,
-            None,
             NetworkStatusHandle::default(),
             CoverageLossLedger::new(),
         )
@@ -3269,12 +3235,12 @@ mod tests {
         let status = NetworkStatusHandle::default();
         let connection = match role {
             ConnectionRole::Primary => {
-                NeighborConnection::connect_primary_with_coverage(simulator_id, session, None, status.clone(), coverage.clone())
+                NeighborConnection::connect_primary_with_coverage(simulator_id, session, status.clone(), coverage.clone())
                     .await
                     .expect("connect primary simulator")
             }
             ConnectionRole::Neighbor => {
-                NeighborConnection::connect_with_coverage(simulator_id, session, 42, None, status.clone(), coverage.clone())
+                NeighborConnection::connect_with_coverage(simulator_id, session, 42, status.clone(), coverage.clone())
                     .await
                     .expect("connect neighbor simulator")
             }
@@ -3383,7 +3349,6 @@ mod tests {
             simulator_id,
             session(simulator_address),
             42,
-            None,
             NetworkStatusHandle::default(),
             coverage.clone(),
         )
@@ -3458,7 +3423,6 @@ mod tests {
             simulator_id,
             session(simulator_address),
             42,
-            None,
             NetworkStatusHandle::default(),
             coverage.clone(),
         )
@@ -3527,7 +3491,6 @@ mod tests {
             simulator_id,
             session(simulator_address),
             42,
-            None,
             NetworkStatusHandle::default(),
             coverage.clone(),
         )
@@ -3663,10 +3626,9 @@ mod tests {
         let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
         let coverage = CoverageLossLedger::new();
         let status = NetworkStatusHandle::default();
-        let connection =
-            NeighborConnection::connect_with_coverage(simulator_id, session(simulator_address), 42, None, status, coverage.clone())
-                .await
-                .expect("connect neighbor simulator");
+        let connection = NeighborConnection::connect_with_coverage(simulator_id, session(simulator_address), 42, status, coverage.clone())
+            .await
+            .expect("connect neighbor simulator");
 
         let shared_budget = SimulatorMemoryBudget::new();
         let packet_memory = shared_budget.for_neighbor();

@@ -337,7 +337,6 @@ impl Circuit {
             self.status.record_error(&message);
             return Err(message);
         }
-        tracing::Span::current().record("datagram_bytes", prepared.bytes.len());
         self.commit_sent(prepared, Instant::now())
     }
 

@@ -20,6 +20,7 @@ use tokio::{
     runtime::Handle,
     task::{JoinError, JoinHandle},
 };
+use tracing::Instrument;
 use world::Region;
 
 const COMMANDS: usize = 64;
@@ -151,7 +152,7 @@ impl AssetCoordinator {
         let store = Store::new(budget.clone());
         let handle =
             AssetHandle { requests, active: Arc::clone(&active), runtime: runtime.clone(), budget, textures: store.texture_events() };
-        let worker = runtime.clone().spawn(run(store, receiver, control_receiver, active, runtime, cancelled));
+        let worker = runtime.clone().spawn(run(store, receiver, control_receiver, active, runtime, cancelled).in_current_span());
         Self { handle, controls, worker }
     }
 
@@ -210,6 +211,7 @@ fn classify_network_error(error: Error) -> Failure {
     }
 }
 
+#[tracing::instrument(name = "assets.service", level = "debug", skip_all)]
 async fn run(
     mut store: Store,
     mut requests: mpsc::Receiver<DemandRequest>,
@@ -237,23 +239,32 @@ async fn run(
                 continue;
             }
             let transport = transports.get(&job.route()).cloned();
-            jobs.push(runtime.spawn(async move {
-                let Some(transport) = transport else { return LoadCompletion::Fetched(job, Err(Failure::RouteClosed)) };
-                let result = {
-                    let fetched = transport.fetch(&job).fuse();
-                    let cancelled = job.cancelled().fuse();
-                    pin_mut!(fetched, cancelled);
-                    futures::select_biased! {
-                        _ = cancelled => Err(Failure::Cancelled),
-                        result = fetched => result,
+            let span = tracing::debug_span!("assets.fetch", kind = ?job.resource().kind, route = ?job.route());
+            jobs.push(
+                runtime.spawn(
+                    async move {
+                        let Some(transport) = transport else { return LoadCompletion::Fetched(job, Err(Failure::RouteClosed)) };
+                        let result = {
+                            let fetched = transport.fetch(&job).fuse();
+                            let cancelled = job.cancelled().fuse();
+                            pin_mut!(fetched, cancelled);
+                            futures::select_biased! {
+                                _ = cancelled => Err(Failure::Cancelled),
+                                result = fetched => result,
+                            }
+                        };
+                        if let Err(failure) = &result {
+                            tracing::debug!(?failure, "asset fetch did not complete");
+                        }
+                        if job.is_cancelled() {
+                            LoadCompletion::Fetched(job, Err(Failure::Cancelled))
+                        } else {
+                            LoadCompletion::Fetched(job, result)
+                        }
                     }
-                };
-                if job.is_cancelled() {
-                    LoadCompletion::Fetched(job, Err(Failure::Cancelled))
-                } else {
-                    LoadCompletion::Fetched(job, result)
-                }
-            }));
+                    .instrument(span),
+                ),
+            );
         }
         waiting.sort_by_key(|(job, _)| std::cmp::Reverse(store.priority(job)));
         let mut index = 0;
@@ -263,8 +274,13 @@ async fn run(
                 store.complete(job, Err(Failure::Cancelled), now);
             } else if store.try_start_decode(&mut waiting[index].0) {
                 let (job, bytes) = waiting.remove(index);
+                let span = tracing::debug_span!("assets.decode", kind = ?job.resource().kind, input_bytes = bytes.len());
                 jobs.push(runtime.spawn_blocking(move || {
+                    let _span = span.enter();
                     let result = job.prepare(bytes);
+                    if let Err(failure) = &result {
+                        tracing::debug!(?failure, "asset preparation rejected");
+                    }
                     LoadCompletion::Prepared(job, result)
                 }));
             } else {
@@ -312,9 +328,12 @@ async fn run(
                 if regions.contains_key(&region) {
                     continue;
                 }
-                if let Ok(route) = store.register_route() {
-                    regions.insert(region, route);
-                    transports.insert(route, CapabilityTransport::new(client));
+                match store.register_route() {
+                    Ok(route) => {
+                        regions.insert(region, route);
+                        transports.insert(route, CapabilityTransport::new(client));
+                    }
+                    Err(error) => tracing::warn!(?error, "could not register asset route"),
                 }
             }
             Input::Control(Some(RouteCommand::Retire(region))) => {

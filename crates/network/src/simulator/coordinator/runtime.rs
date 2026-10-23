@@ -181,9 +181,6 @@ impl<'a> CoordinatorRuntime<'a> {
                 }
                 _ = &mut session_deadline, if !startup.is_ready() && !*disconnect_requested.borrow() => {
                     tracing::warn!("Simulator session timed out");
-                    if let Some(capture) = &coordinator.capture {
-                        capture.circuit_lifecycle("session_timeout", coordinator.session.circuit_code);
-                    }
                     return Err("Timed out while establishing the simulator session.".into());
                 }
                 _ = time::sleep_until(run_state.logout_deadline.unwrap_or_else(|| time::Instant::now() + LOGOUT_TIMEOUT)), if run_state.logout_deadline.is_some() => {
@@ -338,9 +335,6 @@ impl<'a> CoordinatorRuntime<'a> {
                                         tracing::info!("Simulator session ready");
                                         coordinator.status.set_circuit_established(true);
                                         coordinator.status.set_lifecycle(NetworkLifecycle::Connected);
-                                        if let Some(capture) = &coordinator.capture {
-                                            capture.circuit_lifecycle("session_ready", coordinator.session.circuit_code);
-                                        }
                                         coordinator.primary.state.send_replace(PrimaryState::Ready { generation: 0 });
                                         if startup.should_publish_ready() {
                                             coordinator.publish_session_ready(

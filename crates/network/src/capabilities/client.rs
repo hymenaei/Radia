@@ -9,6 +9,7 @@ use tokio::{
     task::{AbortHandle, JoinError, JoinHandle},
     time,
 };
+use tracing::Instrument;
 
 use super::{
     budget::{
@@ -18,11 +19,10 @@ use super::{
     event_queue::{self, EventQueueTask},
     request::{
         AdmittedCapabilities, AdmittedResponse, Command, RequestDeadline, capability_error, capability_llsd_limits_with_response_limit,
-        decode_capability_value_with_response_limit, logical_endpoint_label, run, validate_capability_names, wait_for_session_close,
+        decode_capability_value_with_response_limit, run, validate_capability_names, wait_for_session_close,
     },
 };
 use crate::{
-    capture::CaptureRecorder,
     coverage::CoverageLossLedger,
     error::Error,
     event::{EventEnvelope, SimulatorId},
@@ -33,24 +33,23 @@ use crate::{
 #[derive(Clone)]
 pub struct CapabilityUrl {
     pub(super) url: Url,
-    pub(super) capture_endpoint: Option<String>,
 }
 
 impl CapabilityUrl {
-    pub(super) fn from_discovery(name: &str, url: Url) -> Self {
-        Self { url, capture_endpoint: logical_endpoint_label(name) }
+    pub(super) fn from_discovery(url: Url) -> Self {
+        Self { url }
     }
 
     pub fn parse(value: &str) -> Result<Self, Error> {
         let url = Url::parse(value).map_err(|_| Error::Capability("Capability URL is invalid.".into()))?;
         validate_http_url(&url).map_err(Error::Capability)?;
-        Ok(Self { url, capture_endpoint: None })
+        Ok(Self { url })
     }
 
     pub fn with_query_pair(&self, name: &str, value: &str) -> Self {
         let mut url = self.url.clone();
         url.query_pairs_mut().append_pair(name, value);
-        Self { url, capture_endpoint: self.capture_endpoint.clone() }
+        Self { url }
     }
 
     pub fn with_trailing_slash(&self) -> Self {
@@ -58,7 +57,7 @@ impl CapabilityUrl {
         if !url.path().ends_with('/') {
             url.set_path(&format!("{}/", url.path()));
         }
-        Self { url, capture_endpoint: self.capture_endpoint.clone() }
+        Self { url }
     }
 }
 
@@ -89,33 +88,23 @@ impl fmt::Debug for Client {
 
 impl Client {
     pub fn new(seed: Url) -> Result<Self, Error> {
-        Self::new_with_capture(seed, None).map_err(Error::Capability)
+        Self::new_with_status(seed, NetworkStatusHandle::default()).map_err(Error::Capability)
     }
 
-    pub(crate) fn new_with_capture(seed: Url, capture: Option<CaptureRecorder>) -> Result<Self, String> {
-        Self::new_with_status(seed, capture, NetworkStatusHandle::default())
+    pub(crate) fn new_with_status(seed: Url, status: NetworkStatusHandle) -> Result<Self, String> {
+        Self::new_with_status_and_budget(seed, status, CapabilityBudget::new())
     }
 
-    pub(crate) fn new_with_status(seed: Url, capture: Option<CaptureRecorder>, status: NetworkStatusHandle) -> Result<Self, String> {
-        Self::new_with_status_and_budget(seed, capture, status, CapabilityBudget::new())
-    }
-
-    pub(crate) fn new_with_status_and_budget(
-        seed: Url,
-        capture: Option<CaptureRecorder>,
-        status: NetworkStatusHandle,
-        budget: CapabilityBudget,
-    ) -> Result<Self, String> {
+    pub(crate) fn new_with_status_and_budget(seed: Url, status: NetworkStatusHandle, budget: CapabilityBudget) -> Result<Self, String> {
         validate_http_url(&seed)?;
         let runtime = Handle::try_current().map_err(|_| "A Tokio runtime is required for capability requests.".to_string())?;
         let http = budget
             .http_client()?
-            .with_capture(capture.clone())
             .with_status(status.clone())
             .with_memory_budget(budget.response_memory.clone(), http::ResponseMemoryClass::Ordinary);
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (session_closed, session_closed_receiver) = watch::channel(false);
-        let task = runtime.spawn(run(http.clone(), seed.clone(), receiver, session_closed_receiver, capture, status.clone()));
+        let task = runtime.spawn(run(http.clone(), seed.clone(), receiver, session_closed_receiver, status.clone()).in_current_span());
         let request_worker = Arc::new(RequestWorker { task: Mutex::new(Some(task)) });
         Ok(Self {
             seed: Arc::new(seed),
@@ -324,7 +313,7 @@ impl Client {
         T: Send + 'static,
         F: Future<Output = Result<T, Error>> + Send + 'static,
     {
-        let task = self.runtime.spawn(future);
+        let task = self.runtime.spawn(future.in_current_span());
         let abort = AbortOnDrop(task.abort_handle());
         async move {
             let result = task.await;
@@ -413,26 +402,29 @@ impl Client {
         let (role, primary) = event_queue::EventQueueRoleHandle::channel(is_primary);
         let session_closed = self.session_closed.subscribe();
         let (completed, completion) = oneshot::channel();
-        let task = runtime.spawn(async move {
-            let exit = event_queue::run_event_queue(
-                simulator_id,
-                source,
-                seed,
-                http,
-                events,
-                shutdown,
-                primary,
-                status,
-                session_closed,
-                ordinary_requests,
-                primary_event_queues,
-                neighbor_event_queues,
-                queued_event_bytes,
-                coverage_losses,
-            )
-            .await;
-            let _ = completed.send(exit);
-        });
+        let task = runtime.spawn(
+            async move {
+                let exit = event_queue::run_event_queue(
+                    simulator_id,
+                    source,
+                    seed,
+                    http,
+                    events,
+                    shutdown,
+                    primary,
+                    status,
+                    session_closed,
+                    ordinary_requests,
+                    primary_event_queues,
+                    neighbor_event_queues,
+                    queued_event_bytes,
+                    coverage_losses,
+                )
+                .await;
+                let _ = completed.send(exit);
+            }
+            .in_current_span(),
+        );
         Ok(EventQueueTask::new(task, completion, role))
     }
 }
@@ -527,8 +519,6 @@ async fn decode_admitted_response(response: AdmittedResponse, http: http::Client
 pub(crate) mod tests {
     use super::{RequestDeadline, admit_capability_decode_memory, decode_admitted_response};
     use std::{
-        collections::HashSet,
-        fs,
         future::Future,
         io::{self, ErrorKind, Read, Write},
         net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream},
@@ -555,11 +545,7 @@ pub(crate) mod tests {
             MAX_CONCURRENT_CAPABILITY_REQUESTS, MAX_CONCURRENT_EVENT_QUEUES, MAX_EVENT_QUEUE_ERRORS, MAX_EVENT_QUEUE_RESPONSE_BYTES,
             MAX_LLSD_XML_ELEMENTS, MAX_QUEUED_CAPABILITY_EVENT_BYTES, MAX_SEED_CAPABILITY_RESPONSE_BYTES, RetryOutcome, decode_event_batch,
             event_queue::{event_batch_allocation_bound, event_queue_retry_delay, retryable_event_queue_error},
-            expected_empty_poll, measure_allocations, post_event_queue, retry_event_queue, seed_capability_retry_delay, seed_retry_delay,
-        },
-        capture::{
-            CaptureConfig, CaptureEvent, CaptureEventKind, CaptureManifest, CapturePublication, CaptureRecorder, CaptureSession,
-            CaptureState,
+            expected_empty_poll, post_event_queue, retry_event_queue, seed_capability_retry_delay, seed_retry_delay,
         },
         coverage::CoverageLossLedger,
         event::{CLIENT_EVENT_CAPACITY, EventEnvelope, EventReceiver, PRIMARY_TERMINAL_EVENT_CAPACITY, SimulatorId},
@@ -592,7 +578,6 @@ pub(crate) mod tests {
     };
     use url::Url;
     use uuid::Uuid;
-    use zip::ZipArchive;
 
     fn available_event_queue_permits(budget: &CapabilityBudget) -> usize {
         budget.primary_event_queues.available_permits() + budget.neighbor_event_queues.available_permits()
@@ -736,10 +721,10 @@ pub(crate) mod tests {
         let seed = Url::parse(&format!("{endpoint}/seed")).expect("valid seed URL");
         let resource = CapabilityUrl::parse(&format!("{endpoint}/resource")).expect("valid capability URL");
         let budget = CapabilityBudget::new();
-        let first = Client::new_with_status_and_budget(seed.clone(), None, NetworkStatusHandle::default(), budget.clone())
+        let first = Client::new_with_status_and_budget(seed.clone(), NetworkStatusHandle::default(), budget.clone())
             .expect("create first capability client");
-        let second = Client::new_with_status_and_budget(seed, None, NetworkStatusHandle::default(), budget)
-            .expect("create second capability client");
+        let second =
+            Client::new_with_status_and_budget(seed, NetworkStatusHandle::default(), budget).expect("create second capability client");
 
         assert!(first.get_bytes(&resource).await.expect("first capability request").is_empty());
         assert!(second.get_bytes(&resource).await.expect("second capability request").is_empty());
@@ -786,7 +771,7 @@ pub(crate) mod tests {
         let allocation_bound =
             xml::value_allocation_bound(&body, crate::capabilities::request::capability_llsd_limits()).expect("bound valid LLSD response");
         let memory_limit = body_len + LLSD_SCAN_WORKING_BYTES + allocation_bound;
-        let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0, 0);
+        let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0);
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_len).expect("reserve raw response memory");
         let (gate, entered_rx) = DecodeGate::new();
         *DECODE_GATE.get_or_init(Default::default).lock().expect("decode gate lock") = Some(gate.clone());
@@ -821,7 +806,7 @@ pub(crate) mod tests {
         let bound = xml::value_allocation_bound(&malformed, crate::capabilities::request::capability_llsd_limits());
         assert!(matches!(bound, Err(xml::BoundError::Malformed)), "malformed input must fail preflight");
         let memory_limit = malformed_len + LLSD_SCAN_WORKING_BYTES;
-        let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0, 0);
+        let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0);
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, malformed_len).expect("reserve malformed response memory");
         let requests = Arc::new(Semaphore::new(1));
         let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
@@ -849,7 +834,7 @@ pub(crate) mod tests {
         let allocation_bound =
             xml::value_allocation_bound(&body, crate::capabilities::request::capability_llsd_limits()).expect("bound valid LLSD response");
         let memory_limit = body.capacity() + LLSD_SCAN_WORKING_BYTES + allocation_bound;
-        let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0, 0);
+        let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0);
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body.capacity()).expect("reserve raw response memory");
         let (gate, entered_rx) = DecodeGate::new();
         *DECODE_GATE.get_or_init(Default::default).lock().expect("decode gate lock") = Some(gate.clone());
@@ -917,7 +902,7 @@ pub(crate) mod tests {
 
         for body in [nested.into_bytes(), many_values.into_bytes()] {
             let memory_limit = body.capacity() + LLSD_SCAN_WORKING_BYTES;
-            let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0, 0);
+            let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0);
             let raw = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body.capacity()).expect("admit raw response body");
             let client = http::Client::new(Some(TEST_TIMEOUT), false, None)
                 .expect("build HTTP client")
@@ -941,7 +926,7 @@ pub(crate) mod tests {
         let body_capacity = body.capacity();
 
         for limit in [body_capacity + LLSD_SCAN_WORKING_BYTES - 1, body_capacity + LLSD_SCAN_WORKING_BYTES + bound - 1] {
-            let budget = http::ResponseMemoryBudget::new(limit, 0, 0, 0);
+            let budget = http::ResponseMemoryBudget::new(limit, 0, 0);
             let raw = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_capacity).expect("admit raw response body");
             let client = http::Client::new(Some(TEST_TIMEOUT), false, None)
                 .expect("build HTTP client")
@@ -961,7 +946,7 @@ pub(crate) mod tests {
     fn dropped_reply_releases_admission() {
         let body = b"body".to_vec();
         let body_len = body.len();
-        let budget = http::ResponseMemoryBudget::new(body_len, 0, 0, 0);
+        let budget = http::ResponseMemoryBudget::new(body_len, 0, 0);
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_len).expect("reserve response memory");
         let requests = Arc::new(Semaphore::new(1));
         let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
@@ -1345,7 +1330,7 @@ pub(crate) mod tests {
         let budget = CapabilityBudget::new();
         let clients = (0..2)
             .map(|_| {
-                Client::new_with_status_and_budget(server.url("/seed"), None, NetworkStatusHandle::default(), budget.clone())
+                Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
                     .expect("active Tokio runtime")
             })
             .collect::<Vec<_>>();
@@ -1376,7 +1361,7 @@ pub(crate) mod tests {
         let budget = CapabilityBudget::new();
         let clients = (0..2)
             .map(|_| {
-                Client::new_with_status_and_budget(server.url("/seed"), None, NetworkStatusHandle::default(), budget.clone())
+                Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
                     .expect("active Tokio runtime")
             })
             .collect::<Vec<_>>();
@@ -1462,7 +1447,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn shared_budget_covers_event_queue_and_capture() {
+    async fn response_classes_share_budget() {
         let _decode_gate_test = DECODE_GATE_TEST_LOCK.get_or_init(|| Mutex::new(())).lock().await;
         let event_server = EventQueueTestServer::start(|base| {
             let mut event_url = base.clone();
@@ -1478,18 +1463,12 @@ pub(crate) mod tests {
         let mut budget = CapabilityBudget::new();
         let ordinary_memory_limit = 64 * 1024;
         let event_queue_memory_limit = 2 * 1024 * 1024;
-        let capture_memory_limit = 64 * 1024;
-        budget.response_memory = http::ResponseMemoryBudget::new(ordinary_memory_limit, event_queue_memory_limit, capture_memory_limit, 0);
+        budget.response_memory = http::ResponseMemoryBudget::new(ordinary_memory_limit, event_queue_memory_limit, 0);
         let ordinary_request_capacity = budget.ordinary_requests.available_permits();
         let event_queue_capacity = available_event_queue_permits(&budget);
         let queued_event_capacity = budget.queued_event_bytes.available_permits();
-        let recorder = CaptureRecorder::new();
-        let capture_directory = tempfile::tempdir().expect("create capture directory");
-        let capture = CaptureSession::start(CaptureConfig::new(capture_directory.path().join("captures")), recorder.clone())
-            .expect("start network capture");
-        let client =
-            Client::new_with_status_and_budget(event_server.url("/seed"), Some(recorder), NetworkStatusHandle::default(), budget.clone())
-                .expect("active Tokio runtime");
+        let client = Client::new_with_status_and_budget(event_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
+            .expect("active Tokio runtime");
         let (event_sender, mut received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
         let task = client
@@ -1559,60 +1538,16 @@ pub(crate) mod tests {
             .expect("EventQueue response admission returns after batch drop and shutdown");
         drop(event_queue_memory);
 
-        let summary = capture.finish_recording(&CapturePublication::default());
-        assert_eq!(summary.state, CaptureState::Complete, "capture should finish: {:?}", summary.error);
-        let capture_path = summary.capture_path.unwrap_or_else(|| panic!("capture archive path: {:?}", summary.error));
-        let mut archive = ZipArchive::new(fs::File::open(capture_path).expect("open capture archive")).expect("decode capture archive");
-        let mut manifest_bytes = Vec::new();
-        archive.by_name("manifest.json").expect("capture manifest").read_to_end(&mut manifest_bytes).expect("read capture manifest");
-        let manifest: CaptureManifest = serde_json::from_slice(&manifest_bytes).expect("decode capture manifest");
-        let mut event_bytes = Vec::new();
-        archive.by_name("events.jsonl").expect("capture events").read_to_end(&mut event_bytes).expect("read capture events");
-        let mut payload_bytes = Vec::new();
-        archive.by_name("payloads.bin").expect("capture payloads").read_to_end(&mut payload_bytes).expect("read capture payloads");
-        assert_eq!(manifest.payload_bytes, payload_bytes.len() as u64);
-        let events = event_bytes
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(|line| serde_json::from_slice::<CaptureEvent>(line).expect("decode capture event"))
-            .collect::<Vec<_>>();
-        let request_ids = events
-            .iter()
-            .filter_map(|event| match &event.kind {
-                CaptureEventKind::HttpRequest { request_id, .. } => Some(*request_id),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
-        let mut ordinary_response_captured = false;
-        let mut event_queue_response_captured = false;
-        for event in &events {
-            let CaptureEventKind::HttpResponse { request_id, status: 200, .. } = &event.kind else {
-                continue;
-            };
-            assert!(request_ids.contains(request_id), "captured HTTP response must match a captured request");
-            let Some(reference) = event.payloads.first() else {
-                continue;
-            };
-            let start = usize::try_from(reference.offset).expect("capture payload offset fits usize");
-            let length = usize::try_from(reference.length).expect("capture payload length fits usize");
-            let end = start.checked_add(length).expect("capture payload range does not overflow");
-            let body = payload_bytes.get(start..end).expect("captured response payload is in range");
-            ordinary_response_captured |= body == ordinary_body.as_bytes();
-            event_queue_response_captured |= body == TWO_EVENT_BATCH.as_bytes();
-        }
-        assert!(ordinary_response_captured, "capture must contain the exact ordinary HTTP response body");
-        assert!(event_queue_response_captured, "capture must contain the exact EventQueue HTTP response body");
         drop(client);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "manual process-wide allocator sample; run with cargo test -p network --lib -- --ignored event_queue_peak_with_ordinary_live --nocapture"]
     async fn event_queue_peak_with_ordinary_live() {
-        event_queue_peak_sample(false).await;
-        event_queue_peak_sample(true).await;
+        event_queue_peak_sample().await;
     }
 
-    async fn event_queue_peak_sample(capture_enabled: bool) {
+    async fn event_queue_peak_sample() {
         const EVENT_QUEUE_COUNT: usize = MAX_CONCURRENT_EVENT_QUEUES;
         const ORDINARY_REQUEST_COUNT: usize = MAX_CONCURRENT_CAPABILITY_REQUESTS;
         const EVENT_COUNT: usize = 4;
@@ -1639,18 +1574,8 @@ pub(crate) mod tests {
         let ordinary_server = LocalServer::start(vec![ordinary_response; ORDINARY_REQUEST_COUNT]);
         let budget = CapabilityBudget::new();
         let queued_event_capacity = budget.queued_event_bytes.available_permits();
-        let (capture, recorder, _capture_directory) = if capture_enabled {
-            let recorder = CaptureRecorder::new();
-            let directory = tempfile::tempdir().expect("create capture directory");
-            let capture = CaptureSession::start(CaptureConfig::new(directory.path().join("captures")), recorder.clone())
-                .expect("start network capture");
-            (Some(capture), Some(recorder), Some(directory))
-        } else {
-            (None, None, None)
-        };
-        let client =
-            Client::new_with_status_and_budget(event_server.url("/seed"), recorder, NetworkStatusHandle::default(), budget.clone())
-                .expect("active Tokio runtime");
+        let client = Client::new_with_status_and_budget(event_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
+            .expect("active Tokio runtime");
         let (event_sender, mut received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
         let mut event_tasks = Vec::with_capacity(EVENT_QUEUE_COUNT);
@@ -1716,15 +1641,11 @@ pub(crate) mod tests {
         }
         event_server.finish();
 
-        if let Some(capture) = capture {
-            let summary = capture.finish_recording(&CapturePublication::default());
-            assert_eq!(summary.state, CaptureState::Complete, "capture should finish: {:?}", summary.error);
-        }
         let (baseline_bytes, live_delta_bytes, peak_bytes, elapsed_ns) = measurement.finish();
         let peak_delta_bytes = peak_bytes.saturating_sub(baseline_bytes);
         let total_batch_bound = event_batch_bound.saturating_mul(EVENT_QUEUE_COUNT);
         eprintln!(
-            "Configured-concurrency EventQueue process allocation sample: capture={capture_enabled} event_queues={EVENT_QUEUE_COUNT} ordinary_requests={ORDINARY_REQUEST_COUNT} event_response={} B ordinary_response={} B events_per_batch={} value_bound_per_queue={} B batch_bound_per_queue={} B queued_event_bytes_remaining={} ordinary_limit={} B event_queue_limit={} B process_baseline={} B process_live_delta={} B process_peak={} B process_peak_delta={} B peak_delta_to_all_batch_bounds={:.2} elapsed={} ns. Four ordinary decoders remain paused with their bodies admitted while nine EventQueue responses are sent concurrently; all decoded EventQueue batches remain retained through the sample. Process-wide allocator sample includes test harness, Reqwest/Hyper, Tokio, and capture writer; excludes allocator overhead and RSS.",
+            "Configured-concurrency EventQueue process allocation sample: event_queues={EVENT_QUEUE_COUNT} ordinary_requests={ORDINARY_REQUEST_COUNT} event_response={} B ordinary_response={} B events_per_batch={} value_bound_per_queue={} B batch_bound_per_queue={} B queued_event_bytes_remaining={} ordinary_limit={} B event_queue_limit={} B process_baseline={} B process_live_delta={} B process_peak={} B process_peak_delta={} B peak_delta_to_all_batch_bounds={:.2} elapsed={} ns. Four ordinary decoders remain paused with their bodies admitted while nine EventQueue responses are sent concurrently; all decoded EventQueue batches remain retained through the sample. Process-wide allocator sample includes test harness, Reqwest/Hyper, and Tokio; excludes allocator overhead and RSS.",
             event_body.len(),
             ordinary_body.len(),
             EVENT_COUNT,
@@ -1758,85 +1679,13 @@ pub(crate) mod tests {
         drop(batches);
     }
 
-    #[test]
-    fn event_capture_decode_peak() {
-        const EVENT_COUNT: usize = 4;
-        const EVENT_PAYLOAD_BYTES: usize = 32 * 1024;
-        const ORDINARY_PAYLOAD_BYTES: usize = 64 * 1024;
-
-        let event_payload = "e".repeat(EVENT_PAYLOAD_BYTES);
-        let mut event_template = String::from("<llsd><map><key>id</key><integer>5</integer><key>events</key><array>");
-        for _ in 0..EVENT_COUNT {
-            event_template.push_str("<map><key>message</key><string>ObjectUpdate</string><key>body</key><map><key>payload</key><string>");
-            event_template.push_str(&event_payload);
-            event_template.push_str("</string></map></map>");
-        }
-        event_template.push_str("</array></map></llsd>");
-        let event_template = event_template.into_bytes();
-        let ordinary_payload = "o".repeat(ORDINARY_PAYLOAD_BYTES);
-        let ordinary_template = format!("<llsd><map><key>payload</key><string>{ordinary_payload}</string></map></llsd>").into_bytes();
-
-        let recorder = CaptureRecorder::new();
-        let capture_directory = tempfile::tempdir().expect("create capture directory");
-        let capture = CaptureSession::start(CaptureConfig::new(capture_directory.path().join("captures")), recorder.clone())
-            .expect("start network capture");
-        let request_id = recorder.http_request("EventQueueGet", "POST", Vec::new(), &[]);
-        let capture_memory = http::ResponseMemoryBudget::new(0, 0, event_template.len(), 0);
-
-        let ((event_body, ordinary_body, event_id, events, ordinary_value, allocation_bound), _, peak_bytes, elapsed_ns) =
-            measure_allocations(|| {
-                let event_body = event_template.clone();
-                let ordinary_body = ordinary_template.clone();
-                let allocation_bound = xml::value_allocation_bound(&event_body, crate::capabilities::request::capability_llsd_limits())
-                    .expect("bound EventQueue XML decode");
-                let (event_id, events) = decode_event_batch(&event_body).expect("decode the EventQueue batch");
-                let ordinary_value: Value =
-                    crate::capabilities::request::decode_capability_value(&ordinary_body).expect("decode the ordinary response");
-
-                assert_eq!(event_id, 5);
-                assert_eq!(events.len(), EVENT_COUNT);
-                assert!(matches!(&ordinary_value, Value::Map(_)));
-
-                let permit = capture_memory
-                    .try_reserve(http::ResponseMemoryClass::Capture, event_body.len())
-                    .expect("admit the captured EventQueue response");
-                recorder.http_response_with_memory(
-                    request_id,
-                    Some(200),
-                    Vec::new(),
-                    Duration::ZERO,
-                    "complete",
-                    Some(&event_body),
-                    Some(permit),
-                );
-
-                (event_body, ordinary_body, event_id, events, ordinary_value, allocation_bound)
-            });
-
-        assert_eq!(event_body.len(), event_template.len());
-        assert_eq!(ordinary_body.len(), ordinary_template.len());
-        assert!(peak_bytes >= (event_body.len() + ordinary_body.len()) as i128);
-        eprintln!(
-            "EventQueue/capture/decode allocation sample: event={} B ordinary={} B LLSD-bound={} B caller-thread-peak={} B elapsed={} ns",
-            event_body.len(),
-            ordinary_body.len(),
-            allocation_bound,
-            peak_bytes,
-            elapsed_ns
-        );
-
-        drop((event_id, events, ordinary_value, event_body, ordinary_body));
-        let summary = capture.finish_recording(&CapturePublication::default());
-        assert_eq!(summary.state, CaptureState::Complete, "capture should finish: {:?}", summary.error);
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn event_poll_wait_cancels_on_close() {
         let server = EventQueueBudgetTestServer::start();
         let budget = CapabilityBudget::new();
         let clients = (0..2)
             .map(|_| {
-                Client::new_with_status_and_budget(server.url("/seed"), None, NetworkStatusHandle::default(), budget.clone())
+                Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
                     .expect("active Tokio runtime")
             })
             .collect::<Vec<_>>();
@@ -1899,13 +1748,12 @@ pub(crate) mod tests {
         let waiting_server = EventQueueBudgetTestServer::start();
         let primary_server = EventQueueBudgetTestServer::start();
         let budget = CapabilityBudget::new();
-        let active_client =
-            Client::new_with_status_and_budget(active_server.url("/seed"), None, NetworkStatusHandle::default(), budget.clone())
-                .expect("active Tokio runtime");
+        let active_client = Client::new_with_status_and_budget(active_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
+            .expect("active Tokio runtime");
         let waiting_client =
-            Client::new_with_status_and_budget(waiting_server.url("/seed"), None, NetworkStatusHandle::default(), budget.clone())
+            Client::new_with_status_and_budget(waiting_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
                 .expect("active Tokio runtime");
-        let primary_client = Client::new_with_status_and_budget(primary_server.url("/seed"), None, NetworkStatusHandle::default(), budget)
+        let primary_client = Client::new_with_status_and_budget(primary_server.url("/seed"), NetworkStatusHandle::default(), budget)
             .expect("active Tokio runtime");
         let (events, _received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
@@ -1990,13 +1838,13 @@ pub(crate) mod tests {
         let new_primary_server = EventQueueBudgetTestServer::start();
         let budget = CapabilityBudget::new();
         let neighbor_client =
-            Client::new_with_status_and_budget(neighbor_server.url("/seed"), None, NetworkStatusHandle::default(), budget.clone())
+            Client::new_with_status_and_budget(neighbor_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
                 .expect("active Tokio runtime");
         let old_primary_client =
-            Client::new_with_status_and_budget(old_primary_server.url("/seed"), None, NetworkStatusHandle::default(), budget.clone())
+            Client::new_with_status_and_budget(old_primary_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
                 .expect("active Tokio runtime");
         let new_primary_client =
-            Client::new_with_status_and_budget(new_primary_server.url("/seed"), None, NetworkStatusHandle::default(), budget)
+            Client::new_with_status_and_budget(new_primary_server.url("/seed"), NetworkStatusHandle::default(), budget)
                 .expect("active Tokio runtime");
         let (events, _received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
@@ -3079,7 +2927,7 @@ pub(crate) mod tests {
             ]
         });
         let mut client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-        client.budget.response_memory = http::ResponseMemoryBudget::new(0, 0, 0, 64 * 1024);
+        client.budget.response_memory = http::ResponseMemoryBudget::new(0, 0, 64 * 1024);
         let (sender, receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let mut receiver = EventReceiver::new(receiver);
         let (_shutdown, shutdown_requested) = watch::channel(false);

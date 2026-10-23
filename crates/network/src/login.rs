@@ -16,7 +16,6 @@ use uuid::Uuid;
 
 use crate::{
     capabilities::spawn_blocking_with_permit,
-    capture::CaptureRecorder,
     http::{Client, validate_http_url},
     status::{NetworkLifecycle, NetworkStatusHandle},
 };
@@ -130,7 +129,6 @@ pub(crate) async fn login_with_status_at(
     mfa_token: &str,
     mfa_hash: &str,
     login_url: &str,
-    capture: Option<CaptureRecorder>,
     status: NetworkStatusHandle,
 ) -> Result<LoginResponse, String> {
     status.set_lifecycle(NetworkLifecycle::LoggingIn);
@@ -143,7 +141,7 @@ pub(crate) async fn login_with_status_at(
             return Err(error);
         }
     };
-    let result = login_at_with_capture(credentials, mfa_token, mfa_hash, &login_url, capture, status.clone()).await;
+    let result = login_request(credentials, mfa_token, mfa_hash, &login_url, status.clone()).await;
     match &result {
         Ok(LoginResponse::Authenticated { .. }) => {
             status.set_lifecycle(NetworkLifecycle::Connecting);
@@ -165,16 +163,15 @@ pub(crate) async fn login_at(
     mfa_hash: &str,
     login_url: &Url,
 ) -> Result<LoginResponse, String> {
-    login_at_with_capture(credentials, mfa_token, mfa_hash, login_url, None, NetworkStatusHandle::default()).await
+    login_request(credentials, mfa_token, mfa_hash, login_url, NetworkStatusHandle::default()).await
 }
 
 #[tracing::instrument(name = "network.login.request", level = "debug", skip_all, fields(grid = ?credentials.grid))]
-async fn login_at_with_capture(
+async fn login_request(
     credentials: &LoginCredentials,
     mfa_token: &str,
     mfa_hash: &str,
     login_url: &Url,
-    capture: Option<CaptureRecorder>,
     status: NetworkStatusHandle,
 ) -> Result<LoginResponse, String> {
     validate_http_url(login_url).map_err(|_| "The login server URL is invalid.".to_string())?;
@@ -207,12 +204,11 @@ async fn login_at_with_capture(
     .map_err(|_| "Could not prepare the login request: login operation admission is unavailable.".to_string())?;
     let client = Client::new(Some(LOGIN_REQUEST_TIMEOUT), true, Some(concat!("Radia/", env!("CARGO_PKG_VERSION"))))
         .map_err(|error| format!("Could not prepare the login request: {error}"))?
-        .with_capture(capture.clone())
         .with_status(status);
     tracing::debug!("Login request started");
     let response = time::timeout_at(
         deadline,
-        client.post_operation_bounded("login", None, login_url, "text/xml", None, body.into_bytes(), MAX_LOGIN_RESPONSE_BYTES),
+        client.post_operation_bounded("login", login_url, "text/xml", None, body.into_bytes(), MAX_LOGIN_RESPONSE_BYTES),
     )
     .await
     .map_err(|_| "Could not contact Second Life: the login operation exceeded its deadline.".to_string())?

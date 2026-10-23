@@ -88,7 +88,6 @@ async fn root_disconnect_skips_remote_logout_wait() {
     let mut connection = SimulatorCoordinator::connect_with_status(
         login_session(simulator.local_addr().expect("simulator address")),
         ResponseData::default(),
-        None,
         NetworkStatusHandle::default(),
     )
     .await
@@ -138,7 +137,6 @@ async fn disconnect_reports_closed_primary() {
     let mut connection = SimulatorCoordinator::connect_with_status(
         login_session(simulator.local_addr().expect("simulator address")),
         ResponseData::default(),
-        None,
         status.clone(),
     )
     .await
@@ -169,7 +167,6 @@ async fn disconnect_logout_respects_deadline() {
     let mut connection = SimulatorCoordinator::connect_with_status(
         login_session(simulator.local_addr().expect("simulator address")),
         ResponseData::default(),
-        None,
         status.clone(),
     )
     .await
@@ -202,7 +199,6 @@ async fn failed_root_disconnect_reports_no_send() {
     let mut connection = SimulatorCoordinator::connect_with_status(
         login_session(simulator.local_addr().expect("simulator address")),
         ResponseData::default(),
-        None,
         NetworkStatusHandle::default(),
     )
     .await

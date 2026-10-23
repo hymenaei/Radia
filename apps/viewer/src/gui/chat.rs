@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px};
 use gpui_component::{
-    Disableable, IconName, StyledExt, Theme,
+    StyledExt, Theme,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
 };
@@ -37,7 +37,8 @@ impl ChatWindow {
 impl Render for ChatWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx).colors;
-        let (title, action) = self.chat.update(cx, |chat, cx| (chat.titlebar_content(cx), chat.titlebar_action(cx)));
+        let title = self.chat.update(cx, |chat, cx| chat.titlebar_content(cx));
+        let action = div().into_any_element();
         let content = div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground);
         #[cfg(target_os = "windows")]
         let content = content.child(crate::gui::components::window_chrome::windows_titlebar(window.is_maximized(), title, action, theme));
@@ -59,8 +60,6 @@ pub struct ChatScreen {
     message_bytes: usize,
     transcript_scroll: gpui::ScrollHandle,
     message_input: gpui::Entity<InputState>,
-    capture_stop_pending: bool,
-    capture_generation: u64,
 }
 
 impl ChatScreen {
@@ -75,8 +74,6 @@ impl ChatScreen {
             message_bytes: 0,
             transcript_scroll: gpui::ScrollHandle::new(),
             message_input,
-            capture_stop_pending: false,
-            capture_generation: 0,
         }
     }
 
@@ -87,8 +84,6 @@ impl ChatScreen {
     }
 
     pub fn clear_session(&mut self, cx: &mut Context<Self>) {
-        self.capture_generation = self.capture_generation.wrapping_add(1);
-        self.capture_stop_pending = false;
         self.session = None;
         self.region_name = None;
         self.session_handle = None;
@@ -109,80 +104,14 @@ impl ChatScreen {
             .into_any_element()
     }
 
-    pub(crate) fn titlebar_action(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = Theme::global(cx).colors;
-        let capture_status = self.session_handle.as_ref().and_then(SessionHandle::capture_status);
-        let capture_visible = capture_status.is_some_and(|status| status.active || status.finalizing);
-        let capture_saving = self.capture_stop_pending || capture_status.is_some_and(|status| status.finalizing);
-
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .when(capture_visible, |this| {
-                this.child(
-                    Button::new("stop-capture")
-                        .ghost()
-                        .compact()
-                        .h(px(24.))
-                        .w(px(24.))
-                        .when(capture_saving, |this| this.icon(IconName::LoaderCircle).loading(true))
-                        .when(!capture_saving, |this| this.child(div().size(px(8.)).rounded(px(1.)).bg(theme.danger)))
-                        .disabled(capture_saving)
-                        .accessibility_label(if capture_saving { "Saving capture" } else { "Stop capture" })
-                        .on_click(cx.listener(|this, _event, _window, cx| this.stop_capture(cx))),
-                )
-            })
-            .into_any_element()
-    }
-
     pub fn set_region_name(&mut self, region_name: String, cx: &mut Context<Self>) {
         self.region_name = Some(region_name);
         cx.notify();
     }
 
     pub fn set_session_handle(&mut self, session_handle: SessionHandle, cx: &mut Context<Self>) {
-        self.capture_generation = self.capture_generation.wrapping_add(1);
-        self.capture_stop_pending = false;
         self.session_handle = Some(session_handle);
         cx.notify();
-    }
-
-    fn stop_capture(&mut self, cx: &mut Context<Self>) {
-        if self.capture_stop_pending {
-            return;
-        }
-
-        let Some(session_handle) = self.session_handle.clone() else { return };
-        if !session_handle.capture_status().is_some_and(|status| status.active) {
-            return;
-        }
-
-        self.capture_stop_pending = true;
-        let generation = self.capture_generation;
-        cx.notify();
-
-        cx.spawn(async move |this, cx| {
-            match session_handle.stop_capture().await {
-                Ok(path) => {
-                    tracing::info!(operation = "capture_stop", outcome = "saved", capture_path = %path.display(), "Capture finished")
-                }
-                Err(error) => tracing::error!(operation = "capture_stop", outcome = "failed", %error, "Could not stop capture"),
-            }
-            if this
-                .update(cx, |this, cx| {
-                    if this.capture_generation != generation {
-                        return;
-                    }
-                    this.capture_stop_pending = false;
-                    cx.notify();
-                })
-                .is_err()
-            {
-                tracing::trace!("Chat view was already unavailable after capture stopped");
-            }
-        })
-        .detach();
     }
 
     pub fn add_chat_messages(&mut self, messages: impl IntoIterator<Item = ChatMessage>, cx: &mut Context<Self>) {

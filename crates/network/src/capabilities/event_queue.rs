@@ -409,7 +409,7 @@ fn allocate_event_queue_incarnation() -> Option<u64> {
     NEXT_EVENT_QUEUE_INCARNATION.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1)).ok()
 }
 
-#[tracing::instrument(name = "capabilities.event_queue", level = "debug", skip_all)]
+#[tracing::instrument(name = "capabilities.event_queue", level = "debug", skip_all, fields(simulator = simulator_id.get()), ret)]
 pub(super) async fn run_event_queue(
     simulator_id: SimulatorId,
     source: SocketAddr,
@@ -831,7 +831,6 @@ async fn post_event_queue_inner(
             client
                 .post_operation_bounded_classified_with_extra(
                     "event_queue",
-                    Some(EVENT_QUEUE_NAME),
                     url,
                     "application/llsd+xml",
                     Some("application/llsd+xml"),
@@ -845,7 +844,6 @@ async fn post_event_queue_inner(
             client
                 .post_operation_bounded_classified(
                     "event_queue",
-                    Some(EVENT_QUEUE_NAME),
                     url,
                     "application/llsd+xml",
                     Some("application/llsd+xml"),
@@ -1042,6 +1040,7 @@ async fn retry_event_queue_with_hint(
 
     pending_loss.commit();
     let delay = event_queue_retry_delay_with_hint(*error_count, retry_after);
+    tracing::debug!(attempt = *error_count, delay_ms = delay.as_millis(), "retrying event queue poll");
     *error_count += 1;
     wait_for_retry(delay, shutdown, session_closed).await
 }
@@ -1078,6 +1077,7 @@ async fn retry_seed_capability_lookup(
 
     *retries += 1;
     let delay = seed_retry_delay(*retries, retry_after);
+    tracing::debug!(attempt = *retries, delay_ms = delay.as_millis(), "retrying event queue discovery");
     wait_for_retry(delay, shutdown, session_closed).await
 }
 
@@ -1685,7 +1685,7 @@ mod event_queue_batch_tests {
     async fn exhausted_budget_skips_decode() {
         let body = b"<llsd><map><key>id</key><integer>1</integer><key>events</key><array/></map></llsd>".to_vec();
         let available = body.len() + LLSD_SCAN_WORKING_BYTES;
-        let budget = ResponseMemoryBudget::new(0, 0, 0, available);
+        let budget = ResponseMemoryBudget::new(0, 0, available);
         let raw = budget.try_reserve(ResponseMemoryClass::EventQueue, body.len()).expect("reserve input");
         let workspace = budget.try_reserve(ResponseMemoryClass::EventQueue, LLSD_SCAN_WORKING_BYTES).expect("reserve scanner");
         let event_queues = Arc::new(Semaphore::new(1));
@@ -1704,7 +1704,7 @@ mod event_queue_batch_tests {
         let body = b"<llsd><map><key>id</key><integer>1</integer><key>events</key><array/></map></llsd>".to_vec();
         let decoded_bytes = event_batch_allocation_bound(&body).expect("bound valid batch");
         let reserved_bytes = body.len() + decoded_bytes;
-        let budget = ResponseMemoryBudget::new(0, 0, 0, reserved_bytes);
+        let budget = ResponseMemoryBudget::new(0, 0, reserved_bytes);
         let raw_memory = budget.try_reserve(ResponseMemoryClass::EventQueue, body.len()).expect("reserve raw response");
         let decoded_memory = budget.try_reserve(ResponseMemoryClass::EventQueue, decoded_bytes).expect("reserve decode workspace");
         let event_queues = Arc::new(Semaphore::new(1));

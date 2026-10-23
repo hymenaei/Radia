@@ -13,6 +13,7 @@ use tokio::{
     task::JoinSet,
     time,
 };
+use tracing::Instrument;
 
 use super::{
     budget::{
@@ -23,7 +24,6 @@ use super::{
     client::CapabilityUrl,
 };
 use crate::{
-    capture::CaptureRecorder,
     error::Error,
     http::{self, Response, validate_http_url},
     status::NetworkStatusHandle,
@@ -225,7 +225,6 @@ pub(super) async fn run(
     seed: Url,
     mut commands: mpsc::Receiver<Command>,
     session_closed: watch::Receiver<bool>,
-    capture: Option<CaptureRecorder>,
     status: NetworkStatusHandle,
 ) {
     let mut requests = JoinSet::new();
@@ -250,70 +249,67 @@ pub(super) async fn run(
         let client = client.clone();
         let seed = seed.clone();
         let session_closed = session_closed.clone();
-        let capture = capture.clone();
         let status = status.clone();
-        requests.spawn(async move {
-            match command {
-                Command::RequestCapabilities { names, mut reply, deadline, _permit } => {
-                    let result = tokio::select! {
-                        biased;
-                        _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
-                        _ = reply.closed() => return,
-                        _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
-                        result = request_capabilities(&client, &seed, &names, _permit) => result,
-                    };
-                    match &result {
-                        Ok((granted, _, _)) => status.note_capabilities(granted.keys().map(String::as_str)),
-                        Err(error) if !error.is_session_closed() => status.record_error(error.to_string()),
-                        Err(_) => {}
+        requests.spawn(
+            async move {
+                match command {
+                    Command::RequestCapabilities { names, mut reply, deadline, _permit } => {
+                        let result = tokio::select! {
+                            biased;
+                            _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
+                            _ = reply.closed() => return,
+                            _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
+                            result = request_capabilities(&client, &seed, &names, _permit) => result,
+                        };
+                        match &result {
+                            Ok((granted, _, _)) => status.note_capabilities(granted.keys().map(String::as_str)),
+                            Err(error) if !error.is_session_closed() => status.record_error(error.to_string()),
+                            Err(_) => {}
+                        }
+                        let result = result.map(|(capabilities, memory, request)| AdmittedCapabilities {
+                            capabilities,
+                            _request: request,
+                            _memory: memory,
+                        });
+                        let _ = reply.send(result);
                     }
-                    if result.is_ok()
-                        && let Some(capture) = &capture
-                    {
-                        capture.lifecycle("capabilities_discovered");
+                    Command::Post { url, body, max_response_bytes, mut reply, deadline, _permit } => {
+                        let result = tokio::select! {
+                            biased;
+                            _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
+                            _ = reply.closed() => return,
+                            _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
+                            result = post(&client, &url.url, body, "Capability request", max_response_bytes)
+                                => result.map_err(CapabilityFailure::Http),
+                        };
+                        if let Err(error) = &result
+                            && !error.is_session_closed()
+                        {
+                            status.record_error(error.to_string());
+                        }
+                        let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
+                        let _ = reply.send(result);
                     }
-                    let result = result.map(|(capabilities, memory, request)| AdmittedCapabilities {
-                        capabilities,
-                        _request: request,
-                        _memory: memory,
-                    });
-                    let _ = reply.send(result);
-                }
-                Command::Post { url, body, max_response_bytes, mut reply, deadline, _permit } => {
-                    let result = tokio::select! {
-                        biased;
-                        _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
-                        _ = reply.closed() => return,
-                        _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
-                        result = post(&client, &url.url, url.capture_endpoint.as_deref(), body, "Capability request", max_response_bytes)
-                            => result.map_err(CapabilityFailure::Http),
-                    };
-                    if let Err(error) = &result
-                        && !error.is_session_closed()
-                    {
-                        status.record_error(error.to_string());
+                    Command::GetBytes { url, max_response_bytes, mut reply, deadline, _permit } => {
+                        let result = tokio::select! {
+                            biased;
+                            _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
+                            _ = reply.closed() => return,
+                            _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
+                            result = get_bytes(&client, &url.url, max_response_bytes) => result.map_err(CapabilityFailure::Http),
+                        };
+                        if let Err(error) = &result
+                            && !error.is_session_closed()
+                        {
+                            status.record_error(error.to_string());
+                        }
+                        let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
+                        let _ = reply.send(result);
                     }
-                    let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
-                    let _ = reply.send(result);
-                }
-                Command::GetBytes { url, max_response_bytes, mut reply, deadline, _permit } => {
-                    let result = tokio::select! {
-                        biased;
-                        _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
-                        _ = reply.closed() => return,
-                        _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
-                        result = get_bytes(&client, &url.url, url.capture_endpoint.as_deref(), max_response_bytes) => result.map_err(CapabilityFailure::Http),
-                    };
-                    if let Err(error) = &result
-                        && !error.is_session_closed()
-                    {
-                        status.record_error(error.to_string());
-                    }
-                    let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
-                    let _ = reply.send(result);
                 }
             }
-        });
+            .in_current_span(),
+        );
     }
 
     drop(commands);
@@ -349,10 +345,9 @@ fn decode_requested_capabilities(
     names: &[String],
 ) -> Result<(HashMap<String, CapabilityUrl>, Option<http::ResponseMemoryPermit>), CapabilityFailure> {
     let mut response = admit_seed_capability_decode(response).map_err(LookupError::into_failure)?;
-    let capabilities = decode_capabilities_with_memory(&response.body, names, response.memory.as_mut(), |name, url, _| {
-        CapabilityUrl::from_discovery(name, url)
-    })
-    .map_err(CapabilityDecodeError::into_failure)?;
+    let capabilities =
+        decode_capabilities_with_memory(&response.body, names, response.memory.as_mut(), |_, url, _| CapabilityUrl::from_discovery(url))
+            .map_err(CapabilityDecodeError::into_failure)?;
     Ok((capabilities, response.memory.take()))
 }
 
@@ -394,7 +389,6 @@ pub(super) async fn request_capabilities_response(
     let response = client
         .post_operation_bounded_classified(
             "seed_capability",
-            None,
             seed,
             "application/llsd+xml",
             Some("application/llsd+xml"),
@@ -572,18 +566,10 @@ fn seed_capability_llsd_limits() -> Limits {
     Limits { max_bytes: MAX_SEED_CAPABILITY_RESPONSE_BYTES, ..capability_llsd_limits() }
 }
 
-async fn post(
-    client: &http::Client,
-    url: &Url,
-    capture_endpoint: Option<&str>,
-    body: Vec<u8>,
-    context: &str,
-    max_response_bytes: usize,
-) -> Result<Response, http::Error> {
+async fn post(client: &http::Client, url: &Url, body: Vec<u8>, context: &str, max_response_bytes: usize) -> Result<Response, http::Error> {
     let response = client
         .post_operation_bounded_classified(
             "capability_post",
-            capture_endpoint,
             url,
             "application/llsd+xml",
             Some("application/llsd+xml"),
@@ -597,13 +583,8 @@ async fn post(
     Ok(response)
 }
 
-async fn get_bytes(
-    client: &http::Client,
-    url: &Url,
-    capture_endpoint: Option<&str>,
-    max_response_bytes: usize,
-) -> Result<Response, http::Error> {
-    let response = client.get_bounded_classified("capability_get", capture_endpoint, url, max_response_bytes).await?;
+async fn get_bytes(client: &http::Client, url: &Url, max_response_bytes: usize) -> Result<Response, http::Error> {
+    let response = client.get_bounded_classified("capability_get", url, max_response_bytes).await?;
     if !response.status.is_success() {
         return Err(http::Error::http_status(
             response.status,
@@ -619,28 +600,11 @@ fn into_admitted_response(response: Response, max_response_bytes: usize, request
     AdmittedResponse { body: response.body, max_response_bytes, _memory: response.memory, _request: request }
 }
 
-pub(super) fn logical_endpoint_label(name: &str) -> Option<String> {
-    const MAX_LABEL_BYTES: usize = 128;
-
-    if name.is_empty()
-        || name.len() > MAX_LABEL_BYTES
-        || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return None;
-    }
-    Some(name.to_owned())
-}
-
 pub(super) fn decode_llsd_xml(body: &str, context: &str) -> Result<Value, String> {
     xml::from_slice_with_limits(body.as_bytes(), capability_llsd_limits()).map_err(|error| {
         let reason = llsd_error(error);
         format!("{context}: {reason}")
     })
-}
-
-#[cfg(test)]
-pub(super) fn decode_capability_value(body: &[u8]) -> Result<Value, Error> {
-    decode_capability_value_with_response_limit(body, MAX_CAPABILITY_RESPONSE_BYTES)
 }
 
 pub(super) fn decode_capability_value_with_response_limit(body: &[u8], max_response_bytes: usize) -> Result<Value, Error> {
@@ -715,7 +679,7 @@ mod admission_tests {
     }
 
     fn capability_response_budget(limit: usize) -> http::ResponseMemoryBudget {
-        http::ResponseMemoryBudget::new(limit, 0, 0, 0)
+        http::ResponseMemoryBudget::new(limit, 0, 0)
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -919,7 +883,6 @@ mod admission_tests {
             .map(|_| {
                 Client::new_with_status_and_budget(
                     Url::parse("http://127.0.0.1:9/seed").expect("seed URL"),
-                    None,
                     NetworkStatusHandle::default(),
                     budget.clone(),
                 )
@@ -945,7 +908,6 @@ mod admission_tests {
         let budget = CapabilityBudget::new();
         let client = Client::new_with_status_and_budget(
             Url::parse("http://127.0.0.1:9/seed").expect("seed URL"),
-            None,
             NetworkStatusHandle::default(),
             budget.clone(),
         )

@@ -64,4 +64,3 @@ gpui = { workspace = true, features = ["test-support"] }
 network = { workspace = true, features = ["testing"] }
 test-support.workspace = true
 tempfile.workspace = true
-zip.workspace = true

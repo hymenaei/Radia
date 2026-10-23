@@ -10,7 +10,7 @@ async fn neighbor_intro_precedes_early_udp_data() {
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
     let connection =
-        NeighborConnection::connect(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, None, NetworkStatusHandle::default())
+        NeighborConnection::connect(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
             .await
             .expect("connect neighbor circuit");
     let task = spawn(connection.run(event_sender, shutdown, neighbor_requests, commands, mpsc::channel(1).1, SimulatorMemoryBudget::new()));
@@ -50,7 +50,6 @@ async fn neighbor_task_limit_preserves_current() {
     let mut connection = SimulatorCoordinator::connect_with_status(
         login_session(primary.local_addr().expect("primary simulator address")),
         ResponseData::default(),
-        None,
         NetworkStatusHandle::default(),
     )
     .await
@@ -162,7 +161,6 @@ async fn neighbor_simulator_limit_is_bounded() {
     let mut connection = SimulatorCoordinator::connect_with_status(
         login_session(primary.local_addr().expect("primary simulator address")),
         ResponseData::default(),
-        None,
         NetworkStatusHandle::default(),
     )
     .await
@@ -414,15 +412,10 @@ async fn neighbor_overload_keeps_control() {
     let (_shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(32);
     let (_commands, command_receiver) = mpsc::channel(NEIGHBOR_COMMAND_CAPACITY);
-    let neighbor_connection = NeighborConnection::connect(
-        simulator_id,
-        login_session(neighbor_endpoint),
-        0x1000_0000_0000_1000,
-        None,
-        NetworkStatusHandle::default(),
-    )
-    .await
-    .expect("connect neighbor circuit");
+    let neighbor_connection =
+        NeighborConnection::connect(simulator_id, login_session(neighbor_endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
+            .await
+            .expect("connect neighbor circuit");
     let packet_memory = SimulatorMemoryBudget::new().for_neighbor();
     let budget = packet_memory.clone();
     let mut task =

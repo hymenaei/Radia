@@ -112,7 +112,6 @@ async fn replacing_neighbor_releases_queued_state() {
     let mut connection = SimulatorCoordinator::connect_with_status(
         login_session(primary.local_addr().expect("primary simulator address")),
         ResponseData::default(),
-        None,
         NetworkStatusHandle::default(),
     )
     .await
@@ -143,7 +142,7 @@ async fn replacing_neighbor_releases_queued_state() {
         SimulatorCapabilitySession {
             endpoint: old_endpoint,
             seed_capability: seed_capability.clone(),
-            client: Client::new_with_status_and_budget(seed_capability, None, NetworkStatusHandle::default(), CapabilityBudget::new())
+            client: Client::new_with_status_and_budget(seed_capability, NetworkStatusHandle::default(), CapabilityBudget::new())
                 .expect("create old capability client"),
             event_queue_role: EventQueueRoleHandle::channel(false).0,
             event_queue_task: None,
@@ -174,14 +173,10 @@ async fn replacing_neighbor_releases_queued_state() {
 async fn preconnect_overflow_is_neighbor_scoped() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let primary_endpoint = primary.local_addr().expect("read primary address");
-    let mut connection = SimulatorCoordinator::connect_with_status(
-        login_session(primary_endpoint),
-        ResponseData::default(),
-        None,
-        NetworkStatusHandle::default(),
-    )
-    .await
-    .expect("connect primary circuit");
+    let mut connection =
+        SimulatorCoordinator::connect_with_status(login_session(primary_endpoint), ResponseData::default(), NetworkStatusHandle::default())
+            .await
+            .expect("connect primary circuit");
     let simulator_id = SimulatorId::new(53);
     let neighbor_endpoint = "127.0.0.1:13003".parse().expect("parse neighbor endpoint");
     let region_handle = 0x1000_0000_0000_1003;

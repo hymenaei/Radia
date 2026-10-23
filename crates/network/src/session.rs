@@ -10,8 +10,6 @@ use std::{
     future::Future,
     net::SocketAddr,
     num::NonZeroU64,
-    path::PathBuf,
-    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -27,12 +25,10 @@ use tokio::{
         mpsc::{self, OwnedPermit, Receiver, Sender},
         oneshot, watch,
     },
-    task::spawn_blocking,
 };
 
 use crate::{
     LoginCredentials,
-    capture::{CaptureConfig, CapturePublication, CaptureRecorder, CaptureSession, CaptureState, CaptureStatus, CaptureSummary},
     coverage::{CoverageLoss, CoverageLossLedger, CoverageLossRecord, CoverageSnapshot, CoverageSource, CoverageWatermark},
     error::Error,
     event::{
@@ -139,41 +135,20 @@ impl Session {
     }
 
     pub fn start(credentials: LoginCredentials) -> Result<Self, Error> {
-        Self::start_inner(credentials, None, SessionOptions::default())
+        Self::start_with_options(credentials, SessionOptions::default())
     }
 
     pub fn start_with_options(credentials: LoginCredentials, options: SessionOptions) -> Result<Self, Error> {
-        Self::start_inner(credentials, None, options)
-    }
-
-    pub fn start_with_capture(credentials: LoginCredentials, config: CaptureConfig) -> Result<Self, Error> {
-        Self::start_inner(credentials, Some(config), SessionOptions::default())
-    }
-
-    pub fn start_with_capture_and_options(
-        credentials: LoginCredentials,
-        config: CaptureConfig,
-        options: SessionOptions,
-    ) -> Result<Self, Error> {
-        Self::start_inner(credentials, Some(config), options)
-    }
-
-    fn start_inner(credentials: LoginCredentials, capture_config: Option<CaptureConfig>, options: SessionOptions) -> Result<Self, Error> {
         let login_url = credentials.grid.login_url().to_owned();
-        Self::start_inner_with_login_url(credentials, capture_config, options, login_url)
+        Self::start_at(credentials, options, login_url)
     }
 
     #[cfg(feature = "testing")]
     pub(crate) fn start_with_login_url_for_test(credentials: LoginCredentials, login_url: String) -> Result<Self, Error> {
-        Self::start_inner_with_login_url(credentials, None, SessionOptions::default(), login_url)
+        Self::start_at(credentials, SessionOptions::default(), login_url)
     }
 
-    fn start_inner_with_login_url(
-        credentials: LoginCredentials,
-        capture_config: Option<CaptureConfig>,
-        options: SessionOptions,
-        login_url: String,
-    ) -> Result<Self, Error> {
+    fn start_at(credentials: LoginCredentials, options: SessionOptions, login_url: String) -> Result<Self, Error> {
         let (command_sender, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
         let (event_sender, events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
         let coverage_losses = CoverageLossLedger::new();
@@ -181,9 +156,6 @@ impl Session {
         let terminal_event_permit = event_sender.clone().try_reserve_owned().expect("new event channel has capacity");
         let (disconnect_sender, disconnect_receiver) = watch::channel(false);
         let (worker_finished_sender, worker_finished) = watch::channel(false);
-        let (capture_commands, capture_command_receiver) = mpsc::channel(8);
-        let capture = CaptureRecorder::new();
-        let client_capture = capture.clone();
         let status = NetworkStatusHandle::new();
         status.set_lifecycle(NetworkLifecycle::LoggingIn);
         let worker_status = status.clone();
@@ -208,22 +180,6 @@ impl Session {
                     }
                 };
 
-                let capture_session = match capture_config {
-                    Some(config) => match CaptureSession::start(config, capture.clone()) {
-                        Ok(session) => Some(session),
-                        Err(error) => {
-                            worker_status.record_error(&error);
-                            worker_status.set_lifecycle(NetworkLifecycle::Failed);
-                            runtime.block_on(send_failure_event(&failure_sender, error, &mut failure_shutdown));
-                            worker_finished_sender.send_replace(true);
-                            return;
-                        }
-                    },
-                    None => None,
-                };
-                if capture_session.is_some() {
-                    capture.lifecycle("capture_started");
-                }
                 let channels = Channels {
                     commands: command_receiver,
                     command_sender: worker_command_sender,
@@ -232,17 +188,7 @@ impl Session {
                     disconnect_requested: disconnect_receiver,
                     coverage_losses: worker_coverage_losses,
                 };
-                let shutdown_requested = channels.disconnect_requested.clone();
-                let events = channels.events.clone();
-                let run = run_client(credentials, channels, Some(capture.clone()), worker_status.clone(), login_url, options);
-                let result = runtime.block_on(run_with_capture(
-                    run,
-                    events,
-                    shutdown_requested,
-                    capture.clone(),
-                    capture_session,
-                    capture_command_receiver,
-                ));
+                let result = runtime.block_on(run_client(credentials, channels, worker_status.clone(), login_url, options));
                 if let Err(error) = result {
                     worker_status.record_error(&error);
                     worker_status.set_lifecycle(NetworkLifecycle::Failed);
@@ -261,8 +207,6 @@ impl Session {
                 disconnect_requested: disconnect_sender,
                 command_admission_closed: Arc::new(Mutex::new(false)),
                 worker_finished,
-                capture_commands,
-                capture: client_capture,
                 status,
             },
             events,
@@ -429,24 +373,12 @@ impl Session {
         }
     }
 
-    pub async fn start_capture(&self, config: CaptureConfig) -> Result<(), Error> {
-        self.handle.start_capture(config).await
-    }
-
-    pub fn capture_status(&self) -> Option<CaptureStatus> {
-        self.handle.capture_status()
-    }
-
     pub fn network_status(&self) -> NetworkStatusSnapshot {
         self.handle.network_status()
     }
 
     pub fn current_simulator(&self) -> Option<SocketAddr> {
         self.handle.network_status().simulator_endpoint
-    }
-
-    pub async fn stop_capture(&self) -> Result<PathBuf, Error> {
-        self.handle.stop_capture().await
     }
 
     pub fn send(&self, message: impl OutboundMessage, delivery: Delivery) -> Result<(), Error> {
@@ -474,8 +406,6 @@ pub struct SessionHandle {
     disconnect_requested: watch::Sender<bool>,
     command_admission_closed: Arc<Mutex<bool>>,
     worker_finished: watch::Receiver<bool>,
-    capture_commands: Sender<CaptureCommand>,
-    capture: CaptureRecorder,
     status: NetworkStatusHandle,
 }
 
@@ -490,27 +420,8 @@ impl SessionHandle {
         self.disconnect_requested.send_replace(true);
     }
 
-    pub async fn start_capture(&self, config: CaptureConfig) -> Result<(), Error> {
-        let (completed, response) = oneshot::channel();
-        self.capture_commands.send(CaptureCommand::Start { config, completed }).await.map_err(|_| Error::SessionClosed)?;
-        response.await.map_err(|_| Error::CaptureStartCanceled)?.map_err(Error::Capture)
-    }
-
-    pub fn capture_status(&self) -> Option<CaptureStatus> {
-        self.capture.status()
-    }
-
     pub fn network_status(&self) -> NetworkStatusSnapshot {
         self.status.snapshot()
-    }
-
-    pub async fn stop_capture(&self) -> Result<PathBuf, Error> {
-        let (completed, response) = oneshot::channel();
-        self.capture_commands
-            .send(CaptureCommand::Stop { completed, publication: CapturePublication::default() })
-            .await
-            .map_err(|_| Error::SessionClosed)?;
-        response.await.map_err(|_| Error::CaptureStopCanceled)?.map_err(Error::Capture)
     }
 
     pub fn send(&self, message: impl OutboundMessage, delivery: Delivery) -> Result<(), Error> {
@@ -594,22 +505,6 @@ struct Channels {
     coverage_losses: CoverageLossLedger,
 }
 
-enum CaptureCommand {
-    Start { config: CaptureConfig, completed: oneshot::Sender<Result<(), String>> },
-    Stop { completed: oneshot::Sender<Result<PathBuf, String>>, publication: CapturePublication },
-}
-
-enum CaptureOperationResult {
-    Started(Result<CaptureSession, String>),
-    Stopped(Result<CaptureSummary, String>),
-    Interrupted { path: PathBuf, error: Option<String> },
-}
-
-enum CaptureOperationReply {
-    Start(oneshot::Sender<Result<(), String>>),
-    Stop(oneshot::Sender<Result<PathBuf, String>>),
-}
-
 impl outbound_message::Sealed for TeleportCancel {}
 
 impl OutboundMessage for TeleportCancel {}
@@ -653,186 +548,10 @@ fn try_send_command(commands: &Sender<Command>, command: Command, closed: Error)
     })
 }
 
-async fn run_with_capture<F>(
-    run: F,
-    events: Sender<EventEnvelope>,
-    shutdown_requested: watch::Receiver<bool>,
-    capture: CaptureRecorder,
-    mut capture_session: Option<CaptureSession>,
-    mut capture_commands: Receiver<CaptureCommand>,
-) -> Result<(), String>
-where
-    F: Future<Output = Result<(), String>> + Send,
-{
-    tokio::pin!(run);
-
-    let mut network_result = None;
-    let mut operation: Option<Pin<Box<dyn Future<Output = CaptureOperationResult> + Send>>> = None;
-    let mut operation_reply = None;
-    let mut stop_publication: Option<CapturePublication> = None;
-
-    loop {
-        if network_result.is_some() && *shutdown_requested.borrow() {
-            let stopping_capture = matches!(operation_reply.as_ref(), Some(CaptureOperationReply::Stop(_)));
-            if stopping_capture && let Some(publication) = stop_publication.take() {
-                publication.request_interruption();
-            }
-            if let Some(reply) = operation_reply.take() {
-                let error = "The viewer is shutting down before the capture operation completes.".to_string();
-                match reply {
-                    CaptureOperationReply::Start(completed) => {
-                        let _ = completed.send(Err(error));
-                    }
-                    CaptureOperationReply::Stop(completed) => {
-                        let _ = completed.send(Err(error));
-                    }
-                }
-            }
-            if let Some(pending) = operation.take() {
-                if stopping_capture {
-                    drop(pending);
-                } else {
-                    let _ = pending.await;
-                }
-            }
-        }
-
-        if network_result.is_some() && operation.is_none() {
-            if let Some(session) = capture_session.take() {
-                capture.lifecycle("capture_interrupted");
-                operation = Some(interrupt_capture(session));
-            } else {
-                break;
-            }
-        }
-
-        tokio::select! {
-            biased;
-            result = async { operation.as_mut().expect("capture operation exists").as_mut().await }, if operation.is_some() => {
-                operation = None;
-                stop_publication = None;
-                match (result, operation_reply.take()) {
-                    (CaptureOperationResult::Started(Ok(session)), Some(CaptureOperationReply::Start(completed))) => {
-                        capture_session = Some(session);
-                        let _ = completed.send(Ok(()));
-                    }
-                    (CaptureOperationResult::Started(Err(error)), Some(CaptureOperationReply::Start(completed))) => {
-                        let _ = completed.send(Err(error));
-                    }
-                    (CaptureOperationResult::Stopped(Ok(summary)), reply) => {
-                        let completion = match (summary.error.clone(), summary.capture_path.clone()) {
-                            (Some(error), _) => Err(error),
-                            (None, Some(path)) => Ok(path),
-                            (None, None) => Err("Capture finalization did not produce an export.".into()),
-                        };
-                        if let Some(CaptureOperationReply::Stop(completed)) = reply {
-                            let _ = completed.send(completion);
-                        }
-                    }
-                    (CaptureOperationResult::Stopped(Err(error)), Some(CaptureOperationReply::Stop(completed))) => {
-                        let _ = completed.send(Err(error));
-                    }
-                    (CaptureOperationResult::Interrupted { path, error }, _) => {
-                        let _ = events.try_send(EventEnvelope::new(Event::CaptureInterrupted { path, error }));
-                    }
-                    (CaptureOperationResult::Started(_), _) | (CaptureOperationResult::Stopped(_), _) => {}
-                }
-            }
-            command = capture_commands.recv(), if operation.is_none() => {
-                match command {
-                    Some(CaptureCommand::Start { config, completed }) if network_result.is_none() => {
-                        if capture_session.is_some() {
-                            let _ = completed.send(Err("A capture session is already active.".into()));
-                            continue;
-                        }
-                        let capture = capture.clone();
-                        operation_reply = Some(CaptureOperationReply::Start(completed));
-                        operation = Some(start_capture(config, capture));
-                    }
-                    Some(CaptureCommand::Stop { completed, publication }) if network_result.is_none() => {
-                        let Some(session) = capture_session.take() else {
-                            let _ = completed.send(Err("No capture session is active.".into()));
-                            continue;
-                        };
-                        capture.lifecycle("capture_stopped");
-                        operation_reply = Some(CaptureOperationReply::Stop(completed));
-                        operation = Some(stop_capture(session, publication.clone(), events.clone()));
-                        stop_publication = Some(publication);
-                    }
-                    Some(CaptureCommand::Start { completed, .. }) => {
-                        let _ = completed.send(Err("The network client has stopped.".into()));
-                    }
-                    Some(CaptureCommand::Stop { completed, .. }) => {
-                        let _ = completed.send(Err("The network client has stopped.".into()));
-                    }
-                    None => {}
-                }
-            }
-            result = &mut run, if network_result.is_none() => {
-                if result.is_err() {
-                    capture.lifecycle("network_failed");
-                }
-                network_result = Some(result);
-            }
-        }
-    }
-
-    network_result.unwrap_or(Ok(()))
-}
-
-fn start_capture(config: CaptureConfig, capture: CaptureRecorder) -> Pin<Box<dyn Future<Output = CaptureOperationResult> + Send>> {
-    Box::pin(async move {
-        let task = spawn_blocking(move || {
-            let session = CaptureSession::start(config, capture.clone())?;
-            capture.lifecycle("capture_started");
-            Ok::<_, String>(session)
-        });
-        CaptureOperationResult::Started(task.await.map_err(|error| format!("Capture startup failed: {error}")).and_then(|result| result))
-    })
-}
-
-fn stop_capture(
-    session: CaptureSession,
-    publication: CapturePublication,
-    events: Sender<EventEnvelope>,
-) -> Pin<Box<dyn Future<Output = CaptureOperationResult> + Send>> {
-    let task = spawn_blocking(move || {
-        let summary = session.finish_recording(&publication);
-        let path = summary.capture_path.clone().unwrap_or_default();
-        let event = if summary.state == CaptureState::Interrupted {
-            Event::CaptureInterrupted { path, error: summary.error.clone() }
-        } else {
-            Event::CaptureFinished { path, error: summary.error.clone() }
-        };
-        let _ = events.try_send(EventEnvelope::new(event));
-        summary
-    });
-    let operation: Pin<Box<dyn Future<Output = CaptureOperationResult> + Send>> = Box::pin(async move {
-        match task.await {
-            Ok(summary) => CaptureOperationResult::Stopped(Ok(summary)),
-            Err(error) => CaptureOperationResult::Stopped(Err(format!("Capture finalization failed: {error}"))),
-        }
-    });
-    operation
-}
-
-fn interrupt_capture(session: CaptureSession) -> Pin<Box<dyn Future<Output = CaptureOperationResult> + Send>> {
-    let path = session.path().to_path_buf();
-    Box::pin(async move {
-        let task = spawn_blocking(move || session.interrupt());
-        let error = match task.await {
-            Ok(summary) => summary.error,
-            Err(error) => Some(format!("Capture interruption failed: {error}")),
-        };
-        CaptureOperationResult::Interrupted { path, error }
-    })
-}
-
 #[tracing::instrument(name = "network.session", level = "info", skip_all, fields(grid = ?credentials.grid))]
 async fn run_client(
     credentials: LoginCredentials,
     channels: Channels,
-    capture: Option<CaptureRecorder>,
     status: NetworkStatusHandle,
     login_url: String,
     options: SessionOptions,
@@ -842,7 +561,7 @@ async fn run_client(
     let mut mfa_hash = credentials.mfa_hash.clone();
     let (session, login_data) = loop {
         let response = match wait_for_login(
-            login_with_status_at(&credentials, &mfa_token, &mfa_hash, &login_url, capture.clone(), status.clone()),
+            login_with_status_at(&credentials, &mfa_token, &mfa_hash, &login_url, status.clone()),
             &mut disconnect_requested,
         )
         .await
@@ -850,9 +569,6 @@ async fn run_client(
             Some(Ok(response)) => response,
             Some(Err(error)) => {
                 tracing::warn!("Login failed");
-                if let Some(capture) = &capture {
-                    capture.lifecycle("login_failed");
-                }
                 return Err(error);
             }
             None => return Ok(()),
@@ -860,9 +576,6 @@ async fn run_client(
         match response {
             LoginResponse::Authenticated { session, mfa_hash: returned_hash, data } => {
                 tracing::info!(target: "network::client", "Login authenticated");
-                if let Some(capture) = &capture {
-                    capture.lifecycle("login_completed");
-                }
                 let remembered_hash = returned_hash.or_else(|| (!mfa_hash.is_empty()).then(|| mfa_hash.clone()));
                 if !matches!(
                     send_client_event(&events, Event::LoginAccepted { mfa_hash: remembered_hash }, &mut disconnect_requested).await,
@@ -874,9 +587,6 @@ async fn run_client(
             }
             LoginResponse::MfaChallenge => {
                 tracing::info!("Login requires MFA");
-                if let Some(capture) = &capture {
-                    capture.lifecycle("mfa_challenge");
-                }
                 mfa_token.clear();
                 mfa_hash.clear();
                 let challenge = MfaChallenge::new(command_sender.clone());
@@ -928,7 +638,6 @@ async fn run_client(
     let Some(simulator) = SimulatorCoordinator::connect_with_options(
         session,
         login_data,
-        capture,
         status,
         coverage_losses,
         options,
@@ -957,15 +666,12 @@ async fn wait_for_login<F: Future>(login: F, disconnect_requested: &mut watch::R
 mod tests {
     use std::{
         collections::HashMap,
-        fs,
         future::{Future, pending},
-        io::Read,
         mem::replace,
         net::SocketAddr,
-        path::Path,
         pin::pin,
         str::from_utf8,
-        sync::{self, Arc, Mutex},
+        sync::{Arc, Mutex},
         task::{Context, Waker},
         thread,
         time::Duration,
@@ -988,7 +694,6 @@ mod tests {
             chat::chat_from_viewer,
         },
     };
-    use tempfile::tempdir;
     use test_support::lludp;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -999,34 +704,20 @@ mod tests {
         task::{JoinHandle, spawn_blocking, yield_now},
     };
     use uuid::Uuid;
-    use zip::ZipArchive;
 
     use super::{
-        COMMAND_CAPACITY, CaptureCommand, CaptureOperationResult, Channels, Command, MAX_OUTBOUND_CHAT_MESSAGE_BYTES,
-        MAX_OUTBOUND_OBJECT_REQUESTS, MfaChallenge, NETWORK_THREAD_STACK_SIZE, Session, SessionHandle, SessionOptions, run_client,
-        run_with_capture, send_failure_event, stop_capture, wait_for_login,
+        COMMAND_CAPACITY, Channels, Command, MAX_OUTBOUND_CHAT_MESSAGE_BYTES, MAX_OUTBOUND_OBJECT_REQUESTS, MfaChallenge,
+        NETWORK_THREAD_STACK_SIZE, Session, SessionHandle, SessionOptions, run_client, send_failure_event, wait_for_login,
+    };
+    use crate::event::{
+        CLIENT_EVENT_CAPACITY, CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventSendOutcome,
+        PRIMARY_TERMINAL_EVENT_CAPACITY, send_client_event,
     };
     use crate::status::{NetworkLifecycle, NetworkStatusHandle};
-    use crate::{
-        capture::{CaptureConfig, CaptureManifest, CapturePublication, CaptureRecorder, CaptureSession, CaptureState},
-        event::{
-            CLIENT_EVENT_CAPACITY, CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventReceiver, EventSendOutcome,
-            PRIMARY_TERMINAL_EVENT_CAPACITY, send_client_event,
-        },
-    };
     use tokio::{
         sync::{mpsc, oneshot, watch},
         time::timeout,
     };
-
-    fn archive_entry(path: &Path, name: &str) -> Vec<u8> {
-        let file = fs::File::open(path).expect("open capture archive");
-        let mut archive = ZipArchive::new(file).expect("decode capture archive");
-        let mut entry = archive.by_name(name).expect("find capture entry");
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).expect("read capture entry");
-        bytes
-    }
 
     const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
     const SESSION_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
@@ -1180,15 +871,12 @@ mod tests {
         let coverage_changed = coverage_losses.subscribe();
         let (disconnect_requested, disconnect_signal) = watch::channel(false);
         let (worker_finished_sender, worker_finished) = watch::channel(false);
-        let (capture_commands, _capture_command_receiver) = mpsc::channel(8);
         let status = NetworkStatusHandle::new();
         let handle = SessionHandle {
             commands: commands.clone(),
             disconnect_requested,
             command_admission_closed: Arc::new(Mutex::new(false)),
             worker_finished,
-            capture_commands,
-            capture: CaptureRecorder::new(),
             status: status.clone(),
         };
         let session = Session {
@@ -1211,7 +899,6 @@ mod tests {
                     disconnect_requested: disconnect_signal,
                     coverage_losses,
                 },
-                None,
                 status,
                 login_url,
                 SessionOptions::default(),
@@ -1234,16 +921,12 @@ mod tests {
         let coverage_changed = coverage_losses.subscribe();
         let (disconnect_requested, disconnect_signal) = watch::channel(false);
         let (worker_finished_sender, worker_finished) = watch::channel(false);
-        let (capture_commands, capture_command_receiver) = mpsc::channel(8);
-        let capture = CaptureRecorder::new();
         let status = NetworkStatusHandle::new();
         let handle = SessionHandle {
             commands: commands.clone(),
             disconnect_requested,
             command_admission_closed: Arc::new(Mutex::new(false)),
             worker_finished,
-            capture_commands,
-            capture: capture.clone(),
             status: status.clone(),
         };
         let session = Session {
@@ -1268,8 +951,7 @@ mod tests {
                     disconnect_requested: disconnect_signal.clone(),
                     coverage_losses,
                 };
-                let run = run_client(credentials, channels, Some(capture.clone()), status, login_url, SessionOptions::default());
-                let result = runtime.block_on(run_with_capture(run, events, disconnect_signal, capture, None, capture_command_receiver));
+                let result = runtime.block_on(run_client(credentials, channels, status, login_url, SessionOptions::default()));
                 runtime.shutdown_background();
                 worker_finished_sender.send_replace(true);
                 result
@@ -2031,7 +1713,6 @@ mod tests {
                 disconnect_requested,
                 coverage_losses: CoverageLossLedger::new(),
             },
-            None,
             NetworkStatusHandle::default(),
             login_url,
             SessionOptions::default(),
@@ -2554,15 +2235,12 @@ mod tests {
         let (commands, _command_receiver) = mpsc::channel(1);
         let (disconnect_requested, mut disconnect_state) = watch::channel(false);
         let (worker_finished_sender, worker_finished) = watch::channel(false);
-        let (capture_commands, _capture_command_receiver) = mpsc::channel(1);
         let status = NetworkStatusHandle::new();
         let handle = SessionHandle {
             commands,
             disconnect_requested,
             command_admission_closed: Arc::new(Mutex::new(false)),
             worker_finished,
-            capture_commands,
-            capture: CaptureRecorder::new(),
             status: status.clone(),
         };
         let first_handle = handle.clone();
@@ -2710,14 +2388,11 @@ mod tests {
         let (commands, mut command_receiver) = mpsc::channel(1);
         let (disconnect_requested, _) = watch::channel(false);
         let (worker_finished_sender, worker_finished) = watch::channel(false);
-        let (capture_commands, _) = mpsc::channel(1);
         let handle = SessionHandle {
             commands,
             disconnect_requested,
             command_admission_closed: Arc::new(Mutex::new(false)),
             worker_finished,
-            capture_commands,
-            capture: CaptureRecorder::new(),
             status: NetworkStatusHandle::new(),
         };
         let request = RequestMultipleObjects {
@@ -2737,14 +2412,11 @@ mod tests {
 
     fn targeted_send_handle(commands: mpsc::Sender<Command>, disconnect_requested: watch::Sender<bool>) -> SessionHandle {
         let (_, worker_finished) = watch::channel(false);
-        let (capture_commands, _) = mpsc::channel(1);
         SessionHandle {
             commands,
             disconnect_requested,
             command_admission_closed: Arc::new(Mutex::new(false)),
             worker_finished,
-            capture_commands,
-            capture: CaptureRecorder::new(),
             status: NetworkStatusHandle::new(),
         }
     }
@@ -2860,15 +2532,12 @@ mod tests {
         let (commands, _command_receiver) = mpsc::channel(1);
         let (disconnect_requested, _) = watch::channel(false);
         let (_worker_finished_sender, worker_finished) = watch::channel(false);
-        let (capture_commands, _capture_command_receiver) = mpsc::channel(1);
         let status = NetworkStatusHandle::new();
         let handle = SessionHandle {
             commands,
             disconnect_requested,
             command_admission_closed: Arc::new(Mutex::new(false)),
             worker_finished,
-            capture_commands,
-            capture: CaptureRecorder::new(),
             status: status.clone(),
         };
 
@@ -2884,15 +2553,12 @@ mod tests {
         let (commands, _command_receiver) = mpsc::channel(1);
         let (disconnect_requested, disconnect_observed) = watch::channel(false);
         let (_worker_finished_sender, worker_finished) = watch::channel(false);
-        let (capture_commands, _capture_command_receiver) = mpsc::channel(1);
         let status = NetworkStatusHandle::new();
         let handle = SessionHandle {
             commands,
             disconnect_requested,
             command_admission_closed: Arc::new(Mutex::new(false)),
             worker_finished,
-            capture_commands,
-            capture: CaptureRecorder::new(),
             status: status.clone(),
         };
         let session = Session::new_for_test(handle, mpsc::channel(1).1);
@@ -2918,187 +2584,6 @@ mod tests {
             timeout(Duration::from_secs(1), send_failure).await.expect("shutdown should release the blocked send").expect("send task");
 
         assert!(matches!(outcome, EventSendOutcome::Shutdown));
-    }
-
-    #[tokio::test]
-    async fn late_interruption_keeps_capture_complete() {
-        let directory = tempdir().expect("create client test directory");
-        let recorder = CaptureRecorder::new();
-        let capture_root = directory.path().join("captures");
-        let session = CaptureSession::start(CaptureConfig::new(&capture_root), recorder).expect("start capture");
-        let capture_path = session.path().to_path_buf();
-        let (events, mut received_events) = mpsc::channel(1);
-        let publication = CapturePublication::default();
-
-        let CaptureOperationResult::Stopped(Ok(summary)) = stop_capture(session, publication.clone(), events).await else {
-            panic!("capture stop should publish an archive");
-        };
-        publication.request_interruption();
-
-        assert_eq!(summary.state, CaptureState::Complete, "capture finalization error: {:?}", summary.error);
-        assert!(
-            matches!(received_events.try_recv().map(EventEnvelope::into_event), Ok(Event::CaptureFinished { path, error: None }) if path == capture_path)
-        );
-        let manifest = archive_entry(&capture_path, "manifest.json");
-        let manifest: CaptureManifest = serde_json::from_slice(&manifest).expect("decode capture manifest");
-        assert_eq!(manifest.state, CaptureState::Complete);
-    }
-
-    #[tokio::test]
-    async fn pre_publish_interruption_stays_interrupted() {
-        let directory = tempdir().expect("create client test directory");
-        let recorder = CaptureRecorder::new();
-        let capture_root = directory.path().join("captures");
-        let session = CaptureSession::start(CaptureConfig::new(&capture_root), recorder).expect("start capture");
-        let capture_path = session.path().to_path_buf();
-        let (events, mut received_events) = mpsc::channel(1);
-        let publication = CapturePublication::default();
-        publication.request_interruption();
-
-        let CaptureOperationResult::Stopped(Ok(summary)) = stop_capture(session, publication, events).await else {
-            panic!("capture stop should publish an archive");
-        };
-
-        assert_eq!(summary.state, CaptureState::Interrupted, "capture finalization error: {:?}", summary.error);
-        assert!(
-            matches!(received_events.try_recv().map(EventEnvelope::into_event), Ok(Event::CaptureInterrupted { path, error: None }) if path == capture_path)
-        );
-        let manifest = archive_entry(&capture_path, "manifest.json");
-        let manifest: CaptureManifest = serde_json::from_slice(&manifest).expect("decode capture manifest");
-        assert_eq!(manifest.state, CaptureState::Interrupted);
-    }
-
-    #[tokio::test]
-    async fn shutdown_during_publish_interrupts_capture() {
-        let directory = tempdir().expect("create client test directory");
-        let recorder = CaptureRecorder::new();
-        let capture_root = directory.path().join("captures");
-        let session = CaptureSession::start(CaptureConfig::new(&capture_root), recorder.clone()).expect("start capture");
-        let capture_path = session.path().to_path_buf();
-        let (publication_reached, at_publication) = oneshot::channel();
-        let (continue_publication, release_publication) = sync::mpsc::channel();
-        let publication = CapturePublication::default();
-        publication.pause_before_claim(publication_reached, release_publication);
-
-        let (events, mut received_events) = mpsc::channel(1);
-        let (network_finished, wait_for_network) = oneshot::channel();
-        let network = async move {
-            wait_for_network.await.map_err(|_| "test ended before network shutdown".to_string())?;
-            Ok(())
-        };
-        let (shutdown, shutdown_requested) = watch::channel(false);
-        let (capture_command_sender, capture_commands) = mpsc::channel(1);
-        let coordinator = spawn(run_with_capture(network, events, shutdown_requested, recorder, Some(session), capture_commands));
-        let (stop_completed, stop_result) = oneshot::channel();
-        capture_command_sender.send(CaptureCommand::Stop { completed: stop_completed, publication }).await.expect("queue capture stop");
-
-        timeout(Duration::from_secs(2), at_publication).await.expect("stop should reach archive publication").expect("publication signal");
-        network_finished.send(()).expect("network task should still be waiting");
-        shutdown.send_replace(true);
-
-        let stop_result =
-            timeout(Duration::from_secs(2), stop_result).await.expect("shutdown should finish the stop request").expect("stop reply");
-        assert!(matches!(stop_result, Err(error) if error.contains("shutting down")));
-        timeout(Duration::from_secs(2), coordinator)
-            .await
-            .expect("capture coordinator should return before archive publication resumes")
-            .expect("capture coordinator should not panic")
-            .expect("network shutdown should succeed");
-        assert!(!capture_path.exists(), "archive should remain unpublished while the writer is paused");
-
-        continue_publication.send(()).expect("capture writer should be paused");
-        let event = timeout(Duration::from_secs(2), received_events.recv()).await.expect("capture writer should finish publication");
-        assert!(matches!(
-            event.map(EventEnvelope::into_event),
-            Some(Event::CaptureInterrupted { path, error: None }) if path == capture_path
-        ));
-        let manifest: CaptureManifest =
-            serde_json::from_slice(&archive_entry(&capture_path, "manifest.json")).expect("decode capture manifest");
-        assert_eq!(manifest.state, CaptureState::Interrupted);
-    }
-
-    #[tokio::test]
-    async fn capture_stop_completes_when_event_queue_is_full() {
-        let directory = tempdir().expect("create client test directory");
-        let recorder = CaptureRecorder::new();
-        let capture_root = directory.path().join("captures");
-        let session = CaptureSession::start(CaptureConfig::new(&capture_root), recorder.clone()).expect("start capture");
-        let (events, mut received_events) = mpsc::channel(1);
-        events.try_send(EventEnvelope::new(Event::Failed("occupy event queue".into()))).expect("fill event queue");
-        let (network_finished, wait_for_network) = oneshot::channel();
-        let network = async move {
-            wait_for_network.await.map_err(|_| "network test ended early".to_string())?;
-            Ok(())
-        };
-        let (_shutdown, shutdown_requested) = watch::channel(false);
-        let (capture_commands, capture_command_receiver) = mpsc::channel(1);
-        let coordinator = spawn(run_with_capture(network, events, shutdown_requested, recorder, Some(session), capture_command_receiver));
-        let (completed, response) = oneshot::channel();
-        capture_commands
-            .send(CaptureCommand::Stop { completed, publication: CapturePublication::default() })
-            .await
-            .expect("queue capture stop");
-
-        let capture_path = timeout(Duration::from_secs(2), response)
-            .await
-            .expect("full event queue must not block capture stop")
-            .expect("capture stop reply")
-            .expect("capture archive should be complete");
-        assert!(capture_path.is_file());
-        assert!(
-            matches!(received_events.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(message)) if message == "occupy event queue")
-        );
-        assert!(received_events.try_recv().is_err());
-
-        network_finished.send(()).expect("network task should still be waiting");
-        timeout(Duration::from_secs(2), coordinator)
-            .await
-            .expect("capture coordinator should exit")
-            .expect("capture coordinator should not panic")
-            .expect("network task should finish");
-    }
-
-    #[tokio::test]
-    async fn capture_stops_on_close() {
-        let directory = tempdir().expect("create client test directory");
-        let recorder = CaptureRecorder::new();
-        let capture_root = directory.path().join("captures");
-        let capture_session = CaptureSession::start(CaptureConfig::new(&capture_root), recorder.clone()).expect("start capture");
-        let capture_path = capture_session.path().to_path_buf();
-        let (events, received_events) = mpsc::channel(2);
-        let mut received_events = EventReceiver::new(received_events);
-        let (shutdown, shutdown_requested) = watch::channel(false);
-        let network_shutdown = shutdown_requested.clone();
-        let run = async move {
-            let mut network_shutdown = network_shutdown;
-            while !*network_shutdown.borrow() {
-                if network_shutdown.changed().await.is_err() {
-                    break;
-                }
-            }
-            Ok(())
-        };
-        let (capture_command_sender, capture_commands) = mpsc::channel(1);
-        let worker = spawn(run_with_capture(run, events, shutdown_requested, recorder, Some(capture_session), capture_commands));
-
-        shutdown.send_replace(true);
-        timeout(Duration::from_secs(1), worker)
-            .await
-            .expect("shutdown should interrupt capture promptly")
-            .expect("capture coordinator should not panic")
-            .expect("network shutdown should succeed");
-
-        let event = received_events.try_recv();
-        assert!(
-            matches!(event, Ok(Event::CaptureInterrupted { ref path, error: None }) if path == &capture_path),
-            "unexpected capture shutdown event: {event:?}"
-        );
-        let manifest = archive_entry(&capture_path, "manifest.json");
-        let manifest: CaptureManifest = serde_json::from_slice(&manifest).expect("decode capture manifest");
-        assert_eq!(manifest.state, CaptureState::Interrupted);
-        assert_eq!(fs::read_dir(&capture_root).expect("capture directory").count(), 1);
-
-        drop(capture_command_sender);
     }
 
     #[test]

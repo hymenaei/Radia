@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::{
     fmt,
     sync::atomic::{AtomicU64, Ordering},
@@ -163,8 +162,6 @@ pub enum Event {
     SimulatorCapabilities { simulator_id: SimulatorId, source: SocketAddr, capabilities: Client },
     SimulatorPromoted { previous_simulator_id: SimulatorId, simulator_id: SimulatorId, session: Box<AgentSession>, capabilities: Client },
     SimulatorMessage { simulator_id: SimulatorId, source: SocketAddr, sequence: u32, packet_order: PacketOrder, message: Message },
-    CaptureFinished { path: PathBuf, error: Option<String> },
-    CaptureInterrupted { path: PathBuf, error: Option<String> },
     SendFailed(String),
     Failed(String),
 }
@@ -255,16 +252,6 @@ impl fmt::Debug for Event {
                 .field("sequence", sequence)
                 .field("message", &"[OMITTED]")
                 .finish(),
-            Self::CaptureFinished { error, .. } => formatter
-                .debug_struct("CaptureFinished")
-                .field("path", &"[REDACTED]")
-                .field("error", &error.as_ref().map(|_| "[REDACTED]"))
-                .finish(),
-            Self::CaptureInterrupted { error, .. } => formatter
-                .debug_struct("CaptureInterrupted")
-                .field("path", &"[REDACTED]")
-                .field("error", &error.as_ref().map(|_| "[REDACTED]"))
-                .finish(),
             Self::SendFailed(_) => formatter.debug_tuple("SendFailed").field(&"[REDACTED]").finish(),
             Self::Failed(_) => formatter.debug_tuple("Failed").field(&"[REDACTED]").finish(),
         }
@@ -300,7 +287,6 @@ pub(crate) async fn send_failure_event(
 
 #[cfg(test)]
 mod redaction_tests {
-    use std::path::PathBuf;
 
     use llsd::Value;
 
@@ -343,25 +329,6 @@ mod redaction_tests {
         let debug = format!("{event:?}");
         for secret in ["192.0.2.92", "4660", "simulator-error-secret"] {
             assert!(!debug.contains(secret));
-        }
-    }
-
-    #[test]
-    fn capture_event_debug_redacts_local_details() {
-        let finished = Event::CaptureFinished {
-            path: PathBuf::from("C:/users/alice/captures/private-session.vcap"),
-            error: Some("could not write private-session-token".into()),
-        };
-        let interrupted = Event::CaptureInterrupted {
-            path: PathBuf::from("C:/users/alice/captures/private-session.vcap"),
-            error: Some("could not write private-session-token".into()),
-        };
-
-        for debug in [format!("{finished:?}"), format!("{interrupted:?}")] {
-            assert!(!debug.contains("alice"));
-            assert!(!debug.contains("private-session"));
-            assert!(!debug.contains("private-session-token"));
-            assert!(debug.contains("[REDACTED]"));
         }
     }
 }

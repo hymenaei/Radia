@@ -207,7 +207,7 @@ async fn five_simulator_load() {
         (first_neighbor_fair_bytes + second_neighbor_fair_bytes + third_neighbor_fair_bytes + fourth_neighbor_fair_bytes) as f64 / 4.0;
     assert!(neighbor_average > 0.0, "neighbors received no traffic during the load run");
     eprintln!(
-        "five-simulator load: capture=off, warmup={warmup:?}, measured={duration:?}, elapsed={elapsed:?}, rate={:.0} fair B/s, primary/neighbor-average={:.2}, configured-rate={} B/s",
+        "five-simulator load: warmup={warmup:?}, measured={duration:?}, elapsed={elapsed:?}, rate={:.0} fair B/s, primary/neighbor-average={:.2}, configured-rate={} B/s",
         total_bytes as f64 / duration.as_secs_f64(),
         primary_fair_bytes as f64 / neighbor_average,
         crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get()
@@ -385,7 +385,7 @@ async fn five_simulator_load() {
     let burst_bytes: usize = burst_reports.iter().map(|(_, report)| report.received.bytes).sum();
     let burst_received: usize = burst_reports.iter().map(|(_, report)| report.received.requests).sum();
     eprintln!(
-        "five-simulator Fair burst: capture=off, sends-per-simulator={BURST_SENDS_PER_SIMULATOR}, objects-per-request={}, received={burst_received}, wire-bytes={burst_bytes}, elapsed={burst_elapsed:?}, aggregate-rate={:.0} B/s, configured-rate={} B/s",
+        "five-simulator Fair burst: sends-per-simulator={BURST_SENDS_PER_SIMULATOR}, objects-per-request={}, received={burst_received}, wire-bytes={burst_bytes}, elapsed={burst_elapsed:?}, aggregate-rate={:.0} B/s, configured-rate={} B/s",
         u8::MAX as usize,
         burst_bytes as f64 / burst_elapsed.as_secs_f64(),
         crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get()
@@ -772,7 +772,6 @@ async fn disconnect_cancels_primary_startup() {
     let startup = spawn(SimulatorCoordinator::connect_with_gate_and_disconnect(
         login_session(endpoint),
         ResponseData::default(),
-        None,
         status.clone(),
         send_gate,
         disconnect_requested,

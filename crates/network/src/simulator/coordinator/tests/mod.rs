@@ -207,7 +207,6 @@ async fn connected_neighbor_with_options(
     let mut connection = SimulatorCoordinator::connect_with_status_and_send_gate(
         AgentSession { seed_capability: seed, ..login_session(primary_endpoint) },
         ResponseData::default(),
-        None,
         status.clone(),
         send_gate,
     )

@@ -211,7 +211,6 @@ async fn full_handoff_queue_recovers() {
             seed_capability: Url::parse("http://127.0.0.1:1/seed").expect("seed URL"),
         },
         ResponseData::default(),
-        None,
         crate::status::NetworkStatusHandle::default(),
     )
     .await

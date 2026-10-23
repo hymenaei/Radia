@@ -1,5 +1,4 @@
 pub mod capabilities;
-pub mod capture;
 pub mod coverage;
 mod error;
 mod event;
@@ -22,7 +21,6 @@ pub mod testing {
 }
 mod transport;
 
-pub use capture::CaptureConfig;
 pub use coverage::{
     CoverageLoss, CoverageLossLedger, CoverageLossReason, CoverageLossRecord, CoverageSnapshot, CoverageSource, CoverageWatermark,
 };

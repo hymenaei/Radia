@@ -17,6 +17,7 @@ use scene::{
 };
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
+use tracing::Instrument;
 use uuid::Uuid;
 use world::{MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS};
 
@@ -117,7 +118,7 @@ impl SceneFeed {
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
-        drop(runtime.clone().spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, wake)));
+        drop(runtime.clone().spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, wake).in_current_span()));
         Self { runtime, view, budget, agent_id, water_height: None, camera, incoming, _cancel: cancel }
     }
 
@@ -200,6 +201,7 @@ async fn execute_world_read(reader: &WorldReader, job: &ReadJob) -> Result<ReadR
     })
 }
 
+#[tracing::instrument(name = "scene.feed", level = "debug", skip_all)]
 async fn run(
     mut scene: Reconciler,
     sources: SceneSources,
@@ -235,12 +237,18 @@ async fn run(
                 Some(Instant::now())
             }
             ReconcileStep::Build(job) => {
-                meshes.push(runtime.spawn_blocking(move || job.run()));
+                let span = tracing::Span::current();
+                meshes.push(runtime.spawn_blocking(move || span.in_scope(|| job.run())));
                 Some(Instant::now())
             }
             ReconcileStep::Publish(batch) => {
-                if sender.try_send(batch).is_err() {
-                    break;
+                match sender.try_send(batch) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::error!("scene publication exceeded its single-batch limit");
+                        break;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
                 }
                 wake();
                 Some(Instant::now())
@@ -281,7 +289,12 @@ async fn run(
                     Some(command) => if let Err(error) = scene.push_environment(command.region, command.push) { tracing::warn!(?error, "experience environment push rejected"); },
                     None => break,
                 },
-                (job, reply) = reading => scene.complete_read(job, reply, Instant::now()),
+                (job, reply) = reading => {
+                    if let Err(failure) = &reply && !matches!(failure, ReadFailure::Busy) {
+                        tracing::debug!(?failure, "scene world read did not complete");
+                    }
+                    scene.complete_read(job, reply, Instant::now());
+                },
                 completion = building => match completion {
                     Ok(completion) => scene.complete_mesh(completion),
                     Err(error) => {

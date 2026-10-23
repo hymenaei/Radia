@@ -102,7 +102,7 @@ async fn retired_capability_worker_is_joined() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind held capability");
     let seed = Url::parse(&format!("http://{}/held", listener.local_addr().expect("HTTP endpoint"))).expect("held URL");
     let mut connection =
-        SimulatorCoordinator::connect_with_status(login_session(endpoint), ResponseData::default(), None, NetworkStatusHandle::default())
+        SimulatorCoordinator::connect_with_status(login_session(endpoint), ResponseData::default(), NetworkStatusHandle::default())
             .await
             .expect("connect coordinator");
     let client = connection.new_capability_client(seed.clone()).expect("track capability worker");
@@ -141,7 +141,6 @@ async fn capability_worker_count_is_bounded() {
     let mut connection = SimulatorCoordinator::connect_with_status(
         login_session(simulator.local_addr().expect("simulator endpoint")),
         ResponseData::default(),
-        None,
         NetworkStatusHandle::default(),
     )
     .await
@@ -168,7 +167,6 @@ async fn full_decode_slots_do_not_block_primary_retry_timers() {
     let connection = SimulatorCoordinator::connect_with_coverage(
         login_session(simulator.local_addr().expect("read simulator address")),
         ResponseData::default(),
-        None,
         NetworkStatusHandle::default(),
         coverage_losses.clone(),
     )
@@ -275,7 +273,7 @@ async fn neighbor_circuit_fails_after_udp_inactivity() {
     let endpoint = neighbor.local_addr().expect("read neighbor address");
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");
     let connection =
-        NeighborConnection::connect(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, None, NetworkStatusHandle::default())
+        NeighborConnection::connect(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
             .await
             .expect("connect neighbor circuit");
     let (events, mut event_receiver) = mpsc::channel(4);
@@ -340,7 +338,7 @@ async fn full_queue_keeps_control_responsive() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
     let connection =
-        SimulatorCoordinator::connect_with_status(login_session(endpoint), ResponseData::default(), None, NetworkStatusHandle::default())
+        SimulatorCoordinator::connect_with_status(login_session(endpoint), ResponseData::default(), NetworkStatusHandle::default())
             .await
             .expect("connect simulator circuit");
     let (_, peer) = receive(&simulator).await;
@@ -387,7 +385,7 @@ async fn capability_events_wait_for_simulator_connection() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
     let mut connection =
-        SimulatorCoordinator::connect_with_status(login_session(endpoint), ResponseData::default(), None, NetworkStatusHandle::default())
+        SimulatorCoordinator::connect_with_status(login_session(endpoint), ResponseData::default(), NetworkStatusHandle::default())
             .await
             .expect("connect simulator circuit");
     let simulator_id = connection.simulator_id;

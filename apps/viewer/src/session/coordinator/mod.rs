@@ -26,6 +26,7 @@ use protocol::lludp::Message;
 use scene::Camera;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
+use tracing::Instrument;
 use world::{LocalAddress, UpdateSource};
 
 use self::events::{
@@ -90,6 +91,7 @@ where
     }
 }
 
+#[tracing::instrument(name = "viewer.session", level = "info", skip_all)]
 pub(crate) async fn drain_session(
     mut session: Session,
     session_handle: SessionHandle,
@@ -103,9 +105,9 @@ pub(crate) async fn drain_session(
     credential_write_lock: WriteLock,
 ) {
     use Event::{
-        CapabilityError, CapabilityEvent, CapabilityEventBatch, CaptureFinished, CaptureInterrupted, CoverageLost, EventQueueCoverageLost,
-        Failed, LoginAccepted, MfaRequired, SendFailed, SessionReady, SimulatorCapabilities, SimulatorConnectFailed, SimulatorConnected,
-        SimulatorDisconnected, SimulatorFailed, SimulatorMessage, SimulatorPromoted,
+        CapabilityError, CapabilityEvent, CapabilityEventBatch, CoverageLost, EventQueueCoverageLost, Failed, LoginAccepted, MfaRequired,
+        SendFailed, SessionReady, SimulatorCapabilities, SimulatorConnectFailed, SimulatorConnected, SimulatorDisconnected,
+        SimulatorFailed, SimulatorMessage, SimulatorPromoted,
     };
 
     let cancellation = async move {
@@ -137,12 +139,17 @@ pub(crate) async fn drain_session(
     let mut media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
     let recovery_queue = Arc::new(Mutex::new(RecoveryScheduler::new()));
     let (mut recovery_wake, recovery_wake_receiver) = mpsc::channel(1);
-    drop(runtime.clone().spawn(recovery::run_recovery_retries(
-        recovery_wake_receiver,
-        Arc::clone(&recovery_queue),
-        session_handle.clone(),
-        cancellation.clone(),
-    )));
+    drop(
+        runtime.clone().spawn(
+            recovery::run_recovery_retries(
+                recovery_wake_receiver,
+                Arc::clone(&recovery_queue),
+                session_handle.clone(),
+                cancellation.clone(),
+            )
+            .in_current_span(),
+        ),
+    );
 
     loop {
         if cancellation.clone().now_or_never().is_some() {
@@ -394,7 +401,9 @@ pub(crate) async fn drain_session(
                 let write_lock = credential_write_lock.clone();
                 let username = username.clone();
                 let password = password.clone();
+                let span = tracing::Span::current();
                 drop(runtime.spawn_blocking(move || {
+                    let _span = span.enter();
                     let _guard = block_on(write_lock.lock());
                     let mut warning = None;
                     let remembered_login = if remember_login {
@@ -440,22 +449,27 @@ pub(crate) async fn drain_session(
                 let username = username.clone();
                 let runtime = runtime.clone();
                 let cancelled = cancellation.clone();
-                drop(runtime.spawn(async move {
-                    let load = load_favorites(&capabilities, &lookup, &session, &login_data).fuse();
-                    pin_mut!(load);
-                    let cancelled = cancelled.fuse();
-                    pin_mut!(cancelled);
-                    futures::select! {
-                        result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
-                            grid: session.grid,
-                            agent_id: session.agent_id,
-                            session_id: session.session_id,
-                            username,
-                            result,
-                        })),
-                        _ = cancelled => {}
-                    }
-                }));
+                drop(
+                    runtime.spawn(
+                        async move {
+                            let load = load_favorites(&capabilities, &lookup, &session, &login_data).fuse();
+                            pin_mut!(load);
+                            let cancelled = cancelled.fuse();
+                            pin_mut!(cancelled);
+                            futures::select! {
+                                result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
+                                    grid: session.grid,
+                                    agent_id: session.agent_id,
+                                    session_id: session.session_id,
+                                    username,
+                                    result,
+                                })),
+                                _ = cancelled => {}
+                            }
+                        }
+                        .in_current_span(),
+                    ),
+                );
             }
             SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
                 let session = *session;
@@ -506,22 +520,27 @@ pub(crate) async fn drain_session(
                     let mailbox = mailbox.clone();
                     let username = username.clone();
                     let cancelled = cancellation.clone();
-                    drop(runtime.clone().spawn(async move {
-                        let load = load_favorites(&capabilities, &favorites_lookup, &favorites_session, &login_data).fuse();
-                        pin_mut!(load);
-                        let cancelled = cancelled.fuse();
-                        pin_mut!(cancelled);
-                        futures::select! {
-                            result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
-                                grid: favorites_session.grid,
-                                agent_id: favorites_session.agent_id,
-                                session_id: favorites_session.session_id,
-                                username,
-                                result,
-                            })),
-                            _ = cancelled => {}
-                        }
-                    }));
+                    drop(
+                        runtime.clone().spawn(
+                            async move {
+                                let load = load_favorites(&capabilities, &favorites_lookup, &favorites_session, &login_data).fuse();
+                                pin_mut!(load);
+                                let cancelled = cancelled.fuse();
+                                pin_mut!(cancelled);
+                                futures::select! {
+                                    result = load => mailbox.publish(ViewerUpdate::Favorites(FavoritesUpdate {
+                                        grid: favorites_session.grid,
+                                        agent_id: favorites_session.agent_id,
+                                        session_id: favorites_session.session_id,
+                                        username,
+                                        result,
+                                    })),
+                                    _ = cancelled => {}
+                                }
+                            }
+                            .in_current_span(),
+                        ),
+                    );
                 }
             }
             SimulatorConnected { simulator_id, region_handle, .. } => {
@@ -542,10 +561,6 @@ pub(crate) async fn drain_session(
                 let scope = if Some(simulator_id) == primary_simulator_id { SimulatorScope::Primary } else { SimulatorScope::Neighbor };
                 let region_name = session_world.region_name(simulator_id);
                 handle_simulator_message(scope, source, message, active_session.as_ref(), region_lookup.as_ref(), region_name, &mailbox);
-            }
-            CaptureFinished { .. } => {}
-            CaptureInterrupted { error, .. } => {
-                tracing::warn!(operation = "capture_stop", outcome = "interrupted", error = ?error, "Capture interrupted")
             }
             SendFailed(error) => tracing::warn!(operation = "simulator_send", outcome = "failed", %error, "Send failed"),
             EventQueueCoverageLost { reason, .. } => tracing::warn!(

@@ -151,7 +151,10 @@ impl NetworkStatusHandle {
     }
 
     pub(crate) fn set_lifecycle(&self, lifecycle: NetworkLifecycle) {
-        self.state.lifecycle.store(lifecycle as u8, Ordering::Relaxed);
+        let previous = lifecycle_from_u8(self.state.lifecycle.swap(lifecycle as u8, Ordering::Relaxed));
+        if previous != lifecycle {
+            tracing::info!(?previous, ?lifecycle, "network lifecycle changed");
+        }
     }
 
     pub(crate) fn mark_disconnecting(&self) {

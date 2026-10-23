@@ -13,7 +13,7 @@ async fn handoff_waits_for_matching_movement() {
     let (shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
-    let mut connection = NeighborConnection::connect(simulator_id, session.clone(), region_handle, None, NetworkStatusHandle::default())
+    let mut connection = NeighborConnection::connect(simulator_id, session.clone(), region_handle, NetworkStatusHandle::default())
         .await
         .expect("connect destination circuit");
     connection.handoff = Some(HandoffTarget {

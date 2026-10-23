@@ -780,10 +780,9 @@ mod tests {
             endpoint: destination.local_addr().expect("destination endpoint"),
             seed_capability: session.seed_capability.clone(),
         };
-        let mut connection =
-            SimulatorCoordinator::connect_with_status(session, ResponseData::default(), None, NetworkStatusHandle::default())
-                .await
-                .expect("connect coordinator");
+        let mut connection = SimulatorCoordinator::connect_with_status(session, ResponseData::default(), NetworkStatusHandle::default())
+            .await
+            .expect("connect coordinator");
         let id = SimulatorId::allocate().expect("destination ID");
         let (events, _receiver) = mpsc::channel(4);
         let (_shutdown, shutdown) = watch::channel(false);

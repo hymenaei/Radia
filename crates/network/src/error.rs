@@ -14,13 +14,10 @@ pub enum Error {
     SessionClosed,
     LoginEnded,
     SimulatorConnectionClosed,
-    CaptureStartCanceled,
-    CaptureStopCanceled,
     CapabilityRequestCanceled,
     CapabilitySessionClosed,
     CapabilityHttp(crate::capabilities::HttpError),
     Capability(String),
-    Capture(String),
 }
 
 impl fmt::Debug for Error {
@@ -38,13 +35,10 @@ impl fmt::Debug for Error {
             Self::SessionClosed => formatter.write_str("SessionClosed"),
             Self::LoginEnded => formatter.write_str("LoginEnded"),
             Self::SimulatorConnectionClosed => formatter.write_str("SimulatorConnectionClosed"),
-            Self::CaptureStartCanceled => formatter.write_str("CaptureStartCanceled"),
-            Self::CaptureStopCanceled => formatter.write_str("CaptureStopCanceled"),
             Self::CapabilityRequestCanceled => formatter.write_str("CapabilityRequestCanceled"),
             Self::CapabilitySessionClosed => formatter.write_str("CapabilitySessionClosed"),
             Self::CapabilityHttp(error) => formatter.debug_tuple("CapabilityHttp").field(error).finish(),
             Self::Capability(_) => formatter.debug_tuple("Capability").field(&"[REDACTED]").finish(),
-            Self::Capture(_) => formatter.debug_tuple("Capture").field(&"[REDACTED]").finish(),
         }
     }
 }
@@ -64,12 +58,10 @@ impl fmt::Display for Error {
             Self::SessionClosed => formatter.write_str("The network session has stopped."),
             Self::LoginEnded => formatter.write_str("The login request has ended."),
             Self::SimulatorConnectionClosed => formatter.write_str("The simulator connection has closed."),
-            Self::CaptureStartCanceled => formatter.write_str("The network session stopped before capture could start."),
-            Self::CaptureStopCanceled => formatter.write_str("The network session stopped before capture could finish."),
             Self::CapabilityRequestCanceled => formatter.write_str("The capability request ended unexpectedly."),
             Self::CapabilitySessionClosed => formatter.write_str("The capability connection has closed."),
             Self::CapabilityHttp(error) => write!(formatter, "{error}"),
-            Self::Capability(message) | Self::Capture(message) => formatter.write_str(message),
+            Self::Capability(message) => formatter.write_str(message),
         }
     }
 }

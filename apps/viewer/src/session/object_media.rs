@@ -13,6 +13,7 @@ use network::{
 };
 use tokio::runtime::Handle;
 use tokio::sync::watch;
+use tracing::Instrument;
 use uuid::Uuid;
 use world::{
     LocalAddress, MAX_MEDIA_DIMENSION, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_MEDIA_WHITELIST_ENTRIES, MAX_SURFACE_FACES,
@@ -131,7 +132,7 @@ impl ObjectMediaFetcher {
         let (result_sender, result_receiver) = mpsc::channel(RESULT_QUEUE_CAPACITY);
         let retirement = Arc::new(Mutex::new(RetirementState::default()));
         let (retirement_generation, retirement_updates) = watch::channel(0);
-        drop(runtime.spawn(run(request_receiver, result_sender, retirement.clone(), retirement_updates, cancellation)));
+        drop(runtime.spawn(run(request_receiver, result_sender, retirement.clone(), retirement_updates, cancellation).in_current_span()));
         Self { requests: request_sender, results: result_receiver, pending: HashMap::new(), retirement, retirement_generation }
     }
 

@@ -17,6 +17,7 @@ use futures::{
 use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
+use tracing::Instrument;
 #[cfg(target_os = "linux")]
 use winit::platform::wayland::EventLoopBuilderExtWayland;
 #[cfg(target_os = "windows")]
@@ -104,6 +105,7 @@ impl Viewport {
         let shared = Arc::new(SharedWindowState::default());
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new().name("scene-window".into()).spawn(move || {
+            let _span = tracing::info_span!("viewer.viewport").entered();
             let event_loop = match EventLoop::with_user_event().with_any_thread(true).build() {
                 Ok(event_loop) => event_loop,
                 Err(error) => {
@@ -701,17 +703,23 @@ impl SceneWindow {
             while let Some(job) = renderer.next_texture_job() {
                 let sender = self.texture_sender.clone();
                 let wake = Arc::clone(&self.wake);
-                let work = feed.runtime.spawn_blocking(move || job.run(CompressionQuality::Fast));
-                drop(feed.runtime.spawn(async move {
-                    match work.await {
-                        Ok(completion) => match sender.try_send(completion) {
-                            Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
-                            Err(mpsc::TrySendError::Full(_)) => tracing::warn!("Texture completion queue is full"),
-                        },
-                        Err(error) => tracing::error!(%error, "texture worker stopped unexpectedly"),
-                    }
-                    wake.wake();
-                }));
+                let span = tracing::Span::current();
+                let work = feed.runtime.spawn_blocking(move || span.in_scope(|| job.run(CompressionQuality::Fast)));
+                drop(
+                    feed.runtime.spawn(
+                        async move {
+                            match work.await {
+                                Ok(completion) => match sender.try_send(completion) {
+                                    Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
+                                    Err(mpsc::TrySendError::Full(_)) => tracing::warn!("Texture completion queue is full"),
+                                },
+                                Err(error) => tracing::error!(%error, "texture worker stopped unexpectedly"),
+                            }
+                            wake.wake();
+                        }
+                        .in_current_span(),
+                    ),
+                );
             }
         }
         self.next_frame = Instant::now();

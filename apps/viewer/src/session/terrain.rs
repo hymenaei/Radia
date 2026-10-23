@@ -55,9 +55,13 @@ impl TerrainDecodeQueue {
         assert!(!self.is_full(), "intake pauses while terrain decoder admission is full");
         let data = data.clone();
         let cancelled = Arc::clone(&self.cancelled);
+        let span = tracing::Span::current();
         self.jobs.push_back(
             runtime
-                .spawn_blocking(move || decode_terrain_patches(source, &data, &cancelled))
+                .spawn_blocking(move || {
+                    let _entered = span.enter();
+                    decode_terrain_patches(source, &data, &cancelled)
+                })
                 .map(move |result| {
                     result.unwrap_or_else(|error| {
                         tracing::error!(%error, "terrain worker stopped unexpectedly");

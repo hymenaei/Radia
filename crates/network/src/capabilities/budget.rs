@@ -56,7 +56,6 @@ impl CapabilityBudget {
             response_memory: http::ResponseMemoryBudget::new(
                 ORDINARY_RESPONSE_MEMORY_BYTES,
                 EVENT_QUEUE_RESPONSE_MEMORY_BYTES,
-                crate::capture::MAX_CAPTURE_QUEUED_PAYLOAD_BYTES,
                 SHARED_RESPONSE_MEMORY_BYTES,
             ),
             http_client: Arc::new(OnceLock::new()),
@@ -80,7 +79,8 @@ pub(crate) async fn spawn_blocking_with_permit<T>(
 where
     T: Send + 'static,
 {
-    spawn_blocking(move || (work(), permit)).await
+    let span = tracing::Span::current();
+    spawn_blocking(move || span.in_scope(|| (work(), permit))).await
 }
 
 #[cfg(test)]

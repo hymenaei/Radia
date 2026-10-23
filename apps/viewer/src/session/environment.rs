@@ -362,8 +362,10 @@ async fn fetch(request: &Request, runtime: Handle, decoders: Arc<Semaphore>) -> 
         };
         let permit = decoders.clone().acquire_owned().await.map_err(|_| FetchError::Worker)?;
         let scope = request.target.scope();
+        let span = tracing::Span::current();
         let response = runtime
             .spawn_blocking(move || {
+                let _entered = span.enter();
                 let _permit = permit;
                 decode(&bytes, scope)
             })

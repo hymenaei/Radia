@@ -152,9 +152,7 @@ fn shutdown(cx: &mut App) {
                 viewport.shutdown();
             }
         });
-        if disconnect_session(session).await {
-            println!("Capture interrupted and saved locally.");
-        }
+        disconnect_session(session).await;
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         worker.await;
         cx.update(|app| app.quit());
@@ -348,16 +346,14 @@ fn show_chat(focus: bool, cx: &mut App) {
     }
 }
 
-async fn disconnect_session(session_slot: Arc<Mutex<Option<network::SessionHandle>>>) -> bool {
+async fn disconnect_session(session_slot: Arc<Mutex<Option<network::SessionHandle>>>) {
     let client = session_slot.lock().unwrap_or_else(PoisonError::into_inner).clone();
     let Some(client) = client else {
-        return false;
+        return;
     };
 
-    let capture_active = client.capture_status().is_some_and(|status| status.active);
     client.disconnect().await;
     session_slot.lock().unwrap_or_else(PoisonError::into_inner).take();
-    capture_active
 }
 
 fn set_dark_theme(cx: &mut App) {

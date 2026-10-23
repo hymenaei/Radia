@@ -21,6 +21,7 @@ use tokio::{
     task::{AbortHandle, Id, JoinSet},
     time::{self, Instant},
 };
+use tracing::Instrument;
 use url::Url;
 use uuid::Uuid;
 
@@ -38,7 +39,6 @@ use crate::transport::SendGate;
 use crate::{
     AgentSession,
     capabilities::{CapabilityBudget, Client, EVENT_QUEUE_NAME, EventQueueExit, EventQueueRoleHandle},
-    capture::CaptureRecorder,
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
     error::Error,
     event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, SimulatorId},
@@ -227,7 +227,6 @@ pub(crate) struct SimulatorCoordinator {
     capability_budget: CapabilityBudget,
     capability_workers: JoinSet<()>,
     login_data: ResponseData,
-    capture: Option<CaptureRecorder>,
     status: NetworkStatusHandle,
     event_backlog: PrimaryEventBacklog,
     packet_memory: SimulatorMemoryBudget,
@@ -266,21 +265,19 @@ impl SimulatorCoordinator {
     pub(crate) async fn connect_with_status(
         session: AgentSession,
         login_data: ResponseData,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
     ) -> Result<Self, String> {
-        Self::connect_with_coverage(session, login_data, capture, status, CoverageLossLedger::new()).await
+        Self::connect_with_coverage(session, login_data, status, CoverageLossLedger::new()).await
     }
 
     #[cfg(test)]
     pub(crate) async fn connect_with_coverage(
         session: AgentSession,
         login_data: ResponseData,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
         coverage_losses: CoverageLossLedger,
     ) -> Result<Self, String> {
-        Self::connect_with_options(session, login_data, capture, status, coverage_losses, SessionOptions::default(), None)
+        Self::connect_with_options(session, login_data, status, coverage_losses, SessionOptions::default(), None)
             .await?
             .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())
     }
@@ -288,7 +285,6 @@ impl SimulatorCoordinator {
     pub(crate) async fn connect_with_options(
         session: AgentSession,
         login_data: ResponseData,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
         coverage_losses: CoverageLossLedger,
         options: SessionOptions,
@@ -297,7 +293,6 @@ impl SimulatorCoordinator {
         Self::connect_with_options_and_gate(
             session,
             login_data,
-            capture,
             status,
             coverage_losses,
             options,
@@ -312,14 +307,12 @@ impl SimulatorCoordinator {
     pub(crate) async fn connect_with_status_and_send_gate(
         session: AgentSession,
         login_data: ResponseData,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
         send_gate: SendGate,
     ) -> Result<Self, String> {
         Self::connect_with_options_and_gate(
             session,
             login_data,
-            capture,
             status,
             CoverageLossLedger::new(),
             SessionOptions::default(),
@@ -334,7 +327,6 @@ impl SimulatorCoordinator {
     async fn connect_with_gate_and_disconnect(
         session: AgentSession,
         login_data: ResponseData,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
         send_gate: SendGate,
         disconnect_requested: watch::Receiver<bool>,
@@ -342,7 +334,6 @@ impl SimulatorCoordinator {
         Self::connect_with_options_and_gate(
             session,
             login_data,
-            capture,
             status,
             CoverageLossLedger::new(),
             SessionOptions::default(),
@@ -355,7 +346,6 @@ impl SimulatorCoordinator {
     async fn connect_with_options_and_gate(
         session: AgentSession,
         login_data: ResponseData,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
         coverage_losses: CoverageLossLedger,
         options: SessionOptions,
@@ -367,7 +357,6 @@ impl SimulatorCoordinator {
         let result = Self::connect_inner(
             session,
             login_data,
-            capture,
             status.clone(),
             coverage_losses,
             options,
@@ -392,7 +381,6 @@ impl SimulatorCoordinator {
     async fn connect_inner(
         session: AgentSession,
         login_data: ResponseData,
-        capture: Option<CaptureRecorder>,
         status: NetworkStatusHandle,
         coverage_losses: CoverageLossLedger,
         options: SessionOptions,
@@ -403,16 +391,8 @@ impl SimulatorCoordinator {
             return Ok(None);
         }
         let simulator_id = SimulatorId::allocate().ok_or_else(|| "Simulator connection ID space is exhausted.".to_string())?;
-        if let Some(capture) = &capture {
-            capture.circuit_lifecycle("circuit_starting", session.circuit_code);
-        }
         let capability_budget = CapabilityBudget::new();
-        let capabilities = Client::new_with_status_and_budget(
-            session.seed_capability.clone(),
-            capture.clone(),
-            status.clone(),
-            capability_budget.clone(),
-        )?;
+        let capabilities = Client::new_with_status_and_budget(session.seed_capability.clone(), status.clone(), capability_budget.clone())?;
         let outbound_budget = OutboundBudget::new(options.upstream_bytes_per_second().get());
         let mut capability_workers = JoinSet::new();
         track_capability_worker(&mut capability_workers, &capabilities);
@@ -427,63 +407,60 @@ impl SimulatorCoordinator {
         let mut root_connection_workers = JoinSet::<ConnectionTaskResult>::new();
         let root_id = simulator_id;
         let root_endpoint = session.simulator_address;
-        let circuit_code = session.circuit_code;
         let root_events = neighbor_events.clone();
         let root_neighbor_requests = neighbor_requests.clone();
         let root_shutdown = neighbor_cancellation.subscribe();
         let root_memory = packet_memory.clone();
         let root_session = session.clone();
-        let root_capture = capture.clone();
         let root_status = status.clone();
         let root_coverage_losses = coverage_losses.clone();
         let root_budget: OutboundBudgetHandle = outbound_budget.handle();
-        let root_connection_abort = root_connection_workers.spawn(async move {
-            let outcome = match NeighborConnection::connect_primary_with_state(
-                root_id,
-                root_session,
-                root_capture.clone(),
-                root_status,
-                root_coverage_losses,
-                primary_state_receiver,
-                root_budget,
-                #[cfg(test)]
-                root_send_gate,
-            )
-            .await
-            {
-                Ok(connection) => {
-                    if let Some(capture) = &root_capture {
-                        capture.circuit_lifecycle("use_circuit_code_sent", circuit_code);
+        let root_connection_abort = root_connection_workers.spawn(
+            async move {
+                let outcome = match NeighborConnection::connect_primary_with_state(
+                    root_id,
+                    root_session,
+                    root_status,
+                    root_coverage_losses,
+                    primary_state_receiver,
+                    root_budget,
+                    #[cfg(test)]
+                    root_send_gate,
+                )
+                .await
+                {
+                    Ok(connection) => {
+                        let _ = ready_sender.send(Ok(()));
+                        NeighborTaskOutcome::Finished(
+                            connection
+                                .run(
+                                    root_events.clone(),
+                                    root_shutdown,
+                                    root_neighbor_requests,
+                                    root_command_receiver,
+                                    root_logout_receiver,
+                                    root_memory,
+                                )
+                                .await,
+                        )
                     }
-                    let _ = ready_sender.send(Ok(()));
-                    NeighborTaskOutcome::Finished(
-                        connection
-                            .run(
-                                root_events.clone(),
-                                root_shutdown,
-                                root_neighbor_requests,
-                                root_command_receiver,
-                                root_logout_receiver,
-                                root_memory,
-                            )
-                            .await,
-                    )
-                }
-                Err(error) => {
-                    let _ = ready_sender.send(Err(error.clone()));
-                    NeighborTaskOutcome::ConnectFailed(error)
-                }
-            };
-            let _ = root_events
-                .send(NeighborEvent::Finished {
-                    simulator_id: root_id,
-                    region_handle: None,
-                    endpoint: root_endpoint,
-                    outcome: outcome.clone(),
-                })
-                .await;
-            (root_id, None, root_endpoint, outcome)
-        });
+                    Err(error) => {
+                        let _ = ready_sender.send(Err(error.clone()));
+                        NeighborTaskOutcome::ConnectFailed(error)
+                    }
+                };
+                let _ = root_events
+                    .send(NeighborEvent::Finished {
+                        simulator_id: root_id,
+                        region_handle: None,
+                        endpoint: root_endpoint,
+                        outcome: outcome.clone(),
+                    })
+                    .await;
+                (root_id, None, root_endpoint, outcome)
+            }
+            .in_current_span(),
+        );
         let startup_result = match startup_disconnect.as_mut() {
             Some(disconnect) => tokio::select! {
                 biased;
@@ -538,7 +515,6 @@ impl SimulatorCoordinator {
             capability_budget,
             capability_workers,
             login_data,
-            capture,
             status,
             event_backlog: PrimaryEventBacklog::default(),
             packet_memory,
@@ -623,7 +599,7 @@ impl SimulatorCoordinator {
         if self.capability_workers.len() >= MAX_CAPABILITY_WORKERS {
             return Err("The capability worker limit has been reached.".into());
         }
-        let client = Client::new_with_status_and_budget(seed, self.capture.clone(), self.status.clone(), self.capability_budget.clone())?;
+        let client = Client::new_with_status_and_budget(seed, self.status.clone(), self.capability_budget.clone())?;
         track_capability_worker(&mut self.capability_workers, &client);
         Ok(client)
     }
@@ -970,7 +946,6 @@ impl SimulatorCoordinator {
         if let Some(handoff) = &handoff {
             session.seed_capability = handoff.seed_capability.clone();
         }
-        let capture = self.capture.clone();
         let status = self.status.clone();
         let coverage_losses = self.coverage_losses.clone();
         let packet_memory = self.packet_memory.for_neighbor();
@@ -983,29 +958,33 @@ impl SimulatorCoordinator {
             command_sender.try_send(NeighborCommand::PrepareHandoff(handoff)).expect("new neighbor command queue has capacity");
         }
         let finish_events = neighbor_events.clone();
-        let task = neighbors.spawn(async move {
-            let outcome = match NeighborConnection::connect_with_primary_state(
-                simulator_id,
-                session,
-                region_handle,
-                capture,
-                status,
-                coverage_losses,
-                primary_state_receiver,
-                outbound_budget,
-            )
-            .await
-            {
-                Ok(connection) => NeighborTaskOutcome::Finished(
-                    connection.run(neighbor_events, shutdown, neighbor_requests, command_receiver, logout_receiver, packet_memory).await,
-                ),
-                Err(error) => NeighborTaskOutcome::ConnectFailed(error),
-            };
-            let _ = finish_events
-                .send(NeighborEvent::Finished { simulator_id, region_handle: Some(region_handle), endpoint, outcome: outcome.clone() })
-                .await;
-            (simulator_id, Some(region_handle), endpoint, outcome)
-        });
+        let task = neighbors.spawn(
+            async move {
+                let outcome = match NeighborConnection::connect_with_primary_state(
+                    simulator_id,
+                    session,
+                    region_handle,
+                    status,
+                    coverage_losses,
+                    primary_state_receiver,
+                    outbound_budget,
+                )
+                .await
+                {
+                    Ok(connection) => NeighborTaskOutcome::Finished(
+                        connection
+                            .run(neighbor_events, shutdown, neighbor_requests, command_receiver, logout_receiver, packet_memory)
+                            .await,
+                    ),
+                    Err(error) => NeighborTaskOutcome::ConnectFailed(error),
+                };
+                let _ = finish_events
+                    .send(NeighborEvent::Finished { simulator_id, region_handle: Some(region_handle), endpoint, outcome: outcome.clone() })
+                    .await;
+                (simulator_id, Some(region_handle), endpoint, outcome)
+            }
+            .in_current_span(),
+        );
         neighbor_task_owners.insert(task.id(), (simulator_id, Some(region_handle), endpoint));
         connections.insert(
             region_handle,
@@ -1170,9 +1149,6 @@ impl SimulatorCoordinator {
     async fn disconnect_once(&mut self, logout_already_sent: bool) -> Result<LogoutOutcome, String> {
         tracing::info!(logout_already_sent, "Simulator disconnect started");
         self.status.set_lifecycle(NetworkLifecycle::Disconnecting);
-        if let Some(capture) = &self.capture {
-            capture.circuit_lifecycle("disconnect_started", self.session.circuit_code);
-        }
         self.finish_pending_logout().await?;
         let outcome = if logout_already_sent || self.logout_request_sent {
             LogoutOutcome::AlreadySent
@@ -1619,7 +1595,7 @@ async fn run_session_with_status(
     let mut failure_shutdown = disconnect_requested.clone();
     let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
     let result = async {
-        let connection = SimulatorCoordinator::connect_with_status(session, ResponseData::default(), None, status).await?;
+        let connection = SimulatorCoordinator::connect_with_status(session, ResponseData::default(), status).await?;
         if let Some(sender) = packet_memory_sender {
             let _ = sender.send(connection.packet_memory.clone());
         }

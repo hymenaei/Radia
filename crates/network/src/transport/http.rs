@@ -8,12 +8,12 @@ use std::{
 
 use reqwest::{
     StatusCode, Url,
-    header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, RETRY_AFTER},
+    header::{ACCEPT, CONTENT_TYPE, HeaderMap, RETRY_AFTER},
     redirect::Policy,
 };
 use tokio::time;
 
-use crate::{capture::CaptureRecorder, status::NetworkStatusHandle};
+use crate::status::NetworkStatusHandle;
 
 #[cfg(test)]
 const MAX_HTTP_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -24,7 +24,6 @@ type AdmittedBody = (Vec<u8>, Option<ResponseMemoryPermit>, Option<ResponseMemor
 pub(crate) struct Client {
     client: reqwest::Client,
     timeout: Option<Duration>,
-    capture: Option<CaptureRecorder>,
     status: Option<NetworkStatusHandle>,
     memory: Option<ResponseMemoryBudget>,
     memory_class: ResponseMemoryClass,
@@ -39,14 +38,7 @@ impl Client {
         if let Some(user_agent) = user_agent {
             builder = builder.user_agent(user_agent);
         }
-        builder.build().map(|client| Self {
-            client,
-            timeout,
-            capture: None,
-            status: None,
-            memory: None,
-            memory_class: ResponseMemoryClass::Ordinary,
-        })
+        builder.build().map(|client| Self { client, timeout, status: None, memory: None, memory_class: ResponseMemoryClass::Ordinary })
     }
 
     pub(crate) fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
@@ -67,11 +59,6 @@ impl Client {
         }
     }
 
-    pub(crate) fn with_capture(mut self, capture: Option<CaptureRecorder>) -> Self {
-        self.capture = capture;
-        self
-    }
-
     pub(crate) fn with_status(mut self, status: NetworkStatusHandle) -> Self {
         self.status = Some(status);
         self
@@ -86,20 +73,19 @@ impl Client {
         body: Vec<u8>,
         max_response_bytes: usize,
     ) -> Result<Response, String> {
-        self.post_operation_bounded("capability_post", None, url, content_type, accept, body, max_response_bytes).await
+        self.post_operation_bounded("capability_post", url, content_type, accept, body, max_response_bytes).await
     }
 
     pub(crate) async fn post_operation_bounded(
         &self,
         operation: &str,
-        capture_endpoint: Option<&str>,
         url: &Url,
         content_type: &str,
         accept: Option<&str>,
         body: Vec<u8>,
         max_response_bytes: usize,
     ) -> Result<Response, String> {
-        self.post_operation_bounded_inner(operation, capture_endpoint, url, content_type, accept, body, max_response_bytes, true, None)
+        self.post_operation_bounded_inner(operation, url, content_type, accept, body, max_response_bytes, true, None)
             .await
             .map_err(|error| error.to_string())
     }
@@ -107,21 +93,18 @@ impl Client {
     pub(crate) async fn post_operation_bounded_classified(
         &self,
         operation: &str,
-        capture_endpoint: Option<&str>,
         url: &Url,
         content_type: &str,
         accept: Option<&str>,
         body: Vec<u8>,
         max_response_bytes: usize,
     ) -> Result<Response, Error> {
-        self.post_operation_bounded_inner(operation, capture_endpoint, url, content_type, accept, body, max_response_bytes, false, None)
-            .await
+        self.post_operation_bounded_inner(operation, url, content_type, accept, body, max_response_bytes, false, None).await
     }
 
     pub(crate) async fn post_operation_bounded_classified_with_extra(
         &self,
         operation: &str,
-        capture_endpoint: Option<&str>,
         url: &Url,
         content_type: &str,
         accept: Option<&str>,
@@ -129,23 +112,12 @@ impl Client {
         max_response_bytes: usize,
         extra_memory: ResponseMemoryPermit,
     ) -> Result<Response, Error> {
-        self.post_operation_bounded_inner(
-            operation,
-            capture_endpoint,
-            url,
-            content_type,
-            accept,
-            body,
-            max_response_bytes,
-            false,
-            Some(extra_memory),
-        )
-        .await
+        self.post_operation_bounded_inner(operation, url, content_type, accept, body, max_response_bytes, false, Some(extra_memory)).await
     }
 
     #[cfg(test)]
     pub(crate) async fn get(&self, url: &Url) -> Result<Response, String> {
-        self.get_bounded("capability_get", None, url, MAX_HTTP_RESPONSE_BYTES).await
+        self.get_bounded("capability_get", url, MAX_HTTP_RESPONSE_BYTES).await
     }
 
     #[tracing::instrument(
@@ -155,7 +127,6 @@ impl Client {
     async fn post_operation_bounded_inner(
         &self,
         operation: &str,
-        capture_endpoint: Option<&str>,
         url: &Url,
         content_type: &str,
         accept: Option<&str>,
@@ -174,16 +145,6 @@ impl Client {
         if let Some(accept) = accept {
             request = request.header(ACCEPT, accept);
         }
-        let mut request_headers = vec![("content-type".to_owned(), content_type.to_owned())];
-        if let Some(accept) = accept {
-            request_headers.push(("accept".to_owned(), accept.to_owned()));
-        }
-        let request_id = self.capture.as_ref().map(|capture| {
-            let memory = (capture.is_active() && !body.is_empty())
-                .then(|| self.try_reserve_memory(ResponseMemoryClass::Capture, body.len()).ok())
-                .flatten();
-            capture.http_request_with_memory(capture_endpoint.unwrap_or(operation), "POST", request_headers, &body, memory)
-        });
         if let Some(status) = &self.status {
             status.note_http_request();
         }
@@ -192,9 +153,6 @@ impl Client {
             Ok(response) => response,
             Err(error) => {
                 let elapsed = started.elapsed();
-                if let (Some(capture), Some(request_id)) = (&self.capture, request_id) {
-                    capture.http_response_with_memory(request_id, None, Vec::new(), elapsed, "send_error", None, None);
-                }
                 tracing::warn!(error = %error, elapsed_ms = elapsed.as_millis(), "HTTP request failed");
                 if record_errors && let Some(status) = &self.status {
                     status.record_error(error.to_string());
@@ -207,7 +165,6 @@ impl Client {
         }
         let status = response.status();
         let headers = response.headers().clone();
-        let captured_headers = capture_headers(&headers);
         let retry_after = response_retry_after(&headers);
         let body = match read_bounded_body_admitted(
             response,
@@ -223,17 +180,6 @@ impl Client {
             Ok(body) => body,
             Err(error) => {
                 let elapsed = started.elapsed();
-                if let (Some(capture), Some(request_id)) = (&self.capture, request_id) {
-                    capture.http_response_with_memory(
-                        request_id,
-                        Some(status.as_u16()),
-                        captured_headers,
-                        elapsed,
-                        "body_error",
-                        None,
-                        None,
-                    );
-                }
                 if record_errors && let Some(status) = &self.status {
                     status.record_error(error.to_string());
                 }
@@ -242,50 +188,26 @@ impl Client {
             }
         };
         let elapsed = started.elapsed();
-        if let (Some(capture), Some(request_id)) = (&self.capture, request_id) {
-            let capture_memory = (capture.is_active() && !body.0.is_empty())
-                .then(|| self.try_reserve_memory(ResponseMemoryClass::Capture, body.0.len()).ok())
-                .flatten();
-            capture.http_response_with_memory(
-                request_id,
-                Some(status.as_u16()),
-                captured_headers,
-                elapsed,
-                "complete",
-                Some(&body.0),
-                capture_memory,
-            );
-        }
+        tracing::debug!(
+            http_status = status.as_u16(),
+            response_bytes = body.0.len(),
+            elapsed_ms = elapsed.as_millis(),
+            "HTTP response received"
+        );
         Ok(Response { status, headers, body: body.0, elapsed, memory: body.1, extra_memory: body.2 })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn get_bounded(&self, operation: &str, url: &Url, max_response_bytes: usize) -> Result<Response, String> {
+        self.get_bounded_classified(operation, url, max_response_bytes).await.map_err(|error| error.to_string())
     }
 
     #[tracing::instrument(
         name = "http.get", level = "debug", skip_all,
         fields(operation = %operation, response_limit = max_response_bytes)
     )]
-    #[cfg(test)]
-    pub(crate) async fn get_bounded(
-        &self,
-        operation: &str,
-        capture_endpoint: Option<&str>,
-        url: &Url,
-        max_response_bytes: usize,
-    ) -> Result<Response, String> {
-        self.get_bounded_classified(operation, capture_endpoint, url, max_response_bytes).await.map_err(|error| error.to_string())
-    }
-
-    pub(crate) async fn get_bounded_classified(
-        &self,
-        operation: &str,
-        capture_endpoint: Option<&str>,
-        url: &Url,
-        max_response_bytes: usize,
-    ) -> Result<Response, Error> {
+    pub(crate) async fn get_bounded_classified(&self, operation: &str, url: &Url, max_response_bytes: usize) -> Result<Response, Error> {
         validate_http_url(url).map_err(Error::Message)?;
-        let request_id = self
-            .capture
-            .as_ref()
-            .map(|capture| capture.http_request_with_memory(capture_endpoint.unwrap_or(operation), "GET", Vec::new(), &[], None));
         let started = Instant::now();
         let deadline = self.timeout.map(|timeout| time::Instant::now() + timeout);
         if let Some(status) = &self.status {
@@ -298,9 +220,6 @@ impl Client {
         let response = match send_with_deadline(request.send(), deadline, started).await {
             Ok(response) => response,
             Err(error) => {
-                if let (Some(capture), Some(request_id)) = (&self.capture, request_id) {
-                    capture.http_response_with_memory(request_id, None, Vec::new(), started.elapsed(), "send_error", None, None);
-                }
                 tracing::warn!(elapsed_ms = started.elapsed().as_millis(), "HTTP request failed");
                 if let Some(status) = &self.status {
                     status.record_error(error.to_string());
@@ -313,7 +232,6 @@ impl Client {
         }
         let status = response.status();
         let headers = response.headers().clone();
-        let captured_headers = capture_headers(&headers);
         let retry_after = response_retry_after(&headers);
         let body = match read_bounded_body_admitted(
             response,
@@ -328,17 +246,6 @@ impl Client {
         {
             Ok(body) => body,
             Err(error) => {
-                if let (Some(capture), Some(request_id)) = (&self.capture, request_id) {
-                    capture.http_response_with_memory(
-                        request_id,
-                        Some(status.as_u16()),
-                        captured_headers,
-                        started.elapsed(),
-                        "body_error",
-                        None,
-                        None,
-                    );
-                }
                 if let Some(status) = &self.status {
                     status.record_error(error.to_string());
                 }
@@ -346,21 +253,14 @@ impl Client {
                 return Err(error.with_response(status, retry_after, started.elapsed()));
             }
         };
-        if let (Some(capture), Some(request_id)) = (&self.capture, request_id) {
-            let capture_memory = (capture.is_active() && !body.0.is_empty())
-                .then(|| self.try_reserve_memory(ResponseMemoryClass::Capture, body.0.len()).ok())
-                .flatten();
-            capture.http_response_with_memory(
-                request_id,
-                Some(status.as_u16()),
-                captured_headers,
-                started.elapsed(),
-                "complete",
-                Some(&body.0),
-                capture_memory,
-            );
-        }
-        Ok(Response { status, headers, body: body.0, elapsed: started.elapsed(), memory: body.1, extra_memory: body.2 })
+        let elapsed = started.elapsed();
+        tracing::debug!(
+            http_status = status.as_u16(),
+            response_bytes = body.0.len(),
+            elapsed_ms = elapsed.as_millis(),
+            "HTTP response received"
+        );
+        Ok(Response { status, headers, body: body.0, elapsed, memory: body.1, extra_memory: body.2 })
     }
 }
 
@@ -516,22 +416,19 @@ impl error::Error for Error {}
 pub(crate) enum ResponseMemoryClass {
     Ordinary,
     EventQueue,
-    Capture,
 }
 
 #[derive(Clone)]
 pub(crate) struct ResponseMemoryBudget(Arc<Mutex<ResponseMemoryState>>);
 
 impl ResponseMemoryBudget {
-    pub(crate) fn new(ordinary_limit: usize, event_queue_limit: usize, capture_limit: usize, shared_limit: usize) -> Self {
+    pub(crate) fn new(ordinary_limit: usize, event_queue_limit: usize, shared_limit: usize) -> Self {
         Self(Arc::new(Mutex::new(ResponseMemoryState {
             ordinary_limit,
             event_queue_limit,
-            capture_limit,
             shared_limit,
             ordinary_used: 0,
             event_queue_used: 0,
-            capture_used: 0,
             shared_used: 0,
         })))
     }
@@ -546,7 +443,6 @@ impl ResponseMemoryBudget {
         let (used, limit) = match class {
             ResponseMemoryClass::Ordinary => (state.ordinary_used, state.ordinary_limit),
             ResponseMemoryClass::EventQueue => (state.event_queue_used, state.event_queue_limit),
-            ResponseMemoryClass::Capture => (state.capture_used, state.capture_limit),
         };
         let next_used =
             used.checked_add(bytes).ok_or_else(|| Error::resource_exhausted("Capability memory budget arithmetic overflowed."))?;
@@ -563,7 +459,6 @@ impl ResponseMemoryBudget {
         match class {
             ResponseMemoryClass::Ordinary => state.ordinary_used = next_used,
             ResponseMemoryClass::EventQueue => state.event_queue_used = next_used,
-            ResponseMemoryClass::Capture => state.capture_used = next_used,
         }
         state.shared_used = next_shared;
         Ok(())
@@ -574,14 +469,12 @@ impl ResponseMemoryBudget {
         let (used, limit) = match class {
             ResponseMemoryClass::Ordinary => (state.ordinary_used, state.ordinary_limit),
             ResponseMemoryClass::EventQueue => (state.event_queue_used, state.event_queue_limit),
-            ResponseMemoryClass::Capture => (state.capture_used, state.capture_limit),
         };
         let next_used = used.saturating_sub(bytes);
         let released_shared = used.saturating_sub(limit).saturating_sub(next_used.saturating_sub(limit));
         match class {
             ResponseMemoryClass::Ordinary => state.ordinary_used = next_used,
             ResponseMemoryClass::EventQueue => state.event_queue_used = next_used,
-            ResponseMemoryClass::Capture => state.capture_used = next_used,
         }
         state.shared_used = state.shared_used.saturating_sub(released_shared);
     }
@@ -590,11 +483,9 @@ impl ResponseMemoryBudget {
 struct ResponseMemoryState {
     ordinary_limit: usize,
     event_queue_limit: usize,
-    capture_limit: usize,
     shared_limit: usize,
     ordinary_used: usize,
     event_queue_used: usize,
-    capture_used: usize,
     shared_used: usize,
 }
 
@@ -648,16 +539,6 @@ fn retry_after_delay(value: &str, now: SystemTime) -> Option<Duration> {
 
     let retry_at = httpdate::parse_http_date(value).ok()?;
     Some(retry_at.duration_since(now).unwrap_or_default())
-}
-
-fn capture_headers(headers: &HeaderMap) -> Vec<(String, String)> {
-    let mut captured = Vec::new();
-    for name in [CONTENT_TYPE, CONTENT_LENGTH, RETRY_AFTER] {
-        for value in headers.get_all(&name).iter().filter_map(|value| value.to_str().ok()) {
-            captured.push((name.as_str().to_owned(), value.to_owned()));
-        }
-    }
-    captured
 }
 
 fn response_retry_after(headers: &HeaderMap) -> Option<Duration> {
@@ -832,42 +713,26 @@ pub(crate) fn validate_http_url(url: &Url) -> Result<(), String> {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+    use reqwest::header::{HeaderMap, HeaderValue};
 
-    use super::{Error, RETRY_AFTER, Response, ResponseMemoryBudget, ResponseMemoryClass, StatusCode, capture_headers, retry_after_delay};
-
-    #[test]
-    fn duplicate_headers() {
-        let mut headers = HeaderMap::new();
-        headers.append(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-        headers.append(CONTENT_TYPE, HeaderValue::from_static("application/xml"));
-
-        assert_eq!(
-            capture_headers(&headers),
-            [("content-type".into(), "text/plain".into()), ("content-type".into(), "application/xml".into())]
-        );
-    }
+    use super::{Error, RETRY_AFTER, Response, ResponseMemoryBudget, ResponseMemoryClass, StatusCode, retry_after_delay};
 
     #[test]
     fn shared_memory_preserves_class_reserves() {
-        let budget = ResponseMemoryBudget::new(8, 6, 3, 4);
+        let budget = ResponseMemoryBudget::new(8, 6, 4);
         let mut ordinary = budget.try_reserve(ResponseMemoryClass::Ordinary, 12).expect("ordinary borrows shared bytes");
         let mut events = budget.try_reserve(ResponseMemoryClass::EventQueue, 6).expect("protected EventQueue bytes remain available");
-        let capture = budget.try_reserve(ResponseMemoryClass::Capture, 3).expect("protected capture bytes remain available");
         assert!(matches!(events.try_grow(1), Err(Error::ResourceExhausted { .. })));
         ordinary.shrink_to(8);
         events.try_grow(4).expect("released shared bytes can be borrowed by EventQueue");
         assert!(matches!(ordinary.try_grow(1), Err(Error::ResourceExhausted { .. })));
         drop(ordinary);
-        drop(capture);
         assert!(
             matches!(events.try_grow(1), Err(Error::ResourceExhausted { .. })),
-            "dropping dedicated charges must not release another class's shared charge"
+            "EventQueue cannot exceed its reserved and shared capacity"
         );
         drop(events);
-        for (class, bytes) in
-            [(ResponseMemoryClass::Ordinary, 12), (ResponseMemoryClass::EventQueue, 10), (ResponseMemoryClass::Capture, 7)]
-        {
+        for (class, bytes) in [(ResponseMemoryClass::Ordinary, 12), (ResponseMemoryClass::EventQueue, 10)] {
             drop(budget.try_reserve(class, bytes).expect("all reservations return to baseline"));
         }
     }
@@ -1080,12 +945,12 @@ pub(crate) mod testing {
             let raw_peak_delta = raw_peak.saturating_sub(raw_baseline);
             drop(raw);
 
-            let budget = ResponseMemoryBudget::new(body_bytes * 4, 0, 0, 0);
+            let budget = ResponseMemoryBudget::new(body_bytes * 4, 0, 0);
             let client = super::Client::new(Some(Duration::from_secs(5)), false, None)
                 .expect("build bounded Network HTTP client")
                 .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
             let network_measurement: ProcessMeasurement = crate::capabilities::begin_process_measurement();
-            let result = client.get_bounded_classified("test", None, &server.url("/bounded"), body_bytes).await;
+            let result = client.get_bounded_classified("test", &server.url("/bounded"), body_bytes).await;
             let (network_baseline, network_live, network_peak, network_elapsed) = network_measurement.finish();
             let response = result.expect("admit bounded Network response");
             assert_eq!(response.body.len(), body_bytes);
@@ -1119,13 +984,13 @@ pub(crate) mod testing {
     async fn oversized_declared_length_is_rejected_before_body_read_or_admission() {
         let wire_response = b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n".to_vec();
         let server = LocalServer::start(vec![wire_response]);
-        let budget = ResponseMemoryBudget::new(8, 0, 0, 0);
+        let budget = ResponseMemoryBudget::new(8, 0, 0);
         let client = Client::new(Some(Duration::from_secs(2)), false, None)
             .expect("build HTTP client")
             .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
 
         let error = client
-            .get_bounded_classified("test", None, &server.url("/body"), 5)
+            .get_bounded_classified("test", &server.url("/body"), 5)
             .await
             .expect_err("declared body size exceeds limit before the body arrives");
 
@@ -1163,13 +1028,13 @@ pub(crate) mod testing {
                 .into_bytes();
         response.extend_from_slice(GZIP_BODY);
         let server = LocalServer::start(vec![response]);
-        let budget = ResponseMemoryBudget::new(GZIP_BODY.len() * 3, 0, 0, 0);
+        let budget = ResponseMemoryBudget::new(GZIP_BODY.len() * 3, 0, 0);
         let client = Client::new(Some(Duration::from_secs(2)), false, None)
             .expect("build HTTP client")
             .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
 
         let response = client
-            .get_bounded_classified("test", None, &server.url("/compressed"), GZIP_BODY.len())
+            .get_bounded_classified("test", &server.url("/compressed"), GZIP_BODY.len())
             .await
             .expect("the HTTP client does not automatically decompress response bodies");
 
@@ -1190,15 +1055,13 @@ pub(crate) mod testing {
     async fn content_length_mismatch_releases_admitted_memory() {
         let response = concat!("HTTP/1.1 200 OK\r\n", "Content-Length: 6\r\n", "Retry-After: 2\r\n", "Connection: close\r\n\r\n", "abc");
         let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
-        let budget = ResponseMemoryBudget::new(12, 0, 0, 0);
+        let budget = ResponseMemoryBudget::new(12, 0, 0);
         let client = Client::new(Some(Duration::from_secs(2)), false, None)
             .expect("build HTTP client")
             .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
 
-        let error = client
-            .get_bounded_classified("test", None, &server.url("/body"), 6)
-            .await
-            .expect_err("truncated Content-Length response must fail");
+        let error =
+            client.get_bounded_classified("test", &server.url("/body"), 6).await.expect_err("truncated Content-Length response must fail");
 
         assert!(matches!(
             error,
@@ -1221,13 +1084,13 @@ pub(crate) mod testing {
             "0\r\n\r\n"
         );
         let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
-        let budget = ResponseMemoryBudget::new(5, 0, 0, 0);
+        let budget = ResponseMemoryBudget::new(5, 0, 0);
         let client = Client::new(Some(Duration::from_secs(2)), false, None)
             .expect("build HTTP client")
             .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
 
         let error = client
-            .get_bounded_classified("test", None, &server.url("/body"), 10)
+            .get_bounded_classified("test", &server.url("/body"), 10)
             .await
             .expect_err("actual response growth exceeds the admitted memory");
 
@@ -1248,12 +1111,12 @@ pub(crate) mod testing {
             "0\r\n\r\n"
         );
         let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
-        let budget = ResponseMemoryBudget::new(12, 0, 0, 0);
+        let budget = ResponseMemoryBudget::new(12, 0, 0);
         let client = Client::new(Some(Duration::from_secs(2)), false, None)
             .expect("build HTTP client")
             .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
 
-        let response = client.get_bounded_classified("test", None, &server.url("/body"), 6).await.expect("admit exact body capacity");
+        let response = client.get_bounded_classified("test", &server.url("/body"), 6).await.expect("admit exact body capacity");
         assert_eq!(response.body, b"abcdef");
         assert!(budget.try_reserve(ResponseMemoryClass::Ordinary, 7).is_err(), "response memory stays charged while its body lives");
 
@@ -1265,7 +1128,7 @@ pub(crate) mod testing {
 
     #[test]
     fn body_growth_reserves_replacement() {
-        let budget = ResponseMemoryBudget::new(8, 0, 0, 0);
+        let budget = ResponseMemoryBudget::new(8, 0, 0);
         let mut body = Vec::with_capacity(4);
         body.extend_from_slice(b"data");
         let mut memory = Some(budget.try_reserve(ResponseMemoryClass::Ordinary, body.capacity()).expect("admit old body"));
@@ -1283,7 +1146,7 @@ pub(crate) mod testing {
 
     #[test]
     fn body_overallocation_is_charged() {
-        let budget = ResponseMemoryBudget::new(12, 0, 0, 0);
+        let budget = ResponseMemoryBudget::new(12, 0, 0);
         let mut memory = Some(budget.try_reserve(ResponseMemoryClass::Ordinary, 9).expect("admit old and requested body bytes"));
 
         admit_body_capacity(&mut memory, 12, StatusCode::OK, None, Instant::now())
@@ -1291,7 +1154,7 @@ pub(crate) mod testing {
         assert!(budget.try_reserve(ResponseMemoryClass::Ordinary, 1).is_err(), "actual Vec capacity remains charged");
 
         drop(memory);
-        let budget = ResponseMemoryBudget::new(11, 0, 0, 0);
+        let budget = ResponseMemoryBudget::new(11, 0, 0);
         let mut memory = Some(budget.try_reserve(ResponseMemoryClass::Ordinary, 9).expect("admit initial reservation"));
         let error = admit_body_capacity(&mut memory, 12, StatusCode::OK, None, Instant::now())
             .expect_err("reject actual capacity beyond the remaining budget");
@@ -1304,13 +1167,13 @@ pub(crate) mod testing {
         let response =
             concat!("HTTP/1.1 200 OK\r\n", "Transfer-Encoding: chunked\r\n", "Connection: close\r\n\r\n", "6\r\nabcdef\r\n", "0\r\n\r\n");
         let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
-        let budget = ResponseMemoryBudget::new(6, 0, 0, 0);
+        let budget = ResponseMemoryBudget::new(6, 0, 0);
         let client = Client::new(Some(Duration::from_secs(2)), false, None)
             .expect("build HTTP client")
             .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
 
         let error = client
-            .get_bounded_classified("test", None, &server.url("/body"), 6)
+            .get_bounded_classified("test", &server.url("/body"), 6)
             .await
             .expect_err("body storage and the incoming chunk coexist during the copy");
 
@@ -1326,10 +1189,8 @@ pub(crate) mod testing {
         let server = LocalServer::start_delayed_body(response, Duration::from_millis(500));
         let client = Client::new(Some(Duration::from_millis(250)), false, None).expect("build short-timeout HTTP client");
 
-        let error = client
-            .get_bounded_classified("test", None, &server.url("/body"), 16)
-            .await
-            .expect_err("body must share the operation deadline");
+        let error =
+            client.get_bounded_classified("test", &server.url("/body"), 16).await.expect_err("body must share the operation deadline");
 
         assert!(matches!(&error, Error::Timeout { status: Some(StatusCode::OK), .. }), "body read exceeded its deadline: {error:?}");
         assert_eq!(server.finish().len(), 1);

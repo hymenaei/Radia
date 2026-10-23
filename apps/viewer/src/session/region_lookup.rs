@@ -21,6 +21,7 @@ use protocol::{
 use tokio::runtime::Handle;
 #[cfg(test)]
 use tokio::spawn;
+use tracing::Instrument;
 use uuid::Uuid;
 use world::RegionHandle;
 
@@ -94,8 +95,8 @@ impl RegionLookup {
                 tokio::time::sleep(timeout)
             }) as TimeoutFuture
         });
-        let spawn_background = Arc::new(move |future| {
-            drop(executor.spawn(future));
+        let spawn_background = Arc::new(move |future: BackgroundTask| {
+            drop(executor.spawn(future.in_current_span()));
         });
         Self::new_inner(session, make_timeout, send_message, spawn_background, LOOKUP_TIMEOUT)
     }

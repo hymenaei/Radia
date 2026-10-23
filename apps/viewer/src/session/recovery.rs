@@ -267,6 +267,8 @@ pub(super) fn schedule_recovery_requests(
     if targets.is_empty() && updated.is_empty() {
         return;
     }
+    let simulator = targets.first().and_then(|(simulator, _)| simulator.map(SimulatorId::get));
+    let region = targets.first().map(|(_, address)| address.region().get());
     let agent_data = session.map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
     let now = Instant::now();
     let mut dropped = 0;
@@ -300,7 +302,7 @@ pub(super) fn schedule_recovery_requests(
         (dropped > 0).then(|| queue.record_overflow(dropped, now)).flatten()
     };
     if let Some(dropped) = overflow_warning {
-        tracing::warn!(dropped, "some object recovery targets could not be queued");
+        tracing::warn!(simulator, region, dropped, "some object recovery targets could not be queued");
     }
     match wake_sender.try_send(()) {
         Ok(()) => {}
@@ -353,7 +355,8 @@ pub(super) async fn run_recovery_retries(
         let packet_size = Packet::new(0, Message::RequestMultipleObjects(request.clone())).encode().map(|packet| packet.len());
         if !packet_size.is_ok_and(|size| size <= MAX_RECOVERY_REQUEST_BYTES) {
             degrade_recoveries(&queue, &recoveries);
-            tracing::error!("object recovery request exceeded its byte budget");
+            let region = first.key.region().get();
+            tracing::error!(simulator = simulator_id.get(), region, "object recovery request exceeded its byte budget");
             continue;
         }
 
@@ -374,7 +377,8 @@ pub(super) async fn run_recovery_retries(
             }
             Err(error) if retryable_send_error(&error) => {
                 defer_recoveries(&queue, &recoveries, now);
-                tracing::debug!(%error, "object recovery send deferred");
+                let region = first.key.region().get();
+                tracing::debug!(simulator = simulator_id.get(), region, %error, "object recovery send deferred");
             }
             Err(error) => {
                 if simulator_lost_error(&error) {
@@ -382,7 +386,8 @@ pub(super) async fn run_recovery_retries(
                 } else {
                     degrade_recoveries(&queue, &recoveries);
                 }
-                tracing::warn!(%error, "could not request object updates");
+                let region = first.key.region().get();
+                tracing::warn!(simulator = simulator_id.get(), region, %error, "could not request object updates");
             }
         }
     }
@@ -392,12 +397,17 @@ fn warn_unrecovered(reason: &'static str, recoveries: &[ScheduledRecovery]) {
     if recoveries.is_empty() {
         return;
     }
-    let addresses = recoveries.iter().take(MAX_RECOVERY_DIAGNOSTIC_ADDRESSES).map(|recovery| recovery.key).collect::<Vec<_>>();
+    let simulator = recoveries.first().map(|recovery| recovery.simulator_id.get());
+    let region = recoveries.first().map(|recovery| recovery.key.region().get());
+    let local_ids =
+        recoveries.iter().take(MAX_RECOVERY_DIAGNOSTIC_ADDRESSES).map(|recovery| recovery.key.local_id().get()).collect::<Vec<_>>();
     tracing::warn!(
         reason,
+        simulator,
+        region,
         count = recoveries.len(),
-        addresses = ?addresses,
-        "Object recovery stopped; objects may remain missing"
+        local_ids = ?local_ids,
+        "object recovery stopped; objects may remain missing"
     );
 }
 

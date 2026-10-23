@@ -73,7 +73,7 @@ impl PresentationMailbox {
         match wake_sender.try_send(()) {
             Ok(()) => {}
             Err(error) if error.is_full() => {}
-            Err(error) => tracing::trace!(%error, "Presentation receiver closed"),
+            Err(error) => tracing::trace!(%error, "presentation receiver closed"),
         }
     }
 }

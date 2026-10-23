@@ -265,7 +265,7 @@ impl WorldReadHost {
         });
     }
 
-    fn reserved(&mut self) -> Option<ReadRequest> {
+    pub(crate) fn take_reserved(&mut self) -> Option<ReadRequest> {
         if self.consecutive_intake < MAX_INTAKE_TURNS {
             return None;
         }
@@ -274,29 +274,14 @@ impl WorldReadHost {
         Some(request)
     }
 
-    async fn next(&mut self) -> ReadRequest {
+    pub(crate) async fn next_request(&mut self) -> ReadRequest {
         let request = self.receiver.recv().await.expect("the service retains a request sender");
         self.consecutive_intake = 0;
         request
     }
 
-    pub(crate) async fn select<T>(&mut self, intake: impl Future<Output = T>) -> Result<T, ReadRequest> {
-        if let Some(request) = self.reserved() {
-            return Err(request);
-        }
-        let result = {
-            let intake = intake.fuse();
-            let request = self.next().fuse();
-            pin_mut!(intake, request);
-            futures::select_biased! {
-                input = intake => Ok(input),
-                request = request => Err(request),
-            }
-        };
-        if result.is_ok() {
-            self.consecutive_intake = (self.consecutive_intake + 1).min(MAX_INTAKE_TURNS);
-        }
-        result
+    pub(crate) fn record_intake_turn(&mut self) {
+        self.consecutive_intake = (self.consecutive_intake + 1).min(MAX_INTAKE_TURNS);
     }
 
     pub(crate) fn finish(&mut self) {
@@ -321,7 +306,7 @@ fn check_limit(limit: usize, maximum: usize) -> Result<(), ReadError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{future::pending, num::NonZeroU32};
+    use std::num::NonZeroU32;
 
     use futures::{join, poll};
     use uuid::Uuid;
@@ -352,8 +337,7 @@ mod tests {
         world: &World,
     ) -> Result<T, ReadError> {
         join!(read, async {
-            let Err(request) = service.select(pending::<()>()).await else { unreachable!() };
-            request.serve(world);
+            service.next_request().await.serve(world);
         })
         .0
     }
@@ -476,7 +460,7 @@ mod tests {
             assert!(poll!(read.as_mut()).is_pending());
         }
         assert_eq!(reader.barrier().await, Err(ReadError::Busy));
-        let request = service.next().await;
+        let request = service.next_request().await;
         request.serve(&world);
         assert_eq!(reader.barrier().await, Err(ReadError::Busy), "a queued reply still owns admission");
         let delivered = pending.remove(0).await.unwrap();
@@ -500,7 +484,7 @@ mod tests {
         for _ in 0..3 {
             let mut page = Box::pin(reader.regions(None, MAX_REGION_PAGE_ITEMS));
             assert!(poll!(page.as_mut()).is_pending());
-            service.next().await.serve(&world);
+            service.next_request().await.serve(&world);
             pending.push(page);
         }
         assert_eq!(reader.regions(None, MAX_REGION_PAGE_ITEMS).await, Err(ReadError::Busy));
@@ -517,10 +501,10 @@ mod tests {
         assert!(poll!(timed_out.as_mut()).is_pending());
         tokio::time::advance(READ_TIMEOUT).await;
         assert_eq!(timed_out.await, Err(ReadError::Busy));
-        service.next().await.serve(&world);
+        service.next_request().await.serve(&world);
         let mut late = Box::pin(reader.barrier());
         assert!(poll!(late.as_mut()).is_pending());
-        service.next().await.serve(&world);
+        service.next_request().await.serve(&world);
         let mut queued = Box::pin(reader.barrier());
         assert!(poll!(queued.as_mut()).is_pending());
         let mut observed = reader.clone();

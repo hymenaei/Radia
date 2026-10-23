@@ -10,7 +10,6 @@ use futures::executor::block_on;
 use render::scene;
 use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
 use tracing::Instrument;
-use crate::DEFAULT_DRAW_DISTANCE;
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -20,7 +19,7 @@ use winit::{
 };
 
 use super::{FRAME_INTERVAL, InputCapture, SharedWindowState};
-use crate::{camera::OrbitCamera, scene_feed::SceneFeed};
+use crate::{DEFAULT_DRAW_DISTANCE, camera::OrbitCamera, scene_feed::SceneFeed};
 
 const RECOVERY_DELAY: Duration = Duration::from_millis(500);
 pub(super) const MAX_RECOVERIES: u32 = 3;

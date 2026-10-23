@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, VecDeque},
-    future::Future,
     sync::Arc,
     time::Duration,
 };
@@ -8,11 +7,10 @@ use std::{
 use futures::{
     FutureExt, StreamExt,
     future::{AbortHandle, Abortable, BoxFuture, pending},
-    pin_mut,
     stream::FuturesUnordered,
 };
 use llsd::{Limits, Map, Value, notation, xml};
-use network::{Event, PacketOrder, SimulatorId, capabilities::Client};
+use network::{PacketOrder, SimulatorId, capabilities::Client};
 use protocol::{lludp::Message, messages::ParcelProperties};
 use tokio::{runtime::Handle, sync::Semaphore};
 use uuid::Uuid;
@@ -49,6 +47,13 @@ struct Route {
     client: Client,
     parcel: Option<ParcelNotice>,
     parcel_order: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+enum RouteChange {
+    SessionReady,
+    Promoted,
+    Capabilities,
 }
 
 struct Request {
@@ -103,7 +108,7 @@ impl EnvironmentIntake {
     fn queue(&mut self, world: &SessionWorld, region: Region, scope: EnvironmentScope) {
         let Some(target) = world.world().environment_target(region, scope) else { return };
         let Some(source) = self.source(region) else {
-            tracing::error!("environment request sequence exhausted");
+            tracing::error!(region = region.get(), "environment request sequence exhausted");
             return;
         };
         let Some(route) = self.routes.get(&region) else { return };
@@ -127,7 +132,7 @@ impl EnvironmentIntake {
     fn clear_parcel(&mut self, world: &mut SessionWorld, region: Region) {
         let Some(source) = self.source(region) else { return };
         if let Err(error) = world.observe_agent_parcel(source, None) {
-            tracing::warn!(?error, "could not clear environment parcel selection");
+            tracing::warn!(region = region.get(), %error, "could not clear environment parcel selection");
         }
         if let Some(route) = self.routes.get_mut(&region) {
             route.parcel = None;
@@ -173,7 +178,7 @@ impl EnvironmentIntake {
         }
         let Some(source) = self.source(region) else { return };
         if let Err(error) = world.observe_agent_parcel(source, Some(notice.parcel)) {
-            tracing::warn!(?error, "could not observe environment parcel selection");
+            tracing::warn!(region = region.get(), %error, "could not observe environment parcel selection");
             return;
         }
         self.routes.get_mut(&region).expect("registered environment route").parcel = Some(notice);
@@ -185,71 +190,134 @@ impl EnvironmentIntake {
         }
     }
 
-    pub(super) fn observe(&mut self, event: &Event, world: &mut SessionWorld, primary: Option<SimulatorId>) {
-        match event {
-            Event::SessionReady { simulator_id, capabilities, .. }
-            | Event::SimulatorPromoted { simulator_id, capabilities, .. }
-            | Event::SimulatorCapabilities { simulator_id, capabilities, .. } => {
-                let Some(region) = world.region_for(*simulator_id) else { return };
-                let initial = !self.routes.contains_key(&region);
-                if initial && self.routes.len() >= MAX_REGIONS {
-                    return;
-                }
-                self.routes.entry(region).or_insert_with(|| Route { client: capabilities.clone(), parcel: None, parcel_order: None });
-                if let Event::SimulatorPromoted { previous_simulator_id, .. } = event
-                    && let Some(previous) = world.region_for(*previous_simulator_id)
-                {
-                    self.clear_parcel(world, previous);
-                }
-                if (initial && primary == Some(*simulator_id)) || !matches!(event, Event::SimulatorCapabilities { .. }) {
-                    self.queue(world, region, EnvironmentScope::Region);
-                }
+    pub(super) fn session_ready(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator: SimulatorId,
+        client: &Client,
+        primary: Option<SimulatorId>,
+    ) {
+        self.route(world, simulator, client, primary, RouteChange::SessionReady);
+    }
+
+    pub(super) fn simulator_promoted(
+        &mut self,
+        world: &mut SessionWorld,
+        previous: SimulatorId,
+        simulator: SimulatorId,
+        client: &Client,
+        primary: Option<SimulatorId>,
+    ) {
+        self.route(world, simulator, client, primary, RouteChange::Promoted);
+        if let Some(region) = world.region_for(previous) {
+            self.clear_parcel(world, region);
+        }
+    }
+
+    pub(super) fn simulator_capabilities(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator: SimulatorId,
+        client: &Client,
+        primary: Option<SimulatorId>,
+    ) {
+        self.route(world, simulator, client, primary, RouteChange::Capabilities);
+    }
+
+    fn route(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator: SimulatorId,
+        client: &Client,
+        primary: Option<SimulatorId>,
+        change: RouteChange,
+    ) {
+        let Some(region) = world.region_for(simulator) else { return };
+        let initial = !self.routes.contains_key(&region);
+        if initial && self.routes.len() >= MAX_REGIONS {
+            return;
+        }
+        self.routes.entry(region).or_insert_with(|| Route { client: client.clone(), parcel: None, parcel_order: None });
+        let should_queue = match change {
+            RouteChange::SessionReady | RouteChange::Promoted => true,
+            RouteChange::Capabilities => initial && primary == Some(simulator),
+        };
+        if should_queue {
+            self.queue(world, region, EnvironmentScope::Region);
+        }
+    }
+
+    pub(super) fn simulator_disconnected(&mut self, world: &mut SessionWorld, simulator: SimulatorId) {
+        let Some(region) = world.region_for(simulator) else { return };
+        self.routes.remove(&region);
+        self.queued.retain(|(known, _), _| *known != region);
+        self.order.retain(|key| self.queued.contains_key(key));
+        for ((known, _), cancel) in &self.active {
+            if *known == region {
+                cancel.abort();
             }
-            Event::SimulatorDisconnected { simulator_id, .. } | Event::SimulatorFailed { simulator_id, .. } => {
-                if let Some(region) = world.region_for(*simulator_id) {
-                    self.routes.remove(&region);
-                    self.queued.retain(|(known, _), _| *known != region);
-                    self.order.retain(|key| self.queued.contains_key(key));
-                    for ((known, _), cancel) in &self.active {
-                        if *known == region {
-                            cancel.abort();
-                        }
+        }
+    }
+
+    pub(super) fn capability(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator: SimulatorId,
+        message: &str,
+        body: &Value,
+        primary: Option<SimulatorId>,
+    ) {
+        if primary == Some(simulator) {
+            self.capability_event(world, simulator, message, body);
+        }
+    }
+
+    pub(super) fn capability_batch<'a>(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator: SimulatorId,
+        events: impl IntoIterator<Item = (&'a str, &'a Value)>,
+        primary: Option<SimulatorId>,
+    ) {
+        if primary == Some(simulator) {
+            for (message, body) in events {
+                self.capability_event(world, simulator, message, body);
+            }
+        }
+    }
+
+    pub(super) fn simulator_message(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator: SimulatorId,
+        packet_order: PacketOrder,
+        message: &Message,
+        primary: Option<SimulatorId>,
+    ) {
+        if primary != Some(simulator) {
+            return;
+        }
+        let Some(region) = world.region_for(simulator) else { return };
+        match message {
+            Message::ParcelProperties(message) => match parcel_message(message) {
+                Ok(Some(notice)) => {
+                    let PacketOrder::Ordered(order) = packet_order else { return };
+                    let Some(route) = self.routes.get_mut(&region) else { return };
+                    if route.parcel_order.is_some_and(|previous| previous >= order) {
+                        return;
                     }
+                    route.parcel_order = Some(order);
+                    self.parcel(world, region, notice);
                 }
-            }
-            Event::CapabilityEvent { simulator_id, message, body, .. } if primary == Some(*simulator_id) => {
-                self.capability(world, *simulator_id, message, body);
-            }
-            Event::CapabilityEventBatch { simulator_id, events, .. } if primary == Some(*simulator_id) => {
-                for event in events {
-                    self.capability(world, *simulator_id, &event.message, &event.body);
-                }
-            }
-            Event::SimulatorMessage { simulator_id, packet_order, message, .. } if primary == Some(*simulator_id) => {
-                let Some(region) = world.region_for(*simulator_id) else { return };
-                match message {
-                    Message::ParcelProperties(message) => match parcel_message(message) {
-                        Ok(Some(notice)) => {
-                            let PacketOrder::Ordered(order) = packet_order else { return };
-                            let Some(route) = self.routes.get_mut(&region) else { return };
-                            if route.parcel_order.is_some_and(|previous| previous >= *order) {
-                                return;
-                            }
-                            route.parcel_order = Some(*order);
-                            self.parcel(world, region, notice);
-                        }
-                        Ok(None) => {}
-                        Err(error) => tracing::debug!(?error, "invalid parcel environment notification"),
-                    },
-                    Message::RegionInfo(_) => self.queue(world, region, EnvironmentScope::Region),
-                    _ => {}
-                }
-            }
+                Ok(None) => {}
+                Err(error) => tracing::debug!(?error, "invalid parcel environment notification"),
+            },
+            Message::RegionInfo(_) => self.queue(world, region, EnvironmentScope::Region),
             _ => {}
         }
     }
 
-    fn capability(&mut self, world: &mut SessionWorld, simulator: SimulatorId, message: &str, body: &Value) {
+    fn capability_event(&mut self, world: &mut SessionWorld, simulator: SimulatorId, message: &str, body: &Value) {
         if message != "ParcelProperties" {
             return;
         }
@@ -261,7 +329,7 @@ impl EnvironmentIntake {
         }
     }
 
-    pub(super) async fn select<T>(&mut self, input: impl Future<Output = T>) -> Result<T, Option<Box<Completion>>> {
+    fn schedule_queued(&mut self) {
         let queued = self.order.len();
         for _ in 0..queued {
             if self.jobs.len() >= MAX_FETCHES {
@@ -288,17 +356,14 @@ impl EnvironmentIntake {
                 .boxed(),
             );
         }
-        let next =
-            async { if self.jobs.is_empty() { pending().await } else { self.jobs.next().await.expect("active environment jobs") } }.fuse();
-        let input = input.fuse();
-        pin_mut!(next, input);
-        futures::select! {
-            input = input => Ok(input),
-            (key, completion) = next => {
-                self.active.remove(&key);
-                Err(completion.map(Box::new))
-            }
-        }
+    }
+
+    pub(super) async fn next_completion(&mut self) -> Option<Box<Completion>> {
+        self.schedule_queued();
+        let (key, completion) =
+            async { if self.jobs.is_empty() { pending().await } else { self.jobs.next().await.expect("active environment jobs") } }.await;
+        self.active.remove(&key);
+        completion.map(Box::new)
     }
 
     pub(super) fn complete(&mut self, world: &mut SessionWorld, completion: Completion) {
@@ -326,9 +391,11 @@ impl EnvironmentIntake {
                 }
             }
             Err(FetchError::Unavailable | FetchError::Superseded) => {
-                tracing::debug!(scope = ?target.scope(), "environment request unavailable or superseded");
+                tracing::debug!(region = target.region().get(), scope = ?target.scope(), "environment request unavailable or superseded");
             }
-            Err(error) => tracing::warn!(?error, scope = ?target.scope(), "environment could not be loaded"),
+            Err(error) => {
+                tracing::warn!(region = target.region().get(), ?error, scope = ?target.scope(), "environment could not be loaded")
+            }
         }
     }
 
@@ -338,7 +405,7 @@ impl EnvironmentIntake {
                 tracing::info!(region = target.region().get(), scope = ?target.scope(), "environment assignment updated");
             }
             Ok(_) => {}
-            Err(error) => tracing::warn!(?error, "environment assignment rejected"),
+            Err(error) => tracing::warn!(region = target.region().get(), %error, "environment assignment rejected"),
         }
     }
 }
@@ -693,7 +760,7 @@ mod tests {
             region,
             ParcelNotice { parcel: ParcelLocalId::new(42).unwrap(), sequence: 1, version: 7, overrides: true },
         );
-        let Err(Some(completion)) = intake.select(pending::<()>()).await else { panic!("environment completion missing") };
+        let Some(completion) = intake.next_completion().await else { panic!("environment completion missing") };
         intake.complete(&mut world, *completion);
         let observed = world.world().environment(region).unwrap().parcel.unwrap().assignment.unwrap();
         assert_eq!(observed.version, Some(7));

@@ -32,8 +32,8 @@ use crate::{
     gui::window_geometry::observe,
     remembered_login::{self, CredentialStoreError, RememberedLogin},
     session::{
-        AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, RegionLookup, Session, SessionReadyUpdate,
-        ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
+        AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, RegionLookup, Session,
+        SessionReadyUpdate, ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
     },
     world_reader::WorldReader,
 };
@@ -420,11 +420,13 @@ impl LoginScreen {
             background.clone(),
             mailbox,
             cancel_receiver,
-            grid,
-            remembered_username,
-            remembered_password,
-            remember_login,
-            credential_write_lock,
+            CredentialPersistence {
+                grid,
+                username: remembered_username,
+                password: remembered_password,
+                remember_login,
+                write_lock: credential_write_lock,
+            },
         )));
 
         cx.notify();

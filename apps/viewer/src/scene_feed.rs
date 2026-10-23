@@ -306,7 +306,7 @@ async fn run(
             futures::select_biased! {
                 _ = cancelled => break,
                 command = pushed => match command {
-                    Some(command) => if let Err(error) = scene.push_environment(command.region, command.push) { tracing::warn!(?error, "experience environment push rejected"); },
+                    Some(command) => if let Err(error) = scene.push_environment(command.region, command.push) { tracing::warn!(region = command.region.get(), ?error, "experience environment push rejected"); },
                     None => break,
                 },
                 (job, reply) = reading => {
@@ -343,8 +343,9 @@ async fn run(
 mod tests {
     use super::*;
     use crate::asset_coordinator::AssetCoordinator;
+    use crate::world_reader::ReadRequest;
     use crate::world_reader::WorldReadHost;
-    use futures::join;
+    use futures::{Future, FutureExt, join};
     use math::{DVec3, Quat, Vec3};
     use render::scene::{EnvironmentProperty, EnvironmentPush, Status};
     use std::{
@@ -358,6 +359,25 @@ mod tests {
         Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate, Pose, Region,
         RegionInfo, Shape, SurfaceAppearance, UpdateSource, World, WorldLimits,
     };
+
+    async fn select_read<T>(service: &mut WorldReadHost, intake: impl Future<Output = T>) -> Result<T, ReadRequest> {
+        if let Some(request) = service.take_reserved() {
+            return Err(request);
+        }
+        let result = {
+            let intake = intake.fuse();
+            let request = service.next_request().fuse();
+            pin_mut!(intake, request);
+            futures::select_biased! {
+                input = intake => Ok(input),
+                request = request => Err(request),
+            }
+        };
+        if result.is_ok() {
+            service.record_intake_turn();
+        }
+        result
+    }
 
     fn world() -> World {
         World::new(WorldLimits {
@@ -518,7 +538,7 @@ mod tests {
         .fuse();
         let serving = async {
             loop {
-                let Err(request) = reads.select(pending::<()>()).await else { unreachable!() };
+                let Err(request) = select_read(&mut reads, pending::<()>()).await else { unreachable!() };
                 request.serve(&world);
             }
         }
@@ -568,7 +588,7 @@ mod tests {
             .fuse();
             let serving = async {
                 loop {
-                    let Err(request) = service.select(pending::<()>()).await else { unreachable!() };
+                    let Err(request) = select_read(&mut service, pending::<()>()).await else { unreachable!() };
                     request.serve(&world);
                 }
             }
@@ -584,7 +604,7 @@ mod tests {
         let (barrier, turns) = join!(reader.barrier(), async {
             let mut turns = 0;
             while turns < 1024 {
-                match service.select(ready(())).await {
+                match select_read(&mut service, ready(())).await {
                     Ok(()) => {
                         turns += 1;
                         let mut patch = ObjectPatch::new(
@@ -627,7 +647,7 @@ mod tests {
             .fuse();
             let serving = async {
                 loop {
-                    let Err(request) = service.select(pending::<()>()).await else { unreachable!() };
+                    let Err(request) = select_read(&mut service, pending::<()>()).await else { unreachable!() };
                     request.serve(&world);
                 }
             }

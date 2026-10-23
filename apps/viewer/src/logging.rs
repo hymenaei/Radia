@@ -22,7 +22,9 @@ pub(crate) fn init() -> Option<WorkerGuard> {
     let (json, guard, file_error, maintenance_warning) = match create_session_log() {
         Ok((file, warning)) => {
             let (writer, guard) = tracing_appender::non_blocking(file);
-            let file_filter = EnvFilter::try_from_env("FILE_LOG").unwrap_or_else(|_| EnvFilter::new("trace"));
+            let file_filter = EnvFilter::try_from_env("FILE_LOG").unwrap_or_else(|_| {
+                EnvFilter::new("info,viewer=debug,network=debug,protocol=debug,world=debug,render=debug,assets=debug,llsd=debug")
+            });
             let json = fmt::layer()
                 .json()
                 .with_timer(ChronoLocal::new("%Y-%m-%dT%H:%M:%S%.3f%:z".into()))

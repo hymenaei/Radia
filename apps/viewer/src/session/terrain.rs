@@ -1,12 +1,12 @@
 use std::{
-    future::{Future, pending},
+    future::pending,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-use futures::{FutureExt, StreamExt, future::BoxFuture, pin_mut, stream::FuturesOrdered};
+use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesOrdered};
 use protocol::{
     lludp::Message,
     types::layer_data::{self, terrain},
@@ -59,7 +59,7 @@ impl TerrainDecodeQueue {
                 })
                 .map(move |result| {
                     result.unwrap_or_else(|error| {
-                        tracing::error!(%error, "terrain worker stopped unexpectedly");
+                        tracing::error!(region = source.region().get(), %error, "terrain worker stopped unexpectedly");
                         DecodedTerrain { source, patches: Vec::new(), rejected: 1 }
                     })
                 })
@@ -67,15 +67,8 @@ impl TerrainDecodeQueue {
         );
     }
 
-    pub(super) async fn select<T>(&mut self, intake: impl Future<Output = T>) -> Result<T, DecodedTerrain> {
-        let decoded =
-            async { if self.jobs.is_empty() { pending().await } else { self.jobs.next().await.expect("nonempty terrain jobs") } }.fuse();
-        let intake = intake.fuse();
-        pin_mut!(decoded, intake);
-        futures::select_biased! {
-            decoded = decoded => Err(decoded),
-            input = intake => Ok(input),
-        }
+    pub(super) async fn next_completion(&mut self) -> DecodedTerrain {
+        async { if self.jobs.is_empty() { pending().await } else { self.jobs.next().await.expect("nonempty terrain jobs") } }.await
     }
 }
 
@@ -115,7 +108,7 @@ fn decode_terrain_patches(source: UpdateSource, data: &[u8], cancelled: &AtomicB
 
 #[cfg(test)]
 mod tests {
-    use futures::{channel::oneshot, future::ready};
+    use futures::channel::oneshot;
     use network::testing::simulator_id;
     use protocol::messages::LayerData;
     use world::{OrderEvidence, Region};
@@ -151,13 +144,14 @@ mod tests {
             );
         }
         assert!(work.is_full());
-        release.pop().unwrap().send(()).unwrap();
-        assert!(matches!(work.select(ready(7)).await, Ok(7)));
+        release.remove(0).send(()).unwrap();
+        let decoded = work.next_completion().await;
+        assert_eq!(decoded.source.sequence(), 1);
         for send in release {
             send.send(()).unwrap();
         }
-        for order in 1..=MAX_TERRAIN_JOBS as u32 {
-            let Err(decoded) = work.select(pending::<()>()).await else { unreachable!() };
+        for order in 2..=MAX_TERRAIN_JOBS as u32 {
+            let decoded = work.next_completion().await;
             assert_eq!(decoded.source.sequence(), order);
             assert!(!work.is_full());
         }
@@ -175,7 +169,7 @@ mod tests {
         let source = UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0);
         let mut work = TerrainDecodeQueue::default();
         work.enqueue(&message(flat()), source, &Handle::current());
-        let Err(decoded) = work.select(pending::<()>()).await else { unreachable!() };
+        let decoded = work.next_completion().await;
         assert_eq!(decoded.rejected, 0);
         world.apply_terrain(decoded);
         let page = world.world().terrain_page(region, None, 8).unwrap().unwrap();

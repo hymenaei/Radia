@@ -264,7 +264,7 @@ async fn run(
                 LoadJob::Fetch(job) => job,
             };
             let transport = transports.get(&job.route()).cloned();
-            let span = tracing::debug_span!("assets.fetch", kind = ?job.resource().kind, route = ?job.route());
+            let span = tracing::debug_span!("assets.fetch", asset = ?job.resource().id, kind = ?job.resource().kind, route = ?job.route());
             jobs.push(
                 runtime.spawn(
                     async move {
@@ -307,7 +307,7 @@ async fn run(
                     continue;
                 }
             };
-            let span = tracing::debug_span!("assets.decode", kind = ?job.resource().kind);
+            let span = tracing::debug_span!("assets.decode", asset = ?job.resource().id, kind = ?job.resource().kind);
             jobs.push(runtime.spawn_blocking(move || {
                 let _span = span.enter();
                 let completion = job.run();
@@ -364,7 +364,7 @@ async fn run(
                         transports.insert(route, CapabilityTransport::new(client));
                         routes.send_replace(());
                     }
-                    Err(error) => tracing::warn!(?error, "could not register asset route"),
+                    Err(error) => tracing::warn!(region = region.get(), ?error, "could not register asset route"),
                 }
             }
             Input::Control(Some(RouteCommand::Retire(region))) => {
@@ -382,7 +382,7 @@ async fn run(
                     .map(|route| store.request(*route, resource, priority, Instant::now()).map_err(RequestError::Admission))
                     .transpose();
                 if reply.send(result).is_err() {
-                    tracing::trace!("asset request receiver closed");
+                    tracing::trace!(region = region.get(), "asset request receiver closed");
                 }
             }
             Input::Job(Ok(WorkerResult::Input(input))) => waiting.push_back(input),

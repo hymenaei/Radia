@@ -3,6 +3,7 @@ name = "render"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autobenches = false
 
 [lints]
 workspace = true
@@ -27,5 +28,5 @@ criterion.workspace = true
 block_compression = { workspace = true, features = ["bc15", "bc7"] }
 
 [[bench]]
-name = "texture"
+name = "main"
 harness = false

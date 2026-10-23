@@ -50,7 +50,7 @@ impl World {
         }
         let address = LocalAddress::new(source.region, local_id);
         let live = self.entity_at(address).map(|entity| {
-            let record = self.store.record(entity).expect("address index contains a live entity");
+            let record = self.store.object_record(entity).expect("address index contains a live entity");
             (entity, record.id, record.state.binding.fence())
         });
         if live.is_some_and(|(_, id, _)| self.self_agent == Some(id)) {
@@ -126,7 +126,7 @@ impl World {
                 }
                 let Some((child_kind, child_id, child_address, child_fence)) = self
                     .store
-                    .record(child)
+                    .object_record(child)
                     .map(|record| (record.kind, record.id, record.state.binding.address, record.state.binding.fence()))
                 else {
                     continue;
@@ -149,7 +149,7 @@ impl World {
 
     fn advance_parent_fence(&mut self, child: Entity, invalidation: Option<Stamp>, invalidation_region: Region) {
         let Some(stamp) = invalidation
-            .filter(|_| self.store.record(child).is_some_and(|record| record.state.binding.address.region == invalidation_region))
+            .filter(|_| self.store.object_record(child).is_some_and(|record| record.state.binding.address.region == invalidation_region))
         else {
             return;
         };

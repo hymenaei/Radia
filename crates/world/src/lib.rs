@@ -141,7 +141,7 @@ impl World {
     }
 
     pub fn object_binding_target(&self, entity: Entity) -> Option<ObjectBindingTarget> {
-        let object = self.store.record(entity)?;
+        let object = self.store.object_record(entity)?;
         Some(ObjectBindingTarget {
             entity,
             id: object.id,
@@ -154,7 +154,7 @@ impl World {
         if target.entity.1 != self.id || self.entity(target.id) != Some(target.entity) {
             return false;
         }
-        let Some(object) = self.store.record(target.entity) else { return false };
+        let Some(object) = self.store.object_record(target.entity) else { return false };
         object.state.binding.address == target.address
             && object.state.binding.address_generation == target.address_generation
             && self.entity_at(target.address) == Some(target.entity)

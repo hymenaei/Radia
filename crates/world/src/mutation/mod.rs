@@ -49,8 +49,7 @@ impl World {
     }
 
     fn detach_snapshot(&self, entity: Entity, kind: Kind, current: Parent, next: Parent) -> Option<WorldPose> {
-        let leaves_object =
-            matches!(current, Parent::Resolved(parent) if self.store.record(parent).is_some_and(|record| record.kind != Kind::Avatar));
+        let leaves_object = matches!(current, Parent::Resolved(parent) if self.store.object_record(parent).is_some_and(|record| record.kind != Kind::Avatar));
         if kind != Kind::Avatar || next != Parent::Root || !leaves_object {
             return None;
         }

@@ -148,7 +148,7 @@ impl World {
 
     pub(crate) fn preflight_address(&self, address: LocalAddress, id: Uuid, stamp: Stamp) -> Option<Applied> {
         if let Some(entity) = self.entity_at(address) {
-            let record = self.store.record(entity).expect("address index contains a live entity");
+            let record = self.store.object_record(entity).expect("address index contains a live entity");
             return (record.id != id && stamp <= record.state.binding.fence()).then(|| Applied::new(ApplyOutcome::IgnoredStale));
         }
         if let Some(tombstone) = self.tombstones.get(&address) {

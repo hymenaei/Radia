@@ -1,5 +1,4 @@
 mod impls;
-#[path = "facet.rs"]
 mod policy;
 
 pub(super) use policy::Origin;

@@ -231,13 +231,6 @@ struct QueryRun {
 }
 
 impl QueryRun {
-    fn object<'b>(&self, world: &'b World, entity: Entity) -> Option<Object<'b>> {
-        if entity.1 != world.id {
-            return None;
-        }
-        world.object(entity)
-    }
-
     fn spend(&mut self, amount: usize) -> bool {
         if self.remaining < amount {
             self.incomplete = Some(QueryIncompleteReason::WorkLimit);
@@ -564,7 +557,7 @@ impl World {
             if run.query.region.is_some_and(|filter| filter != region) || self.spatial_is_dirty(entity) {
                 continue;
             }
-            let unresolved_id = run.object(self, entity).and_then(|object| {
+            let unresolved_id = self.object(entity).and_then(|object| {
                 let (properties, provenance) = object.properties_data();
                 live_matches_without_pose(&object, run.query, properties, provenance).then(|| object.id())
             });
@@ -614,7 +607,7 @@ impl World {
     }
 
     fn live_item(&self, entity: Entity, sphere: Option<Sphere>, run: &mut QueryRun) -> Option<WorldQueryItem> {
-        let object = run.object(self, entity)?;
+        let object = self.object(entity)?;
         let id = object.id();
         let (properties, provenance) = object.properties_data();
         if !live_matches_without_pose(&object, run.query, properties, provenance) {

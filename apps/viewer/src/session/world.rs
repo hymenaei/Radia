@@ -494,7 +494,6 @@ impl SessionWorld {
             return None;
         }
         let local_id = object.address().local_id();
-        drop(object);
 
         let mut patch = ObjectPatch::new(source, local_id);
         patch.avatar_appearance = Some(update.update);

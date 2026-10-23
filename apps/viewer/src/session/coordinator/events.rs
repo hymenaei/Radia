@@ -563,7 +563,6 @@ mod tests {
         let agent = state.object(state.entity(agent_id).expect("source agent remains present")).expect("agent object");
         assert_eq!(agent.address().region(), source_region);
         assert!(observations.contains_key(&destination_id));
-        drop(agent);
 
         assert!(begin_world_handoff(&mut world_primary, &mut promoted_target, source_id, destination_id));
         let destination = agent_update(agent_id, 20, destination_handle.get());
@@ -583,7 +582,6 @@ mod tests {
         assert_eq!(world_primary, Some(destination_id));
         assert_eq!(promoted_target, None);
         assert!(!observations.contains_key(&destination_id));
-        drop(agent);
         apply_world_event_with_handoff(
             &mut intake,
             &SimulatorDisconnected {
@@ -960,7 +958,6 @@ mod tests {
         let parent = state.object(state.entity(parent_id).unwrap()).unwrap();
         assert_eq!(parent.transform().position(), Some(Vec3::new(31.0, 42.0, 53.0)));
         let before_cached_revision = state.revision();
-        drop(parent);
 
         let mut cached = fixture_packet(vectors::OBJECT_UPDATE_CACHED).message().clone();
         let ObjectUpdateCached(update) = &mut cached else { panic!("expected cached object fixture") };

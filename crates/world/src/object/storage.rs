@@ -97,7 +97,7 @@ impl ObjectStore {
 
     pub(crate) fn remove(&mut self, entity: Entity) {
         let (id, address) = {
-            let record = self.record(entity).expect("removal target is live");
+            let record = self.object_record(entity).expect("removal target is live");
             (record.id, record.state.binding.address)
         };
         self.ecs.despawn(entity.0).expect("removal target is live");
@@ -117,7 +117,7 @@ impl ObjectStore {
         ordering: ObjectOrdering,
     ) {
         let (id, previous) = {
-            let record = self.record(entity).expect("mutation target is live");
+            let record = self.object_record(entity).expect("mutation target is live");
             (record.id, record.state.binding.address)
         };
         let address = state.binding.address;
@@ -160,13 +160,6 @@ impl ObjectStore {
         }
     }
 
-    pub(crate) fn record(&self, entity: Entity) -> Option<Ref<'_, ObjectRecord>> {
-        if entity.1 != self.world {
-            return None;
-        }
-        self.ecs.get::<&ObjectRecord>(entity.0).ok()
-    }
-
     pub(crate) fn object_record(&self, entity: Entity) -> Option<&ObjectRecord> {
         if entity.1 != self.world {
             return None;
@@ -183,6 +176,7 @@ impl ObjectStore {
     }
 
     fn component_ref<'a, T: Component>(&'a self, entity: hecs::Entity, view: Option<&ViewBorrow<'a, &'a T>>) -> Option<&'a T> {
+        // SAFETY: `&self.ecs` only takes shared dynamic borrows; mutation needs `&mut ObjectStore`, so these reads cannot alias a writer.
         unsafe {
             if let Some(view) = view {
                 let component = view.get_unchecked(entity)?;
@@ -206,15 +200,6 @@ impl ObjectStore {
             .unwrap_or_default()
     }
 
-    pub(crate) fn sit_target(&self, entity: hecs::Entity) -> Fenced<crate::SitTarget> {
-        self.ecs
-            .entity(entity)
-            .expect("sit-target read target is live")
-            .get::<&Fenced<crate::SitTarget>>()
-            .map(|component| (*component).clone())
-            .unwrap_or_default()
-    }
-
     pub(crate) fn removal_data(&mut self, entity: hecs::Entity) -> (Uuid, Kind, ObjectState, ObjectProperties, usize) {
         let (record, properties, object_media) = self
             .ecs
@@ -233,23 +218,11 @@ impl ObjectStore {
         self.ecs.query::<(hecs::Entity, &ObjectRecord)>()
     }
 
-    pub(crate) fn record_view(&self) -> ComponentView<'_, ObjectRecord> {
-        self.component_view::<ObjectRecord>()
-    }
-
-    pub(crate) fn records(&self) -> ViewBorrow<'_, &ObjectRecord> {
-        self.ecs.view::<&ObjectRecord>()
-    }
-
     pub(crate) fn ordered_records(&self) -> ViewBorrow<'_, (&ObjectRecord, &ObjectOrdering)> {
         self.ecs.view::<(&ObjectRecord, &ObjectOrdering)>()
     }
 
     pub(crate) fn read(&self, entity: hecs::Entity) -> QueryOne<'_, (&ObjectRecord, &ObjectOrdering)> {
-        self.ecs.query_one::<(&ObjectRecord, &ObjectOrdering)>(entity)
-    }
-
-    pub(crate) fn read_ordered(&self, entity: hecs::Entity) -> QueryOne<'_, (&ObjectRecord, &ObjectOrdering)> {
         self.ecs.query_one::<(&ObjectRecord, &ObjectOrdering)>(entity)
     }
 
@@ -284,7 +257,7 @@ impl ObjectStore {
         let mut regions = HashMap::<Region, BTreeSet<Uuid>>::new();
         let mut avatars = BTreeSet::new();
         for (id, entity) in self.entities() {
-            let record = self.record(entity).ok_or("UUID index points to a dead or foreign entity")?;
+            let record = self.object_record(entity).ok_or("UUID index points to a dead or foreign entity")?;
             if id.is_nil() || record.id != id || !self.ids.contains(&id) || self.entity_at(record.state.binding.address) != Some(entity) {
                 return Err("object identity indexes disagree with stored state");
             }

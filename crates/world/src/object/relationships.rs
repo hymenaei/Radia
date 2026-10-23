@@ -8,7 +8,7 @@ use crate::history::{
 };
 use crate::mutation::Effects;
 use crate::update::{FieldStamp, Stamp};
-use crate::{AttachmentPoint, Entity, Kind, LocalAddress, Parent, ParentUpdate, Region};
+use crate::{AttachmentPoint, Entity, Kind, LocalAddress, ObjectRecord, Parent, ParentUpdate, Region};
 use crate::{Binding, World};
 use ParentResolution::{Accepted, Cycle};
 
@@ -40,9 +40,9 @@ impl World {
     }
 
     pub(crate) fn parent_will_be_cascaded(&self, root: Entity, target: Entity, stamp: Stamp) -> bool {
-        let Some(root_region) = self.store.record(root).map(|record| record.state.binding.address.region()) else { return false };
+        let Some(root_region) = self.store.object_record(root).map(|record| record.state.binding.address.region()) else { return false };
         let mut current = target;
-        let records = self.store.records();
+        let records = self.store.component_view::<ObjectRecord>();
 
         for _ in 0..=self.store.len() {
             if current == root {
@@ -66,7 +66,7 @@ impl World {
 
     pub(crate) fn invalidate_subtree(&self, root: Entity, effects: &mut Effects) {
         if self.children.get(&root).is_some_and(|children| !children.is_empty()) {
-            let id = self.store.record(root).expect("a subtree root is live").id;
+            let id = self.store.object_record(root).expect("a subtree root is live").id;
             effects.changes.push(SubtreeInvalidated { id, entity: root });
         }
     }
@@ -83,17 +83,18 @@ impl World {
             ParentUpdate::Root => Accepted(Parent::Root),
             ParentUpdate::Local(parent_local_id) => {
                 let address = LocalAddress::new(region, parent_local_id);
-                if child.is_some_and(|entity| self.store.record(entity).is_some_and(|obj| obj.state.binding.address == address))
+                if child.is_some_and(|entity| self.store.object_record(entity).is_some_and(|obj| obj.state.binding.address == address))
                     || local_id == parent_local_id
                 {
                     return Cycle;
                 }
-                let expected_uuid = child.and_then(|entity| self.store.record(entity)).and_then(|object| match object.state.parent {
-                    Parent::Pending { address: pending_address, expected_uuid } if pending_address == address => expected_uuid,
-                    _ => None,
-                });
+                let expected_uuid =
+                    child.and_then(|entity| self.store.object_record(entity)).and_then(|object| match object.state.parent {
+                        Parent::Pending { address: pending_address, expected_uuid } if pending_address == address => expected_uuid,
+                        _ => None,
+                    });
                 if let Some(parent) = self.entity_at(address) {
-                    let object = self.store.record(parent).expect("address index contains a live parent");
+                    let object = self.store.object_record(parent).expect("address index contains a live parent");
                     if object.state.binding.admits_parent_link(expected_uuid, Some(stamp), object.id) {
                         if child.is_some_and(|child| self.would_cycle(child, parent)) { Cycle } else { Accepted(Parent::Resolved(parent)) }
                     } else {
@@ -118,7 +119,7 @@ impl World {
     }
 
     fn is_avatar_parent(&self, parent: Parent) -> bool {
-        matches!(parent, Parent::Resolved(entity) if self.store.record(entity).is_some_and(|record| record.kind == Kind::Avatar))
+        matches!(parent, Parent::Resolved(entity) if self.store.object_record(entity).is_some_and(|record| record.kind == Kind::Avatar))
     }
 
     fn parent_frame_identity_changed(&self, current: Parent, next: Parent) -> bool {
@@ -127,10 +128,12 @@ impl World {
         }
         match (current, next) {
             (Parent::Pending { address, expected_uuid }, Parent::Resolved(entity))
-            | (Parent::Resolved(entity), Parent::Pending { address, expected_uuid }) => self.store.record(entity).is_none_or(|object| {
-                object.state.binding.address != address
-                    || expected_uuid.map_or(object.state.binding.parent_resolution_fence.is_some(), |expected| expected != object.id)
-            }),
+            | (Parent::Resolved(entity), Parent::Pending { address, expected_uuid }) => {
+                self.store.object_record(entity).is_none_or(|object| {
+                    object.state.binding.address != address
+                        || expected_uuid.map_or(object.state.binding.parent_resolution_fence.is_some(), |expected| expected != object.id)
+                })
+            }
             _ => true,
         }
     }
@@ -144,7 +147,7 @@ impl World {
 
     pub(crate) fn set_parent(&mut self, child: Entity, parent: Parent) {
         let child_uuid = {
-            let record = self.store.record(child).expect("a parented child is live");
+            let record = self.store.object_record(child).expect("a parented child is live");
             if record.state.parent == parent {
                 return;
             }
@@ -164,7 +167,7 @@ impl World {
     }
 
     pub(crate) fn detach_parent(&mut self, child: Entity) {
-        let Some((parent, child_uuid)) = self.store.record(child).map(|object| (object.state.parent, object.id)) else {
+        let Some((parent, child_uuid)) = self.store.object_record(child).map(|object| (object.state.parent, object.id)) else {
             return;
         };
         match parent {
@@ -192,7 +195,7 @@ impl World {
         let children = self.children.remove(&parent).unwrap_or_default();
         for child in children.into_values() {
             let Some((child_parent, child_address, child_uuid)) =
-                self.store.record(child).map(|object| (object.state.parent, object.state.binding.address, object.id))
+                self.store.object_record(child).map(|object| (object.state.parent, object.state.binding.address, object.id))
             else {
                 continue;
             };
@@ -213,10 +216,10 @@ impl World {
 
     pub(crate) fn resolve_waiting_children(&mut self, address: LocalAddress, parent: Entity, parent_uuid: Uuid, effects: &mut Effects) {
         let waiting = self.pending_children.get(&address).cloned().unwrap_or_default();
-        let binding = self.store.record(parent).expect("address index contains a live parent").state.binding;
+        let binding = self.store.object_record(parent).expect("address index contains a live parent").state.binding;
         for child in waiting {
             let (parent_state, child_address, uuid, parent_stamp) = {
-                let mut read = self.store.read_ordered(child.0);
+                let mut read = self.store.read(child.0);
                 let Ok((record, ordering)) = read.get() else { continue };
                 (record.state.parent, record.state.binding.address, record.id, ordering.fences.parent)
             };
@@ -240,15 +243,15 @@ impl World {
     }
 
     pub(crate) fn would_cycle(&self, child: Entity, mut parent: Entity) -> bool {
-        if self.store.record(child).is_some_and(|object| object.state.parent == Parent::Resolved(parent)) {
+        if self.store.object_record(child).is_some_and(|object| object.state.parent == Parent::Resolved(parent)) {
             return false;
         }
         if parent == child {
             return true;
         }
-        let Some(Parent::Resolved(next)) = self.store.record(parent).map(|object| object.state.parent) else { return false };
+        let Some(Parent::Resolved(next)) = self.store.object_record(parent).map(|object| object.state.parent) else { return false };
         parent = next;
-        let records = self.store.records();
+        let records = self.store.component_view::<ObjectRecord>();
         for _ in 1..self.store.len() {
             if parent == child {
                 return true;

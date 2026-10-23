@@ -1,4 +1,4 @@
-use std::collections::btree_set::Iter as BTreeSetIter;
+use std::collections::btree_set;
 use std::sync::Arc;
 
 use hecs::{QueryBorrow, Ref};
@@ -15,6 +15,7 @@ use crate::{
 };
 use crate::{ObjectOrdering, ObjectRecord, World};
 
+#[derive(Clone, Copy)]
 pub struct Object<'a> {
     pub(crate) entity: Entity,
     record: &'a ObjectRecord,
@@ -22,7 +23,6 @@ pub struct Object<'a> {
 }
 
 impl<'a> Object<'a> {
-    #[inline(always)]
     pub(crate) fn new(entity: Entity, record: &'a ObjectRecord, world: &'a World) -> Self {
         Self { entity, record, world }
     }
@@ -40,7 +40,6 @@ impl<'a> Object<'a> {
         self.world.store.ordering(self.entity.0)
     }
 
-    #[inline(always)]
     pub const fn entity(&self) -> Entity {
         self.entity
     }
@@ -151,20 +150,12 @@ impl<'a> Object<'a> {
     }
 }
 
-impl Clone for Object<'_> {
-    fn clone(&self) -> Self {
-        let record = self.world.store.object_record(self.entity).expect("object clone target is live");
-        Self::new(self.entity, record, self.world)
-    }
-}
-
 pub struct Objects<'a> {
     pub(crate) records: QueryBorrow<'a, (hecs::Entity, &'a ObjectRecord)>,
     pub(crate) world: &'a World,
 }
 
 impl<'a> Objects<'a> {
-    #[inline(always)]
     pub fn iter<'b>(&'b mut self) -> impl Iterator<Item = Object<'b>> + 'b {
         let world = self.world;
         self.records.iter().map(move |(entity, record)| Object::new(Entity(entity, world.id), record, world))
@@ -172,14 +163,14 @@ impl<'a> Objects<'a> {
 }
 
 pub(crate) struct IndexedObjects<'a> {
-    ids: BTreeSetIter<'a, Uuid>,
+    ids: btree_set::Iter<'a, Uuid>,
     records: ComponentView<'a, ObjectRecord>,
     world: &'a World,
 }
 
 impl<'a> IndexedObjects<'a> {
-    pub(crate) fn new(ids: BTreeSetIter<'a, Uuid>, world: &'a World) -> Self {
-        Self { ids, records: world.store.record_view(), world }
+    pub(crate) fn new(ids: btree_set::Iter<'a, Uuid>, world: &'a World) -> Self {
+        Self { ids, records: world.store.component_view::<ObjectRecord>(), world }
     }
 }
 

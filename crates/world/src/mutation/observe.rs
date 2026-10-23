@@ -40,7 +40,7 @@ impl World {
             return Err(ApplyError::InvalidValue { field: "agent_id" });
         }
         let entity = self.entity(id).ok_or(ApplyError::StaleRegion)?;
-        if self.store.record(entity).expect("UUID index contains a live entity").state.binding.address.region != from {
+        if self.store.object_record(entity).expect("UUID index contains a live entity").state.binding.address.region != from {
             return Err(ApplyError::StaleRegion);
         }
         self.observe(observation, true)
@@ -55,7 +55,7 @@ impl World {
             return Ok(self.defer(DeferredReason::AmbiguousOrder, address));
         };
         let existing = self.entity(id);
-        let current = existing.and_then(|entity| self.store.record(entity)).map(|record| record.state);
+        let current = existing.and_then(|entity| self.store.object_record(entity)).map(|record| record.state);
         if source.authority() == Untracked && current.is_none_or(|state| state.binding.address != address) {
             let applied = self.unknown_address(address, stamp);
             return Ok(if applied.outcome == ApplyOutcome::Unchanged { Applied::new(ApplyOutcome::IgnoredStale) } else { applied });
@@ -264,7 +264,7 @@ impl World {
         if let (Parent::Resolved(parent_entity), Local(parent_local_id)) = (parent, update)
             && self.parent_will_be_cascaded(displaced, parent_entity, origin.stamp)
         {
-            let expected_uuid = self.store.record(parent_entity).expect("resolved parent is live before the commit").id;
+            let expected_uuid = self.store.object_record(parent_entity).expect("resolved parent is live before the commit").id;
             return Parent::Pending { address: LocalAddress::new(region, parent_local_id), expected_uuid: Some(expected_uuid) };
         }
         parent

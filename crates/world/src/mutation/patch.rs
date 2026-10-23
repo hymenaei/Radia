@@ -7,6 +7,7 @@ use crate::FieldRejectionReason::UntrustedSource;
 use crate::UpdateAuthority::{Tracked, Untracked};
 use crate::history::WorldChange::EntityUpdated;
 use crate::history::WorldChangeClasses;
+use crate::object::components::Fenced;
 use crate::object::relationships::ParentResolution;
 use crate::update::FieldStamp;
 use crate::{
@@ -190,7 +191,7 @@ impl World {
             if object.address().region != source.region {
                 return Ok(Applied::unchanged());
             }
-            (object.record().state, self.store.sit_target(entity.0), *object.ordering())
+            (object.record().state, self.store.component::<Fenced<SitTarget>>(entity.0).cloned().unwrap_or_default(), *object.ordering())
         };
 
         let mut rejections = Rejections::default();

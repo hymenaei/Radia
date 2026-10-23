@@ -20,6 +20,7 @@ use crate::object::components::{
     Binding, Fences, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field, newer_region_field,
 };
 use crate::object::storage::ObjectStore;
+use crate::object::view::IndexedObjects;
 use crate::query::spatial::SpatialIndex;
 use crate::region::RegionState;
 use crate::update::Stamp;
@@ -160,12 +161,12 @@ impl World {
     }
 
     pub fn object(&self, entity: Entity) -> Option<Object<'_>> {
-        let entry = self.store.object(entity)?;
-        Some(Object::new(entry, self))
+        let record = self.store.object_record(entity)?;
+        Some(Object::new(entity, record, self))
     }
 
     pub fn objects(&self) -> Objects<'_> {
-        Objects { entries: self.store.objects(), world: self }
+        Objects { records: self.store.objects(), world: self }
     }
 
     pub fn object_count(&self) -> usize {
@@ -173,10 +174,7 @@ impl World {
     }
 
     pub fn objects_in_region(&self, region: Region) -> impl Iterator<Item = Object<'_>> {
-        self.store.region_ids(region).into_iter().flat_map(|ids| ids.iter()).map(|id| {
-            let entity = self.entity(*id).expect("region index contains only live objects");
-            self.object(entity).expect("region index contains only complete objects")
-        })
+        self.store.region_ids(region).into_iter().flat_map(|ids| IndexedObjects::new(ids.iter(), self))
     }
 
     pub fn children(&self, entity: Entity) -> impl Iterator<Item = Object<'_>> {
@@ -184,10 +182,7 @@ impl World {
     }
 
     pub fn avatars(&self) -> impl Iterator<Item = Object<'_>> {
-        self.store.avatar_ids().iter().map(|id| {
-            let entity = self.entity(*id).expect("avatar index contains only live entities");
-            self.object(entity).expect("avatar index contains only complete objects")
-        })
+        IndexedObjects::new(self.store.avatar_ids().iter(), self)
     }
 
     pub fn regions(&self) -> impl Iterator<Item = (Region, &RegionInfo)> {

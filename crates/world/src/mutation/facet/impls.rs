@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{Facet, FacetContext, FacetMerge, FacetRefs, FacetSupport, FacetUpdates, Origin};
+use super::{Facet, FacetContext, FacetMerge, FacetSupport, FacetUpdates, Origin};
 use crate::MAX_OBJECT_MEDIA_BYTES;
 use crate::history::WorldChangeClasses;
 use crate::object::components::Fenced;
@@ -21,10 +21,6 @@ impl Facet for Shape {
 
     fn merge(_current: Option<&Self>, update: Self::Update, _context: FacetContext) -> FacetMerge<Self> {
         merge_field(update)
-    }
-
-    fn read<'a>(facets: &'a FacetRefs<'_>) -> Option<&'a Self::View> {
-        facets.cached().shape.get_or_init(|| facets.entry.get::<&Fenced<Shape>>()).as_deref()?.value.as_ref().map(Self::view)
     }
 
     fn view(&self) -> &Self::View {
@@ -52,10 +48,6 @@ impl Facet for Appearance {
         merge_field(update)
     }
 
-    fn read<'a>(facets: &'a FacetRefs<'_>) -> Option<&'a Self::View> {
-        facets.cached().appearance.get_or_init(|| facets.entry.get::<&Fenced<Appearance>>()).as_deref()?.value.as_ref().map(Self::view)
-    }
-
     fn view(&self) -> &Self::View {
         self
     }
@@ -75,16 +67,6 @@ impl Facet for Arc<SurfaceAppearance> {
             Some(current) if current.as_ref() == &update => Arc::clone(current),
             _ => Arc::new(update),
         }))
-    }
-
-    fn read<'a>(facets: &'a FacetRefs<'_>) -> Option<&'a Self::View> {
-        facets
-            .cached()
-            .surface_appearance
-            .get_or_init(|| facets.entry.get::<&Fenced<Arc<SurfaceAppearance>>>())
-            .as_deref()?
-            .value
-            .as_deref()
     }
 
     fn view(&self) -> &Self::View {
@@ -110,16 +92,6 @@ impl Facet for Arc<PbrMaterialAssignments> {
                 _ => Arc::new(update),
             })
         })
-    }
-
-    fn read<'a>(facets: &'a FacetRefs<'_>) -> Option<&'a Self::View> {
-        facets
-            .cached()
-            .pbr_materials
-            .get_or_init(|| facets.entry.get::<&Fenced<Arc<PbrMaterialAssignments>>>())
-            .as_deref()?
-            .value
-            .as_deref()
     }
 
     fn view(&self) -> &Self::View {
@@ -154,16 +126,6 @@ impl Facet for Arc<PbrMaterialOverrides> {
         })
     }
 
-    fn read<'a>(facets: &'a FacetRefs<'_>) -> Option<&'a Self::View> {
-        facets
-            .cached()
-            .pbr_material_overrides
-            .get_or_init(|| facets.entry.get::<&Fenced<Arc<PbrMaterialOverrides>>>())
-            .as_deref()?
-            .value
-            .as_deref()
-    }
-
     fn view(&self) -> &Self::View {
         self.as_ref()
     }
@@ -193,10 +155,6 @@ impl Facet for Arc<AvatarAppearance> {
         let mut value = current.map_or_else(AvatarAppearance::default, |current| current.as_ref().clone());
         value.apply(update);
         FacetMerge::Applied(Some(Arc::new(value)))
-    }
-
-    fn read<'a>(facets: &'a FacetRefs<'_>) -> Option<&'a Self::View> {
-        facets.cached().avatar_appearance.get_or_init(|| facets.entry.get::<&Fenced<Arc<AvatarAppearance>>>()).as_deref()?.value.as_deref()
     }
 
     fn view(&self) -> &Self::View {
@@ -240,10 +198,6 @@ impl Facet for Arc<ObjectMedia> {
         }
     }
 
-    fn read<'a>(facets: &'a FacetRefs<'_>) -> Option<&'a Self::View> {
-        facets.cached().object_media.get_or_init(|| facets.entry.get::<&Fenced<Arc<ObjectMedia>>>()).as_deref()?.value.as_deref()
-    }
-
     fn view(&self) -> &Self::View {
         self.as_ref()
     }
@@ -260,10 +214,6 @@ impl Facet for SitTarget {
 
     fn merge(_current: Option<&Self>, update: Self::Update, _context: FacetContext) -> FacetMerge<Self> {
         FacetMerge::Applied(update)
-    }
-
-    fn read<'a>(facets: &'a FacetRefs<'_>) -> Option<&'a Self::View> {
-        facets.cached().sit_target.get_or_init(|| facets.entry.get::<&Fenced<SitTarget>>()).as_deref()?.value.as_ref().map(Self::view)
     }
 
     fn view(&self) -> &Self::View {

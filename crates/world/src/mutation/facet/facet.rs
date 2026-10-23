@@ -1,10 +1,10 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use hecs::{EntityBuilder, EntityRef, Ref};
+use hecs::{EntityBuilder, EntityRef};
 
 use super::impls::{apply_facet, check_support, reject_untrusted};
 use crate::history::WorldChangeClasses;
-use crate::object::components::{Fenced, ObjectProperties, RegionalStamp, newer_region_field};
+use crate::object::components::{Fenced, RegionalStamp, newer_region_field};
 use crate::update::{FieldStamp, Stamp};
 use crate::{
     Appearance, AvatarAppearance, FieldGroup, FieldRejectionReason, Kind, ObjectMedia, PbrMaterialAssignments, PbrMaterialOverrides,
@@ -81,7 +81,7 @@ pub(crate) trait Facet: Clone + PartialEq + Send + Sync + 'static {
     }
 
     fn merge(current: Option<&Self>, update: Self::Update, context: FacetContext) -> FacetMerge<Self>;
-    fn read<'a>(facets: &'a FacetRefs<'_>) -> Option<&'a Self::View>;
+
     fn view(&self) -> &Self::View;
 }
 
@@ -95,17 +95,6 @@ macro_rules! define_facets {
         #[derive(Default)]
         pub(crate) struct FacetUpdates {
             $(pub(crate) $field: Option<<$ty as Facet>::Update>,)+
-        }
-
-        pub(crate) struct FacetRefs<'a> {
-            pub(super) entry: EntityRef<'a>,
-            pub(super) cache: OnceLock<Box<FacetCache<'a>>>,
-        }
-
-        #[derive(Default)]
-        pub(super) struct FacetCache<'a> {
-            $(pub(super) $field: OnceLock<Option<Ref<'a, Fenced<$ty>>>>,)+
-            pub(super) properties: OnceLock<Option<Ref<'a, ObjectProperties>>>,
         }
 
         impl FacetSet {
@@ -163,29 +152,6 @@ macro_rules! define_facets {
             #[cfg(feature = "invariants")]
             pub(crate) fn components_valid(entry: EntityRef<'_>) -> bool {
                 true $(&& entry.get::<&Fenced<$ty>>().map_or(true, |component| component.is_stored()))+
-            }
-        }
-
-        impl<'a> FacetRefs<'a> {
-            pub(crate) fn read(entry: EntityRef<'a>) -> Self {
-                Self { entry, cache: OnceLock::new() }
-            }
-
-            pub(crate) fn get<T: Facet>(&self) -> Option<&T::View> {
-                T::read(self)
-            }
-
-            pub(super) fn cached(&self) -> &FacetCache<'a> {
-                self.cache.get_or_init(|| Box::default())
-            }
-
-            pub(crate) fn properties(&self) -> ObjectProperties {
-                self.cached()
-                    .properties
-                    .get_or_init(|| self.entry.get::<&ObjectProperties>())
-                    .as_deref()
-                    .copied()
-                    .unwrap_or_default()
             }
         }
 

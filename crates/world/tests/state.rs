@@ -95,10 +95,7 @@ fn object_views_support_shared_reads() {
             let reader = scope.spawn(move || shared.properties());
             assert_eq!(scanned.clone().properties(), reader.join().unwrap());
         });
-        drop(scanned);
     }
-    drop(object);
-    drop(second);
     assert_eq!(
         world.remove_object(source(region, 2), address(region, 1).local_id()).unwrap().outcome,
         world::ApplyOutcome::Removed(uuid(60))

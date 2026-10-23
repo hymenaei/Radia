@@ -564,8 +564,10 @@ impl World {
             if run.query.region.is_some_and(|filter| filter != region) || self.spatial_is_dirty(entity) {
                 continue;
             }
-            let unresolved_id =
-                run.object(self, entity).filter(|object| live_matches_without_pose(object, run.query)).map(|object| object.id());
+            let unresolved_id = run.object(self, entity).and_then(|object| {
+                let (properties, provenance) = object.properties_data();
+                live_matches_without_pose(&object, run.query, properties, provenance).then(|| object.id())
+            });
             if let Some(id) = unresolved_id {
                 run.unresolved(id);
             }
@@ -614,20 +616,18 @@ impl World {
     fn live_item(&self, entity: Entity, sphere: Option<Sphere>, run: &mut QueryRun) -> Option<WorldQueryItem> {
         let object = run.object(self, entity)?;
         let id = object.id();
-        if !live_matches_without_pose(&object, run.query) {
+        let (properties, provenance) = object.properties_data();
+        if !live_matches_without_pose(&object, run.query, properties, provenance) {
             return None;
         }
 
         let address = object.address();
-        let properties = object.properties();
-        let provenance = object.properties_provenance();
 
         let pose = if let Some(sphere) = sphere {
             match object.world_pose() {
                 Ok(PoseState::Resolved(pose)) if within_radius(pose.position, sphere) => Some(pose),
                 Ok(PoseState::Resolved(_)) => return None,
                 Ok(PoseState::Unresolved(_)) | Ok(PoseState::Provisional { .. }) | Err(_) => {
-                    drop(object);
                     run.unresolved(id);
                     return None;
                 }
@@ -640,15 +640,8 @@ impl World {
     }
 }
 
-fn live_matches_without_pose(object: &Object<'_>, query: WorldQuery) -> bool {
-    matches_query_fields(
-        query,
-        object.address().region(),
-        object.kind(),
-        object.attachment_point(),
-        object.properties(),
-        object.properties_provenance(),
-    )
+fn live_matches_without_pose(object: &Object<'_>, query: WorldQuery, properties: Properties, provenance: PropertiesProvenance) -> bool {
+    matches_query_fields(query, object.address().region(), object.kind(), object.attachment_point(), properties, provenance)
 }
 
 fn validate_budget(budget: WorldQueryBudget) -> Result<(), WorldReadError> {

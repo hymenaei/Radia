@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use hecs::{EntityBuilder, EntityRef, Iter, QueryOne, Ref, ViewBorrow};
+use hecs::{Component, EntityBuilder, QueryBorrow, QueryOne, Ref, ViewBorrow};
 use uuid::Uuid;
 
 use crate::identity::WorldId;
@@ -18,6 +18,17 @@ pub(crate) struct ObjectStore {
     addresses: HashMap<LocalAddress, Entity>,
     regions: HashMap<Region, BTreeSet<Uuid>>,
     avatars: BTreeSet<Uuid>,
+}
+
+pub(crate) struct ComponentView<'a, T: Component> {
+    store: &'a ObjectStore,
+    view: ViewBorrow<'a, &'a T>,
+}
+
+impl<'a, T: Component> ComponentView<'a, T> {
+    pub(crate) fn get(&self, entity: hecs::Entity) -> Option<&'a T> {
+        self.store.component_ref(entity, Some(&self.view))
+    }
 }
 
 impl ObjectStore {
@@ -156,11 +167,30 @@ impl ObjectStore {
         self.ecs.get::<&ObjectRecord>(entity.0).ok()
     }
 
-    pub(crate) fn object(&self, entity: Entity) -> Option<EntityRef<'_>> {
+    pub(crate) fn object_record(&self, entity: Entity) -> Option<&ObjectRecord> {
         if entity.1 != self.world {
             return None;
         }
-        self.ecs.entity(entity.0).ok()
+        self.component_ref(entity.0, None)
+    }
+
+    pub(crate) fn component<T: Component>(&self, entity: hecs::Entity) -> Option<&T> {
+        self.component_ref(entity, None)
+    }
+
+    pub(crate) fn component_view<T: Component>(&self) -> ComponentView<'_, T> {
+        ComponentView { store: self, view: self.ecs.view::<&T>() }
+    }
+
+    fn component_ref<'a, T: Component>(&'a self, entity: hecs::Entity, view: Option<&ViewBorrow<'a, &'a T>>) -> Option<&'a T> {
+        unsafe {
+            if let Some(view) = view {
+                let component = view.get_unchecked(entity)?;
+                Some(&*(component as *const T))
+            } else {
+                self.ecs.get_unchecked::<&T>(entity).ok()
+            }
+        }
     }
 
     pub(crate) fn facets(&self, entity: hecs::Entity, updates: &FacetUpdates, reset: bool) -> FacetSet {
@@ -185,10 +215,11 @@ impl ObjectStore {
             .unwrap_or_default()
     }
 
-    pub(crate) fn removal_data(&self, entity: hecs::Entity) -> (Uuid, Kind, ObjectState, ObjectProperties, usize) {
-        let entry = self.ecs.entity(entity).expect("removal target is live");
-        let mut query = entry.query::<(&ObjectRecord, Option<&ObjectProperties>, Option<&Fenced<Arc<ObjectMedia>>>)>();
-        let (record, properties, object_media) = query.get().expect("every object has a record");
+    pub(crate) fn removal_data(&mut self, entity: hecs::Entity) -> (Uuid, Kind, ObjectState, ObjectProperties, usize) {
+        let (record, properties, object_media) = self
+            .ecs
+            .query_one_mut::<(&ObjectRecord, Option<&ObjectProperties>, Option<&Fenced<Arc<ObjectMedia>>>)>(entity)
+            .expect("every object has a record");
         (
             record.id,
             record.kind,
@@ -198,8 +229,12 @@ impl ObjectStore {
         )
     }
 
-    pub(crate) fn objects(&self) -> Iter<'_> {
-        self.ecs.iter()
+    pub(crate) fn objects(&self) -> QueryBorrow<'_, (hecs::Entity, &ObjectRecord)> {
+        self.ecs.query::<(hecs::Entity, &ObjectRecord)>()
+    }
+
+    pub(crate) fn record_view(&self) -> ComponentView<'_, ObjectRecord> {
+        self.component_view::<ObjectRecord>()
     }
 
     pub(crate) fn records(&self) -> ViewBorrow<'_, &ObjectRecord> {

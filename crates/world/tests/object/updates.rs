@@ -345,8 +345,6 @@ fn untracked_updates_respect_field_authority() {
     assert_eq!(current.position(), Some(Vec3::X));
     assert_eq!(current.scale(), Some(Vec3::ONE));
     assert_eq!(current.linear_motion().velocity, Some(Vec3::Z));
-    drop(current);
-
     let mut observation = object(untracked(region, 200), 320, 1, Object, Root);
     observation.pose = Some(Pose { position: Some(Vec3::Y), rotation: None });
     observation.scale = Some(Vec3::splat(3.0));
@@ -489,8 +487,6 @@ fn untracked_updates_fill_unfenced_groups() {
     assert_eq!(current.linear_motion().velocity, Some(Vec3::Y));
     assert_eq!(current.angular_velocity(), Some(Vec3::Z));
     assert_eq!(current.scale(), Some(Vec3::splat(2.0)));
-    drop(current);
-
     let patch = ObjectPatch {
         pose: Some(Pose { position: Some(Vec3::Y), rotation: None }),
         linear_motion: LinearMotion { velocity: Some(Vec3::Z), acceleration: None },
@@ -537,8 +533,6 @@ fn stale_observation_fills_only_unset_groups() {
     assert_eq!(current.transform().position(), Some(Vec3::Y));
     assert_eq!(current.transform().scale(), Some(Vec3::splat(2.0)));
     assert_eq!(current.properties().owner_id, Some(uuid(72)));
-    drop(current);
-
     let mut stale_alias = object(source(region, 115), 70, 11, Object, Root);
     stale_alias.pose = Some(Pose { position: Some(Vec3::splat(8.0)), rotation: None });
     stale_alias.scale = Some(Vec3::splat(8.0));

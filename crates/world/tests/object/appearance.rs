@@ -72,8 +72,6 @@ fn shape_appearance_fences_are_independent() {
     let current = world.object(entity).unwrap();
     assert_eq!(current.shape(), Some(mesh_shape(0x209)));
     assert_eq!(current.appearance(), Some(Appearance::Avatar));
-    drop(current);
-
     let clear =
         ObjectPatch { shape: FieldUpdate::Clear, appearance: FieldUpdate::Clear, ..ObjectPatch::new(source(region, 30), local_id(1)) };
     assert_eq!(world.patch_object(clear).unwrap().outcome, Updated(entity));
@@ -508,8 +506,6 @@ fn transfer_scopes_regional_fields() {
     assert_eq!(view.properties().owner_id, Some(owner));
     assert_eq!(view.properties().creator_id, Some(creator));
     assert_eq!(view.sit_target(), Some(destination_target));
-    drop(view);
-
     let returned = world.observe_object(object(source(first, 2), 380, 2, Object, Root)).unwrap();
     assert_eq!(returned.outcome, Updated(entity));
     let next_creator = uuid(383);

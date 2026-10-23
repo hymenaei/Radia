@@ -373,8 +373,6 @@ fn agent_region_change_requires_handoff() {
     assert_eq!(current.linear_motion(), LinearMotion::default());
     assert_eq!(current.angular_velocity(), None);
     assert_eq!(current.properties().owner_id, Some(uuid(41)));
-    drop(current);
-
     let return_handoff = object(source(source_region, 104), 40, 10, Avatar, Root);
     assert_eq!(world.handoff_agent(destination_region, return_handoff).unwrap().outcome, AgentHandedOff(agent));
     let stale_property = PropertiesPatch { owner_id: Some(uuid(42)), creator_id: None };

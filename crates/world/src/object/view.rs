@@ -1,10 +1,13 @@
-use std::sync::{Arc, OnceLock};
+use std::collections::btree_set::Iter as BTreeSetIter;
+use std::sync::Arc;
 
-use hecs::{EntityRef, Iter, Ref};
+use hecs::{QueryBorrow, Ref};
 use math::{Quat, Vec3};
 use uuid::Uuid;
 
-use crate::mutation::facet::{Facet, FacetRefs};
+use crate::mutation::facet::Facet;
+use crate::object::components::{Fenced, ObjectProperties};
+use crate::object::storage::ComponentView;
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, Kind, LinearMotion, LocalAddress, LocalTransform, ObjectMedia,
     Parent, PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Properties, PropertiesProvenance, Shape, SitTarget,
@@ -14,29 +17,23 @@ use crate::{ObjectOrdering, ObjectRecord, World};
 
 pub struct Object<'a> {
     pub(crate) entity: Entity,
-    entry: EntityRef<'a>,
-    record: OnceLock<Ref<'a, ObjectRecord>>,
-    facets: OnceLock<FacetRefs<'a>>,
+    record: &'a ObjectRecord,
     pub(crate) world: &'a World,
 }
 
 impl<'a> Object<'a> {
     #[inline(always)]
-    pub(crate) fn new(entry: EntityRef<'a>, world: &'a World) -> Self {
-        let entity = Entity(entry.entity(), world.id);
-        Self { entity, entry, record: OnceLock::new(), facets: OnceLock::new(), world }
+    pub(crate) fn new(entity: Entity, record: &'a ObjectRecord, world: &'a World) -> Self {
+        Self { entity, record, world }
     }
 
-    pub(crate) fn record(&self) -> &ObjectRecord {
-        self.record.get_or_init(|| self.entry.get::<&ObjectRecord>().expect("every object has a record"))
+    pub(crate) fn record(&self) -> &'a ObjectRecord {
+        self.record
     }
 
-    fn facet<T: Facet>(&self) -> Option<&T::View> {
-        self.facet_refs().get::<T>()
-    }
-
-    fn facet_refs(&self) -> &FacetRefs<'a> {
-        self.facets.get_or_init(|| FacetRefs::read(self.entry))
+    fn facet<T: Facet>(&self) -> Option<&'a T::View> {
+        let store = &self.world.store;
+        store.component::<Fenced<T>>(self.entity.0)?.value.as_ref().map(T::view)
     }
 
     pub(crate) fn ordering(&self) -> Ref<'a, ObjectOrdering> {
@@ -49,47 +46,47 @@ impl<'a> Object<'a> {
     }
 
     pub fn id(&self) -> Uuid {
-        self.record().id
+        self.record.id
     }
 
     pub fn kind(&self) -> Kind {
-        self.record().kind
+        self.record.kind
     }
 
     pub fn transform(&self) -> Transform {
-        self.record().state.transform
+        self.record.state.transform
     }
 
     pub fn position(&self) -> Option<Vec3> {
-        self.record().state.transform.position()
+        self.record.state.transform.position()
     }
 
     pub fn rotation(&self) -> Option<Quat> {
-        self.record().state.transform.rotation()
+        self.record.state.transform.rotation()
     }
 
     pub fn scale(&self) -> Option<Vec3> {
-        self.record().state.transform.scale()
+        self.record.state.transform.scale()
     }
 
     pub fn local_transform(&self) -> Option<LocalTransform> {
-        self.record().state.transform.local_transform()
+        self.record.state.transform.local_transform()
     }
 
     pub fn address(&self) -> LocalAddress {
-        self.record().state.binding.address
+        self.record.state.binding.address
     }
 
     pub fn parent(&self) -> Parent {
-        self.record().state.parent
+        self.record.state.parent
     }
 
     pub fn linear_motion(&self) -> LinearMotion {
-        self.record().state.linear_motion
+        self.record.state.linear_motion
     }
 
     pub fn angular_velocity(&self) -> Option<Vec3> {
-        self.record().state.angular_velocity
+        self.record.state.angular_velocity
     }
 
     pub fn shape(&self) -> Option<Shape> {
@@ -100,36 +97,41 @@ impl<'a> Object<'a> {
         self.facet::<Appearance>().copied()
     }
 
-    pub fn surface_appearance(&self) -> Option<&SurfaceAppearance> {
+    pub fn surface_appearance(&self) -> Option<&'a SurfaceAppearance> {
         self.facet::<Arc<SurfaceAppearance>>()
     }
 
-    pub fn pbr_materials(&self) -> Option<&PbrMaterialAssignments> {
+    pub fn pbr_materials(&self) -> Option<&'a PbrMaterialAssignments> {
         self.facet::<Arc<PbrMaterialAssignments>>()
     }
 
-    pub fn pbr_material_overrides(&self) -> Option<&PbrMaterialOverrides> {
+    pub fn pbr_material_overrides(&self) -> Option<&'a PbrMaterialOverrides> {
         self.facet::<Arc<PbrMaterialOverrides>>()
     }
 
-    pub fn object_media(&self) -> Option<&ObjectMedia> {
+    pub fn object_media(&self) -> Option<&'a ObjectMedia> {
         self.facet::<Arc<ObjectMedia>>()
     }
 
-    pub fn avatar_appearance(&self) -> Option<&AvatarAppearance> {
+    pub fn avatar_appearance(&self) -> Option<&'a AvatarAppearance> {
         self.facet::<Arc<AvatarAppearance>>()
     }
 
     pub fn properties(&self) -> Properties {
-        self.facet_refs().properties().properties
+        self.properties_data().0
     }
 
     pub fn properties_provenance(&self) -> PropertiesProvenance {
-        self.facet_refs().properties().properties_provenance
+        self.properties_data().1
+    }
+
+    pub(crate) fn properties_data(&self) -> (Properties, PropertiesProvenance) {
+        let properties = self.world.store.component::<ObjectProperties>(self.entity.0).copied().unwrap_or_default();
+        (properties.properties, properties.properties_provenance)
     }
 
     pub fn attachment_point(&self) -> Option<AttachmentPoint> {
-        self.record().state.attachment_point
+        self.record.state.attachment_point
     }
 
     pub fn sit_target(&self) -> Option<SitTarget> {
@@ -151,20 +153,43 @@ impl<'a> Object<'a> {
 
 impl Clone for Object<'_> {
     fn clone(&self) -> Self {
-        let entry = self.world.store.object(self.entity).expect("object clone target is live");
-        Self::new(entry, self.world)
+        let record = self.world.store.object_record(self.entity).expect("object clone target is live");
+        Self::new(self.entity, record, self.world)
     }
 }
 
 pub struct Objects<'a> {
-    pub(crate) entries: Iter<'a>,
+    pub(crate) records: QueryBorrow<'a, (hecs::Entity, &'a ObjectRecord)>,
     pub(crate) world: &'a World,
 }
 
 impl<'a> Objects<'a> {
     #[inline(always)]
-    pub fn iter(&mut self) -> impl Iterator<Item = Object<'a>> + '_ {
+    pub fn iter<'b>(&'b mut self) -> impl Iterator<Item = Object<'b>> + 'b {
         let world = self.world;
-        self.entries.by_ref().map(move |entry| Object::new(entry, world))
+        self.records.iter().map(move |(entity, record)| Object::new(Entity(entity, world.id), record, world))
+    }
+}
+
+pub(crate) struct IndexedObjects<'a> {
+    ids: BTreeSetIter<'a, Uuid>,
+    records: ComponentView<'a, ObjectRecord>,
+    world: &'a World,
+}
+
+impl<'a> IndexedObjects<'a> {
+    pub(crate) fn new(ids: BTreeSetIter<'a, Uuid>, world: &'a World) -> Self {
+        Self { ids, records: world.store.record_view(), world }
+    }
+}
+
+impl<'a> Iterator for IndexedObjects<'a> {
+    type Item = Object<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let id = *self.ids.next()?;
+        let entity = self.world.entity(id).expect("object index contains only live entities");
+        let record = self.records.get(entity.0).expect("object index contains only complete objects");
+        Some(Object::new(entity, record, self.world))
     }
 }

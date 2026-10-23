@@ -54,6 +54,8 @@ Shared ID newtypes distinguish objects, assets, avatars, groups, regions, parcel
 
 ### `crates/network`
 
+HTTP uses Reqwest 0.13 with default features disabled and the rustls feature enabled. The default crypto provider is aws-lc; platform certificate verification uses the operating system's trust policy. The viewer does not install a global crypto provider or disable certificate checks. Redirects remain disabled, compressed responses remain raw, and request deadlines cover response-body reads. The aws-lc native dependency adds build-tool requirements described in tooling.md.
+
 ### `crates/protocol`
 
 Protocol owns wire framing, field codecs, typed messages, and generated metadata from the pinned Second Life message template. Messages are grouped by agent, chat, circuit, region, map, and object responsibilities. Shared object payloads and reconstruction rules belong to the object group; raw field reading and writing belong to the LLUDP codec. Each leaf module retains its protocol message name in snake_case. Root message re-exports keep common type imports concise. Wire names and field layouts remain exact.

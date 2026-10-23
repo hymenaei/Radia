@@ -1,6 +1,8 @@
 use std::{
+    backtrace::Backtrace,
     fs::{self, OpenOptions},
     io::{self, IsTerminal},
+    panic,
     path::Path,
 };
 
@@ -15,7 +17,61 @@ use tracing_subscriber::{
 const LOG_DIR: &str = "target/logs";
 const MAX_LOGS: usize = 20;
 
-pub(crate) fn init() -> io::Result<WorkerGuard> {
+pub(crate) fn init() -> Option<WorkerGuard> {
+    let (json, guard, file_error) = match create_session_log() {
+        Ok(file) => {
+            let (writer, guard) = tracing_appender::non_blocking(file);
+            let file_filter = EnvFilter::try_from_env("FILE_LOG").unwrap_or_else(|_| EnvFilter::new("trace"));
+            let json = fmt::layer()
+                .json()
+                .with_timer(ChronoLocal::new("%Y-%m-%dT%H:%M:%S%.3f%:z".into()))
+                .with_file(true)
+                .with_line_number(true)
+                .with_writer(writer)
+                .with_filter(file_filter);
+            (Some(json), Some(guard), None)
+        }
+        Err(error) => (None, None, Some(error)),
+    };
+
+    let console_filter = EnvFilter::try_from_env("LOG").unwrap_or_else(|_| EnvFilter::new("warn,viewer=info"));
+
+    let console = fmt::layer()
+        .compact()
+        .with_timer(ChronoLocal::new("%H:%M:%S%.3f".into()))
+        .with_ansi(io::stderr().is_terminal())
+        .with_writer(io::stderr)
+        .with_filter(console_filter);
+
+    let subscriber = tracing_subscriber::registry().with(console).with(json);
+
+    #[cfg(feature = "tracy")]
+    let subscriber = subscriber.with(tracing_tracy::TracyLayer::default());
+
+    if let Err(error) = subscriber.try_init() {
+        eprintln!("Could not initialize tracing: {error}");
+    }
+
+    if let Some(error) = file_error {
+        tracing::warn!(%error, "Could not create session log; continuing with console logging");
+    }
+
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        tracing::error!(
+            target: "viewer::panic",
+            panic = info.payload_as_str().unwrap_or("non-string panic payload"),
+            location = info.location().map(tracing::field::display),
+            backtrace = %Backtrace::force_capture(),
+            "panic"
+        );
+        default_hook(info);
+    }));
+
+    guard
+}
+
+fn create_session_log() -> io::Result<std::fs::File> {
     let dir = Path::new(LOG_DIR);
     fs::create_dir_all(dir)?;
 
@@ -44,30 +100,7 @@ pub(crate) fn init() -> io::Result<WorkerGuard> {
     fs::hard_link(&path, &latest)?;
     prune_logs(dir)?;
 
-    let (writer, guard) = tracing_appender::non_blocking(file);
-
-    let console_filter = EnvFilter::try_from_env("LOG").unwrap_or_else(|_| EnvFilter::new("warn,viewer=info"));
-
-    let file_filter = EnvFilter::try_from_env("FILE_LOG").unwrap_or_else(|_| EnvFilter::new("trace"));
-
-    let console = fmt::layer()
-        .compact()
-        .with_timer(ChronoLocal::new("%H:%M:%S%.3f".into()))
-        .with_ansi(io::stderr().is_terminal())
-        .with_writer(io::stderr)
-        .with_filter(console_filter);
-
-    let json = fmt::layer()
-        .json()
-        .with_timer(ChronoLocal::new("%Y-%m-%dT%H:%M:%S%.3f%:z".into()))
-        .with_file(true)
-        .with_line_number(true)
-        .with_writer(writer)
-        .with_filter(file_filter);
-
-    tracing_subscriber::registry().with(console).with(json).init();
-
-    Ok(guard)
+    Ok(file)
 }
 
 fn prune_logs(dir: &Path) -> io::Result<()> {

@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use math::{DQuat, DVec3};
+use math::{DQuat, DVec3, ray_intersects_bounds, ray_triangle_intersection};
 
 use crate::DEFAULT_DRAW_DISTANCE;
 
@@ -136,7 +136,7 @@ pub(crate) fn pick_world_point(
         if !origin.is_finite() || !direction.is_finite() {
             continue;
         }
-        if !math::ray_intersects_bounds(origin, direction, instance.mesh.mesh().bounds(), closest) {
+        if !ray_intersects_bounds(origin, direction, instance.mesh.mesh().bounds(), closest) {
             continue;
         }
         let mesh = instance.mesh.mesh();
@@ -152,7 +152,7 @@ pub(crate) fn pick_world_point(
             }
             work += 1;
             let triangle = indices.map(|index| mesh.vertices()[index as usize].position);
-            let Some(distance) = math::ray_triangle_intersection(origin, direction, triangle, double_sided) else { continue };
+            let Some(distance) = ray_triangle_intersection(origin, direction, triangle, double_sided) else { continue };
             if distance >= 0.05 && distance < closest {
                 closest = distance;
                 found = true;

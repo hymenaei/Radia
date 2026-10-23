@@ -13,6 +13,7 @@ use std::{
 use gpui::{App, Bounds, Context, Pixels, Point, Size, Subscription, Window, point, px, size};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_slice, to_vec};
+use utils::write_atomic;
 
 const SAVE_DELAY: Duration = Duration::from_millis(400);
 const MAX_WINDOW_DIMENSION: u32 = 8192;
@@ -145,7 +146,7 @@ fn save_geometry(path: &Path, key: &str, geometry: StoredWindowGeometry) -> std:
     geometries.insert(key.to_owned(), geometry);
     let contents = to_vec(&geometries).map_err(std::io::Error::other)?;
     fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
-    utils::write_atomic(path, &contents)
+    write_atomic(path, &contents)
 }
 
 fn clamp_size(size: StoredWindowSize, minimum: StoredWindowSize) -> StoredWindowSize {

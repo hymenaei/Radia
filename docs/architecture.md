@@ -17,7 +17,7 @@ This section talks briefly about the important crates and data structures. Pay a
 Note also which crates are **API Boundaries**. Rules at the boundary are different. Substantial changes to a boundary's public API need approval first, and everything behind it can change freely.
 
 ```text
-apps/viewer/           # package `viewer`, executable `radia`
+apps/viewer/           # package `viewer`, executable `viewer`
 crates/assets/         # package `assets`
 crates/llsd/           # package `llsd`
 crates/math/           # package `math`

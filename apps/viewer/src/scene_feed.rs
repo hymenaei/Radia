@@ -313,7 +313,7 @@ mod tests {
     use crate::asset_coordinator::AssetCoordinator;
     use crate::world_reader::WorldReadHost;
     use futures::join;
-    use math::{DVec3, Vec3};
+    use math::{DVec3, Quat, Vec3};
     use scene::Status;
     use std::{
         future::{pending, ready},
@@ -422,7 +422,7 @@ mod tests {
             Kind::Object,
             ParentUpdate::Root,
         );
-        object.pose = Some(Pose { position: Some(Vec3::new(10.0, 0.0, 0.0)), rotation: Some(math::Quat::IDENTITY) });
+        object.pose = Some(Pose { position: Some(Vec3::new(10.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
         object.scale = Some(Vec3::ONE);
         object.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
         object.appearance = FieldUpdate::Set(Appearance::Surface);

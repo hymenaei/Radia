@@ -7,6 +7,7 @@ use std::{
 use network::Grid;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, to_vec_pretty};
+use utils::write_atomic;
 use uuid::Uuid;
 
 use super::FavoriteLocation;
@@ -156,7 +157,7 @@ fn save_to(path: &Path, favorites: &FavoriteStore) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
 
     let contents = to_vec_pretty(favorites).map_err(|error| format!("Could not encode favorite landmarks: {error}"))?;
-    utils::write_atomic(path, &contents).map_err(|error| format!("Could not save login locations to {}: {error}", path.display()))
+    write_atomic(path, &contents).map_err(|error| format!("Could not save login locations to {}: {error}", path.display()))
 }
 
 #[cfg(test)]

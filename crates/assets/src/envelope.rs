@@ -1,10 +1,10 @@
 use std::io::{Read, Write};
 
-use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use llsd::{Binary, Limits, Value, binary, xml};
 use utils::AssetId;
 
 use crate::{Failure, Kind, Resource};
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 
 const MAX_ENVELOPE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -62,7 +62,7 @@ pub(crate) fn extract(resource: Resource, bytes: Vec<u8>) -> Result<Vec<u8>, Fai
             };
             let Some(Value::Binary(zipped)) = fields.remove("Zipped") else { return Err(Failure::Malformed) };
             let mut decoder = ZlibDecoder::new(zipped.as_slice());
-            let mut inflated = Vec::with_capacity(MAX_ENVELOPE_BYTES);
+            let mut inflated = Vec::new();
             let mut chunk = [0; 16 * 1024];
             loop {
                 let count = decoder.read(&mut chunk).map_err(|_| Failure::Malformed)?;

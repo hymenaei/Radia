@@ -36,6 +36,10 @@ The viewer coordinates the library crates. The common directory is being removed
 
 ### `crates/assets`
 
+Assets owns request admission, bounded decoding, and retained content. Scratch reservations and resident charges are distinct private types. Retaining content consumes its scratch reservation; the resulting charge has no resize or split operations. Resident handles keep data charged until the final owner releases it, independently of scratch-work admission. Closing a job cancellation channel ends the cancellation wait.
+
+Material decoding is grouped by legacy and PBR formats, with shared texture and sampler values in their parent module. Texture decoding, headers, and handle lifetimes share a texture module. Legacy envelope inflation grows with actual content while retaining its fixed decompression limit.
+
 ### `crates/llsd`
 
 ### `crates/math`

@@ -6,16 +6,12 @@ use std::{
 
 use crate::{
     Blob, EnvironmentDescription, Failure, Image, Kind, MaterialDescription, Resource, TextureHandle, TextureSize, WeakTexture,
-    budget::Reservation, envelope, environment, material, texture,
+    budget::{Reservation, Resident},
+    envelope, environment, material, texture,
 };
 
 #[derive(Clone)]
 pub struct Environment(Arc<EnvironmentInner>);
-
-struct EnvironmentInner {
-    description: EnvironmentDescription,
-    _reservation: Reservation,
-}
 
 impl Deref for Environment {
     type Target = EnvironmentDescription;
@@ -30,13 +26,13 @@ impl Debug for Environment {
     }
 }
 
+struct EnvironmentInner {
+    description: EnvironmentDescription,
+    _reservation: Resident,
+}
+
 #[derive(Clone)]
 pub struct Material(Arc<MaterialInner>);
-
-struct MaterialInner {
-    description: MaterialDescription,
-    _reservation: Reservation,
-}
 
 impl Deref for Material {
     type Target = MaterialDescription;
@@ -51,11 +47,26 @@ impl Debug for Material {
     }
 }
 
+struct MaterialInner {
+    description: MaterialDescription,
+    _reservation: Resident,
+}
+
 #[derive(Clone, Debug)]
 pub enum Content {
     Texture(TextureHandle),
     Material(Material),
     Environment(Environment),
+}
+
+impl Content {
+    pub(crate) fn downgrade(&self) -> StoredContent {
+        match self {
+            Self::Texture(texture) => StoredContent::Texture(texture.downgrade()),
+            Self::Material(material) => StoredContent::Material(material.clone()),
+            Self::Environment(environment) => StoredContent::Environment(environment.clone()),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -71,16 +82,6 @@ impl StoredContent {
             Self::Texture(texture) => texture.upgrade().map(Content::Texture),
             Self::Material(material) => Some(Content::Material(material.clone())),
             Self::Environment(environment) => Some(Content::Environment(environment.clone())),
-        }
-    }
-}
-
-impl Content {
-    pub(crate) fn downgrade(&self) -> StoredContent {
-        match self {
-            Self::Texture(texture) => StoredContent::Texture(texture.downgrade()),
-            Self::Material(material) => StoredContent::Material(material.clone()),
-            Self::Environment(environment) => StoredContent::Environment(environment.clone()),
         }
     }
 }
@@ -124,7 +125,7 @@ impl Prepared {
                 Ok(Finished::Other(Content::Material(Material(Arc::new(MaterialInner { description, _reservation: reservation })))))
             }
             Data::Environment(description) => {
-                let bytes = description.retained_bytes() + size_of::<Reservation>() + 2 * size_of::<usize>();
+                let bytes = description.retained_bytes() + size_of::<Resident>() + 2 * size_of::<usize>();
                 let reservation = reservation.retain(bytes).map_err(|_| Failure::TooLarge)?;
                 Ok(Finished::Other(Content::Environment(Environment(Arc::new(EnvironmentInner {
                     description,
@@ -148,8 +149,8 @@ pub(crate) fn prepare_cancellable(
     let bytes = envelope::extract(resource, bytes)?;
     let data = match resource.kind {
         Kind::Texture => Data::Texture(texture::decode(&bytes, size, &cancelled)?),
-        Kind::PbrMaterial => Data::Material(material::pbr(&bytes)?),
-        Kind::LegacyMaterial => Data::Material(material::legacy(&bytes)?),
+        Kind::PbrMaterial => Data::Material(material::pbr::decode(&bytes)?),
+        Kind::LegacyMaterial => Data::Material(material::legacy::decode(&bytes)?),
         Kind::Environment => Data::Environment(environment::decode(&bytes)?),
     };
     if cancelled() {

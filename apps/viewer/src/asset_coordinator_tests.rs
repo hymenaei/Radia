@@ -154,7 +154,7 @@ async fn missing_grants_and_discovery_retry() {
 
 #[tokio::test]
 async fn material_preparation_publishes_content() {
-    use assets::{AlphaMode, Content, MaterialDescription, Status};
+    use assets::{PbrAlphaMode, Content, MaterialDescription, Status};
 
     let peer = Peer::new(2, |index, _, base| {
         if index == 0 {
@@ -196,7 +196,7 @@ async fn material_preparation_publishes_content() {
         demand.changed().await;
     };
     let MaterialDescription::Pbr(description) = &*material else { panic!("expected PBR material") };
-    assert_eq!(description.alpha_mode, AlphaMode::Mask);
+    assert_eq!(description.alpha_mode, PbrAlphaMode::Mask);
     assert_eq!(description.alpha_cutoff, 0.75);
     cancel.send(()).unwrap();
     service.stop().await;

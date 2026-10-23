@@ -1,4 +1,5 @@
-use crate::{Failure, texture::MAX_SOURCE_EDGE};
+use super::MAX_SOURCE_EDGE;
+use crate::Failure;
 
 #[derive(Clone, Copy)]
 pub(super) struct Header {
@@ -13,6 +14,7 @@ fn short(bytes: &[u8], offset: usize) -> Result<u16, Failure> {
     let bytes = bytes.get(offset..offset + 2).ok_or(Failure::Malformed)?;
     Ok(u16::from_be_bytes(bytes.try_into().expect("two bytes")))
 }
+
 fn word(bytes: &[u8], offset: usize) -> Result<u32, Failure> {
     let bytes = bytes.get(offset..offset + 4).ok_or(Failure::Malformed)?;
     Ok(u32::from_be_bytes(bytes.try_into().expect("four bytes")))

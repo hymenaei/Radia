@@ -1,11 +1,13 @@
-use super::*;
-use crate::Priority;
-use crate::{
-    Image,
-    budget::{ASSET_WORK_BYTES, TEXTURE_WORK_BYTES},
-};
+use llsd::binary;
 use test_support::texture::{GRAY_4096_J2C, RGBA_J2C, RGBA_RAW};
 use uuid::Uuid;
+
+use super::*;
+use crate::{
+    Image, Priority,
+    budget::{ASSET_WORK_BYTES, TEXTURE_WORK_BYTES},
+    material::{MaterialDescription, PbrMaterial},
+};
 
 fn resource(id: u128) -> Resource {
     Resource { id: AssetId::new(Uuid::from_u128(id)), kind: Kind::Texture }
@@ -497,7 +499,136 @@ proptest::proptest! {
             proptest::prop_assert!(stats.charged_bytes - stats.resident_bytes <= ASSET_WORK_BYTES);
             proptest::prop_assert!(stats.resident_bytes <= stats.charged_bytes);
         }
-        drop(leases); store.close(); drop(jobs);
+        drop(leases);
+        store.close();
+        drop(jobs);
         proptest::prop_assert_eq!(budget.stats().charged_bytes, 0);
     }
+}
+
+const PBR_JSON: &str = r#"{"asset":{"version":"2.0"},"materials":[{}]}"#;
+
+fn legacy_fields(mode: i32, cutoff: i32) -> llsd::Map {
+    let mut fields: llsd::Map = [
+        ("NormMap".into(), llsd::Value::Uuid(Uuid::from_u128(7))),
+        ("SpecMap".into(), llsd::Value::Uuid(Uuid::nil())),
+        ("SpecColor".into(), llsd::Value::Array([51, 102, 153, 204].map(llsd::Value::Integer).into())),
+    ]
+    .into();
+    for (name, value) in [
+        ("NormOffsetX", 2500),
+        ("NormOffsetY", -5000),
+        ("NormRepeatX", 20000),
+        ("NormRepeatY", 30000),
+        ("NormRotation", 15000),
+        ("SpecOffsetX", -1250),
+        ("SpecOffsetY", 7500),
+        ("SpecRepeatX", -10000),
+        ("SpecRepeatY", 0),
+        ("SpecRotation", -20000),
+        ("SpecExp", 137),
+        ("EnvIntensity", 73),
+        ("DiffuseAlphaMode", mode),
+        ("AlphaMaskCutoff", cutoff),
+    ] {
+        fields.insert(name.into(), llsd::Value::Integer(value));
+    }
+    fields
+}
+
+fn material_envelope(json: &str) -> Vec<u8> {
+    let mut bytes = b"{\0\0\0\x03k\0\0\0\x07versions\0\0\0\x031.1k\0\0\0\x04types\0\0\0\x08GLTF 2.0k\0\0\0\x04datas".to_vec();
+    bytes.extend((json.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(json.as_bytes());
+    bytes.push(b'}');
+    bytes
+}
+
+fn legacy_envelope(id: AssetId) -> Vec<u8> {
+    use flate2::{Compression, write::ZlibEncoder};
+    use std::io::Write;
+    let record = binary::to_vec(&llsd::Value::Array(vec![llsd::Value::Map(
+        [
+            ("ID".into(), llsd::Value::Binary(llsd::Binary::new(id.uuid().as_bytes().to_vec()))),
+            ("Material".into(), llsd::Value::Map(legacy_fields(2, 128))),
+        ]
+        .into(),
+    )]))
+    .unwrap();
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&record).unwrap();
+    let zipped = encoder.finish().unwrap();
+    llsd::xml::to_vec(&llsd::Value::Map([("Zipped".into(), llsd::Value::Binary(llsd::Binary::new(zipped)))].into())).unwrap()
+}
+
+#[test]
+fn shared_material_retains_charge() {
+    let now = Instant::now();
+    let budget = Budget::default();
+    let mut store = Store::new(budget.clone());
+    let route = store.register_route().unwrap();
+    let resource = Resource { id: AssetId::new(Uuid::from_u128(2)), kind: Kind::PbrMaterial };
+    let first = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
+    let second = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
+    let mut job = store.next_job(now).unwrap();
+    assert!(store.try_start_decode(&mut job));
+    let prepared = job.prepare(material_envelope(PBR_JSON)).unwrap();
+    store.complete(job, Ok(prepared), now);
+    let Status::Ready(Content::Material(material)) = first.status() else { panic!("expected material") };
+    let Status::Ready(Content::Material(shared)) = second.status() else { panic!("expected shared material") };
+    assert!(std::ptr::eq(&*material, &*shared));
+    assert_eq!(budget.stats().resident_bytes, size_of::<MaterialDescription>());
+    store.close();
+    assert!(matches!(second.status(), Status::StaleSession));
+    assert_eq!(*material, MaterialDescription::Pbr(PbrMaterial::default()));
+    drop(material);
+    assert_eq!(budget.stats().charged_bytes, size_of::<MaterialDescription>());
+    drop(shared);
+    assert_eq!(budget.stats().charged_bytes, 0);
+}
+
+#[test]
+fn retired_material_cannot_publish() {
+    let now = Instant::now();
+    let budget = Budget::default();
+    let mut store = Store::new(budget.clone());
+    let route = store.register_route().unwrap();
+    let resource = Resource { id: AssetId::new(Uuid::from_u128(3)), kind: Kind::LegacyMaterial };
+    let old = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
+    let mut job = store.next_job(now).unwrap();
+    assert!(store.try_start_decode(&mut job));
+    let prepared = job.prepare(legacy_envelope(resource.id)).unwrap();
+    store.retire_route(route);
+    store.complete(job, Ok(prepared), now);
+    assert!(matches!(old.status(), Status::Failed { failure: Failure::RouteClosed, .. }));
+    assert_eq!(budget.stats().charged_bytes, 0);
+    let route = store.register_route().unwrap();
+    let current = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
+    let mut job = store.next_job(now).unwrap();
+    assert!(store.try_start_decode(&mut job));
+    let result = job.prepare(legacy_envelope(resource.id));
+    store.complete(job, result, now);
+    let Status::Ready(Content::Material(material)) = current.status() else { panic!("expected legacy material") };
+    assert_eq!(*material, crate::material::legacy::decode(&binary::to_vec(&llsd::Value::Map(legacy_fields(2, 128))).unwrap()).unwrap());
+}
+
+#[test]
+fn material_identity_must_match() {
+    let now = Instant::now();
+    let budget = Budget::default();
+    let mut store = Store::new(budget.clone());
+    let route = store.register_route().unwrap();
+    let resource = Resource { id: AssetId::new(Uuid::from_u128(1)), kind: Kind::PbrMaterial };
+    let demand = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
+    let mut job = store.next_job(now).unwrap();
+    assert!(store.try_start_decode(&mut job));
+    let other = Resource { id: AssetId::new(Uuid::from_u128(2)), ..resource };
+    let _other_demand = store.request(route, Request::new(other), Priority::Visible, now).unwrap();
+    let mut other_job = store.next_job(now).unwrap();
+    assert!(store.try_start_decode(&mut other_job));
+    let result = other_job.prepare(material_envelope(PBR_JSON));
+    drop(other_job);
+    store.complete(job, result, now);
+    assert!(matches!(demand.status(), Status::Failed { failure: Failure::Malformed, retry_at: None }));
+    assert_eq!(budget.stats().charged_bytes, 0);
 }

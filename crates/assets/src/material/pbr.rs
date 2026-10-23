@@ -1,136 +1,14 @@
-use llsd::{Limits, binary};
 use serde_json::{Map, Value};
-use utils::AssetId;
 use uuid::Uuid;
 
+use super::{Filter, MaterialDescription, MaterialTexture, MinFilter, Sampler, Wrap, json, texture_ref};
 use crate::Failure;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum AlphaMode {
+pub enum PbrAlphaMode {
     Opaque,
     Mask,
     Blend,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LegacyAlphaMode {
-    Opaque,
-    Blend,
-    Mask,
-    Emissive,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LegacyMaterial {
-    pub diffuse_color: [f32; 4],
-    pub diffuse: MaterialTexture,
-    pub texgen: TexGen,
-    pub fullbright: bool,
-    pub bump: u8,
-    pub shiny: u8,
-    pub glow: f32,
-    pub normal: MaterialTexture,
-    pub specular: MaterialTexture,
-    pub specular_color: [u8; 4],
-    pub specular_exponent: u8,
-    pub environment_intensity: u8,
-    pub alpha_mode: LegacyAlphaMode,
-    pub alpha_cutoff: f32,
-}
-
-impl Default for LegacyMaterial {
-    fn default() -> Self {
-        Self {
-            diffuse_color: [1.0; 4],
-            diffuse: MaterialTexture::default(),
-            texgen: TexGen::Default,
-            fullbright: false,
-            bump: 0,
-            shiny: 0,
-            glow: 0.0,
-            normal: MaterialTexture::default(),
-            specular: MaterialTexture::default(),
-            specular_color: [255; 4],
-            specular_exponent: 51,
-            environment_intensity: 0,
-            alpha_mode: LegacyAlphaMode::Blend,
-            alpha_cutoff: 0.0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TexGen {
-    #[default]
-    Default,
-    Planar,
-    Unsupported(u8),
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum Filter {
-    Nearest,
-    Linear,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum MinFilter {
-    Nearest,
-    Linear,
-    NearestMipmapNearest,
-    LinearMipmapNearest,
-    NearestMipmapLinear,
-    LinearMipmapLinear,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub enum Wrap {
-    ClampToEdge,
-    MirroredRepeat,
-    #[default]
-    Repeat,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct Sampler {
-    pub mag_filter: Option<Filter>,
-    pub min_filter: Option<MinFilter>,
-    pub wrap_s: Wrap,
-    pub wrap_t: Wrap,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TextureRef {
-    Absent,
-    Clear,
-    Asset(AssetId),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MaterialTexture {
-    pub texture: TextureRef,
-    pub transform: TextureTransform,
-    pub tex_coord: u32,
-    pub sampler: Sampler,
-}
-
-impl Default for MaterialTexture {
-    fn default() -> Self {
-        Self { texture: TextureRef::Absent, transform: TextureTransform::default(), tex_coord: 0, sampler: Sampler::default() }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TextureTransform {
-    pub offset: [f32; 2],
-    pub scale: [f32; 2],
-    pub rotation: f32,
-}
-
-impl Default for TextureTransform {
-    fn default() -> Self {
-        Self { offset: [0.0; 2], scale: [1.0; 2], rotation: 0.0 }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -147,7 +25,7 @@ pub struct PbrMaterial {
     pub normal_scale: f32,
     pub occlusion_strength: f32,
     pub unlit: bool,
-    pub alpha_mode: AlphaMode,
+    pub alpha_mode: PbrAlphaMode,
     pub alpha_cutoff: f32,
     pub double_sided: bool,
 }
@@ -167,99 +45,11 @@ impl Default for PbrMaterial {
             normal_scale: 1.0,
             occlusion_strength: 1.0,
             unlit: false,
-            alpha_mode: AlphaMode::Opaque,
+            alpha_mode: PbrAlphaMode::Opaque,
             alpha_cutoff: 0.5,
             double_sided: false,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum MaterialDescription {
-    Legacy(LegacyMaterial),
-    Pbr(PbrMaterial),
-}
-
-impl MaterialDescription {
-    pub fn base_color_texture(&self) -> &MaterialTexture {
-        match self {
-            Self::Legacy(material) => &material.diffuse,
-            Self::Pbr(material) => &material.base_color,
-        }
-    }
-}
-
-pub(crate) fn legacy(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
-    let limits = Limits {
-        max_bytes: 4 * 1024 * 1024,
-        max_depth: 16,
-        max_values: 4096,
-        max_container_items: 512,
-        max_string_bytes: 2 * 1024 * 1024,
-        max_map_key_bytes: 128,
-        max_binary_bytes: 2 * 1024 * 1024,
-    };
-    let llsd::Value::Map(fields) = binary::from_slice_with_limits(bytes, limits).map_err(|_| Failure::Malformed)? else {
-        return Err(Failure::Malformed);
-    };
-    let byte = |key| match fields.get(key) {
-        Some(llsd::Value::Integer(value)) => u8::try_from(*value).map_err(|_| Failure::Malformed),
-        _ => Err(Failure::Malformed),
-    };
-    let alpha_mode = match byte("DiffuseAlphaMode")? {
-        0 => LegacyAlphaMode::Opaque,
-        1 => LegacyAlphaMode::Blend,
-        2 => LegacyAlphaMode::Mask,
-        3 => LegacyAlphaMode::Emissive,
-        _ => return Err(Failure::Unsupported),
-    };
-    let fixed = |key| match fields.get(key) {
-        Some(llsd::Value::Integer(value)) => Ok(*value as f32 / 10_000.0),
-        _ => Err(Failure::Malformed),
-    };
-    let texture = |key| match fields.get(key) {
-        Some(llsd::Value::Uuid(id)) => Ok(texture_ref(*id)),
-        _ => Err(Failure::Malformed),
-    };
-    let Some(llsd::Value::Array(color)) = fields.get("SpecColor") else { return Err(Failure::Malformed) };
-    let mut specular_color = [0; 4];
-    if color.len() != specular_color.len() {
-        return Err(Failure::Malformed);
-    }
-    for (dest, value) in specular_color.iter_mut().zip(color) {
-        let llsd::Value::Integer(value) = value else { return Err(Failure::Malformed) };
-        *dest = u8::try_from(*value).map_err(|_| Failure::Malformed)?;
-    }
-    Ok(MaterialDescription::Legacy(LegacyMaterial {
-        normal: MaterialTexture {
-            texture: texture("NormMap")?,
-            transform: TextureTransform {
-                offset: [fixed("NormOffsetX")?, fixed("NormOffsetY")?],
-                scale: [fixed("NormRepeatX")?, fixed("NormRepeatY")?],
-                rotation: fixed("NormRotation")?,
-            },
-            ..MaterialTexture::default()
-        },
-        specular: MaterialTexture {
-            texture: texture("SpecMap")?,
-            transform: TextureTransform {
-                offset: [fixed("SpecOffsetX")?, fixed("SpecOffsetY")?],
-                scale: [fixed("SpecRepeatX")?, fixed("SpecRepeatY")?],
-                rotation: fixed("SpecRotation")?,
-            },
-            ..MaterialTexture::default()
-        },
-        specular_color,
-        specular_exponent: byte("SpecExp")?,
-        environment_intensity: byte("EnvIntensity")?,
-        alpha_mode,
-        alpha_cutoff: f32::from(byte("AlphaMaskCutoff")?) / 255.0,
-        ..LegacyMaterial::default()
-    }))
-}
-
-fn texture_ref(id: Uuid) -> TextureRef {
-    if id.is_nil() || id == Uuid::max() { TextureRef::Clear } else { TextureRef::Asset(AssetId::new(id)) }
 }
 
 fn object(value: &Value) -> Result<&Map<String, Value>, Failure> {
@@ -365,8 +155,8 @@ fn unit_vector<const N: usize>(value: &Value) -> Result<[f32; N], Failure> {
     Ok(result)
 }
 
-pub(crate) fn pbr(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
-    let root = super::material_json::parse(bytes)?;
+pub(crate) fn decode(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
+    let root = json::parse(bytes)?;
     let root = object(&root)?;
     let asset = object(root.get("asset").ok_or(Failure::Malformed)?)?;
     if asset.get("version").and_then(Value::as_str) != Some("2.0") {
@@ -402,9 +192,9 @@ pub(crate) fn pbr(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
     }
     if let Some(mode) = material.get("alphaMode") {
         result.alpha_mode = match mode.as_str().ok_or(Failure::Malformed)? {
-            "OPAQUE" => AlphaMode::Opaque,
-            "MASK" => AlphaMode::Mask,
-            "BLEND" => AlphaMode::Blend,
+            "OPAQUE" => PbrAlphaMode::Opaque,
+            "MASK" => PbrAlphaMode::Mask,
+            "BLEND" => PbrAlphaMode::Blend,
             _ => return Err(Failure::Unsupported),
         };
     }
@@ -457,5 +247,153 @@ pub(crate) fn pbr(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
 }
 
 #[cfg(test)]
-#[path = "material_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::material::{TextureRef, TextureTransform};
+    use utils::AssetId;
+
+    fn pbr_description(json: &[u8]) -> PbrMaterial {
+        let MaterialDescription::Pbr(material) = decode(json).unwrap() else { panic!("expected PBR") };
+        material
+    }
+
+    #[test]
+    fn factors_and_defaults() {
+        assert_eq!(pbr_description(br#"{"asset":{"version":"2.0"},"materials":[{}]}"#), PbrMaterial::default());
+        let material = pbr_description(br#"{"asset":{"version":"2.0"},"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0.2,0.4,0.6,0.8]},"alphaMode":"BLEND","doubleSided":true}]}"#);
+        assert_eq!(material.base_color_factor, [0.2, 0.4, 0.6, 0.8]);
+        assert_eq!(material.base_color.texture, TextureRef::Absent);
+        assert_eq!(material.alpha_mode, PbrAlphaMode::Blend);
+        assert!(material.double_sided);
+        assert_eq!(pbr_description(br#"{"asset":{"version":"2.0"},"materials":[{"alphaCutoff":1.25}]}"#).alpha_cutoff, 1.25);
+    }
+
+    const TEXTURED: &str = r#"{
+        "asset":{"version":"2.0"},
+        "images":[{"uri":"00112233-4455-6677-8899-aabbccddeeff"}],
+        "textures":[{"source":0}],
+        "materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0,
+            "extensions":{"KHR_texture_transform":{"offset":[0.25,-0.5],"scale":[2,3],"rotation":1.5}}}},
+            "alphaMode":"MASK","alphaCutoff":0.25,"doubleSided":false}]
+    }"#;
+
+    const CHANNELS: &str = r#"{
+        "asset":{"version":"2.0"},
+        "images":[
+            {"uri":"00000000-0000-0000-0000-000000000001"},
+            {"uri":"00000000-0000-0000-0000-000000000002"},
+            {"uri":"00000000-0000-0000-0000-000000000003"},
+            {"uri":"00000000-0000-0000-0000-000000000004"},
+            {"uri":"00000000-0000-0000-0000-000000000005"}
+        ],
+        "samplers":[{"magFilter":9728,"minFilter":9987,"wrapS":33071,"wrapT":33648}],
+        "textures":[{"source":0},{"source":1},{"source":2,"sampler":0},{"source":3},{"source":4}],
+        "materials":[{
+            "pbrMetallicRoughness":{
+                "baseColorTexture":{"index":0},
+                "metallicRoughnessTexture":{"index":2,"texCoord":1,
+                    "extensions":{"KHR_texture_transform":{"offset":[-0.25,0.75],"scale":[-2,0],"rotation":-1,"texCoord":3}}},
+                "metallicFactor":0.3,"roughnessFactor":0.7
+            },
+            "normalTexture":{"index":1,"scale":-0.5,"texCoord":2},
+            "emissiveTexture":{"index":3},"emissiveFactor":[0.1,0.2,0.3],
+            "occlusionTexture":{"index":4,"strength":0.4},
+            "extensions":{"KHR_materials_unlit":{}}
+        }]
+    }"#;
+
+    #[test]
+    fn pbr_channels_survive() {
+        let material = pbr_description(CHANNELS.as_bytes());
+        for (info, id) in [
+            (material.base_color, 1),
+            (material.normal, 2),
+            (material.metallic_roughness, 3),
+            (material.emissive, 4),
+            (material.occlusion, 5),
+        ] {
+            assert_eq!(info.texture, TextureRef::Asset(AssetId::new(Uuid::from_u128(id))));
+        }
+        assert_eq!(material.metallic, 0.3);
+        assert_eq!(material.roughness, 0.7);
+        assert_eq!(material.emissive_factor, [0.1, 0.2, 0.3]);
+        assert_eq!(material.normal_scale, -0.5);
+        assert_eq!(material.occlusion_strength, 0.4);
+        assert!(material.unlit);
+        assert_eq!(material.normal.tex_coord, 2);
+        assert_eq!(material.normal.sampler, Sampler::default());
+        let info = material.metallic_roughness;
+        assert_eq!(info.tex_coord, 3);
+        assert_eq!(info.transform, TextureTransform { offset: [-0.25, 0.75], scale: [-2.0, 0.0], rotation: -1.0 });
+        assert_eq!(
+            info.sampler,
+            Sampler {
+                mag_filter: Some(Filter::Nearest),
+                min_filter: Some(MinFilter::LinearMipmapLinear),
+                wrap_s: Wrap::ClampToEdge,
+                wrap_t: Wrap::MirroredRepeat,
+            }
+        );
+    }
+
+    #[test]
+    fn auxiliary_channels_validate() {
+        for (from, to) in [
+            ("\"index\":1", "\"index\":99"),
+            ("\"scale\":-0.5", "\"scale\":1e100"),
+            ("\"strength\":0.4", "\"strength\":-0.1"),
+            ("\"metallicFactor\":0.3", "\"metallicFactor\":1.00000001"),
+            ("\"roughnessFactor\":0.7", "\"roughnessFactor\":null"),
+            ("\"emissiveFactor\":[0.1,0.2,0.3]", "\"emissiveFactor\":[0.1,0.2]"),
+            ("\"texCoord\":2", "\"texCoord\":4294967296"),
+            ("\"KHR_materials_unlit\":{}", "\"KHR_materials_unlit\":false"),
+            ("\"sampler\":0", "\"sampler\":1"),
+            ("\"magFilter\":9728", "\"magFilter\":9987"),
+            ("\"minFilter\":9987", "\"minFilter\":0"),
+            ("\"wrapS\":33071", "\"wrapS\":0"),
+            ("\"wrapT\":33648", "\"wrapT\":null"),
+        ] {
+            assert_eq!(decode(CHANNELS.replace(from, to).as_bytes()), Err(Failure::Malformed), "{from} -> {to}");
+        }
+    }
+
+    #[test]
+    fn texture_transform_and_clear() {
+        let material = pbr_description(TEXTURED.as_bytes());
+        assert_eq!(material.base_color.texture, TextureRef::Asset(AssetId::new(Uuid::from_u128(0x00112233445566778899aabbccddeeff))));
+        assert_eq!(material.base_color.transform, TextureTransform { offset: [0.25, -0.5], scale: [2.0, 3.0], rotation: 1.5 });
+        assert_eq!(material.alpha_mode, PbrAlphaMode::Mask);
+        assert_eq!(material.alpha_cutoff, 0.25);
+        assert!(!material.double_sided);
+        for clear in ["00000000-0000-0000-0000-000000000000", "ffffffff-ffff-ffff-ffff-ffffffffffff"] {
+            let json = TEXTURED.replace("00112233-4455-6677-8899-aabbccddeeff", clear);
+            assert_eq!(pbr_description(json.as_bytes()).base_color.texture, TextureRef::Clear);
+        }
+    }
+
+    #[test]
+    fn invalid_materials_fail() {
+        for json in [
+            TEXTURED.replace("\"source\":0", "\"source\":99"),
+            TEXTURED.replace("\"index\":0", "\"index\":-1"),
+            TEXTURED.replace("\"rotation\":1.5", "\"rotation\":1e100"),
+            TEXTURED.replace("\"alphaCutoff\":0.25", "\"alphaCutoff\":-0.1"),
+            TEXTURED.replace("\"doubleSided\":false", "\"doubleSided\":0"),
+            TEXTURED.replace("\"scale\":[2,3]", "\"scale\":[2]"),
+            TEXTURED.replace("\"alphaMode\":\"MASK\"", "\"alphaMode\":null"),
+            r#"{"asset":{"version":"2.0"},"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1.00000001]}}]}"#.into(),
+        ] {
+            assert_eq!(decode(json.as_bytes()), Err(Failure::Malformed), "{json}");
+        }
+        for json in [
+            TEXTURED.replace("00112233-4455-6677-8899-aabbccddeeff", "https://example.com/image.png"),
+            TEXTURED.replace("\"MASK\"", "\"UNKNOWN\""),
+            TEXTURED.replace("\"2.0\"", "\"3.0\""),
+            TEXTURED.replace("\"version\":\"2.0\"", "\"version\":\"2.0\",\"minVersion\":\"2.1\""),
+            TEXTURED.replace("\"asset\":", "\"extensionsRequired\":[\"KHR_materials_transmission\"],\"asset\":"),
+        ] {
+            assert_eq!(decode(json.as_bytes()), Err(Failure::Unsupported), "{json}");
+        }
+        assert_eq!(decode(&TEXTURED.as_bytes()[..TEXTURED.len() - 1]), Err(Failure::Malformed));
+    }
+}

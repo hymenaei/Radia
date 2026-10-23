@@ -438,7 +438,6 @@ fn string_field(value: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use llsd::{Map, Value};
     use uuid::Uuid;
 
     use super::{InventoryItem, RegionGridCell, global_position, parse_landmark_asset, parse_position};

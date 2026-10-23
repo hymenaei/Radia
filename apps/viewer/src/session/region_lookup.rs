@@ -29,6 +29,13 @@ const SEND_RETRY_LIMIT: usize = 4;
 const INITIAL_SEND_RETRY_DELAY: Duration = Duration::from_millis(20);
 const METERS_PER_CELL: f64 = 256.0;
 
+type SendFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
+type SendMessage = dyn Fn(RegionLookupRequest, Delivery) -> SendFuture + Send + Sync;
+type TimeoutFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type MakeTimeout = dyn Fn(Duration) -> TimeoutFuture + Send + Sync;
+type BackgroundTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type SpawnBackground = dyn Fn(BackgroundTask) + Send + Sync;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RegionGridCell {
     x: u32,
@@ -64,62 +71,9 @@ impl RegionGridCell {
     }
 }
 
-type SendFuture = Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>;
-type SendMessage = dyn Fn(RegionLookupRequest, Delivery) -> SendFuture + Send + Sync;
-type TimeoutFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
-type MakeTimeout = dyn Fn(Duration) -> TimeoutFuture + Send + Sync;
-type BackgroundTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-type SpawnBackground = dyn Fn(BackgroundTask) + Send + Sync;
 #[derive(Clone)]
 pub struct RegionLookup {
     inner: Arc<Inner>,
-}
-
-struct Inner {
-    agent_id: Uuid,
-    session_id: Uuid,
-    simulator_address: SocketAddr,
-    make_timeout: Arc<MakeTimeout>,
-    send_message: Arc<SendMessage>,
-    spawn_background: Arc<SpawnBackground>,
-    state: Mutex<State>,
-    timeout: Duration,
-}
-
-#[derive(Default)]
-struct State {
-    next_waiter_id: u64,
-    next_generation: u64,
-    by_region_id: HashMap<Uuid, PendingLookup>,
-    by_map_cell: HashMap<RegionGridCell, PendingLookup>,
-}
-
-struct PendingLookup {
-    generation: u64,
-    waiters: HashMap<u64, oneshot::Sender<Result<String, String>>>,
-}
-
-#[derive(Clone, Copy)]
-enum LookupKey {
-    RegionId(Uuid),
-    MapCell(RegionGridCell),
-}
-
-#[derive(Clone)]
-enum RegionLookupRequest {
-    RegionHandle(RegionHandleRequest),
-    MapBlock(MapBlockRequest),
-}
-
-struct WaiterGuard {
-    lookup: RegionLookup,
-    waiter_id: u64,
-}
-
-impl Drop for WaiterGuard {
-    fn drop(&mut self) {
-        self.lookup.cancel_waiter(self.waiter_id);
-    }
 }
 
 impl RegionLookup {
@@ -373,8 +327,23 @@ impl RegionLookup {
     }
 }
 
-pub(crate) fn map_request_coordinates(cell: RegionGridCell) -> Option<(u16, u16)> {
-    Some((u16::try_from(cell.x()).ok()?, u16::try_from(cell.y()).ok()?))
+struct Inner {
+    agent_id: Uuid,
+    session_id: Uuid,
+    simulator_address: SocketAddr,
+    make_timeout: Arc<MakeTimeout>,
+    send_message: Arc<SendMessage>,
+    spawn_background: Arc<SpawnBackground>,
+    state: Mutex<State>,
+    timeout: Duration,
+}
+
+#[derive(Default)]
+struct State {
+    next_waiter_id: u64,
+    next_generation: u64,
+    by_region_id: HashMap<Uuid, PendingLookup>,
+    by_map_cell: HashMap<RegionGridCell, PendingLookup>,
 }
 
 impl State {
@@ -430,9 +399,43 @@ impl State {
     }
 }
 
+struct PendingLookup {
+    generation: u64,
+    waiters: HashMap<u64, oneshot::Sender<Result<String, String>>>,
+}
+
+#[derive(Clone, Copy)]
+enum LookupKey {
+    RegionId(Uuid),
+    MapCell(RegionGridCell),
+}
+
+#[derive(Clone)]
+enum RegionLookupRequest {
+    RegionHandle(RegionHandleRequest),
+    MapBlock(MapBlockRequest),
+}
+
+struct WaiterGuard {
+    lookup: RegionLookup,
+    waiter_id: u64,
+}
+
+impl Drop for WaiterGuard {
+    fn drop(&mut self) {
+        self.lookup.cancel_waiter(self.waiter_id);
+    }
+}
+
+pub(crate) fn map_request_coordinates(cell: RegionGridCell) -> Option<(u16, u16)> {
+    Some((u16::try_from(cell.x()).ok()?, u16::try_from(cell.y()).ok()?))
+}
+
 fn finish(pending: PendingLookup, result: Result<String, String>) {
     for sender in pending.waiters.into_values() {
-        let _ = sender.send(result.clone());
+        if sender.send(result.clone()).is_err() {
+            tracing::trace!("region lookup receiver closed");
+        }
     }
 }
 

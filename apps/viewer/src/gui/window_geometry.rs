@@ -20,6 +20,7 @@ const MAX_WINDOW_DIMENSION: u32 = 8192;
 const MIN_VISIBLE_TITLEBAR_WIDTH: f32 = 64.0;
 const MIN_VISIBLE_TITLEBAR_HEIGHT: f32 = 24.0;
 const TITLEBAR_HEIGHT: f32 = 48.0;
+
 static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -35,10 +36,43 @@ struct StoredWindowGeometry {
     y: Option<i32>,
 }
 
+impl StoredWindowGeometry {
+    fn size(self) -> StoredWindowSize {
+        StoredWindowSize { width: self.width, height: self.height }
+    }
+
+    fn origin(self) -> Option<Point<Pixels>> {
+        Some(point(px(self.x? as f32), px(self.y? as f32)))
+    }
+}
+
+impl From<Bounds<Pixels>> for StoredWindowGeometry {
+    fn from(bounds: Bounds<Pixels>) -> Self {
+        Self {
+            width: u32::from(bounds.size.width.round()),
+            height: u32::from(bounds.size.height.round()),
+            x: Some(f32::from(bounds.origin.x).round() as i32),
+            y: Some(f32::from(bounds.origin.y).round() as i32),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct StoredWindowSize {
     width: u32,
     height: u32,
+}
+
+impl From<Size<Pixels>> for StoredWindowSize {
+    fn from(size: Size<Pixels>) -> Self {
+        Self { width: u32::from(size.width.round()), height: u32::from(size.height.round()) }
+    }
+}
+
+impl From<StoredWindowSize> for Size<Pixels> {
+    fn from(stored_size: StoredWindowSize) -> Self {
+        size(px(stored_size.width as f32), px(stored_size.height as f32))
+    }
 }
 
 pub(crate) fn restore_bounds(
@@ -118,7 +152,11 @@ fn save_geometry(path: &Path, key: &str, geometry: StoredWindowGeometry) -> std:
     let temp_path = path.with_extension(format!("{}-{temp_id}.tmp", id()));
     fs::write(&temp_path, contents)?;
     if let Err(error) = fs::rename(&temp_path, path) {
-        let _ = fs::remove_file(temp_path);
+        if let Err(cleanup_error) = fs::remove_file(&temp_path)
+            && cleanup_error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%cleanup_error, path = %temp_path.display(), "could not remove temporary window geometry");
+        }
         return Err(error);
     }
 
@@ -157,39 +195,6 @@ fn fit_inside_display(bounds: Bounds<Pixels>, display: Bounds<Pixels>) -> Bounds
     Bounds {
         origin: point(px(f32::from(bounds.origin.x).clamp(left, max_x)), px(f32::from(bounds.origin.y).clamp(top, max_y))),
         size: bounds.size,
-    }
-}
-
-impl StoredWindowGeometry {
-    fn size(self) -> StoredWindowSize {
-        StoredWindowSize { width: self.width, height: self.height }
-    }
-
-    fn origin(self) -> Option<Point<Pixels>> {
-        Some(point(px(self.x? as f32), px(self.y? as f32)))
-    }
-}
-
-impl From<Bounds<Pixels>> for StoredWindowGeometry {
-    fn from(bounds: Bounds<Pixels>) -> Self {
-        Self {
-            width: u32::from(bounds.size.width.round()),
-            height: u32::from(bounds.size.height.round()),
-            x: Some(f32::from(bounds.origin.x).round() as i32),
-            y: Some(f32::from(bounds.origin.y).round() as i32),
-        }
-    }
-}
-
-impl From<Size<Pixels>> for StoredWindowSize {
-    fn from(size: Size<Pixels>) -> Self {
-        Self { width: u32::from(size.width.round()), height: u32::from(size.height.round()) }
-    }
-}
-
-impl From<StoredWindowSize> for Size<Pixels> {
-    fn from(stored_size: StoredWindowSize) -> Self {
-        size(px(stored_size.width as f32), px(stored_size.height as f32))
     }
 }
 

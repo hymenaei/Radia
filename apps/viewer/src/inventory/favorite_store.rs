@@ -20,31 +20,6 @@ pub struct FavoriteStore {
     agents: Vec<AgentFavorites>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct AgentFavorites {
-    grid: StoredGrid,
-    agent_id: Uuid,
-    username: String,
-    #[serde(default)]
-    favorites: Vec<FavoriteLocation>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum StoredGrid {
-    Agni,
-    Aditi,
-}
-
-impl From<Grid> for StoredGrid {
-    fn from(grid: Grid) -> Self {
-        match grid {
-            Grid::Agni => Self::Agni,
-            Grid::Aditi => Self::Aditi,
-        }
-    }
-}
-
 impl FavoriteStore {
     pub fn favorites_for(&self, grid: Grid, agent_id: Uuid) -> &[FavoriteLocation] {
         let grid = StoredGrid::from(grid);
@@ -97,6 +72,31 @@ impl FavoriteStore {
         self.remember_agent(grid, agent_id, username);
         if let Some(agent) = self.agents.iter_mut().find(|agent| agent.grid == grid_key && agent.agent_id == agent_id) {
             agent.favorites = favorites;
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AgentFavorites {
+    grid: StoredGrid,
+    agent_id: Uuid,
+    username: String,
+    #[serde(default)]
+    favorites: Vec<FavoriteLocation>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum StoredGrid {
+    Agni,
+    Aditi,
+}
+
+impl From<Grid> for StoredGrid {
+    fn from(grid: Grid) -> Self {
+        match grid {
+            Grid::Agni => Self::Agni,
+            Grid::Aditi => Self::Aditi,
         }
     }
 }
@@ -160,7 +160,11 @@ fn save_to(path: &Path, favorites: &FavoriteStore) -> Result<(), String> {
     fs::write(&temporary_path, contents)
         .map_err(|error| format!("Could not write login locations to {}: {error}", temporary_path.display()))?;
     if let Err(error) = fs::rename(&temporary_path, path) {
-        let _ = fs::remove_file(&temporary_path);
+        if let Err(cleanup_error) = fs::remove_file(&temporary_path)
+            && cleanup_error.kind() != ErrorKind::NotFound
+        {
+            tracing::warn!(%cleanup_error, path = %temporary_path.display(), "could not remove temporary login locations");
+        }
         return Err(format!("Could not save login locations to {}: {error}", path.display()));
     }
     Ok(())

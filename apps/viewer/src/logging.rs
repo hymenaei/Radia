@@ -1,113 +1,96 @@
 use std::{
-    backtrace::Backtrace,
-    env,
     fs::{self, OpenOptions},
     io::{self, IsTerminal},
-    panic,
     path::Path,
-    thread,
 };
 
-use time::OffsetDateTime;
-use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
+use chrono::{Duration, Local};
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
-    Layer,
-    filter::{LevelFilter, Targets},
+    EnvFilter,
     fmt::{self, time::ChronoLocal},
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
+    prelude::*,
 };
 
-const CRATES: [&str; 11] = ["viewer", "assets", "base", "llsd", "testing", "math", "network", "protocol", "render", "scene", "world"];
+const LOG_DIR: &str = "target/logs";
+const MAX_LOGS: usize = 20;
 
-#[must_use]
-pub(crate) fn init() -> Option<WorkerGuard> {
-    let log_filter = match env::var("LOG") {
-        Ok(filter) => match filter.parse::<Targets>() {
-            Ok(filter) => Some(filter),
-            Err(error) => {
-                eprintln!("Ignoring invalid LOG filter: {error}");
-                None
+pub(crate) fn init() -> io::Result<WorkerGuard> {
+    let dir = Path::new(LOG_DIR);
+    fs::create_dir_all(dir)?;
+
+    let mut time = Local::now();
+
+    let (file, path) = loop {
+        let path = dir.join(format!("{}.jsonl", time.format("%Y%m%d-%H%M%S")));
+
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => break (file, path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                time += Duration::seconds(1);
             }
-        },
-        Err(_) => None,
-    };
-
-    let console_filter = log_filter
-        .clone()
-        .unwrap_or_else(|| Targets::new().with_default(LevelFilter::WARN).with_targets(CRATES.map(|name| (name, LevelFilter::INFO))));
-    let file_filter = log_filter
-        .unwrap_or_else(|| Targets::new().with_default(LevelFilter::WARN).with_targets(CRATES.map(|name| (name, LevelFilter::TRACE))));
-
-    let now = OffsetDateTime::now_utc();
-    let name = format!(
-        "{:04}{:02}{:02}-{:02}{:02}{:02}.jsonl",
-        now.year(),
-        u8::from(now.month()),
-        now.day(),
-        now.hour(),
-        now.minute(),
-        now.second()
-    );
-    let dir = Path::new("target/logs");
-    let (writer, guard) = match fs::create_dir_all(dir).and_then(|()| OpenOptions::new().write(true).create_new(true).open(dir.join(name)))
-    {
-        Ok(file) => {
-            let (writer, guard) = NonBlockingBuilder::default().buffered_lines_limit(16_384).lossy(true).finish(file);
-            (Some(writer), Some(guard))
-        }
-        Err(error) => {
-            eprintln!("Could not create session log: {error}");
-            (None, None)
+            Err(error) => return Err(error),
         }
     };
+
+    let latest = dir.join("latest.jsonl");
+
+    match fs::remove_file(&latest) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    fs::hard_link(&path, &latest)?;
+    prune_logs(dir)?;
+
+    let (writer, guard) = tracing_appender::non_blocking(file);
+
+    let console_filter = EnvFilter::try_from_env("LOG").unwrap_or_else(|_| EnvFilter::new("warn,viewer=info"));
+
+    let file_filter = EnvFilter::try_from_env("FILE_LOG").unwrap_or_else(|_| EnvFilter::new("trace"));
 
     let console = fmt::layer()
         .compact()
         .with_timer(ChronoLocal::new("%H:%M:%S%.3f".into()))
         .with_ansi(io::stderr().is_terminal())
-        .with_target(true)
         .with_writer(io::stderr)
         .with_filter(console_filter);
 
-    let json = writer.map(|writer| {
-        fmt::layer()
-            .json()
-            .with_writer(writer)
-            .with_file(true)
-            .with_line_number(true)
-            .with_thread_names(true)
-            .with_current_span(false)
-            .with_span_list(true)
-            .with_filter(file_filter)
+    let json = fmt::layer()
+        .json()
+        .with_timer(ChronoLocal::new("%Y-%m-%dT%H:%M:%S%.3f%:z".into()))
+        .with_file(true)
+        .with_line_number(true)
+        .with_writer(writer)
+        .with_filter(file_filter);
+
+    tracing_subscriber::registry().with(console).with(json).init();
+
+    Ok(guard)
+}
+
+fn prune_logs(dir: &Path) -> io::Result<()> {
+    let mut logs = fs::read_dir(dir)?.map(|entry| entry.map(|entry| entry.path())).collect::<io::Result<Vec<_>>>()?;
+
+    logs.retain(|path| {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let Some(stamp) = name.strip_suffix(".jsonl") else {
+            return false;
+        };
+
+        let bytes = stamp.as_bytes();
+        bytes.len() == 15 && bytes[8] == b'-' && bytes[..8].iter().all(u8::is_ascii_digit) && bytes[9..].iter().all(u8::is_ascii_digit)
     });
 
-    let subscriber = tracing_subscriber::registry().with(console).with(json);
+    logs.sort();
 
-    #[cfg(feature = "tracy")]
-    let subscriber = subscriber
-        .with(tracing_tracy::TracyLayer::default().with_filter(Targets::new().with_targets(CRATES.map(|name| (name, LevelFilter::TRACE)))));
-
-    if let Err(error) = subscriber.try_init() {
-        eprintln!("Could not initialize tracing: {error}");
+    let excess = logs.len().saturating_sub(MAX_LOGS);
+    for path in logs.into_iter().take(excess) {
+        fs::remove_file(path)?;
     }
 
-    let default_hook = panic::take_hook();
-
-    panic::set_hook(Box::new(move |info| {
-        let current = thread::current();
-
-        tracing::error!(
-            target: "viewer::panic",
-            panic = info.payload_as_str().unwrap_or("non-string panic payload"),
-            thread = current.name().unwrap_or("<unnamed>"),
-            location = info.location().map(tracing::field::display),
-            backtrace = %Backtrace::force_capture(),
-            "panic"
-        );
-
-        default_hook(info);
-    }));
-
-    guard
+    Ok(())
 }

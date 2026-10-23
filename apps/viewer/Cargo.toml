@@ -12,7 +12,7 @@ name = "viewer"
 path = "src/lib.rs"
 
 [[bin]]
-name = "radia"
+name = "viewer"
 path = "src/main.rs"
 doc = false
 
@@ -40,10 +40,8 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
-time.workspace = true
 tracing-tracy = { workspace = true, optional = true }
 tokio.workspace = true
-url.workspace = true
 world.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -59,6 +57,8 @@ winit.workspace = true
 winit = { workspace = true, features = ["x11", "wayland", "wayland-dlopen"] }
 
 [dev-dependencies]
+time.workspace = true
+url.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 gpui = { workspace = true, features = ["test-support"] }
 network = { workspace = true, features = ["testing"] }

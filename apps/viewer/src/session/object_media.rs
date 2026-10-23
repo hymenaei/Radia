@@ -114,9 +114,6 @@ impl RetirementState {
     }
 }
 
-pub(super) fn response_is_stale(response_version: u32, requested_version: u32) -> bool {
-    response_version < requested_version
-}
 pub(super) struct ObjectMediaFetcher {
     requests: mpsc::Sender<FetchRequest>,
     results: mpsc::Receiver<ObjectMediaResult>,
@@ -172,6 +169,43 @@ impl ObjectMediaFetcher {
             self.retirement_generation.send_modify(|generation| *generation = generation.saturating_add(1));
         }
     }
+}
+
+enum FetchOutcome {
+    Cancelled,
+    Retired,
+    Complete(Result<ObjectMediaUpdate, FetchError>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FetchError {
+    Capability,
+    Malformed,
+    ObjectMismatch,
+    Invalid(ObjectMediaError),
+    Transport,
+    StaleVersion { requested: u32, received: u32 },
+}
+
+impl From<ParseError> for FetchError {
+    fn from(error: ParseError) -> Self {
+        match error {
+            ParseError::Malformed => Self::Malformed,
+            ParseError::ObjectMismatch => Self::ObjectMismatch,
+            ParseError::Invalid(error) => Self::Invalid(error),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParseError {
+    Malformed,
+    ObjectMismatch,
+    Invalid(ObjectMediaError),
+}
+
+pub(super) fn response_is_stale(response_version: u32, requested_version: u32) -> bool {
+    response_version < requested_version
 }
 
 async fn run<F>(
@@ -241,12 +275,6 @@ async fn run<F>(
     }
 }
 
-enum FetchOutcome {
-    Cancelled,
-    Retired,
-    Complete(Result<ObjectMediaUpdate, FetchError>),
-}
-
 fn is_retired(retirement: &Mutex<RetirementState>, simulator_id: SimulatorId) -> bool {
     retirement.lock().unwrap_or_else(PoisonError::into_inner).is_retired(simulator_id)
 }
@@ -312,26 +340,6 @@ async fn fetch(
     let response =
         request.client.post_with_response_limit(&capability, &payload, RESPONSE_LIMIT_BYTES).await.map_err(|_| FetchError::Transport)?;
     parse_response(&response, request.target.binding.object_id()).map_err(FetchError::from)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum FetchError {
-    Capability,
-    Malformed,
-    ObjectMismatch,
-    Invalid(ObjectMediaError),
-    Transport,
-    StaleVersion { requested: u32, received: u32 },
-}
-
-impl From<ParseError> for FetchError {
-    fn from(error: ParseError) -> Self {
-        match error {
-            ParseError::Malformed => Self::Malformed,
-            ParseError::ObjectMismatch => Self::ObjectMismatch,
-            ParseError::Invalid(error) => Self::Invalid(error),
-        }
-    }
 }
 
 fn parse_response(response: &Value, expected_id: Uuid) -> Result<ObjectMediaUpdate, ParseError> {
@@ -444,13 +452,6 @@ pub(super) fn media_version(value: &str) -> Option<u32> {
     let (version, agent_id) = value.split_once('/')?;
     Uuid::parse_str(agent_id).ok()?;
     version.parse().ok()
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ParseError {
-    Malformed,
-    ObjectMismatch,
-    Invalid(ObjectMediaError),
 }
 
 #[cfg(test)]

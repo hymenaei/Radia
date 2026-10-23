@@ -9,11 +9,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    DEFAULT_DRAW_DISTANCE,
-    camera::{self, OrbitCamera},
-    scene_feed::SceneFeed,
-};
 use egui::{Context, DragValue, Slider, ViewportId};
 use futures::{
     channel::mpsc::{Receiver, Sender, channel},
@@ -22,6 +17,10 @@ use futures::{
 use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
+#[cfg(target_os = "linux")]
+use winit::platform::wayland::EventLoopBuilderExtWayland;
+#[cfg(target_os = "windows")]
+use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition},
@@ -31,10 +30,11 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-#[cfg(target_os = "linux")]
-use winit::platform::wayland::EventLoopBuilderExtWayland;
-#[cfg(target_os = "windows")]
-use winit::platform::windows::EventLoopBuilderExtWindows;
+use crate::{
+    DEFAULT_DRAW_DISTANCE,
+    gui::camera::{self, OrbitCamera},
+    scene_feed::SceneFeed,
+};
 
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const RECOVERY_DELAY: Duration = Duration::from_millis(500);
@@ -273,8 +273,11 @@ impl WindowApp {
     }
 
     fn request_chat(&mut self, generation: u64) {
-        if !self.shared.chat_pending.swap(true, Ordering::AcqRel) {
-            let _ = self.events.try_send(ViewportEvent::Chat(generation));
+        if !self.shared.chat_pending.swap(true, Ordering::AcqRel)
+            && let Err(error) = self.events.try_send(ViewportEvent::Chat(generation))
+        {
+            self.shared.chat_pending.store(false, Ordering::Release);
+            tracing::trace!(%error, "chat request could not be queued");
         }
     }
 }
@@ -506,11 +509,6 @@ struct SceneWindow {
     cursor: PhysicalPosition<f64>,
     modifiers: ModifiersState,
     drag: Option<DragState>,
-}
-
-struct DragState {
-    origin: PhysicalPosition<f64>,
-    travel: [f64; 2],
 }
 
 impl SceneWindow {
@@ -764,6 +762,11 @@ impl Drop for SceneWindow {
     }
 }
 
+struct DragState {
+    origin: PhysicalPosition<f64>,
+    travel: [f64; 2],
+}
+
 #[derive(Default)]
 struct PresentationRecovery {
     attempts: u32,
@@ -792,7 +795,25 @@ fn debug_ui(window: &Window) -> (Context, egui_winit::State) {
 
 #[cfg(test)]
 mod tests {
-    use super::{PresentationRecovery, RequestedScene};
+    use std::sync::Arc;
+
+    use futures::channel::mpsc::channel;
+
+    use super::{PresentationRecovery, RequestedScene, SharedWindowState, ViewportEvent, WindowApp};
+
+    #[test]
+    fn rejected_chat_requests_can_retry() {
+        let (events, mut incoming) = channel(0);
+        let mut app =
+            WindowApp { shared: Arc::new(SharedWindowState::default()), events, active: None, retired: Vec::new(), generation: 1 };
+        app.events.try_send(ViewportEvent::Ready(1)).unwrap();
+        app.request_chat(1);
+        assert!(matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1))));
+        app.request_chat(1);
+        assert!(matches!(incoming.try_recv(), Ok(ViewportEvent::Chat(1))), "a rejected request must not suppress a later request");
+        app.request_chat(1);
+        assert!(incoming.try_recv().is_err(), "an accepted request must coalesce until received");
+    }
 
     #[test]
     fn requests_cannot_revive_cancelled_sessions() {

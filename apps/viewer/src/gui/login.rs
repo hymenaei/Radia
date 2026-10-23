@@ -1,13 +1,8 @@
-use crate::chat::ChatScreen;
 use std::sync::{
     Arc, Mutex, PoisonError,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicU64, Ordering},
 };
 
-use crate::inventory::{
-    FavoriteLocation,
-    favorite_store::{self, FavoriteStore},
-};
 use gpui::{Context, IntoElement, Render, SharedString, Window, div, prelude::*, px};
 #[cfg(target_os = "linux")]
 use gpui_component::StyledExt;
@@ -18,20 +13,25 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     select::{Select, SelectEvent, SelectItem, SelectState},
 };
-use network::{AgentSession, CaptureConfig, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
+use network::{AgentSession, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
 
+use crate::gui::chat::ChatScreen;
 #[cfg(target_os = "linux")]
-use crate::window_chrome::linux_titlebar;
+use crate::gui::components::window_chrome::linux_titlebar;
 #[cfg(target_os = "windows")]
-use crate::window_chrome::windows_titlebar;
+use crate::gui::components::window_chrome::windows_titlebar;
+use crate::inventory::{
+    FavoriteLocation,
+    favorite_store::{self, FavoriteStore},
+};
 use crate::{
     asset_coordinator::AssetHandle,
+    gui::window_geometry::observe,
     remembered_login::{self, RememberedLogin},
     session::{
         AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, RegionLookup, Session, SessionReadyUpdate,
         ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
     },
-    window_geometry::observe,
     world_reader::WorldReader,
 };
 
@@ -76,7 +76,6 @@ pub struct LoginScreen {
     storage_loading: bool,
     grid: Grid,
     remember_login: bool,
-    capture_on_login: Arc<AtomicBool>,
     remembered_login: Option<RememberedLogin>,
     chat_screen: gpui::Entity<ChatScreen>,
     session_handle: Option<SessionHandle>,
@@ -104,12 +103,7 @@ pub struct LoginScreen {
 }
 
 impl LoginScreen {
-    pub fn new(
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        capture_on_login: Arc<AtomicBool>,
-        shutdown_session: Arc<Mutex<Option<SessionHandle>>>,
-    ) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, shutdown_session: Arc<Mutex<Option<SessionHandle>>>) -> Self {
         let grid = Grid::default();
         let favorite_locations = Vec::new();
         let username = cx.new(|cx| InputState::new(window, cx).placeholder("Username"));
@@ -147,7 +141,6 @@ impl LoginScreen {
             storage_loading: true,
             grid,
             remember_login: false,
-            capture_on_login,
             remembered_login: None,
             chat_screen,
             session_handle: None,
@@ -177,26 +170,31 @@ impl LoginScreen {
         let background = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
             let (login, favorite_store) = background.spawn(async move { (remembered_login::load(grid), favorite_store::load()) }).await;
-            let _ = this.update_in(cx, |screen, window, cx| {
-                let (login, login_warning) = match login {
-                    Ok(login) => (login, None),
-                    Err(error) => (None, Some(error)),
-                };
-                let (favorite_store, favorite_warning) = match favorite_store {
-                    Ok(favorites) => (favorites, None),
-                    Err(error) => (FavoriteStore::default(), Some(error)),
-                };
-                let username = login.as_ref().map(|login| login.username.as_str()).unwrap_or("");
-                let favorites = favorites_for_username(&favorite_store, grid, username);
+            if this
+                .update_in(cx, |screen, window, cx| {
+                    let (login, login_warning) = match login {
+                        Ok(login) => (login, None),
+                        Err(error) => (None, Some(error)),
+                    };
+                    let (favorite_store, favorite_warning) = match favorite_store {
+                        Ok(favorites) => (favorites, None),
+                        Err(error) => (FavoriteStore::default(), Some(error)),
+                    };
+                    let username = login.as_ref().map(|login| login.username.as_str()).unwrap_or("");
+                    let favorites = favorites_for_username(&favorite_store, grid, username);
 
-                screen.favorite_store = favorite_store;
-                screen.favorite_store_loaded = favorite_warning.is_none();
-                screen.favorite_storage_warning = favorite_warning.clone();
-                screen.set_remembered_login(login, favorites, window, cx);
-                screen.storage_loading = false;
-                screen.status = login_warning.or(favorite_warning);
-                cx.notify();
-            });
+                    screen.favorite_store = favorite_store;
+                    screen.favorite_store_loaded = favorite_warning.is_none();
+                    screen.favorite_storage_warning = favorite_warning.clone();
+                    screen.set_remembered_login(login, favorites, window, cx);
+                    screen.storage_loading = false;
+                    screen.status = login_warning.or(favorite_warning);
+                    cx.notify();
+                })
+                .is_err()
+            {
+                tracing::trace!("Login screen was already unavailable after loading saved credentials");
+            }
         })
         .detach();
 
@@ -218,22 +216,27 @@ impl LoginScreen {
         let background = cx.background_executor().clone();
         cx.spawn_in(window, async move |this, cx| {
             let login = background.spawn(async move { remembered_login::load(grid) }).await;
-            let _ = this.update_in(cx, |screen, window, cx| {
-                if screen.grid != grid || screen.credential_load_generation != generation {
-                    return;
-                }
+            if this
+                .update_in(cx, |screen, window, cx| {
+                    if screen.grid != grid || screen.credential_load_generation != generation {
+                        return;
+                    }
 
-                let (login, login_warning) = match login {
-                    Ok(login) => (login, None),
-                    Err(error) => (None, Some(error)),
-                };
-                let username = login.as_ref().map(|login| login.username.as_str()).unwrap_or("");
-                let favorites = favorites_for_username(&screen.favorite_store, grid, username);
-                screen.set_remembered_login(login, favorites, window, cx);
-                screen.storage_loading = false;
-                screen.status = login_warning.or_else(|| screen.favorite_storage_warning.clone());
-                cx.notify();
-            });
+                    let (login, login_warning) = match login {
+                        Ok(login) => (login, None),
+                        Err(error) => (None, Some(error)),
+                    };
+                    let username = login.as_ref().map(|login| login.username.as_str()).unwrap_or("");
+                    let favorites = favorites_for_username(&screen.favorite_store, grid, username);
+                    screen.set_remembered_login(login, favorites, window, cx);
+                    screen.storage_loading = false;
+                    screen.status = login_warning.or_else(|| screen.favorite_storage_warning.clone());
+                    cx.notify();
+                })
+                .is_err()
+            {
+                tracing::trace!("Login screen was already unavailable after changing grids");
+            }
         })
         .detach();
     }
@@ -315,8 +318,10 @@ impl LoginScreen {
             }
         };
 
-        if let Some(cancel) = self.session_cancel.take() {
-            let _ = cancel.send(());
+        if let Some(cancel) = self.session_cancel.take()
+            && cancel.send(()).is_err()
+        {
+            tracing::trace!("Previous login task was already stopped");
         }
         self.session_generation = self.session_generation.wrapping_add(1);
         self.presentation_mailbox = None;
@@ -329,8 +334,7 @@ impl LoginScreen {
         *self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.current_region_name = None;
         self.region_lookup = None;
-        let capture_enabled = self.capture_on_login.swap(false, Ordering::AcqRel);
-        self.status = capture_enabled.then(|| "Capture enabled. Raw data will be saved locally when capture stops.".into());
+        self.status = None;
 
         let credentials = LoginCredentials {
             first_name,
@@ -343,11 +347,7 @@ impl LoginScreen {
         let remember_login = self.remember_login;
         let remembered_username = username.trim().to_owned();
         let remembered_password = password.to_string();
-        let network_session = match if capture_enabled {
-            capture_config().and_then(|config| Session::start_with_capture(credentials, config).map_err(|error| error.to_string()))
-        } else {
-            Session::start(credentials).map_err(|error| error.to_string())
-        } {
+        let network_session = match Session::start(credentials).map_err(|error| error.to_string()) {
             Ok(session) => session,
             Err(error) => {
                 self.is_connecting = false;
@@ -366,7 +366,7 @@ impl LoginScreen {
         self.presentation_mailbox = Some(mailbox.clone());
         let (cancel_sender, cancel_receiver) = futures::channel::oneshot::channel();
         self.session_cancel = Some(cancel_sender);
-        let background = crate::app::service_runtime(cx);
+        let background = crate::gui::service_runtime(cx);
         let credential_write_lock = self.credential_write_lock.clone();
         let grid = self.grid;
 
@@ -474,8 +474,8 @@ impl LoginScreen {
             });
 
             #[cfg(any(target_os = "windows", target_os = "linux"))]
-            if crate::app::start_scene(self.session_generation, cx) {
-                crate::app::connect_world(
+            if crate::gui::start_scene(self.session_generation, cx) {
+                crate::gui::connect_world(
                     self.session_generation,
                     crate::scene_feed::SceneSources { reader: world_reader.clone(), environments, assets: assets.clone() },
                     session.agent_id,
@@ -525,7 +525,7 @@ impl LoginScreen {
 
     fn end_session(&mut self, error: String, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        crate::app::end_scene(self.session_generation, cx);
+        crate::gui::end_scene(self.session_generation, cx);
         let was_connected = self.session.is_some();
         tracing::warn!(was_connected, %error, "Viewer session ended after a failure");
         self.is_connecting = false;
@@ -631,34 +631,6 @@ impl LoginScreen {
         }
         cx.notify();
     }
-}
-
-fn split_username(username: &str) -> Option<(String, String)> {
-    let mut names = username.split_whitespace();
-    let first_name = names.next()?.to_owned();
-    let last_name = names.collect::<Vec<_>>().join(" ");
-    let last_name = if last_name.is_empty() { "Resident".to_owned() } else { last_name };
-
-    Some((first_name, last_name))
-}
-
-fn spawn_options(favorites: &[FavoriteLocation]) -> Vec<SpawnOption> {
-    let mut options = vec![
-        SpawnOption { title: "Last location".into(), choice: SpawnChoice::Last },
-        SpawnOption { title: "Home".into(), choice: SpawnChoice::Home },
-    ];
-    options.extend(
-        favorites
-            .iter()
-            .cloned()
-            .map(|favorite| SpawnOption { title: format!("★ {}", favorite.name).into(), choice: SpawnChoice::Favorite(favorite) }),
-    );
-    options.push(SpawnOption { title: "Enter region name…".into(), choice: SpawnChoice::Region });
-    options
-}
-
-fn favorites_for_username(favorites: &FavoriteStore, grid: Grid, username: &str) -> Vec<FavoriteLocation> {
-    favorites.agent_id_for_username(grid, username).map(|agent_id| favorites.favorites_for(grid, agent_id).to_vec()).unwrap_or_default()
 }
 
 impl Render for LoginScreen {
@@ -831,39 +803,50 @@ impl Render for LoginScreen {
                                     .on_click({
                                         let screen = cx.entity().downgrade();
                                         move |checked, window, app| {
-                                            let _ = screen.update(app, |this, cx| {
-                                                this.remember_login = *checked;
-                                                if !*checked {
-                                                    this.remembered_login = None;
-                                                    this.spawn_choice = SpawnChoice::Last;
-                                                    this.spawn_location.update(cx, |state, cx| {
-                                                        state.set_items(spawn_options(&[]), window, cx);
-                                                        state.set_selected_value(&SpawnChoice::Last, window, cx);
-                                                    });
-                                                    let grid = this.grid;
-                                                    let generation = this.session_generation;
-                                                    let write_lock = this.credential_write_lock.clone();
-                                                    let background = cx.background_executor().clone();
-                                                    cx.spawn(async move |this, cx| {
-                                                        let result = background
-                                                            .spawn(async move {
-                                                                let _guard = write_lock.lock().await;
-                                                                remembered_login::clear(grid)
-                                                            })
-                                                            .await;
-                                                        if let Err(error) = result {
-                                                            let _ = this.update(cx, |view, cx| {
-                                                                if view.session_generation == generation {
-                                                                    view.status = Some(error);
-                                                                    cx.notify();
-                                                                }
-                                                            });
-                                                        }
-                                                    })
-                                                    .detach();
-                                                }
-                                                cx.notify();
-                                            });
+                                            if screen
+                                                .update(app, |this, cx| {
+                                                    this.remember_login = *checked;
+                                                    if !*checked {
+                                                        this.remembered_login = None;
+                                                        this.spawn_choice = SpawnChoice::Last;
+                                                        this.spawn_location.update(cx, |state, cx| {
+                                                            state.set_items(spawn_options(&[]), window, cx);
+                                                            state.set_selected_value(&SpawnChoice::Last, window, cx);
+                                                        });
+                                                        let grid = this.grid;
+                                                        let generation = this.session_generation;
+                                                        let write_lock = this.credential_write_lock.clone();
+                                                        let background = cx.background_executor().clone();
+                                                        cx.spawn(async move |this, cx| {
+                                                            let result = background
+                                                                .spawn(async move {
+                                                                    let _guard = write_lock.lock().await;
+                                                                    remembered_login::clear(grid)
+                                                                })
+                                                                .await;
+                                                            if let Err(error) = result
+                                                                && this
+                                                                    .update(cx, |view, cx| {
+                                                                        if view.session_generation == generation {
+                                                                            view.status = Some(error);
+                                                                            cx.notify();
+                                                                        }
+                                                                    })
+                                                                    .is_err()
+                                                            {
+                                                                tracing::trace!(
+                                                                    "Login screen was already unavailable after clearing saved credentials"
+                                                                );
+                                                            }
+                                                        })
+                                                        .detach();
+                                                    }
+                                                    cx.notify();
+                                                })
+                                                .is_err()
+                                            {
+                                                tracing::trace!("Login screen was already unavailable after changing the remember setting");
+                                            }
                                         }
                                     }),
                             ),
@@ -907,10 +890,32 @@ impl Render for LoginScreen {
     }
 }
 
-pub(super) fn capture_config() -> Result<CaptureConfig, String> {
-    let local_data = dirs::data_local_dir().ok_or_else(|| "Could not find local application data directory.".to_string())?;
-    let root = local_data.join("Radia").join("captures");
-    Ok(CaptureConfig::new(root))
+fn split_username(username: &str) -> Option<(String, String)> {
+    let mut names = username.split_whitespace();
+    let first_name = names.next()?.to_owned();
+    let last_name = names.collect::<Vec<_>>().join(" ");
+    let last_name = if last_name.is_empty() { "Resident".to_owned() } else { last_name };
+
+    Some((first_name, last_name))
+}
+
+fn spawn_options(favorites: &[FavoriteLocation]) -> Vec<SpawnOption> {
+    let mut options = vec![
+        SpawnOption { title: "Last location".into(), choice: SpawnChoice::Last },
+        SpawnOption { title: "Home".into(), choice: SpawnChoice::Home },
+    ];
+    options.extend(
+        favorites
+            .iter()
+            .cloned()
+            .map(|favorite| SpawnOption { title: format!("★ {}", favorite.name).into(), choice: SpawnChoice::Favorite(favorite) }),
+    );
+    options.push(SpawnOption { title: "Enter region name…".into(), choice: SpawnChoice::Region });
+    options
+}
+
+fn favorites_for_username(favorites: &FavoriteStore, grid: Grid, username: &str) -> Vec<FavoriteLocation> {
+    favorites.agent_id_for_username(grid, username).map(|agent_id| favorites.favorites_for(grid, agent_id).to_vec()).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -928,10 +933,14 @@ mod tests {
             let screen = cx.entity().downgrade();
             div().debug_selector(|| "remember-login-checkbox".into()).child(
                 Checkbox::new("remember-login-test").checked(self.checked).label("Remember me").on_click(move |checked, _, app| {
-                    let _ = screen.update(app, |this, cx| {
-                        this.checked = *checked;
-                        cx.notify();
-                    });
+                    assert!(
+                        screen
+                            .update(app, |this, cx| {
+                                this.checked = *checked;
+                                cx.notify();
+                            })
+                            .is_ok()
+                    );
                 }),
             )
         }

@@ -23,7 +23,6 @@ const MAX_WORLD_TOMBSTONES: usize = 16_384;
 const MAX_WORLD_JOURNAL_ENTRIES: usize = 4_096;
 const MAX_REGION_NAME_BYTES: usize = 256;
 const MAX_INGEST_DIAGNOSTIC_ADDRESSES: usize = 8;
-
 const MAX_OBJECTS_PER_INTAKE_QUANTUM: usize = 32;
 const QUERY_STATE_MAINTENANCE_WORK_PER_QUANTUM: usize = MAX_QUERY_STATE_MAINTENANCE_WORK / 32;
 
@@ -42,20 +41,35 @@ pub(super) enum RegistrationError {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) struct BlockResult {
-    pub(super) index: usize,
-    pub(super) address: Option<LocalAddress>,
-    pub(super) result: Option<Result<Applied, ApplyError>>,
-    pub(super) recovery_target: Option<LocalAddress>,
-    recovery_satisfied: bool,
-    pub(super) valid: bool,
+pub(super) enum BlockOutcome {
+    Invalid,
+    RecoveryRequired(LocalAddress),
+    Applied { address: Option<LocalAddress>, applied: Applied, recovered: Option<LocalAddress> },
+    Rejected { address: Option<LocalAddress>, error: ApplyError },
+}
+
+impl BlockOutcome {
+    pub(super) fn applied(&self) -> Option<&Applied> {
+        match self {
+            Self::Applied { applied, .. } => Some(applied),
+            _ => None,
+        }
+    }
+
+    fn address(&self) -> Option<LocalAddress> {
+        match self {
+            Self::RecoveryRequired(address) => Some(*address),
+            Self::Applied { address, .. } | Self::Rejected { address, .. } => *address,
+            Self::Invalid => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct IngestSummary {
     pub(super) status: IngestStatus,
     pub(super) accepted_region_handle: Option<RegionHandle>,
-    pub(super) blocks: Vec<BlockResult>,
+    pub(super) blocks: Vec<BlockOutcome>,
     pub(super) invalid_blocks: usize,
     pub(super) invalid_fields: usize,
 }
@@ -66,34 +80,14 @@ impl IngestSummary {
     }
 
     pub(super) fn push_applied(&mut self, applied: Applied, address: Option<LocalAddress>) {
-        let index = self.blocks.len();
-        self.blocks.push(BlockResult {
-            index,
-            address,
-            result: Some(Ok(applied)),
-            recovery_target: None,
-            recovery_satisfied: false,
-            valid: true,
-        });
+        self.blocks.push(BlockOutcome::Applied { address, applied, recovered: None });
     }
 
     pub(super) fn push_error(&mut self, error: ApplyError, address: Option<LocalAddress>) {
-        let index = self.blocks.len();
-        self.blocks.push(BlockResult {
-            index,
-            address,
-            result: Some(Err(error)),
-            recovery_target: None,
-            recovery_satisfied: false,
-            valid: true,
-        });
+        self.blocks.push(BlockOutcome::Rejected { address, error });
     }
 
-    pub(super) fn append(&mut self, mut other: Self) {
-        let offset = self.blocks.len();
-        for block in &mut other.blocks {
-            block.index += offset;
-        }
+    pub(super) fn append(&mut self, other: Self) {
         self.blocks.extend(other.blocks);
         self.invalid_blocks = self.invalid_blocks.saturating_add(other.invalid_blocks);
         self.invalid_fields = self.invalid_fields.saturating_add(other.invalid_fields);
@@ -105,9 +99,11 @@ impl IngestSummary {
 
     pub(super) fn recovery_targets(&self) -> impl Iterator<Item = LocalAddress> + '_ {
         self.blocks.iter().flat_map(|block| {
-            block.recovery_target.into_iter().chain(
-                block.result.iter().filter_map(|result| result.as_ref().ok()).flat_map(|applied| applied.recovery.requests.iter().copied()),
-            )
+            let required = match block {
+                BlockOutcome::RecoveryRequired(address) => Some(*address),
+                _ => None,
+            };
+            required.into_iter().chain(block.applied().into_iter().flat_map(|applied| applied.recovery.requests.iter().copied()))
         })
     }
 
@@ -115,13 +111,12 @@ impl IngestSummary {
         self.blocks
             .iter()
             .filter_map(|block| {
-                let result = block.result.as_ref()?.as_ref().ok()?;
-                let address = match &result.outcome {
+                let BlockOutcome::Applied { applied, recovered, .. } = block else { return None };
+                let address = match &applied.outcome {
                     TombstoneRecorded(address) => Some(*address),
-                    _ if block.recovery_satisfied => block.address,
-                    _ => None,
+                    _ => *recovered,
                 };
-                Some((result, address))
+                Some((applied, address))
             })
             .flat_map(|(result, address)| result.recovery_cancellations.iter().copied().chain(address))
     }
@@ -146,27 +141,28 @@ impl IngestSummary {
         let mut rejected_addresses = [None; MAX_INGEST_DIAGNOSTIC_ADDRESSES];
         let mut rejected_address_count = 0;
         for block in &self.blocks {
-            let Some(result) = &block.result else { continue };
             let mut rejected = false;
-            match result {
-                Err(InvalidValue { .. } | KindMismatch { .. }) => {
+            match block {
+                BlockOutcome::Rejected { error: InvalidValue { .. } | KindMismatch { .. }, .. } => {
                     malformed = malformed.saturating_add(1);
                     rejected = true;
                 }
-                Err(
-                    EntityBudgetExhausted
-                    | TerrainBudgetExhausted
-                    | EnvironmentBudgetExhausted
-                    | RegistrationBudgetExhausted
-                    | RevisionExhausted
-                    | FrameGenerationExhausted
-                    | AddressGenerationExhausted,
-                ) => {
+                BlockOutcome::Rejected {
+                    error:
+                        EntityBudgetExhausted
+                        | TerrainBudgetExhausted
+                        | EnvironmentBudgetExhausted
+                        | RegistrationBudgetExhausted
+                        | RevisionExhausted
+                        | FrameGenerationExhausted
+                        | AddressGenerationExhausted,
+                    ..
+                } => {
                     resource_limits = resource_limits.saturating_add(1);
                     rejected = true;
                 }
-                Err(StaleRegion | RegionRetired) => {}
-                Ok(applied) => {
+                BlockOutcome::Rejected { error: StaleRegion | RegionRetired, .. } => {}
+                BlockOutcome::Applied { applied, .. } => {
                     for rejection in applied.rejections.iter() {
                         match rejection.reason {
                             RejectedValue { .. } | InvalidRotation | ParentCycle | ParentDependsOnRejectedParent => {
@@ -181,10 +177,11 @@ impl IngestSummary {
                         }
                     }
                 }
+                BlockOutcome::Invalid | BlockOutcome::RecoveryRequired(_) => {}
             }
             if rejected
                 && rejected_address_count < MAX_INGEST_DIAGNOSTIC_ADDRESSES
-                && let Some(address) = block.address
+                && let Some(address) = block.address()
             {
                 rejected_addresses[rejected_address_count] = Some(address);
                 rejected_address_count += 1;
@@ -349,21 +346,25 @@ impl SessionWorld {
         }
         summary.invalid_blocks = batch.invalid_blocks;
         summary.invalid_fields = batch.invalid_fields;
-        for (index, operation) in batch.blocks.into_iter().enumerate() {
-            let (address, result, recovery_target, recovery_satisfied, valid) = match operation {
+        for operation in batch.blocks {
+            let outcome = match operation {
                 Some(ObjectOperation::Cached { source, local_id }) => {
                     let address = LocalAddress::new(source.region(), local_id);
-                    (Some(address), None, Some(address), false, true)
+                    BlockOutcome::RecoveryRequired(address)
                 }
                 Some(operation) => {
                     let address = operation.address();
-                    let result = apply_operation(&mut self.world, operation);
-                    let recovery_satisfied = result.as_ref().is_ok_and(|applied| applied.recovery.satisfied);
-                    (Some(address), Some(result), None, recovery_satisfied, true)
+                    match apply_operation(&mut self.world, operation) {
+                        Ok(applied) => {
+                            let recovered = applied.recovery.satisfied.then_some(address);
+                            BlockOutcome::Applied { address: Some(address), applied, recovered }
+                        }
+                        Err(error) => BlockOutcome::Rejected { address: Some(address), error },
+                    }
                 }
-                None => (None, None, None, false, false),
+                None => BlockOutcome::Invalid,
             };
-            summary.blocks.push(BlockResult { index, address, result, recovery_target, recovery_satisfied, valid });
+            summary.blocks.push(outcome);
         }
         Some(summary)
     }
@@ -647,7 +648,7 @@ mod tests {
     use crate::session::inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation};
 
     use super::{
-        IngestStatus, IngestSummary, MAX_OBJECTS_PER_INTAKE_QUANTUM, MAX_WORLD_ENTITIES, RegistrationError, SessionWorld,
+        BlockOutcome, IngestStatus, IngestSummary, MAX_OBJECTS_PER_INTAKE_QUANTUM, MAX_WORLD_ENTITIES, RegistrationError, SessionWorld,
         viewer_world_limits,
     };
     use world::ApplyError::InvalidValue;
@@ -763,7 +764,7 @@ mod tests {
             .apply_object_batch(simulator_id, ObjectBatch { region, region_handle: None, blocks, invalid_blocks: 0, invalid_fields: 0 })
             .expect("registered simulator");
 
-        assert!(summary.blocks.iter().all(|block| block.result.as_ref().is_some_and(|result| result.is_ok())));
+        assert!(summary.blocks.iter().all(|block| block.applied().is_some()));
         assert_eq!(world.world().objects().iter().count(), 10_001);
         assert_eq!(viewer_world_limits().max_entities_per_region, MAX_WORLD_ENTITIES);
     }
@@ -817,11 +818,10 @@ mod tests {
         assert_eq!(session.world().objects().iter().count(), MAX_OBJECTS_PER_INTAKE_QUANTUM);
         assert_eq!(session.world().revision().get(), before_revision + MAX_OBJECTS_PER_INTAKE_QUANTUM as u64);
         assert_eq!(summary.blocks.len(), MAX_OBJECTS_PER_INTAKE_QUANTUM + 1);
+        assert_eq!(summary.blocks.last(), Some(&BlockOutcome::Invalid));
         assert_eq!(summary.invalid_blocks, 1);
         assert_eq!(summary.invalid_fields, 2);
-        assert!(
-            summary.blocks[..MAX_OBJECTS_PER_INTAKE_QUANTUM].iter().all(|block| block.result.as_ref().is_some_and(|result| result.is_ok()))
-        );
+        assert!(summary.blocks[..MAX_OBJECTS_PER_INTAKE_QUANTUM].iter().all(|block| block.applied().is_some()));
     }
 
     #[test]
@@ -888,7 +888,7 @@ mod tests {
                 },
             )
             .expect("registered simulator");
-        assert!(matches!(rejected.blocks[0].result, Some(Err(world::ApplyError::EntityBudgetExhausted))));
+        assert!(matches!(rejected.blocks[0], BlockOutcome::Rejected { error: world::ApplyError::EntityBudgetExhausted, .. }));
         assert!(rejected.recovery_targets().next().is_none());
 
         let success = apply_one(
@@ -897,7 +897,7 @@ mod tests {
             region,
             ObjectOperation::Observe(observation(region, 3, 0x1001, local_id, ParentUpdate::Root)),
         );
-        assert!(success.blocks[0].result.as_ref().is_some_and(|result| result.is_ok()));
+        assert!(success.blocks[0].applied().is_some());
         assert_eq!(session.world().objects().iter().count(), 1);
     }
 
@@ -919,7 +919,7 @@ mod tests {
         let mut child = observation(region, 2, 0x1001, child_local_id, ParentUpdate::Local(parent_local_id));
         child.kind = Kind::Avatar;
         let introduced = apply_one(&mut session, simulator_id, region, ObjectOperation::Observe(child.clone()));
-        assert!(introduced.blocks[0].result.as_ref().unwrap().as_ref().unwrap().recovery.satisfied);
+        assert!(introduced.blocks[0].applied().unwrap().recovery.satisfied);
 
         apply_one(
             &mut session,
@@ -1186,7 +1186,7 @@ mod tests {
         let mut pose = ObjectPatch::new(UpdateSource::new(region, 5, OrderEvidence::Ordered(5), 0), child_local_id);
         pose.pose = Some(Pose { position: Some(Vec3::new(1.0, 2.0, 3.0)), rotation: None });
         let partial = apply_one(&mut world, simulator_id, region, ObjectOperation::Patch(pose));
-        assert!(partial.blocks[0].result.as_ref().unwrap().as_ref().unwrap().revision.is_some());
+        assert!(partial.blocks[0].applied().unwrap().revision.is_some());
         assert_eq!(partial.recovery_cancellation_addresses().count(), 0);
 
         let mut parent = ObjectPatch::new(UpdateSource::new(region, 6, OrderEvidence::Ordered(6), 0), child_local_id);
@@ -1227,7 +1227,7 @@ mod tests {
             region,
             ObjectOperation::Observe(observation(region, 3, 0x1201, local_id, ParentUpdate::Root)),
         );
-        assert!(matches!(full.blocks[0].result.as_ref().unwrap(), Ok(applied) if applied.outcome == world::ApplyOutcome::Unchanged));
+        assert_eq!(full.blocks[0].applied().unwrap().outcome, world::ApplyOutcome::Unchanged);
         assert_eq!(full.recovery_cancellation_addresses().collect::<Vec<_>>(), [address]);
 
         let cached = apply_one(
@@ -1243,7 +1243,7 @@ mod tests {
             region,
             ObjectOperation::Observe(observation(region, 3, 0x1201, local_id, ParentUpdate::Root)),
         );
-        assert!(matches!(stale.blocks[0].result.as_ref().unwrap(), Ok(applied) if applied.outcome == world::ApplyOutcome::IgnoredStale));
+        assert_eq!(stale.blocks[0].applied().unwrap().outcome, world::ApplyOutcome::IgnoredStale);
         assert_eq!(stale.recovery_cancellation_addresses().count(), 0);
 
         let mut partial = ObjectPatch::new(UpdateSource::new(region, 5, OrderEvidence::Ordered(5), 0), local_id);

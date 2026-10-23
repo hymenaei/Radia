@@ -1,3 +1,5 @@
+use std::num::{NonZeroU8, NonZeroU32};
+
 use math::{Quat, Vec3};
 use protocol::{
     lludp::{Message, Message::ImprovedTerseObjectUpdate, Message::ObjectUpdate, Message::ObjectUpdateCompressed, Packet},
@@ -5,7 +7,6 @@ use protocol::{
         ExtraParamUpdate, ExtraParameter, GenericStreamingMessage, ObjectExtraParams, StartPingCheck, object::improved_terse_object_update,
     },
 };
-use std::num::{NonZeroU8, NonZeroU32};
 use test_support::{lludp::vectors, parse_hex_fixture};
 use utils::AssetId;
 use uuid::Uuid;

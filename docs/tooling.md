@@ -8,6 +8,10 @@ cargo check --workspace --all-targets
 cargo build --workspace --locked
 cargo build --workspace --release --locked
 cargo build -p <crate>
+cargo build -p viewer --bin viewer
+
+# Run Radia
+cargo run -p viewer --bin viewer
 
 # Build diagnostics
 cargo build --workspace --timings

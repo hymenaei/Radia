@@ -22,7 +22,7 @@ use world::{
     SurfaceAppearance, UpdateSource,
 };
 
-use super::super::object_media::media_version;
+use crate::session::object_media::media_version;
 
 const VOLUME_PCODE: u8 = 9;
 const LEGACY_AVATAR_PCODE: u8 = 47;
@@ -54,14 +54,6 @@ pub(crate) enum ObjectOperation {
     Cached { source: UpdateSource, local_id: NonZeroU32 },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::session) struct ObjectMediaRequest {
-    pub(in crate::session) source: UpdateSource,
-    pub(in crate::session) object_id: Uuid,
-    pub(in crate::session) local_id: NonZeroU32,
-    pub(in crate::session) version: u32,
-}
-
 impl ObjectOperation {
     pub(crate) fn source(&self) -> UpdateSource {
         match self {
@@ -79,6 +71,24 @@ impl ObjectOperation {
         };
         LocalAddress::new(source.region(), local_id)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::session) struct ObjectMediaRequest {
+    pub(in crate::session) source: UpdateSource,
+    pub(in crate::session) object_id: Uuid,
+    pub(in crate::session) local_id: NonZeroU32,
+    pub(in crate::session) version: u32,
+}
+
+#[derive(Clone, Copy)]
+struct InvalidBlock;
+
+#[derive(Clone, Copy)]
+struct ObjectClassification {
+    kind: Kind,
+    shape: FieldUpdate<Shape>,
+    appearance: FieldUpdate<Appearance>,
 }
 
 pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderEvidence, message: &Message) -> Option<ObjectBatch> {
@@ -252,9 +262,6 @@ fn map_terse_blocks(
         })
         .collect()
 }
-
-#[derive(Clone, Copy)]
-struct InvalidBlock;
 
 fn full_observation(block: &ObjectData, source: UpdateSource, invalid_fields: &mut usize) -> Result<ObjectOperation, InvalidBlock> {
     let id = non_nil_uuid(block.id)?;
@@ -441,13 +448,6 @@ fn object_kind(pcode: u8) -> Kind {
     }
 }
 
-#[derive(Clone, Copy)]
-struct ObjectClassification {
-    kind: Kind,
-    shape: FieldUpdate<Shape>,
-    appearance: FieldUpdate<Appearance>,
-}
-
 fn prim_shape(shape: ObjectShape) -> PrimShape {
     PrimShape {
         path_curve: shape.path_curve,
@@ -529,6 +529,7 @@ fn object_classification(
         _ => ObjectClassification { kind: object_kind(pcode), shape: FieldUpdate::Clear, appearance: FieldUpdate::Clear },
     }
 }
+
 #[cfg(test)]
 #[path = "object_tests.rs"]
 mod tests;

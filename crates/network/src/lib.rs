@@ -6,6 +6,9 @@ mod login;
 mod session;
 mod simulator;
 mod status;
+#[cfg(test)]
+mod test_support;
+mod transport;
 #[cfg(feature = "testing")]
 #[doc(hidden)]
 pub mod testing {
@@ -19,7 +22,8 @@ pub mod testing {
         SimulatorId::allocate().expect("simulator ID space is available during tests")
     }
 }
-mod transport;
+
+pub(crate) use transport::http;
 
 pub use coverage::{
     CoverageLoss, CoverageLossLedger, CoverageLossReason, CoverageLossRecord, CoverageSnapshot, CoverageSource, CoverageWatermark,
@@ -29,5 +33,4 @@ pub use event::{CapabilityEvent, Event, EventQueueBatchOrder, PacketOrder, Simul
 pub use login::{AgentSession, Grid, LoginCredentials, StartLocation};
 pub use session::{DEFAULT_UPSTREAM_BYTES_PER_SECOND, MfaChallenge, OutboundMessage, Session, SessionHandle, SessionOptions};
 pub use status::{NetworkLifecycle, NetworkStatusHandle, NetworkStatusSnapshot};
-pub(crate) use transport::http;
 pub use transport::lludp::Delivery;

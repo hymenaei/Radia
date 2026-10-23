@@ -1,14 +1,3 @@
-mod coordination;
-mod coverage;
-mod handoff_cases;
-mod handoff_return;
-mod load;
-mod neighbor;
-mod neighbor_control;
-mod routing;
-mod session;
-mod startup;
-
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::{Future, pending},
@@ -19,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ::test_support::lludp::fixture;
 use llsd::{Map, Value};
 use protocol::{
     BlockValues, ChatType, FieldValue, SchemaMessage,
@@ -37,40 +27,39 @@ use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, UdpSocket},
     runtime, spawn,
-    sync::{Barrier, Notify, Semaphore, mpsc, oneshot, watch},
+    sync::{Notify, Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{advance, timeout},
 };
 use url::Url;
 use uuid::Uuid;
 
-use super::*;
-use super::{
-    CoordinatorGate, EVENT_BACKLOG_DISCONNECT_REASON, HandoffState, HandoffTarget, LOGOUT_TIMEOUT, MAX_CONCURRENT_PACKET_DECODES,
-    MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PENDING_SIMULATOR_EVENTS,
-    MAX_PRECONNECT_EVENTS, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENTS,
-    NEIGHBOR_COMMAND_CAPACITY, NeighborConnection, NeighborConnectionState, NeighborEvent, PreconnectEvents, PreconnectOutcome,
-    ReplacementGate, SimulatorCapabilitySession, queue_neighbor_event, queue_until_connected, run_session,
-};
 use crate::{
     AgentSession, Error, Grid,
-    capabilities::{CapabilityBudget, Client, EventQueueExit, begin_process_measurement},
+    capabilities::{CapabilityBudget, Client, EventQueueExit},
     coverage::{CoverageLoss, CoverageLossLedger, CoverageLossReason, CoverageSource},
     event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY, PacketOrder::Ordered, SimulatorId},
-    session::{COMMAND_CAPACITY, Command, NETWORK_THREAD_STACK_SIZE},
+    session::{COMMAND_CAPACITY, Command, DEFAULT_UPSTREAM_BYTES_PER_SECOND, NETWORK_THREAD_STACK_SIZE},
     simulator::coordinator::{
-        CoordinatorRunState, EventQueueRoleHandle, LogoutOutcome, LogoutUnavailable, NeighborCommand, NeighborTaskOutcome, PromotionSetup,
-        SessionStartup, SimulatorMemoryBudget, neighbor_completion_event,
+        CoordinatorRunState, EventQueueRoleHandle, LogoutOutcome, LogoutUnavailable, PromotionSetup, SessionStartup, SimulatorCommand,
+        SimulatorMemoryBudget, SimulatorTaskOutcome, neighbor_completion_event,
     },
     simulator::{EventRetention, SimulatorCoordinator},
     status::{NetworkLifecycle, NetworkStatusHandle},
     transport::{
         UdpTransport,
-        lludp::{Circuit, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS},
-        pacing::{ProbeHandle, TrafficClass},
+        lludp::{Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS},
     },
 };
-use test_support::lludp::fixture;
+
+use super::*;
+use super::{
+    CoordinatorGate, EVENT_BACKLOG_DISCONNECT_REASON, HandoffState, HandoffTarget, LOGOUT_TIMEOUT, MAX_CONCURRENT_PACKET_DECODES,
+    MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PENDING_SIMULATOR_EVENTS,
+    MAX_PRECONNECT_EVENTS, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENTS,
+    NEIGHBOR_COMMAND_CAPACITY, PreconnectEvents, PreconnectOutcome, ReplacementGate, SimulatorCapabilitySession, SimulatorConnection,
+    SimulatorConnectionState, SimulatorEvent, queue_neighbor_event, queue_until_connected, run_session,
+};
 
 const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
 const SESSION_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
@@ -78,6 +67,106 @@ const CIRCUIT_CODE: u32 = 0x1122_3344;
 const WAIT: Duration = Duration::from_secs(2);
 const SESSION_EVENT_CAPACITY: usize = 2;
 const TEST_EVENT_CAPACITY: usize = CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY;
+
+fn coordinator_options(status: NetworkStatusHandle) -> SimulatorCoordinatorOptions {
+    super::test_options(status)
+}
+
+async fn connect_with_status(
+    session: AgentSession,
+    login_data: ResponseData,
+    status: NetworkStatusHandle,
+) -> Result<SimulatorCoordinator, String> {
+    SimulatorCoordinator::connect(session, login_data, coordinator_options(status))
+        .await?
+        .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())
+}
+
+async fn connect_with_coverage(
+    session: AgentSession,
+    login_data: ResponseData,
+    status: NetworkStatusHandle,
+    coverage_losses: CoverageLossLedger,
+) -> Result<SimulatorCoordinator, String> {
+    let mut options = coordinator_options(status);
+    options.coverage_losses = coverage_losses;
+    SimulatorCoordinator::connect(session, login_data, options)
+        .await?
+        .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())
+}
+
+async fn connect_with_status_and_send_gate(
+    session: AgentSession,
+    login_data: ResponseData,
+    status: NetworkStatusHandle,
+    send_gate: SendGate,
+) -> Result<SimulatorCoordinator, String> {
+    let mut options = coordinator_options(status);
+    options.root_send_gate = Some(send_gate);
+    SimulatorCoordinator::connect(session, login_data, options)
+        .await?
+        .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())
+}
+
+async fn connect_with_gate_and_disconnect(
+    session: AgentSession,
+    login_data: ResponseData,
+    status: NetworkStatusHandle,
+    send_gate: SendGate,
+    disconnect_requested: watch::Receiver<bool>,
+) -> Result<Option<SimulatorCoordinator>, String> {
+    let mut options = coordinator_options(status);
+    options.root_send_gate = Some(send_gate);
+    options.startup_disconnect = Some(disconnect_requested);
+    SimulatorCoordinator::connect(session, login_data, options).await
+}
+
+pub(super) async fn connect_test_connection(
+    simulator_id: SimulatorId,
+    session: AgentSession,
+    region_handle: Option<u64>,
+    status: NetworkStatusHandle,
+    coverage_losses: CoverageLossLedger,
+    primary_state: Option<watch::Receiver<PrimaryState>>,
+    budget: Option<OutboundBudgetHandle>,
+    owned_budget: Option<OutboundBudget>,
+    send_gate: Option<SendGate>,
+) -> Result<SimulatorConnection, String> {
+    let (budget, owned_budget) = match (budget, owned_budget) {
+        (Some(budget), owned_budget) => (budget, owned_budget),
+        (None, Some(owned_budget)) => (owned_budget.handle(), Some(owned_budget)),
+        (None, None) => {
+            let owned_budget = OutboundBudget::new(DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
+            (owned_budget.handle(), Some(owned_budget))
+        }
+    };
+    SimulatorConnection::connect(
+        session,
+        SimulatorConnectionOptions { simulator_id, region_handle, status, coverage_losses, primary_state, budget, owned_budget, send_gate },
+    )
+    .await
+}
+
+async fn connect_test_neighbor(
+    simulator_id: SimulatorId,
+    session: AgentSession,
+    region_handle: u64,
+    status: NetworkStatusHandle,
+) -> Result<SimulatorConnection, String> {
+    connect_test_connection(simulator_id, session, Some(region_handle), status, CoverageLossLedger::new(), None, None, None, None).await
+}
+
+pub(super) async fn connect_test_primary_with_state(
+    simulator_id: SimulatorId,
+    session: AgentSession,
+    status: NetworkStatusHandle,
+    coverage_losses: CoverageLossLedger,
+    primary_state: watch::Receiver<PrimaryState>,
+    budget: OutboundBudgetHandle,
+    send_gate: Option<SendGate>,
+) -> Result<SimulatorConnection, String> {
+    connect_test_connection(simulator_id, session, None, status, coverage_losses, Some(primary_state), Some(budget), None, send_gate).await
+}
 
 struct NeighborHarness {
     primary: UdpSocket,
@@ -95,7 +184,6 @@ struct NeighborHarness {
     client: JoinHandle<Result<(), String>>,
     pause_sends: watch::Sender<bool>,
     send_entered: Arc<Notify>,
-    pacer_probe: Option<ProbeHandle>,
 }
 
 impl NeighborHarness {
@@ -204,7 +292,7 @@ async fn connected_neighbor_with_options(
     let (disconnect, disconnect_requested) = watch::channel(false);
     let status = NetworkStatusHandle::default();
     let (send_gate, pause_sends, send_entered) = UdpTransport::new_send_gate();
-    let mut connection = SimulatorCoordinator::connect_with_status_and_send_gate(
+    let mut connection = connect_with_status_and_send_gate(
         AgentSession { seed_capability: seed, ..login_session(primary_endpoint) },
         ResponseData::default(),
         status.clone(),
@@ -215,7 +303,6 @@ async fn connected_neighbor_with_options(
     connection.promotion_gate = promotion_gate;
     connection.replacement_gate = replacement_gate;
     let packet_memory = connection.packet_memory.clone();
-    let pacer_probe = connection.outbound_budget.as_ref().and_then(|budget| budget.handle().probe());
     let terminal = event_sender.clone().reserve_owned().await.expect("reserve terminal event");
     let client = spawn(connection.run(command_receiver, event_sender, disconnect_requested, terminal));
 
@@ -286,7 +373,6 @@ async fn connected_neighbor_with_options(
         client,
         pause_sends,
         send_entered,
-        pacer_probe,
     }
 }
 
@@ -406,7 +492,7 @@ async fn announce_neighbor(primary: &UdpSocket, peer: SocketAddr, endpoint: Sock
 async fn send_targeted(commands: &mpsc::Sender<Command>, simulator_id: SimulatorId, message: Message) -> Result<(), Error> {
     let (completed, response) = oneshot::channel();
     commands
-        .send(Command::SendTo { simulator_id, message, delivery: Delivery::Reliable, completed, dispatch_probe: None })
+        .send(Command::SendTo { simulator_id, message, delivery: Delivery::Reliable, completed })
         .await
         .map_err(|_| Error::SessionClosed)?;
     response.await.map_err(|_| Error::SessionClosed)?
@@ -419,24 +505,6 @@ fn object_request() -> Message {
             session_id: Uuid::parse_str(SESSION_ID).expect("session UUID"),
         },
         objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 77 }],
-    })
-}
-
-fn burst_object_request() -> Message {
-    const OBJECTS_PER_REQUEST: usize = u8::MAX as usize;
-    let mut objects = Vec::with_capacity(OBJECTS_PER_REQUEST);
-    for index in 0..OBJECTS_PER_REQUEST {
-        objects.push(ObjectRequest {
-            cache_miss_type: CacheMissType::Full,
-            local_id: u32::try_from(index).expect("outbound object index fits u32"),
-        });
-    }
-    Message::RequestMultipleObjects(RequestMultipleObjects {
-        agent_data: RequestAgentData {
-            agent_id: Uuid::parse_str(AGENT_ID).expect("agent UUID"),
-            session_id: Uuid::parse_str(SESSION_ID).expect("session UUID"),
-        },
-        objects,
     })
 }
 
@@ -460,11 +528,11 @@ async fn next_event(events: &mut mpsc::Receiver<EventEnvelope>) -> Event {
     }
 }
 
-async fn next_neighbor_event(events: &mut mpsc::Receiver<NeighborEvent>) -> Event {
+async fn next_neighbor_event(events: &mut mpsc::Receiver<SimulatorEvent>) -> Event {
     timeout(WAIT, async {
         match events.recv().await.expect("neighbor event channel remains open") {
-            NeighborEvent::Simulator(event) => event.into_event(),
-            NeighborEvent::SendCompleted { .. } | NeighborEvent::Finished { .. } => {
+            SimulatorEvent::Simulator(event) => event.into_event(),
+            SimulatorEvent::SendCompleted { .. } | SimulatorEvent::Finished { .. } => {
                 panic!("a standalone neighbor worker must not emit its manager completion")
             }
         }
@@ -490,3 +558,137 @@ async fn next_raw_event(events: &mut mpsc::Receiver<EventEnvelope>) -> Event {
 fn set_sequence(bytes: &mut [u8], sequence: u32) {
     bytes[1..5].copy_from_slice(&sequence.to_be_bytes());
 }
+
+#[tokio::test]
+async fn stalled_send_is_isolated() {
+    let mut harness = connected_neighbor().await;
+    harness.pause_sends.send_replace(true);
+    let (completed, mut response) = oneshot::channel();
+    harness
+        .commands
+        .send(Command::SendTo { simulator_id: harness.primary_id, message: object_request(), delivery: Delivery::Reliable, completed })
+        .await
+        .expect("dispatch primary send");
+    timeout(WAIT, harness.send_entered.notified()).await.expect("primary enters local send");
+    assert!(matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+
+    let neighbor_send = spawn({
+        let commands = harness.commands.clone();
+        let id = harness.neighbor_id;
+        async move { send_targeted(&commands, id, object_request()).await }
+    });
+    let sent = receive_message(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
+    assert!(timeout(WAIT, neighbor_send).await.expect("unrelated send completion").expect("send task").is_ok());
+    harness.neighbor.send_to(&ack(41, sent.sequence()), harness.neighbor_peer).await.expect("ack neighbor request");
+
+    let mut chat = fixture("chat_from_simulator.hex");
+    chat[0] |= 0x40;
+    set_sequence(&mut chat, 42);
+    harness.neighbor.send_to(&chat, harness.neighbor_peer).await.expect("send unrelated reliable data");
+    loop {
+        if matches!(next_raw_event(&mut harness.events).await, Event::SimulatorMessage { simulator_id, sequence: 42, .. } if simulator_id == harness.neighbor_id)
+        {
+            break;
+        }
+    }
+    receive_ack(&harness.neighbor, 42).await;
+    harness.neighbor.send_to(&start_ping_packet(43, 9, 0), harness.neighbor_peer).await.expect("ping unrelated connection");
+    receive_message(&harness.neighbor, |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 9)).await;
+    assert!(matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty)), "primary local send is still pending");
+
+    let (abandoned, abandoned_receiver) = oneshot::channel();
+    drop(abandoned_receiver);
+    harness
+        .commands
+        .send(Command::SendTo {
+            simulator_id: harness.primary_id,
+            message: object_request(),
+            delivery: Delivery::Reliable,
+            completed: abandoned,
+        })
+        .await
+        .expect("admit abandoned send");
+    harness.neighbor.send_to(&start_ping_packet(44, 10, 0), harness.neighbor_peer).await.expect("ping after abandoned send");
+    receive_message(&harness.neighbor, |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 10)).await;
+
+    harness.disconnect.send_replace(true);
+    assert!(
+        timeout(LOGOUT_TIMEOUT + WAIT, harness.client)
+            .await
+            .expect("bounded shutdown despite stalled send")
+            .expect("coordinator task")
+            .is_ok()
+    );
+    assert!(matches!(response.await, Ok(Err(Error::SimulatorConnectionClosed))));
+    assert_eq!(harness.packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
+}
+
+#[tokio::test]
+async fn abandoned_send_does_not_block() {
+    let harness = connected_neighbor().await;
+    harness.pause_sends.send_replace(true);
+
+    let (first, first_response) = oneshot::channel();
+    harness
+        .commands
+        .send(Command::SendTo {
+            simulator_id: harness.primary_id,
+            message: object_request(),
+            delivery: Delivery::Reliable,
+            completed: first,
+        })
+        .await
+        .expect("dispatch first send");
+    drop(first_response);
+    timeout(WAIT, harness.send_entered.notified()).await.expect("first send should stall in the local socket");
+
+    let (second, second_response) = oneshot::channel();
+    harness
+        .commands
+        .send(Command::SendTo {
+            simulator_id: harness.primary_id,
+            message: object_request(),
+            delivery: Delivery::Reliable,
+            completed: second,
+        })
+        .await
+        .expect("queue second send");
+    drop(second_response);
+
+    harness.pause_sends.send_replace(false);
+    for ack_sequence in 24..26 {
+        let sent = receive_message(&harness.primary, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
+        harness.primary.send_to(&ack(ack_sequence, sent.sequence()), harness.primary_peer).await.expect("ack abandoned send");
+    }
+
+    let (completed, response) = oneshot::channel();
+    harness
+        .commands
+        .send(Command::SendTo { simulator_id: harness.primary_id, message: object_request(), delivery: Delivery::Reliable, completed })
+        .await
+        .expect("dispatch send after abandoned completions");
+    let sent = receive_message(&harness.primary, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
+    timeout(WAIT, response).await.expect("later send completion should arrive").expect("send reply").expect("later send succeeds");
+    harness.primary.send_to(&ack(26, sent.sequence()), harness.primary_peer).await.expect("ack later send");
+
+    harness.shutdown().await;
+}
+
+#[path = "coordination_tests.rs"]
+mod coordination;
+#[path = "coverage_tests.rs"]
+mod coverage;
+#[path = "handoff_cases_tests.rs"]
+mod handoff_cases;
+#[path = "handoff_return_tests.rs"]
+mod handoff_return;
+#[path = "neighbor_tests.rs"]
+mod neighbor;
+#[path = "neighbor_control_tests.rs"]
+mod neighbor_control;
+#[path = "routing_tests.rs"]
+mod routing;
+#[path = "session_tests.rs"]
+mod session;
+#[path = "startup_tests.rs"]
+mod startup;

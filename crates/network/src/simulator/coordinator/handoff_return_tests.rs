@@ -8,10 +8,8 @@ fn event_batch_preserves_forwarded_order() {
 }
 
 async fn run_event_batch_order_survives_forwarding() {
-    use crate::{
-        capabilities::{EventQueueTestServer, EventServerResponse},
-        http::testing::response,
-    };
+    use crate::test_support::http::response;
+    use crate::test_support::{EventQueueTestServer, EventServerResponse};
 
     let (release, poll_response) = sync::mpsc::channel();
     let batch = r#"<llsd><map><key>id</key><integer>1</integer><key>events</key><array>
@@ -153,10 +151,8 @@ fn stale_cancel_keeps_new_handoff() {
 }
 
 async fn run_stale_cancel() {
-    use crate::{
-        capabilities::{EventQueueTestServer, EventServerResponse},
-        http::testing::response,
-    };
+    use crate::test_support::http::response;
+    use crate::test_support::{EventQueueTestServer, EventServerResponse};
     use llsd::{Map, xml};
 
     let (release, poll_response) = sync::mpsc::channel();
@@ -198,13 +194,7 @@ async fn run_stale_cancel() {
     let (completed, mut canceled) = oneshot::channel();
     harness
         .commands
-        .send(Command::SendTo {
-            simulator_id: harness.primary_id,
-            message: cancel,
-            delivery: Delivery::Reliable,
-            completed,
-            dispatch_probe: None,
-        })
+        .send(Command::SendTo { simulator_id: harness.primary_id, message: cancel, delivery: Delivery::Reliable, completed })
         .await
         .expect("queue cancellation");
     timeout(WAIT, harness.send_entered.notified()).await.expect("hold cancellation send");

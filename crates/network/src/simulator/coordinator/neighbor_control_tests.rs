@@ -76,7 +76,7 @@ async fn neighbor_shutdown_preempts_start() {
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
     let neighbor_connection =
-        NeighborConnection::connect(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
+        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
             .await
             .expect("connect neighbor circuit");
 
@@ -94,7 +94,7 @@ async fn neighbor_logout_bypasses_full_queues() {
     let endpoint = neighbor.local_addr().expect("read neighbor address");
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");
     let mut connection =
-        NeighborConnection::connect(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
+        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
             .await
             .expect("connect neighbor circuit");
     let (send_gate, pause_sends, send_entered) = UdpTransport::new_send_gate();
@@ -114,7 +114,7 @@ async fn neighbor_logout_bypasses_full_queues() {
     for _ in 0..MAX_PENDING_PACKETS {
         let (completed, response) = oneshot::channel();
         commands
-            .send(NeighborCommand::Send {
+            .send(SimulatorCommand::Send {
                 message: object_request(),
                 delivery: Delivery::Reliable,
                 completed: Some(completed),
@@ -132,7 +132,7 @@ async fn neighbor_logout_bypasses_full_queues() {
     pause_sends.send_replace(true);
     let (queued_completed, queued_response) = oneshot::channel();
     commands
-        .try_send(NeighborCommand::Send {
+        .try_send(SimulatorCommand::Send {
             message: chat_message("x".repeat(7_900)),
             delivery: Delivery::Unreliable,
             completed: Some(queued_completed),
@@ -143,7 +143,7 @@ async fn neighbor_logout_bypasses_full_queues() {
     timeout(WAIT, send_entered.notified()).await.expect("ordinary send should reach the paused local socket");
     let (queued_tail_completed, queued_tail_response) = oneshot::channel();
     commands
-        .send(NeighborCommand::Send {
+        .send(SimulatorCommand::Send {
             message: object_request(),
             delivery: Delivery::Unreliable,
             completed: Some(queued_tail_completed),
@@ -152,7 +152,7 @@ async fn neighbor_logout_bypasses_full_queues() {
         })
         .await
         .expect("queue an ordinary message behind the paused send");
-    commands.send(NeighborCommand::CancelHandoff).await.expect("queue a command behind the application message");
+    commands.send(SimulatorCommand::CancelHandoff).await.expect("queue a command behind the application message");
     timeout(WAIT, async {
         while commands.capacity() == 0 {
             task::yield_now().await;
@@ -189,7 +189,7 @@ async fn neighbor_receiver_close_preempts() {
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
     let neighbor_connection =
-        NeighborConnection::connect(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
+        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
             .await
             .expect("connect neighbor circuit");
     let task = spawn(neighbor_connection.run(
@@ -226,7 +226,7 @@ async fn neighbor_ping_is_delayed() {
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
     let neighbor_connection =
-        NeighborConnection::connect(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
+        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
             .await
             .expect("connect neighbor circuit");
     let task = spawn(neighbor_connection.run(

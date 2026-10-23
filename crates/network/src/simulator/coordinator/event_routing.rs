@@ -4,7 +4,7 @@ use tokio::{sync::mpsc, time::Instant};
 
 use super::{
     EVENT_BACKLOG_DISCONNECT_REASON, EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD, LOGOUT_TIMEOUT,
-    MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, NeighborEvent,
+    MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, SimulatorEvent,
 };
 use crate::event::{EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY, SimulatorId};
 
@@ -103,7 +103,7 @@ pub(super) fn queue_until_connected(
 }
 
 pub(super) fn queue_neighbor_event(
-    events: &mpsc::Sender<NeighborEvent>,
+    events: &mpsc::Sender<SimulatorEvent>,
     pending_events: &mut VecDeque<EventEnvelope>,
     event: impl Into<EventEnvelope>,
     closing: &mut bool,
@@ -130,7 +130,7 @@ pub(super) fn queue_neighbor_event(
 }
 
 fn queue_neighbor_channel_event(
-    events: &mpsc::Sender<NeighborEvent>,
+    events: &mpsc::Sender<SimulatorEvent>,
     pending_events: &mut VecDeque<EventEnvelope>,
     event: EventEnvelope,
 ) -> EventQueueOutcome {
@@ -147,14 +147,14 @@ fn queue_neighbor_channel_event(
         };
     }
 
-    match events.try_send(NeighborEvent::Simulator(event)) {
+    match events.try_send(SimulatorEvent::Simulator(event)) {
         Ok(()) => EventQueueOutcome::Queued,
         Err(mpsc::error::TrySendError::Closed(_)) => EventQueueOutcome::ReceiverClosed,
-        Err(mpsc::error::TrySendError::Full(NeighborEvent::Simulator(event))) => {
+        Err(mpsc::error::TrySendError::Full(SimulatorEvent::Simulator(event))) => {
             pending_events.push_back(event);
             EventQueueOutcome::Queued
         }
-        Err(mpsc::error::TrySendError::Full(NeighborEvent::SendCompleted { .. } | NeighborEvent::Finished { .. })) => {
+        Err(mpsc::error::TrySendError::Full(SimulatorEvent::SendCompleted { .. } | SimulatorEvent::Finished { .. })) => {
             unreachable!("only simulator events enter the neighbor event backlog")
         }
     }
@@ -203,7 +203,7 @@ mod tests {
 
     use super::{PrimaryEventBacklog, primary_event_queue_size, queue_neighbor_event};
     use crate::simulator::coordinator::{
-        EVENT_BACKLOG_DISCONNECT_REASON, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_QUEUED_SIMULATOR_EVENTS, NeighborEvent,
+        EVENT_BACKLOG_DISCONNECT_REASON, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_QUEUED_SIMULATOR_EVENTS, SimulatorEvent,
     };
 
     #[test]
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn full_neighbor_queue_keeps_teardown_open() {
         let (events, receiver) = mpsc::channel(1);
-        events.try_send(NeighborEvent::Simulator(Event::Failed("hold event".into()).into())).expect("fill application event channel");
+        events.try_send(SimulatorEvent::Simulator(Event::Failed("hold event".into()).into())).expect("fill application event channel");
         let mut pending = VecDeque::with_capacity(MAX_QUEUED_SIMULATOR_EVENTS);
         for _ in 0..MAX_QUEUED_SIMULATOR_EVENTS {
             pending.push_back(Event::Failed("pending event".into()).into());

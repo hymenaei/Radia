@@ -17,8 +17,8 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    ConnectionRole, CoordinatorRunState, NeighborConnectionState, NeighborEvent, NeighborHandoffCommand, NeighborRequest, PreconnectEvents,
-    SimulatorCapabilitySession, SimulatorCoordinator, record_event_envelope_loss, remove_simulator_capability,
+    ConnectionRole, CoordinatorRunState, HandoffCommand, PreconnectEvents, SimulatorCapabilitySession, SimulatorConnectionState,
+    SimulatorCoordinator, SimulatorEvent, SimulatorRequest, record_event_envelope_loss, remove_simulator_capability,
 };
 use crate::{
     capabilities::{Client, EventQueueExit},
@@ -201,9 +201,9 @@ pub(super) enum HandoffDecision {
 
 pub(super) struct PromotionSetup<'a> {
     pub(super) state: &'a mut CoordinatorRunState,
-    pub(super) neighbor_requests: mpsc::Sender<NeighborRequest>,
+    pub(super) neighbor_requests: mpsc::Sender<SimulatorRequest>,
     pub(super) application_events: mpsc::Sender<EventEnvelope>,
-    pub(super) neighbor_events: mpsc::Sender<NeighborEvent>,
+    pub(super) neighbor_events: mpsc::Sender<SimulatorEvent>,
     pub(super) shutdown: watch::Receiver<bool>,
     pub(super) capability_events: mpsc::Sender<EventEnvelope>,
 }
@@ -366,7 +366,7 @@ impl SimulatorCoordinator {
         ) {
             self.status.record_error(format!("Could not start destination simulator capabilities: {error}"));
             if let Some(connection) = setup.state.neighbor_connections.get_mut(&handoff.region_handle) {
-                connection.queue_handoff_command(NeighborHandoffCommand::Cancel);
+                connection.queue_handoff_command(HandoffCommand::Cancel);
             }
             return Ok(());
         }
@@ -525,7 +525,7 @@ pub(super) fn teleport_failure_matches(pending: Option<&PendingPromotion>, order
 pub(super) fn cancel_pending_handoff(
     current: PendingPromotion,
     root_simulator_id: SimulatorId,
-    neighbor_connections: &mut HashMap<u64, NeighborConnectionState>,
+    neighbor_connections: &mut HashMap<u64, SimulatorConnectionState>,
     retiring_simulators: &mut HashSet<SimulatorId>,
     preconnect_events: &mut PreconnectEvents,
     connected_simulators: &mut HashSet<SimulatorId>,
@@ -536,7 +536,7 @@ pub(super) fn cancel_pending_handoff(
         if let Some(connection) =
             neighbor_connections.get_mut(&current.handoff.region_handle).filter(|connection| connection.simulator_id == current.target)
         {
-            connection.queue_handoff_command(NeighborHandoffCommand::Cancel);
+            connection.queue_handoff_command(HandoffCommand::Cancel);
         }
         return;
     }
@@ -780,9 +780,14 @@ mod tests {
             endpoint: destination.local_addr().expect("destination endpoint"),
             seed_capability: session.seed_capability.clone(),
         };
-        let mut connection = SimulatorCoordinator::connect_with_status(session, ResponseData::default(), NetworkStatusHandle::default())
-            .await
-            .expect("connect coordinator");
+        let mut connection = SimulatorCoordinator::connect(
+            session,
+            ResponseData::default(),
+            crate::simulator::coordinator::test_options(NetworkStatusHandle::default()),
+        )
+        .await
+        .expect("coordinator startup")
+        .expect("primary connection starts");
         let id = SimulatorId::allocate().expect("destination ID");
         let (events, _receiver) = mpsc::channel(4);
         let (_shutdown, shutdown) = watch::channel(false);

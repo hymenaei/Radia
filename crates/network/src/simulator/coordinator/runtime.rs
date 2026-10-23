@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::time::Instant;
 use std::{collections::VecDeque, pin::Pin};
 
 use protocol::lludp::Message;
@@ -11,8 +9,8 @@ use tokio::{
 
 use super::{
     CLIENT_EVENT_CAPACITY, ConnectionQueueFailure, ConnectionTaskResult, CoordinatorRunState, HANDOFF_COMMAND_RETRY_INTERVAL,
-    LOGOUT_TIMEOUT, NeighborEvent, NeighborRequest, NeighborTaskOutcome, PrimaryRoute, PrimaryState, SESSION_TIMEOUT, SessionStartup,
-    SimulatorCapabilitySession, SimulatorCoordinator,
+    LOGOUT_TIMEOUT, PrimaryRoute, PrimaryState, SESSION_TIMEOUT, SessionStartup, SimulatorCapabilitySession, SimulatorCoordinator,
+    SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome,
     capability_events::redact_seed_capability,
     finish_logout,
     handoff::{
@@ -38,10 +36,10 @@ pub(super) struct CoordinatorRuntime<'a> {
     disconnect_requested: watch::Receiver<bool>,
     capability_events: mpsc::Sender<EventEnvelope>,
     capability_event_rx: mpsc::Receiver<EventEnvelope>,
-    neighbor_events: mpsc::Sender<NeighborEvent>,
-    neighbor_event_rx: mpsc::Receiver<NeighborEvent>,
-    neighbor_requests: mpsc::Sender<NeighborRequest>,
-    neighbor_request_rx: mpsc::Receiver<NeighborRequest>,
+    neighbor_events: mpsc::Sender<SimulatorEvent>,
+    neighbor_event_rx: mpsc::Receiver<SimulatorEvent>,
+    neighbor_requests: mpsc::Sender<SimulatorRequest>,
+    neighbor_request_rx: mpsc::Receiver<SimulatorRequest>,
     root_connection_workers: JoinSet<ConnectionTaskResult>,
     event_queue: EventQueueTask,
     active_primary_event_queue: EventQueueRoleHandle,
@@ -50,7 +48,7 @@ pub(super) struct CoordinatorRuntime<'a> {
     neighbor_events_closed: bool,
     startup: SessionStartup,
     run_state: CoordinatorRunState,
-    pending_neighbor_finishes: VecDeque<NeighborEvent>,
+    pending_neighbor_finishes: VecDeque<SimulatorEvent>,
     handoff_state: HandoffState,
     handoff_command_retry: Interval,
     session_deadline: Pin<Box<Sleep>>,
@@ -307,7 +305,7 @@ impl<'a> CoordinatorRuntime<'a> {
                 }
                 neighbor_event = neighbor_event_rx.recv(), if !neighbor_events_closed => {
                     match neighbor_event {
-                        Some(NeighborEvent::Simulator(event)) => {
+                        Some(SimulatorEvent::Simulator(event)) => {
                             let (event, retained_bytes, coverage_watermark) = event.into_parts();
                             if let Event::SimulatorMessage {
                                 simulator_id,
@@ -481,7 +479,7 @@ impl<'a> CoordinatorRuntime<'a> {
                                 }
                             }
                         }
-                        Some(NeighborEvent::SendCompleted { simulator_id, cancel_target, error, report_failure }) => {
+                        Some(SimulatorEvent::SendCompleted { simulator_id, cancel_target, error, report_failure }) => {
                             if let Some(error) = error {
                                 if report_failure {
                                     coordinator.publish_event(
@@ -514,7 +512,7 @@ impl<'a> CoordinatorRuntime<'a> {
                                 }
                             }
                         }
-                        Some(NeighborEvent::Finished { simulator_id, region_handle, endpoint, outcome }) => {
+                        Some(SimulatorEvent::Finished { simulator_id, region_handle, endpoint, outcome }) => {
                             if is_current_simulator(simulator_id, coordinator.simulator_id, &run_state.neighbor_connections)
                                 || run_state.retiring_simulators.contains(&simulator_id)
                             {
@@ -538,7 +536,7 @@ impl<'a> CoordinatorRuntime<'a> {
                                 }
                                 run_state.connected_simulators.remove(&simulator_id);
                                 let event = neighbor_completion_event(simulator_id, region_handle, endpoint, &outcome);
-                                if let NeighborTaskOutcome::Finished(Err(reason)) | NeighborTaskOutcome::ConnectFailed(reason) = &outcome {
+                                if let SimulatorTaskOutcome::Finished(Err(reason)) | SimulatorTaskOutcome::ConnectFailed(reason) = &outcome {
                                     coordinator.status.record_error(reason);
                                 }
                             if simulator_id == coordinator.primary.simulator_id {
@@ -547,8 +545,8 @@ impl<'a> CoordinatorRuntime<'a> {
                                         return finish_logout(run_state.disconnect_reason);
                                     }
                                     return match outcome {
-                                        NeighborTaskOutcome::Finished(Ok(())) => finish_logout(run_state.disconnect_reason),
-                                        NeighborTaskOutcome::Finished(Err(reason)) | NeighborTaskOutcome::ConnectFailed(reason) => {
+                                        SimulatorTaskOutcome::Finished(Ok(())) => finish_logout(run_state.disconnect_reason),
+                                        SimulatorTaskOutcome::Finished(Err(reason)) | SimulatorTaskOutcome::ConnectFailed(reason) => {
                                             Err(reason)
                                         }
                                     };
@@ -699,7 +697,7 @@ impl<'a> CoordinatorRuntime<'a> {
                     }
                 }
                 request = neighbor_request_rx.recv(), if run_state.logout_deadline.is_none() => {
-                    if let Some(NeighborRequest::Enable { simulator_id, region_handle, endpoint }) = request
+                    if let Some(SimulatorRequest::Enable { simulator_id, region_handle, endpoint }) = request
                         && is_current_simulator(simulator_id, coordinator.simulator_id, &run_state.neighbor_connections)
                     {
                         let mut setup = PromotionSetup {
@@ -739,7 +737,7 @@ impl<'a> CoordinatorRuntime<'a> {
                             coordinator.simulator_id,
                             None,
                             coordinator.session.simulator_address,
-                            &NeighborTaskOutcome::ConnectFailed(reason),
+                            &SimulatorTaskOutcome::ConnectFailed(reason),
                         );
                         coordinator.publish_event(
                             &events,
@@ -765,11 +763,11 @@ impl<'a> CoordinatorRuntime<'a> {
                                     || run_state.retiring_simulators.contains(&simulator_id))
                             {
                                 let outcome = if error.is_cancelled() && run_state.retiring_simulators.contains(&simulator_id) {
-                                    NeighborTaskOutcome::Finished(Ok(()))
+                                    SimulatorTaskOutcome::Finished(Ok(()))
                                 } else {
-                                    NeighborTaskOutcome::Finished(Err(error.to_string()))
+                                    SimulatorTaskOutcome::Finished(Err(error.to_string()))
                                 };
-                                let finish = NeighborEvent::Finished { simulator_id, region_handle, endpoint, outcome };
+                                let finish = SimulatorEvent::Finished { simulator_id, region_handle, endpoint, outcome };
                                 match neighbor_events.try_send(finish) {
                                     Ok(()) => {}
                                     Err(mpsc::error::TrySendError::Full(finish)) => pending_neighbor_finishes.push_back(finish),
@@ -823,13 +821,7 @@ impl<'a> CoordinatorRuntime<'a> {
                             message,
                             delivery,
                             completed,
-                            #[cfg(test)]
-                            dispatch_probe,
                         }) => {
-                            #[cfg(test)]
-                            if let Some(dispatch_probe) = dispatch_probe {
-                                let _ = dispatch_probe.send(Instant::now());
-                            }
                             let cancel_handoff = simulator_id == coordinator.primary.simulator_id
                                 && is_teleport_cancel(&message, coordinator.session.agent_id, coordinator.session.session_id);
                             let cancel_target = cancel_handoff.then(|| handoff_state.cancellation()).flatten();

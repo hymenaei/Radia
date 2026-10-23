@@ -711,6 +711,7 @@ pub(crate) fn validate_http_url(url: &Url) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
     use std::time::{Duration, UNIX_EPOCH};
 
     use reqwest::header::{HeaderMap, HeaderValue};
@@ -768,512 +769,409 @@ mod tests {
         assert_eq!(retry_after_delay("soon", UNIX_EPOCH), None);
         assert_eq!(retry_after_delay("", UNIX_EPOCH), None);
     }
-}
-#[cfg(test)]
-pub(crate) mod testing {
-    use std::{
-        io::{ErrorKind, Read, Write},
-        net::{SocketAddr, TcpListener, TcpStream},
-        str::from_utf8,
-        thread,
-        time::{Duration, Instant},
-    };
+    #[cfg(test)]
+    mod body_tests {
+        use super::*;
 
-    use crate::capabilities::ProcessMeasurement;
-    use crate::http::{Client, Error, ResponseMemoryBudget, ResponseMemoryClass, read_bounded_body, validate_http_url};
-    use reqwest::StatusCode;
-    use url::Url;
+        use std::time::Instant;
 
-    use super::{admit_body_capacity, grow_admitted_body};
+        use crate::capabilities::ProcessMeasurement;
+        use crate::http::{Client, admit_body_capacity, grow_admitted_body, read_bounded_body, validate_http_url};
+        use crate::test_support::http::{LocalServer, response};
+        use reqwest::StatusCode;
+        use url::Url;
 
-    pub(crate) struct LocalServer {
-        address: SocketAddr,
-        worker: thread::JoinHandle<Vec<Vec<u8>>>,
-    }
+        #[tokio::test]
+        async fn redirects_are_not_followed() {
+            let redirect =
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:0/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let server = LocalServer::start(vec![redirect.as_bytes().to_vec()]);
+            let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
 
-    impl LocalServer {
-        pub(crate) fn start(responses: Vec<Vec<u8>>) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
-            listener.set_nonblocking(true).expect("set local listener nonblocking");
-            let address = listener.local_addr().expect("read local listener address");
-            let worker = thread::spawn(move || {
-                responses
-                    .into_iter()
-                    .map(|response| {
-                        let (mut stream, _) = accept_with_timeout(&listener);
-                        stream.set_nonblocking(false).expect("set local stream blocking");
-                        stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set local request timeout");
-                        let request = read_request(&mut stream);
-                        stream.write_all(&response).expect("write local response");
-                        request
-                    })
-                    .collect()
-            });
+            let response = client.get(&server.url("/start")).await.expect("return redirect response without following it");
+            let requests = server.finish();
 
-            Self { address, worker }
+            assert_eq!(response.status, StatusCode::FOUND);
+            assert_eq!(requests.len(), 1);
         }
 
-        pub(crate) fn start_delayed_body(response: Vec<u8>, delay: Duration) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
-            listener.set_nonblocking(true).expect("set local listener nonblocking");
-            let address = listener.local_addr().expect("read local listener address");
-            let worker = thread::spawn(move || {
-                let (mut stream, _) = accept_with_timeout(&listener);
-                stream.set_nonblocking(false).expect("set local stream blocking");
-                stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set local request timeout");
-                let request = read_request(&mut stream);
-                let body_start = header_body_start(&response).expect("response headers are terminated") + 4;
-                stream.write_all(&response[..body_start]).expect("write local response headers");
-                thread::sleep(delay);
-                stream.write_all(&response[body_start..]).expect("write delayed local response body");
-                vec![request]
-            });
+        #[tokio::test]
+        async fn body_at_limit_is_accepted() {
+            let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "12345")]);
+            let response = reqwest::Client::new().get(server.url("/body")).send().await.expect("receive local HTTP response");
 
-            Self { address, worker }
+            assert_eq!(read_bounded_body(response, 5).await.expect("body at limit"), b"12345");
+            server.finish();
         }
 
-        pub(crate) fn url(&self, path: &str) -> Url {
-            Url::parse(&format!("http://{}{path}", self.address)).expect("valid local HTTP URL")
-        }
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "manual allocation measurement; run cargo test -p network --release http_client_heap_peak -- --ignored --nocapture"]
+        async fn http_client_heap_peak() {
+            const BODY_SIZES: [usize; 2] = [128 * 1024, crate::http::MAX_HTTP_RESPONSE_BYTES];
+            let responses = BODY_SIZES
+                .iter()
+                .flat_map(|body_bytes| {
+                    let body = "x".repeat(*body_bytes);
+                    let wire_response = response(200, "OK", "application/octet-stream", None, &body);
+                    [wire_response.clone(), wire_response]
+                })
+                .collect();
+            let server = LocalServer::start(responses);
+            let raw_client = reqwest::Client::new();
+            for body_bytes in BODY_SIZES {
+                let raw_measurement: ProcessMeasurement = crate::capabilities::begin_process_measurement();
+                let raw = raw_client
+                    .get(server.url("/raw"))
+                    .send()
+                    .await
+                    .expect("receive raw Reqwest response")
+                    .bytes()
+                    .await
+                    .expect("read raw body");
+                let (raw_baseline, raw_live, raw_peak, raw_elapsed) = raw_measurement.finish();
+                assert_eq!(raw.len(), body_bytes);
+                assert!(raw.iter().all(|byte| *byte == b'x'));
+                let raw_peak_delta = raw_peak.saturating_sub(raw_baseline);
+                drop(raw);
 
-        pub(crate) fn finish(self) -> Vec<Vec<u8>> {
-            self.worker.join().expect("local HTTP server should finish")
-        }
-    }
+                let budget = ResponseMemoryBudget::new(body_bytes * 4, 0, 0);
+                let client = crate::http::Client::new(Some(Duration::from_secs(5)), false, None)
+                    .expect("build bounded Network HTTP client")
+                    .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
+                let network_measurement: ProcessMeasurement = crate::capabilities::begin_process_measurement();
+                let result = client.get_bounded_classified("test", &server.url("/bounded"), body_bytes).await;
+                let (network_baseline, network_live, network_peak, network_elapsed) = network_measurement.finish();
+                let response = result.expect("admit bounded Network response");
+                assert_eq!(response.body.len(), body_bytes);
+                assert!(response.body.iter().all(|byte| *byte == b'x'));
+                assert_eq!(response.memory.as_ref().map(|permit| permit.bytes), Some(response.body.capacity()));
+                let network_peak_delta = network_peak.saturating_sub(network_baseline);
+                eprintln!(
+                    "HTTP/1 loopback process allocation sample: body={body_bytes} B, raw Reqwest live/peak={raw_live}/{raw_peak_delta} B in {raw_elapsed} ns, Network live/peak={network_live}/{network_peak_delta} B in {network_elapsed} ns, Network body capacity={} B",
+                    response.body.capacity(),
+                );
 
-    pub(crate) fn response(status: u16, reason: &str, content_type: &str, retry_after: Option<&str>, body: &str) -> Vec<u8> {
-        let retry_after = retry_after.map(|value| format!("Retry-After: {value}\r\n")).unwrap_or_default();
-        format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n{retry_after}\r\n{body}",
-        body.len()
-    )
-    .into_bytes()
-    }
-
-    fn accept_with_timeout(listener: &TcpListener) -> (TcpStream, SocketAddr) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match listener.accept() {
-                Ok(connection) => return connection,
-                Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "no request reached local HTTP server");
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => panic!("accept local HTTP request: {error}"),
+                drop(response);
+                let permit =
+                    budget.try_reserve(ResponseMemoryClass::Ordinary, body_bytes * 4).expect("response drop returns all body admission");
+                drop(permit);
             }
+            assert_eq!(server.finish().len(), BODY_SIZES.len() * 2);
         }
-    }
 
-    pub(crate) fn read_request(stream: &mut TcpStream) -> Vec<u8> {
-        let mut request = Vec::new();
-        let mut chunk = [0; 4096];
-        loop {
-            let size = stream.read(&mut chunk).expect("read local HTTP request");
-            if size == 0 {
-                return request;
-            }
-            request.extend_from_slice(&chunk[..size]);
-            if let Some(body_start) = header_body_start(&request) {
-                let content_length = request[..body_start]
-                    .split(|byte| *byte == b'\n')
-                    .filter_map(|line| from_utf8(line).ok())
-                    .find_map(|line| {
-                        let (name, value) = line.trim().split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok()).flatten()
-                    })
-                    .unwrap_or(0);
-                if request.len() >= body_start + 4 + content_length {
-                    return request;
-                }
-            }
+        #[tokio::test]
+        async fn content_length_is_bounded() {
+            let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "123456")]);
+            let response = reqwest::Client::new().get(server.url("/body")).send().await.expect("receive local HTTP response");
+
+            let error = read_bounded_body(response, 5).await.expect_err("declared body exceeds limit");
+            assert!(error.to_string().contains("5-byte limit"));
+            server.finish();
         }
-    }
 
-    fn header_body_start(request: &[u8]) -> Option<usize> {
-        request.windows(4).position(|window| window == b"\r\n\r\n")
-    }
-
-    #[tokio::test]
-    async fn redirects_are_not_followed() {
-        let redirect = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:0/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        let server = LocalServer::start(vec![redirect.as_bytes().to_vec()]);
-        let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
-
-        let response = client.get(&server.url("/start")).await.expect("return redirect response without following it");
-        let requests = server.finish();
-
-        assert_eq!(response.status, StatusCode::FOUND);
-        assert_eq!(requests.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn body_at_limit_is_accepted() {
-        let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "12345")]);
-        let response = reqwest::Client::new().get(server.url("/body")).send().await.expect("receive local HTTP response");
-
-        assert_eq!(read_bounded_body(response, 5).await.expect("body at limit"), b"12345");
-        server.finish();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    #[ignore = "manual allocation measurement; run cargo test -p network --release http_client_heap_peak -- --ignored --nocapture"]
-    async fn http_client_heap_peak() {
-        const BODY_SIZES: [usize; 2] = [128 * 1024, super::MAX_HTTP_RESPONSE_BYTES];
-        let responses = BODY_SIZES
-            .iter()
-            .flat_map(|body_bytes| {
-                let body = "x".repeat(*body_bytes);
-                let wire_response = response(200, "OK", "application/octet-stream", None, &body);
-                [wire_response.clone(), wire_response]
-            })
-            .collect();
-        let server = LocalServer::start(responses);
-        let raw_client = reqwest::Client::new();
-        for body_bytes in BODY_SIZES {
-            let raw_measurement: ProcessMeasurement = crate::capabilities::begin_process_measurement();
-            let raw = raw_client
-                .get(server.url("/raw"))
-                .send()
-                .await
-                .expect("receive raw Reqwest response")
-                .bytes()
-                .await
-                .expect("read raw body");
-            let (raw_baseline, raw_live, raw_peak, raw_elapsed) = raw_measurement.finish();
-            assert_eq!(raw.len(), body_bytes);
-            assert!(raw.iter().all(|byte| *byte == b'x'));
-            let raw_peak_delta = raw_peak.saturating_sub(raw_baseline);
-            drop(raw);
-
-            let budget = ResponseMemoryBudget::new(body_bytes * 4, 0, 0);
-            let client = super::Client::new(Some(Duration::from_secs(5)), false, None)
-                .expect("build bounded Network HTTP client")
+        #[tokio::test]
+        async fn oversized_declared_length_is_rejected_before_body_read_or_admission() {
+            let wire_response = b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n".to_vec();
+            let server = LocalServer::start(vec![wire_response]);
+            let budget = ResponseMemoryBudget::new(8, 0, 0);
+            let client = Client::new(Some(Duration::from_secs(2)), false, None)
+                .expect("build HTTP client")
                 .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
-            let network_measurement: ProcessMeasurement = crate::capabilities::begin_process_measurement();
-            let result = client.get_bounded_classified("test", &server.url("/bounded"), body_bytes).await;
-            let (network_baseline, network_live, network_peak, network_elapsed) = network_measurement.finish();
-            let response = result.expect("admit bounded Network response");
-            assert_eq!(response.body.len(), body_bytes);
-            assert!(response.body.iter().all(|byte| *byte == b'x'));
-            assert_eq!(response.memory.as_ref().map(|permit| permit.bytes), Some(response.body.capacity()));
-            let network_peak_delta = network_peak.saturating_sub(network_baseline);
-            eprintln!(
-                "HTTP/1 loopback process allocation sample: body={body_bytes} B, raw Reqwest live/peak={raw_live}/{raw_peak_delta} B in {raw_elapsed} ns, Network live/peak={network_live}/{network_peak_delta} B in {network_elapsed} ns, Network body capacity={} B",
-                response.body.capacity(),
-            );
 
+            let error = client
+                .get_bounded_classified("test", &server.url("/body"), 5)
+                .await
+                .expect_err("declared body size exceeds limit before the body arrives");
+
+            assert!(matches!(error, Error::ResourceExhausted { status: Some(StatusCode::OK), .. }));
+            assert_eq!(server.finish().len(), 1);
+            drop(budget.try_reserve(ResponseMemoryClass::Ordinary, 8).expect("early rejection reserves no response memory"));
+        }
+
+        #[tokio::test]
+        async fn chunked_body_limit() {
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "Connection: close\r\n\r\n",
+                "3\r\nabc\r\n",
+                "3\r\ndef\r\n",
+                "0\r\n\r\n"
+            );
+            let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
+            let response = reqwest::Client::new().get(server.url("/body")).send().await.expect("receive local HTTP response");
+
+            let error = read_bounded_body(response, 5).await.expect_err("chunked body exceeds limit");
+            assert!(error.to_string().contains("5-byte limit"));
+            server.finish();
+        }
+
+        #[tokio::test]
+        async fn gzip_content_encoding_remains_raw_and_memory_bounded() {
+            const GZIP_BODY: &[u8] = &[
+                0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0xab, 0xa8, 0x18, 0x05, 0xa3, 0x60, 0x14, 0x54, 0x8c, 0x50,
+                0x00, 0x00, 0x63, 0xf0, 0xd7, 0x48, 0x00, 0x04, 0x00, 0x00,
+            ];
+            let mut response =
+                format!("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", GZIP_BODY.len())
+                    .into_bytes();
+            response.extend_from_slice(GZIP_BODY);
+            let server = LocalServer::start(vec![response]);
+            let budget = ResponseMemoryBudget::new(GZIP_BODY.len() * 3, 0, 0);
+            let client = Client::new(Some(Duration::from_secs(2)), false, None)
+                .expect("build HTTP client")
+                .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
+
+            let response = client
+                .get_bounded_classified("test", &server.url("/compressed"), GZIP_BODY.len())
+                .await
+                .expect("the HTTP client does not automatically decompress response bodies");
+
+            assert_eq!(response.body, GZIP_BODY, "compressed content remains caller-owned raw bytes");
+            assert_eq!(
+                response.memory.as_ref().map(|permit| permit.bytes),
+                Some(response.body.capacity()),
+                "raw response allocation is charged at its actual capacity"
+            );
             drop(response);
             let permit =
-                budget.try_reserve(ResponseMemoryClass::Ordinary, body_bytes * 4).expect("response drop returns all body admission");
+                budget.try_reserve(ResponseMemoryClass::Ordinary, GZIP_BODY.len() * 3).expect("drop releases compressed-body admission");
+            drop(permit);
+            assert_eq!(server.finish().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn content_length_mismatch_releases_admitted_memory() {
+            let response =
+                concat!("HTTP/1.1 200 OK\r\n", "Content-Length: 6\r\n", "Retry-After: 2\r\n", "Connection: close\r\n\r\n", "abc");
+            let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
+            let budget = ResponseMemoryBudget::new(12, 0, 0);
+            let client = Client::new(Some(Duration::from_secs(2)), false, None)
+                .expect("build HTTP client")
+                .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
+
+            let error = client
+                .get_bounded_classified("test", &server.url("/body"), 6)
+                .await
+                .expect_err("truncated Content-Length response must fail");
+
+            assert!(matches!(
+                error,
+                Error::Transport { status: Some(StatusCode::OK), elapsed, retry_after: Some(retry_after), .. }
+                    if elapsed > Duration::ZERO && elapsed < Duration::from_secs(2) && retry_after == Duration::from_secs(2)
+            ));
+            assert_eq!(server.finish().len(), 1);
+            let permit = budget.try_reserve(ResponseMemoryClass::Ordinary, 12).expect("truncated body releases its admission");
             drop(permit);
         }
-        assert_eq!(server.finish().len(), BODY_SIZES.len() * 2);
-    }
 
-    #[tokio::test]
-    async fn content_length_is_bounded() {
-        let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "123456")]);
-        let response = reqwest::Client::new().get(server.url("/body")).send().await.expect("receive local HTTP response");
+        #[tokio::test]
+        async fn body_growth_fails_fast_and_releases_budget() {
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "Connection: close\r\n\r\n",
+                "3\r\nabc\r\n",
+                "3\r\ndef\r\n",
+                "0\r\n\r\n"
+            );
+            let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
+            let budget = ResponseMemoryBudget::new(5, 0, 0);
+            let client = Client::new(Some(Duration::from_secs(2)), false, None)
+                .expect("build HTTP client")
+                .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
 
-        let error = read_bounded_body(response, 5).await.expect_err("declared body exceeds limit");
-        assert!(error.to_string().contains("5-byte limit"));
-        server.finish();
-    }
+            let error = client
+                .get_bounded_classified("test", &server.url("/body"), 10)
+                .await
+                .expect_err("actual response growth exceeds the admitted memory");
 
-    #[tokio::test]
-    async fn oversized_declared_length_is_rejected_before_body_read_or_admission() {
-        let wire_response = b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n".to_vec();
-        let server = LocalServer::start(vec![wire_response]);
-        let budget = ResponseMemoryBudget::new(8, 0, 0);
-        let client = Client::new(Some(Duration::from_secs(2)), false, None)
-            .expect("build HTTP client")
-            .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
-
-        let error = client
-            .get_bounded_classified("test", &server.url("/body"), 5)
-            .await
-            .expect_err("declared body size exceeds limit before the body arrives");
-
-        assert!(matches!(error, Error::ResourceExhausted { status: Some(StatusCode::OK), .. }));
-        assert_eq!(server.finish().len(), 1);
-        drop(budget.try_reserve(ResponseMemoryClass::Ordinary, 8).expect("early rejection reserves no response memory"));
-    }
-
-    #[tokio::test]
-    async fn chunked_body_limit() {
-        let response = concat!(
-            "HTTP/1.1 200 OK\r\n",
-            "Transfer-Encoding: chunked\r\n",
-            "Connection: close\r\n\r\n",
-            "3\r\nabc\r\n",
-            "3\r\ndef\r\n",
-            "0\r\n\r\n"
-        );
-        let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
-        let response = reqwest::Client::new().get(server.url("/body")).send().await.expect("receive local HTTP response");
-
-        let error = read_bounded_body(response, 5).await.expect_err("chunked body exceeds limit");
-        assert!(error.to_string().contains("5-byte limit"));
-        server.finish();
-    }
-
-    #[tokio::test]
-    async fn gzip_content_encoding_remains_raw_and_memory_bounded() {
-        const GZIP_BODY: &[u8] = &[
-            0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0xab, 0xa8, 0x18, 0x05, 0xa3, 0x60, 0x14, 0x54, 0x8c, 0x50, 0x00,
-            0x00, 0x63, 0xf0, 0xd7, 0x48, 0x00, 0x04, 0x00, 0x00,
-        ];
-        let mut response =
-            format!("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", GZIP_BODY.len())
-                .into_bytes();
-        response.extend_from_slice(GZIP_BODY);
-        let server = LocalServer::start(vec![response]);
-        let budget = ResponseMemoryBudget::new(GZIP_BODY.len() * 3, 0, 0);
-        let client = Client::new(Some(Duration::from_secs(2)), false, None)
-            .expect("build HTTP client")
-            .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
-
-        let response = client
-            .get_bounded_classified("test", &server.url("/compressed"), GZIP_BODY.len())
-            .await
-            .expect("the HTTP client does not automatically decompress response bodies");
-
-        assert_eq!(response.body, GZIP_BODY, "compressed content remains caller-owned raw bytes");
-        assert_eq!(
-            response.memory.as_ref().map(|permit| permit.bytes),
-            Some(response.body.capacity()),
-            "raw response allocation is charged at its actual capacity"
-        );
-        drop(response);
-        let permit =
-            budget.try_reserve(ResponseMemoryClass::Ordinary, GZIP_BODY.len() * 3).expect("drop releases compressed-body admission");
-        drop(permit);
-        assert_eq!(server.finish().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn content_length_mismatch_releases_admitted_memory() {
-        let response = concat!("HTTP/1.1 200 OK\r\n", "Content-Length: 6\r\n", "Retry-After: 2\r\n", "Connection: close\r\n\r\n", "abc");
-        let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
-        let budget = ResponseMemoryBudget::new(12, 0, 0);
-        let client = Client::new(Some(Duration::from_secs(2)), false, None)
-            .expect("build HTTP client")
-            .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
-
-        let error =
-            client.get_bounded_classified("test", &server.url("/body"), 6).await.expect_err("truncated Content-Length response must fail");
-
-        assert!(matches!(
-            error,
-            Error::Transport { status: Some(StatusCode::OK), elapsed, retry_after: Some(retry_after), .. }
-                if elapsed > Duration::ZERO && elapsed < Duration::from_secs(2) && retry_after == Duration::from_secs(2)
-        ));
-        assert_eq!(server.finish().len(), 1);
-        let permit = budget.try_reserve(ResponseMemoryClass::Ordinary, 12).expect("truncated body releases its admission");
-        drop(permit);
-    }
-
-    #[tokio::test]
-    async fn body_growth_fails_fast_and_releases_budget() {
-        let response = concat!(
-            "HTTP/1.1 200 OK\r\n",
-            "Transfer-Encoding: chunked\r\n",
-            "Connection: close\r\n\r\n",
-            "3\r\nabc\r\n",
-            "3\r\ndef\r\n",
-            "0\r\n\r\n"
-        );
-        let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
-        let budget = ResponseMemoryBudget::new(5, 0, 0);
-        let client = Client::new(Some(Duration::from_secs(2)), false, None)
-            .expect("build HTTP client")
-            .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
-
-        let error = client
-            .get_bounded_classified("test", &server.url("/body"), 10)
-            .await
-            .expect_err("actual response growth exceeds the admitted memory");
-
-        assert!(matches!(error, Error::ResourceExhausted { status: Some(StatusCode::OK), .. }));
-        assert_eq!(server.finish().len(), 1);
-        let permit = budget.try_reserve(ResponseMemoryClass::Ordinary, 5).expect("failed response releases partial admission");
-        drop(permit);
-    }
-
-    #[tokio::test]
-    async fn chunked_body_growth_releases_budget() {
-        let response = concat!(
-            "HTTP/1.1 200 OK\r\n",
-            "Transfer-Encoding: chunked\r\n",
-            "Connection: close\r\n\r\n",
-            "3\r\nabc\r\n",
-            "3\r\ndef\r\n",
-            "0\r\n\r\n"
-        );
-        let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
-        let budget = ResponseMemoryBudget::new(12, 0, 0);
-        let client = Client::new(Some(Duration::from_secs(2)), false, None)
-            .expect("build HTTP client")
-            .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
-
-        let response = client.get_bounded_classified("test", &server.url("/body"), 6).await.expect("admit exact body capacity");
-        assert_eq!(response.body, b"abcdef");
-        assert!(budget.try_reserve(ResponseMemoryClass::Ordinary, 7).is_err(), "response memory stays charged while its body lives");
-
-        drop(response);
-        let permit = budget.try_reserve(ResponseMemoryClass::Ordinary, 12).expect("body drop returns the full admission");
-        drop(permit);
-        server.finish();
-    }
-
-    #[test]
-    fn body_growth_reserves_replacement() {
-        let budget = ResponseMemoryBudget::new(8, 0, 0);
-        let mut body = Vec::with_capacity(4);
-        body.extend_from_slice(b"data");
-        let mut memory = Some(budget.try_reserve(ResponseMemoryClass::Ordinary, body.capacity()).expect("admit old body"));
-        let mut admitted_bytes = body.capacity();
-
-        let error = grow_admitted_body(&mut body, 1, 5, &mut admitted_bytes, &mut memory, StatusCode::OK, None, Instant::now())
-            .expect_err("the old body and full replacement exceed the eight-byte budget");
-
-        assert!(matches!(error, Error::ResourceExhausted { status: Some(StatusCode::OK), .. }));
-        assert_eq!(body.as_slice(), b"data");
-        assert_eq!(body.capacity(), 4, "reallocation must not start before admission succeeds");
-        assert_eq!(admitted_bytes, 4);
-        assert!(budget.try_reserve(ResponseMemoryClass::Ordinary, 4).is_ok(), "only the old body remains charged");
-    }
-
-    #[test]
-    fn body_overallocation_is_charged() {
-        let budget = ResponseMemoryBudget::new(12, 0, 0);
-        let mut memory = Some(budget.try_reserve(ResponseMemoryClass::Ordinary, 9).expect("admit old and requested body bytes"));
-
-        admit_body_capacity(&mut memory, 12, StatusCode::OK, None, Instant::now())
-            .expect("charge allocator capacity beyond the requested growth");
-        assert!(budget.try_reserve(ResponseMemoryClass::Ordinary, 1).is_err(), "actual Vec capacity remains charged");
-
-        drop(memory);
-        let budget = ResponseMemoryBudget::new(11, 0, 0);
-        let mut memory = Some(budget.try_reserve(ResponseMemoryClass::Ordinary, 9).expect("admit initial reservation"));
-        let error = admit_body_capacity(&mut memory, 12, StatusCode::OK, None, Instant::now())
-            .expect_err("reject actual capacity beyond the remaining budget");
-        assert!(matches!(error, Error::ResourceExhausted { status: Some(StatusCode::OK), .. }));
-        assert!(budget.try_reserve(ResponseMemoryClass::Ordinary, 2).is_ok(), "failed growth keeps only the old reservation");
-    }
-
-    #[tokio::test]
-    async fn body_copy_accounts_for_chunk_memory() {
-        let response =
-            concat!("HTTP/1.1 200 OK\r\n", "Transfer-Encoding: chunked\r\n", "Connection: close\r\n\r\n", "6\r\nabcdef\r\n", "0\r\n\r\n");
-        let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
-        let budget = ResponseMemoryBudget::new(6, 0, 0);
-        let client = Client::new(Some(Duration::from_secs(2)), false, None)
-            .expect("build HTTP client")
-            .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
-
-        let error = client
-            .get_bounded_classified("test", &server.url("/body"), 6)
-            .await
-            .expect_err("body storage and the incoming chunk coexist during the copy");
-
-        assert!(matches!(error, Error::ResourceExhausted { status: Some(StatusCode::OK), .. }));
-        let permit = budget.try_reserve(ResponseMemoryClass::Ordinary, 6).expect("failed read releases body and chunk admission");
-        drop(permit);
-        server.finish();
-    }
-
-    #[tokio::test]
-    async fn operation_deadline_covers_body_reading() {
-        let response = response(200, "OK", "text/plain", None, "data");
-        let server = LocalServer::start_delayed_body(response, Duration::from_millis(500));
-        let client = Client::new(Some(Duration::from_millis(250)), false, None).expect("build short-timeout HTTP client");
-
-        let error =
-            client.get_bounded_classified("test", &server.url("/body"), 16).await.expect_err("body must share the operation deadline");
-
-        assert!(matches!(&error, Error::Timeout { status: Some(StatusCode::OK), .. }), "body read exceeded its deadline: {error:?}");
-        assert_eq!(server.finish().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn post_limit_is_enforced() {
-        let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "123456")]);
-        let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
-
-        let error = match client.post_bounded(&server.url("/login"), "text/xml", None, Vec::new(), 5).await {
-            Err(error) => error,
-            Ok(_) => panic!("login response exceeded the configured limit"),
-        };
-
-        assert!(error.contains("5-byte limit"));
-        assert_eq!(server.finish().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn transport_errors_hide_urls() {
-        let url = "http://127.0.0.1:0/cap?token=secret-token";
-        let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
-
-        let error = match client.get(&Url::parse(url).expect("parse capability URL")).await {
-            Err(error) => error,
-            Ok(_) => panic!("closed port should fail"),
-        };
-
-        assert!(!error.contains("secret-token"));
-        assert!(!error.contains(url));
-    }
-
-    #[test]
-    fn unsafe_urls_are_rejected() {
-        for url in [
-            Url::parse("ftp://example.com/cap").expect("parse FTP URL"),
-            Url::parse("http://user:password@example.com/cap").expect("parse credential URL"),
-            Url::parse("https://example.com/cap#fragment").expect("parse fragment URL"),
-            Url::parse("file:///tmp/cap").expect("parse file URL"),
-        ] {
-            assert!(validate_http_url(&url).is_err(), "accepted {url}");
+            assert!(matches!(error, Error::ResourceExhausted { status: Some(StatusCode::OK), .. }));
+            assert_eq!(server.finish().len(), 1);
+            let permit = budget.try_reserve(ResponseMemoryClass::Ordinary, 5).expect("failed response releases partial admission");
+            drop(permit);
         }
 
-        for url in [
-            Url::parse("http://127.0.0.1:9000/cap?token=opaque").expect("parse local HTTP URL"),
-            Url::parse("https://caps.example.net:8443/arbitrary/path").expect("parse HTTPS URL"),
-        ] {
-            assert!(validate_http_url(&url).is_ok(), "rejected {url}");
+        #[tokio::test]
+        async fn chunked_body_growth_releases_budget() {
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "Connection: close\r\n\r\n",
+                "3\r\nabc\r\n",
+                "3\r\ndef\r\n",
+                "0\r\n\r\n"
+            );
+            let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
+            let budget = ResponseMemoryBudget::new(12, 0, 0);
+            let client = Client::new(Some(Duration::from_secs(2)), false, None)
+                .expect("build HTTP client")
+                .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
+
+            let response = client.get_bounded_classified("test", &server.url("/body"), 6).await.expect("admit exact body capacity");
+            assert_eq!(response.body, b"abcdef");
+            assert!(budget.try_reserve(ResponseMemoryClass::Ordinary, 7).is_err(), "response memory stays charged while its body lives");
+
+            drop(response);
+            let permit = budget.try_reserve(ResponseMemoryClass::Ordinary, 12).expect("body drop returns the full admission");
+            drop(permit);
+            server.finish();
+        }
+
+        #[test]
+        fn body_growth_reserves_replacement() {
+            let budget = ResponseMemoryBudget::new(8, 0, 0);
+            let mut body = Vec::with_capacity(4);
+            body.extend_from_slice(b"data");
+            let mut memory = Some(budget.try_reserve(ResponseMemoryClass::Ordinary, body.capacity()).expect("admit old body"));
+            let mut admitted_bytes = body.capacity();
+
+            let error = grow_admitted_body(&mut body, 1, 5, &mut admitted_bytes, &mut memory, StatusCode::OK, None, Instant::now())
+                .expect_err("the old body and full replacement exceed the eight-byte budget");
+
+            assert!(matches!(error, Error::ResourceExhausted { status: Some(StatusCode::OK), .. }));
+            assert_eq!(body.as_slice(), b"data");
+            assert_eq!(body.capacity(), 4, "reallocation must not start before admission succeeds");
+            assert_eq!(admitted_bytes, 4);
+            assert!(budget.try_reserve(ResponseMemoryClass::Ordinary, 4).is_ok(), "only the old body remains charged");
+        }
+
+        #[test]
+        fn body_overallocation_is_charged() {
+            let budget = ResponseMemoryBudget::new(12, 0, 0);
+            let mut memory = Some(budget.try_reserve(ResponseMemoryClass::Ordinary, 9).expect("admit old and requested body bytes"));
+
+            admit_body_capacity(&mut memory, 12, StatusCode::OK, None, Instant::now())
+                .expect("charge allocator capacity beyond the requested growth");
+            assert!(budget.try_reserve(ResponseMemoryClass::Ordinary, 1).is_err(), "actual Vec capacity remains charged");
+
+            drop(memory);
+            let budget = ResponseMemoryBudget::new(11, 0, 0);
+            let mut memory = Some(budget.try_reserve(ResponseMemoryClass::Ordinary, 9).expect("admit initial reservation"));
+            let error = admit_body_capacity(&mut memory, 12, StatusCode::OK, None, Instant::now())
+                .expect_err("reject actual capacity beyond the remaining budget");
+            assert!(matches!(error, Error::ResourceExhausted { status: Some(StatusCode::OK), .. }));
+            assert!(budget.try_reserve(ResponseMemoryClass::Ordinary, 2).is_ok(), "failed growth keeps only the old reservation");
+        }
+
+        #[tokio::test]
+        async fn body_copy_accounts_for_chunk_memory() {
+            let response = concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "Connection: close\r\n\r\n",
+                "6\r\nabcdef\r\n",
+                "0\r\n\r\n"
+            );
+            let server = LocalServer::start(vec![response.as_bytes().to_vec()]);
+            let budget = ResponseMemoryBudget::new(6, 0, 0);
+            let client = Client::new(Some(Duration::from_secs(2)), false, None)
+                .expect("build HTTP client")
+                .with_memory_budget(budget.clone(), ResponseMemoryClass::Ordinary);
+
+            let error = client
+                .get_bounded_classified("test", &server.url("/body"), 6)
+                .await
+                .expect_err("body storage and the incoming chunk coexist during the copy");
+
+            assert!(matches!(error, Error::ResourceExhausted { status: Some(StatusCode::OK), .. }));
+            let permit = budget.try_reserve(ResponseMemoryClass::Ordinary, 6).expect("failed read releases body and chunk admission");
+            drop(permit);
+            server.finish();
+        }
+
+        #[tokio::test]
+        async fn operation_deadline_covers_body_reading() {
+            let response = response(200, "OK", "text/plain", None, "data");
+            let server = LocalServer::start_delayed_body(response, Duration::from_millis(500));
+            let client = Client::new(Some(Duration::from_millis(250)), false, None).expect("build short-timeout HTTP client");
+
+            let error =
+                client.get_bounded_classified("test", &server.url("/body"), 16).await.expect_err("body must share the operation deadline");
+
+            assert!(matches!(&error, Error::Timeout { status: Some(StatusCode::OK), .. }), "body read exceeded its deadline: {error:?}");
+            assert_eq!(server.finish().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn post_limit_is_enforced() {
+            let server = LocalServer::start(vec![response(200, "OK", "text/plain", None, "123456")]);
+            let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
+
+            let error = match client.post_bounded(&server.url("/login"), "text/xml", None, Vec::new(), 5).await {
+                Err(error) => error,
+                Ok(_) => panic!("login response exceeded the configured limit"),
+            };
+
+            assert!(error.contains("5-byte limit"));
+            assert_eq!(server.finish().len(), 1);
+        }
+
+        #[tokio::test]
+        async fn transport_errors_hide_urls() {
+            let url = "http://127.0.0.1:0/cap?token=secret-token";
+            let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
+
+            let error = match client.get(&Url::parse(url).expect("parse capability URL")).await {
+                Err(error) => error,
+                Ok(_) => panic!("closed port should fail"),
+            };
+
+            assert!(!error.contains("secret-token"));
+            assert!(!error.contains(url));
+        }
+
+        #[test]
+        fn unsafe_urls_are_rejected() {
+            for url in [
+                Url::parse("ftp://example.com/cap").expect("parse FTP URL"),
+                Url::parse("http://user:password@example.com/cap").expect("parse credential URL"),
+                Url::parse("https://example.com/cap#fragment").expect("parse fragment URL"),
+                Url::parse("file:///tmp/cap").expect("parse file URL"),
+            ] {
+                assert!(validate_http_url(&url).is_err(), "accepted {url}");
+            }
+
+            for url in [
+                Url::parse("http://127.0.0.1:9000/cap?token=opaque").expect("parse local HTTP URL"),
+                Url::parse("https://caps.example.net:8443/arbitrary/path").expect("parse HTTPS URL"),
+            ] {
+                assert!(validate_http_url(&url).is_ok(), "rejected {url}");
+            }
         }
     }
-}
-#[cfg(test)]
-mod redaction_tests {
-    use std::time::Duration;
+    #[cfg(test)]
+    mod redaction_tests {
+        use std::time::Duration;
 
-    use reqwest::{
-        StatusCode,
-        header::{HeaderMap, HeaderValue},
-    };
-
-    use super::Response;
-
-    #[test]
-    fn response_debug_hides_private_details() {
-        let mut headers = HeaderMap::new();
-        headers.insert("authorization", HeaderValue::from_static("Bearer header-secret"));
-        headers.insert("cookie", HeaderValue::from_static("session=cookie-secret"));
-        let response = Response {
-            status: StatusCode::OK,
-            headers,
-            body: b"body-session-secret".to_vec(),
-            elapsed: Duration::from_millis(12),
-            memory: None,
-            extra_memory: None,
+        use reqwest::{
+            StatusCode,
+            header::{HeaderMap, HeaderValue},
         };
 
-        let debug = format!("{response:?}");
+        use super::Response;
 
-        for secret in ["authorization", "header-secret", "cookie", "cookie-secret", "body-session-secret"] {
-            assert!(!debug.contains(secret));
+        #[test]
+        fn response_debug_hides_private_details() {
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", HeaderValue::from_static("Bearer header-secret"));
+            headers.insert("cookie", HeaderValue::from_static("session=cookie-secret"));
+            let response = Response {
+                status: StatusCode::OK,
+                headers,
+                body: b"body-session-secret".to_vec(),
+                elapsed: Duration::from_millis(12),
+                memory: None,
+                extra_memory: None,
+            };
+
+            let debug = format!("{response:?}");
+
+            for secret in ["authorization", "header-secret", "cookie", "cookie-secret", "body-session-secret"] {
+                assert!(!debug.contains(secret));
+            }
+            assert!(debug.contains("body_bytes"));
+            assert!(debug.contains("header_count"));
         }
-        assert!(debug.contains("body_bytes"));
-        assert!(debug.contains("header_count"));
     }
 }

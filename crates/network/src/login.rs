@@ -318,8 +318,8 @@ fn authenticated_response(value: login::Authenticated, credentials: &LoginCreden
 mod tests {
     use crate::{AgentSession, Event, Grid, LoginCredentials, PacketOrder::Ordered, StartLocation, event::SimulatorId};
 
-    use crate::http::testing::{LocalServer, response};
     use crate::login::{LoginResponse, login_at};
+    use crate::test_support::http::{LocalServer, response};
     use math::Vec3;
     use protocol::{
         Audible, ChatSourceType, ChatType,

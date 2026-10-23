@@ -653,7 +653,233 @@ fn string_value(value: &Value) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod admission_tests {
+pub(crate) mod allocation_measurement {
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        cell::Cell,
+        hint::black_box,
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    use super::*;
+
+    struct CountingAllocator;
+
+    #[derive(Clone, Copy, Default)]
+    struct AllocationCount {
+        live: i128,
+        peak: i128,
+        active: bool,
+    }
+
+    thread_local! {
+        static ALLOCATION_COUNT: Cell<AllocationCount> = const { Cell::new(AllocationCount { live: 0, peak: 0, active: false }) };
+    }
+
+    static PROCESS_LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
+    static PROCESS_PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+    static PROCESS_MEASUREMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let ptr = unsafe { System.alloc(layout) };
+            if !ptr.is_null() {
+                account(layout.size() as i128);
+            }
+            ptr
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let ptr = unsafe { System.alloc_zeroed(layout) };
+            if !ptr.is_null() {
+                account(layout.size() as i128);
+            }
+            ptr
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) };
+            account(-(layout.size() as i128));
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let resized = unsafe { System.realloc(ptr, layout, new_size) };
+            if !resized.is_null() {
+                account(new_size as i128);
+                account(-(layout.size() as i128));
+            }
+            resized
+        }
+    }
+
+    fn account(bytes: i128) {
+        if bytes > 0 {
+            let bytes = bytes as usize;
+            let live = PROCESS_LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed).saturating_add(bytes);
+            if PROCESS_MEASUREMENT_ACTIVE.load(Ordering::Acquire) {
+                PROCESS_PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
+            }
+        } else if bytes < 0 {
+            PROCESS_LIVE_BYTES.fetch_sub((-bytes) as usize, Ordering::Relaxed);
+        }
+
+        let _ = ALLOCATION_COUNT.try_with(|count| {
+            let mut state = count.get();
+            state.live += bytes;
+            if state.active {
+                state.peak = state.peak.max(state.live);
+            }
+            count.set(state);
+        });
+    }
+
+    pub(crate) fn measure<T>(operation: impl FnOnce() -> T) -> (T, i128, i128, u128) {
+        let baseline = ALLOCATION_COUNT.with(|count| {
+            let mut state = count.get();
+            state.active = true;
+            state.peak = state.live;
+            count.set(state);
+            state.live
+        });
+        let started = Instant::now();
+        let value = operation();
+        let elapsed = started.elapsed().as_nanos();
+        let (live, peak) = ALLOCATION_COUNT.with(|count| {
+            let mut state = count.get();
+            state.active = false;
+            count.set(state);
+            (state.live - baseline, state.peak - baseline)
+        });
+        (value, live, peak, elapsed)
+    }
+
+    pub(crate) struct ProcessMeasurement {
+        baseline: usize,
+        started: Instant,
+        active: bool,
+    }
+
+    pub(crate) fn begin_process_measurement() -> ProcessMeasurement {
+        assert!(!PROCESS_MEASUREMENT_ACTIVE.load(Ordering::Acquire), "process allocation measurement is already active");
+        let baseline = PROCESS_LIVE_BYTES.load(Ordering::Relaxed);
+        PROCESS_PEAK_BYTES.store(baseline, Ordering::Relaxed);
+        PROCESS_MEASUREMENT_ACTIVE.store(true, Ordering::Release);
+        ProcessMeasurement { baseline, started: Instant::now(), active: true }
+    }
+
+    impl ProcessMeasurement {
+        pub(crate) fn finish(mut self) -> (usize, i128, usize, u128) {
+            PROCESS_MEASUREMENT_ACTIVE.store(false, Ordering::Release);
+            self.active = false;
+            let live = PROCESS_LIVE_BYTES.load(Ordering::Relaxed) as i128 - self.baseline as i128;
+            let peak = PROCESS_PEAK_BYTES.load(Ordering::Relaxed);
+            (self.baseline, live, peak, self.started.elapsed().as_nanos())
+        }
+    }
+
+    impl Drop for ProcessMeasurement {
+        fn drop(&mut self) {
+            if self.active {
+                PROCESS_MEASUREMENT_ACTIVE.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    fn body(grants: &[(String, String)]) -> (Vec<u8>, Vec<String>) {
+        let mut xml = String::from("<llsd><map>");
+        let mut names = Vec::with_capacity(grants.len());
+        for (name, url) in grants {
+            names.push(name.clone());
+            xml.push_str("<key>");
+            xml.push_str(name);
+            xml.push_str("</key><string>");
+            xml.push_str(url);
+            xml.push_str("</string>");
+        }
+        xml.push_str("</map></llsd>");
+        (xml.into_bytes(), names)
+    }
+
+    #[test]
+    fn url_admission_estimate_covers_measured_corpus() {
+        let mut grants = vec![
+            ("SpacePath".to_owned(), format!("https://cap.example/{}", " ".repeat(32 * 1024))),
+            ("DottedHost".to_owned(), format!("http://{}", "1.".repeat(4096))),
+            ("EncodedDottedHost".to_owned(), format!("http://{}1", "1%2E1%2e".repeat(2048))),
+            ("UnicodeDottedHost".to_owned(), format!("http://{}1", "1。".repeat(4096))),
+            ("IdnaHost".to_owned(), format!("https://{}.example/{}", "ü".repeat(12), "e\u{301}".repeat(1024))),
+            ("QueryApostrophes".to_owned(), format!("https://cap.example/?q={}", "'".repeat(8192))),
+        ];
+        grants
+            .extend((0..MAX_CAPABILITY_NAMES).map(|index| (format!("Capability{index:03}"), format!("https://cap.example/asset/{index}"))));
+        let cases = [
+            ("space path", vec![grants[0].clone()]),
+            ("dotted host", vec![grants[1].clone()]),
+            ("percent-dotted host", vec![grants[2].clone()]),
+            ("Unicode-dotted host", vec![grants[3].clone()]),
+            ("IDNA and combining path", vec![grants[4].clone()]),
+            ("query apostrophes", vec![grants[5].clone()]),
+            ("maximum grants", grants[6..].to_vec()),
+        ];
+
+        for (name, grants) in cases {
+            let (body, names) = body(&grants);
+            let limits = seed_capability_llsd_limits();
+            let value = decode_capability_values(&body).expect("decode corpus for URL estimate");
+            let url_estimate = capability_url_parse_memory_estimate(&value, &names).expect("estimate URL parser memory");
+            drop(value);
+            let llsd_bound = xml::value_allocation_bound(&body, limits).expect("bound capability LLSD value");
+            let (scan_result, scan_live, scan_peak, scan_ns) =
+                measure(|| xml::value_allocation_bound(black_box(&body), limits).expect("scan capability LLSD"));
+            assert_eq!(scan_result, llsd_bound);
+            assert_eq!(scan_live, 0, "scanner allocations return for {name}");
+            let (decoded, retained, peak, decode_ns) = measure(|| {
+                decode_capabilities_with_memory(black_box(&body), black_box(&names), None, |_, url, input_bytes| SeedCapability {
+                    url,
+                    input_bytes,
+                })
+            });
+            assert!(peak >= retained.max(0));
+            let url_peak = peak.saturating_sub(llsd_bound as i128).max(retained.max(0));
+            assert!(
+                url_estimate as i128 >= url_peak,
+                "URL estimate undercount for {name}: peak={peak}, LLSD={llsd_bound}, retained={retained}, estimate={url_estimate}"
+            );
+            eprintln!(
+                "{name}: input={} B, retained={retained} B, peak={peak} B, LLSD={llsd_bound} B, scan_peak={scan_peak} B, URL estimate={url_estimate} B, peak/LLSD={:.2}, estimate/observed={:.2}, scan/decode={:.2} ({scan_ns}/{decode_ns} ns)",
+                body.len(),
+                peak as f64 / llsd_bound.max(1) as f64,
+                url_estimate as f64 / url_peak.max(1) as f64,
+                scan_ns as f64 / decode_ns.max(1) as f64,
+            );
+            if let Ok(capabilities) = &decoded {
+                let retained_estimate = capability_map_retained_memory_estimate(capabilities);
+                assert!(
+                    retained_estimate as i128 >= retained.max(0),
+                    "retained map estimate undercount for {name}: retained={retained}, estimate={retained_estimate}"
+                );
+            }
+            drop(decoded);
+            if grants.len() == 1 {
+                let (url, retained, peak, _) = measure(|| Url::parse(black_box(&grants[0].1)));
+                if let Ok(url) = url {
+                    let retained_estimate = url_retained_memory_estimate(&url, grants[0].1.len());
+                    assert!(
+                        retained_estimate as i128 >= retained.max(0),
+                        "retained URL estimate undercount for {name}: retained={retained}, peak={peak}, estimate={retained_estimate}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
     use super::*;
     use reqwest::header::HeaderMap;
     use std::future::poll_fn;
@@ -937,229 +1163,5 @@ mod admission_tests {
         assert_eq!(budget.ordinary_requests.available_permits(), 0);
         drop(held);
         assert_eq!(budget.ordinary_requests.available_permits(), MAX_CONCURRENT_CAPABILITY_REQUESTS);
-    }
-}
-#[cfg(test)]
-pub(crate) mod allocation_measurement {
-    use std::{
-        alloc::{GlobalAlloc, Layout, System},
-        cell::Cell,
-        hint::black_box,
-        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    };
-
-    use super::*;
-
-    struct CountingAllocator;
-
-    #[derive(Clone, Copy, Default)]
-    struct AllocationCount {
-        live: i128,
-        peak: i128,
-        active: bool,
-    }
-
-    thread_local! {
-        static ALLOCATION_COUNT: Cell<AllocationCount> = const { Cell::new(AllocationCount { live: 0, peak: 0, active: false }) };
-    }
-
-    static PROCESS_LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
-    static PROCESS_PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
-    static PROCESS_MEASUREMENT_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-    #[global_allocator]
-    static ALLOCATOR: CountingAllocator = CountingAllocator;
-
-    unsafe impl GlobalAlloc for CountingAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let ptr = unsafe { System.alloc(layout) };
-            if !ptr.is_null() {
-                account(layout.size() as i128);
-            }
-            ptr
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            let ptr = unsafe { System.alloc_zeroed(layout) };
-            if !ptr.is_null() {
-                account(layout.size() as i128);
-            }
-            ptr
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) };
-            account(-(layout.size() as i128));
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            let resized = unsafe { System.realloc(ptr, layout, new_size) };
-            if !resized.is_null() {
-                account(new_size as i128);
-                account(-(layout.size() as i128));
-            }
-            resized
-        }
-    }
-
-    fn account(bytes: i128) {
-        if bytes > 0 {
-            let bytes = bytes as usize;
-            let live = PROCESS_LIVE_BYTES.fetch_add(bytes, Ordering::Relaxed).saturating_add(bytes);
-            if PROCESS_MEASUREMENT_ACTIVE.load(Ordering::Acquire) {
-                PROCESS_PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
-            }
-        } else if bytes < 0 {
-            PROCESS_LIVE_BYTES.fetch_sub((-bytes) as usize, Ordering::Relaxed);
-        }
-
-        let _ = ALLOCATION_COUNT.try_with(|count| {
-            let mut state = count.get();
-            state.live += bytes;
-            if state.active {
-                state.peak = state.peak.max(state.live);
-            }
-            count.set(state);
-        });
-    }
-
-    pub(crate) fn measure<T>(operation: impl FnOnce() -> T) -> (T, i128, i128, u128) {
-        let baseline = ALLOCATION_COUNT.with(|count| {
-            let mut state = count.get();
-            state.active = true;
-            state.peak = state.live;
-            count.set(state);
-            state.live
-        });
-        let started = Instant::now();
-        let value = operation();
-        let elapsed = started.elapsed().as_nanos();
-        let (live, peak) = ALLOCATION_COUNT.with(|count| {
-            let mut state = count.get();
-            state.active = false;
-            count.set(state);
-            (state.live - baseline, state.peak - baseline)
-        });
-        (value, live, peak, elapsed)
-    }
-
-    pub(crate) struct ProcessMeasurement {
-        baseline: usize,
-        started: Instant,
-        active: bool,
-    }
-
-    pub(crate) fn begin_process_measurement() -> ProcessMeasurement {
-        assert!(!PROCESS_MEASUREMENT_ACTIVE.load(Ordering::Acquire), "process allocation measurement is already active");
-        let baseline = PROCESS_LIVE_BYTES.load(Ordering::Relaxed);
-        PROCESS_PEAK_BYTES.store(baseline, Ordering::Relaxed);
-        PROCESS_MEASUREMENT_ACTIVE.store(true, Ordering::Release);
-        ProcessMeasurement { baseline, started: Instant::now(), active: true }
-    }
-
-    impl ProcessMeasurement {
-        pub(crate) fn finish(mut self) -> (usize, i128, usize, u128) {
-            PROCESS_MEASUREMENT_ACTIVE.store(false, Ordering::Release);
-            self.active = false;
-            let live = PROCESS_LIVE_BYTES.load(Ordering::Relaxed) as i128 - self.baseline as i128;
-            let peak = PROCESS_PEAK_BYTES.load(Ordering::Relaxed);
-            (self.baseline, live, peak, self.started.elapsed().as_nanos())
-        }
-    }
-
-    impl Drop for ProcessMeasurement {
-        fn drop(&mut self) {
-            if self.active {
-                PROCESS_MEASUREMENT_ACTIVE.store(false, Ordering::Release);
-            }
-        }
-    }
-
-    fn body(grants: &[(String, String)]) -> (Vec<u8>, Vec<String>) {
-        let mut xml = String::from("<llsd><map>");
-        let mut names = Vec::with_capacity(grants.len());
-        for (name, url) in grants {
-            names.push(name.clone());
-            xml.push_str("<key>");
-            xml.push_str(name);
-            xml.push_str("</key><string>");
-            xml.push_str(url);
-            xml.push_str("</string>");
-        }
-        xml.push_str("</map></llsd>");
-        (xml.into_bytes(), names)
-    }
-
-    #[test]
-    fn url_admission_estimate_covers_measured_corpus() {
-        let mut grants = vec![
-            ("SpacePath".to_owned(), format!("https://cap.example/{}", " ".repeat(32 * 1024))),
-            ("DottedHost".to_owned(), format!("http://{}", "1.".repeat(4096))),
-            ("EncodedDottedHost".to_owned(), format!("http://{}1", "1%2E1%2e".repeat(2048))),
-            ("UnicodeDottedHost".to_owned(), format!("http://{}1", "1。".repeat(4096))),
-            ("IdnaHost".to_owned(), format!("https://{}.example/{}", "ü".repeat(12), "e\u{301}".repeat(1024))),
-            ("QueryApostrophes".to_owned(), format!("https://cap.example/?q={}", "'".repeat(8192))),
-        ];
-        grants
-            .extend((0..MAX_CAPABILITY_NAMES).map(|index| (format!("Capability{index:03}"), format!("https://cap.example/asset/{index}"))));
-        let cases = [
-            ("space path", vec![grants[0].clone()]),
-            ("dotted host", vec![grants[1].clone()]),
-            ("percent-dotted host", vec![grants[2].clone()]),
-            ("Unicode-dotted host", vec![grants[3].clone()]),
-            ("IDNA and combining path", vec![grants[4].clone()]),
-            ("query apostrophes", vec![grants[5].clone()]),
-            ("maximum grants", grants[6..].to_vec()),
-        ];
-
-        for (name, grants) in cases {
-            let (body, names) = body(&grants);
-            let limits = seed_capability_llsd_limits();
-            let value = decode_capability_values(&body).expect("decode corpus for URL estimate");
-            let url_estimate = capability_url_parse_memory_estimate(&value, &names).expect("estimate URL parser memory");
-            drop(value);
-            let llsd_bound = xml::value_allocation_bound(&body, limits).expect("bound capability LLSD value");
-            let (scan_result, scan_live, scan_peak, scan_ns) =
-                measure(|| xml::value_allocation_bound(black_box(&body), limits).expect("scan capability LLSD"));
-            assert_eq!(scan_result, llsd_bound);
-            assert_eq!(scan_live, 0, "scanner allocations return for {name}");
-            let (decoded, retained, peak, decode_ns) = measure(|| {
-                decode_capabilities_with_memory(black_box(&body), black_box(&names), None, |_, url, input_bytes| SeedCapability {
-                    url,
-                    input_bytes,
-                })
-            });
-            assert!(peak >= retained.max(0));
-            let url_peak = peak.saturating_sub(llsd_bound as i128).max(retained.max(0));
-            assert!(
-                url_estimate as i128 >= url_peak,
-                "URL estimate undercount for {name}: peak={peak}, LLSD={llsd_bound}, retained={retained}, estimate={url_estimate}"
-            );
-            eprintln!(
-                "{name}: input={} B, retained={retained} B, peak={peak} B, LLSD={llsd_bound} B, scan_peak={scan_peak} B, URL estimate={url_estimate} B, peak/LLSD={:.2}, estimate/observed={:.2}, scan/decode={:.2} ({scan_ns}/{decode_ns} ns)",
-                body.len(),
-                peak as f64 / llsd_bound.max(1) as f64,
-                url_estimate as f64 / url_peak.max(1) as f64,
-                scan_ns as f64 / decode_ns.max(1) as f64,
-            );
-            if let Ok(capabilities) = &decoded {
-                let retained_estimate = capability_map_retained_memory_estimate(capabilities);
-                assert!(
-                    retained_estimate as i128 >= retained.max(0),
-                    "retained map estimate undercount for {name}: retained={retained}, estimate={retained_estimate}"
-                );
-            }
-            drop(decoded);
-            if grants.len() == 1 {
-                let (url, retained, peak, _) = measure(|| Url::parse(black_box(&grants[0].1)));
-                if let Ok(url) = url {
-                    let retained_estimate = url_retained_memory_estimate(&url, grants[0].1.len());
-                    assert!(
-                        retained_estimate as i128 >= retained.max(0),
-                        "retained URL estimate undercount for {name}: retained={retained}, peak={peak}, estimate={retained_estimate}"
-                    );
-                }
-            }
-        }
     }
 }

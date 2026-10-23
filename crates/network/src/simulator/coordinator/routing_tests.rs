@@ -109,7 +109,7 @@ async fn replacing_neighbor_releases_queued_state() {
     let old_endpoint = old_neighbor.local_addr().expect("read old neighbor address");
     let new_endpoint = new_neighbor.local_addr().expect("read replacement address");
     let region_handle = 0x1000_0000_0000_1000;
-    let mut connection = SimulatorCoordinator::connect_with_status(
+    let mut connection = connect_with_status(
         login_session(primary.local_addr().expect("primary simulator address")),
         ResponseData::default(),
         NetworkStatusHandle::default(),
@@ -118,7 +118,7 @@ async fn replacing_neighbor_releases_queued_state() {
     .expect("connect primary circuit");
     let _ = receive(&primary).await;
     let (application_events, _application_event_receiver) = mpsc::channel(8);
-    let (neighbor_events, _neighbor_event_receiver) = mpsc::channel::<NeighborEvent>(8);
+    let (neighbor_events, _neighbor_event_receiver) = mpsc::channel::<SimulatorEvent>(8);
     let (_shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(8);
     let mut run_state = CoordinatorRunState::new();
@@ -173,10 +173,9 @@ async fn replacing_neighbor_releases_queued_state() {
 async fn preconnect_overflow_is_neighbor_scoped() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let primary_endpoint = primary.local_addr().expect("read primary address");
-    let mut connection =
-        SimulatorCoordinator::connect_with_status(login_session(primary_endpoint), ResponseData::default(), NetworkStatusHandle::default())
-            .await
-            .expect("connect primary circuit");
+    let mut connection = connect_with_status(login_session(primary_endpoint), ResponseData::default(), NetworkStatusHandle::default())
+        .await
+        .expect("connect primary circuit");
     let simulator_id = SimulatorId::new(53);
     let neighbor_endpoint = "127.0.0.1:13003".parse().expect("parse neighbor endpoint");
     let region_handle = 0x1000_0000_0000_1003;
@@ -185,7 +184,7 @@ async fn preconnect_overflow_is_neighbor_scoped() {
     let mut run_state = CoordinatorRunState::new();
     run_state.neighbor_connections.insert(
         region_handle,
-        NeighborConnectionState {
+        SimulatorConnectionState {
             simulator_id,
             endpoint: neighbor_endpoint,
             abort: neighbor_task.abort_handle(),
@@ -349,13 +348,7 @@ async fn run_queued_target_does_not_follow_neighbor_replacement() {
     let (completed, result) = oneshot::channel();
     harness
         .commands
-        .send(Command::SendTo {
-            simulator_id: neighbor_id,
-            message: object_request(),
-            delivery: Delivery::Reliable,
-            completed,
-            dispatch_probe: None,
-        })
+        .send(Command::SendTo { simulator_id: neighbor_id, message: object_request(), delivery: Delivery::Reliable, completed })
         .await
         .expect("queue an exact send while the replacement route is installed");
     replacement_release.send(()).expect("resume coordinator after replacement");

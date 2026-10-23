@@ -1,13 +1,9 @@
 use std::{collections::HashMap, future::pending, net::SocketAddr, time::Duration};
 
 use protocol::{
-    ChatType,
     lludp::{Message, Packet},
     login::ResponseData,
-    messages::{
-        ChatFromViewer, CompletePingCheck, LogoutRequest, PacketAck, PingId, agent::logout_request, chat::chat_from_viewer,
-        chat::chat_from_viewer::ChatData, circuit::packet_ack::Packets,
-    },
+    messages::{CompletePingCheck, LogoutRequest, PacketAck, PingId, agent::logout_request, circuit::packet_ack::Packets},
 };
 use tokio::{
     net::UdpSocket,
@@ -16,17 +12,17 @@ use tokio::{
     task::yield_now,
     time::{self, Instant, timeout},
 };
-use url::Url;
 use uuid::Uuid;
 
+use super::{AGENT_ID, SESSION_ID, chat_message, connect_with_status, login_session, set_sequence};
 use crate::{
-    AgentSession, Error, Grid,
+    Error,
     event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY},
     session::{COMMAND_CAPACITY, Command},
     simulator::coordinator::{
         LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, LogoutUnavailable, MAX_PENDING_SIMULATOR_EVENTS, send_logout_with_deadline,
     },
-    simulator::{SimulatorCoordinator, run_session},
+    simulator::run_session,
     status::{NetworkLifecycle, NetworkStatusHandle},
     transport::UdpTransport,
     transport::lludp::{
@@ -34,10 +30,8 @@ use crate::{
         acknowledge_pending, retransmit_due,
     },
 };
-use test_support::lludp::fixture;
+use ::test_support::lludp::fixture;
 
-const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
-const SESSION_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
 const CIRCUIT_CODE: u32 = 0x1122_3344;
 const SIMULATOR_TIMEOUT: Duration = Duration::from_secs(2);
 const SESSION_EVENT_CAPACITY: usize = 2;
@@ -63,16 +57,6 @@ fn is_complete_ping(message: &Message, ping_id: u8) -> bool {
     matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == ping_id)
 }
 
-fn chat_message(message: impl Into<String>) -> Message {
-    Message::from(ChatFromViewer {
-        agent_data: chat_from_viewer::AgentData {
-            agent_id: Uuid::parse_str(AGENT_ID).expect("valid test agent ID"),
-            session_id: Uuid::parse_str(SESSION_ID).expect("valid test session ID"),
-        },
-        chat_data: ChatData { message: message.into(), chat_type: ChatType::Normal, channel: 0 },
-    })
-}
-
 fn logout_message() -> Message {
     Message::LogoutRequest(LogoutRequest {
         agent_data: logout_request::AgentData {
@@ -85,7 +69,7 @@ fn logout_message() -> Message {
 #[tokio::test]
 async fn root_disconnect_skips_remote_logout_wait() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let mut connection = SimulatorCoordinator::connect_with_status(
+    let mut connection = connect_with_status(
         login_session(simulator.local_addr().expect("simulator address")),
         ResponseData::default(),
         NetworkStatusHandle::default(),
@@ -134,13 +118,10 @@ async fn logout_failure_preserves_unexpected_error() {
 async fn disconnect_reports_closed_primary() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let status = NetworkStatusHandle::default();
-    let mut connection = SimulatorCoordinator::connect_with_status(
-        login_session(simulator.local_addr().expect("simulator address")),
-        ResponseData::default(),
-        status.clone(),
-    )
-    .await
-    .expect("connect root simulator circuit");
+    let mut connection =
+        connect_with_status(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default(), status.clone())
+            .await
+            .expect("connect root simulator circuit");
     receive(&simulator).await;
     let (logout, receiver) = mpsc::channel(1);
     drop(receiver);
@@ -164,13 +145,10 @@ async fn disconnect_reports_closed_primary() {
 async fn disconnect_logout_respects_deadline() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let status = NetworkStatusHandle::default();
-    let mut connection = SimulatorCoordinator::connect_with_status(
-        login_session(simulator.local_addr().expect("simulator address")),
-        ResponseData::default(),
-        status.clone(),
-    )
-    .await
-    .expect("connect root simulator circuit");
+    let mut connection =
+        connect_with_status(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default(), status.clone())
+            .await
+            .expect("connect root simulator circuit");
     receive(&simulator).await;
     let (logout, _logout_receiver) = mpsc::channel(1);
     let (queued_logout, _queued_response) = oneshot::channel();
@@ -196,7 +174,7 @@ async fn disconnect_logout_respects_deadline() {
 #[tokio::test]
 async fn failed_root_disconnect_reports_no_send() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let mut connection = SimulatorCoordinator::connect_with_status(
+    let mut connection = connect_with_status(
         login_session(simulator.local_addr().expect("simulator address")),
         ResponseData::default(),
         NetworkStatusHandle::default(),
@@ -1038,20 +1016,6 @@ fn late_ack_clears_pending() {
     assert!(pending.is_empty());
 }
 
-fn login_session(simulator_address: SocketAddr) -> AgentSession {
-    AgentSession {
-        first_name: "Test".into(),
-        last_name: "Resident".into(),
-        grid: Grid::Agni,
-        message: "Welcome".into(),
-        simulator_address,
-        agent_id: Uuid::parse_str(AGENT_ID).expect("valid agent UUID"),
-        session_id: Uuid::parse_str(SESSION_ID).expect("valid session UUID"),
-        circuit_code: CIRCUIT_CODE,
-        seed_capability: Url::parse("http://127.0.0.1:1/seed").expect("valid local capability URL"),
-    }
-}
-
 async fn receive(socket: &UdpSocket) -> (Vec<u8>, SocketAddr) {
     receive_with_timeout(socket, SIMULATOR_TIMEOUT).await
 }
@@ -1167,10 +1131,6 @@ fn expected_chat(sequence: u32, message: &str, chat_type: u8, channel: i32) -> V
     bytes.push(chat_type);
     bytes.extend_from_slice(&channel.to_le_bytes());
     bytes
-}
-
-fn set_sequence(bytes: &mut [u8], sequence: u32) {
-    bytes[1..5].copy_from_slice(&sequence.to_be_bytes());
 }
 
 fn start_ping_packet(sequence: u32, ping_id: u8, oldest_unacked: u32) -> Vec<u8> {

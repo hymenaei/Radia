@@ -1,4 +1,13 @@
 use super::*;
+use crate::event::EventReceiver;
+use crate::test_support::http::response;
+use crate::test_support::{
+    EventQueueTestServer, EventServerResponse, acknowledgement, crossed_region_events, hold_response, receive_message, receive_udp,
+    request_line, seed_response, simulator_events,
+};
+use ::test_support::{lludp::vectors, parse_hex_fixture};
+
+const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::test]
 async fn neighbor_intro_precedes_early_udp_data() {
@@ -9,10 +18,9 @@ async fn neighbor_intro_precedes_early_udp_data() {
     let (shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
-    let connection =
-        NeighborConnection::connect(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
-            .await
-            .expect("connect neighbor circuit");
+    let connection = connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
+        .await
+        .expect("connect neighbor circuit");
     let task = spawn(connection.run(event_sender, shutdown, neighbor_requests, commands, mpsc::channel(1).1, SimulatorMemoryBudget::new()));
 
     let (use_circuit, peer) = receive(&neighbor).await;
@@ -45,9 +53,9 @@ async fn neighbor_intro_precedes_early_udp_data() {
 async fn neighbor_task_limit_preserves_current() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let (application_events, mut received_events) = mpsc::channel(MAX_NEIGHBOR_CONNECTION_TASKS + 1);
-    let (neighbor_events, _neighbor_event_receiver) = mpsc::channel::<NeighborEvent>(MAX_NEIGHBOR_CONNECTION_TASKS + 1);
+    let (neighbor_events, _neighbor_event_receiver) = mpsc::channel::<SimulatorEvent>(MAX_NEIGHBOR_CONNECTION_TASKS + 1);
     let (_shutdown_signal, shutdown) = watch::channel(false);
-    let mut connection = SimulatorCoordinator::connect_with_status(
+    let mut connection = connect_with_status(
         login_session(primary.local_addr().expect("primary simulator address")),
         ResponseData::default(),
         NetworkStatusHandle::default(),
@@ -156,9 +164,9 @@ async fn neighbor_task_limit_preserves_current() {
 async fn neighbor_simulator_limit_is_bounded() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let (application_events, mut received_events) = mpsc::channel(MAX_NEIGHBOR_SIMULATORS + 1);
-    let (neighbor_events, _neighbor_event_receiver) = mpsc::channel::<NeighborEvent>(1);
+    let (neighbor_events, _neighbor_event_receiver) = mpsc::channel::<SimulatorEvent>(1);
     let (_shutdown_signal, shutdown) = watch::channel(false);
-    let mut connection = SimulatorCoordinator::connect_with_status(
+    let mut connection = connect_with_status(
         login_session(primary.local_addr().expect("primary simulator address")),
         ResponseData::default(),
         NetworkStatusHandle::default(),
@@ -407,13 +415,13 @@ async fn neighbor_overload_keeps_control() {
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");
     let (event_sender, mut event_receiver) = mpsc::channel(1);
     event_sender
-        .try_send(NeighborEvent::Simulator(Event::Failed("hold application events".into()).into()))
+        .try_send(SimulatorEvent::Simulator(Event::Failed("hold application events".into()).into()))
         .expect("fill neighbor event channel");
     let (_shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(32);
     let (_commands, command_receiver) = mpsc::channel(NEIGHBOR_COMMAND_CAPACITY);
     let neighbor_connection =
-        NeighborConnection::connect(simulator_id, login_session(neighbor_endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
+        connect_test_neighbor(simulator_id, login_session(neighbor_endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
             .await
             .expect("connect neighbor circuit");
     let packet_memory = SimulatorMemoryBudget::new().for_neighbor();
@@ -512,7 +520,7 @@ async fn neighbor_overload_keeps_control() {
     assert_eq!(budget.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
     assert_eq!(budget.decode_slots.available_permits(), MAX_CONCURRENT_PACKET_DECODES);
     let queued = event_receiver.try_recv().expect("the held event remains queued");
-    let NeighborEvent::Simulator(queued) = queued else {
+    let SimulatorEvent::Simulator(queued) = queued else {
         panic!("expected queued simulator event");
     };
     assert!(matches!(queued.into_event(), Event::Failed(message) if message == "hold application events"));
@@ -520,4 +528,277 @@ async fn neighbor_overload_keeps_control() {
         matches!(event_receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)),
         "overflow must not deliver queued application updates after failure"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn event_queue_starts_neighbor() {
+    let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
+    let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
+    let primary_endpoint = primary.local_addr().expect("primary simulator address");
+    let neighbor_endpoint = neighbor.local_addr().expect("neighbor simulator address");
+    let (ip, port) = match neighbor_endpoint {
+        SocketAddr::V4(endpoint) => (endpoint.ip().octets(), endpoint.port()),
+        SocketAddr::V6(_) => panic!("fake neighbor should use IPv4"),
+    };
+    let agent_id = Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("agent UUID");
+    let neighbor_seed_server = EventQueueTestServer::start(|base| {
+        let mut event_url = base.clone();
+        event_url.set_path("/neighbor-event-queue");
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))),
+            EventServerResponse::Response(response(404, "Not Found", "text/plain", None, "stopped")),
+        ]
+    });
+    let neighbor_seed = neighbor_seed_server.url("/neighbor-seed");
+    let server = EventQueueTestServer::start(move |base| {
+        let mut event_url = base.clone();
+        event_url.set_path("/event-queue");
+        let seed = seed_response(&event_url);
+        let event = simulator_events(ip, port, agent_id, &neighbor_seed);
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed)),
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &event)),
+            hold_response(),
+        ]
+    });
+
+    let session = AgentSession {
+        first_name: "Test".into(),
+        last_name: "Resident".into(),
+        grid: Grid::Agni,
+        message: "Welcome".into(),
+        simulator_address: primary_endpoint,
+        agent_id,
+        session_id: Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("session UUID"),
+        circuit_code: 0x1122_3344,
+        seed_capability: server.url("/seed"),
+    };
+    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (event_sender, received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
+    let mut received_events = EventReceiver::new(received_events);
+    let (disconnect, shutdown) = watch::channel(false);
+    let worker = spawn(run_session(session, command_receiver, event_sender, shutdown));
+
+    let (primary_packet, primary_peer) = receive_udp(&primary).await;
+    assert!(matches!(Packet::decode(&primary_packet).expect("decode initial circuit").message(), Message::UseCircuitCode(_)));
+    primary.send_to(&acknowledgement(40, 1), primary_peer).await.expect("ack primary circuit");
+    let (movement_packet, movement_peer) = receive_udp(&primary).await;
+    let movement_packet = Packet::decode(&movement_packet).expect("decode initial movement");
+    assert!(matches!(movement_packet.message(), Message::CompleteAgentMovement(_)));
+    primary.send_to(&acknowledgement(41, movement_packet.sequence()), movement_peer).await.expect("ack initial movement");
+    let (neighbor_packet, neighbor_peer) = receive_udp(&neighbor).await;
+    let neighbor_packet = Packet::decode(&neighbor_packet).expect("decode neighbor circuit");
+    assert_eq!(neighbor_packet.sequence(), 1);
+    assert!(neighbor_packet.is_reliable());
+    assert!(matches!(neighbor_packet.message(), Message::UseCircuitCode(_)));
+    neighbor.send_to(&acknowledgement(40, 1), neighbor_peer).await.expect("ack neighbor circuit");
+
+    let mut saw_event_batch = false;
+    let mut saw_capabilities = false;
+    while !(saw_event_batch && saw_capabilities) {
+        let event = timeout(TEST_TIMEOUT, received_events.recv()).await.expect("forward capability events").expect("network event channel");
+        match event {
+            Event::CapabilityEventBatch { events, .. } => {
+                assert!(!saw_event_batch, "one EventQueue response is published as one application batch");
+                assert_eq!(
+                    events.iter().map(|event| event.message.as_str()).collect::<Vec<_>>(),
+                    ["EnableSimulator", "EstablishAgentCommunication"],
+                    "batch items keep simulator wire order"
+                );
+                saw_event_batch = true;
+                assert!(matches!(
+                    events[1].body.as_map().and_then(|fields| fields.get("seed-capability")),
+                    Some(Value::String(seed)) if seed == "[redacted]"
+                ));
+            }
+            Event::SimulatorCapabilities { source, .. } if source == neighbor_endpoint => saw_capabilities = true,
+            _ => {}
+        }
+    }
+    assert!(request_line(&neighbor_seed_server.next_request()).starts_with("POST /neighbor-seed HTTP/1.1"));
+
+    disconnect.send_replace(true);
+    let (logout, _) = receive_udp(&primary).await;
+    assert!(matches!(Packet::decode(&logout).expect("decode logout").message(), Message::LogoutRequest(_)));
+    timeout(TEST_TIMEOUT, worker).await.expect("network worker shutdown").expect("network task").expect("clean shutdown");
+    server.stop();
+    let requests = server.finish();
+    assert!(requests.len() >= 2, "fake received seed lookup and event poll");
+    neighbor_seed_server.stop();
+    let _ = neighbor_seed_server.finish();
+    assert_ne!(primary_peer, neighbor_peer);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn crossed_region_promotes_after_matching_movement() {
+    let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
+    let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind destination simulator");
+    let primary_endpoint = primary.local_addr().expect("primary simulator address");
+    let neighbor_endpoint = neighbor.local_addr().expect("destination simulator address");
+    let SocketAddr::V4(neighbor_endpoint_v4) = neighbor_endpoint else { panic!("fake destination must use IPv4") };
+    let agent_id = Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("agent UUID");
+    let session_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("session UUID");
+    let region_handle = 0x1000_0000_0000_1000;
+    let neighbor_seed_server = EventQueueTestServer::start(|base| {
+        let mut event_url = base.clone();
+        event_url.set_path("/neighbor-event-queue");
+        vec![EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))), hold_response()]
+    });
+    let neighbor_seed = neighbor_seed_server.url("/neighbor-seed");
+    let primary_seed_server = EventQueueTestServer::start(move |base| {
+        let mut event_url = base.clone();
+        event_url.set_path("/primary-event-queue");
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))),
+            EventServerResponse::Response(response(
+                200,
+                "OK",
+                "application/llsd+xml",
+                None,
+                &crossed_region_events(agent_id, session_id, region_handle, neighbor_endpoint_v4, &neighbor_seed),
+            )),
+            hold_response(),
+        ]
+    });
+    let session = AgentSession {
+        first_name: "Test".into(),
+        last_name: "Resident".into(),
+        grid: Grid::Agni,
+        message: "Welcome".into(),
+        simulator_address: primary_endpoint,
+        agent_id,
+        session_id,
+        circuit_code: 0x1122_3344,
+        seed_capability: primary_seed_server.url("/primary-seed"),
+    };
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (event_sender, received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
+    let mut received_events = EventReceiver::new(received_events);
+    let (_disconnect, shutdown) = watch::channel(false);
+    let worker = spawn(run_session(session, command_receiver, event_sender, shutdown));
+
+    let (primary_packet, primary_peer) = receive_udp(&primary).await;
+    assert!(matches!(Packet::decode(&primary_packet).expect("decode primary circuit").message(), Message::UseCircuitCode(_)));
+    primary.send_to(&acknowledgement(40, 1), primary_peer).await.expect("ack primary circuit");
+    let (movement, movement_peer) = receive_udp(&primary).await;
+    let movement = Packet::decode(&movement).expect("decode primary movement request");
+    assert!(matches!(movement.message(), Message::CompleteAgentMovement(_)));
+    primary.send_to(&acknowledgement(41, movement.sequence()), movement_peer).await.expect("ack primary movement request");
+
+    let mut primary_handshake = parse_hex_fixture(vectors::REGION_HANDSHAKE).expect("parse handshake fixture");
+    primary_handshake[0] |= 0x40;
+    set_sequence(&mut primary_handshake, 22);
+    primary.send_to(&primary_handshake, primary_peer).await.expect("send primary region handshake");
+    let reply = receive_message(&primary, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
+    primary.send_to(&acknowledgement(42, reply.sequence()), primary_peer).await.expect("ack primary handshake reply");
+    let mut primary_movement_complete = parse_hex_fixture(vectors::AGENT_MOVEMENT_COMPLETE).expect("parse movement completion fixture");
+    primary_movement_complete[0] |= 0x40;
+    set_sequence(&mut primary_movement_complete, 23);
+    primary.send_to(&primary_movement_complete, primary_peer).await.expect("complete primary movement");
+
+    let primary_id = loop {
+        match timeout(TEST_TIMEOUT, received_events.recv()).await.expect("receive primary events").expect("event channel remains open") {
+            Event::SimulatorConnected { simulator_id, endpoint, region_handle: None } if endpoint == primary_endpoint => {
+                break simulator_id;
+            }
+            _ => {}
+        }
+    };
+    let (neighbor_packet, neighbor_peer) = receive_udp(&neighbor).await;
+    let neighbor_packet = Packet::decode(&neighbor_packet).expect("decode destination circuit");
+    assert!(matches!(neighbor_packet.message(), Message::UseCircuitCode(_)));
+    neighbor.send_to(&acknowledgement(40, neighbor_packet.sequence()), neighbor_peer).await.expect("ack destination circuit");
+    let neighbor_id = loop {
+        match timeout(TEST_TIMEOUT, received_events.recv()).await.expect("receive destination events").expect("event channel remains open")
+        {
+            Event::SimulatorConnected { simulator_id, endpoint, region_handle: Some(handle) }
+                if endpoint == neighbor_endpoint && handle == region_handle =>
+            {
+                break simulator_id;
+            }
+            _ => {}
+        }
+    };
+
+    let mut neighbor_handshake = parse_hex_fixture(vectors::REGION_HANDSHAKE).expect("parse handshake fixture");
+    neighbor_handshake[0] |= 0x40;
+    set_sequence(&mut neighbor_handshake, 41);
+    neighbor.send_to(&neighbor_handshake, neighbor_peer).await.expect("send destination region handshake");
+    let reply = receive_message(&neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
+    let movement = receive_message(&neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
+    neighbor.send_to(&acknowledgement(42, reply.sequence()), neighbor_peer).await.expect("ack destination handshake reply");
+    neighbor.send_to(&acknowledgement(43, movement.sequence()), neighbor_peer).await.expect("ack destination movement request");
+
+    let wrong_movement = Packet::new(
+        44,
+        Message::AgentMovementComplete(AgentMovementComplete {
+            agent_data: AgentData { agent_id, session_id },
+            data: Data { region_handle: region_handle + 1, ..Default::default() },
+            sim_data: SimData::default(),
+        }),
+    )
+    .with_reliable()
+    .encode()
+    .expect("encode mismatched movement completion");
+    neighbor.send_to(&wrong_movement, neighbor_peer).await.expect("send mismatched movement completion");
+    let mut barrier = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse chat fixture");
+    barrier[0] |= 0x40;
+    set_sequence(&mut barrier, 45);
+    neighbor.send_to(&barrier, neighbor_peer).await.expect("send post-movement barrier");
+    loop {
+        match timeout(TEST_TIMEOUT, received_events.recv())
+            .await
+            .expect("receive before destination promotion")
+            .expect("event channel remains open")
+        {
+            Event::SimulatorMessage { simulator_id, message: Message::ChatFromSimulator(_), .. } if simulator_id == neighbor_id => {
+                break;
+            }
+            Event::SimulatorPromoted { .. } => panic!("mismatched movement completion must not promote the destination"),
+            _ => {}
+        }
+    }
+
+    let matching_movement = Packet::new(
+        46,
+        Message::AgentMovementComplete(AgentMovementComplete {
+            agent_data: AgentData { agent_id, session_id },
+            data: Data { region_handle, ..Default::default() },
+            sim_data: SimData::default(),
+        }),
+    )
+    .with_reliable()
+    .encode()
+    .expect("encode matching movement completion");
+    neighbor.send_to(&matching_movement, neighbor_peer).await.expect("send matching movement completion");
+    let (previous, promoted, promoted_endpoint) = loop {
+        if let Event::SimulatorPromoted { previous_simulator_id, simulator_id, session, .. } =
+            timeout(TEST_TIMEOUT, received_events.recv()).await.expect("receive destination promotion").expect("event channel remains open")
+        {
+            break (previous_simulator_id, simulator_id, session.simulator_address);
+        }
+    };
+    assert_eq!(previous, primary_id);
+    assert_eq!(promoted, neighbor_id);
+    assert_eq!(promoted_endpoint, neighbor_endpoint);
+
+    commands
+        .send(Command::SendMessage {
+            message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 9 } }),
+            delivery: Delivery::Unreliable,
+        })
+        .await
+        .expect("send through the promoted simulator");
+    let routed = receive_message(&neighbor, |message| matches!(message, Message::CompletePingCheck(_))).await;
+    assert!(matches!(routed.message(), Message::CompletePingCheck(_)));
+
+    drop(commands);
+    let logout = receive_message(&neighbor, |message| matches!(message, Message::LogoutRequest(_))).await;
+    assert!(matches!(logout.message(), Message::LogoutRequest(_)));
+    timeout(TEST_TIMEOUT, worker).await.expect("network worker shutdown").expect("network task").expect("clean shutdown");
+    primary_seed_server.stop();
+    let primary_requests = primary_seed_server.finish();
+    assert!(primary_requests.len() >= 2, "primary event queue should receive its seed and poll requests");
+    neighbor_seed_server.stop();
+    let _ = neighbor_seed_server.finish();
 }

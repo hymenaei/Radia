@@ -1,15 +1,18 @@
-#[cfg(test)]
-use std::sync::Arc;
 use std::{
     io::{self, ErrorKind},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
 };
+
+#[cfg(test)]
+use std::sync::Arc;
 
 use tokio::net::UdpSocket;
 #[cfg(test)]
 use tokio::sync::{Notify, watch};
 
 use crate::status::NetworkStatusHandle;
+#[cfg(test)]
+use crate::test_support::SendGate;
 
 const MAX_IPV4_UDP_PAYLOAD: usize = u16::MAX as usize - 20 - 8;
 const MAX_IPV6_UDP_PAYLOAD: usize = u16::MAX as usize - 8;
@@ -112,12 +115,6 @@ impl UdpTransport {
         self.status.note_udp_received();
         Ok(received)
     }
-}
-
-#[cfg(test)]
-pub(crate) struct SendGate {
-    paused: watch::Receiver<bool>,
-    entered: Arc<Notify>,
 }
 
 fn local_bind_address(remote: SocketAddr) -> SocketAddr {

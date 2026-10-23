@@ -1,4 +1,4 @@
-Run commands from the repository root unless stated otherwise. Windows is the primary development platform; use WSL2 for Linux builds and fuzzing. Tool versions are not pinned.
+Run commands from the repository root unless stated otherwise. Windows is the primary development platform; use WSL2 for Linux builds and fuzzing. CI checks Windows, macOS, and Linux. The Rust toolchain follows the stable channel rather than a fixed release. CI installs Nextest 0.9; other development tools may vary by checkout.
 
 Network HTTPS uses Reqwest 0.13 with rustls and aws-lc. Building aws-lc requires a C/C++ compiler. Windows x86-64 assembly uses NASM when available or the crate's enabled prebuilt objects. The selected non-FIPS build does not require CMake, bindgen, or Go. See the [aws-lc-rs build guide](https://github.com/aws/aws-lc-rs#build) for supported toolchains. Certificate verification follows the operating system trust configuration.
 
@@ -12,8 +12,12 @@ cargo build --workspace --release --locked
 cargo build -p <crate>
 cargo build -p viewer --bin viewer
 
-# Run Radia
+# Run viewer
+cargo run
+cargo run --release
 cargo run -p viewer --bin viewer
+cargo run -p <package-with-binary> --release
+cargo run -p <package-with-binary> -- <args>
 
 # Build diagnostics
 cargo build --workspace --timings
@@ -36,18 +40,12 @@ cargo nextest list --workspace
 cargo test --workspace
 cargo test -p <crate>
 
-
 # Run specific tests
 cargo nextest run -p <crate> -E 'test(<name>)'
 cargo nextest run -p <crate> --run-ignored only
 cargo test -p <crate> <name>
 cargo test -p <crate> -- --nocapture
 
-# Run app
-cargo run
-cargo run --release
-cargo run -p <crate> --release
-cargo run -p <crate> -- <args>
 ```
 
 - `cargo lint` checks all targets and features with warnings denied.
@@ -63,7 +61,9 @@ Enable the repository hooks once in each checkout:
 git config --local core.hooksPath .githooks
 ```
 
-The pre-commit hook checks formatting. The pre-push hook runs Clippy and the full workspace test suite with all features, matching CI.
+This command changes the local Git configuration for the current checkout.
+
+The pre-commit hook checks formatting. The pre-push hook runs Clippy on all targets and features with warnings denied, then runs the all-feature workspace test suite through Nextest. CI uses the same workspace and feature scope. Its Clippy command does not pass `-D warnings`.
 
 ## Fuzzing
 
@@ -227,8 +227,6 @@ cargo mutants -f <file-path>
 
 ## Platforms
 
-**Windows:** GUI development, builds, tests, benchmarks, profiling, coverage, Miri, and mutation testing.
+Windows is the primary local development platform. The CI workflow builds, lints, and tests on Windows, macOS, and Linux. It runs documentation tests on Linux.
 
-**WSL2:** Linux builds, fuzzing, corpus management, and fuzz coverage. Confirmed Linux utilities: `cargo-fuzz` and `cargo-binutils`.
-
-Prefer `~/Radia` over `/mnt/c/Radia` for Linux build performance. Keep build artifacts separate between platforms. Windows `.exe` tools exposed through WSL's `PATH` do not replace Linux-native installations.
+Use WSL2 for Linux builds, fuzzing, corpus management, and fuzz coverage. Confirmed Linux utilities include `cargo-fuzz` and `cargo-binutils`. Prefer `~/Radia` over `/mnt/c/Radia` for Linux build performance. Keep build artifacts separate between platforms. Windows `.exe` tools exposed through WSL's `PATH` do not replace Linux-native installations.

@@ -1,15 +1,20 @@
-Radia is a modern third party Second Life viewer written in Rust, focused on rethinking and improving the architecture, performance, usability, and maintainability of existing Second Life viewers.
+Radia is a Second Life viewer written in Rust. It redesigns viewer systems while preserving compatibility with Second Life protocols, content, and workflows.
 
-The project aims to preserve compatibility with the Second Life platform while replacing legacy systems with a cleaner, more modular, and modern implementation. Areas of focus include networking, rendering, user interface, asset handling, and the overall viewer architecture.
+The current milestone is the Classic compatibility baseline. Radia does not identify or offer selectable editions while that work is in progress.
 
-### Build and run
+## Build and run
 
-Install the stable Rust toolchain through rustup. On Windows, install the Visual Studio C++ Build Tools as well, since some dependencies may require a native compiler and Windows SDK.
+Install the stable Rust toolchain through rustup. On Windows, install the Visual Studio C++ Build Tools and Windows SDK. See [tooling.md](docs/tooling.md) for platform setup and development commands.
 
-Then, from the workspace root, run:
+From the workspace root, run:
 
-```cmd
+```sh
 cargo run
 ```
 
-Cargo will download the required dependencies, build Radia, and launch the application.
+## Project docs
+
+- [Vision](docs/vision.md)
+- [Architecture](docs/architecture.md)
+- [Legacy viewer reference guide](docs/reference.md)
+- [Build, test, and profiling commands](docs/tooling.md)

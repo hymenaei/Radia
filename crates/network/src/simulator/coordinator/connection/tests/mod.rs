@@ -288,11 +288,8 @@ async fn run_budget_retry(role: ConnectionRole) {
     }
 }
 
-#[path = "connection_admission_tests.rs"]
 mod admission;
 
-#[path = "connection_lifecycle_tests.rs"]
 mod lifecycle;
 
-#[path = "connection_outbound_tests.rs"]
 mod outbound;

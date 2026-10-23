@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::{sync::mpsc, time::Instant};
 
 use super::{
-    EVENT_BACKLOG_DISCONNECT_REASON, EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD, LOGOUT_TIMEOUT,
-    MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, SimulatorEvent,
+    EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS,
+    MAX_QUEUED_SIMULATOR_EVENTS, SimulatorEvent,
 };
 use crate::event::{EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY, SimulatorId};
 
@@ -90,6 +90,13 @@ pub(super) enum EventQueueOutcome {
     BacklogFull,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum NeighborEventQueueOutcome {
+    Queued,
+    Closing,
+    ReceiverClosed,
+}
+
 pub(super) fn queue_until_connected(
     connected: &HashSet<SimulatorId>,
     pending: &mut PreconnectEvents,
@@ -106,26 +113,17 @@ pub(super) fn queue_neighbor_event(
     events: &mpsc::Sender<SimulatorEvent>,
     pending_events: &mut VecDeque<EventEnvelope>,
     event: impl Into<EventEnvelope>,
-    closing: &mut bool,
-    teardown_deadline: &mut Option<Instant>,
-    close_reason: &mut Option<&'static str>,
-) -> bool {
+) -> NeighborEventQueueOutcome {
     match queue_neighbor_channel_event(events, pending_events, event.into()) {
         EventQueueOutcome::Queued => {
             if pending_events.len() >= MAX_PENDING_SIMULATOR_EVENTS {
-                *closing = true;
-                *teardown_deadline = Some(Instant::now() + LOGOUT_TIMEOUT);
-                *close_reason = Some(EVENT_BACKLOG_DISCONNECT_REASON);
+                NeighborEventQueueOutcome::Closing
+            } else {
+                NeighborEventQueueOutcome::Queued
             }
-            true
         }
-        EventQueueOutcome::ReceiverClosed => false,
-        EventQueueOutcome::BacklogFull => {
-            *closing = true;
-            *teardown_deadline = Some(Instant::now() + LOGOUT_TIMEOUT);
-            *close_reason = Some(EVENT_BACKLOG_DISCONNECT_REASON);
-            true
-        }
+        EventQueueOutcome::ReceiverClosed => NeighborEventQueueOutcome::ReceiverClosed,
+        EventQueueOutcome::BacklogFull => NeighborEventQueueOutcome::Closing,
     }
 }
 
@@ -201,10 +199,8 @@ mod tests {
     use crate::event::{Event, EventEnvelope};
     use tokio::{sync::mpsc, time::Instant};
 
-    use super::{PrimaryEventBacklog, primary_event_queue_size, queue_neighbor_event};
-    use crate::simulator::coordinator::{
-        EVENT_BACKLOG_DISCONNECT_REASON, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_QUEUED_SIMULATOR_EVENTS, SimulatorEvent,
-    };
+    use super::{NeighborEventQueueOutcome, PrimaryEventBacklog, primary_event_queue_size, queue_neighbor_event};
+    use crate::simulator::coordinator::{EVENT_BACKLOG_WARNING_THRESHOLD, MAX_QUEUED_SIMULATOR_EVENTS, SimulatorEvent};
 
     #[test]
     fn backlog_warning_is_rate_limited() {
@@ -251,32 +247,14 @@ mod tests {
         for _ in 0..MAX_QUEUED_SIMULATOR_EVENTS {
             pending.push_back(Event::Failed("pending event".into()).into());
         }
-        let mut closing = false;
-        let mut teardown_deadline = None;
-        let mut close_reason = None;
-
-        assert!(queue_neighbor_event(
-            &events,
-            &mut pending,
-            Event::Failed("overflow".into()),
-            &mut closing,
-            &mut teardown_deadline,
-            &mut close_reason,
-        ));
-        assert!(closing);
-        assert!(teardown_deadline.is_some());
-        assert_eq!(close_reason, Some(EVENT_BACKLOG_DISCONNECT_REASON));
+        assert_eq!(queue_neighbor_event(&events, &mut pending, Event::Failed("overflow".into()),), NeighborEventQueueOutcome::Closing);
         assert_eq!(pending.len(), MAX_QUEUED_SIMULATOR_EVENTS);
 
         drop(receiver);
-        assert!(!queue_neighbor_event(
-            &events,
-            &mut pending,
-            Event::Failed("receiver closed".into()),
-            &mut closing,
-            &mut teardown_deadline,
-            &mut close_reason,
-        ));
+        assert_eq!(
+            queue_neighbor_event(&events, &mut pending, Event::Failed("receiver closed".into())),
+            NeighborEventQueueOutcome::ReceiverClosed
+        );
         assert_eq!(pending.len(), MAX_QUEUED_SIMULATOR_EVENTS);
     }
 }

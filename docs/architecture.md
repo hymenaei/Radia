@@ -40,7 +40,7 @@ The viewer coordinates the library crates. The common directory is being removed
 
 ### `crates/math`
 
-The math crate is the shared import boundary for math types. It currently re-exports selected glam types. Keep consumers importing from math so future project-specific primitives have one home.
+The math crate owns reusable geometry and numeric operations and re-exports selected glam types and scalar extension traits. Frustum extraction uses zero-to-one clip depth, including reversed depth, and tests bounding spheres against six planes. Plane coefficients and sphere calculations use double precision, and plane normal lengths are computed once per frustum. Axis-aligned Bounds, normal transforms, scale-reflection detection, and sRGB channel conversions also live here. Camera policy, mesh storage, and GPU packing stay with scene and render. Keep consumers importing from math so project-specific primitives have one home.
 
 ### `crates/utils`
 

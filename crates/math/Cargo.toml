@@ -9,3 +9,5 @@ workspace = true
 
 [dependencies]
 glam.workspace = true
+
+[dev-dependencies]

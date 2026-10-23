@@ -21,7 +21,7 @@ pub use camera::{Camera, CameraError, Detail};
 pub use environment::{
     EnvironmentProperty, EnvironmentPush, EnvironmentPushError, ExperienceId, ExperienceProperty, ExperienceSetting, ViewerEnvironment,
 };
-pub use mesh::{Bounds, Face, MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh, MeshError, MeshId, SharedMesh, Vertex};
+pub use mesh::{Face, MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh, MeshError, MeshId, SharedMesh, Vertex};
 pub use mesh_cache::{MeshKey, PreparedMesh};
 pub use model::{
     ApplyError, Batch, Geometry, HiddenReason, Object, Patch, Placement, RecoveryReason, RegionData, SceneView, Status, ViewVersion,

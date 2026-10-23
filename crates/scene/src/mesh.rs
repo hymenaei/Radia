@@ -8,7 +8,7 @@ use std::{
     },
 };
 
-use math::{Vec2, Vec3};
+use math::{Bounds, Vec2, Vec3};
 
 use crate::budget::Lease;
 
@@ -54,12 +54,6 @@ pub struct Vertex {
 pub struct Face {
     pub slot: u8,
     pub indices: Range<u32>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Bounds {
-    pub min: Vec3,
-    pub max: Vec3,
 }
 
 pub struct Mesh {

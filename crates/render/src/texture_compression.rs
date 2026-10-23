@@ -135,15 +135,8 @@ struct ColorTables {
 fn downsample(source: &[u8], size: [u32; 2], cancelled: impl Fn() -> bool) -> Result<Vec<u8>, Failure> {
     static COLORS: OnceLock<ColorTables> = OnceLock::new();
     let colors = COLORS.get_or_init(|| ColorTables {
-        linear: std::array::from_fn(|index| {
-            let value = index as f32 / 255.0;
-            if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
-        }),
-        srgb: std::array::from_fn(|index| {
-            let value = index as f32 / 4095.0;
-            let value = if value <= 0.0031308 { value * 12.92 } else { 1.055 * value.powf(1.0 / 2.4) - 0.055 };
-            (value * 255.0).round() as u8
-        }),
+        linear: std::array::from_fn(|index| math::srgb8_to_linear(index as u8)),
+        srgb: std::array::from_fn(|index| math::linear_to_srgb8(index as f32 / 4095.0)),
     });
     let next = size.map(|edge| (edge / 2).max(1));
     if size.into_iter().all(|edge| edge == 1 || edge.is_multiple_of(2)) {

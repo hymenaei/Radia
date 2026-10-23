@@ -2026,7 +2026,7 @@ mod tests {
             packet_ack::Packets,
         },
     };
-    use testing::{lludp::vectors, parse_hex_fixture};
+    use test_support::{lludp::vectors, parse_hex_fixture};
     use tokio::{
         net::UdpSocket,
         spawn,

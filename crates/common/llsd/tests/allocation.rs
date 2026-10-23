@@ -1,7 +1,7 @@
 use std::{fmt::Write, hint::black_box, time::Instant};
 
 use llsd::{Limits, Value, xml};
-use testing::allocation::{self, CountingAllocator, live_bytes};
+use test_support::allocation::{self, CountingAllocator, live_bytes};
 
 #[global_allocator]
 static ALLOC: CountingAllocator = CountingAllocator;

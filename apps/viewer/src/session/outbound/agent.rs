@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn arrival_uses_observed_pose() {
-        let bytes = testing::parse_hex_fixture(testing::lludp::vectors::AGENT_MOVEMENT_COMPLETE).unwrap();
+        let bytes = test_support::parse_hex_fixture(test_support::lludp::vectors::AGENT_MOVEMENT_COMPLETE).unwrap();
         let packet = Packet::decode(&bytes).unwrap();
         let Message::AgentMovementComplete(movement) = packet.message() else { panic!("movement completion") };
         let (agent, session) = (movement.agent_data.agent_id, movement.agent_data.session_id);
@@ -109,7 +109,8 @@ mod tests {
         let view = Camera::new(DVec3::new(128.0, 128.0, 30.0), Vec3::X, 1.0, [720, 720]).unwrap().with_quality(128.0, 1.0).unwrap();
         let update = camera(agent_id, session_id, view, DVec3::ZERO).unwrap();
         let packet = Packet::new(3, update.into()).with_reliable().encode().expect("encode default update");
-        let expected = testing::parse_hex_fixture(testing::lludp::vectors::AGENT_UPDATE_INITIAL).expect("valid AgentUpdate fixture");
+        let expected =
+            test_support::parse_hex_fixture(test_support::lludp::vectors::AGENT_UPDATE_INITIAL).expect("valid AgentUpdate fixture");
         assert_eq!(packet, expected);
     }
 }

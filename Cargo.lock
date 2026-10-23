@@ -4177,7 +4177,7 @@ dependencies = [
  "proptest",
  "quick-xml 0.42.0",
  "serde",
- "testing",
+ "test-support",
  "time",
  "uuid",
 ]
@@ -4629,7 +4629,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "testing",
+ "test-support",
  "time",
  "tokio",
  "tracing",
@@ -5969,7 +5969,7 @@ dependencies = [
  "proptest",
  "quick-xml 0.42.0",
  "sha2 0.10.9",
- "testing",
+ "test-support",
  "tracing",
  "uuid",
 ]
@@ -7795,7 +7795,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "testing"
+name = "test-support"
 version = "0.0.1"
 
 [[package]]
@@ -8666,7 +8666,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "testing",
+ "test-support",
  "time",
  "tokio",
  "tracing",
@@ -10019,7 +10019,7 @@ dependencies = [
  "hecs",
  "math",
  "proptest",
- "testing",
+ "test-support",
  "utils",
  "uuid",
 ]

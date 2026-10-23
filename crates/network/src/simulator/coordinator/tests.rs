@@ -28,7 +28,7 @@ use crate::{
         pacing::{ProbeHandle, TrafficClass},
     },
 };
-use ::testing::lludp::fixture;
+use ::test_support::lludp::fixture;
 use llsd::{Map, Value};
 use protocol::{
     BlockValues, ChatType, FieldValue, SchemaMessage,

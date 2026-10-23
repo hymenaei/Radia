@@ -18,7 +18,7 @@ hecs.workspace = true
 math.workspace = true
 
 [dev-dependencies]
-testing.workspace = true
+test-support.workspace = true
 criterion.workspace = true
 proptest.workspace = true
 

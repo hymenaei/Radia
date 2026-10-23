@@ -1359,7 +1359,7 @@ async fn save_if_current<T>(
 
 #[cfg(test)]
 fn fixture_packet(fixture: &str) -> protocol::lludp::Packet {
-    let bytes = testing::parse_hex_fixture(fixture).expect("valid LLUDP fixture");
+    let bytes = test_support::parse_hex_fixture(fixture).expect("valid LLUDP fixture");
     protocol::lludp::Packet::decode(&bytes).expect("decode LLUDP fixture")
 }
 
@@ -1407,7 +1407,7 @@ mod tests {
         },
     };
     use tempfile::tempdir;
-    use testing::lludp::vectors;
+    use test_support::lludp::vectors;
     use uuid::Uuid;
 
     use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};

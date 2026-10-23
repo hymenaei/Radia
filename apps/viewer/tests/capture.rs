@@ -31,7 +31,7 @@ struct Summary {
 fn valid_capture_decodes_lludp() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let capture_path = directory.path().join("valid.capture");
-    let bytes = testing::parse_hex_fixture(testing::lludp::vectors::START_PING_CHECK)
+    let bytes = test_support::parse_hex_fixture(test_support::lludp::vectors::START_PING_CHECK)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let event = CaptureEvent {
         index: 0,
@@ -70,7 +70,7 @@ fn valid_capture_decodes_lludp() -> Result<(), Box<dyn Error>> {
 #[test]
 fn accepts_missing_packet_metadata() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
-    let bytes = testing::parse_hex_fixture(testing::lludp::vectors::START_PING_CHECK)
+    let bytes = test_support::parse_hex_fixture(test_support::lludp::vectors::START_PING_CHECK)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let payload_path = directory.path().join("payloads.bin");
     File::create(&payload_path)?.write_all(&bytes)?;

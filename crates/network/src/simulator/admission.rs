@@ -308,7 +308,7 @@ mod tests {
     use std::net::SocketAddr;
 
     use crate::event::{Event, EventEnvelope, PacketOrder::Ordered, SimulatorId};
-    use ::testing::{lludp::vectors, parse_hex_fixture};
+    use ::test_support::{lludp::vectors, parse_hex_fixture};
     use protocol::{
         lludp::{Message, MessageId, Packet},
         messages::{PacketAck, packet_ack::Packets},

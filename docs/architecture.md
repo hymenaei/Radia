@@ -22,7 +22,7 @@ crates/assets/         # package `assets`
 crates/common/llsd/    # package `llsd`
 crates/math/           # package `math`
 crates/utils/          # package `utils`
-crates/common/testing/ # package `testing`
+crates/test-support/ # package `testing`
 crates/network/        # package `network`
 crates/protocol/       # package `protocol`
 crates/render/         # package `render`
@@ -46,7 +46,7 @@ The math crate is the shared import boundary for math types. It currently re-exp
 
 Shared ID newtypes distinguish objects, assets, avatars, groups, regions, parcels, inventory items, and folders. Their UUID representation is private. Wire codecs convert explicitly; subsystem APIs adopt these types during their individual reviews. Numeric region handles and parcel-local identifiers remain separate.
 
-### `crates/common/testing`
+### `crates/test-support`
 
 ### `crates/network`
 

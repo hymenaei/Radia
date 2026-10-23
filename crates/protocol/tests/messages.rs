@@ -17,7 +17,7 @@ use protocol::{
     schema::{MessageEncoding, MessageTrust},
 };
 use std::net::Ipv4Addr;
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
 use uuid::Uuid;
 
 fn fixture(hex: &str) -> Vec<u8> {

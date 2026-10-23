@@ -1087,7 +1087,7 @@ fn add_schema_capacity(total: &mut usize, message: &SchemaMessage) {
 mod tests {
     use crate::lludp::Packet;
     use proptest::{prelude::*, test_runner::Config};
-    use testing::{lludp::vectors, parse_hex_fixture};
+    use test_support::{lludp::vectors, parse_hex_fixture};
 
     use super::*;
 

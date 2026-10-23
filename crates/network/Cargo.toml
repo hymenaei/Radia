@@ -27,7 +27,7 @@ zip.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 math.workspace = true
-testing.workspace = true
+test-support.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

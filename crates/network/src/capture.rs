@@ -1563,7 +1563,7 @@ mod format_tests {
     };
     use zip::ZipArchive;
 
-    use ::testing::{lludp::vectors, parse_hex_fixture};
+    use ::test_support::{lludp::vectors, parse_hex_fixture};
     use llsd::Value;
     use protocol::lludp::{Message, Packet};
     use serde_json::{from_slice, from_str, from_value, json, to_value};

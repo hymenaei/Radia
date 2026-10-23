@@ -5,7 +5,7 @@ use protocol::{
         agent_throttle::{AgentData, Throttle},
     },
 };
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
 use uuid::Uuid;
 
 const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";

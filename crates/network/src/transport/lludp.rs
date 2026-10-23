@@ -777,7 +777,7 @@ mod protocol_tests {
             advance_sequence, remove_sent_acks, sequence_age, sequence_is_newer,
         },
     };
-    use ::testing::{lludp::vectors, parse_hex_fixture};
+    use ::test_support::{lludp::vectors, parse_hex_fixture};
     use math::Vec3;
     use protocol::{
         Audible, ChatSourceType, ChatType,

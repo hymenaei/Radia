@@ -3,7 +3,7 @@ use protocol::{
     lludp::{Message, Packet},
     messages::{ExtraParamUpdate, ObjectExtraParams, improved_terse_object_update, object_update, object_update_compressed},
 };
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
 use uuid::Uuid;
 
 fn decode(hex: &str) -> (Vec<u8>, Packet) {

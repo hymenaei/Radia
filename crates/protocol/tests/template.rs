@@ -21,7 +21,7 @@ use protocol::{
         },
     },
 };
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
 
 struct BlockFacts {
     name: &'static str,

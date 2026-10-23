@@ -979,7 +979,7 @@ mod tests {
         },
     };
     use tempfile::tempdir;
-    use testing::lludp;
+    use test_support::lludp;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream, UdpSocket},

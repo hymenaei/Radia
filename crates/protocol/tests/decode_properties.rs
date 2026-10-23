@@ -3,7 +3,7 @@ use proptest::{
     test_runner::{Config, TestCaseResult},
 };
 use protocol::{LLUdpError, lludp::Packet};
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
 
 const MAX_DATAGRAM_BYTES: usize = 0x2000;
 

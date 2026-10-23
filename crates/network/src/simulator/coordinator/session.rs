@@ -15,7 +15,7 @@ use crate::{
         acknowledge_pending, retransmit_due,
     },
 };
-use ::testing::lludp::fixture;
+use ::test_support::lludp::fixture;
 use protocol::{
     ChatType,
     lludp::{Message, Packet},

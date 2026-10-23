@@ -21,7 +21,7 @@ sha2.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
-testing.workspace = true
+test-support.workspace = true
 
 [[bench]]
 name = "packets"

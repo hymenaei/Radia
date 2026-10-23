@@ -9,7 +9,7 @@ use protocol::{
         region_handshake::{RegionInfo1, RegionInfo2, RegionInfo3, RegionInfo4},
     },
 };
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
 use uuid::Uuid;
 
 fn fixture(hex: &str) -> Vec<u8> {

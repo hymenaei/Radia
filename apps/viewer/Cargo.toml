@@ -62,6 +62,6 @@ winit = { workspace = true, features = ["x11", "wayland", "wayland-dlopen"] }
 tokio = { workspace = true, features = ["test-util"] }
 gpui = { workspace = true, features = ["test-support"] }
 network = { workspace = true, features = ["testing"] }
-testing.workspace = true
+test-support.workspace = true
 tempfile.workspace = true
 zip.workspace = true

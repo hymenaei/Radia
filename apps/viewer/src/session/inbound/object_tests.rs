@@ -6,7 +6,7 @@ use protocol::{
     },
 };
 use std::num::{NonZeroU8, NonZeroU32};
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
 use utils::AssetId;
 use uuid::Uuid;
 use world::{

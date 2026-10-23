@@ -11,7 +11,7 @@ use protocol::{
     },
     schema::{self, ids::*},
 };
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
 
 struct CoverageId {
     name: &'static str,

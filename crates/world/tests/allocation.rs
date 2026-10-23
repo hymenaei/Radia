@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 
 use math::{Quat, Vec3};
-use testing::allocation::{CountingAllocator, live_bytes, measure};
+use test_support::allocation::{CountingAllocator, live_bytes, measure};
 use uuid::Uuid;
 use world::{
     Appearance,

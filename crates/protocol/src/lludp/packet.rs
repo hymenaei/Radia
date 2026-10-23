@@ -818,7 +818,7 @@ mod tests {
 
     #[test]
     fn schema_preflight_bounds_schema_shaped_typed_decoders() {
-        use testing::{lludp::vectors, parse_hex_fixture};
+        use test_support::{lludp::vectors, parse_hex_fixture};
 
         for fixture in [
             vectors::AGENT_MOVEMENT_COMPLETE,
@@ -874,7 +874,7 @@ mod tests {
 
     #[test]
     fn typed_preflight_covers_packed_compatibility() {
-        use testing::{lludp::vectors, parse_hex_fixture};
+        use test_support::{lludp::vectors, parse_hex_fixture};
 
         for fixture in [
             vectors::REGION_HANDSHAKE,

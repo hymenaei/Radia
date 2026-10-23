@@ -1,7 +1,7 @@
 use std::{hint::black_box, mem::size_of};
 
 use protocol::lludp::{FieldValue, Message, Packet};
-use testing::{
+use test_support::{
     allocation::{self, CountingAllocator, measure},
     lludp::vectors,
     parse_hex_fixture,

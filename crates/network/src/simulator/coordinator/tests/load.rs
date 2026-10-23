@@ -1,5 +1,39 @@
-use super::*;
 use std::{mem::replace, time::Instant};
+
+use super::*;
+
+#[derive(Default)]
+struct LoadAcknowledgements {
+    sent: usize,
+    appended: Vec<Duration>,
+    standalone: Vec<Duration>,
+    outstanding: usize,
+}
+
+struct LoadReceiverReport {
+    fair_bytes: usize,
+    acknowledgements: LoadAcknowledgements,
+}
+
+struct BurstSendReport {
+    successful: usize,
+    errors: HashMap<String, usize>,
+    latencies: Vec<Duration>,
+    queue_residence: Vec<Duration>,
+}
+
+#[derive(Default)]
+struct BurstReceiveReport {
+    requests: usize,
+    bytes: usize,
+    first_to_last: Option<Duration>,
+    timed_out: bool,
+}
+
+struct BurstReport {
+    sent: BurstSendReport,
+    received: BurstReceiveReport,
+}
 
 #[tokio::test]
 #[ignore = "manual loopback latency measurement; run with --release --ignored --nocapture"]
@@ -396,39 +430,6 @@ async fn five_simulator_load() {
     }
     harness.shutdown().await;
     eprintln!("five-simulator event drain: {} events consumed", event_drain.await.expect("event drain task"));
-}
-
-#[derive(Default)]
-struct LoadAcknowledgements {
-    sent: usize,
-    appended: Vec<Duration>,
-    standalone: Vec<Duration>,
-    outstanding: usize,
-}
-
-struct LoadReceiverReport {
-    fair_bytes: usize,
-    acknowledgements: LoadAcknowledgements,
-}
-
-struct BurstSendReport {
-    successful: usize,
-    errors: HashMap<String, usize>,
-    latencies: Vec<Duration>,
-    queue_residence: Vec<Duration>,
-}
-
-#[derive(Default)]
-struct BurstReceiveReport {
-    requests: usize,
-    bytes: usize,
-    first_to_last: Option<Duration>,
-    timed_out: bool,
-}
-
-struct BurstReport {
-    sent: BurstSendReport,
-    received: BurstReceiveReport,
 }
 
 fn drain_pending_datagrams(socket: &UdpSocket) -> usize {

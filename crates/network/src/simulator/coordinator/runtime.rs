@@ -1,5 +1,3 @@
-//! The single-owner simulator session runtime.
-
 #[cfg(test)]
 use std::time::Instant;
 use std::{collections::VecDeque, pin::Pin};
@@ -9,15 +7,6 @@ use tokio::{
     sync::{mpsc, watch},
     task::JoinSet,
     time::{self, Interval, Sleep},
-};
-
-use crate::{
-    capabilities::{EventQueueExit, EventQueueRoleHandle, EventQueueTask},
-    coverage::CoverageLossReason,
-    error::Error,
-    event::{Event, EventEnvelope},
-    session::Command,
-    status::NetworkLifecycle,
 };
 
 use super::{
@@ -33,6 +22,15 @@ use super::{
     is_current_neighbor, is_current_simulator, neighbor_completion_event, neighbor_event_queue_failure, queue_connection_message,
     queue_primary_message, record_event_envelope_loss, remove_simulator_capability, retry_pending_handoff_commands,
 };
+use crate::{
+    capabilities::{EventQueueExit, EventQueueRoleHandle, EventQueueTask},
+    coverage::CoverageLossReason,
+    error::Error,
+    event::{Event, EventEnvelope},
+    session::Command,
+    status::NetworkLifecycle,
+};
+
 pub(super) struct CoordinatorRuntime<'a> {
     coordinator: &'a mut SimulatorCoordinator,
     commands: mpsc::Receiver<Command>,
@@ -343,7 +341,7 @@ impl<'a> CoordinatorRuntime<'a> {
                                         if let Some(capture) = &coordinator.capture {
                                             capture.circuit_lifecycle("session_ready", coordinator.session.circuit_code);
                                         }
-                                        coordinator.primary.state.send_replace(PrimaryState::PRIMARY_READY);
+                                        coordinator.primary.state.send_replace(PrimaryState::Ready { generation: 0 });
                                         if startup.should_publish_ready() {
                                             coordinator.publish_session_ready(
                                                 &events,

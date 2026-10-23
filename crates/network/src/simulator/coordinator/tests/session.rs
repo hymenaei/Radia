@@ -1,21 +1,5 @@
 use std::{collections::HashMap, future::pending, net::SocketAddr, time::Duration};
 
-use crate::{
-    AgentSession, Error, Grid,
-    event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY},
-    session::{COMMAND_CAPACITY, Command},
-    simulator::coordinator::{
-        LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, LogoutUnavailable, MAX_PENDING_SIMULATOR_EVENTS, send_logout_with_deadline,
-    },
-    simulator::{SimulatorCoordinator, run_session},
-    status::{NetworkLifecycle, NetworkStatusHandle},
-    transport::UdpTransport,
-    transport::lludp::{
-        Circuit, DEFAULT_RETRY_TIMEOUT, Delivery, MAX_PENDING_PACKETS, MAX_RETRIES, PendingPacket, RESENT_FLAG, ReceiveError,
-        acknowledge_pending, retransmit_due,
-    },
-};
-use ::test_support::lludp::fixture;
 use protocol::{
     ChatType,
     lludp::{Message, Packet},
@@ -34,6 +18,30 @@ use tokio::{
 };
 use url::Url;
 use uuid::Uuid;
+
+use crate::{
+    AgentSession, Error, Grid,
+    event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY},
+    session::{COMMAND_CAPACITY, Command},
+    simulator::coordinator::{
+        LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, LogoutUnavailable, MAX_PENDING_SIMULATOR_EVENTS, send_logout_with_deadline,
+    },
+    simulator::{SimulatorCoordinator, run_session},
+    status::{NetworkLifecycle, NetworkStatusHandle},
+    transport::UdpTransport,
+    transport::lludp::{
+        Circuit, DEFAULT_RETRY_TIMEOUT, Delivery, MAX_PENDING_PACKETS, MAX_RETRIES, PendingPacket, RESENT_FLAG, ReceiveError,
+        acknowledge_pending, retransmit_due,
+    },
+};
+use test_support::lludp::fixture;
+
+const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
+const SESSION_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
+const CIRCUIT_CODE: u32 = 0x1122_3344;
+const SIMULATOR_TIMEOUT: Duration = Duration::from_secs(2);
+const SESSION_EVENT_CAPACITY: usize = 2;
+const RETRANSMISSION_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn complete_ping(ping_id: u8) -> Message {
     Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id } })
@@ -54,13 +62,6 @@ fn receive_packet(circuit: &mut Circuit, packet: &Packet) -> bool {
 fn is_complete_ping(message: &Message, ping_id: u8) -> bool {
     matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == ping_id)
 }
-
-const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
-const SESSION_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
-const CIRCUIT_CODE: u32 = 0x1122_3344;
-const SIMULATOR_TIMEOUT: Duration = Duration::from_secs(2);
-const SESSION_EVENT_CAPACITY: usize = 2;
-const RETRANSMISSION_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn chat_message(message: impl Into<String>) -> Message {
     Message::from(ChatFromViewer {

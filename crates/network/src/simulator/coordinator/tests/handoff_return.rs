@@ -244,8 +244,8 @@ async fn run_stale_cancel() {
         if let Event::CapabilityEventBatch { events, .. } = next_raw_event(&mut harness.events).await
             && let Some(event) = events.iter().find(|event| event.message == "CrossedRegion")
         {
-            let fields = super::super::handoff::event_fields(&event.body).expect("published CrossedRegion body");
-            let region = super::super::handoff::event_block(fields, "RegionData").expect("published RegionData block");
+            let fields = crate::simulator::coordinator::handoff::event_fields(&event.body).expect("published CrossedRegion body");
+            let region = crate::simulator::coordinator::handoff::event_block(fields, "RegionData").expect("published RegionData block");
             assert_eq!(region.get("SeedCapability"), Some(&Value::String("[redacted]".into())));
             break;
         }

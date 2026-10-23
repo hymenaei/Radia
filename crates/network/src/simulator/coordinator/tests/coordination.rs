@@ -1,3 +1,25 @@
+use std::{collections::HashMap, future::pending, net::SocketAddr, num::NonZeroU64, time::Duration};
+
+use llsd::{Map, Value};
+use protocol::{
+    BlockValues, FieldValue, SchemaMessage,
+    lludp::Message,
+    login::ResponseData,
+    messages::TeleportCancel,
+    messages::{
+        AgentMovementComplete,
+        agent::agent_movement_complete::{AgentData, Data, SimData},
+    },
+};
+use tokio::{
+    net::UdpSocket,
+    sync::{mpsc, watch},
+    task::JoinSet,
+    time::{self, timeout},
+};
+use url::Url;
+use uuid::Uuid;
+
 use super::capability_events::redact_seed_capability;
 use super::handoff::{matches_handoff_cancellation, matches_pending_promotion};
 use super::{
@@ -17,26 +39,6 @@ use crate::{
         SimulatorId,
     },
 };
-use llsd::{Map, Value};
-use protocol::{
-    BlockValues, FieldValue, SchemaMessage,
-    lludp::Message,
-    login::ResponseData,
-    messages::TeleportCancel,
-    messages::{
-        AgentMovementComplete,
-        agent::agent_movement_complete::{AgentData, Data, SimData},
-    },
-};
-use std::{collections::HashMap, future::pending, net::SocketAddr, num::NonZeroU64, time::Duration};
-use tokio::{
-    net::UdpSocket,
-    sync::{mpsc, watch},
-    task::JoinSet,
-    time::{self, timeout},
-};
-use url::Url;
-use uuid::Uuid;
 
 fn crossed_region(agent_id: Uuid, session_id: Uuid) -> Value {
     Value::Map(Map::from([

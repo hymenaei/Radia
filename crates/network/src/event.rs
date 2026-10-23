@@ -1,26 +1,25 @@
-use crate::{AgentSession, capabilities::Client, coverage::CoverageWatermark, session::MfaChallenge};
-use llsd::Value;
-use protocol::lludp::Message;
-use protocol::login::ResponseData;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::{
     fmt,
     sync::atomic::{AtomicU64, Ordering},
 };
+
+use llsd::Value;
+use protocol::lludp::Message;
+use protocol::login::ResponseData;
 #[cfg(test)]
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::{mpsc, watch};
 
 use crate::simulator::EventRetention;
+use crate::{AgentSession, capabilities::Client, coverage::CoverageWatermark, session::MfaChallenge};
 
 pub(crate) const CLIENT_EVENT_CAPACITY: usize = 32;
 pub(crate) const PRIMARY_TERMINAL_EVENT_CAPACITY: usize = 1;
+
 static NEXT_SIMULATOR_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Identifies one simulator connection within a network session.
-///
-/// A replacement connection receives a different ID, even when it uses the same endpoint.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SimulatorId(u64);
 
@@ -39,25 +38,16 @@ impl SimulatorId {
     }
 }
 
-/// Ordering evidence for an LLUDP packet within one simulator connection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PacketOrder {
-    /// The raw sequence maps to this extended sequence within 2^30 packets of the trusted anchor.
     Ordered(u64),
-    /// This packet cannot be mapped safely, but the connection's ordering anchor remains usable.
-    /// This includes half-range ambiguity and old packets outside the 2^30-packet reorder window.
     Ambiguous,
-    /// A forward jump exceeded the supported progression window or the extended counter overflowed.
-    /// Later packet arrivals cannot restore ordering authority for this connection.
     Degraded,
 }
 
-/// Identifies one admitted EventQueue response batch within a poll-task incarnation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct EventQueueBatchOrder {
-    /// EventQueue poll-task incarnation that received the batch.
     pub incarnation: u64,
-    /// Zero-based order of the batch within that incarnation.
     pub ordinal: u64,
 }
 
@@ -67,13 +57,8 @@ pub(crate) enum EventSendOutcome {
     Shutdown,
 }
 
-/// One decoded message from a simulator's capability EventQueue batch.
-///
-/// Event names and bodies are simulator-controlled and are omitted from debug output.
 pub struct CapabilityEvent {
-    /// The simulator-defined event name.
     pub message: String,
-    /// The decoded LLSD event body.
     pub body: Value,
     pub(crate) retained_bytes: usize,
 }
@@ -162,147 +147,24 @@ impl EventReceiver {
     }
 }
 
-pub(crate) async fn send_client_event(
-    events: &mpsc::Sender<EventEnvelope>,
-    event: Event,
-    shutdown: &mut watch::Receiver<bool>,
-) -> EventSendOutcome {
-    if *shutdown.borrow() {
-        return EventSendOutcome::Shutdown;
-    }
-
-    tokio::select! {
-        biased;
-        _ = shutdown.changed() => EventSendOutcome::Shutdown,
-        result = events.send(EventEnvelope::new(event)) => match result {
-            Ok(()) => EventSendOutcome::Sent,
-            Err(_) => EventSendOutcome::ReceiverClosed,
-        },
-    }
-}
-
-pub(crate) async fn send_failure_event(
-    events: &mpsc::Sender<EventEnvelope>,
-    error: String,
-    shutdown: &mut watch::Receiver<bool>,
-) -> EventSendOutcome {
-    send_client_event(events, Event::Failed(error), shutdown).await
-}
-
-/// A login, simulator, capability, capture, or send result from a [`crate::Session`].
-/// Capture notifications may be dropped when the bounded event queue is full; explicit stop
-/// results come from [`crate::Session::stop_capture`].
 pub enum Event {
-    MfaRequired {
-        challenge: MfaChallenge,
-    },
-    LoginAccepted {
-        mfa_hash: Option<String>,
-    },
-    /// The primary simulator circuit completed login and its region handshake.
-    SessionReady {
-        simulator_id: SimulatorId,
-        session: Box<AgentSession>,
-        capabilities: Client,
-        login_data: ResponseData,
-    },
-    CapabilityEvent {
-        simulator_id: SimulatorId,
-        source: SocketAddr,
-        message: String,
-        body: Value,
-    },
-    /// A complete EventQueue response batch admitted as one Network event.
-    ///
-    /// The events retain server order. The batch carries one source-local coverage watermark and one aggregate retained-memory permit.
-    /// The EventQueue ACK advances when Network admits the full batch, not when a downstream consumer applies its events.
-    CapabilityEventBatch {
-        simulator_id: SimulatorId,
-        source: SocketAddr,
-        order: EventQueueBatchOrder,
-        events: Vec<CapabilityEvent>,
-    },
-    /// A capability request or poll failed for the identified simulator.
-    CapabilityError {
-        simulator_id: SimulatorId,
-        source: SocketAddr,
-        capability: String,
-        reason: String,
-    },
-    /// EventQueueGet stopped after an event response could not be admitted safely.
-    EventQueueCoverageLost {
-        simulator_id: SimulatorId,
-        source: SocketAddr,
-        reason: String,
-    },
-    /// A durable source or session-wide coverage loss that must be reconciled before later events.
-    CoverageLost {
-        loss: crate::coverage::CoverageLoss,
-    },
-    /// A simulator circuit completed its circuit handshake. The primary connection has no region handle.
-    ///
-    /// This does not mean the primary region handshake is complete; `send_to` can still return
-    /// [`crate::Error::SimulatorNotReady`] until [`Event::SessionReady`] arrives.
-    SimulatorConnected {
-        simulator_id: SimulatorId,
-        region_handle: Option<u64>,
-        endpoint: SocketAddr,
-    },
-    /// A simulator circuit ended normally. This terminates the connection identified by `simulator_id`.
-    SimulatorDisconnected {
-        simulator_id: SimulatorId,
-        region_handle: Option<u64>,
-        endpoint: SocketAddr,
-    },
-    /// A simulator circuit ended with a network or protocol error.
-    SimulatorFailed {
-        simulator_id: SimulatorId,
-        region_handle: Option<u64>,
-        endpoint: SocketAddr,
-        reason: String,
-    },
-    /// A neighbor circuit could not be created, so no live connection was introduced.
-    SimulatorConnectFailed {
-        simulator_id: SimulatorId,
-        region_handle: u64,
-        endpoint: SocketAddr,
-    },
-    SimulatorCapabilities {
-        simulator_id: SimulatorId,
-        source: SocketAddr,
-        capabilities: Client,
-    },
-    /// The gaining simulator completed the authenticated agent movement handshake.
-    ///
-    /// Default outbound messages now route to `simulator_id`. The viewer uses the session and
-    /// capabilities to update its region-scoped work after applying the explicit world handoff.
-    SimulatorPromoted {
-        previous_simulator_id: SimulatorId,
-        simulator_id: SimulatorId,
-        session: Box<AgentSession>,
-        capabilities: Client,
-    },
-    SimulatorMessage {
-        simulator_id: SimulatorId,
-        source: SocketAddr,
-        /// Raw LLUDP packet sequence for protocol diagnostics.
-        sequence: u32,
-        /// Extended sequence evidence produced by the connection's LLUDP circuit.
-        packet_order: PacketOrder,
-        message: Message,
-    },
-    /// Capture recording stopped. `path` is empty if packaging failed.
-    /// `error` reports dropped events, writer errors, or packaging errors.
-    CaptureFinished {
-        path: PathBuf,
-        error: Option<String>,
-    },
-    /// Capture recording stopped after interruption. `path` is empty if packaging failed.
-    /// `error` reports writer or packaging failures.
-    CaptureInterrupted {
-        path: PathBuf,
-        error: Option<String>,
-    },
+    MfaRequired { challenge: MfaChallenge },
+    LoginAccepted { mfa_hash: Option<String> },
+    SessionReady { simulator_id: SimulatorId, session: Box<AgentSession>, capabilities: Client, login_data: ResponseData },
+    CapabilityEvent { simulator_id: SimulatorId, source: SocketAddr, message: String, body: Value },
+    CapabilityEventBatch { simulator_id: SimulatorId, source: SocketAddr, order: EventQueueBatchOrder, events: Vec<CapabilityEvent> },
+    CapabilityError { simulator_id: SimulatorId, source: SocketAddr, capability: String, reason: String },
+    EventQueueCoverageLost { simulator_id: SimulatorId, source: SocketAddr, reason: String },
+    CoverageLost { loss: crate::coverage::CoverageLoss },
+    SimulatorConnected { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr },
+    SimulatorDisconnected { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr },
+    SimulatorFailed { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr, reason: String },
+    SimulatorConnectFailed { simulator_id: SimulatorId, region_handle: u64, endpoint: SocketAddr },
+    SimulatorCapabilities { simulator_id: SimulatorId, source: SocketAddr, capabilities: Client },
+    SimulatorPromoted { previous_simulator_id: SimulatorId, simulator_id: SimulatorId, session: Box<AgentSession>, capabilities: Client },
+    SimulatorMessage { simulator_id: SimulatorId, source: SocketAddr, sequence: u32, packet_order: PacketOrder, message: Message },
+    CaptureFinished { path: PathBuf, error: Option<String> },
+    CaptureInterrupted { path: PathBuf, error: Option<String> },
     SendFailed(String),
     Failed(String),
 }
@@ -407,6 +269,33 @@ impl fmt::Debug for Event {
             Self::Failed(_) => formatter.debug_tuple("Failed").field(&"[REDACTED]").finish(),
         }
     }
+}
+
+pub(crate) async fn send_client_event(
+    events: &mpsc::Sender<EventEnvelope>,
+    event: Event,
+    shutdown: &mut watch::Receiver<bool>,
+) -> EventSendOutcome {
+    if *shutdown.borrow() {
+        return EventSendOutcome::Shutdown;
+    }
+
+    tokio::select! {
+        biased;
+        _ = shutdown.changed() => EventSendOutcome::Shutdown,
+        result = events.send(EventEnvelope::new(event)) => match result {
+            Ok(()) => EventSendOutcome::Sent,
+            Err(_) => EventSendOutcome::ReceiverClosed,
+        },
+    }
+}
+
+pub(crate) async fn send_failure_event(
+    events: &mpsc::Sender<EventEnvelope>,
+    error: String,
+    shutdown: &mut watch::Receiver<bool>,
+) -> EventSendOutcome {
+    send_client_event(events, Event::Failed(error), shutdown).await
 }
 
 #[cfg(test)]

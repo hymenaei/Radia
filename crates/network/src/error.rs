@@ -1,38 +1,23 @@
 use std::{fmt, io};
 
-/// Errors returned by the public network API.
 #[non_exhaustive]
 pub enum Error {
-    /// The operating system could not start the network worker thread.
     WorkerStart(io::Error),
     CommandQueueFull,
-    /// The session-wide or target simulator send queue is full.
     SimulatorCommandQueueFull,
-    /// An outbound message has a variable field above the network send limit.
     OutboundMessageTooLarge,
-    /// The target simulator exists but has not completed its connection handshake.
     SimulatorNotReady,
-    /// The supplied simulator ID does not identify an active connection in this session.
     SimulatorUnavailable,
-    /// A local UDP send to a simulator failed.
     SimulatorSend(String),
-    /// The authenticator code is empty after trimming whitespace.
     EmptyMfaCode,
     MfaChallengeCompleted,
     SessionClosed,
-    /// The login request ended before it accepted an MFA code.
     LoginEnded,
-    /// The targeted simulator connection closed before the queued send completed.
     SimulatorConnectionClosed,
-    /// The network session stopped before capture startup completed.
     CaptureStartCanceled,
-    /// The network session stopped before capture finalization completed.
     CaptureStopCanceled,
-    /// The capability request ended before returning a response.
     CapabilityRequestCanceled,
-    /// The capability client belongs to a simulator session that has closed.
     CapabilitySessionClosed,
-    /// The capability request failed with a classified HTTP error.
     CapabilityHttp(crate::capabilities::HttpError),
     Capability(String),
     Capture(String),

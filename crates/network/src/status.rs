@@ -14,26 +14,34 @@ const MAX_STATUS_CAPABILITY_NAME_BYTES: usize = 128;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(u8)]
-/// Network session lifecycle.
 pub enum NetworkLifecycle {
     #[default]
     Idle,
     LoggingIn,
-    /// Login succeeded; the primary simulator is connecting.
     Connecting,
-    /// The primary simulator region handshake completed.
     Connected,
-    /// Simulator circuits and background work are closing.
     Disconnecting,
     Disconnected,
-    /// Login or session processing failed.
     Failed,
 }
 
+impl fmt::Display for NetworkLifecycle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Idle => "idle",
+            Self::LoggingIn => "logging in",
+            Self::Connecting => "connecting",
+            Self::Connected => "connected",
+            Self::Disconnecting => "disconnecting",
+            Self::Disconnected => "disconnected",
+            Self::Failed => "failed",
+        };
+        formatter.write_str(label)
+    }
+}
+
 #[derive(Clone, Default, Eq, PartialEq)]
-/// Snapshot of aggregate session counters and primary simulator state.
-/// Concurrent updates can occur while a snapshot is read, so fields may reflect different instants.
-/// `Debug` redacts the simulator endpoint and last error. `Display` includes both values.
+
 pub struct NetworkStatusSnapshot {
     pub lifecycle: NetworkLifecycle,
     pub simulator_endpoint: Option<SocketAddr>,
@@ -43,7 +51,6 @@ pub struct NetworkStatusSnapshot {
     pub http_requests: u64,
     pub http_responses: u64,
     pub capability_count: usize,
-    /// True when at least one observed capability name was omitted from bounded tracking.
     pub capability_count_is_lower_bound: bool,
     pub reliable_packets_pending: usize,
     pub reliable_retransmits: u64,
@@ -94,23 +101,8 @@ impl fmt::Display for NetworkStatusSnapshot {
     }
 }
 
-impl fmt::Display for NetworkLifecycle {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let label = match self {
-            Self::Idle => "idle",
-            Self::LoggingIn => "logging in",
-            Self::Connecting => "connecting",
-            Self::Connected => "connected",
-            Self::Disconnecting => "disconnecting",
-            Self::Disconnected => "disconnected",
-            Self::Failed => "failed",
-        };
-        formatter.write_str(label)
-    }
-}
-
 #[derive(Clone)]
-/// Shared network status; circuit handles contribute to the aggregate counters.
+
 pub struct NetworkStatusHandle {
     state: Arc<NetworkStatus>,
     circuit_pending: Arc<AtomicUsize>,
@@ -126,27 +118,6 @@ impl fmt::Debug for NetworkStatusHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_tuple("NetworkStatusHandle").field(&self.snapshot()).finish()
     }
-}
-
-#[derive(Default)]
-struct NetworkStatus {
-    lifecycle: AtomicU8,
-    simulator_endpoint: Mutex<Option<SocketAddr>>,
-    circuit_established: AtomicU8,
-    udp_packets_sent: AtomicU64,
-    udp_packets_received: AtomicU64,
-    http_requests: AtomicU64,
-    http_responses: AtomicU64,
-    capabilities: Mutex<CapabilityNames>,
-    reliable_packets_pending: AtomicUsize,
-    reliable_retransmits: AtomicU64,
-    last_error: Mutex<Option<String>>,
-}
-
-#[derive(Default)]
-struct CapabilityNames {
-    names: HashSet<String>,
-    is_lower_bound: bool,
 }
 
 impl NetworkStatusHandle {
@@ -256,6 +227,27 @@ impl NetworkStatusHandle {
         let sanitized = redact_urls(&error, MAX_STATUS_ERROR_CHARS);
         *self.state.last_error.lock().unwrap_or_else(PoisonError::into_inner) = Some(sanitized);
     }
+}
+
+#[derive(Default)]
+struct NetworkStatus {
+    lifecycle: AtomicU8,
+    simulator_endpoint: Mutex<Option<SocketAddr>>,
+    circuit_established: AtomicU8,
+    udp_packets_sent: AtomicU64,
+    udp_packets_received: AtomicU64,
+    http_requests: AtomicU64,
+    http_responses: AtomicU64,
+    capabilities: Mutex<CapabilityNames>,
+    reliable_packets_pending: AtomicUsize,
+    reliable_retransmits: AtomicU64,
+    last_error: Mutex<Option<String>>,
+}
+
+#[derive(Default)]
+struct CapabilityNames {
+    names: HashSet<String>,
+    is_lower_bound: bool,
 }
 
 fn redact_urls(value: &str, max_chars: usize) -> String {
@@ -420,7 +412,6 @@ mod tests {
         assert_eq!(status.snapshot().last_error.as_deref(), Some("request failed at [redacted URL] second line"));
     }
 }
-
 #[cfg(test)]
 mod redaction_tests {
     use super::{NetworkLifecycle, NetworkStatusHandle, NetworkStatusSnapshot};

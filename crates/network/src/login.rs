@@ -1,3 +1,5 @@
+pub use protocol::login::StartLocation;
+
 use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -19,7 +21,12 @@ use crate::{
     status::{NetworkLifecycle, NetworkStatusHandle},
 };
 
-pub use protocol::login::StartLocation;
+const LOGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_LOGIN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LOGIN_XML_DEPTH: usize = 64;
+const MAX_CONCURRENT_LOGIN_OPERATIONS: usize = 2;
+
+static LOGIN_OPERATION_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct AgentSession {
@@ -51,17 +58,10 @@ impl fmt::Debug for AgentSession {
     }
 }
 
-const LOGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_LOGIN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_LOGIN_XML_DEPTH: usize = 64;
-const MAX_CONCURRENT_LOGIN_OPERATIONS: usize = 2;
-static LOGIN_OPERATION_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Grid {
     #[default]
     Agni,
-
     Aditi,
 }
 
@@ -88,7 +88,6 @@ pub struct LoginCredentials {
     pub password: String,
     pub grid: Grid,
     pub start_location: StartLocation,
-
     pub mfa_hash: String,
 }
 

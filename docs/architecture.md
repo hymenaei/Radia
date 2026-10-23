@@ -54,6 +54,10 @@ Shared ID newtypes distinguish objects, assets, avatars, groups, regions, parcel
 
 ### `crates/network`
 
+Session owns the network worker and event stream; SessionHandle provides bounded send and lifecycle controls. The simulator coordinator owns connection routing, root and neighbor roles, handoff, and teardown. Its connection, capability-event, event-routing, handoff, and runtime modules are children of that owner. Coverage loss remains observable when bounded queues cannot preserve application events.
+
+Capabilities separate discovery and request admission, HTTP transport, and event-queue lifecycle. The budget module owns concurrency and response-memory limits. Checked reservations validate dedicated and shared capacity before changing accounting; permits retain admission until blocking work completes, even after its waiter is cancelled.
+
 HTTP uses Reqwest 0.13 with default features disabled and the rustls feature enabled. The default crypto provider is aws-lc; platform certificate verification uses the operating system's trust policy. The viewer does not install a global crypto provider or disable certificate checks. Redirects remain disabled, compressed responses remain raw, and request deadlines cover response-body reads. The aws-lc native dependency adds build-tool requirements described in tooling.md.
 
 ### `crates/protocol`

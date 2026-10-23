@@ -1,4 +1,13 @@
-use super::*;
+mod coordination;
+mod coverage;
+mod handoff_cases;
+mod handoff_return;
+mod load;
+mod neighbor;
+mod neighbor_control;
+mod routing;
+mod session;
+mod startup;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -10,25 +19,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{
-    AgentSession, Error, Grid,
-    capabilities::{CapabilityBudget, Client, EventQueueExit, begin_process_measurement},
-    coverage::{CoverageLoss, CoverageLossLedger, CoverageLossReason, CoverageSource},
-    event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY, PacketOrder::Ordered, SimulatorId},
-    session::{COMMAND_CAPACITY, Command, NETWORK_THREAD_STACK_SIZE},
-    simulator::coordinator::{
-        CoordinatorRunState, EventQueueRoleHandle, LogoutOutcome, LogoutUnavailable, NeighborCommand, NeighborTaskOutcome, PromotionSetup,
-        SessionStartup, SimulatorMemoryBudget, neighbor_completion_event,
-    },
-    simulator::{EventRetention, SimulatorCoordinator},
-    status::{NetworkLifecycle, NetworkStatusHandle},
-    transport::{
-        UdpTransport,
-        lludp::{Circuit, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS},
-        pacing::{ProbeHandle, TrafficClass},
-    },
-};
-use ::test_support::lludp::fixture;
 use llsd::{Map, Value};
 use protocol::{
     BlockValues, ChatType, FieldValue, SchemaMessage,
@@ -54,6 +44,7 @@ use tokio::{
 use url::Url;
 use uuid::Uuid;
 
+use super::*;
 use super::{
     CoordinatorGate, EVENT_BACKLOG_DISCONNECT_REASON, HandoffState, HandoffTarget, LOGOUT_TIMEOUT, MAX_CONCURRENT_PACKET_DECODES,
     MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PENDING_SIMULATOR_EVENTS,
@@ -61,12 +52,59 @@ use super::{
     NEIGHBOR_COMMAND_CAPACITY, NeighborConnection, NeighborConnectionState, NeighborEvent, PreconnectEvents, PreconnectOutcome,
     ReplacementGate, SimulatorCapabilitySession, queue_neighbor_event, queue_until_connected, run_session,
 };
+use crate::{
+    AgentSession, Error, Grid,
+    capabilities::{CapabilityBudget, Client, EventQueueExit, begin_process_measurement},
+    coverage::{CoverageLoss, CoverageLossLedger, CoverageLossReason, CoverageSource},
+    event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY, PacketOrder::Ordered, SimulatorId},
+    session::{COMMAND_CAPACITY, Command, NETWORK_THREAD_STACK_SIZE},
+    simulator::coordinator::{
+        CoordinatorRunState, EventQueueRoleHandle, LogoutOutcome, LogoutUnavailable, NeighborCommand, NeighborTaskOutcome, PromotionSetup,
+        SessionStartup, SimulatorMemoryBudget, neighbor_completion_event,
+    },
+    simulator::{EventRetention, SimulatorCoordinator},
+    status::{NetworkLifecycle, NetworkStatusHandle},
+    transport::{
+        UdpTransport,
+        lludp::{Circuit, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS},
+        pacing::{ProbeHandle, TrafficClass},
+    },
+};
+use test_support::lludp::fixture;
+
 const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
 const SESSION_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
 const CIRCUIT_CODE: u32 = 0x1122_3344;
 const WAIT: Duration = Duration::from_secs(2);
 const SESSION_EVENT_CAPACITY: usize = 2;
 const TEST_EVENT_CAPACITY: usize = CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY;
+
+struct NeighborHarness {
+    primary: UdpSocket,
+    neighbor: UdpSocket,
+    primary_peer: SocketAddr,
+    neighbor_peer: SocketAddr,
+    primary_id: SimulatorId,
+    primary_region_handle: u64,
+    neighbor_id: SimulatorId,
+    commands: mpsc::Sender<Command>,
+    events: mpsc::Receiver<EventEnvelope>,
+    disconnect: watch::Sender<bool>,
+    status: NetworkStatusHandle,
+    packet_memory: SimulatorMemoryBudget,
+    client: JoinHandle<Result<(), String>>,
+    pause_sends: watch::Sender<bool>,
+    send_entered: Arc<Notify>,
+    pacer_probe: Option<ProbeHandle>,
+}
+
+impl NeighborHarness {
+    async fn shutdown(self) {
+        self.disconnect.send_replace(true);
+        receive_message(&self.primary, |message| matches!(message, Message::LogoutRequest(_))).await;
+        assert!(timeout(Duration::from_millis(200), self.client).await.expect("disconnect should finish").expect("client task").is_ok());
+    }
+}
 
 pub(super) fn login_session(simulator_address: SocketAddr) -> AgentSession {
     AgentSession {
@@ -134,33 +172,6 @@ fn duration_percentiles(samples: &[Duration]) -> Option<(Duration, Duration, Dur
     sorted.sort_unstable();
     let percentile = |percent: usize| sorted[(sorted.len() - 1) * percent / 100];
     Some((percentile(50), percentile(95), percentile(99)))
-}
-
-struct NeighborHarness {
-    primary: UdpSocket,
-    neighbor: UdpSocket,
-    primary_peer: SocketAddr,
-    neighbor_peer: SocketAddr,
-    primary_id: SimulatorId,
-    primary_region_handle: u64,
-    neighbor_id: SimulatorId,
-    commands: mpsc::Sender<Command>,
-    events: mpsc::Receiver<EventEnvelope>,
-    disconnect: watch::Sender<bool>,
-    status: NetworkStatusHandle,
-    packet_memory: SimulatorMemoryBudget,
-    client: JoinHandle<Result<(), String>>,
-    pause_sends: watch::Sender<bool>,
-    send_entered: Arc<Notify>,
-    pacer_probe: Option<ProbeHandle>,
-}
-
-impl NeighborHarness {
-    async fn shutdown(self) {
-        self.disconnect.send_replace(true);
-        receive_message(&self.primary, |message| matches!(message, Message::LogoutRequest(_))).await;
-        assert!(timeout(Duration::from_millis(200), self.client).await.expect("disconnect should finish").expect("client task").is_ok());
-    }
 }
 
 async fn connected_neighbor() -> NeighborHarness {
@@ -480,24 +491,3 @@ async fn next_raw_event(events: &mut mpsc::Receiver<EventEnvelope>) -> Event {
 fn set_sequence(bytes: &mut [u8], sequence: u32) {
     bytes[1..5].copy_from_slice(&sequence.to_be_bytes());
 }
-
-#[path = "coordination.rs"]
-mod coordination;
-#[path = "coverage.rs"]
-mod coverage;
-#[path = "handoff.rs"]
-mod handoff_cases;
-#[path = "handoff_return.rs"]
-mod handoff_return;
-#[path = "load.rs"]
-mod load;
-#[path = "neighbor.rs"]
-mod neighbor;
-#[path = "neighbor_control.rs"]
-mod neighbor_control;
-#[path = "routing.rs"]
-mod routing;
-#[path = "session.rs"]
-mod session;
-#[path = "startup.rs"]
-mod startup;

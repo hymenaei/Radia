@@ -1,3 +1,9 @@
+mod capability_events;
+mod connection;
+mod event_routing;
+mod handoff;
+mod runtime;
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
@@ -8,6 +14,8 @@ use std::{
 
 use llsd::Value;
 use protocol::{lludp::Message, login::ResponseData};
+#[cfg(test)]
+use tokio::task::{self, JoinError};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::{AbortHandle, Id, JoinSet},
@@ -15,9 +23,6 @@ use tokio::{
 };
 use url::Url;
 use uuid::Uuid;
-
-#[cfg(test)]
-use tokio::task::{self, JoinError};
 
 #[cfg(test)]
 use super::admission::{
@@ -44,23 +49,12 @@ use crate::{
         pacing::{OutboundBudget, OutboundBudgetHandle},
     },
 };
-
-#[path = "connection.rs"]
-mod connection;
-use connection::NeighborConnection;
-#[path = "capability_events.rs"]
-mod capability_events;
 use capability_events::{decode_agent_communication, decode_enable_simulators};
-#[path = "event_routing.rs"]
-mod event_routing;
+use connection::NeighborConnection;
 use event_routing::{
     EventQueueOutcome, PreconnectEvents, PreconnectOutcome, PrimaryEventBacklog, primary_event_queue_size, queue_neighbor_event,
     queue_simulator_event, queue_until_connected,
 };
-#[path = "handoff.rs"]
-mod handoff;
-#[path = "runtime.rs"]
-mod runtime;
 #[cfg(test)]
 use handoff::{
     FinishOrder, HandoffDecision, HandoffEvidence, PendingPromotion, arbitrate_handoff, decode_teleport_finish, handoff_cancellation,
@@ -88,23 +82,11 @@ const HANDOFF_COMMAND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const EVENT_BACKLOG_DISCONNECT_REASON: &str = "The simulator connection closed because the viewer could not keep up with incoming events.";
 const NEIGHBOR_PRECONNECT_OVERFLOW_REASON: &str = "The neighbor simulator exceeded its bounded pre-connect event buffer.";
 
+type ConnectionTaskResult = (SimulatorId, Option<u64>, SocketAddr, NeighborTaskOutcome);
+
 struct ConnectionQueueFailure {
     error: Error,
     completion: Option<oneshot::Sender<Result<(), Error>>>,
-}
-
-fn record_coverage_loss(ledger: &CoverageLossLedger, simulator_id: SimulatorId, source: CoverageSource, reason: CoverageLossReason) {
-    let _ = ledger.record(simulator_id, source, reason);
-}
-
-fn is_application_event(event: &Event) -> bool {
-    matches!(event, Event::CapabilityEvent { .. } | Event::CapabilityEventBatch { .. } | Event::SimulatorMessage { .. })
-}
-
-fn record_event_envelope_loss(ledger: &CoverageLossLedger, event: EventEnvelope, reason: CoverageLossReason) {
-    if let Some(watermark) = event.coverage_watermark() {
-        record_coverage_loss(ledger, watermark.simulator_id, watermark.source, reason);
-    }
 }
 
 enum NeighborRequest {
@@ -115,26 +97,6 @@ enum NeighborRequest {
 enum NeighborTaskOutcome {
     Finished(Result<(), String>),
     ConnectFailed(String),
-}
-
-type ConnectionTaskResult = (SimulatorId, Option<u64>, SocketAddr, NeighborTaskOutcome);
-
-fn neighbor_completion_event(
-    simulator_id: SimulatorId,
-    region_handle: Option<u64>,
-    endpoint: SocketAddr,
-    outcome: &NeighborTaskOutcome,
-) -> Event {
-    match outcome {
-        NeighborTaskOutcome::Finished(Ok(())) => Event::SimulatorDisconnected { simulator_id, region_handle, endpoint },
-        NeighborTaskOutcome::Finished(Err(reason)) => {
-            Event::SimulatorFailed { simulator_id, region_handle, endpoint, reason: reason.clone() }
-        }
-        NeighborTaskOutcome::ConnectFailed(reason) => match region_handle {
-            Some(region_handle) => Event::SimulatorConnectFailed { simulator_id, region_handle, endpoint },
-            None => Event::SimulatorFailed { simulator_id, region_handle: None, endpoint, reason: reason.clone() },
-        },
-    }
 }
 
 enum NeighborEvent {
@@ -152,72 +114,6 @@ struct NeighborConnectionState {
     pending_handoff_command: Option<NeighborHandoffCommand>,
     primary_state: Option<watch::Sender<PrimaryState>>,
     packet_memory: SimulatorMemoryBudget,
-}
-
-struct PrimaryRoute {
-    simulator_id: SimulatorId,
-    memory: SimulatorMemoryBudget,
-    endpoint: SocketAddr,
-    region_handle: Option<u64>,
-    commands: mpsc::Sender<NeighborCommand>,
-    state: watch::Sender<PrimaryState>,
-    logout: mpsc::Sender<oneshot::Sender<Result<(), Error>>>,
-}
-
-impl PrimaryRoute {
-    fn from_neighbor(region_handle: u64, connection: &NeighborConnectionState) -> Option<Self> {
-        Some(Self {
-            simulator_id: connection.simulator_id,
-            memory: connection.packet_memory.clone(),
-            endpoint: connection.endpoint,
-            region_handle: Some(region_handle),
-            commands: connection.commands.clone(),
-            state: connection.primary_state.clone()?,
-            logout: connection.logout.clone(),
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct PrimaryState {
-    active: bool,
-    session_ready: bool,
-    role_generation: u64,
-}
-
-impl PrimaryState {
-    const NEIGHBOR: Self = Self { active: false, session_ready: false, role_generation: 0 };
-    const PRIMARY_CONNECTING: Self = Self { active: true, session_ready: false, role_generation: 0 };
-    const PRIMARY_READY: Self = Self { active: true, session_ready: true, role_generation: 0 };
-
-    fn promoted(role_generation: u64) -> Self {
-        Self { active: true, session_ready: true, role_generation }
-    }
-
-    fn demoted(role_generation: u64) -> Self {
-        Self { active: false, session_ready: false, role_generation }
-    }
-
-    pub(super) fn connection_role(self) -> ConnectionRole {
-        if self.active { ConnectionRole::Primary } else { ConnectionRole::Neighbor }
-    }
-}
-
-enum NeighborCommand {
-    Send {
-        message: Message,
-        delivery: Delivery,
-        completed: Option<oneshot::Sender<Result<(), Error>>>,
-        cancel_target: Option<HandoffCancellation>,
-        report_failure: bool,
-    },
-    PrepareHandoff(HandoffTarget),
-    CancelHandoff,
-}
-
-enum NeighborHandoffCommand {
-    Prepare(HandoffTarget),
-    Cancel,
 }
 
 impl NeighborConnectionState {
@@ -247,11 +143,68 @@ impl NeighborConnectionState {
     }
 }
 
-async fn retry_pending_handoff_commands(retry: &mut time::Interval, connections: &mut HashMap<u64, NeighborConnectionState>) {
-    retry.tick().await;
-    for connection in connections.values_mut() {
-        connection.flush_handoff_command();
+struct PrimaryRoute {
+    simulator_id: SimulatorId,
+    memory: SimulatorMemoryBudget,
+    endpoint: SocketAddr,
+    region_handle: Option<u64>,
+    commands: mpsc::Sender<NeighborCommand>,
+    state: watch::Sender<PrimaryState>,
+    logout: mpsc::Sender<oneshot::Sender<Result<(), Error>>>,
+}
+
+impl PrimaryRoute {
+    fn from_neighbor(region_handle: u64, connection: &NeighborConnectionState) -> Option<Self> {
+        Some(Self {
+            simulator_id: connection.simulator_id,
+            memory: connection.packet_memory.clone(),
+            endpoint: connection.endpoint,
+            region_handle: Some(region_handle),
+            commands: connection.commands.clone(),
+            state: connection.primary_state.clone()?,
+            logout: connection.logout.clone(),
+        })
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PrimaryState {
+    Neighbor { generation: u64 },
+    Connecting,
+    Ready { generation: u64 },
+}
+
+impl PrimaryState {
+    pub(super) fn role_generation(self) -> u64 {
+        match self {
+            Self::Neighbor { generation } | Self::Ready { generation } => generation,
+            Self::Connecting => 0,
+        }
+    }
+
+    pub(super) fn connection_role(self) -> ConnectionRole {
+        match self {
+            Self::Neighbor { .. } => ConnectionRole::Neighbor,
+            Self::Connecting | Self::Ready { .. } => ConnectionRole::Primary,
+        }
+    }
+}
+
+enum NeighborCommand {
+    Send {
+        message: Message,
+        delivery: Delivery,
+        completed: Option<oneshot::Sender<Result<(), Error>>>,
+        cancel_target: Option<HandoffCancellation>,
+        report_failure: bool,
+    },
+    PrepareHandoff(HandoffTarget),
+    CancelHandoff,
+}
+
+enum NeighborHandoffCommand {
+    Prepare(HandoffTarget),
+    Cancel,
 }
 
 pub(crate) struct SimulatorCoordinator {
@@ -287,19 +240,6 @@ pub(crate) struct SimulatorCoordinator {
     replacement_gate: Option<ReplacementGate>,
 }
 
-#[cfg(test)]
-struct CoordinatorGate {
-    entered: oneshot::Sender<()>,
-    release: oneshot::Receiver<()>,
-}
-
-#[cfg(test)]
-struct ReplacementGate {
-    entered: oneshot::Sender<()>,
-    release: oneshot::Receiver<()>,
-    armed: oneshot::Receiver<()>,
-}
-
 impl Drop for SimulatorCoordinator {
     fn drop(&mut self) {
         self.neighbor_cancellation.send_replace(true);
@@ -311,8 +251,8 @@ impl Drop for SimulatorCoordinator {
 impl SimulatorCoordinator {
     fn promote_primary(&mut self, next: PrimaryRoute, role_generation: u64) {
         self.primary.memory.promote_to(&next.memory);
-        self.primary.state.send_replace(PrimaryState::demoted(role_generation));
-        next.state.send_replace(PrimaryState::promoted(role_generation));
+        self.primary.state.send_replace(PrimaryState::Neighbor { generation: role_generation });
+        next.state.send_replace(PrimaryState::Ready { generation: role_generation });
         self.primary = next;
     }
 
@@ -480,7 +420,7 @@ impl SimulatorCoordinator {
         let (neighbor_requests, neighbor_request_receiver) = mpsc::channel(32);
         let (root_commands, root_command_receiver) = mpsc::channel(NEIGHBOR_COMMAND_CAPACITY);
         let (root_logout, root_logout_receiver) = mpsc::channel(1);
-        let (primary_state_sender, primary_state_receiver) = watch::channel(PrimaryState::PRIMARY_CONNECTING);
+        let (primary_state_sender, primary_state_receiver) = watch::channel(PrimaryState::Connecting);
         let (neighbor_cancellation, _) = watch::channel(false);
         let packet_memory = SimulatorMemoryBudget::new();
         let (ready_sender, mut ready_receiver) = oneshot::channel::<Result<(), String>>();
@@ -1036,7 +976,7 @@ impl SimulatorCoordinator {
         let packet_memory = self.packet_memory.for_neighbor();
         let connection_packet_memory = packet_memory.clone();
         let outbound_budget = self.outbound_budget.as_ref().expect("session pacing budget exists").handle();
-        let (primary_state, primary_state_receiver) = watch::channel(PrimaryState::NEIGHBOR);
+        let (primary_state, primary_state_receiver) = watch::channel(PrimaryState::Neighbor { generation: 0 });
         let (command_sender, command_receiver) = mpsc::channel(NEIGHBOR_COMMAND_CAPACITY);
         let (logout_sender, logout_receiver) = mpsc::channel(1);
         if let Some(handoff) = handoff {
@@ -1341,59 +1281,17 @@ impl SimulatorCoordinator {
     }
 }
 
-fn queue_connection_message(
-    simulator_id: SimulatorId,
-    commands: &mpsc::Sender<NeighborCommand>,
-    message: Message,
-    delivery: Delivery,
-    completed: Option<oneshot::Sender<Result<(), Error>>>,
-    cancel_target: Option<HandoffCancellation>,
-    report_failure: bool,
-) -> Result<(), ConnectionQueueFailure> {
-    let message_name = message.name();
-    let command = NeighborCommand::Send { message, delivery, completed, cancel_target, report_failure };
-    match commands.try_send(command) {
-        Ok(()) => Ok(()),
-        Err(mpsc::error::TrySendError::Full(NeighborCommand::Send { completed, .. })) => {
-            if report_failure {
-                tracing::trace!(
-                    simulator_id = simulator_id.get(),
-                    message = message_name,
-                    delivery = ?delivery,
-                    queue_stage = "connection_commands",
-                    queued_commands = commands.max_capacity() - commands.capacity(),
-                    queue_capacity = commands.max_capacity(),
-                    "Simulator send rejected by a full connection command queue"
-                );
-            }
-            Err(ConnectionQueueFailure { error: Error::SimulatorCommandQueueFull, completion: completed })
-        }
-        Err(mpsc::error::TrySendError::Closed(NeighborCommand::Send { completed, .. })) => {
-            Err(ConnectionQueueFailure { error: Error::SimulatorConnectionClosed, completion: completed })
-        }
-        Err(mpsc::error::TrySendError::Full(_)) | Err(mpsc::error::TrySendError::Closed(_)) => {
-            unreachable!("only send commands are queued through this helper")
-        }
-    }
+#[cfg(test)]
+struct CoordinatorGate {
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
 }
 
-fn queue_primary_message(
-    simulator_id: SimulatorId,
-    commands: &mpsc::Sender<NeighborCommand>,
-    agent_id: Uuid,
-    session_id: Uuid,
-    message: Message,
-    delivery: Delivery,
-    cancellation: Option<HandoffCancellation>,
-) -> Result<(), ConnectionQueueFailure> {
-    let cancel_handoff = is_teleport_cancel(&message, agent_id, session_id);
-    let cancel_target = cancel_handoff.then_some(cancellation).flatten();
-    queue_connection_message(simulator_id, commands, message, delivery, None, cancel_target, true)
-}
-
-fn track_capability_worker(workers: &mut JoinSet<()>, client: &Client) {
-    let client = client.clone();
-    workers.spawn(async move { client.wait_for_worker().await });
+#[cfg(test)]
+struct ReplacementGate {
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+    armed: oneshot::Receiver<()>,
 }
 
 struct SimulatorCapabilitySession {
@@ -1403,6 +1301,12 @@ struct SimulatorCapabilitySession {
     event_queue_role: EventQueueRoleHandle,
     event_queue_task: Option<Id>,
     event_queue_running: bool,
+}
+
+impl Drop for SimulatorCapabilitySession {
+    fn drop(&mut self) {
+        self.client.close_session();
+    }
 }
 
 struct CoordinatorRunState {
@@ -1418,6 +1322,25 @@ struct CoordinatorRunState {
     pending_events: VecDeque<EventEnvelope>,
     logout_deadline: Option<Instant>,
     disconnect_reason: Option<&'static str>,
+}
+
+impl CoordinatorRunState {
+    fn new() -> Self {
+        Self {
+            neighbors: JoinSet::new(),
+            neighbor_event_queues: JoinSet::new(),
+            neighbor_event_queue_owners: HashMap::new(),
+            neighbor_connections: HashMap::new(),
+            retiring_simulators: HashSet::new(),
+            neighbor_task_owners: HashMap::new(),
+            simulator_capabilities: HashMap::new(),
+            connected_simulators: HashSet::new(),
+            preconnect_events: PreconnectEvents::default(),
+            pending_events: VecDeque::with_capacity(MAX_QUEUED_SIMULATOR_EVENTS),
+            logout_deadline: None,
+            disconnect_reason: None,
+        }
+    }
 }
 
 enum SessionStartup {
@@ -1471,29 +1394,146 @@ impl SessionStartup {
     }
 }
 
-impl CoordinatorRunState {
-    fn new() -> Self {
-        Self {
-            neighbors: JoinSet::new(),
-            neighbor_event_queues: JoinSet::new(),
-            neighbor_event_queue_owners: HashMap::new(),
-            neighbor_connections: HashMap::new(),
-            retiring_simulators: HashSet::new(),
-            neighbor_task_owners: HashMap::new(),
-            simulator_capabilities: HashMap::new(),
-            connected_simulators: HashSet::new(),
-            preconnect_events: PreconnectEvents::default(),
-            pending_events: VecDeque::with_capacity(MAX_QUEUED_SIMULATOR_EVENTS),
-            logout_deadline: None,
-            disconnect_reason: None,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogoutOutcome {
+    Sent,
+    AlreadySent,
+    Unavailable(LogoutUnavailable),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogoutUnavailable {
+    ConnectionClosed,
+    ConnectionEnded,
+    Deadline,
+    QueueFull,
+}
+
+impl LogoutUnavailable {
+    fn description(self) -> &'static str {
+        match self {
+            Self::ConnectionClosed => "the active simulator connection is closed",
+            Self::ConnectionEnded => "the active simulator connection ended before sending logout",
+            Self::Deadline => "the bounded logout send deadline expired",
+            Self::QueueFull => "the active simulator logout queue was full",
         }
     }
 }
 
-impl Drop for SimulatorCapabilitySession {
-    fn drop(&mut self) {
-        self.client.close_session();
+struct PendingLogout {
+    completion: oneshot::Receiver<Result<(), Error>>,
+    deadline: Instant,
+}
+
+impl PendingLogout {
+    async fn wait(&mut self) -> Result<(), LogoutAttemptError> {
+        match time::timeout_at(self.deadline, &mut self.completion).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(error))) => Err(LogoutAttemptError::Unexpected(error.to_string())),
+            Ok(Err(_)) => Err(LogoutAttemptError::Unavailable(LogoutUnavailable::ConnectionEnded)),
+            Err(_) => Err(LogoutAttemptError::Unavailable(LogoutUnavailable::Deadline)),
+        }
     }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum LogoutAttemptError {
+    Unavailable(LogoutUnavailable),
+    Unexpected(String),
+}
+
+fn record_coverage_loss(ledger: &CoverageLossLedger, simulator_id: SimulatorId, source: CoverageSource, reason: CoverageLossReason) {
+    let _ = ledger.record(simulator_id, source, reason);
+}
+
+fn is_application_event(event: &Event) -> bool {
+    matches!(event, Event::CapabilityEvent { .. } | Event::CapabilityEventBatch { .. } | Event::SimulatorMessage { .. })
+}
+
+fn record_event_envelope_loss(ledger: &CoverageLossLedger, event: EventEnvelope, reason: CoverageLossReason) {
+    if let Some(watermark) = event.coverage_watermark() {
+        record_coverage_loss(ledger, watermark.simulator_id, watermark.source, reason);
+    }
+}
+
+fn neighbor_completion_event(
+    simulator_id: SimulatorId,
+    region_handle: Option<u64>,
+    endpoint: SocketAddr,
+    outcome: &NeighborTaskOutcome,
+) -> Event {
+    match outcome {
+        NeighborTaskOutcome::Finished(Ok(())) => Event::SimulatorDisconnected { simulator_id, region_handle, endpoint },
+        NeighborTaskOutcome::Finished(Err(reason)) => {
+            Event::SimulatorFailed { simulator_id, region_handle, endpoint, reason: reason.clone() }
+        }
+        NeighborTaskOutcome::ConnectFailed(reason) => match region_handle {
+            Some(region_handle) => Event::SimulatorConnectFailed { simulator_id, region_handle, endpoint },
+            None => Event::SimulatorFailed { simulator_id, region_handle: None, endpoint, reason: reason.clone() },
+        },
+    }
+}
+
+async fn retry_pending_handoff_commands(retry: &mut time::Interval, connections: &mut HashMap<u64, NeighborConnectionState>) {
+    retry.tick().await;
+    for connection in connections.values_mut() {
+        connection.flush_handoff_command();
+    }
+}
+
+fn queue_connection_message(
+    simulator_id: SimulatorId,
+    commands: &mpsc::Sender<NeighborCommand>,
+    message: Message,
+    delivery: Delivery,
+    completed: Option<oneshot::Sender<Result<(), Error>>>,
+    cancel_target: Option<HandoffCancellation>,
+    report_failure: bool,
+) -> Result<(), ConnectionQueueFailure> {
+    let message_name = message.name();
+    let command = NeighborCommand::Send { message, delivery, completed, cancel_target, report_failure };
+    match commands.try_send(command) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(NeighborCommand::Send { completed, .. })) => {
+            if report_failure {
+                tracing::trace!(
+                    simulator_id = simulator_id.get(),
+                    message = message_name,
+                    delivery = ?delivery,
+                    queue_stage = "connection_commands",
+                    queued_commands = commands.max_capacity() - commands.capacity(),
+                    queue_capacity = commands.max_capacity(),
+                    "Simulator send rejected by a full connection command queue"
+                );
+            }
+            Err(ConnectionQueueFailure { error: Error::SimulatorCommandQueueFull, completion: completed })
+        }
+        Err(mpsc::error::TrySendError::Closed(NeighborCommand::Send { completed, .. })) => {
+            Err(ConnectionQueueFailure { error: Error::SimulatorConnectionClosed, completion: completed })
+        }
+        Err(mpsc::error::TrySendError::Full(_)) | Err(mpsc::error::TrySendError::Closed(_)) => {
+            unreachable!("only send commands are queued through this helper")
+        }
+    }
+}
+
+fn queue_primary_message(
+    simulator_id: SimulatorId,
+    commands: &mpsc::Sender<NeighborCommand>,
+    agent_id: Uuid,
+    session_id: Uuid,
+    message: Message,
+    delivery: Delivery,
+    cancellation: Option<HandoffCancellation>,
+) -> Result<(), ConnectionQueueFailure> {
+    let cancel_handoff = is_teleport_cancel(&message, agent_id, session_id);
+    let cancel_target = cancel_handoff.then_some(cancellation).flatten();
+    queue_connection_message(simulator_id, commands, message, delivery, None, cancel_target, true)
+}
+
+fn track_capability_worker(workers: &mut JoinSet<()>, client: &Client) {
+    let client = client.clone();
+    workers.spawn(async move { client.wait_for_worker().await });
 }
 
 fn remove_simulator_capability(capabilities: &mut HashMap<SimulatorId, SimulatorCapabilitySession>, simulator_id: SimulatorId) {
@@ -1590,54 +1630,6 @@ async fn run_session_with_status(
         send_failure_event(&failure_events, error.clone(), &mut failure_shutdown).await;
     }
     result
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LogoutOutcome {
-    Sent,
-    AlreadySent,
-    Unavailable(LogoutUnavailable),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LogoutUnavailable {
-    ConnectionClosed,
-    ConnectionEnded,
-    Deadline,
-    QueueFull,
-}
-
-struct PendingLogout {
-    completion: oneshot::Receiver<Result<(), Error>>,
-    deadline: Instant,
-}
-
-impl PendingLogout {
-    async fn wait(&mut self) -> Result<(), LogoutAttemptError> {
-        match time::timeout_at(self.deadline, &mut self.completion).await {
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(error))) => Err(LogoutAttemptError::Unexpected(error.to_string())),
-            Ok(Err(_)) => Err(LogoutAttemptError::Unavailable(LogoutUnavailable::ConnectionEnded)),
-            Err(_) => Err(LogoutAttemptError::Unavailable(LogoutUnavailable::Deadline)),
-        }
-    }
-}
-
-impl LogoutUnavailable {
-    fn description(self) -> &'static str {
-        match self {
-            Self::ConnectionClosed => "the active simulator connection is closed",
-            Self::ConnectionEnded => "the active simulator connection ended before sending logout",
-            Self::Deadline => "the bounded logout send deadline expired",
-            Self::QueueFull => "the active simulator logout queue was full",
-        }
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum LogoutAttemptError {
-    Unavailable(LogoutUnavailable),
-    Unexpected(String),
 }
 
 async fn send_logout_with_deadline(

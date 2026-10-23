@@ -1,6 +1,5 @@
-//! Session-wide LLUDP byte pacing. The arbiter carries request metadata only;
-//! connections retain their own datagrams and Circuit state.
-
+#[cfg(test)]
+use std::{collections::BTreeMap, env};
 use std::{
     collections::HashMap,
     io::ErrorKind,
@@ -10,9 +9,6 @@ use std::{
     },
     time::Duration,
 };
-
-#[cfg(test)]
-use std::{collections::BTreeMap, env};
 
 use tokio::{
     sync::{mpsc, oneshot},
@@ -35,6 +31,16 @@ pub(crate) enum TrafficClass {
     Control,
     Deadline,
     Fair,
+}
+
+impl TrafficClass {
+    fn index(self) -> usize {
+        match self {
+            Self::Control => 0,
+            Self::Deadline => 1,
+            Self::Fair => 2,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,20 +214,10 @@ impl Bucket {
     }
 }
 
-/// Owns the pacing worker for one logged-in session.
-/// Dropping the owner, including a cancelled shutdown, aborts the worker.
 pub(crate) struct OutboundBudget {
     commands: mpsc::Sender<Command>,
     bucket: Arc<Mutex<Bucket>>,
     worker: JoinHandle<()>,
-    #[cfg(test)]
-    probe: Option<Arc<Mutex<ProbeStats>>>,
-}
-
-#[derive(Clone)]
-pub(crate) struct OutboundBudgetHandle {
-    commands: mpsc::Sender<Command>,
-    bucket: Arc<Mutex<Bucket>>,
     #[cfg(test)]
     probe: Option<Arc<Mutex<ProbeStats>>>,
 }
@@ -270,6 +266,24 @@ impl OutboundBudget {
     }
 }
 
+impl Drop for OutboundBudget {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(probe) = &self.probe {
+            report_probe(probe);
+        }
+        self.worker.abort();
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct OutboundBudgetHandle {
+    commands: mpsc::Sender<Command>,
+    bucket: Arc<Mutex<Bucket>>,
+    #[cfg(test)]
+    probe: Option<Arc<Mutex<ProbeStats>>>,
+}
+
 impl OutboundBudgetHandle {
     pub(crate) async fn register(&self, id: u64, primary: bool) -> Result<ConnectionPacer, String> {
         let role = if primary { ConnectionRole::Primary } else { ConnectionRole::Neighbor };
@@ -295,17 +309,6 @@ impl OutboundBudgetHandle {
     }
 }
 
-impl Drop for OutboundBudget {
-    fn drop(&mut self) {
-        #[cfg(test)]
-        if let Some(probe) = &self.probe {
-            report_probe(probe);
-        }
-        self.worker.abort();
-    }
-}
-
-/// Per-connection registration. Dropping it retires the scheduler slot.
 pub(crate) struct ConnectionPacer {
     id: u64,
     role: ConnectionRole,
@@ -345,7 +348,13 @@ impl ConnectionPacer {
     }
 }
 
-/// Send capability copied into the connection loop's cancellable send future.
+impl Drop for ConnectionPacer {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+        let _ = self.commands.try_send(Command::Unregister { id: self.id });
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct PacerHandle {
     id: u64,
@@ -355,54 +364,75 @@ pub(crate) struct PacerHandle {
     probe: Option<Arc<Mutex<ProbeStats>>>,
 }
 
+impl PacerHandle {
+    pub(crate) fn report_loss(&self) {
+        if let Ok(mut bucket) = self.bucket.lock() {
+            bucket.report_loss(Instant::now());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rate_for_test(&self) -> u64 {
+        self.bucket.lock().expect("session pacing bucket").rate_bytes_per_second
+    }
+
+    pub(crate) async fn send(&self, socket: &UdpTransport, bytes: &[u8], class: TrafficClass) -> Result<Instant, String> {
+        self.send_with_kind(socket, bytes, class, false).await
+    }
+
+    pub(crate) async fn send_retransmission(&self, socket: &UdpTransport, bytes: &[u8], class: TrafficClass) -> Result<Instant, String> {
+        self.send_with_kind(socket, bytes, class, true).await
+    }
+
+    async fn send_with_kind(
+        &self,
+        socket: &UdpTransport,
+        bytes: &[u8],
+        class: TrafficClass,
+        retransmission: bool,
+    ) -> Result<Instant, String> {
+        #[cfg(not(test))]
+        let _ = retransmission;
+        #[cfg(test)]
+        if retransmission && let Some(probe) = &self.probe {
+            record_retry_attempt(probe, self.id, bytes.len());
+        }
+        loop {
+            let (completed, response) = oneshot::channel();
+            self.commands
+                .send(Command::Request { id: self.id, bytes: bytes.len(), class, completed })
+                .await
+                .map_err(|_| "The LLUDP byte pacer has stopped.".to_string())?;
+            let lease = response.await.map_err(|_| "The LLUDP byte pacer stopped before granting a send.".to_string())?;
+            match socket.try_send(bytes) {
+                Ok(()) => {
+                    #[cfg(test)]
+                    if let Some(probe) = &self.probe {
+                        record_wire_send(probe, self.id, class, bytes.len(), retransmission);
+                    }
+                    return Ok(lease.consume());
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    drop(lease);
+                    socket.writable().await.map_err(|error| format!("Could not wait for a simulator datagram send slot: {error}"))?;
+                }
+                Err(error) => {
+                    #[cfg(test)]
+                    if let Some(probe) = &self.probe {
+                        record_send_error(probe, self.id, class);
+                    }
+                    return Err(format!("Could not send a simulator datagram: {error}"));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct ProbeConnection {
     id: u64,
     stats: Arc<Mutex<ProbeStats>>,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct ProbeHandle {
-    stats: Arc<Mutex<ProbeStats>>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Debug, Default)]
-pub(crate) struct ProbeSnapshot {
-    pub(crate) connections: BTreeMap<u64, ProbeConnectionSnapshot>,
-    pub(crate) pending_duration: BTreeMap<TrafficClass, BTreeMap<usize, Duration>>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Debug, Default)]
-pub(crate) struct ProbeConnectionSnapshot {
-    pub(crate) classes: BTreeMap<TrafficClass, ProbeClassSnapshot>,
-    pub(crate) peak_queue_messages: usize,
-    pub(crate) peak_queue_bytes: usize,
-    pub(crate) peak_queue_age: Duration,
-    pub(crate) retry_attempts: u64,
-    pub(crate) retry_attempt_bytes: u64,
-    pub(crate) retry_wire_datagrams: u64,
-    pub(crate) retry_wire_bytes: u64,
-    pub(crate) deferred_retry_expirations: u64,
-    pub(crate) active_retry_expirations: u64,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ProbeClassSnapshot {
-    pub(crate) grants: u64,
-    pub(crate) granted_bytes: u64,
-    pub(crate) wire_datagrams: u64,
-    pub(crate) wire_bytes: u64,
-    pub(crate) wait_p50: Duration,
-    pub(crate) wait_p95: Duration,
-    pub(crate) wait_p99: Duration,
-    pub(crate) peak_queue_age: Duration,
-    pub(crate) outbound_queue_expirations: u64,
-    pub(crate) pending_send_expirations: u64,
 }
 
 #[cfg(test)]
@@ -480,6 +510,115 @@ impl ProbeConnection {
             connection.active_retry_expiration_samples.push(at);
         }
     }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct ProbeHandle {
+    stats: Arc<Mutex<ProbeStats>>,
+}
+
+#[cfg(test)]
+impl ProbeHandle {
+    pub(crate) fn snapshot(&self, start: Instant, end: Instant) -> ProbeSnapshot {
+        let Ok(stats) = self.stats.lock() else { return ProbeSnapshot::default() };
+        let mut snapshot = ProbeSnapshot::default();
+        if end < start {
+            return snapshot;
+        }
+
+        for pair in stats.pending_samples.windows(2) {
+            add_pending_duration(&mut snapshot.pending_duration, &pair[0].classes, pair[0].at, pair[1].at, start, end);
+        }
+        if let Some(last) = stats.pending_samples.last() {
+            add_pending_duration(&mut snapshot.pending_duration, &last.classes, last.at, end, start, end);
+        }
+
+        for (&id, connection) in &stats.connections {
+            let mut connection_snapshot = ProbeConnectionSnapshot::default();
+            let queue_samples = connection.queue_samples.iter().filter(|sample| sample.at >= start && sample.at < end);
+            for sample in queue_samples {
+                connection_snapshot.peak_queue_messages = connection_snapshot.peak_queue_messages.max(sample.queued_messages);
+                connection_snapshot.peak_queue_bytes = connection_snapshot.peak_queue_bytes.max(sample.queued_bytes);
+            }
+            let (attempts, attempt_bytes) = count_bytes(&connection.retry_attempt_samples, start, end);
+            connection_snapshot.retry_attempts = attempts;
+            connection_snapshot.retry_attempt_bytes = attempt_bytes;
+            let (wire_datagrams, wire_bytes) = count_bytes(&connection.retry_wire_samples, start, end);
+            connection_snapshot.retry_wire_datagrams = wire_datagrams;
+            connection_snapshot.retry_wire_bytes = wire_bytes;
+            connection_snapshot.deferred_retry_expirations = count_instants(&connection.deferred_retry_expiration_samples, start, end);
+            connection_snapshot.active_retry_expirations = count_instants(&connection.active_retry_expiration_samples, start, end);
+
+            for (&class, metrics) in &connection.classes {
+                let (grants, granted_bytes) = count_bytes(&metrics.grant_samples, start, end);
+                let (wire_datagrams, wire_bytes) = count_bytes(&metrics.wire_samples, start, end);
+                let waits = metrics.waits.iter().filter(|sample| sample.at >= start && sample.at < end).copied().collect::<Vec<_>>();
+                let peak_queue_age = metrics
+                    .queue_age_samples
+                    .iter()
+                    .filter(|sample| sample.at >= start && sample.at < end)
+                    .map(|sample| sample.duration)
+                    .max()
+                    .unwrap_or_default();
+                connection_snapshot.peak_queue_age = connection_snapshot.peak_queue_age.max(peak_queue_age);
+                connection_snapshot.classes.insert(
+                    class,
+                    ProbeClassSnapshot {
+                        grants,
+                        granted_bytes,
+                        wire_datagrams,
+                        wire_bytes,
+                        wait_p50: percentile_waits(&waits, 50),
+                        wait_p95: percentile_waits(&waits, 95),
+                        wait_p99: percentile_waits(&waits, 99),
+                        peak_queue_age,
+                        outbound_queue_expirations: count_instants(&metrics.outbound_queue_expiration_samples, start, end),
+                        pending_send_expirations: count_instants(&metrics.pending_send_expiration_samples, start, end),
+                    },
+                );
+            }
+            snapshot.connections.insert(id, connection_snapshot);
+        }
+        snapshot
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProbeSnapshot {
+    pub(crate) connections: BTreeMap<u64, ProbeConnectionSnapshot>,
+    pub(crate) pending_duration: BTreeMap<TrafficClass, BTreeMap<usize, Duration>>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ProbeConnectionSnapshot {
+    pub(crate) classes: BTreeMap<TrafficClass, ProbeClassSnapshot>,
+    pub(crate) peak_queue_messages: usize,
+    pub(crate) peak_queue_bytes: usize,
+    pub(crate) peak_queue_age: Duration,
+    pub(crate) retry_attempts: u64,
+    pub(crate) retry_attempt_bytes: u64,
+    pub(crate) retry_wire_datagrams: u64,
+    pub(crate) retry_wire_bytes: u64,
+    pub(crate) deferred_retry_expirations: u64,
+    pub(crate) active_retry_expirations: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ProbeClassSnapshot {
+    pub(crate) grants: u64,
+    pub(crate) granted_bytes: u64,
+    pub(crate) wire_datagrams: u64,
+    pub(crate) wire_bytes: u64,
+    pub(crate) wait_p50: Duration,
+    pub(crate) wait_p95: Duration,
+    pub(crate) wait_p99: Duration,
+    pub(crate) peak_queue_age: Duration,
+    pub(crate) outbound_queue_expirations: u64,
+    pub(crate) pending_send_expirations: u64,
 }
 
 #[cfg(test)]
@@ -566,6 +705,37 @@ struct TimedQueueSnapshot {
     at: Instant,
     queued_messages: usize,
     queued_bytes: usize,
+}
+
+pub(crate) struct BudgetLease {
+    bucket: Arc<Mutex<Bucket>>,
+    bytes: usize,
+    consumed: bool,
+}
+
+impl BudgetLease {
+    fn new(bucket: Arc<Mutex<Bucket>>, bytes: usize) -> Self {
+        Self { bucket, bytes, consumed: false }
+    }
+
+    fn consume(mut self) -> Instant {
+        let now = Instant::now();
+        if let Ok(mut bucket) = self.bucket.lock() {
+            bucket.settle_reservation(self.bytes, false, now);
+        }
+        self.consumed = true;
+        now
+    }
+}
+
+impl Drop for BudgetLease {
+    fn drop(&mut self) {
+        if !self.consumed
+            && let Ok(mut bucket) = self.bucket.lock()
+        {
+            bucket.settle_reservation(self.bytes, true, Instant::now());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -706,72 +876,6 @@ fn add_pending_duration(
 }
 
 #[cfg(test)]
-impl ProbeHandle {
-    pub(crate) fn snapshot(&self, start: Instant, end: Instant) -> ProbeSnapshot {
-        let Ok(stats) = self.stats.lock() else { return ProbeSnapshot::default() };
-        let mut snapshot = ProbeSnapshot::default();
-        if end < start {
-            return snapshot;
-        }
-
-        for pair in stats.pending_samples.windows(2) {
-            add_pending_duration(&mut snapshot.pending_duration, &pair[0].classes, pair[0].at, pair[1].at, start, end);
-        }
-        if let Some(last) = stats.pending_samples.last() {
-            add_pending_duration(&mut snapshot.pending_duration, &last.classes, last.at, end, start, end);
-        }
-
-        for (&id, connection) in &stats.connections {
-            let mut connection_snapshot = ProbeConnectionSnapshot::default();
-            let queue_samples = connection.queue_samples.iter().filter(|sample| sample.at >= start && sample.at < end);
-            for sample in queue_samples {
-                connection_snapshot.peak_queue_messages = connection_snapshot.peak_queue_messages.max(sample.queued_messages);
-                connection_snapshot.peak_queue_bytes = connection_snapshot.peak_queue_bytes.max(sample.queued_bytes);
-            }
-            let (attempts, attempt_bytes) = count_bytes(&connection.retry_attempt_samples, start, end);
-            connection_snapshot.retry_attempts = attempts;
-            connection_snapshot.retry_attempt_bytes = attempt_bytes;
-            let (wire_datagrams, wire_bytes) = count_bytes(&connection.retry_wire_samples, start, end);
-            connection_snapshot.retry_wire_datagrams = wire_datagrams;
-            connection_snapshot.retry_wire_bytes = wire_bytes;
-            connection_snapshot.deferred_retry_expirations = count_instants(&connection.deferred_retry_expiration_samples, start, end);
-            connection_snapshot.active_retry_expirations = count_instants(&connection.active_retry_expiration_samples, start, end);
-
-            for (&class, metrics) in &connection.classes {
-                let (grants, granted_bytes) = count_bytes(&metrics.grant_samples, start, end);
-                let (wire_datagrams, wire_bytes) = count_bytes(&metrics.wire_samples, start, end);
-                let waits = metrics.waits.iter().filter(|sample| sample.at >= start && sample.at < end).copied().collect::<Vec<_>>();
-                let peak_queue_age = metrics
-                    .queue_age_samples
-                    .iter()
-                    .filter(|sample| sample.at >= start && sample.at < end)
-                    .map(|sample| sample.duration)
-                    .max()
-                    .unwrap_or_default();
-                connection_snapshot.peak_queue_age = connection_snapshot.peak_queue_age.max(peak_queue_age);
-                connection_snapshot.classes.insert(
-                    class,
-                    ProbeClassSnapshot {
-                        grants,
-                        granted_bytes,
-                        wire_datagrams,
-                        wire_bytes,
-                        wait_p50: percentile_waits(&waits, 50),
-                        wait_p95: percentile_waits(&waits, 95),
-                        wait_p99: percentile_waits(&waits, 99),
-                        peak_queue_age,
-                        outbound_queue_expirations: count_instants(&metrics.outbound_queue_expiration_samples, start, end),
-                        pending_send_expirations: count_instants(&metrics.pending_send_expiration_samples, start, end),
-                    },
-                );
-            }
-            snapshot.connections.insert(id, connection_snapshot);
-        }
-        snapshot
-    }
-}
-
-#[cfg(test)]
 fn report_probe(probe: &Arc<Mutex<ProbeStats>>) {
     let Ok(mut stats) = probe.lock() else { return };
     if stats.reported {
@@ -810,108 +914,6 @@ fn report_probe(probe: &Arc<Mutex<ProbeStats>>) {
             connection.deferred_retry_expirations,
             connection.active_retry_expirations,
         );
-    }
-}
-
-impl PacerHandle {
-    pub(crate) fn report_loss(&self) {
-        if let Ok(mut bucket) = self.bucket.lock() {
-            bucket.report_loss(Instant::now());
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn rate_for_test(&self) -> u64 {
-        self.bucket.lock().expect("session pacing bucket").rate_bytes_per_second
-    }
-
-    pub(crate) async fn send(&self, socket: &UdpTransport, bytes: &[u8], class: TrafficClass) -> Result<Instant, String> {
-        self.send_with_kind(socket, bytes, class, false).await
-    }
-
-    pub(crate) async fn send_retransmission(&self, socket: &UdpTransport, bytes: &[u8], class: TrafficClass) -> Result<Instant, String> {
-        self.send_with_kind(socket, bytes, class, true).await
-    }
-
-    async fn send_with_kind(
-        &self,
-        socket: &UdpTransport,
-        bytes: &[u8],
-        class: TrafficClass,
-        retransmission: bool,
-    ) -> Result<Instant, String> {
-        #[cfg(not(test))]
-        let _ = retransmission;
-        #[cfg(test)]
-        if retransmission && let Some(probe) = &self.probe {
-            record_retry_attempt(probe, self.id, bytes.len());
-        }
-        loop {
-            let (completed, response) = oneshot::channel();
-            self.commands
-                .send(Command::Request { id: self.id, bytes: bytes.len(), class, completed })
-                .await
-                .map_err(|_| "The LLUDP byte pacer has stopped.".to_string())?;
-            let lease = response.await.map_err(|_| "The LLUDP byte pacer stopped before granting a send.".to_string())?;
-            match socket.try_send(bytes) {
-                Ok(()) => {
-                    #[cfg(test)]
-                    if let Some(probe) = &self.probe {
-                        record_wire_send(probe, self.id, class, bytes.len(), retransmission);
-                    }
-                    return Ok(lease.consume());
-                }
-                Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                    drop(lease);
-                    socket.writable().await.map_err(|error| format!("Could not wait for a simulator datagram send slot: {error}"))?;
-                }
-                Err(error) => {
-                    #[cfg(test)]
-                    if let Some(probe) = &self.probe {
-                        record_send_error(probe, self.id, class);
-                    }
-                    return Err(format!("Could not send a simulator datagram: {error}"));
-                }
-            }
-        }
-    }
-}
-
-impl Drop for ConnectionPacer {
-    fn drop(&mut self) {
-        self.active.store(false, Ordering::Release);
-        let _ = self.commands.try_send(Command::Unregister { id: self.id });
-    }
-}
-
-pub(crate) struct BudgetLease {
-    bucket: Arc<Mutex<Bucket>>,
-    bytes: usize,
-    consumed: bool,
-}
-
-impl BudgetLease {
-    fn new(bucket: Arc<Mutex<Bucket>>, bytes: usize) -> Self {
-        Self { bucket, bytes, consumed: false }
-    }
-
-    fn consume(mut self) -> Instant {
-        let now = Instant::now();
-        if let Ok(mut bucket) = self.bucket.lock() {
-            bucket.settle_reservation(self.bytes, false, now);
-        }
-        self.consumed = true;
-        now
-    }
-}
-
-impl Drop for BudgetLease {
-    fn drop(&mut self) {
-        if !self.consumed
-            && let Ok(mut bucket) = self.bucket.lock()
-        {
-            bucket.settle_reservation(self.bytes, true, Instant::now());
-        }
     }
 }
 
@@ -1326,16 +1328,6 @@ fn next_dispatch_delay(bucket: &Arc<Mutex<Bucket>>, pending: &HashMap<u64, Pendi
         return Duration::from_secs(24 * 60 * 60);
     };
     bucket.lock().map(|bucket| bucket.delay_until(bytes, Instant::now())).unwrap_or(Duration::from_millis(1))
-}
-
-impl TrafficClass {
-    fn index(self) -> usize {
-        match self {
-            Self::Control => 0,
-            Self::Deadline => 1,
-            Self::Fair => 2,
-        }
-    }
 }
 
 #[cfg(test)]

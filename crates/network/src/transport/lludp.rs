@@ -10,6 +10,8 @@ use protocol::{
 };
 use tokio::time::Instant;
 
+#[cfg(test)]
+use crate::transport::UdpTransport;
 use crate::{
     event::{
         PacketOrder,
@@ -17,9 +19,6 @@ use crate::{
     },
     status::NetworkStatusHandle,
 };
-
-#[cfg(test)]
-use crate::transport::UdpTransport;
 
 #[cfg(test)]
 pub(crate) const DEFAULT_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,7 +33,6 @@ const DUPLICATE_ACK_HEADROOM: usize = 256;
 pub(crate) const NEW_RELIABLE_ACK_CAPACITY: usize = MAX_PENDING_ACKS - DUPLICATE_ACK_HEADROOM;
 pub(crate) const MAX_PENDING_PACKETS: usize = 256;
 const MAX_ACKS_PER_PACKET: usize = u8::MAX as usize;
-
 const MAX_NORMAL_DATAGRAM_BYTES: usize = 1_200;
 pub(crate) const MAX_RECEIVED_RELIABLE_PACKETS: usize = 65_536;
 const DUPLICATE_SUPPRESSION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -105,69 +103,10 @@ pub(crate) struct Circuit {
     status: NetworkStatusHandle,
 }
 
-#[cfg_attr(test, derive(Clone))]
-pub(crate) struct PreparedDatagram {
-    bytes: Vec<u8>,
-    commit: DatagramCommit,
-}
-
-#[cfg_attr(test, derive(Clone))]
-enum DatagramCommit {
-    Message { sequence: u32, delivery: Delivery, appended_acks: Vec<u32>, ping: Option<u8> },
-    Acknowledgements { sequence: u32, acknowledgements: Vec<u32> },
-    Retransmission { sequence: u32, sent_at: Instant, retries: u8 },
-}
-
-impl PreparedDatagram {
-    pub(crate) fn bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
-    pub(crate) fn sequence(&self) -> u32 {
-        match &self.commit {
-            DatagramCommit::Message { sequence, .. }
-            | DatagramCommit::Acknowledgements { sequence, .. }
-            | DatagramCommit::Retransmission { sequence, .. } => *sequence,
-        }
-    }
-
-    pub(crate) fn is_acknowledgement(&self) -> bool {
-        matches!(self.commit, DatagramCommit::Acknowledgements { .. })
-    }
-
-    pub(crate) fn is_retransmission(&self) -> bool {
-        matches!(self.commit, DatagramCommit::Retransmission { .. })
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReceiveError {
-    DuplicateHistoryFull,
-    AcknowledgementCapacityFull,
-}
-
-impl fmt::Display for ReceiveError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::DuplicateHistoryFull => formatter.write_str("Reliable packet duplicate history is full."),
-            Self::AcknowledgementCapacityFull => formatter.write_str("Reliable packet acknowledgement capacity is full."),
-        }
-    }
-}
-
 impl Drop for Circuit {
     fn drop(&mut self) {
         self.status.set_reliable_packets_pending(0);
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Delivery {
-    Unreliable,
-
-    Reliable,
-
-    ReliableNoRetry,
 }
 
 impl Circuit {
@@ -608,20 +547,61 @@ impl Circuit {
     }
 }
 
-fn available_ping_id(next_ping_id: u8, pending_pings: &HashMap<u8, Instant>, quarantined_ping_ids: &HashMap<u8, Instant>) -> Option<u8> {
-    (0..=u8::MAX)
-        .map(|offset| next_ping_id.wrapping_add(offset))
-        .find(|ping_id| !pending_pings.contains_key(ping_id) && !quarantined_ping_ids.contains_key(ping_id))
+#[cfg_attr(test, derive(Clone))]
+pub(crate) struct PreparedDatagram {
+    bytes: Vec<u8>,
+    commit: DatagramCommit,
 }
 
-pub(crate) struct PendingPacket {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) sent_at: Instant,
-    pub(crate) retries: u8,
+impl PreparedDatagram {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(crate) fn sequence(&self) -> u32 {
+        match &self.commit {
+            DatagramCommit::Message { sequence, .. }
+            | DatagramCommit::Acknowledgements { sequence, .. }
+            | DatagramCommit::Retransmission { sequence, .. } => *sequence,
+        }
+    }
+
+    pub(crate) fn is_acknowledgement(&self) -> bool {
+        matches!(self.commit, DatagramCommit::Acknowledgements { .. })
+    }
+
+    pub(crate) fn is_retransmission(&self) -> bool {
+        matches!(self.commit, DatagramCommit::Retransmission { .. })
+    }
 }
 
-pub(crate) fn advance_sequence(sequence: u32) -> u32 {
-    sequence.wrapping_add(1)
+#[cfg_attr(test, derive(Clone))]
+enum DatagramCommit {
+    Message { sequence: u32, delivery: Delivery, appended_acks: Vec<u32>, ping: Option<u8> },
+    Acknowledgements { sequence: u32, acknowledgements: Vec<u32> },
+    Retransmission { sequence: u32, sent_at: Instant, retries: u8 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReceiveError {
+    DuplicateHistoryFull,
+    AcknowledgementCapacityFull,
+}
+
+impl fmt::Display for ReceiveError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DuplicateHistoryFull => formatter.write_str("Reliable packet duplicate history is full."),
+            Self::AcknowledgementCapacityFull => formatter.write_str("Reliable packet acknowledgement capacity is full."),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Delivery {
+    Unreliable,
+    Reliable,
+    ReliableNoRetry,
 }
 
 impl Delivery {
@@ -632,6 +612,22 @@ impl Delivery {
     pub(crate) fn tracks_reliable(self) -> bool {
         matches!(self, Self::Reliable)
     }
+}
+
+pub(crate) struct PendingPacket {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) sent_at: Instant,
+    pub(crate) retries: u8,
+}
+
+fn available_ping_id(next_ping_id: u8, pending_pings: &HashMap<u8, Instant>, quarantined_ping_ids: &HashMap<u8, Instant>) -> Option<u8> {
+    (0..=u8::MAX)
+        .map(|offset| next_ping_id.wrapping_add(offset))
+        .find(|ping_id| !pending_pings.contains_key(ping_id) && !quarantined_ping_ids.contains_key(ping_id))
+}
+
+pub(crate) fn advance_sequence(sequence: u32) -> u32 {
+    sequence.wrapping_add(1)
 }
 
 fn remove_sent_acks(pending_acks: &mut VecDeque<u32>, pending_ack_sequences: &mut HashSet<u32>, packet_ids: &[u32]) {
@@ -764,7 +760,6 @@ mod tests {
         assert!(timeout(Duration::from_millis(20), simulator.recv_from(&mut buffer)).await.is_err());
     }
 }
-
 #[cfg(test)]
 mod protocol_tests {
     use crate::{

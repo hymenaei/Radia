@@ -26,12 +26,13 @@ use crate::http::{ResponseMemoryBudget, ResponseMemoryClass};
 
 pub(crate) const CAPTURE_SCHEMA_VERSION: u16 = 1;
 const CAPTURE_ENTRIES: [&str; 3] = ["manifest.json", "events.jsonl", "payloads.bin"];
-
 pub const MAX_CAPTURE_ENTRY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-
 pub const MAX_CAPTURE_EVENT_LINE_BYTES: usize = 1024 * 1024;
 const WRITER_QUEUE_CAPACITY: usize = 1024;
 pub(crate) const MAX_CAPTURE_QUEUED_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const PUBLICATION_PENDING: u8 = 0;
+const PUBLICATION_INTERRUPTION_REQUESTED: u8 = 1;
+const PUBLICATION_CLAIMED: u8 = 2;
 
 #[derive(Clone, Debug)]
 pub struct CaptureConfig {
@@ -65,9 +66,7 @@ pub struct CaptureManifest {
 pub enum CaptureState {
     Recording,
     Complete,
-
     Incomplete,
-
     Interrupted,
 }
 
@@ -149,21 +148,18 @@ pub enum CaptureEventKind {
     HttpRequest {
         request_id: u64,
         method: String,
-
         endpoint: String,
         headers: Vec<(String, String)>,
     },
     HttpResponse {
         request_id: u64,
         status: u16,
-
         duration_ns: u64,
         headers: Vec<(String, String)>,
     },
     HttpError {
         request_id: u64,
         phase: HttpErrorPhase,
-
         duration_ns: u64,
     },
 }
@@ -225,233 +221,6 @@ pub(crate) struct CaptureRecorder {
 impl fmt::Debug for CaptureRecorder {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("CaptureRecorder").field("active", &self.status().is_some()).finish()
-    }
-}
-
-pub(crate) struct CaptureSession {
-    recorder: CaptureRecorder,
-    state: Arc<RecorderState>,
-    writer: Option<JoinHandle<Result<CaptureSummary, String>>>,
-    capture_path: PathBuf,
-    workspace_path: PathBuf,
-    lock_path: PathBuf,
-}
-
-pub(crate) struct CaptureSummary {
-    pub(crate) state: CaptureState,
-    pub(crate) dropped_records: u64,
-    pub(crate) error: Option<String>,
-    pub(crate) capture_path: Option<PathBuf>,
-}
-
-const PUBLICATION_PENDING: u8 = 0;
-const PUBLICATION_INTERRUPTION_REQUESTED: u8 = 1;
-const PUBLICATION_CLAIMED: u8 = 2;
-
-#[derive(Clone, Default)]
-pub(crate) struct CapturePublication(Arc<CapturePublicationState>);
-
-#[derive(Default)]
-struct CapturePublicationState {
-    state: AtomicU8,
-    #[cfg(test)]
-    before_claim: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-}
-
-impl CapturePublication {
-    pub(crate) fn request_interruption(&self) {
-        let _ = self.0.state.compare_exchange(PUBLICATION_PENDING, PUBLICATION_INTERRUPTION_REQUESTED, Ordering::AcqRel, Ordering::Acquire);
-    }
-
-    fn interruption_requested(&self) -> bool {
-        self.0.state.load(Ordering::Acquire) == PUBLICATION_INTERRUPTION_REQUESTED
-    }
-
-    fn claim(&self, state: CaptureState) -> Result<CaptureState, CaptureState> {
-        if state == CaptureState::Recording {
-            unreachable!("recording cannot be published");
-        }
-
-        match self.0.state.compare_exchange(PUBLICATION_PENDING, PUBLICATION_CLAIMED, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => Ok(state),
-            Err(PUBLICATION_INTERRUPTION_REQUESTED) if state == CaptureState::Interrupted => {
-                self.0.state.store(PUBLICATION_CLAIMED, Ordering::Release);
-                Ok(CaptureState::Interrupted)
-            }
-            Err(PUBLICATION_INTERRUPTION_REQUESTED) => Err(CaptureState::Interrupted),
-            Err(PUBLICATION_CLAIMED) => unreachable!("capture publication was already claimed"),
-            Err(_) => unreachable!("invalid capture publication state"),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pause_before_claim(&self, reached: oneshot::Sender<()>, release: mpsc::Receiver<()>) {
-        let hook = Box::new(move || {
-            let _ = reached.send(());
-            let _ = release.recv();
-        });
-        *self.0.before_claim.lock().unwrap_or_else(PoisonError::into_inner) = Some(hook);
-    }
-
-    #[cfg(test)]
-    fn before_claim(&self) {
-        if let Some(hook) = self.0.before_claim.lock().unwrap_or_else(PoisonError::into_inner).take() {
-            hook();
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct CaptureStatus {
-    pub active: bool,
-    pub finalizing: bool,
-    pub elapsed: Duration,
-    pub recorded_events: u64,
-    pub udp_packets: u64,
-    pub http_requests: u64,
-    pub http_responses: u64,
-}
-
-impl CaptureSession {
-    pub(crate) fn start(config: CaptureConfig, recorder: CaptureRecorder) -> Result<Self, String> {
-        if recorder.is_active() {
-            return Err("A capture session is already active.".into());
-        }
-        fs::create_dir_all(&config.root).map_err(|error| format!("Could not prepare the capture directory: {error}"))?;
-        let (capture_path, workspace_path, lock_path) = create_capture_paths(&config.root)?;
-        let started_at = now_rfc3339()?;
-        let manifest = CaptureManifest {
-            schema_version: CAPTURE_SCHEMA_VERSION,
-            viewer_version: env!("CARGO_PKG_VERSION").into(),
-            started_at: started_at.clone(),
-            ended_at: started_at,
-            event_count: 0,
-            dropped_events: 0,
-            payload_bytes: 0,
-            state: CaptureState::Recording,
-        };
-        write_manifest_new(&workspace_path.join("manifest.json"), &manifest)?;
-
-        let records = create_new_file(&workspace_path.join("events.jsonl"))?;
-        let payloads = create_new_file(&workspace_path.join("payloads.bin"))?;
-        let (sender, receiver) = mpsc::sync_channel(WRITER_QUEUE_CAPACITY);
-        let dropped_records = Arc::new(AtomicU64::new(0));
-        let writer_dropped_records = Arc::clone(&dropped_records);
-        let recorder_queued_bytes = Arc::new(AtomicUsize::new(0));
-        let writer_queued_bytes = Arc::clone(&recorder_queued_bytes);
-        let writer_path = workspace_path.clone();
-        let writer = thread::Builder::new()
-            .name("capture-writer".into())
-            .spawn(move || write_records(writer_path, records, payloads, receiver, writer_dropped_records, writer_queued_bytes))
-            .map_err(|error| format!("Could not start network capture writer: {error}"))?;
-        let state = Arc::new(RecorderState {
-            sender,
-            started: Instant::now(),
-            serial: Mutex::new(()),
-            pending_records: Mutex::new(0),
-            records_idle: Condvar::new(),
-            first_request_id: recorder.registry.next_request_id.load(Ordering::Acquire),
-            queued_bytes: recorder_queued_bytes,
-            dropped_records,
-            recorded_events: AtomicU64::new(0),
-            udp_packets: AtomicU64::new(0),
-            http_requests: AtomicU64::new(0),
-            http_responses: AtomicU64::new(0),
-            closed: AtomicBool::new(false),
-        });
-        let session =
-            Self { recorder: recorder.clone(), state: Arc::clone(&state), writer: Some(writer), capture_path, workspace_path, lock_path };
-        if !recorder.install(state) {
-            let _ = session.interrupt();
-            return Err("A capture session is already active.".into());
-        }
-        Ok(session)
-    }
-
-    pub(crate) fn path(&self) -> &Path {
-        &self.capture_path
-    }
-
-    pub(crate) fn finish_recording(mut self, publication: &CapturePublication) -> CaptureSummary {
-        let mut summary = self.stop_with(WriterCommand::Finish, publication);
-        if summary.state == CaptureState::Incomplete && summary.error.is_none() {
-            summary.error =
-                Some(format!("Capture is incomplete: {} capture records or HTTP bodies were dropped.", summary.dropped_records));
-        }
-        self.remove_workspace();
-        summary
-    }
-
-    pub(crate) fn interrupt(mut self) -> CaptureSummary {
-        let summary = self.stop_with(WriterCommand::Interrupt, &CapturePublication::default());
-        self.remove_workspace();
-        summary
-    }
-
-    fn remove_workspace(&self) {
-        if self.capture_path.is_file() {
-            let _ = fs::remove_dir_all(&self.workspace_path);
-        }
-    }
-
-    fn stop_with(&mut self, command: WriterCommand, publication: &CapturePublication) -> CaptureSummary {
-        let mut summary = self.stop_writer(command);
-        self.recorder.uninstall(&self.state);
-        match write_capture_archive_atomically(&self.workspace_path, &self.capture_path, publication) {
-            Ok(state) => summary.state = state,
-            Err(error) => {
-                let _ = fs::remove_file(&self.lock_path);
-                return CaptureSummary {
-                    state: summary.state,
-                    dropped_records: summary.dropped_records,
-                    error: Some(match summary.error {
-                        Some(writer_error) => format!("{writer_error}; could not package raw capture: {error}"),
-                        None => format!("Could not package raw capture: {error}"),
-                    }),
-                    capture_path: None,
-                };
-            }
-        }
-        let _ = fs::remove_file(&self.lock_path);
-        summary.capture_path = Some(self.capture_path.clone());
-        summary
-    }
-
-    fn stop_writer(&mut self, command: WriterCommand) -> CaptureSummary {
-        let should_finish = close_capture_records(&self.state);
-        if should_finish {
-            let _ = self.state.sender.send(command);
-        }
-        match self.writer.take().map(JoinHandle::join) {
-            Some(Ok(Ok(summary))) => summary,
-            Some(Ok(Err(error))) => CaptureSummary {
-                state: CaptureState::Incomplete,
-                dropped_records: self.state.dropped_records.load(Ordering::Acquire),
-                error: Some(error),
-                capture_path: None,
-            },
-            Some(Err(_)) => CaptureSummary {
-                state: CaptureState::Incomplete,
-                dropped_records: self.state.dropped_records.load(Ordering::Acquire),
-                error: Some("The network capture writer stopped unexpectedly.".into()),
-                capture_path: None,
-            },
-            None => CaptureSummary {
-                state: CaptureState::Incomplete,
-                dropped_records: 0,
-                error: Some("The network capture writer was already stopped.".into()),
-                capture_path: None,
-            },
-        }
-    }
-}
-
-impl Drop for CaptureSession {
-    fn drop(&mut self) {
-        if self.writer.is_some() {
-            let _ = self.stop_with(WriterCommand::Interrupt, &CapturePublication::default());
-            self.remove_workspace();
-        }
     }
 }
 
@@ -803,6 +572,305 @@ impl CaptureRecorder {
     }
 }
 
+pub(crate) struct CaptureSession {
+    recorder: CaptureRecorder,
+    state: Arc<RecorderState>,
+    writer: Option<JoinHandle<Result<CaptureSummary, String>>>,
+    capture_path: PathBuf,
+    workspace_path: PathBuf,
+    lock_path: PathBuf,
+}
+
+impl CaptureSession {
+    pub(crate) fn start(config: CaptureConfig, recorder: CaptureRecorder) -> Result<Self, String> {
+        if recorder.is_active() {
+            return Err("A capture session is already active.".into());
+        }
+        fs::create_dir_all(&config.root).map_err(|error| format!("Could not prepare the capture directory: {error}"))?;
+        let (capture_path, workspace_path, lock_path) = create_capture_paths(&config.root)?;
+        let started_at = now_rfc3339()?;
+        let manifest = CaptureManifest {
+            schema_version: CAPTURE_SCHEMA_VERSION,
+            viewer_version: env!("CARGO_PKG_VERSION").into(),
+            started_at: started_at.clone(),
+            ended_at: started_at,
+            event_count: 0,
+            dropped_events: 0,
+            payload_bytes: 0,
+            state: CaptureState::Recording,
+        };
+        write_manifest_new(&workspace_path.join("manifest.json"), &manifest)?;
+
+        let records = create_new_file(&workspace_path.join("events.jsonl"))?;
+        let payloads = create_new_file(&workspace_path.join("payloads.bin"))?;
+        let (sender, receiver) = mpsc::sync_channel(WRITER_QUEUE_CAPACITY);
+        let dropped_records = Arc::new(AtomicU64::new(0));
+        let writer_dropped_records = Arc::clone(&dropped_records);
+        let recorder_queued_bytes = Arc::new(AtomicUsize::new(0));
+        let writer_queued_bytes = Arc::clone(&recorder_queued_bytes);
+        let writer_path = workspace_path.clone();
+        let writer = thread::Builder::new()
+            .name("capture-writer".into())
+            .spawn(move || write_records(writer_path, records, payloads, receiver, writer_dropped_records, writer_queued_bytes))
+            .map_err(|error| format!("Could not start network capture writer: {error}"))?;
+        let state = Arc::new(RecorderState {
+            sender,
+            started: Instant::now(),
+            serial: Mutex::new(()),
+            pending_records: Mutex::new(0),
+            records_idle: Condvar::new(),
+            first_request_id: recorder.registry.next_request_id.load(Ordering::Acquire),
+            queued_bytes: recorder_queued_bytes,
+            dropped_records,
+            recorded_events: AtomicU64::new(0),
+            udp_packets: AtomicU64::new(0),
+            http_requests: AtomicU64::new(0),
+            http_responses: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+        });
+        let session =
+            Self { recorder: recorder.clone(), state: Arc::clone(&state), writer: Some(writer), capture_path, workspace_path, lock_path };
+        if !recorder.install(state) {
+            let _ = session.interrupt();
+            return Err("A capture session is already active.".into());
+        }
+        Ok(session)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.capture_path
+    }
+
+    pub(crate) fn finish_recording(mut self, publication: &CapturePublication) -> CaptureSummary {
+        let mut summary = self.stop_with(WriterCommand::Finish, publication);
+        if summary.state == CaptureState::Incomplete && summary.error.is_none() {
+            summary.error =
+                Some(format!("Capture is incomplete: {} capture records or HTTP bodies were dropped.", summary.dropped_records));
+        }
+        self.remove_workspace();
+        summary
+    }
+
+    pub(crate) fn interrupt(mut self) -> CaptureSummary {
+        let summary = self.stop_with(WriterCommand::Interrupt, &CapturePublication::default());
+        self.remove_workspace();
+        summary
+    }
+
+    fn remove_workspace(&self) {
+        if self.capture_path.is_file() {
+            let _ = fs::remove_dir_all(&self.workspace_path);
+        }
+    }
+
+    fn stop_with(&mut self, command: WriterCommand, publication: &CapturePublication) -> CaptureSummary {
+        let mut summary = self.stop_writer(command);
+        self.recorder.uninstall(&self.state);
+        match write_capture_archive_atomically(&self.workspace_path, &self.capture_path, publication) {
+            Ok(state) => summary.state = state,
+            Err(error) => {
+                let _ = fs::remove_file(&self.lock_path);
+                return CaptureSummary {
+                    state: summary.state,
+                    dropped_records: summary.dropped_records,
+                    error: Some(match summary.error {
+                        Some(writer_error) => format!("{writer_error}; could not package raw capture: {error}"),
+                        None => format!("Could not package raw capture: {error}"),
+                    }),
+                    capture_path: None,
+                };
+            }
+        }
+        let _ = fs::remove_file(&self.lock_path);
+        summary.capture_path = Some(self.capture_path.clone());
+        summary
+    }
+
+    fn stop_writer(&mut self, command: WriterCommand) -> CaptureSummary {
+        let should_finish = close_capture_records(&self.state);
+        if should_finish {
+            let _ = self.state.sender.send(command);
+        }
+        match self.writer.take().map(JoinHandle::join) {
+            Some(Ok(Ok(summary))) => summary,
+            Some(Ok(Err(error))) => CaptureSummary {
+                state: CaptureState::Incomplete,
+                dropped_records: self.state.dropped_records.load(Ordering::Acquire),
+                error: Some(error),
+                capture_path: None,
+            },
+            Some(Err(_)) => CaptureSummary {
+                state: CaptureState::Incomplete,
+                dropped_records: self.state.dropped_records.load(Ordering::Acquire),
+                error: Some("The network capture writer stopped unexpectedly.".into()),
+                capture_path: None,
+            },
+            None => CaptureSummary {
+                state: CaptureState::Incomplete,
+                dropped_records: 0,
+                error: Some("The network capture writer was already stopped.".into()),
+                capture_path: None,
+            },
+        }
+    }
+}
+
+impl Drop for CaptureSession {
+    fn drop(&mut self) {
+        if self.writer.is_some() {
+            let _ = self.stop_with(WriterCommand::Interrupt, &CapturePublication::default());
+            self.remove_workspace();
+        }
+    }
+}
+
+pub(crate) struct CaptureSummary {
+    pub(crate) state: CaptureState,
+    pub(crate) dropped_records: u64,
+    pub(crate) error: Option<String>,
+    pub(crate) capture_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CapturePublication(Arc<CapturePublicationState>);
+
+impl CapturePublication {
+    pub(crate) fn request_interruption(&self) {
+        let _ = self.0.state.compare_exchange(PUBLICATION_PENDING, PUBLICATION_INTERRUPTION_REQUESTED, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    fn interruption_requested(&self) -> bool {
+        self.0.state.load(Ordering::Acquire) == PUBLICATION_INTERRUPTION_REQUESTED
+    }
+
+    fn claim(&self, state: CaptureState) -> Result<CaptureState, CaptureState> {
+        if state == CaptureState::Recording {
+            unreachable!("recording cannot be published");
+        }
+
+        match self.0.state.compare_exchange(PUBLICATION_PENDING, PUBLICATION_CLAIMED, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => Ok(state),
+            Err(PUBLICATION_INTERRUPTION_REQUESTED) if state == CaptureState::Interrupted => {
+                self.0.state.store(PUBLICATION_CLAIMED, Ordering::Release);
+                Ok(CaptureState::Interrupted)
+            }
+            Err(PUBLICATION_INTERRUPTION_REQUESTED) => Err(CaptureState::Interrupted),
+            Err(PUBLICATION_CLAIMED) => unreachable!("capture publication was already claimed"),
+            Err(_) => unreachable!("invalid capture publication state"),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_before_claim(&self, reached: oneshot::Sender<()>, release: mpsc::Receiver<()>) {
+        let hook = Box::new(move || {
+            let _ = reached.send(());
+            let _ = release.recv();
+        });
+        *self.0.before_claim.lock().unwrap_or_else(PoisonError::into_inner) = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn before_claim(&self) {
+        if let Some(hook) = self.0.before_claim.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            hook();
+        }
+    }
+}
+
+#[derive(Default)]
+struct CapturePublicationState {
+    state: AtomicU8,
+    #[cfg(test)]
+    before_claim: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CaptureStatus {
+    pub active: bool,
+    pub finalizing: bool,
+    pub elapsed: Duration,
+    pub recorded_events: u64,
+    pub udp_packets: u64,
+    pub http_requests: u64,
+    pub http_responses: u64,
+}
+
+struct PayloadReservation {
+    queued_bytes: Arc<AtomicUsize>,
+    bytes: usize,
+    committed: bool,
+}
+
+impl PayloadReservation {
+    fn new(queued_bytes: &Arc<AtomicUsize>, bytes: usize) -> Option<Self> {
+        reserve_payload_bytes(queued_bytes, bytes).then(|| Self { queued_bytes: Arc::clone(queued_bytes), bytes, committed: false })
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PayloadReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.queued_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
+        }
+    }
+}
+
+struct PendingCaptureRecord<'a> {
+    state: &'a RecorderState,
+}
+
+impl<'a> PendingCaptureRecord<'a> {
+    fn new(state: &'a RecorderState) -> Self {
+        *state.pending_records.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+        Self { state }
+    }
+}
+
+impl Drop for PendingCaptureRecord<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.state.pending_records.lock().unwrap_or_else(PoisonError::into_inner);
+        *pending -= 1;
+        if *pending == 0 {
+            self.state.records_idle.notify_all();
+        }
+    }
+}
+
+struct SizeLimitedWriter<W> {
+    writer: W,
+    remaining: u64,
+    exceeded_limit: bool,
+}
+
+impl<W> SizeLimitedWriter<W> {
+    fn new(writer: W, limit: u64) -> Self {
+        Self { writer, remaining: limit, exceeded_limit: false }
+    }
+}
+
+impl<W: Write> Write for SizeLimitedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        if bytes.len() as u64 > self.remaining {
+            self.exceeded_limit = true;
+            return Err(std::io::Error::new(ErrorKind::WriteZero, "capture archive entry size limit exceeded"));
+        }
+        let written = self.writer.write(bytes)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
 fn lifecycle_event(name: &str) -> Option<CaptureEventKind> {
     Some(match name {
         "capture_started" | "capture_stopped" | "capture_interrupted" => return None,
@@ -844,33 +912,6 @@ fn reserve_payload_bytes(queued_bytes: &AtomicUsize, amount: usize) -> bool {
     }
 }
 
-struct PayloadReservation {
-    queued_bytes: Arc<AtomicUsize>,
-    bytes: usize,
-    committed: bool,
-}
-
-struct PendingCaptureRecord<'a> {
-    state: &'a RecorderState,
-}
-
-impl<'a> PendingCaptureRecord<'a> {
-    fn new(state: &'a RecorderState) -> Self {
-        *state.pending_records.lock().unwrap_or_else(PoisonError::into_inner) += 1;
-        Self { state }
-    }
-}
-
-impl Drop for PendingCaptureRecord<'_> {
-    fn drop(&mut self) {
-        let mut pending = self.state.pending_records.lock().unwrap_or_else(PoisonError::into_inner);
-        *pending -= 1;
-        if *pending == 0 {
-            self.state.records_idle.notify_all();
-        }
-    }
-}
-
 fn close_capture_records(state: &RecorderState) -> bool {
     let should_finish = {
         let _serial = state.serial.lock().unwrap_or_else(PoisonError::into_inner);
@@ -881,55 +922,6 @@ fn close_capture_records(state: &RecorderState) -> bool {
         pending = state.records_idle.wait(pending).unwrap_or_else(PoisonError::into_inner);
     }
     should_finish
-}
-
-impl PayloadReservation {
-    fn new(queued_bytes: &Arc<AtomicUsize>, bytes: usize) -> Option<Self> {
-        reserve_payload_bytes(queued_bytes, bytes).then(|| Self { queued_bytes: Arc::clone(queued_bytes), bytes, committed: false })
-    }
-
-    fn commit(mut self) {
-        self.committed = true;
-    }
-}
-
-impl Drop for PayloadReservation {
-    fn drop(&mut self) {
-        if !self.committed {
-            self.queued_bytes.fetch_sub(self.bytes, Ordering::AcqRel);
-        }
-    }
-}
-
-struct SizeLimitedWriter<W> {
-    writer: W,
-    remaining: u64,
-    exceeded_limit: bool,
-}
-
-impl<W> SizeLimitedWriter<W> {
-    fn new(writer: W, limit: u64) -> Self {
-        Self { writer, remaining: limit, exceeded_limit: false }
-    }
-}
-
-impl<W: Write> Write for SizeLimitedWriter<W> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if bytes.is_empty() {
-            return Ok(0);
-        }
-        if bytes.len() as u64 > self.remaining {
-            self.exceeded_limit = true;
-            return Err(std::io::Error::new(ErrorKind::WriteZero, "capture archive entry size limit exceeded"));
-        }
-        let written = self.writer.write(bytes)?;
-        self.remaining -= written as u64;
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.writer.flush()
-    }
 }
 
 fn write_records(
@@ -1548,7 +1540,6 @@ mod tests {
         assert!(state.closed.load(Ordering::Acquire));
     }
 }
-
 #[cfg(test)]
 mod format_tests {
     use crate::http::testing::{LocalServer, response};

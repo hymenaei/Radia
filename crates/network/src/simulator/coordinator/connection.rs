@@ -27,6 +27,16 @@ use tokio::{
     time::{self, Instant},
 };
 
+use super::{
+    ACK_INTERVAL, ConnectionRole, EVENT_BACKLOG_DISCONNECT_REASON, HandoffTarget, LOGOUT_TIMEOUT, MAX_PRECONNECT_EVENTS,
+    MAX_QUEUED_SIMULATOR_EVENTS, NEIGHBOR_PRECONNECT_OVERFLOW_REASON, NeighborCommand, NeighborEvent, NeighborRequest, PrimaryState,
+    SimulatorMemoryBudget, connection_message_has_application_event, finish_logout, queue_neighbor_event, record_coverage_loss,
+    record_event_envelope_loss,
+};
+#[cfg(test)]
+use crate::transport::SendGate;
+#[cfg(test)]
+use crate::transport::pacing::ProbeConnection;
 use crate::{
     AgentSession,
     capture::CaptureRecorder,
@@ -41,40 +51,6 @@ use crate::{
     },
 };
 
-#[cfg(test)]
-use crate::transport::pacing::ProbeConnection;
-
-#[cfg(test)]
-use crate::transport::SendGate;
-
-use super::{
-    ACK_INTERVAL, ConnectionRole, EVENT_BACKLOG_DISCONNECT_REASON, HandoffTarget, LOGOUT_TIMEOUT, MAX_PRECONNECT_EVENTS,
-    MAX_QUEUED_SIMULATOR_EVENTS, NEIGHBOR_PRECONNECT_OVERFLOW_REASON, NeighborCommand, NeighborEvent, NeighborRequest, PrimaryState,
-    SimulatorMemoryBudget, connection_message_has_application_event, finish_logout, queue_neighbor_event, record_coverage_loss,
-    record_event_envelope_loss,
-};
-pub(super) struct NeighborConnection {
-    pub(super) simulator_id: SimulatorId,
-    pub(super) session: AgentSession,
-    pub(super) region_handle: Option<u64>,
-    pub(super) role: ConnectionRole,
-    pub(super) socket: Arc<UdpTransport>,
-    pub(super) circuit: Circuit,
-    pub(super) use_circuit_sequence: u32,
-    pub(super) handoff: Option<HandoffTarget>,
-    handoff_role_generation: Option<u64>,
-    pub(super) movement_requested: bool,
-    pub(super) initial_movement_sent: bool,
-    pub(super) primary_active: bool,
-    pub(super) session_ready: bool,
-    agent_throttle_sent: bool,
-    pub(super) capture: Option<CaptureRecorder>,
-    pub(super) coverage_losses: CoverageLossLedger,
-    pub(super) pacer: ConnectionPacer,
-    _owned_budget: Option<OutboundBudget>,
-    primary_state_receiver: watch::Receiver<PrimaryState>,
-}
-
 const MAX_PENDING_SENDS: usize = 8;
 const CONTROL_SEND_RESERVE: usize = 2;
 const MAX_NONCONTROL_SENDS: usize = MAX_PENDING_SENDS - CONTROL_SEND_RESERVE;
@@ -85,7 +61,6 @@ const MAX_PENDING_SEND_BYTES: usize = MAX_PENDING_SENDS * OUTBOUND_SEND_CHARGE_B
 const MAX_SEND_AGE: Duration = Duration::from_secs(5);
 const SEND_QUEUE_EXPIRED: &str = "A simulator datagram exceeded its queue age limit.";
 const RELIABLE_RETRY_EXPIRED: &str = "A reliable simulator retransmission exceeded its send age limit.";
-
 const DEFAULT_AGENT_THROTTLE_RATES: ThrottleRates = ThrottleRates {
     resend_bits_per_second: 460_800.0,
     land_bits_per_second: 317_440.0,
@@ -95,6 +70,1207 @@ const DEFAULT_AGENT_THROTTLE_RATES: ThrottleRates = ThrottleRates {
     texture_bits_per_second: 1_564_672.0,
     asset_bits_per_second: 573_440.0,
 };
+
+type PendingSendFuture = Pin<Box<dyn Future<Output = Result<(Instant, PreparedDatagram), String>> + Send>>;
+
+pub(super) struct NeighborConnection {
+    pub(super) simulator_id: SimulatorId,
+    pub(super) session: AgentSession,
+    pub(super) region_handle: Option<u64>,
+    initial_role: ConnectionRole,
+    pub(super) socket: Arc<UdpTransport>,
+    pub(super) circuit: Circuit,
+    pub(super) use_circuit_sequence: u32,
+    pub(super) handoff: Option<HandoffTarget>,
+    handoff_role_generation: Option<u64>,
+    pub(super) movement_requested: bool,
+    pub(super) initial_movement_sent: bool,
+    primary_state: PrimaryState,
+    agent_throttle_sent: bool,
+    pub(super) capture: Option<CaptureRecorder>,
+    pub(super) coverage_losses: CoverageLossLedger,
+    pub(super) pacer: ConnectionPacer,
+    _owned_budget: Option<OutboundBudget>,
+    primary_state_receiver: watch::Receiver<PrimaryState>,
+}
+
+impl Drop for NeighborConnection {
+    fn drop(&mut self) {
+        self.coverage_losses.retire(self.simulator_id, CoverageSource::Lludp);
+    }
+}
+
+impl NeighborConnection {
+    fn current_primary_state(&self) -> PrimaryState {
+        *self.primary_state_receiver.borrow()
+    }
+
+    fn clear_handoff(&mut self, outbound: &mut OutboundQueue, pending_send: &mut Option<PendingSend>) {
+        self.handoff = None;
+        self.handoff_role_generation = None;
+        self.movement_requested = false;
+        if pending_send
+            .as_ref()
+            .is_some_and(|pending| pending.queued_message.as_ref().is_some_and(|queued| queued.movement == MovementSend::Handoff))
+        {
+            *pending_send = None;
+        }
+        outbound.cancel_handoff_movement();
+    }
+
+    fn invalidate_stale_handoff(&mut self, role_generation: u64, outbound: &mut OutboundQueue, pending_send: &mut Option<PendingSend>) {
+        if self.handoff_role_generation.is_some_and(|generation| generation != role_generation) {
+            self.clear_handoff(outbound, pending_send);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn connect(
+        simulator_id: SimulatorId,
+        session: AgentSession,
+        region_handle: u64,
+        capture: Option<CaptureRecorder>,
+        status: NetworkStatusHandle,
+    ) -> Result<Self, String> {
+        Self::connect_with_coverage(simulator_id, session, region_handle, capture, status, CoverageLossLedger::new()).await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn connect_with_coverage(
+        simulator_id: SimulatorId,
+        session: AgentSession,
+        region_handle: u64,
+        capture: Option<CaptureRecorder>,
+        status: NetworkStatusHandle,
+        coverage_losses: CoverageLossLedger,
+    ) -> Result<Self, String> {
+        let budget = OutboundBudget::new(crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
+        let pacer = budget.register(simulator_id.get(), false).await?;
+        Self::connect_with_role(
+            simulator_id,
+            session,
+            Some(region_handle),
+            ConnectionRole::Neighbor,
+            capture,
+            status,
+            coverage_losses,
+            None,
+            pacer,
+            Some(budget),
+            #[cfg(test)]
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn connect_with_primary_state(
+        simulator_id: SimulatorId,
+        session: AgentSession,
+        region_handle: u64,
+        capture: Option<CaptureRecorder>,
+        status: NetworkStatusHandle,
+        coverage_losses: CoverageLossLedger,
+        primary_state_receiver: watch::Receiver<PrimaryState>,
+        budget: OutboundBudgetHandle,
+    ) -> Result<Self, String> {
+        let pacer = budget.register(simulator_id.get(), false).await?;
+        Self::connect_with_role(
+            simulator_id,
+            session,
+            Some(region_handle),
+            ConnectionRole::Neighbor,
+            capture,
+            status,
+            coverage_losses,
+            Some(primary_state_receiver),
+            pacer,
+            None,
+            #[cfg(test)]
+            None,
+        )
+        .await
+    }
+
+    pub(super) async fn connect_primary_with_state(
+        simulator_id: SimulatorId,
+        session: AgentSession,
+        capture: Option<CaptureRecorder>,
+        status: NetworkStatusHandle,
+        coverage_losses: CoverageLossLedger,
+        primary_state_receiver: watch::Receiver<PrimaryState>,
+        budget: OutboundBudgetHandle,
+        #[cfg(test)] send_gate: Option<SendGate>,
+    ) -> Result<Self, String> {
+        let pacer = budget.register(simulator_id.get(), true).await?;
+        Self::connect_with_role(
+            simulator_id,
+            session,
+            None,
+            ConnectionRole::Primary,
+            capture,
+            status,
+            coverage_losses,
+            Some(primary_state_receiver),
+            pacer,
+            None,
+            #[cfg(test)]
+            send_gate,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn connect_primary_with_coverage(
+        simulator_id: SimulatorId,
+        session: AgentSession,
+        capture: Option<CaptureRecorder>,
+        status: NetworkStatusHandle,
+        coverage_losses: CoverageLossLedger,
+    ) -> Result<Self, String> {
+        let budget = OutboundBudget::new(crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
+        let pacer = budget.register(simulator_id.get(), true).await?;
+        Self::connect_with_role(
+            simulator_id,
+            session,
+            None,
+            ConnectionRole::Primary,
+            capture,
+            status,
+            coverage_losses,
+            None,
+            pacer,
+            Some(budget),
+            #[cfg(test)]
+            None,
+        )
+        .await
+    }
+
+    async fn connect_with_role(
+        simulator_id: SimulatorId,
+        session: AgentSession,
+        region_handle: Option<u64>,
+        role: ConnectionRole,
+        capture: Option<CaptureRecorder>,
+        status: NetworkStatusHandle,
+        coverage_losses: CoverageLossLedger,
+        primary_state: Option<watch::Receiver<PrimaryState>>,
+        pacer: ConnectionPacer,
+        owned_budget: Option<OutboundBudget>,
+        #[cfg(test)] send_gate: Option<SendGate>,
+    ) -> Result<Self, String> {
+        let primary_state_receiver = primary_state.unwrap_or_else(|| {
+            let initial_state =
+                if role == ConnectionRole::Primary { PrimaryState::Connecting } else { PrimaryState::Neighbor { generation: 0 } };
+            watch::channel(initial_state).1
+        });
+        let socket =
+            UdpTransport::connect_with_status(session.simulator_address, session.circuit_code, capture.clone(), status.clone()).await?;
+        #[cfg(test)]
+        let socket = {
+            let mut socket = socket;
+            if let Some(send_gate) = send_gate {
+                socket.set_send_gate(send_gate);
+            }
+            socket
+        };
+        let socket = Arc::new(socket);
+        let circuit_status = match role {
+            ConnectionRole::Primary => status.clone(),
+            ConnectionRole::Neighbor => status.for_circuit(),
+        };
+        let mut circuit = Circuit::with_status(circuit_status);
+        let prepared = circuit.prepare_message(
+            Message::UseCircuitCode(UseCircuitCode {
+                circuit_code: CircuitCode { code: session.circuit_code, session_id: session.session_id, agent_id: session.agent_id },
+            }),
+            Delivery::Reliable,
+        )?;
+        let use_circuit_sequence = send_prepared(&socket, &mut circuit, &pacer, prepared, TrafficClass::Control).await?;
+        Ok(Self {
+            simulator_id,
+            session,
+            region_handle,
+            initial_role: role,
+            socket,
+            circuit,
+            use_circuit_sequence,
+            handoff: None,
+            handoff_role_generation: None,
+            movement_requested: false,
+            initial_movement_sent: false,
+            primary_state: if role == ConnectionRole::Primary {
+                PrimaryState::Connecting
+            } else {
+                PrimaryState::Neighbor { generation: 0 }
+            },
+            agent_throttle_sent: false,
+            capture,
+            coverage_losses,
+            pacer,
+            _owned_budget: owned_budget,
+            primary_state_receiver,
+        })
+    }
+
+    #[tracing::instrument(name = "simulator.neighbor", level = "info", skip_all)]
+    pub(super) async fn run(
+        mut self,
+        events: mpsc::Sender<NeighborEvent>,
+        mut shutdown: watch::Receiver<bool>,
+        neighbor_requests: mpsc::Sender<NeighborRequest>,
+        mut commands: mpsc::Receiver<NeighborCommand>,
+        mut logout_commands: mpsc::Receiver<oneshot::Sender<Result<(), Error>>>,
+        packet_memory: SimulatorMemoryBudget,
+    ) -> Result<(), String> {
+        let mut receive_buffer = [0u8; 65_535];
+        let mut established = false;
+        let mut preconnect_messages: VecDeque<EventEnvelope> = VecDeque::with_capacity(MAX_PRECONNECT_EVENTS);
+        let mut pending_events = VecDeque::with_capacity(MAX_QUEUED_SIMULATOR_EVENTS);
+        let mut pending_notifications = VecDeque::with_capacity(MAX_PENDING_SEND_NOTIFICATIONS);
+        #[cfg(test)]
+        let mut outbound = OutboundQueue::with_probe(self.pacer.probe());
+        #[cfg(not(test))]
+        let mut outbound = OutboundQueue::new();
+        let mut pending_send = None::<PendingSend>;
+        let mut deferred_retries = HashMap::<u32, Instant>::new();
+        let mut priority_logout = None::<QueuedMessage>;
+        let mut logout_waiters = Vec::<oneshot::Sender<Result<(), Error>>>::new();
+        let mut closing = false;
+        let mut logout_sent = false;
+        let mut logout_local_send_completed = false;
+        let mut logout_commands_closed = false;
+        let mut teardown_deadline = None;
+        let mut close_reason = None;
+        let mut ack_timer = time::interval_at(Instant::now() + ACK_INTERVAL, ACK_INTERVAL);
+        ack_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+        let mut ack_timer_due = false;
+        let mut ping_timer = time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
+        ping_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+        let mut last_udp_received = Instant::now();
+        let mut last_send_was_retry = false;
+        let mut saw_region_handshake = false;
+        let mut finish_after_ack = false;
+        let mut primary_state_open = true;
+        let mut event_delivery_turn = false;
+
+        let result = async {
+        loop {
+            if *shutdown.borrow() || events.is_closed() {
+                return finish_logout(close_reason);
+            }
+            let retry_check_at = Instant::now();
+            expire_deferred_retries(
+                &self.circuit,
+                &mut deferred_retries,
+                retry_check_at,
+                #[cfg(test)] pending_send.as_ref().filter(|pending| pending.meta.is_retransmission).map(|pending| pending.meta.sequence),
+                #[cfg(test)] outbound.probe.as_ref(),
+            )?;
+            if pending_notifications.is_empty() {
+                let expired = outbound.expire(Instant::now());
+                for queued in expired {
+                    report_queued_failure(
+                        &events,
+                        &mut pending_notifications,
+                        self.simulator_id,
+                        queued,
+                        SEND_QUEUE_EXPIRED.into(),
+                    )?;
+                }
+            }
+            match expire_pending_send(&mut pending_send, Instant::now()) {
+                Some(PendingSendExpiration::QueuedMessage(queued)) => {
+                    report_queued_failure(
+                        &events,
+                        &mut pending_notifications,
+                        self.simulator_id,
+                        queued,
+                        SEND_QUEUE_EXPIRED.into(),
+                    )?;
+                }
+                Some(PendingSendExpiration::ReliableRetry) => return Err(RELIABLE_RETRY_EXPIRED.into()),
+                None => {}
+            }
+            if closing && pending_events.is_empty() && !logout_sent {
+                finish_after_ack = true;
+            }
+            if finish_after_ack {
+                for queued in outbound.drain() {
+                    fail_queued_on_close(&events, &mut pending_notifications, self.simulator_id, queued);
+                }
+                if pending_send.as_ref().is_some_and(|pending| !pending.meta.is_acknowledgement)
+                    && let Some(mut canceled) = pending_send.take()
+                    && let Some(queued) = canceled.queued_message.take()
+                {
+                    fail_queued_on_close(&events, &mut pending_notifications, self.simulator_id, queued);
+                }
+            }
+            if finish_after_ack && pending_send.is_none() && !self.circuit.has_pending_acks() && pending_notifications.is_empty() {
+                return finish_logout(close_reason);
+            }
+            if pending_send.is_none() {
+                if let Some(queued) = priority_logout.take() {
+                    let prepared = match self.circuit.prepare_message(queued.message.clone(), queued.delivery) {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            let is_logout = matches!(&queued.message, Message::LogoutRequest(_));
+                            report_queued_failure(&events, &mut pending_notifications, self.simulator_id, queued, error.clone())?;
+                            if is_logout {
+                                for completed in logout_waiters.drain(..) {
+                                    let _ = completed.send(Err(Error::SimulatorSend(error.clone())));
+                                }
+                            }
+                            return Err(error);
+                        }
+                    };
+                    pending_send = Some(begin_send(
+                        Arc::clone(&self.socket),
+                        self.pacer.handle(),
+                        prepared,
+                        TrafficClass::Control,
+                        Some(queued),
+                        #[cfg(test)]
+                        outbound.probe.clone(),
+                    ));
+                } else {
+                    let next = if logout_sent {
+                        prepare_shutdown_send(&self.socket, &self.pacer, &mut self.circuit, &mut outbound, ack_timer_due)
+                    } else {
+                        prepare_next_send(
+                            &self.socket,
+                            &self.pacer,
+                            &mut self.circuit,
+                            &mut outbound,
+                            &mut deferred_retries,
+                            ack_timer_due || finish_after_ack,
+                            last_send_was_retry,
+                        )
+                    };
+                    match next {
+                        Ok(next) => pending_send = next,
+                        Err((Some(queued), error)) => {
+                            report_queued_failure(&events, &mut pending_notifications, self.simulator_id, *queued, error)?;
+                            continue;
+                        }
+                        Err((None, error)) => return Err(error),
+                    }
+                }
+            }
+            tokio::select! {
+                biased;
+                sent = async { pending_send.as_mut().expect("send branch is guarded").result.as_mut().await }, if pending_send.is_some() => {
+                    let mut completed = pending_send.take().expect("send branch is guarded");
+                    match sent {
+                        Ok((sent_at, prepared)) => {
+                            let was_retry = completed.meta.is_retransmission;
+                            let sequence = completed.meta.sequence;
+                            let was_logout = completed
+                                .queued_message
+                                .as_ref()
+                                .is_some_and(|queued| matches!(&queued.message, Message::LogoutRequest(_)));
+                            self.circuit.commit_sent(prepared, sent_at)?;
+                            #[cfg(test)]
+                            if let (Some(probe), Some(queued)) = (&completed.probe, &completed.queued_message) {
+                                probe.record_queue_age(queued.class, sent_at.saturating_duration_since(queued.queued_at), sent_at);
+                            }
+                            if was_retry {
+                                deferred_retries.remove(&sequence);
+                            }
+                            last_send_was_retry = was_retry;
+                            if !self.circuit.has_pending_acks() {
+                                ack_timer_due = false;
+                            }
+                            if let Some(queued) = &completed.queued_message
+                                && let Some(cancel_target) = queued.cancel_target
+                            {
+                                queue_send_notification(
+                                    &events,
+                                    &mut pending_notifications,
+                                    self.simulator_id,
+                                    Some(cancel_target),
+                                    None,
+                                    false,
+                                )?;
+                            }
+                            if let Some(queued) = &mut completed.queued_message
+                                && let Some(completion) = queued.completion.take()
+                            {
+                                let _ = completion.send(Ok(()));
+                            }
+                            if was_logout {
+                                logout_local_send_completed = true;
+                                for completed in logout_waiters.drain(..) {
+                                    let _ = completed.send(Ok(()));
+                                }
+                            }
+                            if let Some(queued) = &completed.queued_message {
+                                match queued.movement {
+                                    MovementSend::Initial => self.initial_movement_sent = true,
+                                    MovementSend::Handoff => self.movement_requested = true,
+                                    MovementSend::None => {}
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            let was_logout = completed
+                                .queued_message
+                                .as_ref()
+                                .is_some_and(|queued| matches!(&queued.message, Message::LogoutRequest(_)));
+                            if let Some(queued) = completed.queued_message.take() {
+                                report_queued_failure(&events, &mut pending_notifications, self.simulator_id, queued, error.clone())?;
+                            }
+                            if was_logout {
+                                for completed in logout_waiters.drain(..) {
+                                    let _ = completed.send(Err(Error::SimulatorSend(error.clone())));
+                                }
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+                _ = shutdown.changed() => return Ok(()),
+                _ = events.closed() => return Ok(()),
+                logout = logout_commands.recv(), if !logout_commands_closed => {
+                    match logout {
+                        Some(completed) if logout_sent => {
+                            if logout_local_send_completed {
+                                let _ = completed.send(Ok(()));
+                            } else {
+                                logout_waiters.push(completed);
+                            }
+                        }
+                        Some(completed) => {
+                            if let Some(mut canceled) = pending_send.take()
+                                && let Some(queued) = canceled.queued_message.take()
+                            {
+                                fail_queued_on_close(&events, &mut pending_notifications, self.simulator_id, queued);
+                            }
+                            for queued in outbound.drain() {
+                                fail_queued_on_close(&events, &mut pending_notifications, self.simulator_id, queued);
+                            }
+                            let queued = QueuedMessage {
+                                message: logout_message(&self.session),
+                                delivery: Delivery::ReliableNoRetry,
+                                class: TrafficClass::Control,
+                                queued_at: Instant::now(),
+                                completion: Some(completed),
+                                cancel_target: None,
+                                report_failure: false,
+                                movement: MovementSend::None,
+                            };
+                            priority_logout = Some(queued);
+                            logout_sent = true;
+                            closing = true;
+                            teardown_deadline.get_or_insert_with(|| Instant::now() + LOGOUT_TIMEOUT);
+                        }
+                        None => logout_commands_closed = true,
+                    }
+                }
+                _ = time::sleep_until(teardown_deadline.unwrap_or_else(|| Instant::now() + LOGOUT_TIMEOUT)), if teardown_deadline.is_some() => {
+                    return finish_logout(close_reason);
+                }
+                _ = time::sleep_until(last_udp_received + KEEPALIVE_TIMEOUT),
+                    if established
+                        && !closing
+                        && (self.initial_role == ConnectionRole::Neighbor || !matches!(self.primary_state, PrimaryState::Connecting)) => {
+                    return Err("The simulator stopped responding to LLUDP keepalive traffic.".into());
+                }
+                changed = self.primary_state_receiver.changed(), if primary_state_open => {
+                    match changed {
+                        Ok(()) => {
+                            let state = *self.primary_state_receiver.borrow_and_update();
+                            self.invalidate_stale_handoff(state.role_generation(), &mut outbound, &mut pending_send);
+                            self.primary_state = state;
+                            self.pacer.set_primary(state.connection_role() == ConnectionRole::Primary).await?;
+                        }
+                        Err(_) => primary_state_open = false,
+                    }
+                }
+                _ = ack_timer.tick() => {
+                    ack_timer_due = self.circuit.has_pending_acks();
+                    preempt_deferred_send(
+                        &mut pending_send,
+                        &mut outbound,
+                        &self.circuit,
+                        ack_timer_due || finish_after_ack,
+                    )?;
+                }
+                permit = events.reserve(), if event_delivery_turn && (!pending_notifications.is_empty() || !pending_events.is_empty()) => {
+                    match permit {
+                        Ok(permit) => {
+                            if let Some(notification) = pending_notifications.pop_front() {
+                                permit.send(notification);
+                            } else if let Some(event) = pending_events.pop_front() {
+                                permit.send(NeighborEvent::Simulator(event));
+                            }
+                            event_delivery_turn = false;
+                        }
+                        Err(_) => return Ok(()),
+                    }
+                }
+                _ = ping_timer.tick(), if pending_send.is_none() && !logout_sent && established && (self.initial_role == ConnectionRole::Neighbor || self.initial_movement_sent) => {
+                    if let Some(prepared) = self.circuit.prepare_ping(Instant::now())? {
+                        pending_send = Some(begin_send(
+                            Arc::clone(&self.socket),
+                            self.pacer.handle(),
+                            prepared,
+                            TrafficClass::Control,
+                            None,
+                            #[cfg(test)]
+                            outbound.probe.clone(),
+                        ));
+                    }
+                }
+                command = commands.recv(), if !commands.is_closed() && pending_notifications.is_empty() => {
+                    match command {
+                        Some(NeighborCommand::Send { message, delivery, completed, cancel_target, report_failure }) => {
+                            let message_name = message.name();
+                            let message_traffic_class = message_class(&message);
+                            let mut failed_completion = completed;
+                            let mut failed_cancel_target = cancel_target;
+                            let mut failed_report = report_failure;
+                            let error = if closing {
+                                Some(Error::SimulatorConnectionClosed)
+                            } else if !established {
+                                Some(Error::SimulatorNotReady)
+                            } else {
+                                let queued = QueuedMessage {
+                                    class: message_traffic_class,
+                                    message,
+                                    delivery,
+                                    queued_at: Instant::now(),
+                                    completion: failed_completion.take(),
+                                    cancel_target: failed_cancel_target.take(),
+                                    report_failure,
+                                    movement: MovementSend::None,
+                                };
+                                match outbound.push(queued, active_queue_class(pending_send.as_ref())) {
+                                    Ok(()) => {
+                                        preempt_deferred_send(
+                                            &mut pending_send,
+                                            &mut outbound,
+                                            &self.circuit,
+                                            ack_timer_due || finish_after_ack,
+                                        )?;
+                                        None
+                                    }
+                                    Err(mut queued) => {
+                                        failed_completion = queued.completion.take();
+                                        failed_cancel_target = queued.cancel_target.take();
+                                        failed_report = queued.report_failure;
+                                        Some(Error::SimulatorCommandQueueFull)
+                                    }
+                                }
+                            };
+                            if let Some(error) = error {
+                                if failed_report && matches!(&error, Error::SimulatorCommandQueueFull) {
+                                    let active_class = active_queue_class(pending_send.as_ref());
+                                    let noncontrol_sends = outbound.messages.iter().filter(|queued| queued.class != TrafficClass::Control).count()
+                                        + usize::from(active_class.is_some_and(|class| class != TrafficClass::Control));
+                                    tracing::trace!(
+                                        simulator_id = self.simulator_id.get(),
+                                        message = message_name,
+                                        delivery = ?delivery,
+                                        traffic_class = ?message_traffic_class,
+                                        queue_stage = "outbound",
+                                        queued_sends = outbound.messages.len(),
+                                        active_send = pending_send.is_some(),
+                                        queued_noncontrol_sends = noncontrol_sends,
+                                        queued_bytes = outbound.charged_bytes,
+                                        max_pending_sends = MAX_PENDING_SENDS,
+                                        max_noncontrol_sends = MAX_NONCONTROL_SENDS,
+                                        max_pending_bytes = MAX_PENDING_SEND_BYTES,
+                                        "Simulator send rejected by the bounded outbound queue"
+                                    );
+                                }
+                                let message = error.to_string();
+                                if let Some(completed) = failed_completion {
+                                    let _ = completed.send(Err(error));
+                                }
+                                if failed_report || failed_cancel_target.is_some() {
+                                    queue_send_notification(
+                                        &events,
+                                        &mut pending_notifications,
+                                        self.simulator_id,
+                                        failed_cancel_target,
+                                        Some(message),
+                                        failed_report,
+                                    )?;
+                                }
+                            }
+                        }
+                        Some(NeighborCommand::PrepareHandoff(target)) => {
+                            if Some(target.region_handle) != self.region_handle
+                                || target.endpoint != self.session.simulator_address
+                                || target.agent_id != self.session.agent_id
+                                || target.session_id != self.session.session_id
+                            {
+                                continue;
+                            }
+                            let role_generation = self.current_primary_state().role_generation();
+                            self.invalidate_stale_handoff(role_generation, &mut outbound, &mut pending_send);
+                            if self.handoff.as_ref() == Some(&target) {
+                                continue;
+                            }
+                            self.clear_handoff(&mut outbound, &mut pending_send);
+                            self.session.seed_capability = target.seed_capability.clone();
+                            self.handoff = Some(target);
+                            self.handoff_role_generation = Some(role_generation);
+                            if established && saw_region_handshake {
+                                self.queue_handoff_movement(&mut outbound, pending_send.as_ref())?;
+                            }
+                        }
+                        Some(NeighborCommand::CancelHandoff) => {
+                            self.clear_handoff(&mut outbound, &mut pending_send);
+                        }
+                        None => return Ok(()),
+                    }
+                }
+                received = self.socket.recv(&mut receive_buffer) => {
+                    event_delivery_turn = !pending_notifications.is_empty() || !pending_events.is_empty();
+                    let size = received.map_err(|error| format!("Neighbor simulator connection failed: {error}"))?;
+                    if *shutdown.borrow() || events.is_closed() {
+                        return Ok(());
+                    }
+                    let frame = match Packet::inspect(&receive_buffer[..size]) {
+                        Ok(frame) => frame,
+                        Err(_) => {
+                            record_coverage_loss(
+                                &self.coverage_losses,
+                                self.simulator_id,
+                                CoverageSource::Lludp,
+                                CoverageLossReason::PreflightRejected,
+                            );
+                            self.socket.record_received(&receive_buffer[..size], None);
+                            continue;
+                        }
+                    };
+                    let admission = match self.circuit.prepare_receive(
+                        frame.sequence(),
+                        frame.is_reliable(),
+                        frame.appended_acks(),
+                        Instant::now(),
+                    ) {
+                        Ok(admission) => admission,
+                        Err(error) => {
+                            tracing::debug!(simulator_id = self.simulator_id.get(), reason = %error, "Neighbor packet rejected before decode admission");
+                            record_coverage_loss(
+                                &self.coverage_losses,
+                                self.simulator_id,
+                                CoverageSource::Lludp,
+                                CoverageLossReason::AcknowledgementAdmission,
+                            );
+                            self.socket.record_received(&receive_buffer[..size], None);
+                            continue;
+                        }
+                    };
+                    if matches!(admission, ReceiveAdmission::Duplicate(_)) {
+                        preempt_deferred_send(
+                            &mut pending_send,
+                            &mut outbound,
+                            &self.circuit,
+                            ack_timer_due || finish_after_ack,
+                        )?;
+                        self.socket.record_received(&receive_buffer[..size], None);
+                        last_udp_received = Instant::now();
+                        continue;
+                    }
+                    let message_id = match frame.message_id() {
+                        Ok(id) => id,
+                        Err(_) => {
+                            record_coverage_loss(
+                                &self.coverage_losses,
+                                self.simulator_id,
+                                CoverageSource::Lludp,
+                                CoverageLossReason::PreflightRejected,
+                            );
+                            self.socket.record_received(&receive_buffer[..size], None);
+                            continue;
+                        }
+                    };
+                    let is_packet_ack = message_id == PACKET_ACK;
+                    let decode_permit = if is_packet_ack {
+                        None
+                    } else {
+                        let Some(permit) = packet_memory.try_acquire_decode_slot() else {
+                            tracing::debug!(simulator_id = self.simulator_id.get(), "Neighbor packet rejected because all decoder slots are occupied");
+                            record_coverage_loss(
+                                &self.coverage_losses,
+                                self.simulator_id,
+                                CoverageSource::Lludp,
+                                CoverageLossReason::DecodeAdmission,
+                            );
+                            self.socket.record_received(&receive_buffer[..size], None);
+                            continue;
+                        };
+                        Some(permit)
+                    };
+                    let preflighted = match frame.preflighted() {
+                        Ok(preflighted) => preflighted,
+                        Err(error) => {
+                            if matches!(error, LLUdpError::DecodedPacketTooLarge | LLUdpError::AllocationBoundOverflow) {
+                                tracing::debug!(simulator_id = self.simulator_id.get(), reason = %error, "Neighbor packet rejected by decoded-memory preflight");
+                            }
+                            record_coverage_loss(
+                                &self.coverage_losses,
+                                self.simulator_id,
+                                CoverageSource::Lludp,
+                                preflight_loss_reason(error, message_id),
+                            );
+                            self.socket.record_received(&receive_buffer[..size], None);
+                            drop(decode_permit);
+                            continue;
+                        }
+                    };
+                    let preflight = preflighted.preflight();
+                    let _ack_decode_permit = if is_packet_ack {
+                        let Some(permit) = packet_memory.try_acquire_ack_decode_slot(preflight) else {
+                            tracing::debug!(simulator_id = self.simulator_id.get(), "PacketAck rejected because the control decode budget is full");
+                            record_coverage_loss(
+                                &self.coverage_losses,
+                                self.simulator_id,
+                                CoverageSource::Lludp,
+                                CoverageLossReason::DecodeAdmission,
+                            );
+                            self.socket.record_received(&receive_buffer[..size], None);
+                            drop(decode_permit);
+                            continue;
+                        };
+                        Some(permit)
+                    } else {
+                        None
+                    };
+                    let mut memory_reservation = if is_packet_ack {
+                        None
+                    } else {
+                        match packet_memory.reserve_packet(preflight) {
+                            Ok(reservation) => Some(reservation),
+                            Err(error) => {
+                                tracing::debug!(simulator_id = self.simulator_id.get(), ?error, "Neighbor packet rejected by retained-memory admission");
+                                record_coverage_loss(
+                                    &self.coverage_losses,
+                                    self.simulator_id,
+                                    CoverageSource::Lludp,
+                                    CoverageLossReason::RetainedMemoryAdmission,
+                                );
+                                self.socket.record_received(&receive_buffer[..size], None);
+                                drop(decode_permit);
+                                continue;
+                            }
+                        }
+                    };
+                    let packet = match preflighted.decode() {
+                        Ok(packet) => packet,
+                        Err(error) => {
+                            let reason = if matches!(error, LLUdpError::DecodedPacketTooLarge) {
+                                CoverageLossReason::AllocationEstimateMismatch
+                            } else {
+                                CoverageLossReason::DecodeRejected
+                            };
+                            record_coverage_loss(
+                                &self.coverage_losses,
+                                self.simulator_id,
+                                CoverageSource::Lludp,
+                                reason,
+                            );
+                            self.socket.record_received(&receive_buffer[..size], None);
+                            drop(memory_reservation);
+                            drop(decode_permit);
+                            continue;
+                        }
+                    };
+                    if let Some(reservation) = &mut memory_reservation
+                        && let Err(error) = packet_memory.trim_packet_reservation(reservation, &packet)
+                    {
+                        tracing::error!(simulator_id = self.simulator_id.get(), ?error, "Decoded neighbor packet exceeded its preflight reservation");
+                        record_coverage_loss(
+                            &self.coverage_losses,
+                            self.simulator_id,
+                            CoverageSource::Lludp,
+                            CoverageLossReason::AllocationEstimateMismatch,
+                        );
+                        self.socket.record_received(&receive_buffer[..size], None);
+                        drop(memory_reservation);
+                        drop(decode_permit);
+                        continue;
+                    }
+                    let message = packet.message();
+                    let primary_state = self.current_primary_state();
+                    self.invalidate_stale_handoff(primary_state.role_generation(), &mut outbound, &mut pending_send);
+                    let connection_role = primary_state.connection_role();
+                    let dispatch_message = connection_message_has_application_event(
+                        message,
+                        connection_role,
+                        self.handoff.as_ref(),
+                        self.movement_requested,
+                    );
+                    let event_queue_full = if established {
+                        pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS
+                    } else {
+                        preconnect_messages.len() >= MAX_PRECONNECT_EVENTS
+                    };
+                    if dispatch_message && (closing || events.is_closed() || event_queue_full) {
+                        if event_queue_full && !closing {
+                            close_reason = Some(if established {
+                                EVENT_BACKLOG_DISCONNECT_REASON
+                            } else {
+                                NEIGHBOR_PRECONNECT_OVERFLOW_REASON
+                            });
+                            closing = true;
+                            teardown_deadline.get_or_insert_with(|| Instant::now() + LOGOUT_TIMEOUT);
+                        }
+                        record_coverage_loss(
+                            &self.coverage_losses,
+                            self.simulator_id,
+                            CoverageSource::Lludp,
+                            CoverageLossReason::EventAdmission,
+                        );
+                        self.socket.record_received(&receive_buffer[..size], Some(&packet));
+                        last_udp_received = Instant::now();
+                        drop(memory_reservation);
+                        drop(decode_permit);
+                        continue;
+                    }
+                    self.socket.record_received(&receive_buffer[..size], Some(&packet));
+                    last_udp_received = Instant::now();
+                    self.circuit.acknowledge_message(packet.message());
+                    let receive_outcome = self.circuit.commit_receive(admission);
+                    preempt_deferred_send(
+                        &mut pending_send,
+                        &mut outbound,
+                        &self.circuit,
+                        ack_timer_due || finish_after_ack,
+                    )?;
+                    drop(decode_permit);
+                    let is_new_packet = receive_outcome.is_new_packet;
+                    let dispatch_allowed = !closing;
+                    if !established && !self.circuit.has_pending(self.use_circuit_sequence) {
+                        established = true;
+                        if !queue_neighbor_event(
+                            &events,
+                            &mut pending_events,
+                            Event::SimulatorConnected {
+                                simulator_id: self.simulator_id,
+                                region_handle: self.region_handle,
+                                endpoint: self.session.simulator_address,
+                            },
+                            &mut closing,
+                            &mut teardown_deadline,
+                            &mut close_reason,
+                        ) {
+                            return Ok(());
+                        }
+                        while let Some(event) = preconnect_messages.pop_front() {
+                            let admission_rejected = events.is_closed() || pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS;
+                            let watermark = event.coverage_watermark();
+                            if !queue_neighbor_event(
+                                &events,
+                                &mut pending_events,
+                                event,
+                                &mut closing,
+                                &mut teardown_deadline,
+                                &mut close_reason,
+                            ) {
+                                if let Some(watermark) = watermark {
+                                    record_coverage_loss(
+                                        &self.coverage_losses,
+                                        watermark.simulator_id,
+                                        watermark.source,
+                                        CoverageLossReason::EventAdmission,
+                                    );
+                                }
+                                for queued in pending_events.drain(..) {
+                                    record_event_envelope_loss(
+                                        &self.coverage_losses,
+                                        queued,
+                                        CoverageLossReason::EventAdmission,
+                                    );
+                                }
+                                return Ok(());
+                            }
+                            if admission_rejected
+                                && let Some(watermark) = watermark
+                            {
+                                record_coverage_loss(
+                                    &self.coverage_losses,
+                                    watermark.simulator_id,
+                                    watermark.source,
+                                    CoverageLossReason::EventAdmission,
+                                );
+                            }
+                            if close_reason.is_some() {
+                                for queued in preconnect_messages.drain(..) {
+                                    if let Some(watermark) = queued.coverage_watermark() {
+                                        record_coverage_loss(
+                                            &self.coverage_losses,
+                                            watermark.simulator_id,
+                                            watermark.source,
+                                            CoverageLossReason::EventAdmission,
+                                        );
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        if self.initial_role == ConnectionRole::Primary {
+                            if let Some(capture) = &self.capture {
+                                capture.circuit_lifecycle("use_circuit_code_acked", self.session.circuit_code);
+                            }
+                            queue_internal(
+                                &mut outbound,
+                                Message::CompleteAgentMovement(CompleteAgentMovement {
+                                    agent_data: complete_agent_movement::AgentData {
+                                        agent_id: self.session.agent_id,
+                                        session_id: self.session.session_id,
+                                        circuit_code: self.session.circuit_code,
+                                    },
+                                }),
+                                Delivery::Reliable,
+                                TrafficClass::Deadline,
+                                MovementSend::Initial,
+                                active_queue_class(pending_send.as_ref()),
+                            )?;
+                        }
+                        if saw_region_handshake && self.handoff.is_some() {
+                            self.queue_handoff_movement(&mut outbound, pending_send.as_ref())?;
+                        }
+                    }
+                    if !is_new_packet {
+                        continue;
+                    }
+
+                    let mut dispatch_message = true;
+                    match message {
+                        Message::EnableSimulator(enabled) => {
+                            let info = &enabled.simulator_info;
+                            let endpoint = SocketAddr::from((info.ip, info.port));
+                            if let Err(error) = neighbor_requests.try_send(NeighborRequest::Enable {
+                                simulator_id: self.simulator_id,
+                                region_handle: info.handle,
+                                endpoint,
+                            }) {
+                                let reason = match error {
+                                    mpsc::error::TrySendError::Full(_) => "The neighbor request queue is full.",
+                                    mpsc::error::TrySendError::Closed(_) => "The simulator manager has closed.",
+                                };
+                                return Err(reason.into());
+                            }
+                        }
+                        Message::DisableSimulator(_) => {
+                            closing = true;
+                            teardown_deadline.get_or_insert_with(|| Instant::now() + LOGOUT_TIMEOUT);
+                            dispatch_message = false;
+                        }
+                        Message::RegionHandshake(_) => {
+                            saw_region_handshake = true;
+                            queue_internal(
+                                &mut outbound,
+                                Message::RegionHandshakeReply(RegionHandshakeReply {
+                                    agent_data: region_handshake_reply::AgentData {
+                                        agent_id: self.session.agent_id,
+                                        session_id: self.session.session_id,
+                                    },
+                                    region_info: region_handshake_reply::RegionInfo { flags: 0 },
+                                }),
+                                Delivery::Reliable,
+                                TrafficClass::Control,
+                                MovementSend::None,
+                                active_queue_class(pending_send.as_ref()),
+                            )?;
+                            if established && self.handoff.is_some() {
+                                self.queue_handoff_movement(&mut outbound, pending_send.as_ref())?;
+                            }
+                        }
+                        Message::AgentMovementComplete(message) => {
+                            let matches_current_movement = match connection_role {
+                                ConnectionRole::Primary => {
+                                    message.agent_data.agent_id == self.session.agent_id
+                                        && message.agent_data.session_id == self.session.session_id
+                                }
+                                ConnectionRole::Neighbor => self.handoff.as_ref().is_some_and(|handoff| {
+                                    self.movement_requested
+                                        && message.agent_data.agent_id == handoff.agent_id
+                                        && message.agent_data.session_id == handoff.session_id
+                                        && message.data.region_handle == handoff.region_handle
+                                }),
+                            };
+                            if !matches_current_movement {
+                                dispatch_message = false;
+                            } else {
+                                if connection_role == ConnectionRole::Primary {
+                                    self.region_handle = Some(message.data.region_handle);
+                                }
+                                if dispatch_allowed && !self.agent_throttle_sent {
+                                queue_internal(
+                                    &mut outbound,
+                                    agent_throttle_message(&self.session),
+                                    Delivery::Reliable,
+                                    TrafficClass::Control,
+                                    MovementSend::None,
+                                    active_queue_class(pending_send.as_ref()),
+                                )?;
+                                self.agent_throttle_sent = true;
+                                }
+                            }
+                        }
+                        Message::StartPingCheck(message) => {
+                            dispatch_message = false;
+                            self.circuit.clear_duplicate_list(message.oldest_unacked, Instant::now());
+                            queue_internal(
+                                &mut outbound,
+                                Message::CompletePingCheck(CompletePingCheck {
+                                    ping_id: PingId { ping_id: message.ping_id.ping_id },
+                                }),
+                                Delivery::Unreliable,
+                                TrafficClass::Control,
+                                MovementSend::None,
+                                active_queue_class(pending_send.as_ref()),
+                            )?;
+                        }
+                        Message::CompletePingCheck(message) => {
+                            dispatch_message = false;
+                            self.circuit.record_ping_response(message.ping_id.ping_id, Instant::now());
+                        }
+                        Message::LogoutReply(message)
+                            if closing
+                                && message.agent_data.agent_id == self.session.agent_id
+                                && message.agent_data.session_id == self.session.session_id =>
+                        {
+                            dispatch_message = false;
+                            finish_after_ack = true;
+                            closing = true;
+                        }
+                        Message::PacketAck(_) => dispatch_message = false,
+                        _ => {}
+                    }
+                    preempt_deferred_send(
+                        &mut pending_send,
+                        &mut outbound,
+                        &self.circuit,
+                        ack_timer_due || finish_after_ack,
+                    )?;
+
+                    if dispatch_message && dispatch_allowed {
+                        let event = EventEnvelope::with_retention_and_coverage(
+                            Event::SimulatorMessage {
+                                simulator_id: self.simulator_id,
+                                source: self.session.simulator_address,
+                                sequence: packet.sequence(),
+                                packet_order: receive_outcome.packet_order,
+                                message: packet.into_message(),
+                            },
+                            memory_reservation.take().expect("application packet was admitted").into_retention(),
+                            self.coverage_losses.watermark(self.simulator_id, CoverageSource::Lludp),
+                        );
+                        if established {
+                            let admission_rejected = events.is_closed() || pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS;
+                            let watermark = event.coverage_watermark();
+                            if !queue_neighbor_event(
+                                &events,
+                                &mut pending_events,
+                                event,
+                                &mut closing,
+                                &mut teardown_deadline,
+                                &mut close_reason,
+                            ) {
+                                if let Some(watermark) = watermark {
+                                    record_coverage_loss(
+                                        &self.coverage_losses,
+                                        watermark.simulator_id,
+                                        watermark.source,
+                                        CoverageLossReason::EventAdmission,
+                                    );
+                                }
+                                for queued in pending_events.drain(..) {
+                                    record_event_envelope_loss(
+                                        &self.coverage_losses,
+                                        queued,
+                                        CoverageLossReason::EventAdmission,
+                                    );
+                                }
+                                return Ok(());
+                            }
+                            if admission_rejected
+                                && let Some(watermark) = watermark
+                            {
+                                record_coverage_loss(
+                                    &self.coverage_losses,
+                                    watermark.simulator_id,
+                                    watermark.source,
+                                    CoverageLossReason::EventAdmission,
+                                );
+                            }
+                        } else if preconnect_messages.len() < MAX_PRECONNECT_EVENTS {
+                            preconnect_messages.push_back(event);
+                        } else {
+                            close_reason = Some(NEIGHBOR_PRECONNECT_OVERFLOW_REASON);
+                            closing = true;
+                            teardown_deadline.get_or_insert_with(|| Instant::now() + LOGOUT_TIMEOUT);
+                            if let Some(watermark) = event.coverage_watermark() {
+                                record_coverage_loss(
+                                    &self.coverage_losses,
+                                    watermark.simulator_id,
+                                    watermark.source,
+                                    CoverageLossReason::EventAdmission,
+                                );
+                            }
+                            for queued in preconnect_messages.drain(..) {
+                                if let Some(watermark) = queued.coverage_watermark() {
+                                    record_coverage_loss(
+                                        &self.coverage_losses,
+                                        watermark.simulator_id,
+                                        watermark.source,
+                                        CoverageLossReason::EventAdmission,
+                                    );
+                                }
+                            }
+                        };
+                    } else if dispatch_message && is_new_packet {
+                        record_coverage_loss(
+                            &self.coverage_losses,
+                            self.simulator_id,
+                            CoverageSource::Lludp,
+                            CoverageLossReason::EventAdmission,
+                        );
+                    }
+                }
+                _ = yield_now(), if !event_delivery_turn && (!pending_notifications.is_empty() || !pending_events.is_empty()) => {
+                    event_delivery_turn = true;
+                }
+            }
+        }
+        }
+        .await;
+        flush_send_notifications(&events, &mut pending_notifications, &mut shutdown).await;
+        result
+    }
+
+    fn queue_handoff_movement(&mut self, outbound: &mut OutboundQueue, pending_send: Option<&PendingSend>) -> Result<(), String> {
+        if self.movement_requested
+            || self.handoff.is_none()
+            || outbound.has_handoff_movement()
+            || pending_send
+                .is_some_and(|pending| pending.queued_message.as_ref().is_some_and(|queued| queued.movement == MovementSend::Handoff))
+        {
+            return Ok(());
+        }
+        queue_internal(
+            outbound,
+            Message::CompleteAgentMovement(CompleteAgentMovement {
+                agent_data: complete_agent_movement::AgentData {
+                    agent_id: self.session.agent_id,
+                    session_id: self.session.session_id,
+                    circuit_code: self.session.circuit_code,
+                },
+            }),
+            Delivery::Reliable,
+            TrafficClass::Deadline,
+            MovementSend::Handoff,
+            active_queue_class(pending_send),
+        )
+    }
+}
 
 struct QueuedMessage {
     message: Message,
@@ -299,8 +1475,6 @@ impl OutboundQueue {
     }
 }
 
-type PendingSendFuture = Pin<Box<dyn Future<Output = Result<(Instant, PreparedDatagram), String>> + Send>>;
-
 struct PendingSend {
     meta: PreparedMeta,
     result: PendingSendFuture,
@@ -328,6 +1502,11 @@ impl From<&PreparedDatagram> for PreparedMeta {
             is_retransmission: prepared.is_retransmission(),
         }
     }
+}
+
+enum PendingSendExpiration {
+    QueuedMessage(QueuedMessage),
+    ReliableRetry,
 }
 
 fn pending_send_result(
@@ -406,11 +1585,6 @@ fn traffic_priority(class: TrafficClass) -> u8 {
         TrafficClass::Deadline => 1,
         TrafficClass::Fair => 2,
     }
-}
-
-enum PendingSendExpiration {
-    QueuedMessage(QueuedMessage),
-    ReliableRetry,
 }
 
 fn expire_pending_send(pending: &mut Option<PendingSend>, now: Instant) -> Option<PendingSendExpiration> {
@@ -820,1181 +1994,6 @@ fn message_class(message: &Message) -> TrafficClass {
     }
 }
 
-impl Drop for NeighborConnection {
-    fn drop(&mut self) {
-        self.coverage_losses.retire(self.simulator_id, CoverageSource::Lludp);
-    }
-}
-
-impl NeighborConnection {
-    fn current_primary_state(&self) -> PrimaryState {
-        *self.primary_state_receiver.borrow()
-    }
-
-    fn clear_handoff(&mut self, outbound: &mut OutboundQueue, pending_send: &mut Option<PendingSend>) {
-        self.handoff = None;
-        self.handoff_role_generation = None;
-        self.movement_requested = false;
-        if pending_send
-            .as_ref()
-            .is_some_and(|pending| pending.queued_message.as_ref().is_some_and(|queued| queued.movement == MovementSend::Handoff))
-        {
-            *pending_send = None;
-        }
-        outbound.cancel_handoff_movement();
-    }
-
-    fn invalidate_stale_handoff(&mut self, role_generation: u64, outbound: &mut OutboundQueue, pending_send: &mut Option<PendingSend>) {
-        if self.handoff_role_generation.is_some_and(|generation| generation != role_generation) {
-            self.clear_handoff(outbound, pending_send);
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) async fn connect(
-        simulator_id: SimulatorId,
-        session: AgentSession,
-        region_handle: u64,
-        capture: Option<CaptureRecorder>,
-        status: NetworkStatusHandle,
-    ) -> Result<Self, String> {
-        Self::connect_with_coverage(simulator_id, session, region_handle, capture, status, CoverageLossLedger::new()).await
-    }
-
-    #[cfg(test)]
-    pub(super) async fn connect_with_coverage(
-        simulator_id: SimulatorId,
-        session: AgentSession,
-        region_handle: u64,
-        capture: Option<CaptureRecorder>,
-        status: NetworkStatusHandle,
-        coverage_losses: CoverageLossLedger,
-    ) -> Result<Self, String> {
-        let budget = OutboundBudget::new(crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
-        let pacer = budget.register(simulator_id.get(), false).await?;
-        Self::connect_with_role(
-            simulator_id,
-            session,
-            Some(region_handle),
-            ConnectionRole::Neighbor,
-            capture,
-            status,
-            coverage_losses,
-            None,
-            pacer,
-            Some(budget),
-            #[cfg(test)]
-            None,
-        )
-        .await
-    }
-
-    pub(super) async fn connect_with_primary_state(
-        simulator_id: SimulatorId,
-        session: AgentSession,
-        region_handle: u64,
-        capture: Option<CaptureRecorder>,
-        status: NetworkStatusHandle,
-        coverage_losses: CoverageLossLedger,
-        primary_state_receiver: watch::Receiver<PrimaryState>,
-        budget: OutboundBudgetHandle,
-    ) -> Result<Self, String> {
-        let pacer = budget.register(simulator_id.get(), false).await?;
-        Self::connect_with_role(
-            simulator_id,
-            session,
-            Some(region_handle),
-            ConnectionRole::Neighbor,
-            capture,
-            status,
-            coverage_losses,
-            Some(primary_state_receiver),
-            pacer,
-            None,
-            #[cfg(test)]
-            None,
-        )
-        .await
-    }
-
-    pub(super) async fn connect_primary_with_state(
-        simulator_id: SimulatorId,
-        session: AgentSession,
-        capture: Option<CaptureRecorder>,
-        status: NetworkStatusHandle,
-        coverage_losses: CoverageLossLedger,
-        primary_state_receiver: watch::Receiver<PrimaryState>,
-        budget: OutboundBudgetHandle,
-        #[cfg(test)] send_gate: Option<SendGate>,
-    ) -> Result<Self, String> {
-        let pacer = budget.register(simulator_id.get(), true).await?;
-        Self::connect_with_role(
-            simulator_id,
-            session,
-            None,
-            ConnectionRole::Primary,
-            capture,
-            status,
-            coverage_losses,
-            Some(primary_state_receiver),
-            pacer,
-            None,
-            #[cfg(test)]
-            send_gate,
-        )
-        .await
-    }
-
-    #[cfg(test)]
-    pub(super) async fn connect_primary_with_coverage(
-        simulator_id: SimulatorId,
-        session: AgentSession,
-        capture: Option<CaptureRecorder>,
-        status: NetworkStatusHandle,
-        coverage_losses: CoverageLossLedger,
-    ) -> Result<Self, String> {
-        let budget = OutboundBudget::new(crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
-        let pacer = budget.register(simulator_id.get(), true).await?;
-        Self::connect_with_role(
-            simulator_id,
-            session,
-            None,
-            ConnectionRole::Primary,
-            capture,
-            status,
-            coverage_losses,
-            None,
-            pacer,
-            Some(budget),
-            #[cfg(test)]
-            None,
-        )
-        .await
-    }
-
-    async fn connect_with_role(
-        simulator_id: SimulatorId,
-        session: AgentSession,
-        region_handle: Option<u64>,
-        role: ConnectionRole,
-        capture: Option<CaptureRecorder>,
-        status: NetworkStatusHandle,
-        coverage_losses: CoverageLossLedger,
-        primary_state: Option<watch::Receiver<PrimaryState>>,
-        pacer: ConnectionPacer,
-        owned_budget: Option<OutboundBudget>,
-        #[cfg(test)] send_gate: Option<SendGate>,
-    ) -> Result<Self, String> {
-        let primary_state_receiver = primary_state.unwrap_or_else(|| {
-            let initial_state = if role == ConnectionRole::Primary { PrimaryState::PRIMARY_CONNECTING } else { PrimaryState::NEIGHBOR };
-            watch::channel(initial_state).1
-        });
-        let socket =
-            UdpTransport::connect_with_status(session.simulator_address, session.circuit_code, capture.clone(), status.clone()).await?;
-        #[cfg(test)]
-        let socket = {
-            let mut socket = socket;
-            if let Some(send_gate) = send_gate {
-                socket.set_send_gate(send_gate);
-            }
-            socket
-        };
-        let socket = Arc::new(socket);
-        let circuit_status = match role {
-            ConnectionRole::Primary => status.clone(),
-            ConnectionRole::Neighbor => status.for_circuit(),
-        };
-        let mut circuit = Circuit::with_status(circuit_status);
-        let prepared = circuit.prepare_message(
-            Message::UseCircuitCode(UseCircuitCode {
-                circuit_code: CircuitCode { code: session.circuit_code, session_id: session.session_id, agent_id: session.agent_id },
-            }),
-            Delivery::Reliable,
-        )?;
-        let use_circuit_sequence = send_prepared(&socket, &mut circuit, &pacer, prepared, TrafficClass::Control).await?;
-        Ok(Self {
-            simulator_id,
-            session,
-            region_handle,
-            role,
-            socket,
-            circuit,
-            use_circuit_sequence,
-            handoff: None,
-            handoff_role_generation: None,
-            movement_requested: false,
-            initial_movement_sent: false,
-            primary_active: role == ConnectionRole::Primary,
-            session_ready: false,
-            agent_throttle_sent: false,
-            capture,
-            coverage_losses,
-            pacer,
-            _owned_budget: owned_budget,
-            primary_state_receiver,
-        })
-    }
-
-    #[tracing::instrument(name = "simulator.neighbor", level = "info", skip_all)]
-    pub(super) async fn run(
-        mut self,
-        events: mpsc::Sender<NeighborEvent>,
-        mut shutdown: watch::Receiver<bool>,
-        neighbor_requests: mpsc::Sender<NeighborRequest>,
-        mut commands: mpsc::Receiver<NeighborCommand>,
-        mut logout_commands: mpsc::Receiver<oneshot::Sender<Result<(), Error>>>,
-        packet_memory: SimulatorMemoryBudget,
-    ) -> Result<(), String> {
-        let mut receive_buffer = [0u8; 65_535];
-        let mut established = false;
-        let mut preconnect_messages: VecDeque<EventEnvelope> = VecDeque::with_capacity(MAX_PRECONNECT_EVENTS);
-        let mut pending_events = VecDeque::with_capacity(MAX_QUEUED_SIMULATOR_EVENTS);
-        let mut pending_notifications = VecDeque::with_capacity(MAX_PENDING_SEND_NOTIFICATIONS);
-        #[cfg(test)]
-        let mut outbound = OutboundQueue::with_probe(self.pacer.probe());
-        #[cfg(not(test))]
-        let mut outbound = OutboundQueue::new();
-        let mut pending_send = None::<PendingSend>;
-        let mut deferred_retries = HashMap::<u32, Instant>::new();
-        let mut priority_logout = None::<QueuedMessage>;
-        let mut logout_waiters = Vec::<oneshot::Sender<Result<(), Error>>>::new();
-        let mut closing = false;
-        let mut logout_sent = false;
-        let mut logout_local_send_completed = false;
-        let mut logout_commands_closed = false;
-        let mut teardown_deadline = None;
-        let mut close_reason = None;
-        let mut ack_timer = time::interval_at(Instant::now() + ACK_INTERVAL, ACK_INTERVAL);
-        ack_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-        let mut ack_timer_due = false;
-        let mut ping_timer = time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
-        ping_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-        let mut last_udp_received = Instant::now();
-        let mut last_send_was_retry = false;
-        let mut saw_region_handshake = false;
-        let mut finish_after_ack = false;
-        let mut primary_state_open = true;
-        let mut event_delivery_turn = false;
-
-        let result = async {
-        loop {
-            if *shutdown.borrow() || events.is_closed() {
-                return finish_logout(close_reason);
-            }
-            let retry_check_at = Instant::now();
-            expire_deferred_retries(
-                &self.circuit,
-                &mut deferred_retries,
-                retry_check_at,
-                #[cfg(test)] pending_send.as_ref().filter(|pending| pending.meta.is_retransmission).map(|pending| pending.meta.sequence),
-                #[cfg(test)] outbound.probe.as_ref(),
-            )?;
-            if pending_notifications.is_empty() {
-                let expired = outbound.expire(Instant::now());
-                for queued in expired {
-                    report_queued_failure(
-                        &events,
-                        &mut pending_notifications,
-                        self.simulator_id,
-                        queued,
-                        SEND_QUEUE_EXPIRED.into(),
-                    )?;
-                }
-            }
-            match expire_pending_send(&mut pending_send, Instant::now()) {
-                Some(PendingSendExpiration::QueuedMessage(queued)) => {
-                    report_queued_failure(
-                        &events,
-                        &mut pending_notifications,
-                        self.simulator_id,
-                        queued,
-                        SEND_QUEUE_EXPIRED.into(),
-                    )?;
-                }
-                Some(PendingSendExpiration::ReliableRetry) => return Err(RELIABLE_RETRY_EXPIRED.into()),
-                None => {}
-            }
-            if closing && pending_events.is_empty() && !logout_sent {
-                finish_after_ack = true;
-            }
-            if finish_after_ack {
-                for queued in outbound.drain() {
-                    fail_queued_on_close(&events, &mut pending_notifications, self.simulator_id, queued);
-                }
-                if pending_send.as_ref().is_some_and(|pending| !pending.meta.is_acknowledgement)
-                    && let Some(mut canceled) = pending_send.take()
-                    && let Some(queued) = canceled.queued_message.take()
-                {
-                    fail_queued_on_close(&events, &mut pending_notifications, self.simulator_id, queued);
-                }
-            }
-            if finish_after_ack && pending_send.is_none() && !self.circuit.has_pending_acks() && pending_notifications.is_empty() {
-                return finish_logout(close_reason);
-            }
-            if pending_send.is_none() {
-                if let Some(queued) = priority_logout.take() {
-                    let prepared = match self.circuit.prepare_message(queued.message.clone(), queued.delivery) {
-                        Ok(prepared) => prepared,
-                        Err(error) => {
-                            let is_logout = matches!(&queued.message, Message::LogoutRequest(_));
-                            report_queued_failure(&events, &mut pending_notifications, self.simulator_id, queued, error.clone())?;
-                            if is_logout {
-                                for completed in logout_waiters.drain(..) {
-                                    let _ = completed.send(Err(Error::SimulatorSend(error.clone())));
-                                }
-                            }
-                            return Err(error);
-                        }
-                    };
-                    pending_send = Some(begin_send(
-                        Arc::clone(&self.socket),
-                        self.pacer.handle(),
-                        prepared,
-                        TrafficClass::Control,
-                        Some(queued),
-                        #[cfg(test)]
-                        outbound.probe.clone(),
-                    ));
-                } else {
-                    let next = if logout_sent {
-                        prepare_shutdown_send(&self.socket, &self.pacer, &mut self.circuit, &mut outbound, ack_timer_due)
-                    } else {
-                        prepare_next_send(
-                            &self.socket,
-                            &self.pacer,
-                            &mut self.circuit,
-                            &mut outbound,
-                            &mut deferred_retries,
-                            ack_timer_due || finish_after_ack,
-                            last_send_was_retry,
-                        )
-                    };
-                    match next {
-                        Ok(next) => pending_send = next,
-                        Err((Some(queued), error)) => {
-                            report_queued_failure(&events, &mut pending_notifications, self.simulator_id, *queued, error)?;
-                            continue;
-                        }
-                        Err((None, error)) => return Err(error),
-                    }
-                }
-            }
-            tokio::select! {
-                biased;
-                sent = async { pending_send.as_mut().expect("send branch is guarded").result.as_mut().await }, if pending_send.is_some() => {
-                    let mut completed = pending_send.take().expect("send branch is guarded");
-                    match sent {
-                        Ok((sent_at, prepared)) => {
-                            let was_retry = completed.meta.is_retransmission;
-                            let sequence = completed.meta.sequence;
-                            let was_logout = completed
-                                .queued_message
-                                .as_ref()
-                                .is_some_and(|queued| matches!(&queued.message, Message::LogoutRequest(_)));
-                            self.circuit.commit_sent(prepared, sent_at)?;
-                            #[cfg(test)]
-                            if let (Some(probe), Some(queued)) = (&completed.probe, &completed.queued_message) {
-                                probe.record_queue_age(queued.class, sent_at.saturating_duration_since(queued.queued_at), sent_at);
-                            }
-                            if was_retry {
-                                deferred_retries.remove(&sequence);
-                            }
-                            last_send_was_retry = was_retry;
-                            if !self.circuit.has_pending_acks() {
-                                ack_timer_due = false;
-                            }
-                            if let Some(queued) = &completed.queued_message
-                                && let Some(cancel_target) = queued.cancel_target
-                            {
-                                queue_send_notification(
-                                    &events,
-                                    &mut pending_notifications,
-                                    self.simulator_id,
-                                    Some(cancel_target),
-                                    None,
-                                    false,
-                                )?;
-                            }
-                            if let Some(queued) = &mut completed.queued_message
-                                && let Some(completion) = queued.completion.take()
-                            {
-                                let _ = completion.send(Ok(()));
-                            }
-                            if was_logout {
-                                logout_local_send_completed = true;
-                                for completed in logout_waiters.drain(..) {
-                                    let _ = completed.send(Ok(()));
-                                }
-                            }
-                            if let Some(queued) = &completed.queued_message {
-                                match queued.movement {
-                                    MovementSend::Initial => self.initial_movement_sent = true,
-                                    MovementSend::Handoff => self.movement_requested = true,
-                                    MovementSend::None => {}
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            let was_logout = completed
-                                .queued_message
-                                .as_ref()
-                                .is_some_and(|queued| matches!(&queued.message, Message::LogoutRequest(_)));
-                            if let Some(queued) = completed.queued_message.take() {
-                                report_queued_failure(&events, &mut pending_notifications, self.simulator_id, queued, error.clone())?;
-                            }
-                            if was_logout {
-                                for completed in logout_waiters.drain(..) {
-                                    let _ = completed.send(Err(Error::SimulatorSend(error.clone())));
-                                }
-                            }
-                            return Err(error);
-                        }
-                    }
-                }
-                _ = shutdown.changed() => return Ok(()),
-                _ = events.closed() => return Ok(()),
-                logout = logout_commands.recv(), if !logout_commands_closed => {
-                    match logout {
-                        Some(completed) if logout_sent => {
-                            if logout_local_send_completed {
-                                let _ = completed.send(Ok(()));
-                            } else {
-                                logout_waiters.push(completed);
-                            }
-                        }
-                        Some(completed) => {
-                            if let Some(mut canceled) = pending_send.take()
-                                && let Some(queued) = canceled.queued_message.take()
-                            {
-                                fail_queued_on_close(&events, &mut pending_notifications, self.simulator_id, queued);
-                            }
-                            for queued in outbound.drain() {
-                                fail_queued_on_close(&events, &mut pending_notifications, self.simulator_id, queued);
-                            }
-                            let queued = QueuedMessage {
-                                message: logout_message(&self.session),
-                                delivery: Delivery::ReliableNoRetry,
-                                class: TrafficClass::Control,
-                                queued_at: Instant::now(),
-                                completion: Some(completed),
-                                cancel_target: None,
-                                report_failure: false,
-                                movement: MovementSend::None,
-                            };
-                            priority_logout = Some(queued);
-                            logout_sent = true;
-                            closing = true;
-                            teardown_deadline.get_or_insert_with(|| Instant::now() + LOGOUT_TIMEOUT);
-                        }
-                        None => logout_commands_closed = true,
-                    }
-                }
-                _ = time::sleep_until(teardown_deadline.unwrap_or_else(|| Instant::now() + LOGOUT_TIMEOUT)), if teardown_deadline.is_some() => {
-                    return finish_logout(close_reason);
-                }
-                _ = time::sleep_until(last_udp_received + KEEPALIVE_TIMEOUT),
-                    if established
-                        && !closing
-                        && (self.role == ConnectionRole::Neighbor || !self.primary_active || self.session_ready) => {
-                    return Err("The simulator stopped responding to LLUDP keepalive traffic.".into());
-                }
-                changed = self.primary_state_receiver.changed(), if primary_state_open => {
-                    match changed {
-                        Ok(()) => {
-                            let state = *self.primary_state_receiver.borrow_and_update();
-                            self.invalidate_stale_handoff(state.role_generation, &mut outbound, &mut pending_send);
-                            self.primary_active = state.active;
-                            self.session_ready = state.session_ready;
-                            self.pacer.set_primary(state.active).await?;
-                        }
-                        Err(_) => primary_state_open = false,
-                    }
-                }
-                _ = ack_timer.tick() => {
-                    ack_timer_due = self.circuit.has_pending_acks();
-                    preempt_deferred_send(
-                        &mut pending_send,
-                        &mut outbound,
-                        &self.circuit,
-                        ack_timer_due || finish_after_ack,
-                    )?;
-                }
-                permit = events.reserve(), if event_delivery_turn && (!pending_notifications.is_empty() || !pending_events.is_empty()) => {
-                    match permit {
-                        Ok(permit) => {
-                            if let Some(notification) = pending_notifications.pop_front() {
-                                permit.send(notification);
-                            } else if let Some(event) = pending_events.pop_front() {
-                                permit.send(NeighborEvent::Simulator(event));
-                            }
-                            event_delivery_turn = false;
-                        }
-                        Err(_) => return Ok(()),
-                    }
-                }
-                _ = ping_timer.tick(), if pending_send.is_none() && !logout_sent && established && (self.role == ConnectionRole::Neighbor || self.initial_movement_sent) => {
-                    if let Some(prepared) = self.circuit.prepare_ping(Instant::now())? {
-                        pending_send = Some(begin_send(
-                            Arc::clone(&self.socket),
-                            self.pacer.handle(),
-                            prepared,
-                            TrafficClass::Control,
-                            None,
-                            #[cfg(test)]
-                            outbound.probe.clone(),
-                        ));
-                    }
-                }
-                command = commands.recv(), if !commands.is_closed() && pending_notifications.is_empty() => {
-                    match command {
-                        Some(NeighborCommand::Send { message, delivery, completed, cancel_target, report_failure }) => {
-                            let message_name = message.name();
-                            let message_traffic_class = message_class(&message);
-                            let mut failed_completion = completed;
-                            let mut failed_cancel_target = cancel_target;
-                            let mut failed_report = report_failure;
-                            let error = if closing {
-                                Some(Error::SimulatorConnectionClosed)
-                            } else if !established {
-                                Some(Error::SimulatorNotReady)
-                            } else {
-                                let queued = QueuedMessage {
-                                    class: message_traffic_class,
-                                    message,
-                                    delivery,
-                                    queued_at: Instant::now(),
-                                    completion: failed_completion.take(),
-                                    cancel_target: failed_cancel_target.take(),
-                                    report_failure,
-                                    movement: MovementSend::None,
-                                };
-                                match outbound.push(queued, active_queue_class(pending_send.as_ref())) {
-                                    Ok(()) => {
-                                        preempt_deferred_send(
-                                            &mut pending_send,
-                                            &mut outbound,
-                                            &self.circuit,
-                                            ack_timer_due || finish_after_ack,
-                                        )?;
-                                        None
-                                    }
-                                    Err(mut queued) => {
-                                        failed_completion = queued.completion.take();
-                                        failed_cancel_target = queued.cancel_target.take();
-                                        failed_report = queued.report_failure;
-                                        Some(Error::SimulatorCommandQueueFull)
-                                    }
-                                }
-                            };
-                            if let Some(error) = error {
-                                if failed_report && matches!(&error, Error::SimulatorCommandQueueFull) {
-                                    let active_class = active_queue_class(pending_send.as_ref());
-                                    let noncontrol_sends = outbound.messages.iter().filter(|queued| queued.class != TrafficClass::Control).count()
-                                        + usize::from(active_class.is_some_and(|class| class != TrafficClass::Control));
-                                    tracing::trace!(
-                                        simulator_id = self.simulator_id.get(),
-                                        message = message_name,
-                                        delivery = ?delivery,
-                                        traffic_class = ?message_traffic_class,
-                                        queue_stage = "outbound",
-                                        queued_sends = outbound.messages.len(),
-                                        active_send = pending_send.is_some(),
-                                        queued_noncontrol_sends = noncontrol_sends,
-                                        queued_bytes = outbound.charged_bytes,
-                                        max_pending_sends = MAX_PENDING_SENDS,
-                                        max_noncontrol_sends = MAX_NONCONTROL_SENDS,
-                                        max_pending_bytes = MAX_PENDING_SEND_BYTES,
-                                        "Simulator send rejected by the bounded outbound queue"
-                                    );
-                                }
-                                let message = error.to_string();
-                                if let Some(completed) = failed_completion {
-                                    let _ = completed.send(Err(error));
-                                }
-                                if failed_report || failed_cancel_target.is_some() {
-                                    queue_send_notification(
-                                        &events,
-                                        &mut pending_notifications,
-                                        self.simulator_id,
-                                        failed_cancel_target,
-                                        Some(message),
-                                        failed_report,
-                                    )?;
-                                }
-                            }
-                        }
-                        Some(NeighborCommand::PrepareHandoff(target)) => {
-                            if Some(target.region_handle) != self.region_handle
-                                || target.endpoint != self.session.simulator_address
-                                || target.agent_id != self.session.agent_id
-                                || target.session_id != self.session.session_id
-                            {
-                                continue;
-                            }
-                            let role_generation = self.current_primary_state().role_generation;
-                            self.invalidate_stale_handoff(role_generation, &mut outbound, &mut pending_send);
-                            if self.handoff.as_ref() == Some(&target) {
-                                continue;
-                            }
-                            self.clear_handoff(&mut outbound, &mut pending_send);
-                            self.session.seed_capability = target.seed_capability.clone();
-                            self.handoff = Some(target);
-                            self.handoff_role_generation = Some(role_generation);
-                            if established && saw_region_handshake {
-                                self.queue_handoff_movement(&mut outbound, pending_send.as_ref())?;
-                            }
-                        }
-                        Some(NeighborCommand::CancelHandoff) => {
-                            self.clear_handoff(&mut outbound, &mut pending_send);
-                        }
-                        None => return Ok(()),
-                    }
-                }
-                received = self.socket.recv(&mut receive_buffer) => {
-                    event_delivery_turn = !pending_notifications.is_empty() || !pending_events.is_empty();
-                    let size = received.map_err(|error| format!("Neighbor simulator connection failed: {error}"))?;
-                    if *shutdown.borrow() || events.is_closed() {
-                        return Ok(());
-                    }
-                    let frame = match Packet::inspect(&receive_buffer[..size]) {
-                        Ok(frame) => frame,
-                        Err(_) => {
-                            record_coverage_loss(
-                                &self.coverage_losses,
-                                self.simulator_id,
-                                CoverageSource::Lludp,
-                                CoverageLossReason::PreflightRejected,
-                            );
-                            self.socket.record_received(&receive_buffer[..size], None);
-                            continue;
-                        }
-                    };
-                    let admission = match self.circuit.prepare_receive(
-                        frame.sequence(),
-                        frame.is_reliable(),
-                        frame.appended_acks(),
-                        Instant::now(),
-                    ) {
-                        Ok(admission) => admission,
-                        Err(error) => {
-                            tracing::debug!(simulator_id = self.simulator_id.get(), reason = %error, "Neighbor packet rejected before decode admission");
-                            record_coverage_loss(
-                                &self.coverage_losses,
-                                self.simulator_id,
-                                CoverageSource::Lludp,
-                                CoverageLossReason::AcknowledgementAdmission,
-                            );
-                            self.socket.record_received(&receive_buffer[..size], None);
-                            continue;
-                        }
-                    };
-                    if matches!(admission, ReceiveAdmission::Duplicate(_)) {
-                        preempt_deferred_send(
-                            &mut pending_send,
-                            &mut outbound,
-                            &self.circuit,
-                            ack_timer_due || finish_after_ack,
-                        )?;
-                        self.socket.record_received(&receive_buffer[..size], None);
-                        last_udp_received = Instant::now();
-                        continue;
-                    }
-                    let message_id = match frame.message_id() {
-                        Ok(id) => id,
-                        Err(_) => {
-                            record_coverage_loss(
-                                &self.coverage_losses,
-                                self.simulator_id,
-                                CoverageSource::Lludp,
-                                CoverageLossReason::PreflightRejected,
-                            );
-                            self.socket.record_received(&receive_buffer[..size], None);
-                            continue;
-                        }
-                    };
-                    let is_packet_ack = message_id == PACKET_ACK;
-                    let decode_permit = if is_packet_ack {
-                        None
-                    } else {
-                        let Some(permit) = packet_memory.try_acquire_decode_slot() else {
-                            tracing::debug!(simulator_id = self.simulator_id.get(), "Neighbor packet rejected because all decoder slots are occupied");
-                            record_coverage_loss(
-                                &self.coverage_losses,
-                                self.simulator_id,
-                                CoverageSource::Lludp,
-                                CoverageLossReason::DecodeAdmission,
-                            );
-                            self.socket.record_received(&receive_buffer[..size], None);
-                            continue;
-                        };
-                        Some(permit)
-                    };
-                    let preflighted = match frame.preflighted() {
-                        Ok(preflighted) => preflighted,
-                        Err(error) => {
-                            if matches!(error, LLUdpError::DecodedPacketTooLarge | LLUdpError::AllocationBoundOverflow) {
-                                tracing::debug!(simulator_id = self.simulator_id.get(), reason = %error, "Neighbor packet rejected by decoded-memory preflight");
-                            }
-                            record_coverage_loss(
-                                &self.coverage_losses,
-                                self.simulator_id,
-                                CoverageSource::Lludp,
-                                preflight_loss_reason(error, message_id),
-                            );
-                            self.socket.record_received(&receive_buffer[..size], None);
-                            drop(decode_permit);
-                            continue;
-                        }
-                    };
-                    let preflight = preflighted.preflight();
-                    let _ack_decode_permit = if is_packet_ack {
-                        let Some(permit) = packet_memory.try_acquire_ack_decode_slot(preflight) else {
-                            tracing::debug!(simulator_id = self.simulator_id.get(), "PacketAck rejected because the control decode budget is full");
-                            record_coverage_loss(
-                                &self.coverage_losses,
-                                self.simulator_id,
-                                CoverageSource::Lludp,
-                                CoverageLossReason::DecodeAdmission,
-                            );
-                            self.socket.record_received(&receive_buffer[..size], None);
-                            drop(decode_permit);
-                            continue;
-                        };
-                        Some(permit)
-                    } else {
-                        None
-                    };
-                    let mut memory_reservation = if is_packet_ack {
-                        None
-                    } else {
-                        match packet_memory.reserve_packet(preflight) {
-                            Ok(reservation) => Some(reservation),
-                            Err(error) => {
-                                tracing::debug!(simulator_id = self.simulator_id.get(), ?error, "Neighbor packet rejected by retained-memory admission");
-                                record_coverage_loss(
-                                    &self.coverage_losses,
-                                    self.simulator_id,
-                                    CoverageSource::Lludp,
-                                    CoverageLossReason::RetainedMemoryAdmission,
-                                );
-                                self.socket.record_received(&receive_buffer[..size], None);
-                                drop(decode_permit);
-                                continue;
-                            }
-                        }
-                    };
-                    let packet = match preflighted.decode() {
-                        Ok(packet) => packet,
-                        Err(error) => {
-                            let reason = if matches!(error, LLUdpError::DecodedPacketTooLarge) {
-                                CoverageLossReason::AllocationEstimateMismatch
-                            } else {
-                                CoverageLossReason::DecodeRejected
-                            };
-                            record_coverage_loss(
-                                &self.coverage_losses,
-                                self.simulator_id,
-                                CoverageSource::Lludp,
-                                reason,
-                            );
-                            self.socket.record_received(&receive_buffer[..size], None);
-                            drop(memory_reservation);
-                            drop(decode_permit);
-                            continue;
-                        }
-                    };
-                    if let Some(reservation) = &mut memory_reservation
-                        && let Err(error) = packet_memory.trim_packet_reservation(reservation, &packet)
-                    {
-                        tracing::error!(simulator_id = self.simulator_id.get(), ?error, "Decoded neighbor packet exceeded its preflight reservation");
-                        record_coverage_loss(
-                            &self.coverage_losses,
-                            self.simulator_id,
-                            CoverageSource::Lludp,
-                            CoverageLossReason::AllocationEstimateMismatch,
-                        );
-                        self.socket.record_received(&receive_buffer[..size], None);
-                        drop(memory_reservation);
-                        drop(decode_permit);
-                        continue;
-                    }
-                    let message = packet.message();
-                    let primary_state = self.current_primary_state();
-                    self.invalidate_stale_handoff(primary_state.role_generation, &mut outbound, &mut pending_send);
-                    let connection_role = primary_state.connection_role();
-                    let dispatch_message = connection_message_has_application_event(
-                        message,
-                        connection_role,
-                        self.handoff.as_ref(),
-                        self.movement_requested,
-                    );
-                    let event_queue_full = if established {
-                        pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS
-                    } else {
-                        preconnect_messages.len() >= MAX_PRECONNECT_EVENTS
-                    };
-                    if dispatch_message && (closing || events.is_closed() || event_queue_full) {
-                        if event_queue_full && !closing {
-                            close_reason = Some(if established {
-                                EVENT_BACKLOG_DISCONNECT_REASON
-                            } else {
-                                NEIGHBOR_PRECONNECT_OVERFLOW_REASON
-                            });
-                            closing = true;
-                            teardown_deadline.get_or_insert_with(|| Instant::now() + LOGOUT_TIMEOUT);
-                        }
-                        record_coverage_loss(
-                            &self.coverage_losses,
-                            self.simulator_id,
-                            CoverageSource::Lludp,
-                            CoverageLossReason::EventAdmission,
-                        );
-                        self.socket.record_received(&receive_buffer[..size], Some(&packet));
-                        last_udp_received = Instant::now();
-                        drop(memory_reservation);
-                        drop(decode_permit);
-                        continue;
-                    }
-                    self.socket.record_received(&receive_buffer[..size], Some(&packet));
-                    last_udp_received = Instant::now();
-                    self.circuit.acknowledge_message(packet.message());
-                    let receive_outcome = self.circuit.commit_receive(admission);
-                    preempt_deferred_send(
-                        &mut pending_send,
-                        &mut outbound,
-                        &self.circuit,
-                        ack_timer_due || finish_after_ack,
-                    )?;
-                    drop(decode_permit);
-                    let is_new_packet = receive_outcome.is_new_packet;
-                    let dispatch_allowed = !closing;
-                    if !established && !self.circuit.has_pending(self.use_circuit_sequence) {
-                        established = true;
-                        if !queue_neighbor_event(
-                            &events,
-                            &mut pending_events,
-                            Event::SimulatorConnected {
-                                simulator_id: self.simulator_id,
-                                region_handle: self.region_handle,
-                                endpoint: self.session.simulator_address,
-                            },
-                            &mut closing,
-                            &mut teardown_deadline,
-                            &mut close_reason,
-                        ) {
-                            return Ok(());
-                        }
-                        while let Some(event) = preconnect_messages.pop_front() {
-                            let admission_rejected = events.is_closed() || pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS;
-                            let watermark = event.coverage_watermark();
-                            if !queue_neighbor_event(
-                                &events,
-                                &mut pending_events,
-                                event,
-                                &mut closing,
-                                &mut teardown_deadline,
-                                &mut close_reason,
-                            ) {
-                                if let Some(watermark) = watermark {
-                                    record_coverage_loss(
-                                        &self.coverage_losses,
-                                        watermark.simulator_id,
-                                        watermark.source,
-                                        CoverageLossReason::EventAdmission,
-                                    );
-                                }
-                                for queued in pending_events.drain(..) {
-                                    record_event_envelope_loss(
-                                        &self.coverage_losses,
-                                        queued,
-                                        CoverageLossReason::EventAdmission,
-                                    );
-                                }
-                                return Ok(());
-                            }
-                            if admission_rejected
-                                && let Some(watermark) = watermark
-                            {
-                                record_coverage_loss(
-                                    &self.coverage_losses,
-                                    watermark.simulator_id,
-                                    watermark.source,
-                                    CoverageLossReason::EventAdmission,
-                                );
-                            }
-                            if close_reason.is_some() {
-                                for queued in preconnect_messages.drain(..) {
-                                    if let Some(watermark) = queued.coverage_watermark() {
-                                        record_coverage_loss(
-                                            &self.coverage_losses,
-                                            watermark.simulator_id,
-                                            watermark.source,
-                                            CoverageLossReason::EventAdmission,
-                                        );
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                        if self.role == ConnectionRole::Primary {
-                            if let Some(capture) = &self.capture {
-                                capture.circuit_lifecycle("use_circuit_code_acked", self.session.circuit_code);
-                            }
-                            queue_internal(
-                                &mut outbound,
-                                Message::CompleteAgentMovement(CompleteAgentMovement {
-                                    agent_data: complete_agent_movement::AgentData {
-                                        agent_id: self.session.agent_id,
-                                        session_id: self.session.session_id,
-                                        circuit_code: self.session.circuit_code,
-                                    },
-                                }),
-                                Delivery::Reliable,
-                                TrafficClass::Deadline,
-                                MovementSend::Initial,
-                                active_queue_class(pending_send.as_ref()),
-                            )?;
-                        }
-                        if saw_region_handshake && self.handoff.is_some() {
-                            self.queue_handoff_movement(&mut outbound, pending_send.as_ref())?;
-                        }
-                    }
-                    if !is_new_packet {
-                        continue;
-                    }
-
-                    let mut dispatch_message = true;
-                    match message {
-                        Message::EnableSimulator(enabled) => {
-                            let info = &enabled.simulator_info;
-                            let endpoint = SocketAddr::from((info.ip, info.port));
-                            if let Err(error) = neighbor_requests.try_send(NeighborRequest::Enable {
-                                simulator_id: self.simulator_id,
-                                region_handle: info.handle,
-                                endpoint,
-                            }) {
-                                let reason = match error {
-                                    mpsc::error::TrySendError::Full(_) => "The neighbor request queue is full.",
-                                    mpsc::error::TrySendError::Closed(_) => "The simulator manager has closed.",
-                                };
-                                return Err(reason.into());
-                            }
-                        }
-                        Message::DisableSimulator(_) => {
-                            closing = true;
-                            teardown_deadline.get_or_insert_with(|| Instant::now() + LOGOUT_TIMEOUT);
-                            dispatch_message = false;
-                        }
-                        Message::RegionHandshake(_) => {
-                            saw_region_handshake = true;
-                            queue_internal(
-                                &mut outbound,
-                                Message::RegionHandshakeReply(RegionHandshakeReply {
-                                    agent_data: region_handshake_reply::AgentData {
-                                        agent_id: self.session.agent_id,
-                                        session_id: self.session.session_id,
-                                    },
-                                    region_info: region_handshake_reply::RegionInfo { flags: 0 },
-                                }),
-                                Delivery::Reliable,
-                                TrafficClass::Control,
-                                MovementSend::None,
-                                active_queue_class(pending_send.as_ref()),
-                            )?;
-                            if established && self.handoff.is_some() {
-                                self.queue_handoff_movement(&mut outbound, pending_send.as_ref())?;
-                            }
-                        }
-                        Message::AgentMovementComplete(message) => {
-                            let matches_current_movement = match connection_role {
-                                ConnectionRole::Primary => {
-                                    message.agent_data.agent_id == self.session.agent_id
-                                        && message.agent_data.session_id == self.session.session_id
-                                }
-                                ConnectionRole::Neighbor => self.handoff.as_ref().is_some_and(|handoff| {
-                                    self.movement_requested
-                                        && message.agent_data.agent_id == handoff.agent_id
-                                        && message.agent_data.session_id == handoff.session_id
-                                        && message.data.region_handle == handoff.region_handle
-                                }),
-                            };
-                            if !matches_current_movement {
-                                dispatch_message = false;
-                            } else {
-                                if connection_role == ConnectionRole::Primary {
-                                    self.region_handle = Some(message.data.region_handle);
-                                }
-                                if dispatch_allowed && !self.agent_throttle_sent {
-                                queue_internal(
-                                    &mut outbound,
-                                    agent_throttle_message(&self.session),
-                                    Delivery::Reliable,
-                                    TrafficClass::Control,
-                                    MovementSend::None,
-                                    active_queue_class(pending_send.as_ref()),
-                                )?;
-                                self.agent_throttle_sent = true;
-                                }
-                            }
-                        }
-                        Message::StartPingCheck(message) => {
-                            dispatch_message = false;
-                            self.circuit.clear_duplicate_list(message.oldest_unacked, Instant::now());
-                            queue_internal(
-                                &mut outbound,
-                                Message::CompletePingCheck(CompletePingCheck {
-                                    ping_id: PingId { ping_id: message.ping_id.ping_id },
-                                }),
-                                Delivery::Unreliable,
-                                TrafficClass::Control,
-                                MovementSend::None,
-                                active_queue_class(pending_send.as_ref()),
-                            )?;
-                        }
-                        Message::CompletePingCheck(message) => {
-                            dispatch_message = false;
-                            self.circuit.record_ping_response(message.ping_id.ping_id, Instant::now());
-                        }
-                        Message::LogoutReply(message)
-                            if closing
-                                && message.agent_data.agent_id == self.session.agent_id
-                                && message.agent_data.session_id == self.session.session_id =>
-                        {
-                            dispatch_message = false;
-                            finish_after_ack = true;
-                            closing = true;
-                        }
-                        Message::PacketAck(_) => dispatch_message = false,
-                        _ => {}
-                    }
-                    preempt_deferred_send(
-                        &mut pending_send,
-                        &mut outbound,
-                        &self.circuit,
-                        ack_timer_due || finish_after_ack,
-                    )?;
-
-                    if dispatch_message && dispatch_allowed {
-                        let event = EventEnvelope::with_retention_and_coverage(
-                            Event::SimulatorMessage {
-                                simulator_id: self.simulator_id,
-                                source: self.session.simulator_address,
-                                sequence: packet.sequence(),
-                                packet_order: receive_outcome.packet_order,
-                                message: packet.into_message(),
-                            },
-                            memory_reservation.take().expect("application packet was admitted").into_retention(),
-                            self.coverage_losses.watermark(self.simulator_id, CoverageSource::Lludp),
-                        );
-                        if established {
-                            let admission_rejected = events.is_closed() || pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS;
-                            let watermark = event.coverage_watermark();
-                            if !queue_neighbor_event(
-                                &events,
-                                &mut pending_events,
-                                event,
-                                &mut closing,
-                                &mut teardown_deadline,
-                                &mut close_reason,
-                            ) {
-                                if let Some(watermark) = watermark {
-                                    record_coverage_loss(
-                                        &self.coverage_losses,
-                                        watermark.simulator_id,
-                                        watermark.source,
-                                        CoverageLossReason::EventAdmission,
-                                    );
-                                }
-                                for queued in pending_events.drain(..) {
-                                    record_event_envelope_loss(
-                                        &self.coverage_losses,
-                                        queued,
-                                        CoverageLossReason::EventAdmission,
-                                    );
-                                }
-                                return Ok(());
-                            }
-                            if admission_rejected
-                                && let Some(watermark) = watermark
-                            {
-                                record_coverage_loss(
-                                    &self.coverage_losses,
-                                    watermark.simulator_id,
-                                    watermark.source,
-                                    CoverageLossReason::EventAdmission,
-                                );
-                            }
-                        } else if preconnect_messages.len() < MAX_PRECONNECT_EVENTS {
-                            preconnect_messages.push_back(event);
-                        } else {
-                            close_reason = Some(NEIGHBOR_PRECONNECT_OVERFLOW_REASON);
-                            closing = true;
-                            teardown_deadline.get_or_insert_with(|| Instant::now() + LOGOUT_TIMEOUT);
-                            if let Some(watermark) = event.coverage_watermark() {
-                                record_coverage_loss(
-                                    &self.coverage_losses,
-                                    watermark.simulator_id,
-                                    watermark.source,
-                                    CoverageLossReason::EventAdmission,
-                                );
-                            }
-                            for queued in preconnect_messages.drain(..) {
-                                if let Some(watermark) = queued.coverage_watermark() {
-                                    record_coverage_loss(
-                                        &self.coverage_losses,
-                                        watermark.simulator_id,
-                                        watermark.source,
-                                        CoverageLossReason::EventAdmission,
-                                    );
-                                }
-                            }
-                        };
-                    } else if dispatch_message && is_new_packet {
-                        record_coverage_loss(
-                            &self.coverage_losses,
-                            self.simulator_id,
-                            CoverageSource::Lludp,
-                            CoverageLossReason::EventAdmission,
-                        );
-                    }
-                }
-                _ = yield_now(), if !event_delivery_turn && (!pending_notifications.is_empty() || !pending_events.is_empty()) => {
-                    event_delivery_turn = true;
-                }
-            }
-        }
-        }
-        .await;
-        flush_send_notifications(&events, &mut pending_notifications, &mut shutdown).await;
-        result
-    }
-
-    fn queue_handoff_movement(&mut self, outbound: &mut OutboundQueue, pending_send: Option<&PendingSend>) -> Result<(), String> {
-        if self.movement_requested
-            || self.handoff.is_none()
-            || outbound.has_handoff_movement()
-            || pending_send
-                .is_some_and(|pending| pending.queued_message.as_ref().is_some_and(|queued| queued.movement == MovementSend::Handoff))
-        {
-            return Ok(());
-        }
-        queue_internal(
-            outbound,
-            Message::CompleteAgentMovement(CompleteAgentMovement {
-                agent_data: complete_agent_movement::AgentData {
-                    agent_id: self.session.agent_id,
-                    session_id: self.session.session_id,
-                    circuit_code: self.session.circuit_code,
-                },
-            }),
-            Delivery::Reliable,
-            TrafficClass::Deadline,
-            MovementSend::Handoff,
-            active_queue_class(pending_send),
-        )
-    }
-}
-
 fn preflight_loss_reason(error: LLUdpError, message_id: MessageId) -> CoverageLossReason {
     match error {
         LLUdpError::DecodedPacketTooLarge | LLUdpError::AllocationBoundOverflow => CoverageLossReason::DecodeLimit,
@@ -2051,12 +2050,12 @@ mod tests {
         },
     };
 
-    use super::super::handoff::{HandoffEvidence, HandoffGeneration, HandoffState, PendingPromotion};
-    use super::super::{
+    use super::*;
+    use crate::simulator::coordinator::handoff::{HandoffEvidence, HandoffGeneration, HandoffState, PendingPromotion};
+    use crate::simulator::coordinator::{
         MAX_CONCURRENT_PACKET_DECODES, MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES,
         MAX_QUEUED_SIMULATOR_EVENT_BYTES, SimulatorMemoryBudget,
     };
-    use super::*;
 
     const WAIT: Duration = Duration::from_secs(2);
 
@@ -2070,7 +2069,7 @@ mod tests {
         agent_session.session_id = Uuid::from_bytes([2; 16]);
         agent_session.circuit_code = 0x1234_5678;
         let budget = OutboundBudget::new(crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
-        let (primary_state, primary_state_receiver) = watch::channel(PrimaryState::PRIMARY_CONNECTING);
+        let (primary_state, primary_state_receiver) = watch::channel(PrimaryState::Connecting);
         let connection = NeighborConnection::connect_primary_with_state(
             simulator_id,
             agent_session.clone(),
@@ -2134,7 +2133,7 @@ mod tests {
         let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
         let simulator_id = SimulatorId::allocate().expect("simulator ID");
         let budget = OutboundBudget::new(crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
-        let (primary_state, primary_state_receiver) = watch::channel(PrimaryState::PRIMARY_CONNECTING);
+        let (primary_state, primary_state_receiver) = watch::channel(PrimaryState::Connecting);
         let connection = NeighborConnection::connect_primary_with_state(
             simulator_id,
             session(simulator.local_addr().expect("simulator address")),
@@ -2154,7 +2153,7 @@ mod tests {
         commands.try_send(NeighborCommand::CancelHandoff).expect("fill first command slot");
         commands.try_send(NeighborCommand::CancelHandoff).expect("fill second command slot");
         let (_logout, logout) = mpsc::channel(1);
-        primary_state.send_replace(PrimaryState::demoted(1));
+        primary_state.send_replace(PrimaryState::Neighbor { generation: 1 });
         drop(primary_state);
         let worker = spawn(connection.run(events, shutdown, requests, command_receiver, logout, SimulatorMemoryBudget::new()));
 
@@ -2198,7 +2197,7 @@ mod tests {
         let session_id = agent_session.session_id;
         let budget = OutboundBudget::new(1);
         let pacer = budget.register(simulator_id.get(), false).await.expect("register simulator pacer");
-        let (primary_state, primary_state_receiver) = watch::channel(PrimaryState::NEIGHBOR);
+        let (primary_state, primary_state_receiver) = watch::channel(PrimaryState::Neighbor { generation: 0 });
         let promote_connection = primary_state.clone();
         let mut connection = NeighborConnection::connect_with_role(
             simulator_id,
@@ -2228,7 +2227,7 @@ mod tests {
         let (use_circuit, peer) = receive_packet(&simulator).await;
         send_ack(&simulator, peer, use_circuit.sequence()).await;
         receive_connected(&mut received_events).await;
-        promote_connection.send_replace(PrimaryState::PRIMARY_READY);
+        promote_connection.send_replace(PrimaryState::Ready { generation: 0 });
 
         let (ready_completed, ready_response) = oneshot::channel();
         commands
@@ -2423,7 +2422,7 @@ mod tests {
                     assert_eq!(completed_id, simulator_id);
                     assert!(error.is_none(), "successful local send has no error");
                     assert!(!report_failure, "successful send completion does not report a failure");
-                    assert!(super::super::handoff::matches_handoff_cancellation(&handoff_state, actual));
+                    assert!(crate::simulator::coordinator::handoff::matches_handoff_cancellation(&handoff_state, actual));
                     break;
                 }
             }
@@ -2516,7 +2515,7 @@ mod tests {
                     assert_eq!(completed_id, simulator_id);
                     assert!(error.is_some(), "expired send reports its failure");
                     assert!(report_failure);
-                    assert!(super::super::handoff::matches_handoff_cancellation(&handoff_state, actual));
+                    assert!(crate::simulator::coordinator::handoff::matches_handoff_cancellation(&handoff_state, actual));
                     break;
                 }
             }
@@ -2545,7 +2544,7 @@ mod tests {
     fn handoff_cancellation_for_test(
         source: SimulatorId,
         endpoint: SocketAddr,
-    ) -> (PendingPromotion, super::super::handoff::HandoffCancellation) {
+    ) -> (PendingPromotion, crate::simulator::coordinator::handoff::HandoffCancellation) {
         let handoff = HandoffTarget {
             agent_id: Uuid::nil(),
             session_id: Uuid::nil(),
@@ -2560,7 +2559,7 @@ mod tests {
             handoff,
             evidence: HandoffEvidence::default(),
         };
-        let cancellation = super::super::handoff::handoff_cancellation(&pending);
+        let cancellation = crate::simulator::coordinator::handoff::handoff_cancellation(&pending);
         (pending, cancellation)
     }
 

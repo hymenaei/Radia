@@ -10,15 +10,6 @@ use tokio::{
     time,
 };
 
-use crate::{
-    capture::CaptureRecorder,
-    coverage::CoverageLossLedger,
-    error::Error,
-    event::{EventEnvelope, SimulatorId},
-    http::{self, validate_http_url},
-    status::NetworkStatusHandle,
-};
-
 use super::{
     budget::{
         COMMAND_CAPACITY, CapabilityBudget, EVENT_QUEUE_REQUEST_TIMEOUT, LLSD_SCAN_WORKING_BYTES, MAX_CAPABILITY_REQUEST_BODY_BYTES,
@@ -29,6 +20,14 @@ use super::{
         AdmittedCapabilities, AdmittedResponse, Command, RequestDeadline, capability_error, capability_llsd_limits_with_response_limit,
         decode_capability_value_with_response_limit, logical_endpoint_label, run, validate_capability_names, wait_for_session_close,
     },
+};
+use crate::{
+    capture::CaptureRecorder,
+    coverage::CoverageLossLedger,
+    error::Error,
+    event::{EventEnvelope, SimulatorId},
+    http::{self, validate_http_url},
+    status::NetworkStatusHandle,
 };
 
 #[derive(Clone)]
@@ -80,30 +79,6 @@ pub struct Client {
     budget: CapabilityBudget,
     status: NetworkStatusHandle,
     request_timeout: Duration,
-}
-
-struct RequestWorker {
-    task: Mutex<Option<JoinHandle<()>>>,
-}
-
-impl RequestWorker {
-    async fn wait(&self) -> Result<(), JoinError> {
-        let mut task = self.task.lock().await;
-        let result = match task.as_mut() {
-            Some(task) => task.await,
-            None => return Ok(()),
-        };
-        *task = None;
-        result
-    }
-}
-
-struct AbortOnDrop(AbortHandle);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 impl fmt::Debug for Client {
@@ -462,6 +437,30 @@ impl Client {
     }
 }
 
+struct RequestWorker {
+    task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl RequestWorker {
+    async fn wait(&self) -> Result<(), JoinError> {
+        let mut task = self.task.lock().await;
+        let result = match task.as_mut() {
+            Some(task) => task.await,
+            None => return Ok(()),
+        };
+        *task = None;
+        result
+    }
+}
+
+struct AbortOnDrop(AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn capability_preflight_error(error: xml::BoundError) -> Error {
     match error {
         xml::BoundError::Malformed => Error::Capability(format!("Could not decode an LLSD response: {error}")),
@@ -543,7 +542,7 @@ pub(crate) mod tests {
         time::{Duration, Instant},
     };
 
-    use super::super::budget::LLSD_SCAN_WORKING_BYTES;
+    use crate::capabilities::budget::LLSD_SCAN_WORKING_BYTES;
     use crate::http::testing::{LocalServer, read_request, response};
     use crate::{
         AgentSession,
@@ -785,7 +784,7 @@ pub(crate) mod tests {
         let body = b"<llsd><integer>42</integer></llsd>".to_vec();
         let body_len = body.len();
         let allocation_bound =
-            xml::value_allocation_bound(&body, super::super::request::capability_llsd_limits()).expect("bound valid LLSD response");
+            xml::value_allocation_bound(&body, crate::capabilities::request::capability_llsd_limits()).expect("bound valid LLSD response");
         let memory_limit = body_len + LLSD_SCAN_WORKING_BYTES + allocation_bound;
         let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0, 0);
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_len).expect("reserve raw response memory");
@@ -819,7 +818,7 @@ pub(crate) mod tests {
 
         let malformed = b"<llsd><array></map></llsd>".to_vec();
         let malformed_len = malformed.len();
-        let bound = xml::value_allocation_bound(&malformed, super::super::request::capability_llsd_limits());
+        let bound = xml::value_allocation_bound(&malformed, crate::capabilities::request::capability_llsd_limits());
         assert!(matches!(bound, Err(xml::BoundError::Malformed)), "malformed input must fail preflight");
         let memory_limit = malformed_len + LLSD_SCAN_WORKING_BYTES;
         let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0, 0);
@@ -848,7 +847,7 @@ pub(crate) mod tests {
         let _decode_gate_test = lock_decode_gate_test();
         let body = b"<llsd><integer>42</integer></llsd>".to_vec();
         let allocation_bound =
-            xml::value_allocation_bound(&body, super::super::request::capability_llsd_limits()).expect("bound valid LLSD response");
+            xml::value_allocation_bound(&body, crate::capabilities::request::capability_llsd_limits()).expect("bound valid LLSD response");
         let memory_limit = body.capacity() + LLSD_SCAN_WORKING_BYTES + allocation_bound;
         let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0, 0);
         let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body.capacity()).expect("reserve raw response memory");
@@ -899,7 +898,7 @@ pub(crate) mod tests {
 
     #[test]
     fn decode_preflight_enforces_llsd_limits() {
-        let max_depth = super::super::budget::MAX_LLSD_NESTING_DEPTH;
+        let max_depth = crate::capabilities::budget::MAX_LLSD_NESTING_DEPTH;
         let mut nested = String::from("<llsd>");
         for _ in 0..=max_depth {
             nested.push_str("<array>");
@@ -937,7 +936,8 @@ pub(crate) mod tests {
     #[test]
     fn decode_preflight_enforces_memory_budget() {
         let body = format!("<llsd><string>{}</string></llsd>", "x".repeat(128 * 1024)).into_bytes();
-        let bound = xml::value_allocation_bound(&body, super::super::request::capability_llsd_limits()).expect("bound valid LLSD response");
+        let bound =
+            xml::value_allocation_bound(&body, crate::capabilities::request::capability_llsd_limits()).expect("bound valid LLSD response");
         let body_capacity = body.capacity();
 
         for limit in [body_capacity + LLSD_SCAN_WORKING_BYTES - 1, body_capacity + LLSD_SCAN_WORKING_BYTES + bound - 1] {
@@ -1630,7 +1630,7 @@ pub(crate) mod tests {
         event_body.push_str("</array></map></llsd>");
         let ordinary_payload = "o".repeat(ORDINARY_PAYLOAD_BYTES);
         let ordinary_body = format!("<llsd><string>{ordinary_payload}</string></llsd>");
-        let event_value_bound = xml::value_allocation_bound(event_body.as_bytes(), super::super::request::capability_llsd_limits())
+        let event_value_bound = xml::value_allocation_bound(event_body.as_bytes(), crate::capabilities::request::capability_llsd_limits())
             .expect("bound EventQueue XML decode");
         let event_batch_bound = event_batch_allocation_bound(event_body.as_bytes()).expect("bound EventQueue batch decode");
         let event_response = response(200, "OK", "application/llsd+xml", None, &event_body);
@@ -1787,11 +1787,11 @@ pub(crate) mod tests {
             measure_allocations(|| {
                 let event_body = event_template.clone();
                 let ordinary_body = ordinary_template.clone();
-                let allocation_bound = xml::value_allocation_bound(&event_body, super::super::request::capability_llsd_limits())
+                let allocation_bound = xml::value_allocation_bound(&event_body, crate::capabilities::request::capability_llsd_limits())
                     .expect("bound EventQueue XML decode");
                 let (event_id, events) = decode_event_batch(&event_body).expect("decode the EventQueue batch");
                 let ordinary_value: Value =
-                    super::super::request::decode_capability_value(&ordinary_body).expect("decode the ordinary response");
+                    crate::capabilities::request::decode_capability_value(&ordinary_body).expect("decode the ordinary response");
 
                 assert_eq!(event_id, 5);
                 assert_eq!(events.len(), EVENT_COUNT);
@@ -2663,7 +2663,7 @@ pub(crate) mod tests {
         let coverage_losses = CoverageLossLedger::new();
         let queued_event_capacity = client.budget.queued_event_bytes.available_permits();
         let batch_reservation_floor = queued_event_capacity
-            .checked_sub(super::super::budget::MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES)
+            .checked_sub(crate::capabilities::budget::MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES)
             .expect("session queue budget includes one EventQueue batch reservation");
 
         let (first_sender, first_receiver) = mpsc::channel(1);

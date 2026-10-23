@@ -1,11 +1,11 @@
+#[cfg(test)]
+use std::sync::Arc;
 use std::{
     io::{self, ErrorKind},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
 use protocol::lludp::Packet;
-#[cfg(test)]
-use std::sync::Arc;
 use tokio::net::UdpSocket;
 #[cfg(test)]
 use tokio::sync::{Notify, watch};
@@ -25,12 +25,6 @@ pub(crate) struct UdpTransport {
     status: NetworkStatusHandle,
     #[cfg(test)]
     send_gate: Option<SendGate>,
-}
-
-#[cfg(test)]
-pub(crate) struct SendGate {
-    paused: watch::Receiver<bool>,
-    entered: Arc<Notify>,
 }
 
 impl UdpTransport {
@@ -151,6 +145,12 @@ impl UdpTransport {
     }
 }
 
+#[cfg(test)]
+pub(crate) struct SendGate {
+    paused: watch::Receiver<bool>,
+    entered: Arc<Notify>,
+}
+
 fn local_bind_address(remote: SocketAddr) -> SocketAddr {
     match remote {
         SocketAddr::V4(_) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
@@ -243,9 +243,9 @@ mod tests {
     fn ipv6_is_disabled(error: &io::Error) -> bool {
         match error.raw_os_error() {
             #[cfg(target_os = "linux")]
-            Some(97) => true, // EAFNOSUPPORT
+            Some(97) => true,
             #[cfg(windows)]
-            Some(10047) => true, // WSAEAFNOSUPPORT
+            Some(10047) => true,
             #[cfg(any(
                 target_os = "macos",
                 target_os = "ios",
@@ -256,7 +256,7 @@ mod tests {
                 target_os = "solaris",
                 target_os = "illumos"
             ))]
-            Some(47) => true, // EAFNOSUPPORT
+            Some(47) => true,
             _ => false,
         }
     }

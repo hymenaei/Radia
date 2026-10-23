@@ -1,3 +1,7 @@
+mod outbound_message {
+    pub trait Sealed {}
+}
+
 #[cfg(test)]
 use std::time::Instant;
 use std::{
@@ -43,7 +47,6 @@ use crate::{
 
 pub(crate) const COMMAND_CAPACITY: usize = 256;
 pub(crate) const NETWORK_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
-
 pub const DEFAULT_UPSTREAM_BYTES_PER_SECOND: NonZeroU64 = NonZeroU64::new(64_000).unwrap();
 const MAX_OUTBOUND_CHAT_MESSAGE_BYTES: usize = 8 * 1024 - 6 - 4 - 40 - (1 + u8::MAX as usize * 4);
 const MAX_OUTBOUND_OBJECT_REQUESTS: usize = u8::MAX as usize;
@@ -69,24 +72,7 @@ impl Default for SessionOptions {
     }
 }
 
-mod outbound_message {
-    pub trait Sealed {}
-}
-
 pub trait OutboundMessage: outbound_message::Sealed + Into<Message> {}
-
-impl outbound_message::Sealed for TeleportCancel {}
-impl OutboundMessage for TeleportCancel {}
-impl outbound_message::Sealed for AgentUpdate {}
-impl OutboundMessage for AgentUpdate {}
-impl outbound_message::Sealed for ChatFromViewer {}
-impl OutboundMessage for ChatFromViewer {}
-impl outbound_message::Sealed for MapBlockRequest {}
-impl OutboundMessage for MapBlockRequest {}
-impl outbound_message::Sealed for RegionHandleRequest {}
-impl OutboundMessage for RegionHandleRequest {}
-impl outbound_message::Sealed for RequestMultipleObjects {}
-impl OutboundMessage for RequestMultipleObjects {}
 
 pub struct MfaChallenge {
     commands: Sender<Command>,
@@ -583,25 +569,6 @@ impl SessionHandle {
     }
 }
 
-fn validate_outbound_message(message: &Message) -> Result<(), Error> {
-    match message {
-        Message::ChatFromViewer(message) if message.chat_data.message.capacity() > MAX_OUTBOUND_CHAT_MESSAGE_BYTES => {
-            Err(Error::OutboundMessageTooLarge)
-        }
-        Message::RequestMultipleObjects(message) if message.objects.capacity() > MAX_OUTBOUND_OBJECT_REQUESTS => {
-            Err(Error::OutboundMessageTooLarge)
-        }
-        _ => Ok(()),
-    }
-}
-
-fn try_send_command(commands: &Sender<Command>, command: Command, closed: Error) -> Result<(), Error> {
-    commands.try_send(command).map_err(|error| match error {
-        mpsc::error::TrySendError::Full(_) => Error::CommandQueueFull,
-        mpsc::error::TrySendError::Closed(_) => closed,
-    })
-}
-
 pub(crate) enum Command {
     SubmitMfaCode(String),
     SendMessage {
@@ -641,6 +608,49 @@ enum CaptureOperationResult {
 enum CaptureOperationReply {
     Start(oneshot::Sender<Result<(), String>>),
     Stop(oneshot::Sender<Result<PathBuf, String>>),
+}
+
+impl outbound_message::Sealed for TeleportCancel {}
+
+impl OutboundMessage for TeleportCancel {}
+
+impl outbound_message::Sealed for AgentUpdate {}
+
+impl OutboundMessage for AgentUpdate {}
+
+impl outbound_message::Sealed for ChatFromViewer {}
+
+impl OutboundMessage for ChatFromViewer {}
+
+impl outbound_message::Sealed for MapBlockRequest {}
+
+impl OutboundMessage for MapBlockRequest {}
+
+impl outbound_message::Sealed for RegionHandleRequest {}
+
+impl OutboundMessage for RegionHandleRequest {}
+
+impl outbound_message::Sealed for RequestMultipleObjects {}
+
+impl OutboundMessage for RequestMultipleObjects {}
+
+fn validate_outbound_message(message: &Message) -> Result<(), Error> {
+    match message {
+        Message::ChatFromViewer(message) if message.chat_data.message.capacity() > MAX_OUTBOUND_CHAT_MESSAGE_BYTES => {
+            Err(Error::OutboundMessageTooLarge)
+        }
+        Message::RequestMultipleObjects(message) if message.objects.capacity() > MAX_OUTBOUND_OBJECT_REQUESTS => {
+            Err(Error::OutboundMessageTooLarge)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn try_send_command(commands: &Sender<Command>, command: Command, closed: Error) -> Result<(), Error> {
+    commands.try_send(command).map_err(|error| match error {
+        mpsc::error::TrySendError::Full(_) => Error::CommandQueueFull,
+        mpsc::error::TrySendError::Closed(_) => closed,
+    })
 }
 
 async fn run_with_capture<F>(

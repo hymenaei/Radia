@@ -18,6 +18,8 @@ use crate::{capture::CaptureRecorder, status::NetworkStatusHandle};
 #[cfg(test)]
 const MAX_HTTP_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
+type AdmittedBody = (Vec<u8>, Option<ResponseMemoryPermit>, Option<ResponseMemoryPermit>);
+
 #[derive(Clone)]
 pub(crate) struct Client {
     client: reqwest::Client,
@@ -27,297 +29,6 @@ pub(crate) struct Client {
     memory: Option<ResponseMemoryBudget>,
     memory_class: ResponseMemoryClass,
 }
-
-pub(crate) struct Response {
-    pub(crate) status: StatusCode,
-    pub(crate) headers: HeaderMap,
-    pub(crate) body: Vec<u8>,
-    pub(crate) elapsed: Duration,
-    pub(crate) memory: Option<ResponseMemoryPermit>,
-    pub(crate) extra_memory: Option<ResponseMemoryPermit>,
-}
-
-impl Response {
-    pub(crate) fn retry_after(&self) -> Option<Duration> {
-        let value = self.headers.get(RETRY_AFTER)?.to_str().ok()?;
-        retry_after_delay(value, SystemTime::now())
-    }
-}
-
-fn retry_after_delay(value: &str, now: SystemTime) -> Option<Duration> {
-    let value = value.trim();
-    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        let seconds = value.parse::<u64>().unwrap_or(u64::MAX);
-        return Some(Duration::from_secs(seconds));
-    }
-
-    let retry_at = httpdate::parse_http_date(value).ok()?;
-    Some(retry_at.duration_since(now).unwrap_or_default())
-}
-
-/// Classified failure from a capability HTTP operation.
-///
-/// `Debug` redacts the message. `Display` is intended for application boundaries and may include server-provided diagnostics.
-#[non_exhaustive]
-pub enum Error {
-    /// The HTTP request failed at the transport layer.
-    Transport { elapsed: Duration, status: Option<StatusCode>, retry_after: Option<Duration>, message: String },
-    /// The HTTP operation exceeded its deadline.
-    Timeout { elapsed: Duration, status: Option<StatusCode>, retry_after: Option<Duration>, message: String },
-    /// The HTTP operation was canceled by its owner.
-    Cancelled { elapsed: Duration, status: Option<StatusCode>, retry_after: Option<Duration>, message: String },
-    /// The response exceeded a configured resource or memory limit.
-    ResourceExhausted { elapsed: Duration, status: Option<StatusCode>, retry_after: Option<Duration>, message: String },
-    /// The server returned an unsuccessful HTTP status.
-    HttpStatus { status: StatusCode, elapsed: Duration, retry_after: Option<Duration>, message: String },
-    /// The request could not be formed or validated.
-    Message(String),
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum ResponseMemoryClass {
-    Ordinary,
-    EventQueue,
-    Capture,
-}
-
-#[derive(Clone)]
-pub(crate) struct ResponseMemoryBudget(Arc<Mutex<ResponseMemoryState>>);
-
-struct ResponseMemoryState {
-    ordinary_limit: usize,
-    event_queue_limit: usize,
-    capture_limit: usize,
-    shared_limit: usize,
-    ordinary_used: usize,
-    event_queue_used: usize,
-    capture_used: usize,
-    shared_used: usize,
-}
-
-pub(crate) struct ResponseMemoryPermit {
-    budget: Option<ResponseMemoryBudget>,
-    class: ResponseMemoryClass,
-    bytes: usize,
-}
-
-impl ResponseMemoryBudget {
-    pub(crate) fn new(ordinary_limit: usize, event_queue_limit: usize, capture_limit: usize, shared_limit: usize) -> Self {
-        Self(Arc::new(Mutex::new(ResponseMemoryState {
-            ordinary_limit,
-            event_queue_limit,
-            capture_limit,
-            shared_limit,
-            ordinary_used: 0,
-            event_queue_used: 0,
-            capture_used: 0,
-            shared_used: 0,
-        })))
-    }
-
-    pub(crate) fn try_reserve(&self, class: ResponseMemoryClass, bytes: usize) -> Result<ResponseMemoryPermit, Error> {
-        self.reserve(class, bytes)?;
-        Ok(ResponseMemoryPermit { budget: Some(self.clone()), class, bytes })
-    }
-
-    fn reserve(&self, class: ResponseMemoryClass, bytes: usize) -> Result<(), Error> {
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let (used, limit) = match class {
-            ResponseMemoryClass::Ordinary => (state.ordinary_used, state.ordinary_limit),
-            ResponseMemoryClass::EventQueue => (state.event_queue_used, state.event_queue_limit),
-            ResponseMemoryClass::Capture => (state.capture_used, state.capture_limit),
-        };
-        let next_used =
-            used.checked_add(bytes).ok_or_else(|| Error::resource_exhausted("Capability memory budget arithmetic overflowed."))?;
-        let old_shared = used.saturating_sub(limit);
-        let new_shared = next_used.saturating_sub(limit);
-        let next_shared = state.shared_used.checked_sub(old_shared).and_then(|current| current.checked_add(new_shared));
-        if next_shared.is_none_or(|shared| shared > state.shared_limit) {
-            return Err(Error::resource_exhausted("Capability response memory is temporarily unavailable."));
-        }
-        match class {
-            ResponseMemoryClass::Ordinary => state.ordinary_used = next_used,
-            ResponseMemoryClass::EventQueue => state.event_queue_used = next_used,
-            ResponseMemoryClass::Capture => state.capture_used = next_used,
-        }
-        state.shared_used = next_shared.unwrap_or(state.shared_limit);
-        Ok(())
-    }
-
-    fn release(&self, class: ResponseMemoryClass, bytes: usize) {
-        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let (used, limit) = match class {
-            ResponseMemoryClass::Ordinary => (state.ordinary_used, state.ordinary_limit),
-            ResponseMemoryClass::EventQueue => (state.event_queue_used, state.event_queue_limit),
-            ResponseMemoryClass::Capture => (state.capture_used, state.capture_limit),
-        };
-        let next_used = used.saturating_sub(bytes);
-        let released_shared = used.saturating_sub(limit).saturating_sub(next_used.saturating_sub(limit));
-        match class {
-            ResponseMemoryClass::Ordinary => state.ordinary_used = next_used,
-            ResponseMemoryClass::EventQueue => state.event_queue_used = next_used,
-            ResponseMemoryClass::Capture => state.capture_used = next_used,
-        }
-        state.shared_used = state.shared_used.saturating_sub(released_shared);
-    }
-}
-
-impl ResponseMemoryPermit {
-    pub(crate) fn try_grow_to(&mut self, bytes: usize) -> Result<(), Error> {
-        self.try_grow(bytes.saturating_sub(self.bytes))
-    }
-
-    pub(crate) fn try_grow(&mut self, bytes: usize) -> Result<(), Error> {
-        let Some(budget) = &self.budget else {
-            return Ok(());
-        };
-        let next_bytes =
-            self.bytes.checked_add(bytes).ok_or_else(|| Error::resource_exhausted("Capability memory budget arithmetic overflowed."))?;
-        budget.reserve(self.class, bytes)?;
-        self.bytes = next_bytes;
-        Ok(())
-    }
-
-    pub(crate) fn shrink_to(&mut self, bytes: usize) {
-        let released = self.bytes.saturating_sub(bytes);
-        if released > 0 {
-            if let Some(budget) = &self.budget {
-                budget.release(self.class, released);
-            }
-            self.bytes -= released;
-        }
-    }
-}
-
-impl Drop for ResponseMemoryPermit {
-    fn drop(&mut self) {
-        if let Some(budget) = &self.budget {
-            budget.release(self.class, self.bytes);
-        }
-    }
-}
-
-impl Debug for Response {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Response")
-            .field("status", &self.status)
-            .field("header_count", &self.headers.len())
-            .field("body_bytes", &self.body.len())
-            .field("elapsed", &self.elapsed)
-            .finish()
-    }
-}
-
-impl Debug for Error {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Transport { elapsed, status, retry_after, .. } => formatter
-                .debug_struct("Transport")
-                .field("elapsed", elapsed)
-                .field("status", status)
-                .field("retry_after", retry_after)
-                .field("message", &"[REDACTED]")
-                .finish(),
-            Self::Timeout { elapsed, status, retry_after, .. } => formatter
-                .debug_struct("Timeout")
-                .field("elapsed", elapsed)
-                .field("status", status)
-                .field("retry_after", retry_after)
-                .field("message", &"[REDACTED]")
-                .finish(),
-            Self::Cancelled { elapsed, status, retry_after, .. } => formatter
-                .debug_struct("Cancelled")
-                .field("elapsed", elapsed)
-                .field("status", status)
-                .field("retry_after", retry_after)
-                .field("message", &"[REDACTED]")
-                .finish(),
-            Self::ResourceExhausted { elapsed, status, retry_after, .. } => formatter
-                .debug_struct("ResourceExhausted")
-                .field("elapsed", elapsed)
-                .field("status", status)
-                .field("retry_after", retry_after)
-                .field("message", &"[REDACTED]")
-                .finish(),
-            Self::HttpStatus { status, elapsed, retry_after, .. } => formatter
-                .debug_struct("HttpStatus")
-                .field("status", status)
-                .field("elapsed", elapsed)
-                .field("retry_after", retry_after)
-                .field("message", &"[REDACTED]")
-                .finish(),
-            Self::Message(_) => formatter.debug_tuple("Message").field(&"[REDACTED]").finish(),
-        }
-    }
-}
-
-impl Error {
-    fn request(error: reqwest::Error, elapsed: Duration) -> Self {
-        if error.is_timeout() {
-            Self::Timeout { elapsed, status: None, retry_after: None, message: error.without_url().to_string() }
-        } else {
-            Self::Transport { elapsed, status: None, retry_after: None, message: error.without_url().to_string() }
-        }
-    }
-
-    pub(crate) fn resource_exhausted(message: impl Into<String>) -> Self {
-        Self::ResourceExhausted { elapsed: Duration::ZERO, status: None, retry_after: None, message: message.into() }
-    }
-
-    fn with_response(self, status: StatusCode, retry_after: Option<Duration>, elapsed: Duration) -> Self {
-        match self {
-            Self::Timeout { message, .. } => Self::Timeout { elapsed, status: Some(status), retry_after, message },
-            Self::Transport { message, .. } => Self::Transport { elapsed, status: Some(status), retry_after, message },
-            Self::Cancelled { message, .. } => Self::Cancelled { elapsed, status: Some(status), retry_after, message },
-            Self::ResourceExhausted { message, .. } => Self::ResourceExhausted { elapsed, status: Some(status), retry_after, message },
-            error => error,
-        }
-    }
-
-    pub(crate) fn is_timeout_after(&self, minimum: Duration) -> bool {
-        matches!(self, Self::Timeout { elapsed, status: None, .. } if *elapsed >= minimum)
-    }
-
-    pub(crate) fn retry_after(&self) -> Option<Duration> {
-        match self {
-            Self::Transport { retry_after, .. }
-            | Self::Timeout { retry_after, .. }
-            | Self::Cancelled { retry_after, .. }
-            | Self::ResourceExhausted { retry_after, .. }
-            | Self::HttpStatus { retry_after, .. } => *retry_after,
-            Self::Message(_) => None,
-        }
-    }
-
-    pub(crate) fn is_resource_exhausted(&self) -> bool {
-        matches!(self, Self::ResourceExhausted { .. })
-    }
-
-    pub(crate) fn http_status(status: StatusCode, elapsed: Duration, retry_after: Option<Duration>, context: &str) -> Self {
-        Self::HttpStatus { status, elapsed, retry_after, message: format!("{context}: HTTP {status}") }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_timeout(&self) -> bool {
-        matches!(self, Self::Timeout { .. })
-    }
-}
-
-impl Display for Error {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Transport { message, .. }
-            | Self::Timeout { message, .. }
-            | Self::Cancelled { message, .. }
-            | Self::ResourceExhausted { message, .. }
-            | Self::HttpStatus { message, .. } => formatter.write_str(message),
-            Self::Message(message) => formatter.write_str(message),
-        }
-    }
-}
-
-impl error::Error for Error {}
 
 impl Client {
     pub(crate) fn new(timeout: Option<Duration>, http1_only: bool, user_agent: Option<&str>) -> Result<Self, reqwest::Error> {
@@ -653,6 +364,292 @@ impl Client {
     }
 }
 
+pub(crate) struct Response {
+    pub(crate) status: StatusCode,
+    pub(crate) headers: HeaderMap,
+    pub(crate) body: Vec<u8>,
+    pub(crate) elapsed: Duration,
+    pub(crate) memory: Option<ResponseMemoryPermit>,
+    pub(crate) extra_memory: Option<ResponseMemoryPermit>,
+}
+
+impl Response {
+    pub(crate) fn retry_after(&self) -> Option<Duration> {
+        let value = self.headers.get(RETRY_AFTER)?.to_str().ok()?;
+        retry_after_delay(value, SystemTime::now())
+    }
+}
+
+impl Debug for Response {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Response")
+            .field("status", &self.status)
+            .field("header_count", &self.headers.len())
+            .field("body_bytes", &self.body.len())
+            .field("elapsed", &self.elapsed)
+            .finish()
+    }
+}
+
+#[non_exhaustive]
+pub enum Error {
+    Transport { elapsed: Duration, status: Option<StatusCode>, retry_after: Option<Duration>, message: String },
+    Timeout { elapsed: Duration, status: Option<StatusCode>, retry_after: Option<Duration>, message: String },
+    Cancelled { elapsed: Duration, status: Option<StatusCode>, retry_after: Option<Duration>, message: String },
+    ResourceExhausted { elapsed: Duration, status: Option<StatusCode>, retry_after: Option<Duration>, message: String },
+    HttpStatus { status: StatusCode, elapsed: Duration, retry_after: Option<Duration>, message: String },
+    Message(String),
+}
+
+impl Debug for Error {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport { elapsed, status, retry_after, .. } => formatter
+                .debug_struct("Transport")
+                .field("elapsed", elapsed)
+                .field("status", status)
+                .field("retry_after", retry_after)
+                .field("message", &"[REDACTED]")
+                .finish(),
+            Self::Timeout { elapsed, status, retry_after, .. } => formatter
+                .debug_struct("Timeout")
+                .field("elapsed", elapsed)
+                .field("status", status)
+                .field("retry_after", retry_after)
+                .field("message", &"[REDACTED]")
+                .finish(),
+            Self::Cancelled { elapsed, status, retry_after, .. } => formatter
+                .debug_struct("Cancelled")
+                .field("elapsed", elapsed)
+                .field("status", status)
+                .field("retry_after", retry_after)
+                .field("message", &"[REDACTED]")
+                .finish(),
+            Self::ResourceExhausted { elapsed, status, retry_after, .. } => formatter
+                .debug_struct("ResourceExhausted")
+                .field("elapsed", elapsed)
+                .field("status", status)
+                .field("retry_after", retry_after)
+                .field("message", &"[REDACTED]")
+                .finish(),
+            Self::HttpStatus { status, elapsed, retry_after, .. } => formatter
+                .debug_struct("HttpStatus")
+                .field("status", status)
+                .field("elapsed", elapsed)
+                .field("retry_after", retry_after)
+                .field("message", &"[REDACTED]")
+                .finish(),
+            Self::Message(_) => formatter.debug_tuple("Message").field(&"[REDACTED]").finish(),
+        }
+    }
+}
+
+impl Error {
+    fn request(error: reqwest::Error, elapsed: Duration) -> Self {
+        if error.is_timeout() {
+            Self::Timeout { elapsed, status: None, retry_after: None, message: error.without_url().to_string() }
+        } else {
+            Self::Transport { elapsed, status: None, retry_after: None, message: error.without_url().to_string() }
+        }
+    }
+
+    pub(crate) fn resource_exhausted(message: impl Into<String>) -> Self {
+        Self::ResourceExhausted { elapsed: Duration::ZERO, status: None, retry_after: None, message: message.into() }
+    }
+
+    fn with_response(self, status: StatusCode, retry_after: Option<Duration>, elapsed: Duration) -> Self {
+        match self {
+            Self::Timeout { message, .. } => Self::Timeout { elapsed, status: Some(status), retry_after, message },
+            Self::Transport { message, .. } => Self::Transport { elapsed, status: Some(status), retry_after, message },
+            Self::Cancelled { message, .. } => Self::Cancelled { elapsed, status: Some(status), retry_after, message },
+            Self::ResourceExhausted { message, .. } => Self::ResourceExhausted { elapsed, status: Some(status), retry_after, message },
+            error => error,
+        }
+    }
+
+    pub(crate) fn is_timeout_after(&self, minimum: Duration) -> bool {
+        matches!(self, Self::Timeout { elapsed, status: None, .. } if *elapsed >= minimum)
+    }
+
+    pub(crate) fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Transport { retry_after, .. }
+            | Self::Timeout { retry_after, .. }
+            | Self::Cancelled { retry_after, .. }
+            | Self::ResourceExhausted { retry_after, .. }
+            | Self::HttpStatus { retry_after, .. } => *retry_after,
+            Self::Message(_) => None,
+        }
+    }
+
+    pub(crate) fn is_resource_exhausted(&self) -> bool {
+        matches!(self, Self::ResourceExhausted { .. })
+    }
+
+    pub(crate) fn http_status(status: StatusCode, elapsed: Duration, retry_after: Option<Duration>, context: &str) -> Self {
+        Self::HttpStatus { status, elapsed, retry_after, message: format!("{context}: HTTP {status}") }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_timeout(&self) -> bool {
+        matches!(self, Self::Timeout { .. })
+    }
+}
+
+impl Display for Error {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport { message, .. }
+            | Self::Timeout { message, .. }
+            | Self::Cancelled { message, .. }
+            | Self::ResourceExhausted { message, .. }
+            | Self::HttpStatus { message, .. } => formatter.write_str(message),
+            Self::Message(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl error::Error for Error {}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ResponseMemoryClass {
+    Ordinary,
+    EventQueue,
+    Capture,
+}
+
+#[derive(Clone)]
+pub(crate) struct ResponseMemoryBudget(Arc<Mutex<ResponseMemoryState>>);
+
+impl ResponseMemoryBudget {
+    pub(crate) fn new(ordinary_limit: usize, event_queue_limit: usize, capture_limit: usize, shared_limit: usize) -> Self {
+        Self(Arc::new(Mutex::new(ResponseMemoryState {
+            ordinary_limit,
+            event_queue_limit,
+            capture_limit,
+            shared_limit,
+            ordinary_used: 0,
+            event_queue_used: 0,
+            capture_used: 0,
+            shared_used: 0,
+        })))
+    }
+
+    pub(crate) fn try_reserve(&self, class: ResponseMemoryClass, bytes: usize) -> Result<ResponseMemoryPermit, Error> {
+        self.reserve(class, bytes)?;
+        Ok(ResponseMemoryPermit { budget: Some(self.clone()), class, bytes })
+    }
+
+    fn reserve(&self, class: ResponseMemoryClass, bytes: usize) -> Result<(), Error> {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (used, limit) = match class {
+            ResponseMemoryClass::Ordinary => (state.ordinary_used, state.ordinary_limit),
+            ResponseMemoryClass::EventQueue => (state.event_queue_used, state.event_queue_limit),
+            ResponseMemoryClass::Capture => (state.capture_used, state.capture_limit),
+        };
+        let next_used =
+            used.checked_add(bytes).ok_or_else(|| Error::resource_exhausted("Capability memory budget arithmetic overflowed."))?;
+        let old_shared = used.saturating_sub(limit);
+        let new_shared = next_used.saturating_sub(limit);
+        let Some(next_shared) = state
+            .shared_used
+            .checked_sub(old_shared)
+            .and_then(|current| current.checked_add(new_shared))
+            .filter(|shared| *shared <= state.shared_limit)
+        else {
+            return Err(Error::resource_exhausted("Capability response memory is temporarily unavailable."));
+        };
+        match class {
+            ResponseMemoryClass::Ordinary => state.ordinary_used = next_used,
+            ResponseMemoryClass::EventQueue => state.event_queue_used = next_used,
+            ResponseMemoryClass::Capture => state.capture_used = next_used,
+        }
+        state.shared_used = next_shared;
+        Ok(())
+    }
+
+    fn release(&self, class: ResponseMemoryClass, bytes: usize) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (used, limit) = match class {
+            ResponseMemoryClass::Ordinary => (state.ordinary_used, state.ordinary_limit),
+            ResponseMemoryClass::EventQueue => (state.event_queue_used, state.event_queue_limit),
+            ResponseMemoryClass::Capture => (state.capture_used, state.capture_limit),
+        };
+        let next_used = used.saturating_sub(bytes);
+        let released_shared = used.saturating_sub(limit).saturating_sub(next_used.saturating_sub(limit));
+        match class {
+            ResponseMemoryClass::Ordinary => state.ordinary_used = next_used,
+            ResponseMemoryClass::EventQueue => state.event_queue_used = next_used,
+            ResponseMemoryClass::Capture => state.capture_used = next_used,
+        }
+        state.shared_used = state.shared_used.saturating_sub(released_shared);
+    }
+}
+
+struct ResponseMemoryState {
+    ordinary_limit: usize,
+    event_queue_limit: usize,
+    capture_limit: usize,
+    shared_limit: usize,
+    ordinary_used: usize,
+    event_queue_used: usize,
+    capture_used: usize,
+    shared_used: usize,
+}
+
+pub(crate) struct ResponseMemoryPermit {
+    budget: Option<ResponseMemoryBudget>,
+    class: ResponseMemoryClass,
+    bytes: usize,
+}
+
+impl ResponseMemoryPermit {
+    pub(crate) fn try_grow_to(&mut self, bytes: usize) -> Result<(), Error> {
+        self.try_grow(bytes.saturating_sub(self.bytes))
+    }
+
+    pub(crate) fn try_grow(&mut self, bytes: usize) -> Result<(), Error> {
+        let Some(budget) = &self.budget else {
+            return Ok(());
+        };
+        let next_bytes =
+            self.bytes.checked_add(bytes).ok_or_else(|| Error::resource_exhausted("Capability memory budget arithmetic overflowed."))?;
+        budget.reserve(self.class, bytes)?;
+        self.bytes = next_bytes;
+        Ok(())
+    }
+
+    pub(crate) fn shrink_to(&mut self, bytes: usize) {
+        let released = self.bytes.saturating_sub(bytes);
+        if released > 0 {
+            if let Some(budget) = &self.budget {
+                budget.release(self.class, released);
+            }
+            self.bytes -= released;
+        }
+    }
+}
+
+impl Drop for ResponseMemoryPermit {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.budget {
+            budget.release(self.class, self.bytes);
+        }
+    }
+}
+
+fn retry_after_delay(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let seconds = value.parse::<u64>().unwrap_or(u64::MAX);
+        return Some(Duration::from_secs(seconds));
+    }
+
+    let retry_at = httpdate::parse_http_date(value).ok()?;
+    Some(retry_at.duration_since(now).unwrap_or_default())
+}
+
 fn capture_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     let mut captured = Vec::new();
     for name in [CONTENT_TYPE, CONTENT_LENGTH, RETRY_AFTER] {
@@ -684,8 +681,6 @@ where
     };
     result.map_err(|error| Error::request(error, started.elapsed()))
 }
-
-type AdmittedBody = (Vec<u8>, Option<ResponseMemoryPermit>, Option<ResponseMemoryPermit>);
 
 fn admit_body_capacity(
     memory: &mut Option<ResponseMemoryPermit>,
@@ -909,7 +904,6 @@ mod tests {
         assert_eq!(retry_after_delay("", UNIX_EPOCH), None);
     }
 }
-
 #[cfg(test)]
 pub(crate) mod testing {
     use std::{
@@ -1388,7 +1382,6 @@ pub(crate) mod testing {
         }
     }
 }
-
 #[cfg(test)]
 mod redaction_tests {
     use std::time::Duration;

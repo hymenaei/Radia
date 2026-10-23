@@ -1,6 +1,9 @@
+#[cfg(test)]
+use std::slice::from_ref;
+#[cfg(test)]
+use std::sync;
 use std::{
-    fmt,
-    mem::take,
+    fmt, mem,
     net::SocketAddr,
     str::from_utf8,
     sync::{
@@ -23,7 +26,8 @@ use tokio::{
 use super::budget::{MAX_CONCURRENT_EVENT_QUEUES, MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES};
 use super::{
     budget::{
-        LLSD_SCAN_WORKING_BYTES, MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_SEED_CAPABILITY_RESPONSE_BYTES, spawn_blocking_with_permit,
+        LLSD_SCAN_WORKING_BYTES, MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
+        spawn_blocking_with_permit,
     },
     request::{
         LookupError, admit_and_decode_seed_capabilities, capability_llsd_limits, decode_llsd_xml, request_capabilities_response,
@@ -37,10 +41,6 @@ use crate::{
     simulator::EventRetention,
     status::NetworkStatusHandle,
 };
-#[cfg(test)]
-use std::slice::from_ref;
-#[cfg(test)]
-use std::sync;
 
 const EVENT_QUEUE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const EVENT_QUEUE_RETRY_INCREMENT: Duration = Duration::from_secs(3);
@@ -52,9 +52,9 @@ const SEED_LOOKUP_RETRY_LIMIT: u32 = 5;
 const MAX_SEED_RETRY_AFTER: Duration = Duration::from_secs(30);
 pub(crate) const EVENT_QUEUE_NAME: &str = "EventQueueGet";
 const LINDEN_HTTP_INTERNAL_ERROR: u16 = 499;
-pub(crate) const MAX_EVENT_QUEUE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_QUEUED_CAPABILITY_EVENT_BYTES: usize = 256 * 1024;
 const MAX_EVENT_QUEUE_BATCH_EVENTS: usize = 1024;
+
 static NEXT_EVENT_QUEUE_INCARNATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,29 +70,6 @@ pub(crate) struct EventQueueTask {
     task: JoinHandle<()>,
     completion: Completion,
     role: EventQueueRoleHandle,
-}
-
-enum Completion {
-    Pending(oneshot::Receiver<EventQueueExit>),
-    Finished(EventQueueExit),
-}
-
-#[derive(Clone)]
-pub(crate) struct EventQueueRoleHandle {
-    primary: watch::Sender<bool>,
-}
-
-impl EventQueueRoleHandle {
-    pub(crate) fn channel(is_primary: bool) -> (Self, watch::Receiver<bool>) {
-        let (primary, receiver) = watch::channel(is_primary);
-        (Self { primary }, receiver)
-    }
-
-    pub(crate) fn set_primary(&self, primary: bool) {
-        if *self.primary.borrow() != primary {
-            self.primary.send_replace(primary);
-        }
-    }
 }
 
 impl EventQueueTask {
@@ -128,11 +105,176 @@ impl Drop for EventQueueTask {
     }
 }
 
+enum Completion {
+    Pending(oneshot::Receiver<EventQueueExit>),
+    Finished(EventQueueExit),
+}
+
+#[derive(Clone)]
+pub(crate) struct EventQueueRoleHandle {
+    primary: watch::Sender<bool>,
+}
+
+impl EventQueueRoleHandle {
+    pub(crate) fn channel(is_primary: bool) -> (Self, watch::Receiver<bool>) {
+        let (primary, receiver) = watch::channel(is_primary);
+        (Self { primary }, receiver)
+    }
+
+    pub(crate) fn set_primary(&self, primary: bool) {
+        if *self.primary.borrow() != primary {
+            self.primary.send_replace(primary);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RetryOutcome {
     Retry,
     Stopped,
     LimitReached,
+}
+
+struct EventQueueScope {
+    ledger: CoverageLossLedger,
+    simulator_id: SimulatorId,
+    source: CoverageSource,
+}
+
+impl Drop for EventQueueScope {
+    fn drop(&mut self) {
+        self.ledger.retire(self.simulator_id, self.source);
+    }
+}
+
+struct PendingEventQueueLoss {
+    ledger: CoverageLossLedger,
+    simulator_id: SimulatorId,
+    source: CoverageSource,
+    notifier: EventQueueLossNotifier,
+    state: PendingLossState,
+}
+
+impl PendingEventQueueLoss {
+    fn new(ledger: CoverageLossLedger, simulator_id: SimulatorId, source: CoverageSource, notifier: EventQueueLossNotifier) -> Self {
+        Self { ledger, simulator_id, source, notifier, state: PendingLossState::Pending }
+    }
+
+    fn record(&mut self) {
+        if matches!(self.state, PendingLossState::Pending) {
+            self.ledger.record(self.simulator_id, self.source, CoverageLossReason::EventQueueAdmission);
+            self.state = PendingLossState::Recorded { reason: None };
+        }
+    }
+
+    async fn notify(&mut self, reason: String) -> EventSendOutcome {
+        self.record();
+        if let PendingLossState::Recorded { reason: stored } = &mut self.state {
+            *stored = Some(reason.clone());
+        }
+        self.notifier.notify(reason).await
+    }
+
+    fn commit(&mut self) {
+        if matches!(self.state, PendingLossState::Pending) {
+            self.state = PendingLossState::Committed;
+        }
+    }
+}
+
+impl Drop for PendingEventQueueLoss {
+    fn drop(&mut self) {
+        self.record();
+        if let PendingLossState::Recorded { reason } = mem::replace(&mut self.state, PendingLossState::Committed)
+            && !self.notifier.was_notified()
+        {
+            let notifier = self.notifier.clone();
+            let reason =
+                reason.unwrap_or_else(|| "EventQueueGet polling was canceled before its response could be admitted safely.".into());
+            if let Ok(runtime) = Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = notifier.notify(reason).await;
+                });
+            }
+        }
+    }
+}
+
+enum PendingLossState {
+    Pending,
+    Committed,
+    Recorded { reason: Option<String> },
+}
+
+#[derive(Clone)]
+struct EventQueueLossNotifier {
+    events: mpsc::Sender<EventEnvelope>,
+    simulator_id: SimulatorId,
+    source: SocketAddr,
+    shutdown: watch::Receiver<bool>,
+    session_closed: watch::Receiver<bool>,
+    notified: Arc<AtomicBool>,
+}
+
+impl EventQueueLossNotifier {
+    fn new(
+        events: mpsc::Sender<EventEnvelope>,
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        shutdown: watch::Receiver<bool>,
+        session_closed: watch::Receiver<bool>,
+    ) -> Self {
+        Self { events, simulator_id, source, shutdown, session_closed, notified: Arc::new(AtomicBool::new(false)) }
+    }
+
+    async fn notify(&self, reason: String) -> EventSendOutcome {
+        if self.notified.load(Ordering::Acquire) {
+            return EventSendOutcome::Sent;
+        }
+        if *self.shutdown.borrow() || *self.session_closed.borrow() {
+            return EventSendOutcome::Shutdown;
+        }
+
+        let permit = tokio::select! {
+            biased;
+            _ = wait_for_watch_true(self.shutdown.clone()) => return EventSendOutcome::Shutdown,
+            _ = wait_for_session_close(self.session_closed.clone()) => return EventSendOutcome::Shutdown,
+            result = self.events.reserve() => match result {
+                Ok(permit) => permit,
+                Err(_) => return EventSendOutcome::ReceiverClosed,
+            },
+        };
+        if self.notified.swap(true, Ordering::AcqRel) {
+            drop(permit);
+            return EventSendOutcome::Sent;
+        }
+
+        permit.send(EventEnvelope::new(Event::EventQueueCoverageLost { simulator_id: self.simulator_id, source: self.source, reason }));
+        EventSendOutcome::Sent
+    }
+
+    fn was_notified(&self) -> bool {
+        self.notified.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+enum BatchDecodeError {
+    Preflight(xml::BoundError),
+    Resource(Error),
+    Decode(String),
+    Task(JoinError),
+}
+
+impl fmt::Display for BatchDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Preflight(error) => write!(f, "EventQueueGet response allocation preflight failed: {error}"),
+            Self::Resource(error) => write!(f, "EventQueueGet decode memory is unavailable: {error}"),
+            Self::Decode(error) => f.write_str(error),
+            Self::Task(error) => write!(f, "EventQueueGet decoder task failed: {error}"),
+        }
+    }
 }
 
 async fn wait_for_watch_true(mut watch: watch::Receiver<bool>) {
@@ -260,124 +402,6 @@ async fn reserve_event_queue_slot<'a>(
         _ = wait_for_watch_true(shutdown.clone()) => Err(EventSendOutcome::Shutdown),
         _ = wait_for_session_close(session_closed.clone()) => Err(EventSendOutcome::Shutdown),
         result = events.reserve() => result.map_err(|_| EventSendOutcome::ReceiverClosed),
-    }
-}
-
-struct EventQueueScope {
-    ledger: CoverageLossLedger,
-    simulator_id: SimulatorId,
-    source: CoverageSource,
-}
-
-impl Drop for EventQueueScope {
-    fn drop(&mut self) {
-        self.ledger.retire(self.simulator_id, self.source);
-    }
-}
-
-struct PendingEventQueueLoss {
-    ledger: CoverageLossLedger,
-    simulator_id: SimulatorId,
-    source: CoverageSource,
-    notifier: EventQueueLossNotifier,
-    resolved: bool,
-    recorded: bool,
-    reason: Option<String>,
-}
-
-impl PendingEventQueueLoss {
-    fn new(ledger: CoverageLossLedger, simulator_id: SimulatorId, source: CoverageSource, notifier: EventQueueLossNotifier) -> Self {
-        Self { ledger, simulator_id, source, notifier, resolved: false, recorded: false, reason: None }
-    }
-
-    fn record(&mut self) {
-        if !self.resolved {
-            self.ledger.record(self.simulator_id, self.source, CoverageLossReason::EventQueueAdmission);
-            self.resolved = true;
-            self.recorded = true;
-        }
-    }
-
-    async fn notify(&mut self, reason: String) -> EventSendOutcome {
-        self.record();
-        self.reason = Some(reason.clone());
-        self.notifier.notify(reason).await
-    }
-
-    fn commit(&mut self) {
-        self.resolved = true;
-    }
-}
-
-impl Drop for PendingEventQueueLoss {
-    fn drop(&mut self) {
-        if !self.resolved {
-            self.record();
-        }
-        if self.recorded && !self.notifier.was_notified() {
-            let notifier = self.notifier.clone();
-            let reason = self
-                .reason
-                .clone()
-                .unwrap_or_else(|| "EventQueueGet polling was canceled before its response could be admitted safely.".into());
-            if let Ok(runtime) = Handle::try_current() {
-                runtime.spawn(async move {
-                    let _ = notifier.notify(reason).await;
-                });
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct EventQueueLossNotifier {
-    events: mpsc::Sender<EventEnvelope>,
-    simulator_id: SimulatorId,
-    source: SocketAddr,
-    shutdown: watch::Receiver<bool>,
-    session_closed: watch::Receiver<bool>,
-    notified: Arc<AtomicBool>,
-}
-
-impl EventQueueLossNotifier {
-    fn new(
-        events: mpsc::Sender<EventEnvelope>,
-        simulator_id: SimulatorId,
-        source: SocketAddr,
-        shutdown: watch::Receiver<bool>,
-        session_closed: watch::Receiver<bool>,
-    ) -> Self {
-        Self { events, simulator_id, source, shutdown, session_closed, notified: Arc::new(AtomicBool::new(false)) }
-    }
-
-    async fn notify(&self, reason: String) -> EventSendOutcome {
-        if self.notified.load(Ordering::Acquire) {
-            return EventSendOutcome::Sent;
-        }
-        if *self.shutdown.borrow() || *self.session_closed.borrow() {
-            return EventSendOutcome::Shutdown;
-        }
-
-        let permit = tokio::select! {
-            biased;
-            _ = wait_for_watch_true(self.shutdown.clone()) => return EventSendOutcome::Shutdown,
-            _ = wait_for_session_close(self.session_closed.clone()) => return EventSendOutcome::Shutdown,
-            result = self.events.reserve() => match result {
-                Ok(permit) => permit,
-                Err(_) => return EventSendOutcome::ReceiverClosed,
-            },
-        };
-        if self.notified.swap(true, Ordering::AcqRel) {
-            drop(permit);
-            return EventSendOutcome::Sent;
-        }
-
-        permit.send(EventEnvelope::new(Event::EventQueueCoverageLost { simulator_id: self.simulator_id, source: self.source, reason }));
-        EventSendOutcome::Sent
-    }
-
-    fn was_notified(&self) -> bool {
-        self.notified.load(Ordering::Acquire)
     }
 }
 
@@ -639,7 +663,6 @@ pub(super) async fn run_event_queue(
                         }
                         let Some(next_batch_order) = batch_order.checked_add(1) else {
                             pending_loss.record();
-                            pending_loss.commit();
                             status.record_error("EventQueue batch-order counter exhausted; polling stopped.");
                             drop(batch_reservation);
                             drop(batch);
@@ -880,25 +903,6 @@ pub(super) fn event_batch_allocation_bound(body: &[u8]) -> Result<usize, xml::Bo
     bound.checked_add(conversion).ok_or(xml::BoundError::Overflow)
 }
 
-#[derive(Debug)]
-enum BatchDecodeError {
-    Preflight(xml::BoundError),
-    Resource(Error),
-    Decode(String),
-    Task(JoinError),
-}
-
-impl fmt::Display for BatchDecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Preflight(error) => write!(f, "EventQueueGet response allocation preflight failed: {error}"),
-            Self::Resource(error) => write!(f, "EventQueueGet decode memory is unavailable: {error}"),
-            Self::Decode(error) => f.write_str(error),
-            Self::Task(error) => write!(f, "EventQueueGet decoder task failed: {error}"),
-        }
-    }
-}
-
 pub(crate) fn decode_event_batch(body: &[u8]) -> Result<(i32, Vec<CapabilityEvent>), String> {
     if body.len() > MAX_EVENT_QUEUE_RESPONSE_BYTES {
         return Err(format!("EventQueueGet response exceeded the {MAX_EVENT_QUEUE_RESPONSE_BYTES}-byte limit."));
@@ -957,13 +961,13 @@ fn llsd_heap_size(value: &mut Value) -> usize {
     match value {
         Value::String(value) => value.capacity(),
         Value::Uri(uri) => {
-            let text = take(uri).into_string();
+            let text = mem::take(uri).into_string();
             let capacity = text.capacity();
             *uri = Uri::from(text);
             capacity
         }
         Value::Binary(binary) => {
-            let bytes = take(binary).into_vec();
+            let bytes = mem::take(binary).into_vec();
             let capacity = bytes.capacity();
             *binary = Binary::from(bytes);
             capacity
@@ -1325,7 +1329,6 @@ mod lifecycle_tests {
         assert!(matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_))));
     }
 }
-
 #[cfg(test)]
 mod retained_size_tests {
     use super::*;
@@ -1347,7 +1350,6 @@ mod retained_size_tests {
         assert!(matches!(&binary, Value::Binary(value) if value.as_slice() == b"bin"));
     }
 }
-
 #[cfg(test)]
 mod event_queue_batch_tests {
     use super::*;
@@ -1464,6 +1466,35 @@ mod event_queue_batch_tests {
             assert!(acquire_event_batch_reservation(Arc::clone(&budget), &shutdown_receiver, &session_closed_receiver).is_none());
             assert_eq!(budget.available_permits(), MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES);
         }
+    }
+
+    #[tokio::test]
+    async fn recorded_loss_survives_commit() {
+        let (events, mut received) = mpsc::channel(1);
+        events.try_send(EventEnvelope::new(Event::Failed("occupied".into()))).expect("fill event channel");
+        let (_shutdown, shutdown) = watch::channel(false);
+        let (_session_closed, session_closed) = watch::channel(false);
+        let ledger = CoverageLossLedger::new();
+        let simulator_id = SimulatorId::new(3);
+        let notifier = EventQueueLossNotifier::new(events, simulator_id, SocketAddr::from(([127, 0, 0, 1], 0)), shutdown, session_closed);
+        let mut pending = PendingEventQueueLoss::new(ledger.clone(), simulator_id, source(), notifier);
+        {
+            let mut notification = pin!(pending.notify("admission failed".into()));
+            assert!(notification.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        }
+        pending.commit();
+        drop(pending);
+
+        assert!(matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::Failed(_))));
+        assert!(matches!(
+            received.recv().await.map(EventEnvelope::into_event),
+            Some(Event::EventQueueCoverageLost { simulator_id: id, reason, .. }) if id == simulator_id && reason == "admission failed"
+        ));
+        assert!(received.recv().await.is_none(), "one recorded loss emits one notification");
+        assert!(matches!(
+            ledger.snapshot().losses.as_slice(),
+            [CoverageLoss::Source(loss)] if loss.watermark.generation == 1 && loss.reason == CoverageLossReason::EventQueueAdmission
+        ));
     }
 
     #[tokio::test]

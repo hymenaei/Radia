@@ -14,13 +14,6 @@ use tokio::{
     time,
 };
 
-use crate::{
-    capture::CaptureRecorder,
-    error::Error,
-    http::{self, Response, validate_http_url},
-    status::NetworkStatusHandle,
-};
-
 use super::{
     budget::{
         CLOSED_ERROR, LLSD_SCAN_WORKING_BYTES, MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_NAMES, MAX_CAPABILITY_NAMES_BYTES,
@@ -29,6 +22,19 @@ use super::{
     },
     client::CapabilityUrl,
 };
+use crate::{
+    capture::CaptureRecorder,
+    error::Error,
+    http::{self, Response, validate_http_url},
+    status::NetworkStatusHandle,
+};
+
+const CAPABILITY_URL_PARSE_BYTES_PER_INPUT_BYTE: usize = 4;
+const CAPABILITY_URL_PARSE_BYTES_PER_HOST_COMPONENT: usize = 80;
+const CAPABILITY_URL_PARSE_BYTES_PER_GRANT: usize = 512;
+const CAPABILITY_URL_PARSE_BASE_BYTES: usize = 2048;
+const CAPABILITY_URL_RETAINED_BYTES_PER_SERIALIZED_BYTE: usize = 2;
+const CAPABILITY_URL_RETAINED_BASE_BYTES: usize = 128;
 
 pub(super) struct AdmittedResponse {
     pub(super) body: Vec<u8>,
@@ -46,31 +52,6 @@ pub(super) struct AdmittedCapabilities {
 pub(super) struct SeedCapability {
     pub(super) url: Url,
     pub(super) input_bytes: usize,
-}
-
-pub(super) fn capability_error(error: CapabilityFailure) -> Error {
-    match error {
-        CapabilityFailure::Http(error) => Error::CapabilityHttp(error),
-        CapabilityFailure::Message(message) => Error::Capability(message),
-        CapabilityFailure::SessionClosed => Error::CapabilitySessionClosed,
-    }
-}
-
-pub(super) fn validate_capability_names(names: &[&str]) -> Result<(), Error> {
-    if names.len() > MAX_CAPABILITY_NAMES {
-        return Err(Error::Capability(format!("Capability discovery supports at most {MAX_CAPABILITY_NAMES} names.")));
-    }
-
-    let mut total_bytes = 0_usize;
-    for name in names {
-        if name.len() > MAX_CAPABILITY_NAME_BYTES {
-            return Err(Error::Capability(format!("A capability discovery name exceeds the {MAX_CAPABILITY_NAME_BYTES}-byte limit.")));
-        }
-        total_bytes = total_bytes.checked_add(name.len()).filter(|size| *size <= MAX_CAPABILITY_NAMES_BYTES).ok_or_else(|| {
-            Error::Capability(format!("Capability discovery names exceed the {MAX_CAPABILITY_NAMES_BYTES}-byte total limit."))
-        })?;
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +128,95 @@ impl fmt::Display for CapabilityFailure {
             Self::SessionClosed => formatter.write_str(CLOSED_ERROR),
         }
     }
+}
+
+#[derive(Debug)]
+enum CapabilityDecodeError {
+    Message(String),
+    Admission(http::Error),
+}
+
+impl CapabilityDecodeError {
+    fn into_failure(self) -> CapabilityFailure {
+        match self {
+            Self::Message(message) => CapabilityFailure::Message(message),
+            Self::Admission(error) => CapabilityFailure::Http(error),
+        }
+    }
+
+    fn into_lookup_error(self) -> LookupError {
+        match self {
+            Self::Message(message) => LookupError::Permanent(message),
+            Self::Admission(error) => LookupError::permanent_http(error),
+        }
+    }
+}
+
+pub(super) enum LookupError {
+    Http { error: http::Error, transient: bool },
+    Permanent(String),
+}
+
+impl LookupError {
+    fn transient(error: http::Error) -> Self {
+        Self::Http { error, transient: true }
+    }
+
+    fn permanent_http(error: http::Error) -> Self {
+        Self::Http { error, transient: false }
+    }
+
+    pub(super) fn is_transient(&self) -> bool {
+        matches!(self, Self::Http { transient: true, .. })
+    }
+
+    pub(super) fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Http { error, .. } => error.retry_after(),
+            Self::Permanent(_) => None,
+        }
+    }
+
+    fn into_failure(self) -> CapabilityFailure {
+        match self {
+            Self::Http { error, .. } => CapabilityFailure::Http(error),
+            Self::Permanent(message) => CapabilityFailure::Message(message),
+        }
+    }
+}
+
+impl fmt::Display for LookupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http { error, .. } => error.fmt(formatter),
+            Self::Permanent(message) => formatter.write_str(message),
+        }
+    }
+}
+
+pub(super) fn capability_error(error: CapabilityFailure) -> Error {
+    match error {
+        CapabilityFailure::Http(error) => Error::CapabilityHttp(error),
+        CapabilityFailure::Message(message) => Error::Capability(message),
+        CapabilityFailure::SessionClosed => Error::CapabilitySessionClosed,
+    }
+}
+
+pub(super) fn validate_capability_names(names: &[&str]) -> Result<(), Error> {
+    if names.len() > MAX_CAPABILITY_NAMES {
+        return Err(Error::Capability(format!("Capability discovery supports at most {MAX_CAPABILITY_NAMES} names.")));
+    }
+
+    let mut total_bytes = 0_usize;
+    for name in names {
+        if name.len() > MAX_CAPABILITY_NAME_BYTES {
+            return Err(Error::Capability(format!("A capability discovery name exceeds the {MAX_CAPABILITY_NAME_BYTES}-byte limit.")));
+        }
+        total_bytes = total_bytes.checked_add(name.len()).filter(|size| *size <= MAX_CAPABILITY_NAMES_BYTES).ok_or_else(|| {
+            Error::Capability(format!("Capability discovery names exceed the {MAX_CAPABILITY_NAMES_BYTES}-byte total limit."))
+        })?;
+    }
+    Ok(())
 }
 
 #[tracing::instrument(name = "capabilities.worker", level = "debug", skip_all)]
@@ -404,13 +474,6 @@ fn decode_capabilities_from_value<T>(
     Ok(granted)
 }
 
-const CAPABILITY_URL_PARSE_BYTES_PER_INPUT_BYTE: usize = 4;
-const CAPABILITY_URL_PARSE_BYTES_PER_HOST_COMPONENT: usize = 80;
-const CAPABILITY_URL_PARSE_BYTES_PER_GRANT: usize = 512;
-const CAPABILITY_URL_PARSE_BASE_BYTES: usize = 2048;
-const CAPABILITY_URL_RETAINED_BYTES_PER_SERIALIZED_BYTE: usize = 2;
-const CAPABILITY_URL_RETAINED_BASE_BYTES: usize = 128;
-
 fn capability_url_parse_memory_estimate(response: &Value, names: &[String]) -> Result<usize, CapabilityDecodeError> {
     let fields = response
         .as_map()
@@ -505,72 +568,8 @@ pub(super) fn url_retained_memory_estimate(url: &Url, input_bytes: usize) -> usi
         .saturating_add(CAPABILITY_URL_RETAINED_BASE_BYTES)
 }
 
-#[derive(Debug)]
-enum CapabilityDecodeError {
-    Message(String),
-    Admission(http::Error),
-}
-
-impl CapabilityDecodeError {
-    fn into_failure(self) -> CapabilityFailure {
-        match self {
-            Self::Message(message) => CapabilityFailure::Message(message),
-            Self::Admission(error) => CapabilityFailure::Http(error),
-        }
-    }
-
-    fn into_lookup_error(self) -> LookupError {
-        match self {
-            Self::Message(message) => LookupError::Permanent(message),
-            Self::Admission(error) => LookupError::permanent_http(error),
-        }
-    }
-}
-
 fn seed_capability_llsd_limits() -> Limits {
     Limits { max_bytes: MAX_SEED_CAPABILITY_RESPONSE_BYTES, ..capability_llsd_limits() }
-}
-
-pub(super) enum LookupError {
-    Http { error: http::Error, transient: bool },
-    Permanent(String),
-}
-
-impl LookupError {
-    fn transient(error: http::Error) -> Self {
-        Self::Http { error, transient: true }
-    }
-
-    fn permanent_http(error: http::Error) -> Self {
-        Self::Http { error, transient: false }
-    }
-
-    pub(super) fn is_transient(&self) -> bool {
-        matches!(self, Self::Http { transient: true, .. })
-    }
-
-    pub(super) fn retry_after(&self) -> Option<Duration> {
-        match self {
-            Self::Http { error, .. } => error.retry_after(),
-            Self::Permanent(_) => None,
-        }
-    }
-
-    fn into_failure(self) -> CapabilityFailure {
-        match self {
-            Self::Http { error, .. } => CapabilityFailure::Http(error),
-            Self::Permanent(message) => CapabilityFailure::Message(message),
-        }
-    }
-}
-
-impl fmt::Display for LookupError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Http { error, .. } => error.fmt(formatter),
-            Self::Permanent(message) => formatter.write_str(message),
-        }
-    }
 }
 
 async fn post(
@@ -674,6 +673,7 @@ fn llsd_error(error: llsd::Error) -> String {
         error => error.to_string(),
     }
 }
+
 fn string_value(value: &Value) -> Option<&str> {
     match value {
         Value::String(value) => Some(value),
@@ -698,7 +698,7 @@ mod admission_tests {
         time::timeout,
     };
 
-    use super::super::{
+    use crate::capabilities::{
         budget::{COMMAND_CAPACITY, CapabilityBudget, LLSD_SCAN_WORKING_BYTES},
         client::Client,
     };
@@ -971,7 +971,6 @@ mod admission_tests {
         assert_eq!(budget.ordinary_requests.available_permits(), MAX_CONCURRENT_CAPABILITY_REQUESTS);
     }
 }
-
 #[cfg(test)]
 pub(crate) mod allocation_measurement {
     use std::{

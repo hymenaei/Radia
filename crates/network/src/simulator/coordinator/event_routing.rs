@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::event::{EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY, SimulatorId};
 use tokio::{sync::mpsc, time::Instant};
 
 use super::{
     EVENT_BACKLOG_DISCONNECT_REASON, EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD, LOGOUT_TIMEOUT,
     MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, NeighborEvent,
 };
+use crate::event::{EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY, SimulatorId};
 
 #[derive(Default)]
 pub(super) struct PrimaryEventBacklog {
@@ -84,6 +84,12 @@ pub(super) enum PreconnectOutcome {
     Full,
 }
 
+pub(super) enum EventQueueOutcome {
+    Queued,
+    ReceiverClosed,
+    BacklogFull,
+}
+
 pub(super) fn queue_until_connected(
     connected: &HashSet<SimulatorId>,
     pending: &mut PreconnectEvents,
@@ -94,12 +100,6 @@ pub(super) fn queue_until_connected(
         return PreconnectOutcome::Ready(event);
     }
     if pending.push(simulator_id, event) { PreconnectOutcome::Buffered } else { PreconnectOutcome::Full }
-}
-
-pub(super) enum EventQueueOutcome {
-    Queued,
-    ReceiverClosed,
-    BacklogFull,
 }
 
 pub(super) fn queue_neighbor_event(
@@ -201,8 +201,10 @@ mod tests {
     use crate::event::{Event, EventEnvelope};
     use tokio::{sync::mpsc, time::Instant};
 
-    use super::super::{EVENT_BACKLOG_DISCONNECT_REASON, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_QUEUED_SIMULATOR_EVENTS, NeighborEvent};
     use super::{PrimaryEventBacklog, primary_event_queue_size, queue_neighbor_event};
+    use crate::simulator::coordinator::{
+        EVENT_BACKLOG_DISCONNECT_REASON, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_QUEUED_SIMULATOR_EVENTS, NeighborEvent,
+    };
 
     #[test]
     fn backlog_warning_is_rate_limited() {

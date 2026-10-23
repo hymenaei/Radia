@@ -11,14 +11,13 @@ use tokio::{
 
 use crate::http;
 
-use super::event_queue::MAX_EVENT_QUEUE_RESPONSE_BYTES;
-
 pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 pub(super) const EVENT_QUEUE_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const COMMAND_CAPACITY: usize = 64;
 pub(super) const CLOSED_ERROR: &str = "The capability connection has closed.";
 pub(crate) const MAX_SEED_CAPABILITY_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_CAPABILITY_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+pub(crate) const MAX_EVENT_QUEUE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES: usize = 8 * 1024 * 1024;
 pub(super) const MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES: usize = MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES * MAX_CONCURRENT_EVENT_QUEUES;
 pub(super) const MAX_LLSD_NESTING_DEPTH: usize = 64;
@@ -32,7 +31,6 @@ const ORDINARY_RESPONSE_MEMORY_BYTES: usize = MAX_CAPABILITY_RESPONSE_BYTES * MA
 const EVENT_QUEUE_RESPONSE_MEMORY_BYTES: usize =
     (2 * MAX_EVENT_QUEUE_RESPONSE_BYTES + MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES) * MAX_CONCURRENT_EVENT_QUEUES;
 const SHARED_RESPONSE_MEMORY_BYTES: usize = MAX_EVENT_QUEUE_RESPONSE_BYTES;
-/// Maximum encoded LLSD XML body sent in a capability request.
 pub(crate) const MAX_CAPABILITY_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_CAPABILITY_NAMES: usize = 256;
 pub(super) const MAX_CAPABILITY_NAME_BYTES: usize = 128;
@@ -87,16 +85,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{Arc, mpsc},
-        time::Duration,
-    };
+    use std::sync::{Arc, mpsc};
 
     use tokio::{
         spawn,
         sync::{Semaphore, oneshot},
-        task::yield_now,
-        time::timeout,
     };
 
     use super::spawn_blocking_with_permit;
@@ -108,7 +101,7 @@ mod tests {
         let (entered, entered_rx) = oneshot::channel();
         let (release, release_rx) = mpsc::channel();
         let task = spawn(spawn_blocking_with_permit(permit, move || {
-            let _ = entered.send(());
+            entered.send(()).expect("blocking work receiver is alive");
             release_rx.recv().expect("release blocking work");
         }));
 
@@ -118,16 +111,7 @@ mod tests {
         assert_eq!(slots.available_permits(), 0, "cancellation cannot release work admission early");
 
         release.send(()).expect("unblock running work");
-        timeout(Duration::from_secs(1), async {
-            loop {
-                if let Ok(permit) = Arc::clone(&slots).try_acquire_owned() {
-                    drop(permit);
-                    break;
-                }
-                yield_now().await;
-            }
-        })
-        .await
-        .expect("blocking work completion should release its permit");
+        let permit = slots.acquire().await.expect("blocking work completion releases its permit");
+        drop(permit);
     }
 }

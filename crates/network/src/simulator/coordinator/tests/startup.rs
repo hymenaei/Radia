@@ -42,8 +42,12 @@ async fn cancelled_queues_release_packet_memory() {
     events.try_send(EventEnvelope::new(Event::Failed("occupy intake".into()))).expect("fill intake");
     let mut primary_queue = VecDeque::new();
     assert!(matches!(
-        super::super::queue_simulator_event(&events, &mut primary_queue, retained_packet_event(&budget, primary_id, endpoint, &wire)),
-        super::super::EventQueueOutcome::Queued
+        crate::simulator::coordinator::queue_simulator_event(
+            &events,
+            &mut primary_queue,
+            retained_packet_event(&budget, primary_id, endpoint, &wire)
+        ),
+        crate::simulator::coordinator::EventQueueOutcome::Queued
     ));
     let mut neighbor_queues = Vec::new();
     let mut receivers = Vec::new();
@@ -122,7 +126,7 @@ async fn retired_capability_worker_is_joined() {
     let mut bytes = [0; 1024];
     assert!(timeout(WAIT, socket.read(&mut bytes)).await.expect("read held request").expect("HTTP request bytes") > 0);
     assert_eq!(connection.capability_workers.len(), 2, "root and neighbor workers stay tracked");
-    super::super::remove_simulator_capability(&mut capabilities, id);
+    crate::simulator::coordinator::remove_simulator_capability(&mut capabilities, id);
     assert!(capabilities.is_empty());
     timeout(WAIT, connection.finish_capability_workers()).await.expect("join retired and root workers");
     assert!(connection.capability_workers.is_empty());
@@ -144,11 +148,11 @@ async fn capability_worker_count_is_bounded() {
     .expect("connect coordinator");
     let seed = connection.session.seed_capability.clone();
     let mut clients = Vec::new();
-    for _ in 1..super::super::MAX_CAPABILITY_WORKERS {
+    for _ in 1..crate::simulator::coordinator::MAX_CAPABILITY_WORKERS {
         clients.push(connection.new_capability_client(seed.clone()).expect("admit worker within limit"));
     }
     assert!(connection.new_capability_client(seed).is_err());
-    assert_eq!(connection.capability_workers.len(), super::super::MAX_CAPABILITY_WORKERS);
+    assert_eq!(connection.capability_workers.len(), crate::simulator::coordinator::MAX_CAPABILITY_WORKERS);
     for client in &clients {
         client.close_session();
     }

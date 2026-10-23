@@ -1,6 +1,5 @@
 use super::*;
 use assets::Priority;
-use base::{AssetId, UUID};
 use llsd::{Value, binary, xml};
 use std::{
     io::{Read, Write},
@@ -8,6 +7,8 @@ use std::{
     thread,
 };
 use url::Url;
+use utils::AssetId;
+use uuid::Uuid;
 
 struct Peer {
     url: Url,
@@ -84,7 +85,7 @@ fn grants(base: &Url) -> Vec<u8> {
 }
 
 fn resource(kind: Kind) -> assets::Resource {
-    assets::Resource { id: AssetId::new(UUID::from_u128(1)), kind }
+    assets::Resource { id: AssetId::new(Uuid::from_u128(1)), kind }
 }
 
 #[tokio::test]

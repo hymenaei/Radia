@@ -2,9 +2,9 @@
 
 use std::{f32::consts::TAU, num::NonZeroU32};
 
-use base::UUID;
 use libfuzzer_sys::fuzz_target;
 use math::{Quat, Vec3};
+use uuid::Uuid;
 use world::{
     AgentHandoff, Appearance,
     ApplyError::RegionRetired,
@@ -15,7 +15,7 @@ use world::{
 };
 
 const MAX_OPERATIONS: usize = 256;
-const AGENT_ID: UUID = UUID::from_u128(1);
+const AGENT_ID: Uuid = Uuid::from_u128(1);
 
 fn limits() -> WorldLimits {
     WorldLimits {
@@ -44,12 +44,12 @@ fn source(region: Region, step: usize, bytes: &[u8]) -> UpdateSource {
     if bytes[31] & 15 == 3 { source.with_authority(UpdateAuthority::Untracked) } else { source }
 }
 
-fn uuid(bytes: &[u8]) -> UUID {
+fn uuid(bytes: &[u8]) -> Uuid {
     if bytes[31] & 128 == 0 {
-        return UUID::from_u128(u128::from(bytes[4] % 16) + 2);
+        return Uuid::from_u128(u128::from(bytes[4] % 16) + 2);
     }
     let value = u128::from_le_bytes(bytes[4..20].try_into().expect("fixed UUID bytes"));
-    UUID::from_u128(value.max(1))
+    Uuid::from_u128(value.max(1))
 }
 
 fn local_id(bytes: &[u8]) -> NonZeroU32 {
@@ -165,8 +165,8 @@ fuzz_target!(|data: &[u8]| {
                     && let Some(target) = world.object_binding_target(entity)
                 {
                     let patch = PropertiesPatch {
-                        owner_id: (bytes[3] & 1 != 0).then(|| UUID::from_u128(u128::from(bytes[8]))),
-                        creator_id: (bytes[3] & 2 != 0).then(|| UUID::from_u128(u128::from(bytes[9]))),
+                        owner_id: (bytes[3] & 1 != 0).then(|| Uuid::from_u128(u128::from(bytes[8]))),
+                        creator_id: (bytes[3] & 2 != 0).then(|| Uuid::from_u128(u128::from(bytes[9]))),
                     };
                     let _ = world.patch_properties(source, target, id, patch);
                 }

@@ -1,15 +1,14 @@
-use base::UUID;
+use uuid::Uuid;
 
 use crate::{
     LLUdpError,
     lludp::codec::{Reader, Writer},
 };
 
-/// Cancels a teleport for the identified authenticated agent session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TeleportCancel {
-    pub agent_id: UUID,
-    pub session_id: UUID,
+    pub agent_id: Uuid,
+    pub session_id: Uuid,
 }
 
 pub(crate) fn encode(message: &TeleportCancel, writer: &mut Writer) {

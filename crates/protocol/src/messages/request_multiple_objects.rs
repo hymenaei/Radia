@@ -1,8 +1,7 @@
-use base::UUID;
+use uuid::Uuid;
 
 use crate::{LLUdpError, lludp::codec::Reader};
 
-/// Viewer request for full object data after a cache miss.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestMultipleObjects {
     pub agent_data: RequestAgentData,
@@ -11,25 +10,22 @@ pub struct RequestMultipleObjects {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestAgentData {
-    pub agent_id: UUID,
-    pub session_id: UUID,
+    pub agent_id: Uuid,
+    pub session_id: Uuid,
 }
 
-/// One cache miss request. Unknown wire values remain representable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectRequest {
     pub cache_miss_type: CacheMissType,
     pub local_id: u32,
 }
 
-/// The reason the viewer requests object data after a cache lookup.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheMissType {
-    /// Request the complete object data. Wire value `0`.
     Full,
-    /// Request a refresh because the cached CRC differs. Wire value `1`.
+
     CrcMismatch,
-    /// Preserve a cache-miss value this version does not interpret.
+
     Unknown(u8),
 }
 

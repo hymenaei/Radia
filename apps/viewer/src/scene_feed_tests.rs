@@ -1,7 +1,6 @@
 use super::*;
 use crate::asset_coordinator::AssetCoordinator;
 use crate::world_reader::WorldReadHost;
-use base::UUID;
 use futures::join;
 use math::{DVec3, Vec3};
 use scene::Status;
@@ -9,6 +8,7 @@ use std::{
     future::{pending, ready},
     num::NonZeroU32,
 };
+use uuid::Uuid;
 use world::{
     Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate, Pose, Region,
     RegionInfo, Shape, SurfaceAppearance, UpdateSource, World, WorldLimits,
@@ -33,7 +33,7 @@ fn world() -> World {
 #[test]
 fn ocean_follows_agent_region() {
     let mut world = world();
-    let agent = UUID::from_u128(1);
+    let agent = Uuid::from_u128(1);
     for region in [Region::new(1), Region::new(2)] {
         let _ = world.adopt_region(region).unwrap();
         let _ = world
@@ -105,7 +105,7 @@ async fn missing_asset_preserves_scene() {
     let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap();
     let mut object = ObjectObservation::new(
         UpdateSource::new(region, 1, Ordered(1), 0),
-        UUID::from_u128(1),
+        Uuid::from_u128(1),
         NonZeroU32::new(1).unwrap(),
         Kind::Object,
         ParentUpdate::Root,
@@ -116,7 +116,7 @@ async fn missing_asset_preserves_scene() {
     object.appearance = FieldUpdate::Set(Appearance::Surface);
     object.surface_appearance = Some(
         SurfaceAppearance::new(
-            FaceAppearance { texture_id: UUID::from_u128(100), color: [255, 0, 0, 255], ..FaceAppearance::default() },
+            FaceAppearance { texture_id: Uuid::from_u128(100), color: [255, 0, 0, 255], ..FaceAppearance::default() },
             Vec::new(),
         )
         .unwrap(),
@@ -127,7 +127,7 @@ async fn missing_asset_preserves_scene() {
     let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
     let mut feed = SceneFeed::start(
         SceneSources { reader: reads.reader(), environments, assets: assets.handle() },
-        UUID::from_u128(2),
+        Uuid::from_u128(2),
         watch::channel(None).0,
         Handle::current(),
         || {},
@@ -172,7 +172,7 @@ async fn stalled_publication_preserves_intake() {
     let _ = world
         .observe_object(ObjectObservation::new(
             UpdateSource::new(region, 1, Ordered(1), 0),
-            UUID::from_u128(1),
+            Uuid::from_u128(1),
             NonZeroU32::new(1).unwrap(),
             Kind::Object,
             ParentUpdate::Root,
@@ -184,7 +184,7 @@ async fn stalled_publication_preserves_intake() {
     let (pushes, environments) = crate::session::EnvironmentInbox::channel();
     let mut feed = SceneFeed::start(
         SceneSources { reader: reader.clone(), environments, assets: assets.handle() },
-        UUID::from_u128(1),
+        Uuid::from_u128(1),
         watch::channel(None).0,
         Handle::current(),
         || {},
@@ -237,7 +237,7 @@ async fn stalled_publication_preserves_intake() {
     assert_eq!(turns, 1024);
     assert!(barrier.unwrap().revision > initial);
     assert!(world.revision() > initial);
-    let experience = scene::ExperienceId::new(UUID::from_u128(44)).unwrap();
+    let experience = scene::ExperienceId::new(Uuid::from_u128(44)).unwrap();
     let push = scene::EnvironmentPush::Partial {
         experience,
         sky: vec![scene::EnvironmentProperty { name: "gamma".into(), source: b"r1.4".as_slice().into() }],

@@ -1,6 +1,5 @@
 use std::num::{NonZeroU8, NonZeroU32};
 
-use base::{AssetId, UUID};
 use protocol::{
     lludp::{
         Message,
@@ -15,6 +14,8 @@ use protocol::{
     },
     types::{ObjectShape, TextureEntry, TextureFace, decode_render_material_bindings},
 };
+use utils::AssetId;
+use uuid::Uuid;
 use world::{
     Appearance, AttachmentPoint, FaceAppearance, FieldUpdate, Kind, LinearMotion, LocalAddress, MotionPatch, ObjectObservation,
     ObjectPatch, OrderEvidence, ParentUpdate, Pose, PrimShape, Region, RegionHandle, RenderMaterials, SculptFlags, SculptType, Shape,
@@ -56,7 +57,7 @@ pub(crate) enum ObjectOperation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::session) struct ObjectMediaRequest {
     pub(in crate::session) source: UpdateSource,
-    pub(in crate::session) object_id: UUID,
+    pub(in crate::session) object_id: Uuid,
     pub(in crate::session) local_id: NonZeroU32,
     pub(in crate::session) version: u32,
 }
@@ -175,7 +176,7 @@ fn media_request(
     order: OrderEvidence,
     index: usize,
     pcode: u8,
-    object_id: UUID,
+    object_id: Uuid,
     raw_local_id: u32,
     media_url: &str,
 ) -> Option<ObjectMediaRequest> {
@@ -418,7 +419,7 @@ fn local_id(value: u32) -> Result<NonZeroU32, InvalidBlock> {
     NonZeroU32::new(value).ok_or(InvalidBlock)
 }
 
-fn non_nil_uuid(value: UUID) -> Result<UUID, InvalidBlock> {
+fn non_nil_uuid(value: Uuid) -> Result<Uuid, InvalidBlock> {
     if value.is_nil() { Err(InvalidBlock) } else { Ok(value) }
 }
 
@@ -500,14 +501,14 @@ fn object_classification(
                     let sculpt_type = raw_type & SCULPT_TYPE_MASK;
                     if raw_type & SCULPT_RESERVED_TYPE_MASK != 0 || sculpt_type > 6 {
                         FieldUpdate::Set(Shape::Sculpt {
-                            asset_id: AssetId::new(UUID::from_u128(SCULPT_DEFAULT_TEXTURE)),
+                            asset_id: AssetId::new(Uuid::from_u128(SCULPT_DEFAULT_TEXTURE)),
                             sculpt_type: SculptType::Sphere,
                             flags: SculptFlags::default(),
                         })
                     } else {
                         let flags = SculptFlags { invert: raw_type & SCULPT_FLAG_INVERT != 0, mirror: raw_type & SCULPT_FLAG_MIRROR != 0 };
                         let asset_id =
-                            AssetId::new(UUID::from_slice(&parameter.data[..16]).expect("sculpt parameter contains a complete asset UUID"));
+                            AssetId::new(Uuid::from_slice(&parameter.data[..16]).expect("sculpt parameter contains a complete asset UUID"));
                         match sculpt_type {
                             0 => prim.map_or(FieldUpdate::Keep, |shape| FieldUpdate::Set(Shape::Prim(prim_shape(shape)))),
                             1 => FieldUpdate::Set(Shape::Sculpt { asset_id, sculpt_type: SculptType::Sphere, flags }),

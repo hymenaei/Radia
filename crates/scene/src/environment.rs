@@ -5,7 +5,8 @@ use std::{
 };
 
 use assets::{Content, Environment, EnvironmentSettings, Failure, Priority, Request, Status};
-use base::{AssetId, UUID};
+use utils::AssetId;
+use uuid::Uuid;
 use world::Region;
 
 use crate::{AssetChange, AssetRequest, AssetTicket, Budget, budget::Lease};
@@ -15,13 +16,13 @@ const MAX_PROPERTIES: usize = 56;
 const MAX_PROPERTY_BYTES: usize = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct ExperienceId(UUID);
+pub struct ExperienceId(Uuid);
 
 impl ExperienceId {
-    pub fn new(id: UUID) -> Option<Self> {
+    pub fn new(id: Uuid) -> Option<Self> {
         (!id.is_nil()).then_some(Self(id))
     }
-    pub fn uuid(self) -> UUID {
+    pub fn uuid(self) -> Uuid {
         self.0
     }
 }

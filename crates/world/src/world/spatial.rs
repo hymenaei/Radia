@@ -1,5 +1,3 @@
-//! Derived spatial indexes with explicit, bounded maintenance.
-
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Bound::{Excluded, Unbounded};
 use std::time::Instant;
@@ -8,8 +6,8 @@ use std::time::Instant;
 use std::collections::HashSet;
 
 use crate::PoseError;
-use base::UUID;
 use math::DVec3;
+use uuid::Uuid;
 
 use super::{World, WorldChangeClasses, pose::MAX_PARENT_EDGES};
 use crate::{Entity, Parent, PoseState, Region};
@@ -89,16 +87,16 @@ impl Iterator for CellRange {
 
 #[derive(Default)]
 pub(super) struct SpatialIndex {
-    cells: HashMap<Cell, BTreeMap<UUID, Entity>>,
-    cell_by_entity: HashMap<Entity, (UUID, Cell)>,
-    unresolved: BTreeMap<Region, BTreeMap<UUID, Entity>>,
+    cells: HashMap<Cell, BTreeMap<Uuid, Entity>>,
+    cell_by_entity: HashMap<Entity, (Uuid, Cell)>,
+    unresolved: BTreeMap<Region, BTreeMap<Uuid, Entity>>,
     dirty_roots: HashMap<Entity, DirtyRoot>,
     dirty_roots_by_region: BTreeMap<Region, VecDeque<Entity>>,
     last_dirty_root_region: Option<Region>,
     dirty_regions: BTreeMap<Region, DirtyScope>,
     last_dirty_region: Option<Region>,
     prefer_region: bool,
-    unresolved_by_entity: HashMap<Entity, (UUID, Region)>,
+    unresolved_by_entity: HashMap<Entity, (Uuid, Region)>,
 }
 
 struct DirtyRoot {
@@ -107,7 +105,7 @@ struct DirtyRoot {
 }
 
 #[derive(Default)]
-struct DirtyScope<C = Option<UUID>> {
+struct DirtyScope<C = Option<Uuid>> {
     cursor: C,
     generation: u64,
     scan_generation: u64,
@@ -141,7 +139,7 @@ pub(super) struct SubtreeScan {
 
 struct SubtreeFrame {
     entity: Entity,
-    after_child: Option<UUID>,
+    after_child: Option<Uuid>,
 }
 
 impl SubtreeScan {
@@ -180,27 +178,25 @@ enum DirtyTask {
     Region(Region),
 }
 
-/// Progress made by one bounded query-state maintenance step.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct QueryStateMaintenance {
-    /// Spatial candidates examined or expired recent-object records removed.
     pub work_used: usize,
-    /// Dirty spatial scopes that still need repair.
+
     pub dirty_scopes: usize,
-    /// Whether dirty work remains and should be scheduled again promptly.
+
     pub has_dirty_pressure: bool,
 }
 
 impl SpatialIndex {
-    pub(super) fn candidate_ids(&self, cell: Cell) -> Option<&BTreeMap<UUID, Entity>> {
+    pub(super) fn candidate_ids(&self, cell: Cell) -> Option<&BTreeMap<Uuid, Entity>> {
         self.cells.get(&cell)
     }
 
-    pub(super) fn unresolved_ids(&self) -> impl Iterator<Item = (Region, UUID, Entity)> + '_ {
+    pub(super) fn unresolved_ids(&self) -> impl Iterator<Item = (Region, Uuid, Entity)> + '_ {
         self.unresolved.iter().flat_map(|(region, ids)| ids.iter().map(|(id, entity)| (*region, *id, *entity)))
     }
 
-    pub(super) fn unresolved_ids_in(&self, region: Region) -> impl Iterator<Item = (Region, UUID, Entity)> + '_ {
+    pub(super) fn unresolved_ids_in(&self, region: Region) -> impl Iterator<Item = (Region, Uuid, Entity)> + '_ {
         self.unresolved.get(&region).into_iter().flat_map(move |ids| ids.iter().map(move |(id, entity)| (region, *id, *entity)))
     }
 
@@ -290,7 +286,7 @@ impl SpatialIndex {
         }
     }
 
-    fn refresh(&mut self, entity: Entity, id: UUID, region: Region, pose: Result<PoseState, PoseError>) {
+    fn refresh(&mut self, entity: Entity, id: Uuid, region: Region, pose: Result<PoseState, PoseError>) {
         self.remove_cached_position(entity);
         match pose {
             Ok(PoseState::Resolved(pose)) if pose.position.is_finite() => {
@@ -382,7 +378,7 @@ impl SpatialIndex {
         self.prefer_region = true;
     }
 
-    fn finish_region_batch(&mut self, region: Region, cursor: Option<UUID>, complete: bool) {
+    fn finish_region_batch(&mut self, region: Region, cursor: Option<Uuid>, complete: bool) {
         let done = self.dirty_regions.get_mut(&region).is_none_or(|scope| scope.finish_pass(cursor, complete));
         if done {
             self.dirty_regions.remove(&region);
@@ -604,10 +600,6 @@ impl World {
         work
     }
 
-    /// Repairs the spatial query index and removes expired recent-object metadata.
-    ///
-    /// The shared work limit counts examined spatial candidates and removed recent records. Each
-    /// call also visits at most `work_limit` dirty scopes, including scopes with no candidates.
     pub fn maintain_query_state(&mut self, work_limit: usize) -> Result<QueryStateMaintenance, super::WorldReadError> {
         if work_limit == 0 || work_limit > MAX_QUERY_STATE_MAINTENANCE_WORK {
             return Err(super::WorldReadError::InvalidLimit);
@@ -718,7 +710,7 @@ mod tests {
                 pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
                 ..ObjectObservation::new(
                     UpdateSource::new(region, 1, Ordered(1), 0),
-                    UUID::from_u128(1),
+                    Uuid::from_u128(1),
                     NonZeroU32::new(1).expect("nonzero local ID"),
                     crate::Kind::Object,
                     crate::ParentUpdate::Root,

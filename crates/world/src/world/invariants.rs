@@ -1,7 +1,7 @@
 use super::{MAX_ENVIRONMENT_BYTES, MAX_TERRAIN_PATCHES, World};
 use crate::{Entity, LocalAddress, ObjectMedia, Parent};
-use base::UUID;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use uuid::Uuid;
 
 impl World {
     pub fn check_invariants(&self) -> Result<(), &'static str> {
@@ -23,7 +23,7 @@ impl World {
         {
             return Err("World storage exceeds its configured limits");
         }
-        let mut expected_children = HashMap::<Entity, BTreeMap<UUID, Entity>>::new();
+        let mut expected_children = HashMap::<Entity, BTreeMap<Uuid, Entity>>::new();
         let mut expected_pending_children = HashMap::<LocalAddress, HashSet<Entity>>::new();
         let mut object_media_bytes = 0_usize;
         for (id, entity) in self.store.entities() {

@@ -1,7 +1,7 @@
 use std::{collections::HashSet, num::NonZeroU32};
 
-use base::UUID;
 use math::{DVec3, Quat, Vec3};
+use uuid::Uuid;
 use world::{
     Applied,
     ApplyOutcome::{Introduced, Removed, Updated},
@@ -33,8 +33,8 @@ fn world_limits() -> WorldLimits {
     }
 }
 
-fn uuid(value: u128) -> UUID {
-    UUID::from_u128(value)
+fn uuid(value: u128) -> Uuid {
+    Uuid::from_u128(value)
 }
 
 fn source(region: Region, order: u64) -> UpdateSource {
@@ -60,7 +60,7 @@ fn apply_ok<T>(result: Result<T, world::ApplyError>) {
 
 #[derive(Clone, Copy)]
 struct QueryChild {
-    id: UUID,
+    id: Uuid,
     region: usize,
     local_id: u32,
     parent_local_id: u32,
@@ -72,7 +72,7 @@ fn query_child_local_id(region: usize, slot: usize) -> u32 {
     10 + region as u32 * 16 + slot as u32
 }
 
-fn object_with_id(region: Region, order: u64, id: UUID, local: u32, parent: ParentUpdate) -> ObjectObservation {
+fn object_with_id(region: Region, order: u64, id: Uuid, local: u32, parent: ParentUpdate) -> ObjectObservation {
     let mut observation = object(region, order, 0, local, Object, parent);
     observation.id = id;
     observation
@@ -86,7 +86,7 @@ struct SpatialModel {
 }
 
 impl SpatialModel {
-    fn expected_positions(&self, region_index: usize) -> Option<Vec<(UUID, DVec3)>> {
+    fn expected_positions(&self, region_index: usize) -> Option<Vec<(Uuid, DVec3)>> {
         let origin = self.origins[region_index]?;
         let mut positions = Vec::new();
         for (root_index, local_position) in self.roots[region_index].iter().enumerate() {
@@ -102,7 +102,7 @@ impl SpatialModel {
         Some(positions)
     }
 
-    fn expected(&self, region_index: usize, center: DVec3, radius: f64) -> (HashSet<UUID>, usize) {
+    fn expected(&self, region_index: usize, center: DVec3, radius: f64) -> (HashSet<Uuid>, usize) {
         let object_count = 2 + self.children.iter().flatten().filter(|child| child.region == region_index).count();
         let Some(positions) = self.expected_positions(region_index) else {
             return (HashSet::new(), object_count);

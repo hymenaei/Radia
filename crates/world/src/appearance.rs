@@ -3,7 +3,8 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
-use base::{AssetId, UUID};
+use utils::AssetId;
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Appearance {
@@ -17,7 +18,7 @@ pub const GLTF_TEXTURE_INFO_COUNT: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FaceAppearance {
-    pub texture_id: UUID,
+    pub texture_id: Uuid,
     pub color: [u8; 4],
     pub scale_s: f32,
     pub scale_t: f32,
@@ -27,13 +28,13 @@ pub struct FaceAppearance {
     pub bump_shiny_fullbright: u8,
     pub media_texgen: u8,
     pub glow: f32,
-    pub material_id: UUID,
+    pub material_id: Uuid,
 }
 
 impl Default for FaceAppearance {
     fn default() -> Self {
         Self {
-            texture_id: UUID::nil(),
+            texture_id: Uuid::nil(),
             color: [u8::MAX; 4],
             scale_s: 1.0,
             scale_t: 1.0,
@@ -43,7 +44,7 @@ impl Default for FaceAppearance {
             bump_shiny_fullbright: 0,
             media_texgen: 0,
             glow: 0.0,
-            material_id: UUID::nil(),
+            material_id: Uuid::nil(),
         }
     }
 }
@@ -213,7 +214,7 @@ pub struct GltfTextureTransform {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GltfMaterialOverride {
-    pub textures: [Option<UUID>; GLTF_TEXTURE_INFO_COUNT],
+    pub textures: [Option<Uuid>; GLTF_TEXTURE_INFO_COUNT],
     pub base_color: Option<[f32; 4]>,
     pub emissive: Option<[f32; 3]>,
     pub metallic: Option<f32>,

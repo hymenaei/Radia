@@ -1,11 +1,11 @@
-use base::UUID;
 use network::Grid;
+use uuid::Uuid;
 use viewer::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
 
 #[test]
 fn store_scopes_agents_and_reassigns_usernames() {
-    let agni_agent = UUID::from_u128(1);
-    let aditi_agent = UUID::from_u128(2);
+    let agni_agent = Uuid::from_u128(1);
+    let aditi_agent = Uuid::from_u128(2);
     let agni_favorites = vec![FavoriteLocation { name: "Sandbox".into(), region_name: "Agni region".into(), x: 128, y: 64, z: 23 }];
     let aditi_favorites = vec![FavoriteLocation { name: "Home".into(), region_name: "Aditi region".into(), x: 1, y: 2, z: 3 }];
     let mut store = FavoriteStore::default();
@@ -23,7 +23,7 @@ fn store_scopes_agents_and_reassigns_usernames() {
     assert_eq!(store.favorites_for(Grid::Agni, agni_agent), agni_favorites);
     assert_eq!(store.agent_id_for_username(Grid::Agni, "Example"), None);
 
-    let replacement_agent = UUID::from_u128(3);
+    let replacement_agent = Uuid::from_u128(3);
     assert!(store.remember_agent(Grid::Agni, replacement_agent, "Renamed Account"));
     assert_eq!(store.agent_id_for_username(Grid::Agni, "Renamed Account"), Some(replacement_agent));
     assert_eq!(store.favorites_for(Grid::Agni, agni_agent), agni_favorites);

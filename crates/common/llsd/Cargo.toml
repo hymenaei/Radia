@@ -12,7 +12,7 @@ base64.workspace = true
 quick-xml.workspace = true
 serde.workspace = true
 time.workspace = true
-base.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 testing.workspace = true

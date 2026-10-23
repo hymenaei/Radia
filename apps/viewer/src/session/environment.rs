@@ -5,7 +5,6 @@ use std::{
     time::Duration,
 };
 
-use base::UUID;
 use futures::{
     FutureExt, StreamExt,
     future::{AbortHandle, Abortable, BoxFuture, pending},
@@ -16,6 +15,7 @@ use llsd::{Limits, Map, Value, notation, xml};
 use network::{Event, PacketOrder, SimulatorId, capabilities::Client};
 use protocol::lludp::{FieldValue, Message, SchemaMessage};
 use tokio::{runtime::Handle, sync::Semaphore};
+use uuid::Uuid;
 use world::{
     EnvironmentAssignment, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_SOURCE_BYTES, OrderEvidence, ParcelId,
     Region, RegionOutcome, UpdateSource,
@@ -57,13 +57,13 @@ struct Route {
 struct Request {
     target: EnvironmentTarget,
     source: UpdateSource,
-    region_id: Option<UUID>,
+    region_id: Option<Uuid>,
     version: Option<u32>,
     client: Client,
 }
 
 struct Response {
-    region_id: Option<UUID>,
+    region_id: Option<Uuid>,
     scope: EnvironmentScope,
     assignment: EnvironmentAssignment,
 }
@@ -421,7 +421,7 @@ fn decode(bytes: &[u8], requested: EnvironmentScope) -> Result<Response, FetchEr
     }
     let region_id = match fields.get("region_id") {
         None | Some(Value::Undefined) => None,
-        Some(Value::UUID(id)) => (!id.is_nil()).then_some(*id),
+        Some(Value::Uuid(id)) => (!id.is_nil()).then_some(*id),
         _ => return Err(FetchError::Malformed),
     };
     let mut assignment = inherited(integer(fields.get("env_version"))?.and_then(|version| u32::try_from(version).ok()));

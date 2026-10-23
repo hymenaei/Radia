@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use base::UUID;
 use network::SimulatorId;
+use uuid::Uuid;
 use world::{
     AgentHandoff, Appearance, Applied, ApplyError,
     ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded},
@@ -242,7 +242,7 @@ impl SessionWorld {
         }
     }
 
-    pub(super) fn set_self_agent(&mut self, agent_id: UUID) {
+    pub(super) fn set_self_agent(&mut self, agent_id: Uuid) {
         if let Err(error) = self.world.set_self_agent(agent_id) {
             tracing::warn!(?error, "could not set authenticated world agent");
         }
@@ -318,7 +318,7 @@ impl SessionWorld {
     pub(super) fn update_handshake_metadata(
         &mut self,
         source: UpdateSource,
-        region_id: Option<UUID>,
+        region_id: Option<Uuid>,
         name: String,
     ) -> Result<(), ApplyError> {
         self.world.observe_region_metadata(source, RegionInfo { region_id, name: Some(name), ..RegionInfo::default() }).map(|_| ())
@@ -497,7 +497,7 @@ impl SessionWorld {
         Some(result)
     }
 
-    pub(super) fn object_address(&self, simulator_id: SimulatorId, object_id: UUID) -> Option<LocalAddress> {
+    pub(super) fn object_address(&self, simulator_id: SimulatorId, object_id: Uuid) -> Option<LocalAddress> {
         let region = self.region_for(simulator_id)?;
         let entity = self.world.entity(object_id)?;
         self.world.object(entity).filter(|object| object.address().region() == region).map(|object| object.address())
@@ -629,11 +629,11 @@ mod tests {
         },
     };
 
-    use base::AssetId;
-    use base::UUID;
     use math::{DVec3, Vec3};
     use network::{SimulatorId, testing::simulator_id};
     use tokio::sync::oneshot::channel;
+    use utils::AssetId;
+    use uuid::Uuid;
     use world::{
         Appearance, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FieldUpdate, Kind, LocalAddress,
         MAX_AVATAR_TEXTURE_SLOTS, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, Parent, ParentUpdate, Pose,
@@ -722,7 +722,7 @@ mod tests {
     fn observation(region: Region, order: u32, id: u128, local_id: NonZeroU32, parent: ParentUpdate) -> ObjectObservation {
         ObjectObservation::new(
             UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0),
-            UUID::from_u128(id),
+            Uuid::from_u128(id),
             local_id,
             Kind::Object,
             parent,
@@ -951,12 +951,12 @@ mod tests {
         let mut volume = observation(second_region, 1, 0x702, local_id, ParentUpdate::Root);
         volume.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
         volume.appearance = FieldUpdate::Set(Appearance::Surface);
-        volume.render_materials = Some(RenderMaterials::new(vec![(0, AssetId::new(UUID::from_u128(0x720)))]).unwrap());
+        volume.render_materials = Some(RenderMaterials::new(vec![(0, AssetId::new(Uuid::from_u128(0x720)))]).unwrap());
         apply_one(&mut session, second_simulator, second_region, ObjectOperation::Observe(volume));
 
         let incremental_patch = |region, order, material_id| {
             let mut patch = ObjectPatch::new(UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0), local_id);
-            patch.render_materials = Some(RenderMaterials::new(vec![(0, AssetId::new(UUID::from_u128(material_id)))]).unwrap());
+            patch.render_materials = Some(RenderMaterials::new(vec![(0, AssetId::new(Uuid::from_u128(material_id)))]).unwrap());
             ObjectOperation::RenderMaterialsPatch(patch)
         };
 
@@ -966,7 +966,7 @@ mod tests {
             let first = state.object(state.entity_at(LocalAddress::new(first_region, local_id)).unwrap()).unwrap();
             let second = state.object(state.entity_at(LocalAddress::new(second_region, local_id)).unwrap()).unwrap();
             assert_eq!(first.render_materials(), None);
-            assert_eq!(second.render_materials().unwrap().material(0), Some(AssetId::new(UUID::from_u128(0x720))));
+            assert_eq!(second.render_materials().unwrap().material(0), Some(AssetId::new(Uuid::from_u128(0x720))));
         }
 
         apply_one(&mut session, second_simulator, second_region, incremental_patch(second_region, 2, 0x731));
@@ -974,7 +974,7 @@ mod tests {
         let first = state.object(state.entity_at(LocalAddress::new(first_region, local_id)).unwrap()).unwrap();
         let second = state.object(state.entity_at(LocalAddress::new(second_region, local_id)).unwrap()).unwrap();
         assert_eq!(first.render_materials(), None);
-        assert_eq!(second.render_materials().unwrap().material(0), Some(AssetId::new(UUID::from_u128(0x731))));
+        assert_eq!(second.render_materials().unwrap().material(0), Some(AssetId::new(Uuid::from_u128(0x731))));
     }
 
     #[test]
@@ -985,7 +985,7 @@ mod tests {
         let region = session.register_simulator(first_simulator, None).expect("register simulator");
         let other_region = session.register_simulator(other_simulator, None).expect("register other simulator");
         let local_id = NonZeroU32::new(7).expect("nonzero local ID");
-        let avatar_id = UUID::from_u128(0x801);
+        let avatar_id = Uuid::from_u128(0x801);
         let mut avatar = observation(region, 1, 0x801, local_id, ParentUpdate::Root);
         avatar.kind = Kind::Avatar;
         avatar.appearance = FieldUpdate::Set(Appearance::Avatar);
@@ -994,7 +994,7 @@ mod tests {
         apply_one(&mut session, other_simulator, other_region, ObjectOperation::Observe(other));
 
         let mut texture_values = [None; MAX_AVATAR_TEXTURE_SLOTS];
-        texture_values[usize::from(AvatarTextureSlot::HEAD_BAKED.index())] = Some(AssetId::new(UUID::from_u128(0x803)));
+        texture_values[usize::from(AvatarTextureSlot::HEAD_BAKED.index())] = Some(AssetId::new(Uuid::from_u128(0x803)));
         let update = AvatarAppearanceUpdate::new(
             Some(1),
             None,
@@ -1015,7 +1015,7 @@ mod tests {
         assert_eq!(appearance.visual_param(AvatarVisualParamIndex::new(0).unwrap()), Some(17));
         assert_eq!(
             appearance.texture_slots().and_then(|slots| slots.texture(AvatarTextureSlot::HEAD_BAKED)),
-            Some(AssetId::new(UUID::from_u128(0x803)))
+            Some(AssetId::new(Uuid::from_u128(0x803)))
         );
         assert_eq!(avatar.surface_appearance(), None);
         assert_eq!(other.avatar_appearance(), None);
@@ -1039,7 +1039,7 @@ mod tests {
                 .apply_avatar_appearance(
                     first_simulator,
                     source,
-                    AvatarAppearanceMessage { object_id: UUID::from_u128(0x811), update: update.clone(), invalid_fields: 0 }
+                    AvatarAppearanceMessage { object_id: Uuid::from_u128(0x811), update: update.clone(), invalid_fields: 0 }
                 )
                 .is_none()
         );
@@ -1048,7 +1048,7 @@ mod tests {
                 .apply_avatar_appearance(
                     first_simulator,
                     source,
-                    AvatarAppearanceMessage { object_id: UUID::from_u128(0x812), update: update.clone(), invalid_fields: 0 }
+                    AvatarAppearanceMessage { object_id: Uuid::from_u128(0x812), update: update.clone(), invalid_fields: 0 }
                 )
                 .is_none()
         );
@@ -1057,7 +1057,7 @@ mod tests {
                 .apply_avatar_appearance(
                     other_simulator,
                     source,
-                    AvatarAppearanceMessage { object_id: UUID::from_u128(0x813), update, invalid_fields: 0 },
+                    AvatarAppearanceMessage { object_id: Uuid::from_u128(0x813), update, invalid_fields: 0 },
                 )
                 .is_none()
         );
@@ -1071,7 +1071,7 @@ mod tests {
         let region = session.register_simulator(sim_id, None).expect("register simulator");
         let other_region = session.register_simulator(other_simulator, None).expect("register other simulator");
         let local_id = NonZeroU32::new(7).expect("nonzero local ID");
-        let object_id = UUID::from_u128(0x703);
+        let object_id = Uuid::from_u128(0x703);
         let mut volume = observation(region, 1, 0x703, local_id, ParentUpdate::Root);
         volume.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
         volume.appearance = FieldUpdate::Set(Appearance::Surface);
@@ -1107,7 +1107,7 @@ mod tests {
         let mut session = SessionWorld::new(viewer_world_limits());
         let region = session.register_simulator(simulator_id, None).expect("register simulator");
         let local_id = NonZeroU32::new(7).expect("nonzero local ID");
-        let object_id = UUID::from_u128(0x704);
+        let object_id = Uuid::from_u128(0x704);
         let mut volume = observation(region, 1, 0x704, local_id, ParentUpdate::Root);
         volume.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
         volume.appearance = FieldUpdate::Set(Appearance::Surface);

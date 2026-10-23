@@ -1,8 +1,7 @@
-use base::UUID;
+use uuid::Uuid;
 
 use math::{Quat, Vec3};
 
-/// The viewer's pose, camera, and control state sent to the simulator.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentUpdate {
     pub agent_data: AgentData,
@@ -10,8 +9,8 @@ pub struct AgentUpdate {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentData {
-    pub agent_id: UUID,
-    pub session_id: UUID,
+    pub agent_id: Uuid,
+    pub session_id: Uuid,
     pub body_rotation: Quat,
     pub head_rotation: Quat,
     pub state: u8,

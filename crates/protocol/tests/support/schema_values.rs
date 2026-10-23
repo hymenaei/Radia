@@ -1,11 +1,11 @@
 use std::array::from_fn;
 
-use base::UUID;
 use math::{DVec3, Quat, Vec3, Vec4};
 use protocol::{
     BlockInstance, BlockValues, FieldValue,
     schema::{BlockMode, FieldKind, MessageSchema},
 };
+use uuid::Uuid;
 
 pub(crate) fn generated_schema_blocks(message_schema: &MessageSchema, seed: u64) -> Vec<BlockValues> {
     message_schema
@@ -64,9 +64,9 @@ fn generated_field_value(kind: FieldKind, name: &str, seed: u64) -> FieldValue {
             let rotation = if name == "BodyRotation" { Quat::IDENTITY } else { Quat::from_xyzw(1.0, 0.0, 0.0, 0.0) };
             FieldValue::Quaternion(rotation)
         }
-        FieldKind::UUID => {
+        FieldKind::Uuid => {
             let bytes = from_fn(|index| seed.wrapping_add(index as u64 * 31) as u8);
-            FieldValue::UUID(UUID::from_bytes(bytes))
+            FieldValue::Uuid(Uuid::from_bytes(bytes))
         }
         FieldKind::Vector3 => FieldValue::Vector3(Vec3::new(component(0), component(67), component(134))),
         FieldKind::Vector3d => {

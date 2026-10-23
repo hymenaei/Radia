@@ -9,7 +9,8 @@ workspace = true
 
 [dependencies]
 assets.workspace = true
-base.workspace = true
+uuid.workspace = true
+utils.workspace = true
 world.workspace = true
 math.workspace = true
 

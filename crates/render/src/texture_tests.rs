@@ -1,8 +1,9 @@
 use std::time::Instant;
 
 use assets::{Budget, Content, Kind, Request, Resource, Status, TextureUsage};
-use base::{AssetId, UUID};
 use futures::executor::block_on;
+use utils::AssetId;
+use uuid::Uuid;
 
 use super::*;
 
@@ -19,7 +20,7 @@ fn loaded_fixture(id: u128, bytes: &[u8]) -> TextureHandle {
     let mut store = assets::Store::new(Budget::default());
     let route = store.register_route().unwrap();
     let now = Instant::now();
-    let resource = Resource { id: AssetId::new(UUID::from_u128(id)), kind: Kind::Texture };
+    let resource = Resource { id: AssetId::new(Uuid::from_u128(id)), kind: Kind::Texture };
     let demand = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
     let mut job = store.next_job(now).unwrap();
     assert!(store.try_start_decode(&mut job));

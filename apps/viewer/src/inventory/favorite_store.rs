@@ -1,22 +1,19 @@
-//! Persistent storage for favorite locations by grid and agent.
-
 use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
 };
 
-use base::UUID;
 use network::Grid;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, to_vec_pretty};
+use uuid::Uuid;
 
 use super::FavoriteLocation;
 
 const APP_DIRECTORY: &str = "Radia";
 const LOGIN_LOCATIONS_FILE: &str = "login_locations.json";
 
-/// Favorites stored by grid and agent until [`save`] is called.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct FavoriteStore {
     #[serde(default)]
@@ -26,7 +23,7 @@ pub struct FavoriteStore {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct AgentFavorites {
     grid: StoredGrid,
-    agent_id: UUID,
+    agent_id: Uuid,
     username: String,
     #[serde(default)]
     favorites: Vec<FavoriteLocation>,
@@ -49,8 +46,7 @@ impl From<Grid> for StoredGrid {
 }
 
 impl FavoriteStore {
-    /// Returns saved favorites in stored order, or an empty slice when none exist.
-    pub fn favorites_for(&self, grid: Grid, agent_id: UUID) -> &[FavoriteLocation] {
+    pub fn favorites_for(&self, grid: Grid, agent_id: Uuid) -> &[FavoriteLocation] {
         let grid = StoredGrid::from(grid);
         self.agents
             .iter()
@@ -59,9 +55,7 @@ impl FavoriteStore {
             .unwrap_or_default()
     }
 
-    /// Finds an agent by normalized username. Normalization trims, lowercases, and collapses whitespace.
-    /// A single name uses `resident`; empty input returns `None`.
-    pub fn agent_id_for_username(&self, grid: Grid, username: &str) -> Option<UUID> {
+    pub fn agent_id_for_username(&self, grid: Grid, username: &str) -> Option<Uuid> {
         let grid = StoredGrid::from(grid);
         let username = normalize_username(username);
         if username.is_empty() {
@@ -70,10 +64,7 @@ impl FavoriteStore {
         self.agents.iter().find(|agent| agent.grid == grid && agent.username == username).map(|agent| agent.agent_id)
     }
 
-    /// Records the agent's normalized username on `grid`.
-    ///
-    /// Clears the same username from other agents on that grid. Returns `false` for blank input or when the store does not change.
-    pub fn remember_agent(&mut self, grid: Grid, agent_id: UUID, username: &str) -> bool {
+    pub fn remember_agent(&mut self, grid: Grid, agent_id: Uuid, username: &str) -> bool {
         let grid_key = StoredGrid::from(grid);
         let username = normalize_username(username);
         if username.is_empty() {
@@ -101,8 +92,7 @@ impl FavoriteStore {
         changed
     }
 
-    /// Replaces the favorites list, preserves its order, and remembers a nonblank username.
-    pub fn replace_favorites(&mut self, grid: Grid, agent_id: UUID, username: &str, favorites: Vec<FavoriteLocation>) {
+    pub fn replace_favorites(&mut self, grid: Grid, agent_id: Uuid, username: &str, favorites: Vec<FavoriteLocation>) {
         let grid_key = StoredGrid::from(grid);
         self.remember_agent(grid, agent_id, username);
         if let Some(agent) = self.agents.iter_mut().find(|agent| agent.grid == grid_key && agent.agent_id == agent_id) {
@@ -115,7 +105,7 @@ pub(crate) fn apply_favorites_refresh(
     current_favorites: &mut Vec<FavoriteLocation>,
     store: &mut FavoriteStore,
     grid: Grid,
-    agent_id: UUID,
+    agent_id: Uuid,
     username: &str,
     refresh: Result<Vec<FavoriteLocation>, String>,
 ) -> Result<(), String> {
@@ -125,20 +115,10 @@ pub(crate) fn apply_favorites_refresh(
     Ok(())
 }
 
-/// Reads the per-user favorite file synchronously; a missing file produces an empty store.
-///
-/// # Errors
-///
-/// Returns an error if the application-data directory or file cannot be read, or its JSON is invalid.
 pub fn load() -> Result<FavoriteStore, String> {
     load_from(&login_locations_path()?)
 }
 
-/// Saves favorites to the per-user application-data file synchronously.
-///
-/// # Errors
-///
-/// Returns an error if the application-data directory or file cannot be written, or the store cannot be encoded.
 pub fn save(favorites: &FavoriteStore) -> Result<(), String> {
     save_to(&login_locations_path()?, favorites)
 }
@@ -188,9 +168,9 @@ fn save_to(path: &Path, favorites: &FavoriteStore) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use base::UUID;
     use network::Grid;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     use super::{FavoriteStore, apply_favorites_refresh, load_from, login_locations_path_under, save_to};
     use crate::inventory::FavoriteLocation;
@@ -200,8 +180,8 @@ mod tests {
         let test_directory = tempdir().expect("create temporary login locations directory");
         let path = login_locations_path_under(test_directory.path());
         let mut favorites = FavoriteStore::default();
-        let agni_agent_id = UUID::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
-        let aditi_agent_id = UUID::from_u128(0xfedc_ba98_7654_3210_fedc_ba98_7654_3210);
+        let agni_agent_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        let aditi_agent_id = Uuid::from_u128(0xfedc_ba98_7654_3210_fedc_ba98_7654_3210);
         let agni_favorites = vec![FavoriteLocation { name: "Sandbox".into(), region_name: "Test Region".into(), x: 128, y: 64, z: 23 }];
         let aditi_favorites = vec![FavoriteLocation { name: "Home".into(), region_name: "Beta Region".into(), x: 1, y: 2, z: 3 }];
 
@@ -218,7 +198,7 @@ mod tests {
     fn failed_favorite_refresh_keeps_memory_and_disk_snapshots() {
         let test_directory = tempdir().expect("create temporary login locations directory");
         let path = login_locations_path_under(test_directory.path());
-        let agent_id = UUID::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        let agent_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
         let saved = vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
         let mut store = FavoriteStore::default();
         store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone());

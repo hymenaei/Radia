@@ -4,10 +4,10 @@ use crate::{
     Image,
     budget::{ASSET_WORK_BYTES, TEXTURE_WORK_BYTES},
 };
-use base::UUID;
+use uuid::Uuid;
 
 fn resource(id: u128) -> Resource {
-    Resource { id: AssetId::new(UUID::from_u128(id)), kind: Kind::Texture }
+    Resource { id: AssetId::new(Uuid::from_u128(id)), kind: Kind::Texture }
 }
 fn ready(demand: &Demand) -> Image {
     let Status::Ready(Content::Texture(blob)) = demand.status() else { panic!("expected ready asset") };

@@ -1,39 +1,36 @@
-use base::UUID;
+use uuid::Uuid;
 
 use crate::lludp::codec::Reader;
 
-/// Maximum number of face indices represented by the legacy TextureEntry format.
 pub const MAX_TEXTURE_FACES: usize = 45;
 
-/// A decoded per-face texture entry.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextureFace {
-    /// Diffuse texture asset UUID.
-    pub texture_id: UUID,
-    /// Red, green, blue, and alpha bytes after applying the wire inversion.
+    pub texture_id: Uuid,
+
     pub color: [u8; 4],
-    /// Texture-coordinate scale along S and T.
+
     pub scale_s: f32,
     pub scale_t: f32,
-    /// Texture-coordinate offsets in normalized viewer units.
+
     pub offset_s: f32,
     pub offset_t: f32,
-    /// Rotation in radians.
+
     pub rotation: f32,
-    /// Packed bump, shiny, and fullbright flags.
+
     pub bump_shiny_fullbright: u8,
-    /// Packed media and texture-generation flags.
+
     pub media_texgen: u8,
-    /// Glow in the range 0–1.
+
     pub glow: f32,
-    /// Legacy material asset UUID, distinct from PBR render-material bindings.
-    pub material_id: UUID,
+
+    pub material_id: Uuid,
 }
 
 impl Default for TextureFace {
     fn default() -> Self {
         Self {
-            texture_id: UUID::nil(),
+            texture_id: Uuid::nil(),
             color: [u8::MAX; 4],
             scale_s: 1.0,
             scale_t: 1.0,
@@ -43,12 +40,11 @@ impl Default for TextureFace {
             bump_shiny_fullbright: 0,
             media_texgen: 0,
             glow: 0.0,
-            material_id: UUID::nil(),
+            material_id: Uuid::nil(),
         }
     }
 }
 
-/// A fully decoded TextureEntry, represented by defaults and sparse face overrides.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextureEntry {
     default_face: TextureFace,
@@ -56,12 +52,10 @@ pub struct TextureEntry {
 }
 
 impl TextureEntry {
-    /// Returns the value applied to faces without an explicit override.
     pub const fn default_face(&self) -> &TextureFace {
         &self.default_face
     }
 
-    /// Returns a face value for indices 0 through 44.
     pub fn face(&self, index: u8) -> Option<&TextureFace> {
         if usize::from(index) >= MAX_TEXTURE_FACES {
             return None;
@@ -73,26 +67,16 @@ impl TextureEntry {
         )
     }
 
-    /// Returns sorted face overrides. Each index is unique and in the range 0–44.
     pub fn overrides(&self) -> impl Iterator<Item = (u8, &TextureFace)> {
         self.overrides.iter().map(|(index, face)| (*index, face))
     }
 }
 
-/// Why a TextureEntry field could not be decoded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextureEntryError {
-    /// A required field, mask, or exception value is malformed.
     Malformed,
 }
 
-/// Decodes a TextureEntry payload without reparsing its containing LLUDP message.
-///
-/// Empty fields return `Ok(None)` and do not represent a clear. Required-field errors are
-/// returned as `Err`; callers can keep the failure local to TextureEntry while applying other
-/// fields from the same object update. Message decoders apply their own field bounds and unwrap
-/// any path-specific framing before passing the payload here. Missing or malformed optional
-/// MaterialID data decodes as nil UUIDs for every face, matching the viewer.
 pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, TextureEntryError> {
     if bytes.is_empty() {
         return Ok(None);
@@ -122,7 +106,7 @@ pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, Textur
         bump_shiny_fullbright,
         media_texgen,
         glow: f32::from(glow),
-        material_id: UUID::nil(),
+        material_id: Uuid::nil(),
     };
 
     decode_material_ids(&mut reader, &mut faces, &mut default_face);
@@ -222,13 +206,13 @@ fn decode_material_ids(reader: &mut Reader<'_>, faces: &mut [TextureFace; MAX_TE
 }
 
 fn clear_material_ids(faces: &mut [TextureFace; MAX_TEXTURE_FACES], default_face: &mut TextureFace) {
-    default_face.material_id = UUID::nil();
+    default_face.material_id = Uuid::nil();
     for face in faces.iter_mut() {
-        face.material_id = UUID::nil();
+        face.material_id = Uuid::nil();
     }
 }
 
-fn read_uuid(reader: &mut Reader<'_>) -> Option<UUID> {
+fn read_uuid(reader: &mut Reader<'_>) -> Option<Uuid> {
     reader.uuid().ok()
 }
 
@@ -255,7 +239,7 @@ mod tests {
 
     fn default_wire_entry() -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&UUID::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10).as_bytes()[..]);
+        bytes.extend_from_slice(&Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10).as_bytes()[..]);
         bytes.push(0);
         bytes.extend_from_slice(&[0, 0x10, 0x80, 0xff]);
         bytes.push(0);
@@ -279,7 +263,7 @@ mod tests {
     }
 
     fn uuid_bytes(value: u128) -> [u8; 16] {
-        *UUID::from_u128(value).as_bytes()
+        *Uuid::from_u128(value).as_bytes()
     }
 
     #[test]
@@ -288,7 +272,7 @@ mod tests {
         let decoded = decode_texture_entry(&bytes).unwrap().unwrap();
         let face = decoded.face(44).unwrap();
 
-        assert_eq!(face.texture_id, UUID::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10));
+        assert_eq!(face.texture_id, Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10));
         assert_eq!(face.color, [255, 239, 127, 0]);
         assert_eq!((face.scale_s, face.scale_t), (2.0, 0.5));
         assert_eq!(face.offset_s, 1.0);
@@ -297,7 +281,7 @@ mod tests {
         assert_eq!(face.bump_shiny_fullbright, 0b1010_0101);
         assert_eq!(face.media_texgen, 0b0000_0101);
         assert_eq!(face.glow, 128.0 / 255.0);
-        assert_eq!(face.material_id, UUID::nil());
+        assert_eq!(face.material_id, Uuid::nil());
         assert_eq!(decoded.overrides().count(), 0);
     }
 
@@ -328,10 +312,10 @@ mod tests {
 
         let decoded = decode_texture_entry(&bytes).unwrap().unwrap();
 
-        assert_eq!(decoded.face(0).unwrap().texture_id, UUID::from_u128(1));
-        assert_eq!(decoded.face(1).unwrap().texture_id, UUID::from_u128(2));
-        assert_eq!(decoded.face(2).unwrap().texture_id, UUID::from_u128(2));
-        assert_eq!(decoded.face(44).unwrap().texture_id, UUID::from_u128(1));
+        assert_eq!(decoded.face(0).unwrap().texture_id, Uuid::from_u128(1));
+        assert_eq!(decoded.face(1).unwrap().texture_id, Uuid::from_u128(2));
+        assert_eq!(decoded.face(2).unwrap().texture_id, Uuid::from_u128(2));
+        assert_eq!(decoded.face(44).unwrap().texture_id, Uuid::from_u128(1));
     }
 
     #[test]
@@ -355,7 +339,7 @@ mod tests {
 
         let decoded = decode_texture_entry(&bytes).unwrap().unwrap();
 
-        assert_eq!(decoded.face(44).unwrap().texture_id, UUID::from_u128(2));
+        assert_eq!(decoded.face(44).unwrap().texture_id, Uuid::from_u128(2));
         assert_eq!(decoded.face(45), None);
         assert_eq!(decoded.overrides().map(|(index, _)| index).collect::<Vec<_>>(), [44]);
     }
@@ -377,14 +361,14 @@ mod tests {
     fn bad_material_ids_clear_only_materials() {
         let bytes = default_wire_entry();
         let decoded = decode_texture_entry(&bytes).unwrap().unwrap();
-        assert_eq!(decoded.face(0).unwrap().material_id, UUID::nil());
+        assert_eq!(decoded.face(0).unwrap().material_id, Uuid::nil());
 
         let mut malformed_tail = bytes;
         malformed_tail.extend_from_slice(&uuid_bytes(5));
         malformed_tail.extend_from_slice(&[0x80]);
         let decoded = decode_texture_entry(&malformed_tail).unwrap().unwrap();
-        assert_eq!(decoded.face(0).unwrap().texture_id, UUID::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10));
-        assert_eq!(decoded.face(0).unwrap().material_id, UUID::nil());
+        assert_eq!(decoded.face(0).unwrap().texture_id, Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10));
+        assert_eq!(decoded.face(0).unwrap().material_id, Uuid::nil());
     }
 
     #[test]
@@ -395,8 +379,8 @@ mod tests {
         bytes.extend_from_slice(&uuid_bytes(7));
         bytes.push(0);
         let decoded = decode_texture_entry(&bytes).unwrap().unwrap();
-        assert_eq!(decoded.face(0).unwrap().material_id, UUID::from_u128(7));
-        assert_eq!(decoded.face(1).unwrap().material_id, UUID::from_u128(6));
+        assert_eq!(decoded.face(0).unwrap().material_id, Uuid::from_u128(7));
+        assert_eq!(decoded.face(1).unwrap().material_id, Uuid::from_u128(6));
 
         let mut unterminated = vec![0; 16];
         unterminated.extend_from_slice(&[0x80; 7]);

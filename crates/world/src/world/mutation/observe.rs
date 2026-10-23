@@ -1,5 +1,3 @@
-//! Object observations and explicit agent handoff.
-
 use super::lifecycle::RemovalCause;
 use crate::ParentUpdate::Local;
 
@@ -33,15 +31,6 @@ struct ObservationPlan {
 }
 
 impl World {
-    /// Accepts identity-bearing simulator evidence, introducing or updating an object.
-    ///
-    /// Ordering and binding evidence determine whether the observation can introduce an identity,
-    /// replace an address occupant, or update an existing object. Invalid independent field groups
-    /// are reported in [`Applied::rejections`] while valid groups remain eligible.
-    ///
-    /// # Errors
-    /// Returns an [`ApplyError`] when the operation's context, identity, or required capacity is
-    /// invalid. The World remains unchanged on error.
     pub fn observe_object(&mut self, observation: ObjectObservation) -> Result<Applied, ApplyError> {
         self.observe_object_with_handoff(observation, false)
     }
@@ -463,14 +452,6 @@ impl World {
             .with_recovery_satisfied(recovery_satisfied))
     }
 
-    /// Transfers the authenticated agent from `from` using destination-region evidence.
-    ///
-    /// This explicit operation authorizes a region change that an ordinary agent observation
-    /// cannot make. Rejected independent fields are reported as for [`Self::observe_object`].
-    ///
-    /// # Errors
-    /// Returns an [`ApplyError`] when the agent, source region, destination evidence, or required
-    /// capacity is invalid. The World remains unchanged on error.
     pub fn handoff_agent(&mut self, from: Region, handoff: AgentHandoff) -> Result<Applied, ApplyError> {
         self.require_active_region(from)?;
         self.require_active_region(handoff.source.region)?;
@@ -508,8 +489,8 @@ impl World {
 mod tests {
     use std::num::NonZeroU32;
 
-    use base::UUID;
     use math::Vec3;
+    use uuid::Uuid;
 
     use crate::{
         AgentHandoff, ApplyError, ApplyError::RevisionExhausted, ApplyOutcome, Kind, LinearMotion, LocalAddress, ObjectObservation,
@@ -523,7 +504,7 @@ mod tests {
         let source_region = Region::new(25);
         let destination = Region::new(26);
         let mut world = test_world(&[source_region, destination]);
-        let agent_id = UUID::from_u128(25);
+        let agent_id = Uuid::from_u128(25);
         world.set_self_agent(agent_id).unwrap();
         let observation = ObjectObservation {
             pose: Some(Pose { position: Some(Vec3::new(4.0, 5.0, 6.0)), rotation: None }),
@@ -594,8 +575,8 @@ mod tests {
         assert!(matches!(result, Err(ApplyError::AddressGenerationExhausted)));
         assert_eq!(world.revision(), revision);
         assert_eq!(world.journal.entries.iter().map(|entry| (entry.revision, entry.changes.clone())).collect::<Vec<_>>(), journal);
-        assert_eq!(world.entity(UUID::from_u128(27)), Some(first));
-        assert_eq!(world.entity(UUID::from_u128(28)), Some(displaced));
+        assert_eq!(world.entity(Uuid::from_u128(27)), Some(first));
+        assert_eq!(world.entity(Uuid::from_u128(28)), Some(displaced));
         assert_eq!(world.entity_at(old_address), Some(first));
         assert_eq!(world.entity_at(occupied_address), Some(displaced));
         assert_eq!(world.object_count(), 2);

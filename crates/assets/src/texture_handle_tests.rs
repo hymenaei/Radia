@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use base::UUID;
+use uuid::Uuid;
 
 use super::*;
 use crate::{Content, Kind, Priority, Request, Resource, Status, Store};
@@ -10,7 +10,7 @@ fn loaded() -> (TextureHandle, Budget) {
     let mut store = Store::new(budget.clone());
     let route = store.register_route().unwrap();
     let now = Instant::now();
-    let resource = Resource { id: AssetId::new(UUID::from_u128(1)), kind: Kind::Texture };
+    let resource = Resource { id: AssetId::new(Uuid::from_u128(1)), kind: Kind::Texture };
     let demand = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
     let mut job = store.next_job(now).unwrap();
     assert!(store.try_start_decode(&mut job));

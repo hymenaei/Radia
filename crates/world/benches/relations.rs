@@ -1,7 +1,7 @@
 use std::{hint::black_box, num::NonZeroU32};
 
-use base::UUID;
 use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
+use uuid::Uuid;
 use world::{
     ApplyOutcome::Introduced,
     Kind::Object,
@@ -15,7 +15,7 @@ use super::support::{PER_REGION, SCENE_SIZES, limits, size_name, source};
 #[derive(Clone, Copy)]
 struct RootCase {
     region: Region,
-    id: UUID,
+    id: Uuid,
     child_count: usize,
 }
 
@@ -66,7 +66,7 @@ fn child_first_scene(count: usize) -> (World, Vec<RootCase>) {
             let local_id = NonZeroU32::new(local_index as u32 + 2).expect("child local ID is nonzero");
             let child = ObjectObservation::new(
                 source(region, first_child_id as u64),
-                UUID::from_u128(first_child_id),
+                Uuid::from_u128(first_child_id),
                 local_id,
                 Object,
                 Local(NonZeroU32::new(1).expect("root local ID is nonzero")),
@@ -75,7 +75,7 @@ fn child_first_scene(count: usize) -> (World, Vec<RootCase>) {
             let _ = black_box(world.observe_object(child).expect("pending child introduction"));
         }
 
-        roots.push(RootCase { region, id: UUID::from_u128(u128::MAX - region_index as u128), child_count });
+        roots.push(RootCase { region, id: Uuid::from_u128(u128::MAX - region_index as u128), child_count });
         remaining -= entity_count;
     }
 
@@ -100,7 +100,7 @@ fn bench_deep_reparent(group: &mut BenchmarkGroup<'_, WallTime>) {
                 let _ = world
                     .observe_object(ObjectObservation::new(
                         source(region, u64::from(local)),
-                        UUID::from_u128(u128::from(local)),
+                        Uuid::from_u128(u128::from(local)),
                         NonZeroU32::new(local).unwrap(),
                         Object,
                         parent,

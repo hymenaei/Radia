@@ -12,7 +12,8 @@ invariants = []
 workspace = true
 
 [dependencies]
-base.workspace = true
+uuid.workspace = true
+utils.workspace = true
 hecs.workspace = true
 math.workspace = true
 

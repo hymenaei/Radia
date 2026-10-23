@@ -1,5 +1,3 @@
-//! Coordinates simulator routing, handoffs, capabilities, and connection task lifetimes.
-
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
@@ -8,7 +6,6 @@ use std::{
     time::Duration,
 };
 
-use base::UUID;
 use llsd::Value;
 use protocol::{lludp::Message, login::ResponseData};
 use tokio::{
@@ -17,6 +14,7 @@ use tokio::{
     time::{self, Instant},
 };
 use url::Url;
+use uuid::Uuid;
 
 #[cfg(test)]
 use tokio::task::{self, JoinError};
@@ -1382,8 +1380,8 @@ fn queue_connection_message(
 fn queue_primary_message(
     simulator_id: SimulatorId,
     commands: &mpsc::Sender<NeighborCommand>,
-    agent_id: UUID,
-    session_id: UUID,
+    agent_id: Uuid,
+    session_id: Uuid,
     message: Message,
     delivery: Delivery,
     cancellation: Option<HandoffCancellation>,
@@ -1434,7 +1432,7 @@ impl Default for SessionStartup {
 }
 
 impl SessionStartup {
-    fn observe_primary_message(&mut self, message: &Message, agent_id: UUID, session_id: UUID) -> bool {
+    fn observe_primary_message(&mut self, message: &Message, agent_id: Uuid, session_id: Uuid) -> bool {
         let Self::Connecting { region_handshake: seen_handshake, movement_complete: seen_movement, primary_announced } = self else {
             return false;
         };

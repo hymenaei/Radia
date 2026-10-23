@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use base::UUID;
+use uuid::Uuid;
 
 use crate::{
     LLUdpError,
@@ -12,26 +12,21 @@ use crate::{
 };
 use math::{DVec3, Quat, Vec3, Vec4};
 
-/// A typed value for one schema field.
-///
-/// Multi-byte numbers use little-endian encoding. IP addresses and ports keep wire byte order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FieldValue {
-    /// Boolean encoded as one byte; any nonzero byte decodes as `true`.
     Bool(bool),
     F32(f32),
     F64(f64),
-    /// Four IPv4 address octets in wire order.
+
     IpAddr([u8; 4]),
-    /// Two port bytes in wire order.
+
     IpPort([u8; 2]),
-    /// Encodes as a zero-length field with no payload bytes.
+
     Null,
-    /// Encodes normalized XYZ as three little-endian `f32` values with canonical nonnegative W.
-    /// Zero or non-finite quaternions fail encoding.
+
     Quaternion(Quat),
-    /// UUID bytes in the order returned by `UUID::as_bytes`.
-    UUID(UUID),
+
+    Uuid(Uuid),
     Vector3(Vec3),
     Vector3d(DVec3),
     Vector4(Vec4),
@@ -43,14 +38,12 @@ pub enum FieldValue {
     U16(u16),
     U32(u32),
     U64(u64),
-    /// Raw bytes for a `Fixed` or `Variable` schema field.
+
     Bytes(Vec<u8>),
 }
 
-/// The field values for one instance of a schema block.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockInstance {
-    /// Values in the order declared by the corresponding `BlockSchema::fields` slice.
     pub fields: Vec<FieldValue>,
 }
 
@@ -60,7 +53,6 @@ impl BlockInstance {
     }
 }
 
-/// Instances for one schema block, kept in wire order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockValues {
     pub instances: Vec<BlockInstance>,
@@ -76,7 +68,6 @@ impl BlockValues {
     }
 }
 
-/// A runtime wire message represented by compiled schema metadata and ordered values.
 #[derive(Clone, Debug)]
 pub struct SchemaMessage {
     schema: &'static MessageSchema,
@@ -96,12 +87,6 @@ impl PartialEq for SchemaMessage {
 }
 
 impl SchemaMessage {
-    /// Create a message from its compiled schema and ordered block values.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`LLUdpError::InvalidSchemaMessage`] when the blocks, instance counts, or field
-    /// values do not match the schema.
     pub fn new(schema: &'static MessageSchema, blocks: Vec<BlockValues>) -> Result<Self, LLUdpError> {
         let message = Self { schema, blocks, encoded_schema_len: None, field_presence: Vec::new(), trailing_bytes: Vec::new() };
         message.validate()?;
@@ -124,16 +109,10 @@ impl SchemaMessage {
         self.schema.id
     }
 
-    /// Blocks follow schema order; missing legacy fixed fields are zero-filled.
     pub fn blocks(&self) -> &[BlockValues] {
         &self.blocks
     }
 
-    /// Reports whether one schema field was decoded as present rather than compatibility zero-fill.
-    ///
-    /// Block, instance, and field indexes use the schema's declared order. Authored messages
-    /// created by [`Self::new`] report all existing fields as supplied. Returns `None` for an
-    /// invalid index.
     pub fn field_was_supplied(&self, block_index: usize, instance_index: usize, field_index: usize) -> Option<bool> {
         let block_schema = self.schema.blocks.get(block_index)?;
         self.blocks.get(block_index)?.instances.get(instance_index)?.fields.get(field_index)?;
@@ -152,7 +131,6 @@ impl SchemaMessage {
         None
     }
 
-    /// Bytes after the fields known to this template version.
     pub fn trailing_bytes(&self) -> &[u8] {
         &self.trailing_bytes
     }
@@ -173,7 +151,6 @@ impl SchemaMessage {
         bytes.saturating_add(self.field_presence.capacity()).saturating_add(self.trailing_bytes.capacity())
     }
 
-    /// Preserve bytes appended by a newer template version.
     pub fn with_trailing_bytes(mut self, bytes: Vec<u8>) -> Self {
         self.trailing_bytes = bytes;
         self
@@ -377,7 +354,7 @@ fn validate_field(schema: &FieldSchema, value: &FieldValue) -> Result<(), LLUdpE
         | (FieldKind::IpPort, FieldValue::IpPort(_))
         | (FieldKind::Null, FieldValue::Null)
         | (FieldKind::Quaternion, FieldValue::Quaternion(_))
-        | (FieldKind::UUID, FieldValue::UUID(_))
+        | (FieldKind::Uuid, FieldValue::Uuid(_))
         | (FieldKind::Vector3, FieldValue::Vector3(_))
         | (FieldKind::Vector3d, FieldValue::Vector3d(_))
         | (FieldKind::Vector4, FieldValue::Vector4(_))
@@ -411,7 +388,7 @@ fn encode_field(writer: &mut Writer<'_>, schema: &FieldSchema, value: &FieldValu
         (FieldKind::IpPort, FieldValue::IpPort(value)) => writer.bytes(value),
         (FieldKind::Null, FieldValue::Null) => {}
         (FieldKind::Quaternion, FieldValue::Quaternion(value)) => writer.quaternion_xyz(*value)?,
-        (FieldKind::UUID, FieldValue::UUID(value)) => writer.uuid(*value),
+        (FieldKind::Uuid, FieldValue::Uuid(value)) => writer.uuid(*value),
         (FieldKind::Vector3, FieldValue::Vector3(value)) => writer.vector3(*value),
         (FieldKind::Vector3d, FieldValue::Vector3d(value)) => writer.vector3d(*value),
         (FieldKind::Vector4, FieldValue::Vector4(value)) => {
@@ -457,7 +434,7 @@ fn decode_field(reader: &mut Reader<'_>, schema: &FieldSchema) -> Result<(FieldV
         FieldKind::IpPort => FieldValue::IpPort(reader.take(2)?.try_into().map_err(|_| LLUdpError::TruncatedPacket)?),
         FieldKind::Null => FieldValue::Null,
         FieldKind::Quaternion => FieldValue::Quaternion(reader.quaternion()?),
-        FieldKind::UUID => FieldValue::UUID(reader.uuid()?),
+        FieldKind::Uuid => FieldValue::Uuid(reader.uuid()?),
         FieldKind::Vector3 => FieldValue::Vector3(reader.vector3()?),
         FieldKind::Vector3d => FieldValue::Vector3d(reader.vector3d()?),
         FieldKind::Vector4 => FieldValue::Vector4(Vec4::new(reader.f32()?, reader.f32()?, reader.f32()?, reader.f32()?)),
@@ -500,7 +477,7 @@ fn fixed_field_size(kind: FieldKind) -> Result<Option<usize>, LLUdpError> {
         FieldKind::F32 | FieldKind::IpAddr | FieldKind::S32 | FieldKind::U32 => 4,
         FieldKind::F64 | FieldKind::S64 | FieldKind::U64 => 8,
         FieldKind::Quaternion | FieldKind::Vector3 => 12,
-        FieldKind::UUID => 16,
+        FieldKind::Uuid => 16,
         FieldKind::Vector3d => 24,
         FieldKind::Vector4 => 16,
         FieldKind::Null => 0,
@@ -519,7 +496,7 @@ fn zero_field(kind: FieldKind) -> Result<FieldValue, LLUdpError> {
         FieldKind::IpPort => FieldValue::IpPort([0; 2]),
         FieldKind::Null => FieldValue::Null,
         FieldKind::Quaternion => FieldValue::Quaternion(Quat::IDENTITY),
-        FieldKind::UUID => FieldValue::UUID(UUID::from_bytes([0; 16])),
+        FieldKind::Uuid => FieldValue::Uuid(Uuid::from_bytes([0; 16])),
         FieldKind::Vector3 => FieldValue::Vector3(Vec3::ZERO),
         FieldKind::Vector3d => FieldValue::Vector3d(DVec3::ZERO),
         FieldKind::Vector4 => FieldValue::Vector4(Vec4::ZERO),
@@ -573,7 +550,7 @@ mod tests {
         FieldSchema { name: "IpPort", kind: FieldKind::IpPort },
         FieldSchema { name: "Null", kind: FieldKind::Null },
         FieldSchema { name: "Quaternion", kind: FieldKind::Quaternion },
-        FieldSchema { name: "Uuid", kind: FieldKind::UUID },
+        FieldSchema { name: "Uuid", kind: FieldKind::Uuid },
         FieldSchema { name: "Vector3", kind: FieldKind::Vector3 },
         FieldSchema { name: "Vector3d", kind: FieldKind::Vector3d },
         FieldSchema { name: "Vector4", kind: FieldKind::Vector4 },
@@ -654,7 +631,7 @@ mod tests {
             FieldValue::IpPort([0x1f, 0x90]),
             FieldValue::Null,
             FieldValue::Quaternion(Quat::from_xyzw(1.0, 0.0, 0.0, 0.0)),
-            FieldValue::UUID(UUID::from_bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])),
+            FieldValue::Uuid(Uuid::from_bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])),
             FieldValue::Vector3(Vec3::new(1.0, -2.0, 0.5)),
             FieldValue::Vector3d(DVec3::new(1.0, -2.0, 0.5)),
             FieldValue::Vector4(Vec4::new(1.0, -2.0, 0.5, 4.0)),
@@ -679,29 +656,13 @@ mod tests {
         message.encode_payload(&mut Writer::new(&mut actual)).expect("encode all field kinds");
 
         let expected = vec![
-            0x01, // BOOL
-            0x00, 0x00, 0x80, 0x3f, // F32
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0xbf, // F64
-            0x01, 0x02, 0x03, 0x04, // IPADDR
-            0x1f, 0x90, // IPPORT
-            // NULL: no bytes
-            0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Quaternion
-            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, // UUID
-            0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x3f, // Vector3
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0xe0, 0x3f, // Vector3d
-            0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x80, 0x40, // Vector4
-            0xfe, // S8
-            0xfd, 0xff, // S16
-            0xfc, 0xff, 0xff, 0xff, // S32
-            0xfb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // S64
-            0x05, // U8
-            0x07, 0x06, // U16
-            0x0b, 0x0a, 0x09, 0x08, // U32
-            0x0f, 0x0e, 0x0d, 0x0c, 0x0b, 0x0a, 0x09, 0x08, // U64
-            0xde, 0xad, 0xbe, 0xef, // Fixed(4)
-            0x02, 0xaa, 0xbb, // Variable(1)
-            0x03, 0x00, 0xcc, 0xdd, 0xee, // Variable(2), little-endian U16 length
+            0x01, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0xbf, 0x01, 0x02, 0x03, 0x04, 0x1f, 0x90, 0x00, 0x00,
+            0x80, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+            0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x00, 0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xf0, 0x3f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xe0, 0x3f, 0x00,
+            0x00, 0x80, 0x3f, 0x00, 0x00, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x3f, 0x00, 0x00, 0x80, 0x40, 0xfe, 0xfd, 0xff, 0xfc, 0xff, 0xff,
+            0xff, 0xfb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x05, 0x07, 0x06, 0x0b, 0x0a, 0x09, 0x08, 0x0f, 0x0e, 0x0d, 0x0c, 0x0b,
+            0x0a, 0x09, 0x08, 0xde, 0xad, 0xbe, 0xef, 0x02, 0xaa, 0xbb, 0x03, 0x00, 0xcc, 0xdd, 0xee,
         ];
         assert_eq!(actual, expected);
         assert_eq!(
@@ -1002,7 +963,7 @@ mod tests {
             FieldKind::IpPort => FieldValue::IpPort([0x12, 0x34]),
             FieldKind::Null => FieldValue::Null,
             FieldKind::Quaternion => FieldValue::Quaternion(Quat::from_xyzw(1.0, 0.0, 0.0, 0.0)),
-            FieldKind::UUID => FieldValue::UUID(UUID::from_bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])),
+            FieldKind::Uuid => FieldValue::Uuid(Uuid::from_bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])),
             FieldKind::Vector3 => FieldValue::Vector3(Vec3::new(1.0, -2.0, 0.5)),
             FieldKind::Vector3d => FieldValue::Vector3d(DVec3::new(1.0, -2.0, 0.5)),
             FieldKind::Vector4 => FieldValue::Vector4(Vec4::new(1.0, -2.0, 0.5, 4.0)),

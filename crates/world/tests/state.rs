@@ -4,8 +4,8 @@ use std::{collections::HashSet, num::NonZeroU32};
 
 use OrderEvidence::{Degraded, Ordered};
 use ParentUpdate::{Local, Root};
-use base::UUID;
 use math::{DVec3, Quat, Vec3};
+use uuid::Uuid;
 use world::ApplyError::{EntityBudgetExhausted, InvalidValue, RegionRetired, RegistrationBudgetExhausted, StaleRegion};
 use world::ApplyOutcome::{Deferred, IgnoredStale, Introduced, TombstoneRecorded, Updated};
 use world::DeferredReason::AmbiguousOrder;
@@ -33,8 +33,8 @@ fn limits() -> WorldLimits {
     }
 }
 
-fn uuid(value: u128) -> UUID {
-    UUID::from_u128(value)
+fn uuid(value: u128) -> Uuid {
+    Uuid::from_u128(value)
 }
 
 fn address(region: Region, local_id: u32) -> LocalAddress {

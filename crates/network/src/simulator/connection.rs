@@ -1,5 +1,3 @@
-//! Owns one simulator's UDP socket, LLUDP circuit, and connection lifecycle.
-
 use std::{
     collections::{HashMap, VecDeque, hash_map::Entry},
     future::Future,
@@ -85,8 +83,7 @@ const MAX_PENDING_SEND_BYTES: usize = MAX_PENDING_SENDS * OUTBOUND_SEND_CHARGE_B
 const MAX_SEND_AGE: Duration = Duration::from_secs(5);
 const SEND_QUEUE_EXPIRED: &str = "A simulator datagram exceeded its queue age limit.";
 const RELIABLE_RETRY_EXPIRED: &str = "A reliable simulator retransmission exceeded its send age limit.";
-/// Matches the pinned viewer's default 3,000 throttle preference with its 1.5 headroom factor.
-/// AgentThrottle carries the resulting per-class values in bits per second.
+
 const DEFAULT_AGENT_THROTTLE_RATES: ThrottleRates = ThrottleRates {
     resend_bits_per_second: 460_800.0,
     land_bits_per_second: 317_440.0,
@@ -2021,7 +2018,6 @@ mod tests {
         time::Duration,
     };
 
-    use base::UUID;
     use protocol::{
         ChatType,
         lludp::{Message, Packet},
@@ -2039,6 +2035,7 @@ mod tests {
         time::{advance, timeout},
     };
     use url::Url;
+    use uuid::Uuid;
 
     use crate::{
         AgentSession, Grid,
@@ -2067,8 +2064,8 @@ mod tests {
         let simulator_address = simulator.local_addr().expect("read simulator address");
         let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
         let mut agent_session = session(simulator_address);
-        agent_session.agent_id = UUID::from_bytes([1; 16]);
-        agent_session.session_id = UUID::from_bytes([2; 16]);
+        agent_session.agent_id = Uuid::from_bytes([1; 16]);
+        agent_session.session_id = Uuid::from_bytes([2; 16]);
         agent_session.circuit_code = 0x1234_5678;
         let budget = OutboundBudget::new(crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
         let (primary_state, primary_state_receiver) = watch::channel(PrimaryState::PRIMARY_CONNECTING);
@@ -2536,8 +2533,8 @@ mod tests {
             grid: Grid::Agni,
             message: "Welcome".into(),
             simulator_address,
-            agent_id: UUID::nil(),
-            session_id: UUID::nil(),
+            agent_id: Uuid::nil(),
+            session_id: Uuid::nil(),
             circuit_code: 1,
             seed_capability: Url::parse("http://127.0.0.1:1/seed").expect("valid seed URL"),
         }
@@ -2548,8 +2545,8 @@ mod tests {
         endpoint: SocketAddr,
     ) -> (PendingPromotion, super::super::handoff::HandoffCancellation) {
         let handoff = HandoffTarget {
-            agent_id: UUID::nil(),
-            session_id: UUID::nil(),
+            agent_id: Uuid::nil(),
+            session_id: Uuid::nil(),
             region_handle: 42,
             endpoint,
             seed_capability: Url::parse("http://127.0.0.1:1/seed").expect("valid seed URL"),

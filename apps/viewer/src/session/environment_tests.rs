@@ -27,7 +27,7 @@ fn scope() -> EnvironmentScope {
 fn response_preserves_source_and_metadata() {
     let response = decode(RESPONSE.as_bytes(), scope()).unwrap();
     assert_eq!(response.scope, scope());
-    assert_eq!(response.region_id, Some(UUID::from_u128(0x00112233445566778899aabbccddeeff)));
+    assert_eq!(response.region_id, Some(Uuid::from_u128(0x00112233445566778899aabbccddeeff)));
     assert_eq!(response.assignment.version, Some(7));
     assert_eq!(response.assignment.day_length_seconds, Some(14_400));
     assert_eq!(response.assignment.day_offset_seconds, Some(0));

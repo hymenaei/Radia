@@ -22,7 +22,7 @@ fn factors_and_defaults() {
 #[test]
 fn color_channel_selection() {
     let color = MaterialTexture {
-        texture: TextureRef::Asset(AssetId::new(UUID::from_u128(17))),
+        texture: TextureRef::Asset(AssetId::new(Uuid::from_u128(17))),
         transform: TextureTransform { offset: [0.25, -0.5], scale: [2.0, -3.0], rotation: 0.75 },
         tex_coord: 2,
         sampler: Sampler { wrap_s: Wrap::ClampToEdge, ..Sampler::default() },
@@ -74,7 +74,7 @@ fn pbr_channels_survive() {
     for (info, id) in
         [(material.base_color, 1), (material.normal, 2), (material.metallic_roughness, 3), (material.emissive, 4), (material.occlusion, 5)]
     {
-        assert_eq!(info.texture, TextureRef::Asset(AssetId::new(UUID::from_u128(id))));
+        assert_eq!(info.texture, TextureRef::Asset(AssetId::new(Uuid::from_u128(id))));
     }
     assert_eq!(material.metallic, 0.3);
     assert_eq!(material.roughness, 0.7);
@@ -122,7 +122,7 @@ fn auxiliary_channels_validate() {
 #[test]
 fn texture_transform_and_clear() {
     let material = pbr_description(TEXTURED.as_bytes());
-    assert_eq!(material.base_color.texture, TextureRef::Asset(AssetId::new(UUID::from_u128(0x00112233445566778899aabbccddeeff))));
+    assert_eq!(material.base_color.texture, TextureRef::Asset(AssetId::new(Uuid::from_u128(0x00112233445566778899aabbccddeeff))));
     assert_eq!(material.base_color.transform, TextureTransform { offset: [0.25, -0.5], scale: [2.0, 3.0], rotation: 1.5 });
     assert_eq!(material.alpha_mode, AlphaMode::Mask);
     assert_eq!(material.alpha_cutoff, 0.25);
@@ -173,8 +173,8 @@ fn ignored_fields_stay_bounded() {
 
 fn legacy_fields(mode: i32, cutoff: i32) -> llsd::Map {
     let mut fields: llsd::Map = [
-        ("NormMap".into(), llsd::Value::UUID(UUID::from_u128(7))),
-        ("SpecMap".into(), llsd::Value::UUID(UUID::nil())),
+        ("NormMap".into(), llsd::Value::Uuid(Uuid::from_u128(7))),
+        ("SpecMap".into(), llsd::Value::Uuid(Uuid::nil())),
         ("SpecColor".into(), llsd::Value::Array([51, 102, 153, 204].map(llsd::Value::Integer).into())),
     ]
     .into();
@@ -206,7 +206,7 @@ fn legacy_bytes(mode: i32, cutoff: i32) -> Vec<u8> {
 fn legacy_expected(alpha_mode: LegacyAlphaMode) -> LegacyMaterial {
     LegacyMaterial {
         normal: MaterialTexture {
-            texture: TextureRef::Asset(AssetId::new(UUID::from_u128(7))),
+            texture: TextureRef::Asset(AssetId::new(Uuid::from_u128(7))),
             transform: TextureTransform { offset: [0.25, -0.5], scale: [2.0, 3.0], rotation: 1.5 },
             ..MaterialTexture::default()
         },
@@ -290,7 +290,7 @@ fn shared_material_retains_charge() {
     let budget = Budget::default();
     let mut store = Store::new(budget.clone());
     let route = store.register_route().unwrap();
-    let resource = Resource { id: AssetId::new(UUID::from_u128(2)), kind: Kind::PbrMaterial };
+    let resource = Resource { id: AssetId::new(Uuid::from_u128(2)), kind: Kind::PbrMaterial };
     let first = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
     let second = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
     let mut job = store.next_job(now).unwrap();
@@ -316,7 +316,7 @@ fn retired_material_cannot_publish() {
     let budget = Budget::default();
     let mut store = Store::new(budget.clone());
     let route = store.register_route().unwrap();
-    let resource = Resource { id: AssetId::new(UUID::from_u128(3)), kind: Kind::LegacyMaterial };
+    let resource = Resource { id: AssetId::new(Uuid::from_u128(3)), kind: Kind::LegacyMaterial };
     let old = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
     let mut job = store.next_job(now).unwrap();
     assert!(store.try_start_decode(&mut job));
@@ -341,11 +341,11 @@ fn material_identity_must_match() {
     let budget = Budget::default();
     let mut store = Store::new(budget.clone());
     let route = store.register_route().unwrap();
-    let resource = Resource { id: AssetId::new(UUID::from_u128(1)), kind: Kind::PbrMaterial };
+    let resource = Resource { id: AssetId::new(Uuid::from_u128(1)), kind: Kind::PbrMaterial };
     let demand = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
     let mut job = store.next_job(now).unwrap();
     assert!(store.try_start_decode(&mut job));
-    let other = Resource { id: AssetId::new(UUID::from_u128(2)), ..resource };
+    let other = Resource { id: AssetId::new(Uuid::from_u128(2)), ..resource };
     let _other_demand = store.request(route, Request::new(other), Priority::Visible, now).unwrap();
     let mut other_job = store.next_job(now).unwrap();
     assert!(store.try_start_decode(&mut other_job));

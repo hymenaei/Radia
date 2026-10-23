@@ -1,8 +1,6 @@
-//! Field patches and targeted property updates.
-
 use std::sync::Arc;
 
-use base::UUID;
+use uuid::Uuid;
 
 use super::super::journal::WorldChange::EntityUpdated;
 use super::super::journal::WorldChangeClasses;
@@ -27,15 +25,6 @@ use super::fields::{
 const UNKNOWN_COF_VERSION: i32 = -1;
 
 impl World {
-    /// Applies source-ordered field groups to an existing simulator-local address.
-    ///
-    /// A patch never introduces an object. Missing identity or ambiguous ordering produces a
-    /// deferred outcome and any available recovery targets. Invalid or protected groups are
-    /// rejected independently, preserving eligible sibling changes.
-    ///
-    /// # Errors
-    /// Returns an [`ApplyError`] for invalid operation context or exhausted mutation capacity.
-    /// The World remains unchanged on error.
     pub fn patch_object(&mut self, patch: ObjectPatch) -> Result<Applied, ApplyError> {
         let source = patch.source;
         let local_id = patch.local_id;
@@ -371,20 +360,11 @@ impl World {
             .with_recovery_satisfied(parent_is_newer))
     }
 
-    /// Applies an asynchronous property response to its captured object binding.
-    ///
-    /// `response_id` must match the request target. A response for an obsolete binding is ignored,
-    /// so address reuse or transfer cannot redirect it to another object. Owner and creator
-    /// evidence are accepted independently and retain their source provenance.
-    ///
-    /// # Errors
-    /// Returns an [`ApplyError`] for invalid context, identity values, or exhausted revision
-    /// capacity. The World remains unchanged on error.
     pub fn patch_properties(
         &mut self,
         source: UpdateSource,
         target: ObjectBindingTarget,
-        response_id: UUID,
+        response_id: Uuid,
         patch: PropertiesPatch,
     ) -> Result<Applied, ApplyError> {
         self.require_active_region(source.region)?;
@@ -460,15 +440,7 @@ impl World {
             .with_rejections(rejections))
     }
 
-    /// Applies or clears simulator sit-target evidence for an object UUID in the source region.
-    ///
-    /// `None` clears the target. A missing object or ambiguous source order produces a deferred
-    /// outcome. Invalid target values are reported as a rejected field group.
-    ///
-    /// # Errors
-    /// Returns an [`ApplyError`] for invalid operation context or exhausted revision capacity.
-    /// The World remains unchanged on error.
-    pub fn patch_sit_target(&mut self, source: UpdateSource, id: UUID, target: Option<SitTarget>) -> Result<Applied, ApplyError> {
+    pub fn patch_sit_target(&mut self, source: UpdateSource, id: Uuid, target: Option<SitTarget>) -> Result<Applied, ApplyError> {
         self.require_active_region(source.region)?;
         validate_uuid(id, "object_id")?;
         let Some(stamp) = source.stamp() else {
@@ -546,8 +518,8 @@ impl World {
 mod tests {
     use std::num::NonZeroU32;
 
-    use base::UUID;
     use math::Vec3;
+    use uuid::Uuid;
 
     use crate::{
         Appearance, ApplyOutcome, ApplyOutcome::Introduced, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, Kind,
@@ -567,7 +539,7 @@ mod tests {
             pose: Some(Pose { position: Some(Vec3::X), rotation: None }),
             linear_motion: Some(LinearMotion::default()),
             scale: Some(Vec3::splat(2.0)),
-            ..ObjectObservation::new(source, UUID::from_u128(23), NonZeroU32::new(1).unwrap(), Kind::Object, Root)
+            ..ObjectObservation::new(source, Uuid::from_u128(23), NonZeroU32::new(1).unwrap(), Kind::Object, Root)
         };
         let introduced = world.observe_object(observation).unwrap();
         let ApplyOutcome::Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
@@ -599,7 +571,7 @@ mod tests {
         let local_id = NonZeroU32::new(1).unwrap();
         let object = ObjectObservation {
             appearance: FieldUpdate::Set(Appearance::Surface),
-            ..ObjectObservation::new(UpdateSource::new(region, 1, Ordered(1), 0), UUID::from_u128(24), local_id, Kind::Object, Root)
+            ..ObjectObservation::new(UpdateSource::new(region, 1, Ordered(1), 0), Uuid::from_u128(24), local_id, Kind::Object, Root)
         };
         let introduced = world.observe_object(object).unwrap();
         let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };

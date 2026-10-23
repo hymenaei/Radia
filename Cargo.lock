@@ -355,7 +355,6 @@ dependencies = [
 name = "assets"
 version = "0.0.1"
 dependencies = [
- "base",
  "criterion",
  "flate2",
  "jpeg2k",
@@ -364,6 +363,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "utils",
+ "uuid",
 ]
 
 [[package]]
@@ -630,13 +631,6 @@ dependencies = [
  "object 0.37.3",
  "rustc-demangle",
  "windows-link 0.2.1",
-]
-
-[[package]]
-name = "base"
-version = "0.0.1"
-dependencies = [
- "uuid",
 ]
 
 [[package]]
@@ -4178,7 +4172,6 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 name = "llsd"
 version = "0.0.1"
 dependencies = [
- "base",
  "base64 0.22.1",
  "criterion",
  "proptest",
@@ -4186,6 +4179,7 @@ dependencies = [
  "serde",
  "testing",
  "time",
+ "uuid",
 ]
 
 [[package]]
@@ -4626,7 +4620,6 @@ dependencies = [
 name = "network"
 version = "0.0.1"
 dependencies = [
- "base",
  "criterion",
  "httpdate",
  "llsd",
@@ -4641,6 +4634,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "zip",
 ]
 
@@ -5968,7 +5962,6 @@ dependencies = [
 name = "protocol"
 version = "0.0.1"
 dependencies = [
- "base",
  "criterion",
  "dxr",
  "math",
@@ -5978,6 +5971,7 @@ dependencies = [
  "sha2 0.10.9",
  "testing",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -6480,7 +6474,6 @@ name = "render"
 version = "0.0.1"
 dependencies = [
  "assets",
- "base",
  "block_compression",
  "criterion",
  "egui",
@@ -6490,6 +6483,8 @@ dependencies = [
  "math",
  "scene",
  "tracing",
+ "utils",
+ "uuid",
  "wgpu 30.0.1",
 ]
 
@@ -6869,9 +6864,10 @@ name = "scene"
 version = "0.0.1"
 dependencies = [
  "assets",
- "base",
  "math",
  "proptest",
+ "utils",
+ "uuid",
  "world",
 ]
 
@@ -8541,6 +8537,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
+name = "utils"
+version = "0.0.1"
+dependencies = [
+ "uuid",
+]
+
+[[package]]
 name = "uuid"
 version = "1.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8644,7 +8647,7 @@ name = "viewer"
 version = "0.0.1"
 dependencies = [
  "assets",
- "base",
+ "chrono",
  "dirs 5.0.1",
  "egui",
  "egui-winit",
@@ -8671,6 +8674,8 @@ dependencies = [
  "tracing-subscriber",
  "tracing-tracy",
  "url",
+ "utils",
+ "uuid",
  "winit",
  "world",
  "zip",
@@ -10010,12 +10015,13 @@ checksum = "beffa227304dbaea3ad6a06ac674f9bc83a3dec3b7f63eeb442de37e7cb6bb01"
 name = "world"
 version = "0.0.1"
 dependencies = [
- "base",
  "criterion",
  "hecs",
  "math",
  "proptest",
  "testing",
+ "utils",
+ "uuid",
 ]
 
 [[package]]

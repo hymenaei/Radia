@@ -213,8 +213,8 @@ async fn run_stale_cancel() {
         (
             "AgentData".into(),
             Value::Array(vec![Value::Map(Map::from([
-                ("AgentID".into(), Value::UUID(session.agent_id)),
-                ("SessionID".into(), Value::UUID(session.session_id)),
+                ("AgentID".into(), Value::Uuid(session.agent_id)),
+                ("SessionID".into(), Value::Uuid(session.session_id)),
             ]))]),
         ),
         (

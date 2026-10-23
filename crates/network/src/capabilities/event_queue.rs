@@ -1,5 +1,3 @@
-//! Simulator EventQueueGet polling, batch decoding, and retry policy.
-
 use std::{
     fmt,
     mem::take,
@@ -106,7 +104,6 @@ impl EventQueueTask {
         self.role.clone()
     }
 
-    /// Waits for a repeatable exit result. Cancelling preserves it for a later call.
     pub(crate) async fn completion(&mut self) -> EventQueueExit {
         match &mut self.completion {
             Completion::Finished(exit) => *exit,
@@ -118,7 +115,6 @@ impl EventQueueTask {
         }
     }
 
-    /// Waits for the exit result and worker teardown. Cancelling aborts the worker.
     pub(crate) async fn wait(mut self) -> EventQueueExit {
         let exit = self.completion().await;
         let _ = (&mut self.task).await;
@@ -986,7 +982,7 @@ fn llsd_heap_size(value: &mut Value) -> usize {
             .capacity()
             .saturating_mul(size_of::<Value>())
             .saturating_add(values.iter_mut().fold(0usize, |size, value| size.saturating_add(llsd_heap_size(value)))),
-        Value::Undefined | Value::Boolean(_) | Value::Real(_) | Value::Integer(_) | Value::UUID(_) | Value::Date(_) => 0,
+        Value::Undefined | Value::Boolean(_) | Value::Real(_) | Value::Integer(_) | Value::Uuid(_) | Value::Date(_) => 0,
     }
 }
 

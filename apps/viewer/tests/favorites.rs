@@ -13,11 +13,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base::UUID;
 use llsd::{Value, xml};
 use network::capabilities::Client;
 use tokio::runtime::Runtime;
 use url::Url;
+use uuid::Uuid;
 use viewer::inventory::favorites::{favorite_folder_id, fetch_favorite_landmarks};
 
 const AGENT_ID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -48,8 +48,8 @@ fn empty_folder_requests_items() {
     let server = LocalServer::start(include_str!("fixtures/favorites_empty_folder.xml"), None);
     let seed = server.seed_url();
     let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
-    let agent_id = UUID::parse_str(AGENT_ID).expect("valid fixture UUID");
-    let folder_id = UUID::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
+    let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
+    let folder_id = Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
 
     let favorites = runtime.block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id)).expect("empty folder is valid");
     assert!(favorites.is_empty());
@@ -64,8 +64,8 @@ fn empty_folder_requests_items() {
         .and_then(|folders| folders.first())
         .and_then(Value::as_map)
         .expect("requested folder");
-    assert_eq!(folder.get("folder_id"), Some(&Value::UUID(folder_id)));
-    assert_eq!(folder.get("owner_id"), Some(&Value::UUID(agent_id)));
+    assert_eq!(folder.get("folder_id"), Some(&Value::Uuid(folder_id)));
+    assert_eq!(folder.get("owner_id"), Some(&Value::Uuid(agent_id)));
     assert_eq!(folder.get("sort_order"), Some(&Value::Integer(0)));
     assert_eq!(folder.get("fetch_folders"), Some(&Value::Boolean(true)));
     assert_eq!(folder.get("fetch_items"), Some(&Value::Boolean(true)));
@@ -77,8 +77,8 @@ fn missing_items_rejected() {
     let server = LocalServer::start(include_str!("fixtures/favorites_incomplete_folder.xml"), None);
     let seed = server.seed_url();
     let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
-    let agent_id = UUID::parse_str(AGENT_ID).expect("valid fixture UUID");
-    let folder_id = UUID::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
+    let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
+    let folder_id = Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
 
     let error = runtime
         .block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id))
@@ -96,8 +96,8 @@ fn landmark_asset_parsed() {
     );
     let seed = server.seed_url();
     let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
-    let agent_id = UUID::parse_str(AGENT_ID).expect("valid fixture UUID");
-    let folder_id = UUID::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
+    let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
+    let folder_id = Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
 
     let landmarks = runtime.block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id)).expect("landmark fixture is valid");
     assert_eq!(landmarks.len(), 1);
@@ -118,8 +118,8 @@ fn landmark_asset_request_failure_rejects_partial_results() {
     let server = ConcurrentAssetServer::start_with_failure(landmark_folder_response(ASSET_COUNT), ASSET_COUNT, Some(0));
     let seed = server.seed_url();
     let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
-    let agent_id = UUID::parse_str(AGENT_ID).expect("valid fixture UUID");
-    let folder_id = UUID::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
+    let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
+    let folder_id = Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
 
     let error = runtime
         .block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id))
@@ -142,8 +142,8 @@ fn malformed_landmark_is_skipped_with_valid_peer() {
     );
     let seed = server.seed_url();
     let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
-    let agent_id = UUID::parse_str(AGENT_ID).expect("valid fixture UUID");
-    let folder_id = UUID::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
+    let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
+    let folder_id = Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
 
     let landmarks = runtime
         .block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id))
@@ -164,8 +164,8 @@ fn landmark_fetches_are_bounded_and_keep_folder_order() {
     let server = ConcurrentAssetServer::start(folder_response, ASSET_COUNT);
     let seed = server.seed_url();
     let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
-    let agent_id = UUID::parse_str(AGENT_ID).expect("valid fixture UUID");
-    let folder_id = UUID::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
+    let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
+    let folder_id = Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
 
     let landmarks = runtime.block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id));
     let (requests, peak_fetches) = server.finish();

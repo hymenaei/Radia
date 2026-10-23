@@ -1,7 +1,8 @@
 use std::{collections::HashSet, num::NonZeroU32};
 
-use base::{AssetId, UUID};
 use math::{Quat, Vec3};
+use utils::AssetId;
+use uuid::Uuid;
 use world::ApplyError::{InvalidValue, KindMismatch};
 use world::ApplyOutcome::{AgentHandedOff, Deferred, IgnoredStale, Introduced, Removed, TombstoneRecorded, Unchanged, Updated};
 use world::DeferredReason::{AmbiguousOrder, UnknownObject};
@@ -38,14 +39,14 @@ fn limits() -> WorldLimits {
     }
 }
 
-fn uuid(value: u128) -> UUID {
-    UUID::from_u128(value)
+fn uuid(value: u128) -> Uuid {
+    Uuid::from_u128(value)
 }
 
 fn patch_properties_current(
     world: &mut World,
     source: UpdateSource,
-    id: UUID,
+    id: Uuid,
     patch: PropertiesPatch,
 ) -> Result<world::Applied, world::ApplyError> {
     let entity = world.entity(id).expect("property patch target is live");
@@ -607,7 +608,7 @@ fn render_materials_reject_invalid_bindings() {
         RenderMaterials::new(vec![(1, AssetId::new(uuid(1))), (1, AssetId::new(uuid(2)))]),
         Err(RenderMaterialsError::DuplicateFaceIndex(1))
     );
-    assert!(RenderMaterials::new(vec![(1, AssetId::new(UUID::nil()))]).unwrap().is_empty());
+    assert!(RenderMaterials::new(vec![(1, AssetId::new(Uuid::nil()))]).unwrap().is_empty());
 }
 
 #[test]
@@ -916,7 +917,7 @@ fn partial_patch_merge_and_ordering() {
             &mut world,
             source(region, 11),
             uuid(1),
-            PropertiesPatch { owner_id: Some(UUID::nil()), creator_id: None }
+            PropertiesPatch { owner_id: Some(Uuid::nil()), creator_id: None }
         )
         .unwrap()
         .outcome,
@@ -929,7 +930,7 @@ fn partial_patch_merge_and_ordering() {
         assert_eq!(current.scale(), Some(Vec3::splat(2.0)));
         assert_eq!(current.local_transform(), None);
         assert_eq!(current.linear_motion().velocity, Some(Vec3::X));
-        assert_eq!(current.properties().owner_id, Some(UUID::nil()));
+        assert_eq!(current.properties().owner_id, Some(Uuid::nil()));
     }
 
     let rotation = Quat::from_rotation_y(0.5);

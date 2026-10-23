@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use base::{AssetId, UUID};
 use llsd::{Limits, Map, Value, binary, notation, xml};
+use utils::AssetId;
+use uuid::Uuid;
 
 use crate::{Failure, TextureRef};
 
@@ -262,8 +263,8 @@ fn vector<const N: usize>(fields: &Map, key: &str) -> Result<Option<[f32; N]>, F
 
 fn texture(fields: &Map, key: &str) -> Result<TextureRef, Failure> {
     match fields.get(key) {
-        Some(Value::UUID(id)) if *id == UUID::nil() => Ok(TextureRef::Clear),
-        Some(Value::UUID(id)) => Ok(TextureRef::Asset(AssetId::new(*id))),
+        Some(Value::Uuid(id)) if *id == Uuid::nil() => Ok(TextureRef::Clear),
+        Some(Value::Uuid(id)) => Ok(TextureRef::Asset(AssetId::new(*id))),
         None => Ok(TextureRef::Absent),
         _ => Err(Failure::Malformed),
     }

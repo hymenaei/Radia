@@ -1,18 +1,13 @@
-//! Borrowed object views for point reads and bulk scans.
-
 use super::{ObjectContent, ObjectOrdering, ObjectRecord, ObjectRecordRef, World};
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, GltfMaterialOverrides, Kind, LinearMotion, LocalAddress,
     LocalTransform, ObjectMedia, Parent, PoseError, PoseState, Properties, PropertiesProvenance, RenderMaterials, Shape, SitTarget,
     SurfaceAppearance, Transform, WorldTransformState,
 };
-use base::UUID;
 use hecs::{QueryBorrow, Ref};
 use math::{Quat, Vec3};
+use uuid::Uuid;
 
-/// A read-only view of one live object.
-///
-/// The view borrows spatial state and content. Drop it before mutating the same World.
 #[derive(Clone)]
 pub struct Object<'a> {
     pub(super) entity: Entity,
@@ -20,20 +15,6 @@ pub struct Object<'a> {
     pub(super) world: &'a World,
 }
 
-/// A shared borrow for scanning live objects in unspecified storage order.
-///
-/// The scan borrows object state once. Drop the scan and its views before mutating World.
-/// Views returned by [`iter`](Self::iter) cannot outlive the scan.
-///
-/// ```
-/// # use world::World;
-/// # fn inspect(world: &World) {
-/// let mut objects = world.objects();
-/// for object in objects.iter() {
-///     let _ = (object.id(), object.transform(), object.parent());
-/// }
-/// # }
-/// ```
 pub struct Objects<'a> {
     pub(super) records: QueryBorrow<'a, (hecs::Entity, &'a ObjectRecord, Option<&'a ObjectContent>)>,
     pub(super) world: &'a World,
@@ -63,8 +44,7 @@ impl<'a> Object<'a> {
         self.entity
     }
 
-    /// The non-nil UUID supplied by the simulator for this object.
-    pub fn id(&self) -> UUID {
+    pub fn id(&self) -> Uuid {
         self.record.id
     }
 
@@ -128,7 +108,6 @@ impl<'a> Object<'a> {
         self.content().gltf_material_overrides.as_deref()
     }
 
-    /// Returns the latest fetched per-face ObjectMedia values.
     pub fn object_media(&self) -> Option<&ObjectMedia> {
         self.content().object_media.as_deref()
     }

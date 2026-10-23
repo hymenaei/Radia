@@ -2,13 +2,14 @@ use assets::Priority;
 use std::time::Instant;
 
 use assets::{Alpha, Budget, ColorSpace, Content, Failure, Image, Kind, PixelFormat, Request, Resource, Status, Store};
-use base::{AssetId, UUID};
+use utils::AssetId;
+use uuid::Uuid;
 
 fn decode(bytes: &[u8]) -> Result<Image, Failure> {
     let now = Instant::now();
     let mut store = Store::new(Budget::default());
     let route = store.register_route().unwrap();
-    let resource = Resource { id: AssetId::new(UUID::from_u128(1)), kind: Kind::Texture };
+    let resource = Resource { id: AssetId::new(Uuid::from_u128(1)), kind: Kind::Texture };
     let demand = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
     let mut job = store.next_job(now).unwrap();
     assert!(store.try_start_decode(&mut job));

@@ -1,8 +1,8 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
-use base::UUID;
 use llsd::Value;
 use url::Url;
+use uuid::Uuid;
 
 const MAX_SIMULATORS_PER_ENABLE_EVENT: usize = 32;
 
@@ -39,11 +39,11 @@ pub(super) fn decode_enable_simulators(body: &Value) -> Result<Vec<(u64, SocketA
         .collect()
 }
 
-pub(super) fn decode_agent_communication(body: &Value, agent_id: UUID) -> Result<(SocketAddr, Url), &'static str> {
+pub(super) fn decode_agent_communication(body: &Value, agent_id: Uuid) -> Result<(SocketAddr, Url), &'static str> {
     let body = super::handoff::event_fields(body)?;
     match body.get("agent-id") {
-        Some(Value::UUID(value)) if *value == agent_id => {}
-        Some(Value::UUID(_)) => return Err("agent-id does not match the logged-in agent"),
+        Some(Value::Uuid(value)) if *value == agent_id => {}
+        Some(Value::Uuid(_)) => return Err("agent-id does not match the logged-in agent"),
         _ => return Err("agent-id is not an LLSD UUID"),
     }
     let Some(Value::String(address)) = body.get("sim-ip-and-port") else {
@@ -81,9 +81,9 @@ pub(super) fn redact_seed_capability(body: &mut Value) {
 mod tests {
     use std::net::SocketAddr;
 
-    use base::UUID;
     use llsd::{Map, Value};
     use url::Url;
+    use uuid::Uuid;
 
     use super::MAX_SIMULATORS_PER_ENABLE_EVENT;
     use super::{decode_agent_communication, decode_enable_simulators, redact_seed_capability};
@@ -132,16 +132,16 @@ mod tests {
 
     #[test]
     fn agent_communication() {
-        let agent = UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("agent UUID");
+        let agent = Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("agent UUID");
         let body = Value::Map(Map::from([
-            ("agent-id".to_owned(), Value::UUID(agent)),
+            ("agent-id".to_owned(), Value::Uuid(agent)),
             ("sim-ip-and-port".to_owned(), Value::String("192.0.2.7:13000".to_owned())),
             ("seed-capability".to_owned(), Value::String("https://sim.example.invalid/seed".to_owned())),
         ]));
         let endpoint = "192.0.2.7:13000".parse::<SocketAddr>().expect("simulator endpoint");
         let seed = Url::parse("https://sim.example.invalid/seed").expect("seed URL");
         assert_eq!(decode_agent_communication(&body, agent), Ok((endpoint, seed)));
-        assert_eq!(decode_agent_communication(&body, UUID::default()), Err("agent-id does not match the logged-in agent"));
+        assert_eq!(decode_agent_communication(&body, Uuid::default()), Err("agent-id does not match the logged-in agent"));
     }
 
     #[test]

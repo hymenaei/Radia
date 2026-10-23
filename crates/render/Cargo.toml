@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 assets.workspace = true
-base.workspace = true
+uuid.workspace = true
 math.workspace = true
 scene.workspace = true
 egui.workspace = true
@@ -19,6 +19,7 @@ tracing.workspace = true
 intel_tex_2.workspace = true
 
 [dev-dependencies]
+utils.workspace = true
 futures.workspace = true
 criterion.workspace = true
 block_compression = { workspace = true, features = ["bc15", "bc7"] }

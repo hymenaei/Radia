@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use base::UUID;
+use uuid::Uuid;
 
 use crate::{
     LLUdpError,
@@ -14,10 +14,8 @@ use crate::{
 };
 use math::{Vec3, Vec4};
 
-/// Largest full ObjectUpdate TextureEntry payload decoded by the viewer.
 pub const MAX_TEXTURE_ENTRY_BYTES: usize = 4095;
 
-/// Decodes the bounded TextureEntry payload carried by a full ObjectUpdate.
 pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpError> {
     if bytes.len() > MAX_TEXTURE_ENTRY_BYTES {
         return Err(LLUdpError::InvalidMessage);
@@ -25,7 +23,6 @@ pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpE
     decode_texture_entry_payload(bytes).map_err(|_| LLUdpError::InvalidMessage)
 }
 
-/// A full simulator object update.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectUpdate {
     pub region_data: RegionData,
@@ -36,7 +33,7 @@ pub struct ObjectUpdate {
 pub struct ObjectData {
     pub local_id: u32,
     pub state: u8,
-    pub id: UUID,
+    pub id: Uuid,
     pub crc: u32,
     pub pcode: u8,
     pub material: u8,
@@ -56,7 +53,7 @@ pub struct ObjectData {
     pub particle_system: Vec<u8>,
     pub extra_parameters: Vec<ExtraParameter>,
     pub sound: ObjectSound,
-    pub owner_id: UUID,
+    pub owner_id: Uuid,
     pub joint_type: u8,
     pub joint_pivot: Vec3,
     pub joint_axis_or_anchor: Vec3,

@@ -1,5 +1,3 @@
-//! LLUDP circuit sequencing, acknowledgements, and retries over generic UDP.
-
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt,
@@ -36,7 +34,7 @@ const DUPLICATE_ACK_HEADROOM: usize = 256;
 pub(crate) const NEW_RELIABLE_ACK_CAPACITY: usize = MAX_PENDING_ACKS - DUPLICATE_ACK_HEADROOM;
 pub(crate) const MAX_PENDING_PACKETS: usize = 256;
 const MAX_ACKS_PER_PACKET: usize = u8::MAX as usize;
-/// Keep ordinary viewer datagrams within IPv6's minimum-MTU UDP payload with a small margin.
+
 const MAX_NORMAL_DATAGRAM_BYTES: usize = 1_200;
 pub(crate) const MAX_RECEIVED_RELIABLE_PACKETS: usize = 65_536;
 const DUPLICATE_SUPPRESSION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -163,15 +161,12 @@ impl Drop for Circuit {
     }
 }
 
-/// Reliable delivery and local retransmission policy for an outgoing packet.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Delivery {
-    /// Do not set the reliable flag or track this packet for retries.
     Unreliable,
-    /// Set the reliable flag, track the packet until ACKed, and retry on timeout.
+
     Reliable,
-    /// Set the reliable flag without tracking or retrying the packet locally.
-    /// The simulator may still ACK it.
+
     ReliableNoRetry,
 }
 
@@ -783,7 +778,6 @@ mod protocol_tests {
         },
     };
     use ::testing::{lludp::vectors, parse_hex_fixture};
-    use base::UUID;
     use math::Vec3;
     use protocol::{
         Audible, ChatSourceType, ChatType,
@@ -801,6 +795,7 @@ mod protocol_tests {
         net::UdpSocket,
         time::{Instant, timeout},
     };
+    use uuid::Uuid;
 
     fn complete_ping(ping_id: u8) -> Message {
         Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id } })
@@ -860,7 +855,7 @@ mod protocol_tests {
         }
 
         let message = Message::ChatFromViewer(ChatFromViewer {
-            agent_data: chat_from_viewer::AgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+            agent_data: chat_from_viewer::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
             chat_data: chat_from_viewer::ChatData { message: "x".repeat(255), chat_type: ChatType::Normal, channel: 0 },
         });
         let prepared = circuit.prepare_message(message.clone(), Delivery::Unreliable).expect("prepare limited ACK batch");
@@ -889,7 +884,7 @@ mod protocol_tests {
             circuit.commit_receive(admission);
         }
         let message = Message::RequestMultipleObjects(RequestMultipleObjects {
-            agent_data: RequestAgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+            agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
             objects: (0..u8::MAX).map(|_| ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 0x0102_0304 }).collect(),
         });
         let prepared = circuit.prepare_message(message, Delivery::Unreliable).expect("prepare compatibility-sized request");
@@ -950,8 +945,8 @@ mod protocol_tests {
         let message = Message::ChatFromSimulator(ChatFromSimulator {
             chat_data: ChatData {
                 from_name: "Resident".into(),
-                source_id: UUID::nil(),
-                owner_id: UUID::nil(),
+                source_id: Uuid::nil(),
+                owner_id: Uuid::nil(),
                 source_type: ChatSourceType::Agent,
                 chat_type: ChatType::Normal,
                 audible: Audible::Fully,
@@ -991,7 +986,7 @@ mod protocol_tests {
         let transport = UdpTransport::connect(server.local_addr().expect("simulator address")).await.expect("connect fake simulator");
         let mut circuit = Circuit::new();
         let oversized = Message::from(ChatFromViewer {
-            agent_data: chat_from_viewer::AgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+            agent_data: chat_from_viewer::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
             chat_data: chat_from_viewer::ChatData { message: "x".repeat(9_000), chat_type: ChatType::Normal, channel: 0 },
         });
 
@@ -1027,7 +1022,7 @@ mod protocol_tests {
             .send(
                 &transport,
                 Message::LogoutRequest(LogoutRequest {
-                    agent_data: logout_request::AgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+                    agent_data: logout_request::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
                 }),
                 Delivery::ReliableNoRetry,
             )

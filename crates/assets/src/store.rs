@@ -8,8 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base::AssetId;
 use tokio::sync::watch;
+use utils::AssetId;
 
 use crate::{
     Blob, Budget, Content, Prepared, TextureEvents, TextureHandle, TextureSize, WeakTexture,

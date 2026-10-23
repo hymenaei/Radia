@@ -32,7 +32,7 @@ impl World {
 mod tests {
     use std::num::NonZeroU32;
 
-    use base::UUID;
+    use uuid::Uuid;
 
     use super::super::World;
     use crate::update::Stamp;
@@ -91,7 +91,7 @@ mod tests {
     pub(super) fn observation(region: Region, id: u128, local_id: u32, sequence: u32) -> ObjectObservation {
         ObjectObservation::new(
             UpdateSource::new(region, sequence, Ordered(u64::from(sequence)), 0),
-            UUID::from_u128(id),
+            Uuid::from_u128(id),
             NonZeroU32::new(local_id).unwrap(),
             Kind::Object,
             Root,
@@ -123,7 +123,7 @@ mod tests {
         let result = world
             .observe_object(ObjectObservation::new(
                 UpdateSource::new(region, 90, Ordered(90), 0),
-                UUID::from_u128(20),
+                Uuid::from_u128(20),
                 NonZeroU32::new(1).unwrap(),
                 Kind::Object,
                 Root,
@@ -132,7 +132,7 @@ mod tests {
 
         assert_eq!(result.outcome, ApplyOutcome::IgnoredStale);
         assert!(result.recovery.requests.is_empty());
-        assert_eq!(world.entity(UUID::from_u128(20)), None);
+        assert_eq!(world.entity(Uuid::from_u128(20)), None);
     }
 
     #[test]

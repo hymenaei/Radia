@@ -1,4 +1,3 @@
-use base::UUID;
 use protocol::{
     lludp::{LLUdpError, Message, Packet},
     messages::{
@@ -7,6 +6,7 @@ use protocol::{
     },
 };
 use testing::{lludp::vectors, parse_hex_fixture};
+use uuid::Uuid;
 
 const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
 const SESSION_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
@@ -14,8 +14,8 @@ const SESSION_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
 fn fixture_message() -> AgentThrottle {
     AgentThrottle {
         agent_data: AgentData {
-            agent_id: UUID::parse_str(AGENT_ID).expect("valid fixture agent UUID"),
-            session_id: UUID::parse_str(SESSION_ID).expect("valid fixture session UUID"),
+            agent_id: Uuid::parse_str(AGENT_ID).expect("valid fixture agent UUID"),
+            session_id: Uuid::parse_str(SESSION_ID).expect("valid fixture session UUID"),
             circuit_code: 0x1122_3344,
         },
         throttle: Throttle {

@@ -1,18 +1,10 @@
-//! Complete object lifetimes, identity indexes, and read-only ECS access.
-//!
-//! Component mutation requires an exclusive store borrow. Shared access exposes only immutable
-//! queries, so readers cannot create conflicts with other readers through hecs's runtime borrows.
-//! Every entity has an identity/spatial record and ordering metadata. Content is present only
-//! while it retains data; its absence does not discard field fences. Regions and other World
-//! resources are not entities in this store.
-
 use std::{
     collections::{BTreeSet, HashMap},
     ops::Deref,
 };
 
-use base::UUID;
 use hecs::{QueryBorrow, QueryOne, Ref, ViewBorrow};
+use uuid::Uuid;
 
 use crate::identity::WorldId;
 use crate::{Entity, Kind, LocalAddress, Parent, Region};
@@ -48,11 +40,11 @@ impl ObjectRecordRef<'_> {
 pub(super) struct ObjectStore {
     world: WorldId,
     ecs: hecs::World,
-    entities: HashMap<UUID, Entity>,
-    ids: BTreeSet<UUID>,
+    entities: HashMap<Uuid, Entity>,
+    ids: BTreeSet<Uuid>,
     addresses: HashMap<LocalAddress, Entity>,
-    regions: HashMap<Region, BTreeSet<UUID>>,
-    avatars: BTreeSet<UUID>,
+    regions: HashMap<Region, BTreeSet<Uuid>>,
+    avatars: BTreeSet<Uuid>,
 }
 
 impl ObjectStore {
@@ -68,7 +60,7 @@ impl ObjectStore {
         }
     }
 
-    pub(super) fn entity(&self, id: UUID) -> Option<Entity> {
+    pub(super) fn entity(&self, id: Uuid) -> Option<Entity> {
         self.entities.get(&id).copied()
     }
 
@@ -80,20 +72,20 @@ impl ObjectStore {
         self.entities.len()
     }
 
-    pub(super) fn ids(&self) -> &BTreeSet<UUID> {
+    pub(super) fn ids(&self) -> &BTreeSet<Uuid> {
         &self.ids
     }
 
-    pub(super) fn avatar_ids(&self) -> &BTreeSet<UUID> {
+    pub(super) fn avatar_ids(&self) -> &BTreeSet<Uuid> {
         &self.avatars
     }
 
-    pub(super) fn region_ids(&self, region: Region) -> Option<&BTreeSet<UUID>> {
+    pub(super) fn region_ids(&self, region: Region) -> Option<&BTreeSet<Uuid>> {
         self.regions.get(&region)
     }
 
     #[cfg(feature = "invariants")]
-    pub(super) fn entities(&self) -> impl Iterator<Item = (UUID, Entity)> + '_ {
+    pub(super) fn entities(&self) -> impl Iterator<Item = (Uuid, Entity)> + '_ {
         self.entities.iter().map(|(id, entity)| (*id, *entity))
     }
 
@@ -128,7 +120,6 @@ impl ObjectStore {
         self.remove_region_id(address.region(), id);
     }
 
-    /// `None` preserves content; an empty value removes the optional component.
     pub(super) fn commit(&mut self, entity: Entity, state: ObjectState, content: Option<ObjectContent>, ordering: ObjectOrdering) {
         let (id, previous) = {
             let record = self.record(entity).expect("mutation target is live");
@@ -163,7 +154,7 @@ impl ObjectStore {
         }
     }
 
-    fn remove_region_id(&mut self, region: Region, id: UUID) {
+    fn remove_region_id(&mut self, region: Region, id: Uuid) {
         let ids = self.regions.get_mut(&region).expect("live object has a region index");
         assert!(ids.remove(&id), "region index is missing a live object");
         if ids.is_empty() {
@@ -240,7 +231,7 @@ impl ObjectStore {
         {
             return Err("object storage and identity index counts differ");
         }
-        let mut regions = HashMap::<Region, BTreeSet<UUID>>::new();
+        let mut regions = HashMap::<Region, BTreeSet<Uuid>>::new();
         let mut avatars = BTreeSet::new();
         for (id, entity) in self.entities() {
             let record = self.record(entity).ok_or("UUID index points to a dead or foreign entity")?;

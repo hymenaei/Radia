@@ -1,6 +1,5 @@
-use base::UUID;
+use uuid::Uuid;
 
-/// Confirms the viewer's region initialization to the simulator.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegionHandshakeReply {
     pub agent_data: AgentData,
@@ -9,8 +8,8 @@ pub struct RegionHandshakeReply {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AgentData {
-    pub agent_id: UUID,
-    pub session_id: UUID,
+    pub agent_id: Uuid,
+    pub session_id: Uuid,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

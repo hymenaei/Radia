@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use base::UUID;
+use uuid::Uuid;
 
 use crate::{
     LLUdpError,
@@ -8,27 +8,23 @@ use crate::{
     messages::common::read_variable1,
 };
 
-/// Incremental ExtraParams update for simulator-local objects.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectExtraParams {
-    /// Agent whose session sent the update.
-    pub agent_id: UUID,
-    /// Session that sent the update.
-    pub session_id: UUID,
-    /// Parameter updates in ObjectData block order.
+    pub agent_id: Uuid,
+
+    pub session_id: Uuid,
+
     pub object_data: Vec<ExtraParamUpdate>,
 }
 
-/// One ExtraParams parameter set or removal.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtraParamUpdate {
-    /// Simulator-local object ID.
     pub local_id: u32,
-    /// ExtraParams type identifier.
+
     pub parameter_type: u16,
-    /// Whether this parameter is currently in use.
+
     pub in_use: bool,
-    /// Parameter bytes. This remains present on removal messages and is ignored by consumers when `in_use` is false.
+
     pub data: Vec<u8>,
 }
 

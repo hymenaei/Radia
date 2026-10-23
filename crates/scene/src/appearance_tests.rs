@@ -4,7 +4,7 @@ use assets::AlphaMode;
 #[test]
 fn legacy_combines_diffuse_and_maps() {
     let source = FaceAppearance {
-        texture_id: UUID::from_u128(1),
+        texture_id: Uuid::from_u128(1),
         color: [128, 0, 255, 128],
         scale_s: -2.0,
         scale_t: 3.0,
@@ -17,8 +17,8 @@ fn legacy_combines_diffuse_and_maps() {
         ..FaceAppearance::default()
     };
     let maps = LegacyMaterial {
-        normal: MaterialTexture { texture: TextureRef::Asset(AssetId::new(UUID::from_u128(2))), ..MaterialTexture::default() },
-        specular: MaterialTexture { texture: TextureRef::Asset(AssetId::new(UUID::from_u128(3))), ..MaterialTexture::default() },
+        normal: MaterialTexture { texture: TextureRef::Asset(AssetId::new(Uuid::from_u128(2))), ..MaterialTexture::default() },
+        specular: MaterialTexture { texture: TextureRef::Asset(AssetId::new(Uuid::from_u128(3))), ..MaterialTexture::default() },
         specular_color: [10, 20, 30, 255],
         specular_exponent: 71,
         alpha_mode: LegacyAlphaMode::Mask,
@@ -29,7 +29,7 @@ fn legacy_combines_diffuse_and_maps() {
     assert!((material.diffuse_color[0] - 0.2158605).abs() < 1e-6);
     assert_eq!(&material.diffuse_color[1..3], &[0.0, 1.0]);
     assert_eq!(material.diffuse_color[3], 128.0 / 255.0);
-    assert_eq!(material.diffuse.texture, TextureRef::Asset(AssetId::new(UUID::from_u128(1))));
+    assert_eq!(material.diffuse.texture, TextureRef::Asset(AssetId::new(Uuid::from_u128(1))));
     assert_eq!(material.diffuse.transform, TextureTransform { offset: [0.25, -0.5], scale: [-2.0, 3.0], rotation: 1.5 });
     assert_eq!(material.texgen, TexGen::Planar);
     assert!(material.fullbright);
@@ -45,9 +45,9 @@ fn legacy_combines_diffuse_and_maps() {
 
 #[test]
 fn unresolved_alpha_stays_unknown() {
-    let source = FaceAppearance { texture_id: UUID::from_u128(1), ..FaceAppearance::default() };
+    let source = FaceAppearance { texture_id: Uuid::from_u128(1), ..FaceAppearance::default() };
     assert_eq!(resolve_legacy(source, None, None).1, Alpha::Unknown);
-    let missing = AssetState { asset: AssetId::new(UUID::from_u128(2)), resolution: Resolution::Failed(Failure::NotFound) };
+    let missing = AssetState { asset: AssetId::new(Uuid::from_u128(2)), resolution: Resolution::Failed(Failure::NotFound) };
     assert_eq!(resolve_legacy(source, None, Some(missing)).1, Alpha::Unknown);
     for (mode, expected) in [
         (LegacyAlphaMode::Opaque, Alpha::Opaque),
@@ -63,7 +63,7 @@ fn unresolved_alpha_stays_unknown() {
 #[test]
 fn overrides_do_not_mutate_base() {
     let texture = MaterialTexture {
-        texture: TextureRef::Asset(AssetId::new(UUID::from_u128(1))),
+        texture: TextureRef::Asset(AssetId::new(Uuid::from_u128(1))),
         transform: TextureTransform { offset: [0.4, 0.8], scale: [2.0, 3.0], rotation: 1.0 },
         ..MaterialTexture::default()
     };
@@ -85,7 +85,7 @@ fn overrides_do_not_mutate_base() {
         ..PbrMaterial::default()
     };
     let overrides = GltfMaterialOverride {
-        textures: [Some(UUID::nil()), Some(UUID::max()), Some(UUID::from_u128(3)), None],
+        textures: [Some(Uuid::nil()), Some(Uuid::max()), Some(Uuid::from_u128(3)), None],
         base_color: Some([1.0; 4]),
         emissive: Some([0.0; 3]),
         metallic: Some(1.0),
@@ -105,7 +105,7 @@ fn overrides_do_not_mutate_base() {
     assert!(!changed.double_sided);
     assert_eq!(changed.base_color.texture, texture.texture, "nil override inherits the base texture");
     assert_eq!(changed.normal.texture, TextureRef::Clear);
-    assert_eq!(changed.metallic_roughness.texture, TextureRef::Asset(AssetId::new(UUID::from_u128(3))));
+    assert_eq!(changed.metallic_roughness.texture, TextureRef::Asset(AssetId::new(Uuid::from_u128(3))));
     assert_eq!(changed.emissive.texture, texture.texture);
     assert_eq!(changed.base_color.transform, TextureTransform::default());
     assert_eq!(changed.occlusion, texture, "independent occlusion data is retained");

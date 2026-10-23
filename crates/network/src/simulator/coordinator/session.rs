@@ -16,7 +16,6 @@ use crate::{
     },
 };
 use ::testing::lludp::fixture;
-use base::UUID;
 use protocol::{
     ChatType,
     lludp::{Message, Packet},
@@ -34,6 +33,7 @@ use tokio::{
     time::{self, Instant, timeout},
 };
 use url::Url;
+use uuid::Uuid;
 
 fn complete_ping(ping_id: u8) -> Message {
     Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id } })
@@ -65,8 +65,8 @@ const RETRANSMISSION_TIMEOUT: Duration = Duration::from_secs(8);
 fn chat_message(message: impl Into<String>) -> Message {
     Message::from(ChatFromViewer {
         agent_data: chat_from_viewer::AgentData {
-            agent_id: UUID::parse_str(AGENT_ID).expect("valid test agent ID"),
-            session_id: UUID::parse_str(SESSION_ID).expect("valid test session ID"),
+            agent_id: Uuid::parse_str(AGENT_ID).expect("valid test agent ID"),
+            session_id: Uuid::parse_str(SESSION_ID).expect("valid test session ID"),
         },
         chat_data: ChatData { message: message.into(), chat_type: ChatType::Normal, channel: 0 },
     })
@@ -75,8 +75,8 @@ fn chat_message(message: impl Into<String>) -> Message {
 fn logout_message() -> Message {
     Message::LogoutRequest(LogoutRequest {
         agent_data: logout_request::AgentData {
-            agent_id: UUID::parse_str(AGENT_ID).expect("valid test agent ID"),
-            session_id: UUID::parse_str(SESSION_ID).expect("valid test session ID"),
+            agent_id: Uuid::parse_str(AGENT_ID).expect("valid test agent ID"),
+            session_id: Uuid::parse_str(SESSION_ID).expect("valid test session ID"),
         },
     })
 }
@@ -1048,8 +1048,8 @@ fn login_session(simulator_address: SocketAddr) -> AgentSession {
         grid: Grid::Agni,
         message: "Welcome".into(),
         simulator_address,
-        agent_id: UUID::parse_str(AGENT_ID).expect("valid agent UUID"),
-        session_id: UUID::parse_str(SESSION_ID).expect("valid session UUID"),
+        agent_id: Uuid::parse_str(AGENT_ID).expect("valid agent UUID"),
+        session_id: Uuid::parse_str(SESSION_ID).expect("valid session UUID"),
         circuit_code: CIRCUIT_CODE,
         seed_capability: Url::parse("http://127.0.0.1:1/seed").expect("valid local capability URL"),
     }
@@ -1162,8 +1162,8 @@ fn expected_chat(sequence: u32, message: &str, chat_type: u8, channel: i32) -> V
     let mut bytes = vec![0x40];
     bytes.extend_from_slice(&sequence.to_be_bytes());
     bytes.extend_from_slice(&[0, 0xff, 0xff, 0x00, 0x50]);
-    bytes.extend_from_slice(UUID::parse_str(AGENT_ID).expect("valid agent UUID").as_bytes());
-    bytes.extend_from_slice(UUID::parse_str(SESSION_ID).expect("valid session UUID").as_bytes());
+    bytes.extend_from_slice(Uuid::parse_str(AGENT_ID).expect("valid agent UUID").as_bytes());
+    bytes.extend_from_slice(Uuid::parse_str(SESSION_ID).expect("valid session UUID").as_bytes());
     bytes.extend_from_slice(&(message.len() as u16 + 1).to_le_bytes());
     bytes.extend_from_slice(message.as_bytes());
     bytes.push(0);

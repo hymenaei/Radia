@@ -1,6 +1,6 @@
 use std::str::from_utf8;
 
-use base::UUID;
+use uuid::Uuid;
 
 use super::{error::LLUdpError, types::quaternion_from_xyz};
 use math::{DVec3, Quat, Vec3};
@@ -131,7 +131,7 @@ impl<'a> Writer<'a> {
         self.bytes(&value.to_le_bytes());
     }
 
-    pub(crate) fn uuid(&mut self, value: UUID) {
+    pub(crate) fn uuid(&mut self, value: Uuid) {
         self.bytes(value.as_bytes());
     }
 
@@ -259,8 +259,8 @@ impl<'a> Reader<'a> {
         Ok(f64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]))
     }
 
-    pub(crate) fn uuid(&mut self) -> Result<UUID, LLUdpError> {
-        UUID::from_slice(self.take(16)?).map_err(|_| LLUdpError::TruncatedPacket)
+    pub(crate) fn uuid(&mut self) -> Result<Uuid, LLUdpError> {
+        Uuid::from_slice(self.take(16)?).map_err(|_| LLUdpError::TruncatedPacket)
     }
 
     pub(crate) fn vector3(&mut self) -> Result<Vec3, LLUdpError> {

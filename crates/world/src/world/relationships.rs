@@ -1,8 +1,6 @@
-//! Parent declarations, graph indexes, frame changes, and relationship recovery.
-
 use std::num::NonZeroU32;
 
-use base::UUID;
+use uuid::Uuid;
 
 use super::journal::{
     WorldChange::{EntityUpdated, SubtreeInvalidated},
@@ -24,7 +22,7 @@ impl World {
         &self,
         address: LocalAddress,
         entity: Entity,
-        parent_uuid: UUID,
+        parent_uuid: Uuid,
         parent_binding: Binding,
     ) -> bool {
         let Some(waiting) = self.pending_children.get(&address) else { return false };
@@ -73,8 +71,6 @@ impl World {
         }
     }
 
-    /// Resolves a parent declaration without changing the graph. Cycles reject the declaration;
-    /// an absent or ineligible occupant preserves a pending identity expectation.
     pub(super) fn resolve_parent(
         &self,
         region: Region,
@@ -110,8 +106,6 @@ impl World {
         }
     }
 
-    /// Parent resolution alone preserves a frame when it confirms the same identity.
-    /// Attachment-point changes affect coordinates only in an avatar-relative frame.
     pub(super) fn relationship_frame_changed(
         &self,
         current: Parent,
@@ -198,7 +192,7 @@ impl World {
         &mut self,
         parent: Entity,
         old_address: LocalAddress,
-        parent_uuid: UUID,
+        parent_uuid: Uuid,
         changes: &mut Vec<WorldChange>,
         recovery_targets: &mut Vec<LocalAddress>,
     ) {
@@ -228,7 +222,7 @@ impl World {
         &mut self,
         address: LocalAddress,
         parent: Entity,
-        parent_uuid: UUID,
+        parent_uuid: Uuid,
         changes: &mut Vec<WorldChange>,
         recovery_targets: &mut Vec<LocalAddress>,
         recovery_cancellations: &mut Vec<LocalAddress>,
@@ -296,8 +290,8 @@ impl World {
 #[cfg(test)]
 mod tests {
     use crate::{ApplyError, WorldLimits};
-    use base::UUID;
     use math::{DVec3, Quat, Vec3};
+    use uuid::Uuid;
 
     use super::*;
     use crate::{
@@ -345,12 +339,12 @@ mod tests {
         }
         let removed = world.remove_object(source(region, 3), NonZeroU32::new(1).unwrap()).unwrap();
 
-        assert_eq!(removed.outcome, Removed(UUID::from_u128(1)));
+        assert_eq!(removed.outcome, Removed(Uuid::from_u128(1)));
         assert!(world.object(seat).is_none());
         assert_eq!(world.object_count(), 1);
         assert_eq!(
             world.object(avatar).unwrap().parent(),
-            Pending { address: LocalAddress::new(region, NonZeroU32::new(1).unwrap()), expected_uuid: Some(UUID::from_u128(1)) }
+            Pending { address: LocalAddress::new(region, NonZeroU32::new(1).unwrap()), expected_uuid: Some(Uuid::from_u128(1)) }
         );
         assert_eq!(removed.recovery.requests, [LocalAddress::new(region, NonZeroU32::new(2).unwrap())]);
     }
@@ -364,11 +358,11 @@ mod tests {
         let avatar = observation(&mut world, region, 3, 2, Avatar, Local(NonZeroU32::new(1).unwrap()));
         let removed = world.remove_object(source(region, 2), NonZeroU32::new(1).unwrap()).unwrap();
 
-        assert_eq!(removed.outcome, Removed(UUID::from_u128(1)));
+        assert_eq!(removed.outcome, Removed(Uuid::from_u128(1)));
         assert!(world.object(seat).is_none());
         assert_eq!(
             world.object(avatar).unwrap().parent(),
-            Pending { address: LocalAddress::new(region, NonZeroU32::new(1).unwrap()), expected_uuid: Some(UUID::from_u128(1)) }
+            Pending { address: LocalAddress::new(region, NonZeroU32::new(1).unwrap()), expected_uuid: Some(Uuid::from_u128(1)) }
         );
         assert_eq!(removed.recovery.requests, [LocalAddress::new(region, NonZeroU32::new(2).unwrap())]);
     }
@@ -387,9 +381,9 @@ mod tests {
 
         assert_eq!(world.revision(), WorldRevision(u64::MAX));
         assert_eq!(world.object_count(), 2);
-        assert_eq!(world.entity(UUID::from_u128(1)), Some(parent));
+        assert_eq!(world.entity(Uuid::from_u128(1)), Some(parent));
         assert_eq!(world.entity_at(parent_address), Some(parent));
-        assert_eq!(world.entity(UUID::from_u128(2)), Some(avatar));
+        assert_eq!(world.entity(Uuid::from_u128(2)), Some(avatar));
         assert_eq!(world.object(avatar).unwrap().parent(), Parent::Resolved(parent));
         assert_eq!(world.children(parent).map(|object| object.entity()).collect::<Vec<_>>(), [avatar]);
     }
@@ -413,7 +407,7 @@ mod tests {
             pose: Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) }),
             ..ObjectObservation::new(
                 source(region, order),
-                UUID::from_u128(u128::from(local_id)),
+                Uuid::from_u128(u128::from(local_id)),
                 NonZeroU32::new(local_id).unwrap(),
                 kind,
                 parent,

@@ -1,6 +1,6 @@
 use std::{fmt, sync::Arc};
 
-use base::AssetId;
+use utils::AssetId;
 
 use crate::{ApplyError, Region, RegionApplied, RegionOutcome, UpdateSource, WorldRevision, identity::WorldId, update::FieldStamp};
 

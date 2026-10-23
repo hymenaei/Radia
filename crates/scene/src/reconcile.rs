@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base::UUID;
+use uuid::Uuid;
 use world::{
     Entity, EnvironmentRead, LocalAddress, MAX_ENVIRONMENT_READ_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_PAGE_ITEMS,
     MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetailBatch, ObjectDetailResult, ObjectListPage,
@@ -162,7 +162,7 @@ struct WorldSync {
 #[derive(Default)]
 struct SceneState {
     mirror: Mirror,
-    identities: BTreeMap<UUID, Entity>,
+    identities: BTreeMap<Uuid, Entity>,
     bindings: HashMap<LocalAddress, Entity>,
     bytes: usize,
     dependencies: Dependencies,

@@ -1,14 +1,11 @@
 [package]
-name = "base"
+name = "utils"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [lints]
 workspace = true
-
-[features]
-v4 = ["uuid/v4"]
 
 [dependencies]
 uuid.workspace = true

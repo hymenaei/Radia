@@ -1,7 +1,7 @@
 use std::{future::pending, num::NonZeroU32};
 
-use base::UUID;
 use futures::{join, poll};
+use uuid::Uuid;
 use world::{Kind, ObjectDetailResult, ObjectObservation, OrderEvidence, ParentUpdate, Region, UpdateSource};
 
 use super::*;
@@ -34,13 +34,13 @@ async fn deliver<T>(read: impl Future<Output = Result<T, ReadError>>, service: &
 fn insert(world: &mut World, region: Region, id: u128, local: u32, order: u64) -> Entity {
     let observation = ObjectObservation::new(
         UpdateSource::new(region, order as u32, OrderEvidence::Ordered(order), 0),
-        UUID::from_u128(id),
+        Uuid::from_u128(id),
         NonZeroU32::new(local).unwrap(),
         Kind::Object,
         ParentUpdate::Root,
     );
     let _ = world.observe_object(observation).unwrap();
-    world.entity(UUID::from_u128(id)).unwrap()
+    world.entity(Uuid::from_u128(id)).unwrap()
 }
 
 #[tokio::test]
@@ -88,10 +88,10 @@ async fn pages_preserve_identity_and_cursors() {
     let barrier = deliver(reader.barrier(), &mut service, &world).await.unwrap();
     assert_eq!(barrier.object_count, 2);
     let first = deliver(reader.objects(None, 1), &mut service, &world).await.unwrap();
-    assert_eq!(first.objects[0].id, UUID::from_u128(20));
+    assert_eq!(first.objects[0].id, Uuid::from_u128(20));
     insert(&mut world, region, 10, 3, 3);
     let next = deliver(reader.objects(first.next, 1), &mut service, &world).await.unwrap();
-    assert_eq!(next.objects[0].id, UUID::from_u128(30));
+    assert_eq!(next.objects[0].id, Uuid::from_u128(30));
     assert_eq!(next.hydration_revision, world.revision());
     assert!(next.next.is_none());
     let source = UpdateSource::new(region, 4, OrderEvidence::Ordered(4), 0);

@@ -7,7 +7,6 @@ use std::{
     time::Duration,
 };
 
-use base::UUID;
 use futures::{channel::oneshot, future::select, pin_mut};
 use network::{AgentSession, Delivery, Error, SessionHandle, SimulatorId};
 use protocol::{
@@ -21,6 +20,7 @@ use protocol::{
 use tokio::runtime::Handle;
 #[cfg(test)]
 use tokio::spawn;
+use uuid::Uuid;
 use world::RegionHandle;
 
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -75,8 +75,8 @@ pub struct RegionLookup {
 }
 
 struct Inner {
-    agent_id: UUID,
-    session_id: UUID,
+    agent_id: Uuid,
+    session_id: Uuid,
     simulator_address: SocketAddr,
     make_timeout: Arc<MakeTimeout>,
     send_message: Arc<SendMessage>,
@@ -89,7 +89,7 @@ struct Inner {
 struct State {
     next_waiter_id: u64,
     next_generation: u64,
-    by_region_id: HashMap<UUID, PendingLookup>,
+    by_region_id: HashMap<Uuid, PendingLookup>,
     by_map_cell: HashMap<RegionGridCell, PendingLookup>,
 }
 
@@ -100,7 +100,7 @@ struct PendingLookup {
 
 #[derive(Clone, Copy)]
 enum LookupKey {
-    RegionId(UUID),
+    RegionId(Uuid),
     MapCell(RegionGridCell),
 }
 
@@ -144,7 +144,7 @@ impl RegionLookup {
         });
         Self::new_inner(session, make_timeout, send_message, spawn_background, LOOKUP_TIMEOUT)
     }
-    pub async fn lookup_region_by_id(&self, region_id: UUID) -> Result<String, String> {
+    pub async fn lookup_region_by_id(&self, region_id: Uuid) -> Result<String, String> {
         self.lookup(
             LookupKey::RegionId(region_id),
             RegionLookupRequest::RegionHandle(RegionHandleRequest { request_block: RequestBlock { region_id } }),
@@ -210,7 +210,7 @@ impl RegionLookup {
         }
     }
 
-    fn handle_region_id_reply(&self, region_id: UUID, region_handle: u64) {
+    fn handle_region_id_reply(&self, region_id: Uuid, region_handle: u64) {
         let origin = RegionHandle::new(region_handle).origin();
         let Some(cell) = RegionGridCell::containing(origin.x, origin.y) else {
             self.complete(LookupKey::RegionId(region_id), Err("Second Life returned an invalid region handle.".into()));
@@ -348,8 +348,8 @@ impl RegionLookup {
 
     #[cfg(test)]
     fn for_test(
-        agent_id: UUID,
-        session_id: UUID,
+        agent_id: Uuid,
+        session_id: Uuid,
         simulator_address: SocketAddr,
         make_timeout: impl Fn(Duration) -> TimeoutFuture + Send + Sync + 'static,
         timeout: Duration,
@@ -488,9 +488,9 @@ mod tests {
 
     use super::*;
 
-    const AGENT_ID: UUID = UUID::from_u128(1);
-    const SESSION_ID: UUID = UUID::from_u128(2);
-    const REGION_ID: UUID = UUID::from_u128(3);
+    const AGENT_ID: Uuid = Uuid::from_u128(1);
+    const SESSION_ID: Uuid = Uuid::from_u128(2);
+    const REGION_ID: Uuid = Uuid::from_u128(3);
     const SIMULATOR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 13000);
     const OTHER_SIMULATOR: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 13001);
     const TEST_TIMEOUT: Duration = Duration::from_secs(1);
@@ -519,7 +519,7 @@ mod tests {
         sent.lock().unwrap().clone()
     }
 
-    fn map_reply(agent_id: UUID, x: u16, y: u16, name: &str) -> Message {
+    fn map_reply(agent_id: Uuid, x: u16, y: u16, name: &str) -> Message {
         MapBlockReply(map_block_reply::MapBlockReply {
             agent_data: map_block_reply::AgentData { agent_id, flags: 0 },
             data: vec![map_block_reply::Data {
@@ -530,7 +530,7 @@ mod tests {
                 region_flags: 0,
                 water_height: 0,
                 agents: 0,
-                map_image_id: UUID::nil(),
+                map_image_id: Uuid::nil(),
             }],
         })
     }
@@ -571,7 +571,7 @@ mod tests {
         ));
 
         lookup.handle_message(OTHER_SIMULATOR, &map_reply(AGENT_ID, 12, 34, "Wrong source"));
-        lookup.handle_message(SIMULATOR, &map_reply(UUID::from_u128(99), 12, 34, "Wrong agent"));
+        lookup.handle_message(SIMULATOR, &map_reply(Uuid::from_u128(99), 12, 34, "Wrong agent"));
         assert_pending(&first).await;
         assert_pending(&second).await;
 
@@ -740,7 +740,7 @@ mod tests {
             region_flags: 0,
             water_height: 0,
             agents: 0,
-            map_image_id: UUID::nil(),
+            map_image_id: Uuid::nil(),
         }]);
 
         assert_eq!(replacement_receiver.await.expect("replacement waiter"), Ok("Replacement Region".into()));

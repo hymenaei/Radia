@@ -1,6 +1,6 @@
-use base::UUID;
 use math::{Quat, Vec3};
 use proptest::{prelude::*, test_runner::Config};
+use uuid::Uuid;
 
 use protocol::{
     BlockInstance, BlockValues, ChatType, FieldValue, SchemaMessage,
@@ -123,8 +123,8 @@ proptest! {
     ) {
         let agent = AgentUpdate {
             agent_data: agent_update::AgentData {
-                agent_id: UUID::from_bytes([1; 16]),
-                session_id: UUID::from_bytes([2; 16]),
+                agent_id: Uuid::from_bytes([1; 16]),
+                session_id: Uuid::from_bytes([2; 16]),
                 body_rotation: Quat::IDENTITY,
                 head_rotation: Quat::from_xyzw(0.0, 0.0, 1.0, 0.0),
                 state,
@@ -163,15 +163,15 @@ proptest! {
     ) {
         let typed = Message::ChatFromViewer(ChatFromViewer {
             agent_data: chat_from_viewer::AgentData {
-                agent_id: UUID::from_bytes([3; 16]),
-                session_id: UUID::from_bytes([4; 16]),
+                agent_id: Uuid::from_bytes([3; 16]),
+                session_id: Uuid::from_bytes([4; 16]),
             },
             chat_data: chat_from_viewer::ChatData { message: message.clone(), chat_type, channel },
         });
         let mut encoded_chat = message.into_bytes();
         encoded_chat.push(0);
         let expected_blocks = vec![
-            BlockValues::single(vec![FieldValue::UUID(UUID::from_bytes([3; 16])), FieldValue::UUID(UUID::from_bytes([4; 16]))]),
+            BlockValues::single(vec![FieldValue::Uuid(Uuid::from_bytes([3; 16])), FieldValue::Uuid(Uuid::from_bytes([4; 16]))]),
             BlockValues::single(vec![
                 FieldValue::Bytes(encoded_chat),
                 FieldValue::U8(chat_type.to_wire()),
@@ -212,8 +212,8 @@ fn c_string(value: &str) -> FieldValue {
 
 #[test]
 fn region_handshake_schema_wire_matches() {
-    fn uuid(byte: u8) -> UUID {
-        UUID::from_bytes([byte; 16])
+    fn uuid(byte: u8) -> Uuid {
+        Uuid::from_bytes([byte; 16])
     }
 
     let message_schema = schema::find_by_id(REGION_HANDSHAKE).expect("RegionHandshake schema exists");
@@ -256,19 +256,19 @@ fn region_handshake_schema_wire_matches() {
                 ("RegionFlags", FieldValue::U32(region_info1.region_flags)),
                 ("SimAccess", FieldValue::U8(region_info1.sim_access)),
                 ("SimName", c_string(&region_info1.sim_name)),
-                ("SimOwner", FieldValue::UUID(region_info1.sim_owner)),
+                ("SimOwner", FieldValue::Uuid(region_info1.sim_owner)),
                 ("IsEstateManager", FieldValue::Bool(region_info1.is_estate_manager)),
                 ("WaterHeight", FieldValue::F32(region_info1.water_height)),
                 ("BillableFactor", FieldValue::F32(region_info1.billable_factor)),
-                ("CacheID", FieldValue::UUID(region_info1.cache_id)),
-                ("TerrainBase0", FieldValue::UUID(region_info1.terrain_base[0])),
-                ("TerrainBase1", FieldValue::UUID(region_info1.terrain_base[1])),
-                ("TerrainBase2", FieldValue::UUID(region_info1.terrain_base[2])),
-                ("TerrainBase3", FieldValue::UUID(region_info1.terrain_base[3])),
-                ("TerrainDetail0", FieldValue::UUID(region_info1.terrain_detail[0])),
-                ("TerrainDetail1", FieldValue::UUID(region_info1.terrain_detail[1])),
-                ("TerrainDetail2", FieldValue::UUID(region_info1.terrain_detail[2])),
-                ("TerrainDetail3", FieldValue::UUID(region_info1.terrain_detail[3])),
+                ("CacheID", FieldValue::Uuid(region_info1.cache_id)),
+                ("TerrainBase0", FieldValue::Uuid(region_info1.terrain_base[0])),
+                ("TerrainBase1", FieldValue::Uuid(region_info1.terrain_base[1])),
+                ("TerrainBase2", FieldValue::Uuid(region_info1.terrain_base[2])),
+                ("TerrainBase3", FieldValue::Uuid(region_info1.terrain_base[3])),
+                ("TerrainDetail0", FieldValue::Uuid(region_info1.terrain_detail[0])),
+                ("TerrainDetail1", FieldValue::Uuid(region_info1.terrain_detail[1])),
+                ("TerrainDetail2", FieldValue::Uuid(region_info1.terrain_detail[2])),
+                ("TerrainDetail3", FieldValue::Uuid(region_info1.terrain_detail[3])),
                 ("TerrainStartHeight00", FieldValue::F32(region_info1.terrain_start_heights[0])),
                 ("TerrainStartHeight01", FieldValue::F32(region_info1.terrain_start_heights[1])),
                 ("TerrainStartHeight10", FieldValue::F32(region_info1.terrain_start_heights[2])),
@@ -279,7 +279,7 @@ fn region_handshake_schema_wire_matches() {
                 ("TerrainHeightRange11", FieldValue::F32(region_info1.terrain_height_ranges[3])),
             ],
         )),
-        BlockValues::single(fields_in_schema_order(&message_schema.blocks[1], &[("RegionID", FieldValue::UUID(region_info2.region_id))])),
+        BlockValues::single(fields_in_schema_order(&message_schema.blocks[1], &[("RegionID", FieldValue::Uuid(region_info2.region_id))])),
         BlockValues::single(fields_in_schema_order(
             &message_schema.blocks[2],
             &[

@@ -5,6 +5,7 @@ use std::{
 };
 
 use tokio::runtime::{Builder, Handle};
+use uuid::Uuid;
 
 use crate::{logging, login::LoginScreen, window_geometry::restore_bounds};
 use gpui::{
@@ -231,7 +232,7 @@ pub(crate) fn start_scene(generation: u64, cx: &mut App) -> bool {
 pub(crate) fn connect_world(
     generation: u64,
     sources: crate::scene_feed::SceneSources,
-    agent_id: base::UUID,
+    agent_id: Uuid,
     camera: watch::Sender<Option<Camera>>,
     cx: &mut App,
 ) {

@@ -1,5 +1,3 @@
-//! Resolution of local frames and parent chains into world-space poses.
-
 use math::{DQuat, DVec3, Quat};
 
 use super::World;
@@ -198,8 +196,8 @@ mod tests {
         ApplyOutcome::Introduced, Kind::Object, ObjectObservation, OrderEvidence::Ordered, ParentUpdate::Root, Pose, Region, RegionInfo,
         UpdateSource, WorldLimits,
     };
-    use base::UUID;
     use math::Vec3;
+    use uuid::Uuid;
 
     #[test]
     fn corrupt_parent_cycle_is_bounded() {
@@ -224,7 +222,7 @@ mod tests {
             let result = world
                 .observe_object(ObjectObservation::new(
                     UpdateSource::new(region, order, Ordered(u64::from(order)), 0),
-                    UUID::from_u128(u128::from(id)),
+                    Uuid::from_u128(u128::from(id)),
                     NonZeroU32::new(local_id).expect("nonzero local ID"),
                     Object,
                     Root,
@@ -279,7 +277,7 @@ mod tests {
                 pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
                 ..ObjectObservation::new(
                     UpdateSource::new(region, 1, Ordered(1), 0),
-                    UUID::from_u128(3),
+                    Uuid::from_u128(3),
                     NonZeroU32::new(1).unwrap(),
                     Object,
                     Root,

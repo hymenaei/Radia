@@ -156,7 +156,7 @@ impl Viewport {
         &self,
         generation: u64,
         sources: crate::scene_feed::SceneSources,
-        agent_id: base::UUID,
+        agent_id: uuid::Uuid,
         camera: watch::Sender<Option<scene::Camera>>,
         runtime: Handle,
     ) {

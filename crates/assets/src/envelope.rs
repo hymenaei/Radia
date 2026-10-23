@@ -1,8 +1,8 @@
 use std::io::{Read, Write};
 
-use base::AssetId;
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use llsd::{Binary, Limits, Value, binary, xml};
+use utils::AssetId;
 
 use crate::{Failure, Kind, Resource};
 
@@ -99,10 +99,10 @@ pub(crate) fn extract(resource: Resource, bytes: Vec<u8>) -> Result<Vec<u8>, Fai
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base::UUID;
+    use uuid::Uuid;
 
     fn resource(kind: Kind) -> Resource {
-        Resource { id: AssetId::new(UUID::from_u128(1)), kind }
+        Resource { id: AssetId::new(Uuid::from_u128(1)), kind }
     }
 
     #[test]
@@ -152,7 +152,7 @@ mod tests {
         let response = outer(stored_zlib(&record));
         let selected = extract(resource, response.clone()).unwrap();
         assert_eq!(binary::from_slice::<Value>(&selected).unwrap(), Value::Map([("Name".into(), Value::String("oak".into()))].into()));
-        let other = Resource { id: AssetId::new(UUID::from_u128(2)), ..resource };
+        let other = Resource { id: AssetId::new(Uuid::from_u128(2)), ..resource };
         assert_eq!(extract(other, response), Err(Failure::NotFound));
         assert_eq!(extract(resource, outer(vec![0, 1, 2])), Err(Failure::Malformed));
     }

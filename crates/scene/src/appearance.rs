@@ -2,7 +2,8 @@ use assets::{
     AlphaMode, Failure, LegacyAlphaMode, LegacyMaterial, MaterialDescription, MaterialTexture, PbrMaterial, TexGen, TextureHandle,
     TextureRef, TextureTransform,
 };
-use base::{AssetId, UUID};
+use utils::AssetId;
+use uuid::Uuid;
 use world::{FaceAppearance, GltfAlphaMode, GltfMaterialOverride, GltfTextureTransform};
 
 #[cfg(test)]
@@ -142,7 +143,7 @@ pub(crate) fn apply_overrides(mut material: PbrMaterial, overrides: &GltfMateria
     material
 }
 
-fn apply_texture(info: &mut MaterialTexture, texture: Option<UUID>, transform: GltfTextureTransform) {
+fn apply_texture(info: &mut MaterialTexture, texture: Option<Uuid>, transform: GltfTextureTransform) {
     if let Some(id) = texture.filter(|id| !id.is_nil()) {
         info.texture = texture_ref(id);
     }
@@ -157,8 +158,8 @@ fn apply_texture(info: &mut MaterialTexture, texture: Option<UUID>, transform: G
     }
 }
 
-pub(crate) fn texture_ref(id: UUID) -> TextureRef {
-    if id.is_nil() || id == UUID::max() { TextureRef::Clear } else { TextureRef::Asset(AssetId::new(id)) }
+pub(crate) fn texture_ref(id: Uuid) -> TextureRef {
+    if id.is_nil() || id == Uuid::max() { TextureRef::Clear } else { TextureRef::Asset(AssetId::new(id)) }
 }
 
 fn linear(value: u8) -> f32 {

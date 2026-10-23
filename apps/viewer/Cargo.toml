@@ -20,6 +20,7 @@ doc = false
 tracy = ["dep:tracing-tracy"]
 
 [dependencies]
+chrono.workspace = true
 dirs.workspace = true
 futures.workspace = true
 gpui.workspace = true
@@ -27,7 +28,8 @@ gpui-component.workspace = true
 gpui-component-assets.workspace = true
 gpui-platform.workspace = true
 llsd.workspace = true
-base.workspace = true
+uuid.workspace = true
+utils.workspace = true
 assets.workspace = true
 scene.workspace = true
 math.workspace = true

@@ -1,4 +1,3 @@
-use base::{AssetId, UUID};
 use math::{Quat, Vec3};
 use protocol::{
     lludp::{Message, Message::ImprovedTerseObjectUpdate, Message::ObjectUpdate, Message::ObjectUpdateCompressed, Packet},
@@ -8,6 +7,8 @@ use protocol::{
 };
 use std::num::{NonZeroU8, NonZeroU32};
 use testing::{lludp::vectors, parse_hex_fixture};
+use utils::AssetId;
+use uuid::Uuid;
 use world::{
     Appearance,
     ApplyOutcome::{Introduced, Updated},
@@ -68,7 +69,7 @@ fn compressed_prim_shape() -> PrimShape {
 }
 
 fn asset_id(value: u128) -> AssetId {
-    AssetId::new(UUID::from_u128(value))
+    AssetId::new(Uuid::from_u128(value))
 }
 
 fn packet(fixture: &str) -> Packet {
@@ -104,7 +105,7 @@ fn packed_texture_entry() -> Vec<u8> {
     field
 }
 
-fn render_material_parameter(bindings: &[(u8, UUID)]) -> ExtraParameter {
+fn render_material_parameter(bindings: &[(u8, Uuid)]) -> ExtraParameter {
     let mut data = vec![u8::try_from(bindings.len()).expect("test binding count fits")];
     for (face_index, material_id) in bindings {
         data.push(*face_index);
@@ -113,7 +114,7 @@ fn render_material_parameter(bindings: &[(u8, UUID)]) -> ExtraParameter {
     ExtraParameter { parameter_type: 0x0080, data }
 }
 
-fn media_observation(region: Region, id: UUID, initial_material: u128) -> ObjectObservation {
+fn media_observation(region: Region, id: Uuid, initial_material: u128) -> ObjectObservation {
     ObjectObservation {
         pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
         scale: Some(Vec3::ONE),
@@ -132,8 +133,8 @@ fn media_observation(region: Region, id: UUID, initial_material: u128) -> Object
 
 fn extra_param_message(local_id: u32, parameter_type: u16, in_use: bool, data: Vec<u8>) -> Message {
     Message::ObjectExtraParams(ObjectExtraParams {
-        agent_id: UUID::nil(),
-        session_id: UUID::nil(),
+        agent_id: Uuid::nil(),
+        session_id: Uuid::nil(),
         object_data: vec![ExtraParamUpdate { local_id, parameter_type, in_use, data }],
     })
 }
@@ -279,7 +280,7 @@ fn terse_rotation_roundoff_is_accepted() {
         pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
         ..ObjectObservation::new(
             UpdateSource::new(REGION, 1, OrderEvidence::Ordered(1), 0),
-            UUID::from_u128(0xdead),
+            Uuid::from_u128(0xdead),
             patch.local_id,
             Kind::Object,
             ParentUpdate::Root,
@@ -304,7 +305,7 @@ fn bad_terse_rotation_is_rejected() {
         pose: Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) }),
         ..ObjectObservation::new(
             UpdateSource::new(REGION, 1, OrderEvidence::Ordered(1), 0),
-            UUID::from_u128(0xdead),
+            Uuid::from_u128(0xdead),
             patch.local_id,
             Kind::Object,
             ParentUpdate::Root,
@@ -418,7 +419,7 @@ fn malformed_terse_block_does_not_discard_later_object() {
 
 #[test]
 fn embedded_materials_replace_and_clear() {
-    let bindings = [(0, UUID::from_u128(0x310)), (44, UUID::from_u128(0x311))];
+    let bindings = [(0, Uuid::from_u128(0x310)), (44, Uuid::from_u128(0x311))];
 
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
@@ -475,7 +476,7 @@ fn embedded_materials_replace_and_clear() {
 
 #[test]
 fn non_volume_updates_clear_render_materials() {
-    let bindings = [(0, UUID::from_u128(0x320))];
+    let bindings = [(0, Uuid::from_u128(0x320))];
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].extra_parameters = vec![render_material_parameter(&bindings)];
@@ -542,7 +543,7 @@ fn u8_material_count_skips_extra_faces() {
     let bindings: Vec<_> = (0..usize::from(u8::MAX))
         .map(|index| {
             let face = if index < world::MAX_SURFACE_FACES { index as u8 } else { u8::MAX };
-            (face, UUID::from_u128(0x400 + index as u128))
+            (face, Uuid::from_u128(0x400 + index as u128))
         })
         .collect();
 
@@ -562,7 +563,7 @@ fn u8_material_count_skips_extra_faces() {
 #[test]
 fn full_materials_follow_variable1_limit() {
     for count in [14_usize, 15] {
-        let bindings = (0..count).map(|face| (face as u8, UUID::from_u128(0x500 + face as u128))).collect::<Vec<_>>();
+        let bindings = (0..count).map(|face| (face as u8, Uuid::from_u128(0x500 + face as u128))).collect::<Vec<_>>();
         let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
         let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
         update.objects[0].extra_parameters = vec![render_material_parameter(&bindings)];
@@ -583,8 +584,8 @@ fn full_materials_follow_variable1_limit() {
 #[test]
 fn incremental_materials_replace_and_clear() {
     let mut state = world_with_regions(2);
-    let object_id = UUID::from_u128(0x600);
-    let neighbor_id = UUID::from_u128(0x601);
+    let object_id = Uuid::from_u128(0x600);
+    let neighbor_id = Uuid::from_u128(0x601);
     let first = media_observation(REGION, object_id, 0x610);
     let Introduced(first_entity) = state.observe_object(first).expect("introduce addressed object").outcome else {
         panic!("expected object introduction")
@@ -596,7 +597,7 @@ fn incremental_materials_replace_and_clear() {
         panic!("expected neighbor object introduction")
     };
 
-    let replacement = render_material_parameter(&[(44, UUID::from_u128(0x630))]).data;
+    let replacement = render_material_parameter(&[(44, Uuid::from_u128(0x630))]).data;
     let set = extra_param_message(0x0102_0304, 0x0080, true, replacement);
     let batch = apply_extra_param_message(&mut state, REGION, &set, 2);
     assert_eq!(batch.invalid_blocks, 0);
@@ -620,7 +621,7 @@ fn incremental_materials_replace_and_clear() {
     }
     assert_eq!(state.object(neighbor_entity).unwrap().render_materials().unwrap().material(0), Some(asset_id(0x620)));
 
-    let set_again = extra_param_message(0x0102_0304, 0x0080, true, render_material_parameter(&[(1, UUID::from_u128(0x631))]).data);
+    let set_again = extra_param_message(0x0102_0304, 0x0080, true, render_material_parameter(&[(1, Uuid::from_u128(0x631))]).data);
     apply_extra_param_message(&mut state, REGION, &set_again, 4);
     let malformed = extra_param_message(0x0102_0304, 0x0080, true, vec![1]);
     let batch = apply_extra_param_message(&mut state, REGION, &malformed, 5);
@@ -639,9 +640,9 @@ fn repeated_material_params_replace_in_order() {
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].texture_entry = valid_texture_entry();
     update.objects[0].extra_parameters = vec![
-        render_material_parameter(&[(0, UUID::from_u128(0x313))]),
+        render_material_parameter(&[(0, Uuid::from_u128(0x313))]),
         ExtraParameter { parameter_type: 0x0080, data: vec![1] },
-        render_material_parameter(&[(44, UUID::from_u128(0x314))]),
+        render_material_parameter(&[(44, Uuid::from_u128(0x314))]),
     ];
 
     let batch = decode_object_message(REGION, 46, OrderEvidence::Ordered(46), &full).expect("full object batch");
@@ -653,7 +654,7 @@ fn repeated_material_params_replace_in_order() {
 
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].extra_parameters =
-        vec![render_material_parameter(&[(0, UUID::from_u128(0x313))]), ExtraParameter { parameter_type: 0x0080, data: vec![1] }];
+        vec![render_material_parameter(&[(0, Uuid::from_u128(0x313))]), ExtraParameter { parameter_type: 0x0080, data: vec![1] }];
     let batch = decode_object_message(REGION, 47, OrderEvidence::Ordered(47), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
     assert_eq!(batch.invalid_fields, 1);
@@ -736,7 +737,7 @@ fn compressed_shape_classification() {
         (
             0x0030,
             0x41,
-            UUID::from_u128(0x111),
+            Uuid::from_u128(0x111),
             Some(Shape::Sculpt {
                 asset_id: asset_id(0x111),
                 sculpt_type: SculptType::Sphere,
@@ -746,13 +747,13 @@ fn compressed_shape_classification() {
         (
             0x0060,
             0x85,
-            UUID::from_u128(0x222),
+            Uuid::from_u128(0x222),
             Some(Shape::Mesh { asset_id: asset_id(0x222), flags: SculptFlags { invert: false, mirror: true } }),
         ),
         (
             0x0030,
             0x42,
-            UUID::from_u128(0x224),
+            Uuid::from_u128(0x224),
             Some(Shape::Sculpt {
                 asset_id: asset_id(0x224),
                 sculpt_type: SculptType::Torus,
@@ -762,7 +763,7 @@ fn compressed_shape_classification() {
         (
             0x0030,
             0x83,
-            UUID::from_u128(0x225),
+            Uuid::from_u128(0x225),
             Some(Shape::Sculpt {
                 asset_id: asset_id(0x225),
                 sculpt_type: SculptType::Plane,
@@ -772,19 +773,19 @@ fn compressed_shape_classification() {
         (
             0x0030,
             0xc4,
-            UUID::from_u128(0x226),
+            Uuid::from_u128(0x226),
             Some(Shape::Sculpt {
                 asset_id: asset_id(0x226),
                 sculpt_type: SculptType::Cylinder,
                 flags: SculptFlags { invert: true, mirror: true },
             }),
         ),
-        (0x0030, 0, UUID::nil(), Some(Shape::Prim(compressed_prim_shape()))),
-        (0x0030, 6, UUID::from_u128(0x333), None),
+        (0x0030, 0, Uuid::nil(), Some(Shape::Prim(compressed_prim_shape()))),
+        (0x0030, 6, Uuid::from_u128(0x333), None),
         (
             0x0030,
             0xc7,
-            UUID::from_u128(0x333),
+            Uuid::from_u128(0x333),
             Some(Shape::Sculpt {
                 asset_id: asset_id(0xbe29_3869_d0d9_0a69_5989_ad27_f194_6fd4),
                 sculpt_type: SculptType::Sphere,
@@ -794,7 +795,7 @@ fn compressed_shape_classification() {
         (
             0x0030,
             0x09,
-            UUID::from_u128(0x333),
+            Uuid::from_u128(0x333),
             Some(Shape::Sculpt {
                 asset_id: asset_id(0xbe29_3869_d0d9_0a69_5989_ad27_f194_6fd4),
                 sculpt_type: SculptType::Sphere,
@@ -835,10 +836,10 @@ fn compressed_shape_classification() {
     assert_eq!(observation.shape, FieldUpdate::Keep);
 
     let mut first_data = vec![0; 17];
-    first_data[..16].copy_from_slice(UUID::from_u128(0x444).as_bytes());
+    first_data[..16].copy_from_slice(Uuid::from_u128(0x444).as_bytes());
     first_data[16] = 1;
     let mut last_data = vec![0; 17];
-    last_data[..16].copy_from_slice(UUID::from_u128(0x555).as_bytes());
+    last_data[..16].copy_from_slice(Uuid::from_u128(0x555).as_bytes());
     last_data[16] = 5;
     let mut message = fixture_packet.message().clone();
     let ObjectUpdateCompressed(update) = &mut message else { panic!("expected compressed object fixture") };
@@ -850,9 +851,9 @@ fn compressed_shape_classification() {
     assert_eq!(observation.shape, FieldUpdate::Set(Shape::Mesh { asset_id: asset_id(0x555), flags: SculptFlags::default() }));
 
     let mut malformed_data = vec![0; 16];
-    malformed_data[..16].copy_from_slice(UUID::from_u128(0x666).as_bytes());
+    malformed_data[..16].copy_from_slice(Uuid::from_u128(0x666).as_bytes());
     let mut valid_data = vec![0; 17];
-    valid_data[..16].copy_from_slice(UUID::from_u128(0x777).as_bytes());
+    valid_data[..16].copy_from_slice(Uuid::from_u128(0x777).as_bytes());
     valid_data[16] = 5;
     let mut message = fixture_packet.message().clone();
     let ObjectUpdateCompressed(update) = &mut message else { panic!("expected compressed object fixture") };
@@ -891,7 +892,7 @@ fn full_shape_classification() {
     update.objects.truncate(1);
     update.objects[0].pcode = 9;
     let mut data = vec![0; 17];
-    data[..16].copy_from_slice(UUID::from_u128(0x111).as_bytes());
+    data[..16].copy_from_slice(Uuid::from_u128(0x111).as_bytes());
     data[16] = 1;
     update.objects[0].extra_parameters = vec![ExtraParameter { parameter_type: 0x0030, data }];
 
@@ -911,7 +912,7 @@ fn malformed_shape_params_preserve_shape() {
     let mut valid_message = fixture_packet.message().clone();
     let ObjectUpdateCompressed(update) = &mut valid_message else { panic!("expected compressed object fixture") };
     let mut sculpt_data = vec![0; 17];
-    sculpt_data[..16].copy_from_slice(UUID::from_u128(0x666).as_bytes());
+    sculpt_data[..16].copy_from_slice(Uuid::from_u128(0x666).as_bytes());
     sculpt_data[16] = 0xc1;
     update.objects[0].extra_parameters = vec![ExtraParameter { parameter_type: 0x0030, data: sculpt_data }];
     let valid_batch = decode_object_message(REGION, fixture_packet.sequence(), OrderEvidence::Ordered(22), &valid_message)
@@ -971,7 +972,7 @@ fn invalid_blocks_keep_their_packet_position() {
     let mut message = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut message else { panic!("expected full object fixture") };
     update.objects.truncate(2);
-    update.objects[0].id = UUID::nil();
+    update.objects[0].id = Uuid::nil();
     let batch = decode_object_message(REGION, 1, OrderEvidence::Ambiguous, &message).expect("object batch");
 
     assert_eq!(batch.invalid_blocks, 1);
@@ -988,7 +989,7 @@ fn non_object_messages_are_ignored() {
 #[test]
 fn media_requests_cover_full_and_compressed() {
     let marker = "x-mv:12/00000000-0000-0000-0000-000000000001";
-    let id = UUID::from_u128(0x1234);
+    let id = Uuid::from_u128(0x1234);
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let Message::ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects.truncate(1);
@@ -1091,7 +1092,7 @@ fn compressed_owner_metadata_does_not_populate_object_properties() {
     let message = packet.message().clone();
     let Message::ObjectUpdateCompressed(update) = &message else { panic!("expected compressed object fixture") };
     let first_owner = update.objects[0].owner_id;
-    assert_ne!(first_owner, UUID::from_u128(0));
+    assert_ne!(first_owner, Uuid::from_u128(0));
 
     let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(100), &message)
         .expect("compressed fixture has an object message");

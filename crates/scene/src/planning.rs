@@ -3,7 +3,7 @@ use std::{
     ops::Bound::{Excluded, Unbounded},
 };
 
-use base::UUID;
+use uuid::Uuid;
 use world::Entity;
 
 use crate::{
@@ -56,7 +56,7 @@ pub(crate) struct MeshPlanner {
     targets: HashMap<Entity, MeshTarget>,
     dirty: bool,
     scanning: bool,
-    cursor: Option<UUID>,
+    cursor: Option<Uuid>,
 }
 
 impl MeshPlanner {
@@ -113,7 +113,7 @@ impl MeshPlanner {
         deferred
     }
 
-    pub(crate) fn step(&mut self, mirror: &Mirror, identities: &BTreeMap<UUID, Entity>) -> Vec<MeshChange> {
+    pub(crate) fn step(&mut self, mirror: &Mirror, identities: &BTreeMap<Uuid, Entity>) -> Vec<MeshChange> {
         let Some(camera) = self.camera else {
             return Vec::new();
         };

@@ -10,7 +10,7 @@ use time::{
 };
 
 use crate::Error;
-use base::UUID;
+use uuid::Uuid;
 
 pub(crate) const UUID_NEWTYPE: &str = "llsd::UUID";
 pub(crate) const URI_NEWTYPE: &str = "llsd::URI";
@@ -18,35 +18,30 @@ pub(crate) const DATE_NEWTYPE: &str = "llsd::Date";
 pub(crate) const BINARY_NEWTYPE: &str = "llsd::Binary";
 pub(crate) const VALUE_ENUM: &str = "Value";
 
-/// An LLSD map with keys stored in sorted order.
 pub type Map = BTreeMap<String, Value>;
 
-/// One dynamically typed LLSD value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Undefined,
     Boolean(bool),
     Integer(i32),
     Real(f64),
-    UUID(UUID),
+    Uuid(Uuid),
     String(String),
     Date(Date),
-    /// A URI string. Parsing LLSD does not validate URI syntax.
+
     URI(URI),
     Binary(Binary),
     Array(Vec<Self>),
     Map(Map),
 }
 
-/// A URI-shaped LLSD string that preserves its encoded text.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct URI(String);
 
-/// An owned LLSD binary value.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Binary(Vec<u8>);
 
-/// An LLSD instant normalized to UTC when decoded from text.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Date(OffsetDateTime);
 
@@ -137,10 +132,8 @@ impl Deref for Binary {
 }
 
 impl Date {
-    /// The Unix epoch, 1970-01-01 00:00:00 UTC.
     pub const UNIX_EPOCH: Self = Self(OffsetDateTime::UNIX_EPOCH);
 
-    /// Stores an instant, preserving its offset until conversion or encoding.
     pub const fn from_datetime(value: OffsetDateTime) -> Self {
         Self(value)
     }
@@ -149,9 +142,6 @@ impl Date {
         self.0
     }
 
-    /// Converts seconds since the Unix epoch, rounding to the nearest nanosecond.
-    ///
-    /// Returns `None` for non-finite or out-of-range values.
     pub fn from_unix_seconds(value: f64) -> Option<Self> {
         if !value.is_finite() {
             return None;
@@ -217,14 +207,13 @@ impl Value {
         }
     }
 
-    pub fn as_uuid(&self) -> Option<UUID> {
+    pub fn as_uuid(&self) -> Option<Uuid> {
         match self {
-            Self::UUID(value) => Some(*value),
+            Self::Uuid(value) => Some(*value),
             _ => None,
         }
     }
 
-    /// Returns the text of an LLSD string or URI.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::String(value) => Some(value),
@@ -255,7 +244,7 @@ impl Serialize for Value {
             Self::Boolean(value) => serializer.serialize_bool(*value),
             Self::Integer(value) => serializer.serialize_i32(*value),
             Self::Real(value) => serializer.serialize_f64(*value),
-            Self::UUID(value) => serializer.serialize_newtype_struct(UUID_NEWTYPE, &value.to_string()),
+            Self::Uuid(value) => serializer.serialize_newtype_struct(UUID_NEWTYPE, &value.to_string()),
             Self::String(value) => serializer.serialize_str(value),
             Self::Date(value) => value.serialize(serializer),
             Self::URI(value) => value.serialize(serializer),
@@ -293,7 +282,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
             "Real" => value.newtype_variant().map(Value::Real),
             "UUID" => {
                 let value = value.newtype_variant::<String>()?;
-                UUID::parse_str(&value).map(Value::UUID).map_err(serde::de::Error::custom)
+                Uuid::parse_str(&value).map(Value::Uuid).map_err(serde::de::Error::custom)
             }
             "String" => value.newtype_variant().map(Value::String),
             "Date" => value.newtype_variant().map(Value::Date),

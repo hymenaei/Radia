@@ -1,6 +1,4 @@
-//! Structures and field codecs shared by object-update messages.
-
-use base::UUID;
+use uuid::Uuid;
 
 use crate::{
     LLUdpError,
@@ -8,20 +6,17 @@ use crate::{
 };
 use math::{Quat, Vec3, Vec4};
 
-/// Identifier shared by circuit ping requests and replies.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PingId {
     pub ping_id: u8,
 }
 
-/// Region context shared by simulator object updates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RegionData {
     pub region_handle: u64,
     pub time_dilation: u16,
 }
 
-/// Complete motion data carried by full and improved-terse object updates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ObjectMotion {
     pub position: Vec3,
@@ -45,7 +40,7 @@ pub struct ExtraParameter {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ObjectSound {
-    pub sound_id: UUID,
+    pub sound_id: Uuid,
     pub gain: f32,
     pub flags: u8,
     pub radius: f32,

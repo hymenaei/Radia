@@ -1,4 +1,3 @@
-use base::UUID;
 use protocol::{
     BlockInstance, BlockValues, ChatType, FieldValue, LLUdpError, SchemaMessage,
     lludp::{Message, MessageId, Packet, PacketFlags},
@@ -19,17 +18,18 @@ use protocol::{
     schema::MessageEncoding,
 };
 use testing::{lludp::vectors, parse_hex_fixture};
+use uuid::Uuid;
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")
 }
 
-fn session_id() -> UUID {
-    UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("valid fixture UUID")
+fn session_id() -> Uuid {
+    Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("valid fixture UUID")
 }
 
-fn agent_id() -> UUID {
-    UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("valid fixture UUID")
+fn agent_id() -> Uuid {
+    Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("valid fixture UUID")
 }
 
 fn chat_message(message: String, chat_type: ChatType, channel: i32) -> Message {
@@ -162,7 +162,7 @@ fn schema_chat_uses_unencoded_override() {
     let message = SchemaMessage::new(
         schema,
         vec![
-            BlockValues::single(vec![FieldValue::UUID(agent_id()), FieldValue::UUID(session_id())]),
+            BlockValues::single(vec![FieldValue::Uuid(agent_id()), FieldValue::Uuid(session_id())]),
             BlockValues::single(vec![FieldValue::Bytes(vec![0; 4]), FieldValue::U8(1), FieldValue::S32(0)]),
         ],
     )
@@ -257,7 +257,7 @@ fn logout_reply_nil_item() {
         decoded.message(),
         &Message::LogoutReply(LogoutReply {
             agent_data: logout_reply::AgentData { agent_id: agent_id(), session_id: session_id() },
-            inventory_data: vec![InventoryData { item_id: UUID::nil() }],
+            inventory_data: vec![InventoryData { item_id: Uuid::nil() }],
         })
     );
     assert!(decoded.trailing_message_bytes().is_empty());
@@ -281,7 +281,7 @@ fn truncated_entries_rejected() {
 
 #[test]
 fn region_handle_fixtures() {
-    let region_id = UUID::parse_str("12345678-1234-5678-1234-567812345678").expect("valid fixture region UUID");
+    let region_id = Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("valid fixture region UUID");
     let request_message = RegionHandleRequest { request_block: RequestBlock { region_id } };
     let request = Packet::new(0x0102_0304, request_message.into());
     let request_bytes = fixture(vectors::REGION_HANDLE_REQUEST);
@@ -292,7 +292,7 @@ fn region_handle_fixtures() {
     };
     assert_eq!(
         decoded_request.request_block.region_id,
-        UUID::parse_str("12345678-1234-5678-1234-567812345678").expect("valid fixture region UUID")
+        Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("valid fixture region UUID")
     );
 
     let reply_bytes = fixture(vectors::REGION_ID_AND_HANDLE_REPLY);
@@ -387,7 +387,7 @@ fn header_flags_match_wire() {
         SchemaMessage::schema_by_name("RegionHandshakeReply").expect("RegionHandshakeReply schema").encoding,
         MessageEncoding::Zerocoded
     );
-    let id = UUID::from_bytes([0x11; 16]);
+    let id = Uuid::from_bytes([0x11; 16]);
     let packet = Packet::new(
         1,
         Message::RegionHandshakeReply(RegionHandshakeReply {
@@ -514,10 +514,10 @@ fn schema_zerocoding() {
     let message = SchemaMessage::new(
         schema,
         vec![
-            BlockValues::single(vec![FieldValue::UUID(UUID::nil()), FieldValue::UUID(UUID::nil())]),
+            BlockValues::single(vec![FieldValue::Uuid(Uuid::nil()), FieldValue::Uuid(Uuid::nil())]),
             BlockValues::new(vec![BlockInstance::new(vec![
-                FieldValue::UUID(UUID::nil()),
-                FieldValue::UUID(UUID::nil()),
+                FieldValue::Uuid(Uuid::nil()),
+                FieldValue::Uuid(Uuid::nil()),
                 FieldValue::U8(0),
                 FieldValue::F32(0.0),
                 FieldValue::Bytes(vec![0; 4]),

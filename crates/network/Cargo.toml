@@ -12,7 +12,7 @@ testing = []
 
 [dependencies]
 llsd.workspace = true
-base = { workspace = true, features = ["v4"] }
+uuid = { workspace = true, features = ["v4"] }
 protocol.workspace = true
 reqwest.workspace = true
 httpdate.workspace = true

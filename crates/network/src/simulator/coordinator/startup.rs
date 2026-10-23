@@ -2,8 +2,8 @@ use super::*;
 
 #[test]
 fn startup_accepts_movement_before_handshake() {
-    let agent_id = UUID::from_u128(1);
-    let session_id = UUID::from_u128(2);
+    let agent_id = Uuid::from_u128(1);
+    let session_id = Uuid::from_u128(2);
     let movement = Packet::decode(&movement_complete_packet(1, agent_id, session_id, 0x1000))
         .expect("decode matching movement completion")
         .into_message();
@@ -18,9 +18,9 @@ fn startup_accepts_movement_before_handshake() {
 
 #[test]
 fn startup_ignores_movement_for_another_session() {
-    let agent_id = UUID::from_u128(1);
-    let session_id = UUID::from_u128(2);
-    let wrong_movement = Packet::decode(&movement_complete_packet(1, agent_id, UUID::from_u128(3), 0x1000))
+    let agent_id = Uuid::from_u128(1);
+    let session_id = Uuid::from_u128(2);
+    let wrong_movement = Packet::decode(&movement_complete_packet(1, agent_id, Uuid::from_u128(3), 0x1000))
         .expect("decode mismatched movement completion")
         .into_message();
     let handshake = Packet::decode(&fixture("region_handshake.hex")).expect("decode region handshake").into_message();

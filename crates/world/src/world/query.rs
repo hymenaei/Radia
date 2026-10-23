@@ -1,5 +1,3 @@
-//! Typed filters and resumable, budgeted queries over live and recent objects.
-
 use std::{
     collections::{BTreeSet, Bound::Excluded, HashSet},
     error::Error,
@@ -7,9 +5,9 @@ use std::{
     time::Instant,
 };
 
-use base::UUID;
 use hecs::ViewBorrow;
 use math::DVec3;
+use uuid::Uuid;
 
 use super::{
     Object, ObjectContent, ObjectListItem, ObjectRecord, ObjectRecordRef, RecentObject, World, WorldId, WorldReadError,
@@ -22,7 +20,6 @@ pub const MAX_WORLD_QUERY_RESULTS: usize = 256;
 const DEFAULT_WORLD_QUERY_WORK: usize = 4096;
 const DEFAULT_WORLD_QUERY_RESULTS: usize = 128;
 
-/// Selects live objects, retained removals, or both.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryScope {
     Live,
@@ -30,7 +27,6 @@ pub enum QueryScope {
     LiveAndRecent,
 }
 
-/// Matches a known value exactly or a known value different from the supplied value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueFilter<T> {
     Is(T),
@@ -53,19 +49,17 @@ struct Sphere {
     radius: f64,
 }
 
-/// A typed filter evaluated against one World revision.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldQuery {
     scope: QueryScope,
     region: Option<Region>,
     kind: Option<ValueFilter<Kind>>,
     attachment: Option<ValueFilter<AttachmentPoint>>,
-    owner: Option<ValueFilter<UUID>>,
-    creator: Option<ValueFilter<UUID>>,
+    owner: Option<ValueFilter<Uuid>>,
+    creator: Option<ValueFilter<Uuid>>,
     sphere: Option<Sphere>,
 }
 
-/// Invalid input when constructing a spatial filter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorldQueryBuildError {
     InvalidCenter,
@@ -117,17 +111,16 @@ impl WorldQuery {
         self
     }
 
-    pub const fn owner(mut self, filter: ValueFilter<UUID>) -> Self {
+    pub const fn owner(mut self, filter: ValueFilter<Uuid>) -> Self {
         self.owner = Some(filter);
         self
     }
 
-    pub const fn creator(mut self, filter: ValueFilter<UUID>) -> Self {
+    pub const fn creator(mut self, filter: ValueFilter<Uuid>) -> Self {
         self.creator = Some(filter);
         self
     }
 
-    /// Restricts results to resolved global positions within an exact Euclidean radius in meters.
     pub fn within(mut self, center: DVec3, radius: f64) -> Result<Self, WorldQueryBuildError> {
         if !center.is_finite() {
             return Err(WorldQueryBuildError::InvalidCenter);
@@ -147,13 +140,6 @@ impl WorldQuery {
     }
 }
 
-/// Work and result bounds for one query call.
-///
-/// Work counts inspected candidates, spatial cells, and dirty scopes visited during fallback.
-/// Filtering, pose resolution, and copying a candidate's result are charged to that candidate. A
-/// full allowance can conservatively make item results incomplete when the scan cannot prove it
-/// has exhausted its candidates. The unresolved count has separate completeness and can be
-/// incomplete while item results remain exact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorldQueryBudget {
     pub work: usize,
@@ -166,30 +152,25 @@ impl Default for WorldQueryBudget {
     }
 }
 
-/// Whether a query exhausted every candidate needed for its answer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryCompleteness {
     Exact,
     Incomplete { reason: QueryIncompleteReason },
 }
 
-/// Why the World stopped before the complete answer fit in one bounded call.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryIncompleteReason {
     WorkLimit,
     ResultLimit,
 }
 
-/// Counts selected live or recent objects without resolved positions in a spatial query.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct QueryUnresolved {
-    /// Number of eligible objects without a resolved pose.
     pub objects: usize,
-    /// Whether the query checked every candidate that could affect this count.
+
     pub complete: bool,
 }
 
-/// One live match or one bounded record of a removed object.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WorldQueryItem {
     Live { object: ObjectListItem, pose: Option<WorldPose>, properties: Properties, properties_provenance: PropertiesProvenance },
@@ -197,7 +178,7 @@ pub enum WorldQueryItem {
 }
 
 impl WorldQueryItem {
-    pub const fn id(self) -> UUID {
+    pub const fn id(self) -> Uuid {
         match self {
             Self::Live { object, .. } => object.id,
             Self::Recent(object) => object.id,
@@ -205,14 +186,12 @@ impl WorldQueryItem {
     }
 }
 
-/// Which ordered portion of a combined query remains to be scanned.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum QueryCursorPhase {
     Live,
     Recent,
 }
 
-/// Continuation for one non-spatial query result.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldQueryCursor {
     world: WorldId,
@@ -220,10 +199,9 @@ pub struct WorldQueryCursor {
     revision: WorldRevision,
     recent_expires_at: Option<Instant>,
     phase: QueryCursorPhase,
-    after: Option<UUID>,
+    after: Option<Uuid>,
 }
 
-/// Bounded matches from one query call.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorldQueryPage {
     pub observed_revision: WorldRevision,
@@ -240,7 +218,7 @@ struct QueryRun<'a> {
     incomplete: Option<QueryIncompleteReason>,
     items: Vec<WorldQueryItem>,
     seen_entities: HashSet<Entity>,
-    unresolved_ids: HashSet<UUID>,
+    unresolved_ids: HashSet<Uuid>,
     unresolved_complete: bool,
 }
 
@@ -293,7 +271,7 @@ impl<'a> QueryRun<'a> {
         true
     }
 
-    fn unresolved(&mut self, id: UUID) {
+    fn unresolved(&mut self, id: Uuid) {
         self.unresolved_ids.insert(id);
     }
 
@@ -314,14 +292,6 @@ impl<'a> QueryRun<'a> {
 }
 
 impl World {
-    /// Returns a bounded query result copied from one World revision.
-    ///
-    /// Spatial matches are checked against current resolved poses. If spatial repair is pending,
-    /// the query scans those scopes from the authoritative entity set under the same work bound.
-    /// Unresolved poses are counted separately and do not by themselves make located results
-    /// incomplete. Non-spatial queries can be continued with a cursor. World mutations invalidate
-    /// every cursor, and retained-record expiry invalidates recent-scope cursors. Combined queries
-    /// return live matches before retained records.
     pub fn query(
         &self,
         query: WorldQuery,
@@ -379,7 +349,7 @@ impl World {
     fn query_live_page(
         &self,
         query: WorldQuery,
-        after: Option<UUID>,
+        after: Option<Uuid>,
         revision: WorldRevision,
         recent_expires_at: Option<Instant>,
         run: &mut QueryRun<'_>,
@@ -468,7 +438,7 @@ impl World {
         self.query_spatial_entity_ids(ids.iter().copied(), query, sphere, run)
     }
 
-    fn live_ids(&self, query: WorldQuery) -> Option<&BTreeSet<UUID>> {
+    fn live_ids(&self, query: WorldQuery) -> Option<&BTreeSet<Uuid>> {
         let ids = match query.region {
             Some(region) => self.store.region_ids(region)?,
             None => self.store.ids(),
@@ -480,7 +450,7 @@ impl World {
         })
     }
 
-    fn query_spatial_entity_ids(&self, ids: impl Iterator<Item = UUID>, query: WorldQuery, sphere: Sphere, run: &mut QueryRun<'_>) -> bool {
+    fn query_spatial_entity_ids(&self, ids: impl Iterator<Item = Uuid>, query: WorldQuery, sphere: Sphere, run: &mut QueryRun<'_>) -> bool {
         for id in ids {
             if !run.spend(1) {
                 return false;
@@ -623,7 +593,7 @@ impl World {
 
     fn query_unresolved_ids(
         &self,
-        mut unresolved: impl Iterator<Item = (Region, UUID, Entity)>,
+        mut unresolved: impl Iterator<Item = (Region, Uuid, Entity)>,
         query: WorldQuery,
         run: &mut QueryRun<'_>,
     ) {
@@ -655,7 +625,7 @@ impl World {
     fn query_recent(
         &self,
         query: WorldQuery,
-        after: Option<UUID>,
+        after: Option<Uuid>,
         revision: WorldRevision,
         recent_expires_at: Option<Instant>,
         now: Instant,
@@ -870,7 +840,7 @@ mod tests {
             pose: Some(Pose { position: Some(position), rotation: Some(Quat::IDENTITY) }),
             ..ObjectObservation::new(
                 UpdateSource::new(region, 1, Ordered(id as u64 + 1), 0),
-                UUID::from_u128(id),
+                Uuid::from_u128(id),
                 NonZeroU32::new(local_id).unwrap(),
                 kind,
                 Root,
@@ -889,10 +859,10 @@ mod tests {
         id: u128,
         local_id: u32,
         attachment_point: Option<AttachmentPoint>,
-        owner_id: Option<UUID>,
-        creator_id: Option<UUID>,
+        owner_id: Option<Uuid>,
+        creator_id: Option<Uuid>,
     ) -> Entity {
-        let id = UUID::from_u128(id);
+        let id = Uuid::from_u128(id);
         let observation = ObjectObservation {
             attachment_point: attachment_point.map_or(FieldUpdate::Clear, FieldUpdate::Set),
             ..ObjectObservation::new(
@@ -963,7 +933,7 @@ mod tests {
         let result = world.query(query, None, budget(8)).unwrap();
 
         assert_eq!(result.completeness, QueryCompleteness::Exact);
-        assert_eq!(result.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [UUID::from_u128(1)]);
+        assert_eq!(result.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [Uuid::from_u128(1)]);
     }
 
     #[test]
@@ -972,12 +942,12 @@ mod tests {
         let mut world = World::new(limits());
         add_region(&mut world, region);
         set_origin(&mut world, region);
-        let known = UUID::from_u128(11);
-        let other = UUID::from_u128(12);
-        let owner = UUID::from_u128(91);
-        let other_owner = UUID::from_u128(92);
-        let creator = UUID::from_u128(93);
-        let other_creator = UUID::from_u128(94);
+        let known = Uuid::from_u128(11);
+        let other = Uuid::from_u128(12);
+        let owner = Uuid::from_u128(91);
+        let other_owner = Uuid::from_u128(92);
+        let creator = Uuid::from_u128(93);
+        let other_creator = Uuid::from_u128(94);
         let attachment = AttachmentPoint::new(NonZeroU8::new(5).expect("attachment point is nonzero"));
         let other_attachment = AttachmentPoint::new(NonZeroU8::new(6).expect("attachment point is nonzero"));
 
@@ -1029,10 +999,10 @@ mod tests {
             .query(WorldQuery::live().in_region(second), None, WorldQueryBudget { work: 1, results: 1 })
             .expect("region-filtered query");
 
-        assert_eq!(page.items.iter().copied().map(WorldQueryItem::id).collect::<Vec<_>>(), [UUID::from_u128(100)]);
+        assert_eq!(page.items.iter().copied().map(WorldQueryItem::id).collect::<Vec<_>>(), [Uuid::from_u128(100)]);
     }
 
-    fn query_ids(world: &World, query: WorldQuery) -> HashSet<UUID> {
+    fn query_ids(world: &World, query: WorldQuery) -> HashSet<Uuid> {
         let page = world.query(query, None, budget(8)).expect("metadata query");
         assert_eq!(page.completeness, QueryCompleteness::Exact);
         page.items.into_iter().map(WorldQueryItem::id).collect()
@@ -1082,7 +1052,7 @@ mod tests {
         for id in [31_u32, 32] {
             world.recent.insert(
                 RecentObject {
-                    id: UUID::from_u128(u128::from(id)),
+                    id: Uuid::from_u128(u128::from(id)),
                     kind: Kind::Object,
                     address: super::super::LocalAddress::new(region, NonZeroU32::new(id).unwrap()),
                     attachment_point: None,
@@ -1098,7 +1068,7 @@ mod tests {
         let revision = world.revision();
         let first = world.query_at(query, None, budget(1), now).unwrap();
 
-        assert_eq!(first.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [UUID::from_u128(31)]);
+        assert_eq!(first.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [Uuid::from_u128(31)]);
         assert!(first.next.is_some());
         assert_eq!(world.revision(), revision);
         assert_eq!(world.query_at(query, first.next, budget(1), now + RECENT_OBJECT_TTL), Err(WorldReadError::InvalidCursor));
@@ -1116,7 +1086,7 @@ mod tests {
             pose: Some(Pose { position: Some(Vec3::new(128.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) }),
             ..ObjectObservation::new(
                 UpdateSource::new(region, 2, Ordered(90), 0),
-                UUID::from_u128(41),
+                Uuid::from_u128(41),
                 NonZeroU32::new(1).unwrap(),
                 Kind::Object,
                 Root,
@@ -1127,7 +1097,7 @@ mod tests {
         let result = world.query(query, None, WorldQueryBudget { work: 32, results: 8 }).unwrap();
 
         assert_eq!(result.completeness, QueryCompleteness::Exact);
-        assert_eq!(result.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [UUID::from_u128(41)]);
+        assert_eq!(result.items.iter().map(|item| item.id()).collect::<Vec<_>>(), [Uuid::from_u128(41)]);
     }
 
     #[test]
@@ -1144,7 +1114,7 @@ mod tests {
                 pose: Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) }),
                 ..ObjectObservation::new(
                     UpdateSource::new(region, local_id, Ordered(u64::from(local_id)), 0),
-                    UUID::from_u128(5_000 + u128::from(local_id)),
+                    Uuid::from_u128(5_000 + u128::from(local_id)),
                     NonZeroU32::new(local_id).unwrap(),
                     Kind::Object,
                     parent,
@@ -1154,7 +1124,7 @@ mod tests {
             assert!(matches!(result.outcome, crate::ApplyOutcome::Introduced(_)));
         }
 
-        let candidate_id = UUID::from_u128(5_000 + u128::from(CHAIN_LENGTH + 1));
+        let candidate_id = Uuid::from_u128(5_000 + u128::from(CHAIN_LENGTH + 1));
         let candidate_local_id = NonZeroU32::new(CHAIN_LENGTH + 1).unwrap();
         let candidate = world
             .observe_object(ObjectObservation {
@@ -1208,7 +1178,7 @@ mod tests {
         let mut world = World::new(limits());
         world.recent.insert(
             RecentObject {
-                id: UUID::from_u128(61),
+                id: Uuid::from_u128(61),
                 kind: Kind::Object,
                 address: super::super::LocalAddress::new(region, NonZeroU32::new(1).unwrap()),
                 attachment_point: None,

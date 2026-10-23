@@ -1,12 +1,5 @@
-//! Binary codec for LLSD values and Serde types.
-//!
-//! Decoders apply [`crate::Limits`] and reject trailing bytes.
-//! The binary marker is optional on input and included in output.
-//! Dates use little-endian seconds to match the official viewer ecosystem; real values use network byte order.
-
 use std::io::{Read, Write};
 
-use base::UUID;
 use serde::{
     Deserialize,
     de::{
@@ -15,6 +8,7 @@ use serde::{
     },
     forward_to_deserialize_any,
 };
+use uuid::Uuid;
 
 use crate::{
     Error, Limits, Result,
@@ -53,12 +47,10 @@ fn strip_header(input: &[u8]) -> Option<&[u8]> {
     Some(&input[offset..])
 }
 
-/// Decodes one binary LLSD value from bytes with the default limits.
 pub fn from_slice<T: DeserializeOwned>(input: &[u8]) -> Result<T> {
     from_slice_with_limits(input, Limits::default())
 }
 
-/// Decodes one binary LLSD value with caller-supplied limits.
 pub fn from_slice_with_limits<T: DeserializeOwned>(input: &[u8], limits: Limits) -> Result<T> {
     if input.len() > limits.max_input_bytes {
         return Err(Error::LimitExceeded("input bytes"));
@@ -75,12 +67,10 @@ pub fn from_slice_with_limits<T: DeserializeOwned>(input: &[u8], limits: Limits)
     Ok(value)
 }
 
-/// Reads and decodes one binary LLSD value with the default limits.
 pub fn from_reader<T: DeserializeOwned, R: Read>(mut reader: R) -> Result<T> {
     from_reader_with_limits(&mut reader, Limits::default())
 }
 
-/// Reads at most `max_input_bytes + 1` bytes and decodes them with caller-supplied limits.
 pub fn from_reader_with_limits<T: DeserializeOwned, R: Read>(reader: &mut R, limits: Limits) -> Result<T> {
     let max = limits.max_input_bytes.saturating_add(1);
     let mut bytes = Vec::with_capacity(max.min(8192));
@@ -91,12 +81,10 @@ pub fn from_reader_with_limits<T: DeserializeOwned, R: Read>(reader: &mut R, lim
     from_slice_with_limits(&bytes, limits)
 }
 
-/// Encodes a Serde value as one binary LLSD document.
 pub fn to_vec<T: serde::Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
     ser::to_vec(value, Format::Binary)
 }
 
-/// Encodes one complete binary LLSD document and writes it to `writer`.
 pub fn to_writer<T: serde::Serialize + ?Sized, W: Write>(mut writer: W, value: &T) -> Result<()> {
     ser::to_writer(&mut writer, value, Format::Binary)
 }
@@ -166,7 +154,7 @@ impl<'de> Deserializer<'de> {
         let bytes = self.take(16)?;
         let mut value = [0; 16];
         value.copy_from_slice(bytes);
-        Ok(UUID::from_bytes(value).to_string())
+        Ok(Uuid::from_bytes(value).to_string())
     }
 
     fn read_binary(&mut self) -> Result<Vec<u8>> {

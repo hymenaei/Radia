@@ -1,6 +1,5 @@
-use base::UUID;
+use uuid::Uuid;
 
-/// Simulator reply containing map regions for the requested grid cells.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapBlockReply {
     pub agent_data: AgentData,
@@ -9,7 +8,7 @@ pub struct MapBlockReply {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AgentData {
-    pub agent_id: UUID,
+    pub agent_id: Uuid,
     pub flags: u32,
 }
 
@@ -22,5 +21,5 @@ pub struct Data {
     pub region_flags: u32,
     pub water_height: u8,
     pub agents: u8,
-    pub map_image_id: UUID,
+    pub map_image_id: Uuid,
 }

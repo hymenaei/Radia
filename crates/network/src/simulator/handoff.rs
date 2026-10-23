@@ -1,5 +1,3 @@
-//! LLUDP and capability evidence used to prepare and promote simulator handoffs.
-
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
@@ -9,7 +7,6 @@ use std::{
     str::from_utf8,
 };
 
-use base::UUID;
 use llsd::Value;
 use protocol::{FieldValue, SchemaMessage, lludp::Message, messages::AgentMovementComplete};
 use tokio::{
@@ -17,6 +14,7 @@ use tokio::{
     task::{Id, JoinSet},
 };
 use url::Url;
+use uuid::Uuid;
 
 use crate::{
     capabilities::{Client, EventQueueExit},
@@ -31,8 +29,8 @@ use super::{
 
 #[derive(Clone, Eq, PartialEq)]
 pub(super) struct HandoffTarget {
-    pub(super) agent_id: UUID,
-    pub(super) session_id: UUID,
+    pub(super) agent_id: Uuid,
+    pub(super) session_id: Uuid,
     pub(super) region_handle: u64,
     pub(super) endpoint: SocketAddr,
     pub(super) seed_capability: Url,
@@ -344,13 +342,13 @@ pub(super) fn matches_pending_promotion(
     })
 }
 
-pub(super) fn decode_crossed_region(body: &Value, agent_id: UUID, session_id: UUID) -> Result<HandoffTarget, &'static str> {
+pub(super) fn decode_crossed_region(body: &Value, agent_id: Uuid, session_id: Uuid) -> Result<HandoffTarget, &'static str> {
     let body = event_fields(body)?;
     let agent = event_block(body, "AgentData")?;
-    if !matches!(agent.get("AgentID"), Some(Value::UUID(value)) if *value == agent_id) {
+    if !matches!(agent.get("AgentID"), Some(Value::Uuid(value)) if *value == agent_id) {
         return Err("AgentData.AgentID does not match the authenticated agent");
     }
-    if !matches!(agent.get("SessionID"), Some(Value::UUID(value)) if *value == session_id) {
+    if !matches!(agent.get("SessionID"), Some(Value::Uuid(value)) if *value == session_id) {
         return Err("AgentData.SessionID does not match the authenticated session");
     }
     let region = event_block(body, "RegionData")?;
@@ -377,9 +375,9 @@ pub(super) fn decode_crossed_region(body: &Value, agent_id: UUID, session_id: UU
     make_handoff_target(agent_id, session_id, u64::from_be_bytes(raw_handle), SocketAddr::from((Ipv4Addr::from(raw_ip), port)), seed)
 }
 
-pub(super) fn decode_event_teleport_finish(body: &Value, agent_id: UUID, session_id: UUID) -> Result<HandoffTarget, &'static str> {
+pub(super) fn decode_event_teleport_finish(body: &Value, agent_id: Uuid, session_id: Uuid) -> Result<HandoffTarget, &'static str> {
     let info = event_block(event_fields(body)?, "Info")?;
-    if !matches!(info.get("AgentID"), Some(Value::UUID(value)) if *value == agent_id) {
+    if !matches!(info.get("AgentID"), Some(Value::Uuid(value)) if *value == agent_id) {
         return Err("Info.AgentID does not match the authenticated agent");
     }
     let Some(Value::Binary(raw_handle)) = info.get("RegionHandle") else {
@@ -405,11 +403,11 @@ pub(super) fn decode_event_teleport_finish(body: &Value, agent_id: UUID, session
     make_handoff_target(agent_id, session_id, u64::from_be_bytes(raw_handle), SocketAddr::from((Ipv4Addr::from(raw_ip), port)), seed)
 }
 
-pub(super) fn decode_event_teleport_failed(body: &Value, agent_id: UUID) -> Result<(), &'static str> {
+pub(super) fn decode_event_teleport_failed(body: &Value, agent_id: Uuid) -> Result<(), &'static str> {
     let info = event_block(event_fields(body)?, "Info")?;
     match info.get("AgentID") {
-        Some(Value::UUID(value)) if *value == agent_id => Ok(()),
-        Some(Value::UUID(_)) => Err("Info.AgentID does not match the authenticated agent"),
+        Some(Value::Uuid(value)) if *value == agent_id => Ok(()),
+        Some(Value::Uuid(_)) => Err("Info.AgentID does not match the authenticated agent"),
         _ => Err("Info.AgentID is not an LLSD UUID"),
     }
 }
@@ -432,14 +430,14 @@ pub(super) fn event_block<'a>(fields: &'a BTreeMap<String, Value>, name: &str) -
     }
 }
 
-pub(super) fn decode_teleport_finish(message: &Message, agent_id: UUID, session_id: UUID) -> Result<HandoffTarget, &'static str> {
+pub(super) fn decode_teleport_finish(message: &Message, agent_id: Uuid, session_id: Uuid) -> Result<HandoffTarget, &'static str> {
     let Message::Schema(schema) = message else {
         return Err("message is not a schema message");
     };
     if schema.schema().name != "TeleportFinish" {
         return Err("message is not TeleportFinish");
     }
-    if !matches!(schema_field(schema, "AgentID"), Some(FieldValue::UUID(value)) if *value == agent_id) {
+    if !matches!(schema_field(schema, "AgentID"), Some(FieldValue::Uuid(value)) if *value == agent_id) {
         return Err("Info.AgentID does not match the authenticated agent");
     }
     let Some(FieldValue::IpAddr(ip)) = schema_field(schema, "SimIP") else {
@@ -472,8 +470,8 @@ pub(super) fn schema_field<'a>(schema: &'a SchemaMessage, name: &str) -> Option<
 }
 
 fn make_handoff_target(
-    agent_id: UUID,
-    session_id: UUID,
+    agent_id: Uuid,
+    session_id: Uuid,
     region_handle: u64,
     endpoint: SocketAddr,
     seed: &str,
@@ -501,7 +499,7 @@ pub(super) fn is_handoff_message(message: &Message) -> bool {
     matches!(message, Message::Schema(schema) if matches!(schema.schema().name, "TeleportFinish" | "TeleportFailed"))
 }
 
-pub(super) fn is_teleport_cancel(message: &Message, agent_id: UUID, session_id: UUID) -> bool {
+pub(super) fn is_teleport_cancel(message: &Message, agent_id: Uuid, session_id: Uuid) -> bool {
     matches!(message, Message::TeleportCancel(cancel) if cancel.agent_id == agent_id && cancel.session_id == session_id)
 }
 
@@ -701,7 +699,7 @@ impl SimulatorCoordinator {
                 }
             },
             "TeleportFailed" => match schema_field(schema, "AgentID") {
-                Some(FieldValue::UUID(agent_id)) if *agent_id == self.session.agent_id => {
+                Some(FieldValue::Uuid(agent_id)) if *agent_id == self.session.agent_id => {
                     if teleport_failure_matches(state.pending(), HandoffOrder::Packet(packet_order))
                         && let Some(pending) = state.take_pending()
                     {
@@ -718,7 +716,7 @@ impl SimulatorCoordinator {
                     }
                     Ok(())
                 }
-                Some(FieldValue::UUID(_)) => {
+                Some(FieldValue::Uuid(_)) => {
                     self.status.record_error("Ignored TeleportFailed for a different agent.");
                     Ok(())
                 }

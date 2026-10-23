@@ -3,11 +3,12 @@ use std::{
     time::Duration,
 };
 
-use base::{AssetId, UUID};
 use llsd::{Limits, Map, Value, binary, notation, xml};
 use protocol::lludp::{FieldValue, Message, SchemaMessage};
 use scene::{EnvironmentProperty, EnvironmentPush, ExperienceId};
 use tokio::sync::mpsc;
+use utils::AssetId;
+use uuid::Uuid;
 use world::Region;
 
 #[cfg(test)]
@@ -36,7 +37,7 @@ impl EnvironmentInbox {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct InvalidPush;
 
-pub(super) fn decode(message: &Message, agent: UUID) -> Result<Option<EnvironmentPush>, InvalidPush> {
+pub(super) fn decode(message: &Message, agent: Uuid) -> Result<Option<EnvironmentPush>, InvalidPush> {
     let Message::Schema(message) = message else { return Ok(None) };
     if message.schema().name != "GenericMessage" {
         return Ok(None);
@@ -45,10 +46,10 @@ pub(super) fn decode(message: &Message, agent: UUID) -> Result<Option<Environmen
     if method.strip_suffix(&[0]).unwrap_or(method) != b"PushExpEnvironment" {
         return Ok(None);
     }
-    if field(message, "AgentData", "AgentID") != Some(&FieldValue::UUID(agent)) {
+    if field(message, "AgentData", "AgentID") != Some(&FieldValue::Uuid(agent)) {
         return Err(InvalidPush);
     }
-    let Some(FieldValue::UUID(invoice)) = field(message, "MethodData", "Invoice") else { return Err(InvalidPush) };
+    let Some(FieldValue::Uuid(invoice)) = field(message, "MethodData", "Invoice") else { return Err(InvalidPush) };
     let Some(FieldValue::Bytes(payload)) = field(message, "ParamList", "Parameter") else { return Err(InvalidPush) };
     if payload.len() > 255 {
         return Err(InvalidPush);
@@ -92,7 +93,7 @@ pub(super) fn decode(message: &Message, agent: UUID) -> Result<Option<Environmen
         "ClearEnvironment" => Ok(Some(EnvironmentPush::Clear { experience, transition })),
         "PushFullEnvironment" => {
             let experience = experience.ok_or(InvalidPush)?;
-            let Some(Value::UUID(asset)) = data.get("asset_id") else { return Err(InvalidPush) };
+            let Some(Value::Uuid(asset)) = data.get("asset_id") else { return Err(InvalidPush) };
             if asset.is_nil() {
                 return Err(InvalidPush);
             }

@@ -1,6 +1,6 @@
 use std::mem::size_of;
 
-use base::UUID;
+use uuid::Uuid;
 
 use crate::{
     LLUdpError,
@@ -13,7 +13,6 @@ use crate::{
 };
 use math::{Quat, Vec3};
 
-/// A compressed full object update.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectUpdateCompressed {
     pub region_data: RegionData,
@@ -24,7 +23,7 @@ pub struct ObjectUpdateCompressed {
 pub struct ObjectData {
     pub update_flags: u32,
     pub local_id: u32,
-    pub id: UUID,
+    pub id: Uuid,
     pub pcode: u8,
     pub state: u8,
     pub crc: u32,
@@ -35,7 +34,7 @@ pub struct ObjectData {
     pub rotation: Quat,
     pub angular_velocity: Option<Vec3>,
     pub special_code: u32,
-    pub owner_id: UUID,
+    pub owner_id: Uuid,
     pub parent_local_id: u32,
     pub data: Option<ObjectSpecificData>,
     pub text: Option<ObjectText>,
@@ -71,10 +70,8 @@ const SPECIAL_OBJECT_FIELDS: u32 = 0x7ff;
 const VOLUME_PCODE: u8 = 9;
 const LEGACY_PARTICLE_SYSTEM_SIZE: usize = 86;
 
-/// Largest compressed ObjectUpdate TextureEntry payload decoded by the viewer.
 pub const MAX_TEXTURE_ENTRY_BYTES: usize = 4095;
 
-/// Decodes the bounded TextureEntry payload after the compressed message's binary-data envelope.
 pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpError> {
     if bytes.len() > MAX_TEXTURE_ENTRY_BYTES {
         return Err(LLUdpError::InvalidMessage);

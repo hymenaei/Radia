@@ -1,8 +1,8 @@
 use std::{hint::black_box, num::NonZeroU32};
 
-use base::UUID;
 use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
 use math::{Quat, Vec3};
+use uuid::Uuid;
 use world::{
     AgentHandoff,
     ApplyOutcome::{AgentHandedOff, Introduced, Removed},
@@ -100,7 +100,7 @@ fn bench_local_id_reuse(group: &mut BenchmarkGroup<'_, WallTime>) {
         let removed = verification.world.remove_object(source(target.region, order), target.local_id).expect("object removal");
         assert_eq!(removed.outcome, Removed(target.id));
         order += 1;
-        let new_id = UUID::from_u128(count as u128 + 1);
+        let new_id = Uuid::from_u128(count as u128 + 1);
         let introduced =
             verification.world.observe_object(observation(Row { id: new_id, order, ..target })).expect("local ID reintroduction");
         let Introduced(entity) = introduced.outcome else { panic!("expected local ID reintroduction") };
@@ -117,7 +117,7 @@ fn bench_local_id_reuse(group: &mut BenchmarkGroup<'_, WallTime>) {
             b.iter(|| {
                 let _ = black_box(scene.world.remove_object(source(target.region, order), target.local_id).expect("object removal"));
                 order += 1;
-                let id = UUID::from_u128(next_id);
+                let id = Uuid::from_u128(next_id);
                 next_id += 1;
                 let row = Row { id, order, ..target };
                 let _ = black_box(scene.world.observe_object(observation(row)).expect("local ID reintroduction"));

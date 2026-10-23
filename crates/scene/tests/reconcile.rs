@@ -6,7 +6,6 @@ use std::{
 };
 
 use assets::{Request, TextureSize};
-use base::{AssetId, UUID};
 use math::{DVec3, Quat, Vec3};
 use proptest::prelude::*;
 use scene::{
@@ -14,6 +13,8 @@ use scene::{
     Placement, PreparedMesh, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, RecoveryReason, Resolution, SceneReconciler,
     SceneView, Status, SurfaceKind,
 };
+use utils::AssetId;
+use uuid::Uuid;
 use world::{
     Appearance, EnvironmentAssignment, EnvironmentScope, EnvironmentSource, FaceAppearance, FieldUpdate, GltfAlphaMode,
     GltfMaterialOverride, GltfMaterialOverrides, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParcelId, ParentUpdate,
@@ -52,7 +53,7 @@ fn source(region: u64, order: u64) -> world::UpdateSource {
 }
 
 fn add(world: &mut World, id: u128, local: u32, parent: ParentUpdate, x: f32, order: u64) {
-    let mut obj = ObjectObservation::new(source(1, order), UUID::from_u128(id), NonZeroU32::new(local).unwrap(), Kind::Object, parent);
+    let mut obj = ObjectObservation::new(source(1, order), Uuid::from_u128(id), NonZeroU32::new(local).unwrap(), Kind::Object, parent);
     obj.pose = Some(Pose { position: Some(Vec3::new(x, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
     obj.scale = Some(Vec3::ONE);
     obj.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
@@ -211,9 +212,9 @@ fn unseen_objects_get_baselines() {
         let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
         patch.surface_appearance = Some(
             SurfaceAppearance::new(
-                FaceAppearance { texture_id: UUID::from_u128(100 + id), ..FaceAppearance::default() },
+                FaceAppearance { texture_id: Uuid::from_u128(100 + id), ..FaceAppearance::default() },
                 if id == 3 {
-                    vec![(0, FaceAppearance { texture_id: UUID::from_u128(203), ..FaceAppearance::default() })]
+                    vec![(0, FaceAppearance { texture_id: Uuid::from_u128(203), ..FaceAppearance::default() })]
                 } else {
                     Vec::new()
                 },
@@ -230,14 +231,14 @@ fn unseen_objects_get_baselines() {
         assert!(
             work.requested
                 .iter()
-                .any(|request| request.priority == Priority::Background && request.request.resource().id.uuid() == UUID::from_u128(id)),
+                .any(|request| request.priority == Priority::Background && request.request.resource().id.uuid() == Uuid::from_u128(id)),
             "off-camera defaults and face-zero overrides both need baseline coverage"
         );
     }
-    let baseline = work.requested.iter().find(|request| request.request.resource().id.uuid() == UUID::from_u128(101)).unwrap();
+    let baseline = work.requested.iter().find(|request| request.request.resource().id.uuid() == Uuid::from_u128(101)).unwrap();
     assert_eq!(baseline.priority, Priority::Background);
-    assert_eq!(baseline.request, Request::Texture { id: AssetId::new(UUID::from_u128(101)), size: TextureSize::new(32) });
-    let object = view.objects().find(|object| object.detail().summary.id == UUID::from_u128(1)).unwrap();
+    assert_eq!(baseline.request, Request::Texture { id: AssetId::new(Uuid::from_u128(101)), size: TextureSize::new(32) });
+    let object = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).unwrap();
     assert!(object.mesh().is_none(), "baseline loading does not require preparing off-camera geometry");
     scene.complete_asset(
         baseline.ticket,
@@ -249,10 +250,10 @@ fn unseen_objects_get_baselines() {
     let current = work
         .requested
         .iter()
-        .find(|request| request.priority == Priority::Visible && request.request.resource().id.uuid() == UUID::from_u128(101))
+        .find(|request| request.priority == Priority::Visible && request.request.resource().id.uuid() == Uuid::from_u128(101))
         .unwrap();
     assert_ne!(current.ticket, baseline.ticket);
-    let object = view.objects().find(|object| object.detail().summary.id == UUID::from_u128(1)).unwrap();
+    let object = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).unwrap();
     assert!(object.mesh().is_some());
     assert!(
         object.materials().unwrap().iter().all(|face| face.base_color.as_ref().unwrap().info().unwrap().size == [32; 2]),
@@ -288,7 +289,7 @@ fn larger_visible_objects_build_first() {
             _ => panic!("scene stopped before publishing geometry"),
         }
     }
-    assert_eq!(first, Some(UUID::from_u128(2)), "large on-screen geometry must overtake older, smaller requests");
+    assert_eq!(first, Some(Uuid::from_u128(2)), "large on-screen geometry must overtake older, smaller requests");
     settle(&mut scene, &mut view, &world, &mut now);
     assert!(view.objects().all(|object| object.mesh().is_some()), "smaller requests still complete");
 }
@@ -300,7 +301,7 @@ fn view_bounds_control_texture_priority() {
     let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
     patch.pose = Some(Pose { position: Some(Vec3::new(20.0, 30.0, 0.0)), rotation: None });
     patch.surface_appearance =
-        Some(SurfaceAppearance::new(FaceAppearance { texture_id: UUID::from_u128(101), ..FaceAppearance::default() }, Vec::new()).unwrap());
+        Some(SurfaceAppearance::new(FaceAppearance { texture_id: Uuid::from_u128(101), ..FaceAppearance::default() }, Vec::new()).unwrap());
     let _ = world.patch_object(patch).unwrap();
     let (mut scene, mut view) = SceneReconciler::new(Budget::default());
     let mut now = Instant::now();
@@ -308,7 +309,7 @@ fn view_bounds_control_texture_priority() {
     let first = settle_materials(&mut scene, &mut view, &world, &mut now);
     let baseline = first.requested.last().unwrap();
     assert_eq!(baseline.priority, Priority::Background, "off-screen objects cannot compete with visible textures");
-    assert_eq!(baseline.request, Request::Texture { id: AssetId::new(UUID::from_u128(101)), size: TextureSize::new(32) });
+    assert_eq!(baseline.request, Request::Texture { id: AssetId::new(Uuid::from_u128(101)), size: TextureSize::new(32) });
     scene.camera(Camera::new(DVec3::ZERO, Vec3::X, std::f64::consts::FRAC_PI_2, [2000, 1000]).unwrap());
     let wide = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(wide.released.contains(&baseline.ticket));
@@ -325,7 +326,7 @@ fn shared_textures_follow_camera() {
         add(&mut world, id, id as u32, ParentUpdate::Root, x, id as u64 * 2);
         let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
         patch.surface_appearance = Some(
-            SurfaceAppearance::new(FaceAppearance { texture_id: UUID::from_u128(100), ..FaceAppearance::default() }, Vec::new()).unwrap(),
+            SurfaceAppearance::new(FaceAppearance { texture_id: Uuid::from_u128(100), ..FaceAppearance::default() }, Vec::new()).unwrap(),
         );
         let _ = world.patch_object(patch).unwrap();
     }
@@ -333,7 +334,7 @@ fn shared_textures_follow_camera() {
     let mut now = Instant::now();
     scene.camera(camera(0.0));
     let first = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
-    assert_eq!(first.request, Request::Texture { id: AssetId::new(UUID::from_u128(100)), size: TextureSize::new(128) });
+    assert_eq!(first.request, Request::Texture { id: AssetId::new(Uuid::from_u128(100)), size: TextureSize::new(128) });
     let ready = prepared_asset(first.request, include_bytes!("../../assets/tests/fixtures/gray-4096.j2c").to_vec());
     scene.complete_asset(first.ticket, ready.clone());
     settle_materials(&mut scene, &mut view, &world, &mut now);
@@ -350,7 +351,7 @@ fn shared_textures_follow_camera() {
     assert_eq!(work.released, [first.ticket]);
     assert_eq!(work.requested.len(), 1, "removing the nearest user lowers shared demand");
     let low = work.requested[0];
-    assert_eq!(low.request, Request::Texture { id: AssetId::new(UUID::from_u128(100)), size: TextureSize::new(32) });
+    assert_eq!(low.request, Request::Texture { id: AssetId::new(Uuid::from_u128(100)), size: TextureSize::new(32) });
     scene.complete_asset(low.ticket, assets::Status::Decoding);
     settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.objects().next().unwrap().materials().unwrap()[0].base_color.as_ref().unwrap().info().unwrap().size, [128; 2]);
@@ -386,11 +387,11 @@ fn shared_textures_follow_camera() {
 fn material_arrival_preserves_geometry() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
-    let id = AssetId::new(UUID::from_u128(9));
+    let id = AssetId::new(Uuid::from_u128(9));
     let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
     patch.surface_appearance = Some(
         SurfaceAppearance::new(
-            FaceAppearance { texture_id: UUID::from_u128(6), color: [255, 0, 0, 128], ..FaceAppearance::default() },
+            FaceAppearance { texture_id: Uuid::from_u128(6), color: [255, 0, 0, 128], ..FaceAppearance::default() },
             Vec::new(),
         )
         .unwrap(),
@@ -401,7 +402,7 @@ fn material_arrival_preserves_geometry() {
             (
                 0,
                 GltfMaterialOverride {
-                    textures: [Some(UUID::max()), None, None, None],
+                    textures: [Some(Uuid::max()), None, None, None],
                     base_color: Some([0.6, 0.7, 0.8, 1.0]),
                     alpha_mode: Some(GltfAlphaMode::Opaque),
                     double_sided: Some(false),
@@ -435,7 +436,7 @@ fn material_arrival_preserves_geometry() {
     assert_eq!(view.revision(), revision, "World revision alone cannot identify Scene content");
     assert_eq!(work.requested.len(), 1, "only the visible base-color image is fetched at this shading stage");
     let image_request = work.requested[0];
-    assert_eq!(image_request.request.resource(), assets::Resource { id: AssetId::new(UUID::from_u128(100)), kind: assets::Kind::Texture });
+    assert_eq!(image_request.request.resource(), assets::Resource { id: AssetId::new(Uuid::from_u128(100)), kind: assets::Kind::Texture });
     let object = view.objects().next().unwrap();
     assert_eq!(object.mesh().unwrap().1.id(), mesh);
     let faces = object.materials().unwrap();
@@ -467,7 +468,7 @@ fn binding_edits_reject_old_completion() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
-    let old = AssetId::new(UUID::from_u128(9));
+    let old = AssetId::new(Uuid::from_u128(9));
     patch.render_materials = Some(RenderMaterials::new(vec![(0, old)]).unwrap());
     let _ = world.patch_object(patch).unwrap();
     let (mut scene, mut view) = SceneReconciler::new(Budget::default());
@@ -477,7 +478,7 @@ fn binding_edits_reject_old_completion() {
     scene.complete_asset(first.ticket, material_asset(old));
     let image = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
     assert!(matches!(view.objects().next().unwrap().materials().unwrap()[0].material, assets::MaterialDescription::Pbr(_)));
-    let current = AssetId::new(UUID::from_u128(10));
+    let current = AssetId::new(Uuid::from_u128(10));
     let mut patch = ObjectPatch::new(source(1, 3), NonZeroU32::new(1).unwrap());
     patch.render_materials = Some(RenderMaterials::new(vec![(0, current)]).unwrap());
     let _ = world.patch_object(patch).unwrap();
@@ -512,7 +513,7 @@ fn shared_demand_releases_last_user() {
         add(&mut world, id, id as u32, ParentUpdate::Root, 10.0, id as u64 * 2);
         let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
         patch.surface_appearance = Some(
-            SurfaceAppearance::new(FaceAppearance { texture_id: UUID::from_u128(100), ..FaceAppearance::default() }, Vec::new()).unwrap(),
+            SurfaceAppearance::new(FaceAppearance { texture_id: Uuid::from_u128(100), ..FaceAppearance::default() }, Vec::new()).unwrap(),
         );
         let _ = world.patch_object(patch).unwrap();
     }
@@ -544,12 +545,12 @@ fn regional_demands_have_no_cache_cap() {
         let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
         patch.surface_appearance = Some(
             SurfaceAppearance::new(
-                FaceAppearance { texture_id: UUID::from_u128(10_000 + id * 6), ..FaceAppearance::default() },
+                FaceAppearance { texture_id: Uuid::from_u128(10_000 + id * 6), ..FaceAppearance::default() },
                 (1..6)
                     .map(|slot| {
                         (
                             slot,
-                            FaceAppearance { texture_id: UUID::from_u128(10_000 + id * 6 + u128::from(slot)), ..FaceAppearance::default() },
+                            FaceAppearance { texture_id: Uuid::from_u128(10_000 + id * 6 + u128::from(slot)), ..FaceAppearance::default() },
                         )
                     })
                     .collect(),
@@ -588,7 +589,7 @@ fn shared_texture_outlives_scene() {
         add(&mut world, id, id as u32, ParentUpdate::Root, 10.0, id as u64 * 2);
         let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
         patch.surface_appearance = Some(
-            SurfaceAppearance::new(FaceAppearance { texture_id: UUID::from_u128(101), ..FaceAppearance::default() }, Vec::new()).unwrap(),
+            SurfaceAppearance::new(FaceAppearance { texture_id: Uuid::from_u128(101), ..FaceAppearance::default() }, Vec::new()).unwrap(),
         );
         let _ = world.patch_object(patch).unwrap();
     }
@@ -668,7 +669,7 @@ fn mesh_reuse_and_replacement() {
     let _ = world.patch_object(patch).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
-    let changed = view.objects().find(|object| object.detail().summary.id == UUID::from_u128(1)).unwrap();
+    let changed = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).unwrap();
     assert!(changed.mesh().is_none());
     assert!(matches!(changed.mesh_state(), Some((_, PreparedMesh::Failed(scene::MeshError::UnsupportedCurve)))));
     scene.close();
@@ -891,25 +892,25 @@ fn descendant_pose_updates() {
     assert_eq!(positions(&view), BTreeMap::from([(1, 20.0), (2, 7.0), (3, 10.0)]));
     let _ = world.adopt_region(Region::new(2)).unwrap();
     let mut transfer =
-        ObjectObservation::new(source(2, 1), UUID::from_u128(2), NonZeroU32::new(9).unwrap(), Kind::Object, ParentUpdate::Root);
+        ObjectObservation::new(source(2, 1), Uuid::from_u128(2), NonZeroU32::new(9).unwrap(), Kind::Object, ParentUpdate::Root);
     transfer.pose = Some(Pose { position: Some(Vec3::new(8.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
     transfer.scale = Some(Vec3::ONE);
     let _ = world.observe_object(transfer).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
-    for obj in view.objects().filter(|obj| obj.detail().summary.id != UUID::from_u128(1)) {
+    for obj in view.objects().filter(|obj| obj.detail().summary.id != Uuid::from_u128(1)) {
         assert!(matches!(obj.placement(), Placement::Hidden(_)));
     }
     let _ = world.patch_region(Region::new(2), RegionInfo { origin: Some(DVec3::new(100.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
-    let root = view.objects().find(|obj| obj.detail().summary.id == UUID::from_u128(2)).unwrap();
+    let root = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(2)).unwrap();
     assert!(matches!(root.placement(), Placement::Ready(transform) if transform.pose.position.x == 108.0));
-    let child = view.objects().find(|obj| obj.detail().summary.id == UUID::from_u128(3)).unwrap();
+    let child = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(3)).unwrap();
     assert!(matches!(child.placement(), Placement::Hidden(_)));
     let mut child = ObjectObservation::new(
         source(2, 2),
-        UUID::from_u128(3),
+        Uuid::from_u128(3),
         NonZeroU32::new(10).unwrap(),
         Kind::Object,
         ParentUpdate::Local(NonZeroU32::new(9).unwrap()),
@@ -950,7 +951,7 @@ fn own_signed_dimensions() {
     let (mut scene, mut view) = SceneReconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
-    let child = view.objects().find(|obj| obj.detail().summary.id == UUID::from_u128(2)).unwrap();
+    let child = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(2)).unwrap();
     let Placement::Ready(transform) = child.placement() else {
         panic!("signed dimensions are retained by World");
     };
@@ -961,7 +962,7 @@ fn own_signed_dimensions() {
     let _ = world.patch_object(zero).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
-    let child = view.objects().find(|obj| obj.detail().summary.id == UUID::from_u128(2)).unwrap();
+    let child = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(2)).unwrap();
     assert_eq!(child.placement(), Placement::Hidden(scene::HiddenReason::InvalidDimensions));
 }
 
@@ -1688,16 +1689,16 @@ fn bounded_reconciliation() {
     let bootstrap_time = start.elapsed();
     assert_eq!(view.object_count(), 2048);
     assert!(bootstrap_reads <= 300);
-    let unchanged = view.objects().find(|object| object.detail().summary.id == UUID::from_u128(2048)).unwrap().clone();
+    let unchanged = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(2048)).unwrap().clone();
     move_root(&mut world, 10.0, 3000);
     scene.notify_world_change();
     let start = Instant::now();
     let movement_reads = settle(&mut scene, &mut view, &world, &mut now);
     let movement_time = start.elapsed();
     assert!(movement_reads <= 3, "local movement should only hydrate the affected subtree");
-    let after = view.objects().find(|object| object.detail().summary.id == UUID::from_u128(2048)).unwrap();
+    let after = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(2048)).unwrap();
     assert!(std::ptr::eq(unchanged.detail(), after.detail()));
-    let child = view.objects().find(|object| object.detail().summary.id == UUID::from_u128(3)).unwrap();
+    let child = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(3)).unwrap();
     assert!(matches!(child.placement(), Placement::Ready(transform) if transform.pose.position.x == 12.0));
     eprintln!(
         "2048 objects: bootstrap {:?}, {} reads; three-object movement {:?}, {} reads; admission peak {} bytes",
@@ -1800,8 +1801,8 @@ fn experience_properties_keep_current_owner() {
     let (mut scene, mut view) = SceneReconciler::new(budget.clone());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
-    let a = ExperienceId::new(UUID::from_u128(10)).unwrap();
-    let b = ExperienceId::new(UUID::from_u128(20)).unwrap();
+    let a = ExperienceId::new(Uuid::from_u128(10)).unwrap();
+    let b = ExperienceId::new(Uuid::from_u128(20)).unwrap();
     for (experience, name, value) in [(a, "gamma", "r1.0"), (a, "blue_density", "[r0.1,r0.2,r0.3]"), (b, "gamma", "r2.0")] {
         scene
             .push_environment(
@@ -1855,8 +1856,8 @@ fn experience_assets_order_and_clear() {
     let (mut scene, mut view) = SceneReconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
-    let a = ExperienceId::new(UUID::from_u128(10)).unwrap();
-    let b = ExperienceId::new(UUID::from_u128(20)).unwrap();
+    let a = ExperienceId::new(Uuid::from_u128(10)).unwrap();
+    let b = ExperienceId::new(Uuid::from_u128(20)).unwrap();
     let mut requests = Vec::new();
     for experience in [a, b] {
         scene
@@ -1894,8 +1895,8 @@ fn cleared_sky_restores_experience_day() {
     let (mut scene, mut view) = SceneReconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
-    let a = ExperienceId::new(UUID::from_u128(10)).unwrap();
-    let b = ExperienceId::new(UUID::from_u128(20)).unwrap();
+    let a = ExperienceId::new(Uuid::from_u128(10)).unwrap();
+    let b = ExperienceId::new(Uuid::from_u128(20)).unwrap();
     for (experience, source) in [
         (
             a,

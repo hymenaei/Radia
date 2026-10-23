@@ -32,7 +32,7 @@ fn authored_sky_survives() {
     assert_eq!(definition.flags, 3);
     let EnvironmentSettings::Sky(sky) = definition.settings else { panic!("sky") };
     assert_eq!(sky.sun.rotation, Some([0.0, 0.0, 0.0, 1.0]));
-    assert_eq!(sky.sun.texture, TextureRef::Asset(AssetId::new(UUID::from_u128(0x00112233445566778899aabbccddeeff))));
+    assert_eq!(sky.sun.texture, TextureRef::Asset(AssetId::new(Uuid::from_u128(0x00112233445566778899aabbccddeeff))));
     assert_eq!(sky.sunlight, Some([0.7342, 0.7815, 0.8999]));
     assert_eq!(sky.clouds.scroll_rate, Some([0.2, 0.01]));
     assert_eq!(sky.legacy_haze.unwrap().density, Some(0.7));
@@ -123,7 +123,7 @@ fn settings_charge_follows_ownership() {
     let mut store = Store::new(budget.clone());
     let now = Instant::now();
     let route = store.register_route().unwrap();
-    let demand = store.request(route, Request::Environment(AssetId::new(UUID::from_u128(1))), Priority::Visible, now).unwrap();
+    let demand = store.request(route, Request::Environment(AssetId::new(Uuid::from_u128(1))), Priority::Visible, now).unwrap();
     let mut job = store.next_job(now).unwrap();
     assert!(store.try_start_decode(&mut job));
     let prepared = job.prepare(DAY.to_vec());

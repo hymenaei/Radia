@@ -17,7 +17,6 @@ use crate::{
         SimulatorId,
     },
 };
-use base::UUID;
 use llsd::{Map, Value};
 use protocol::{
     BlockValues, FieldValue, SchemaMessage,
@@ -37,14 +36,15 @@ use tokio::{
     time::{self, timeout},
 };
 use url::Url;
+use uuid::Uuid;
 
-fn crossed_region(agent_id: UUID, session_id: UUID) -> Value {
+fn crossed_region(agent_id: Uuid, session_id: Uuid) -> Value {
     Value::Map(Map::from([
         (
             "AgentData".to_owned(),
             Value::Array(vec![Value::Map(Map::from([
-                ("AgentID".to_owned(), Value::UUID(agent_id)),
-                ("SessionID".to_owned(), Value::UUID(session_id)),
+                ("AgentID".to_owned(), Value::Uuid(agent_id)),
+                ("SessionID".to_owned(), Value::Uuid(session_id)),
             ]))]),
         ),
         (
@@ -60,11 +60,11 @@ fn crossed_region(agent_id: UUID, session_id: UUID) -> Value {
     ]))
 }
 
-fn teleport_finish_event(agent_id: UUID, seed: &str) -> Value {
+fn teleport_finish_event(agent_id: Uuid, seed: &str) -> Value {
     Value::Map(Map::from([(
         "Info".to_owned(),
         Value::Array(vec![Value::Map(Map::from([
-            ("AgentID".to_owned(), Value::UUID(agent_id)),
+            ("AgentID".to_owned(), Value::Uuid(agent_id)),
             ("RegionHandle".to_owned(), Value::Binary(0x1234_u64.to_be_bytes().to_vec().into())),
             ("SeedCapability".to_owned(), Value::String(seed.to_owned())),
             ("SimIP".to_owned(), Value::Binary(vec![192, 0, 2, 4].into())),
@@ -73,13 +73,13 @@ fn teleport_finish_event(agent_id: UUID, seed: &str) -> Value {
     )]))
 }
 
-fn teleport_finish(agent_id: UUID, seed: &str) -> Message {
+fn teleport_finish(agent_id: Uuid, seed: &str) -> Message {
     let schema = SchemaMessage::schema_by_name("TeleportFinish").expect("TeleportFinish schema");
     Message::Schema(
         SchemaMessage::new(
             schema,
             vec![BlockValues::single(vec![
-                FieldValue::UUID(agent_id),
+                FieldValue::Uuid(agent_id),
                 FieldValue::U32(0),
                 FieldValue::IpAddr([192, 0, 2, 4]),
                 FieldValue::IpPort(13_000_u16.to_be_bytes()),
@@ -95,8 +95,8 @@ fn teleport_finish(agent_id: UUID, seed: &str) -> Message {
 
 fn handoff(region_handle: u64, endpoint: &str, seed: &str) -> HandoffTarget {
     HandoffTarget {
-        agent_id: UUID::from_u128(1),
-        session_id: UUID::from_u128(2),
+        agent_id: Uuid::from_u128(1),
+        session_id: Uuid::from_u128(2),
         region_handle,
         endpoint: endpoint.parse().expect("simulator endpoint"),
         seed_capability: Url::parse(seed).expect("seed URL"),
@@ -109,37 +109,37 @@ fn generation(value: u64) -> HandoffGeneration {
 
 #[test]
 fn crossed_region_is_bound_to_session() {
-    let agent_id = UUID::from_u128(1);
-    let session_id = UUID::from_u128(2);
+    let agent_id = Uuid::from_u128(1);
+    let session_id = Uuid::from_u128(2);
     let handoff = decode_crossed_region(&crossed_region(agent_id, session_id), agent_id, session_id).expect("valid crossing");
     assert_eq!(handoff.region_handle, 0x1234);
     assert_eq!(handoff.endpoint, "192.0.2.4:13000".parse().expect("simulator endpoint"));
-    assert!(decode_crossed_region(&crossed_region(UUID::from_u128(3), session_id), agent_id, session_id).is_err());
-    assert!(decode_crossed_region(&crossed_region(agent_id, UUID::from_u128(4)), agent_id, session_id).is_err());
+    assert!(decode_crossed_region(&crossed_region(Uuid::from_u128(3), session_id), agent_id, session_id).is_err());
+    assert!(decode_crossed_region(&crossed_region(agent_id, Uuid::from_u128(4)), agent_id, session_id).is_err());
 
     assert!(decode_crossed_region(&Value::Map(Map::new()), agent_id, session_id).is_err());
 }
 
 #[test]
 fn teleport_finish_has_checked_destination() {
-    let agent_id = UUID::from_u128(1);
-    let session_id = UUID::from_u128(2);
+    let agent_id = Uuid::from_u128(1);
+    let session_id = Uuid::from_u128(2);
     let handoff = decode_teleport_finish(&teleport_finish(agent_id, "https://example.test/seed\0"), agent_id, session_id)
         .expect("valid teleport finish");
     assert_eq!(handoff.region_handle, 0x1234);
-    assert!(decode_teleport_finish(&teleport_finish(UUID::from_u128(3), "https://example.test/seed"), agent_id, session_id).is_err());
+    assert!(decode_teleport_finish(&teleport_finish(Uuid::from_u128(3), "https://example.test/seed"), agent_id, session_id).is_err());
     assert!(decode_teleport_finish(&teleport_finish(agent_id, "file:///seed"), agent_id, session_id).is_err());
 }
 
 #[test]
 fn event_queue_teleport_finish_decodes_real_llsd_shape() {
-    let agent_id = UUID::from_u128(1);
-    let session_id = UUID::from_u128(2);
+    let agent_id = Uuid::from_u128(1);
+    let session_id = Uuid::from_u128(2);
     let body = teleport_finish_event(agent_id, "https://example.test/seed");
     let handoff = decode_event_teleport_finish(&body, agent_id, session_id).expect("valid EventQueue TeleportFinish");
     assert_eq!(handoff.region_handle, 0x1234);
     assert_eq!(handoff.endpoint, "192.0.2.4:13000".parse().expect("simulator endpoint"));
-    assert!(decode_event_teleport_finish(&body, UUID::from_u128(3), session_id).is_err());
+    assert!(decode_event_teleport_finish(&body, Uuid::from_u128(3), session_id).is_err());
     assert!(decode_event_teleport_finish(&teleport_finish_event(agent_id, "file:///seed"), agent_id, session_id).is_err());
 }
 
@@ -150,7 +150,7 @@ fn promotion_requires_current_matching_destination() {
     let handoff = handoff(0x1234, "192.0.2.4:13000", "https://example.test/seed");
     let pending = PendingPromotion { source, target, generation: generation(1), handoff, evidence: HandoffEvidence::default() };
     let movement = AgentMovementComplete {
-        agent_data: AgentData { agent_id: UUID::from_u128(1), session_id: UUID::from_u128(2) },
+        agent_data: AgentData { agent_id: Uuid::from_u128(1), session_id: Uuid::from_u128(2) },
         data: Data { region_handle: 0x1234, ..Default::default() },
         sim_data: SimData::default(),
     };
@@ -162,7 +162,7 @@ fn promotion_requires_current_matching_destination() {
     stale.data.region_handle = 0x5678;
     assert!(!matches_pending_promotion(Some(&pending), source, target, &stale));
     let mut wrong_agent = movement;
-    wrong_agent.agent_data.session_id = UUID::from_u128(4);
+    wrong_agent.agent_data.session_id = Uuid::from_u128(4);
     assert!(!matches_pending_promotion(Some(&pending), source, target, &wrong_agent));
     assert!(!matches_pending_promotion(None, source, target, &wrong_agent));
 }
@@ -203,8 +203,8 @@ async fn full_handoff_queue_recovers() {
             grid: Grid::Agni,
             message: "Welcome".into(),
             simulator_address: simulator.local_addr().expect("simulator address"),
-            agent_id: UUID::from_u128(1),
-            session_id: UUID::from_u128(2),
+            agent_id: Uuid::from_u128(1),
+            session_id: Uuid::from_u128(2),
             circuit_code: 1,
             seed_capability: Url::parse("http://127.0.0.1:1/seed").expect("seed URL"),
         },
@@ -430,17 +430,17 @@ fn teleport_failure_needs_newer_local_order() {
 
 #[test]
 fn teleport_cancel_and_crossing_seed_are_redacted() {
-    let message = Message::TeleportCancel(TeleportCancel { agent_id: UUID::from_u128(1), session_id: UUID::from_u128(2) });
-    assert!(is_teleport_cancel(&message, UUID::from_u128(1), UUID::from_u128(2)));
-    assert!(!is_teleport_cancel(&message, UUID::from_u128(1), UUID::from_u128(3)));
+    let message = Message::TeleportCancel(TeleportCancel { agent_id: Uuid::from_u128(1), session_id: Uuid::from_u128(2) });
+    assert!(is_teleport_cancel(&message, Uuid::from_u128(1), Uuid::from_u128(2)));
+    assert!(!is_teleport_cancel(&message, Uuid::from_u128(1), Uuid::from_u128(3)));
 
-    let mut redacted = crossed_region(UUID::from_u128(1), UUID::from_u128(2));
+    let mut redacted = crossed_region(Uuid::from_u128(1), Uuid::from_u128(2));
     redact_seed_capability(&mut redacted);
     let fields = super::handoff::event_fields(&redacted).expect("crossed region event");
     let region = super::handoff::event_block(fields, "RegionData").expect("region data block");
     assert_eq!(region.get("SeedCapability"), Some(&Value::String("[redacted]".into())));
 
-    let mut finish = teleport_finish_event(UUID::from_u128(1), "https://sim.invalid/private");
+    let mut finish = teleport_finish_event(Uuid::from_u128(1), "https://sim.invalid/private");
     redact_seed_capability(&mut finish);
     let fields = super::handoff::event_fields(&finish).expect("teleport finish event");
     let info = super::handoff::event_block(fields, "Info").expect("teleport finish info");

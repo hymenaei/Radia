@@ -1,6 +1,5 @@
-use base::UUID;
+use uuid::Uuid;
 
-/// Per-class downstream bandwidth allowances sent by the viewer to one simulator.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentThrottle {
     pub agent_data: AgentData,
@@ -9,8 +8,8 @@ pub struct AgentThrottle {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AgentData {
-    pub agent_id: UUID,
-    pub session_id: UUID,
+    pub agent_id: Uuid,
+    pub session_id: Uuid,
     pub circuit_code: u32,
 }
 
@@ -20,9 +19,6 @@ pub struct Throttle {
     pub throttles: ThrottleRates,
 }
 
-/// Per-message-class simulator-to-viewer limits, in bits per second.
-///
-/// The order on the wire is Resend, Land, Wind, Cloud, Task, Texture, Asset.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThrottleRates {
     pub resend_bits_per_second: f32,

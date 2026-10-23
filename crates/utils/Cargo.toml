@@ -8,4 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+tempfile.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]

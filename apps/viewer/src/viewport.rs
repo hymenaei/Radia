@@ -587,7 +587,7 @@ impl SceneWindow {
         }
         let observation = self.camera.as_ref().and_then(|camera| camera.scene_camera(self.window.inner_size().into(), Instant::now()));
         if let (Some(feed), Some(camera)) = (&self.feed, observation) {
-            feed.camera(camera);
+            feed.set_camera(camera);
         }
         let now = Instant::now();
         if now < self.next_frame {

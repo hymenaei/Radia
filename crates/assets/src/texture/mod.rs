@@ -55,6 +55,13 @@ impl PixelFormat {
             Self::Rgba8 => 4,
         }
     }
+
+    pub const fn alpha(self) -> Alpha {
+        match self {
+            Self::GrayAlpha8 | Self::Rgba8 => Alpha::Straight,
+            Self::Gray8 | Self::Rgb8 => Alpha::Opaque,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,10 +101,7 @@ impl Image {
         ColorSpace::Srgb
     }
     pub const fn alpha(&self) -> Alpha {
-        match self.format {
-            PixelFormat::GrayAlpha8 | PixelFormat::Rgba8 => Alpha::Straight,
-            _ => Alpha::Opaque,
-        }
+        self.format.alpha()
     }
     pub fn pixels(&self) -> &[u8] {
         &self.pixels

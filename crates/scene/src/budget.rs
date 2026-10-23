@@ -8,13 +8,6 @@ pub const MEMORY_BYTES: usize = 256 * 1024 * 1024;
 #[derive(Clone, Default)]
 pub struct Budget(Arc<Accounting>);
 
-#[derive(Default)]
-struct Accounting {
-    used: AtomicUsize,
-    peak: AtomicUsize,
-    mesh_jobs: AtomicUsize,
-}
-
 impl Budget {
     pub fn charged_bytes(&self) -> usize {
         self.0.used.load(Ordering::Acquire)
@@ -42,6 +35,13 @@ impl Budget {
         };
         Some(MeshWork { lease, budget: self.clone() })
     }
+}
+
+#[derive(Default)]
+struct Accounting {
+    used: AtomicUsize,
+    peak: AtomicUsize,
+    mesh_jobs: AtomicUsize,
 }
 
 pub(crate) struct MeshWork {

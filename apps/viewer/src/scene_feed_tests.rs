@@ -8,6 +8,7 @@ use std::{
     future::{pending, ready},
     num::NonZeroU32,
 };
+use utils::ExperienceId;
 use uuid::Uuid;
 use world::{
     Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate, Pose, Region,
@@ -53,7 +54,7 @@ fn ocean_follows_agent_region() {
         ))
         .unwrap();
     let _ = world.observe_water_height(UpdateSource::new(Region::new(2), 1, Ordered(1), 0), 31.0).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut hydrate = |world: &World| {
         scene.notify_world_change();
         let now = Instant::now();
@@ -69,7 +70,7 @@ fn ocean_follows_agent_region() {
                         ReadQuery::Terrain(region, cursor) => world.terrain_page(*region, *cursor, 8).map(ReadReply::Terrain),
                         ReadQuery::Environment(region) => Ok(ReadReply::Environment(world.environment(*region))),
                     };
-                    scene.complete(job, reply.map_err(ReadFailure::World), now);
+                    scene.complete_read(job, reply.map_err(ReadFailure::World), now);
                 }
                 ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
                 ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
@@ -132,7 +133,7 @@ async fn missing_asset_preserves_scene() {
         Handle::current(),
         || {},
     );
-    feed.camera(Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1000, 1000]).unwrap());
+    feed.set_camera(Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1000, 1000]).unwrap());
     let receiving = async {
         loop {
             let batch = feed.incoming.recv().await.expect("scene remains active");
@@ -237,7 +238,7 @@ async fn stalled_publication_preserves_intake() {
     assert_eq!(turns, 1024);
     assert!(barrier.unwrap().revision > initial);
     assert!(world.revision() > initial);
-    let experience = scene::ExperienceId::new(Uuid::from_u128(44)).unwrap();
+    let experience = ExperienceId::new(Uuid::from_u128(44)).unwrap();
     let push = scene::EnvironmentPush::Partial {
         experience,
         sky: vec![scene::EnvironmentProperty { name: "gamma".into(), source: b"r1.4".as_slice().into() }],

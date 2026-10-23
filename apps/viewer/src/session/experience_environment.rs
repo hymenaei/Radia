@@ -5,9 +5,9 @@ use std::{
 
 use llsd::{Limits, Map, Value, binary, notation, xml};
 use protocol::lludp::{FieldValue, Message, SchemaMessage};
-use scene::{EnvironmentProperty, EnvironmentPush, ExperienceId};
+use scene::{EnvironmentProperty, EnvironmentPush};
 use tokio::sync::mpsc;
-use utils::AssetId;
+use utils::{AssetId, ExperienceId};
 use uuid::Uuid;
 use world::Region;
 

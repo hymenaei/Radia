@@ -17,6 +17,8 @@ use crate::{
     water,
 };
 
+type Key = (SurfaceKind, Region);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SurfaceKind {
     Water,
@@ -30,8 +32,6 @@ pub struct Surface {
     pub position: DVec3,
     pub mesh: PreparedMesh,
 }
-
-type Key = (SurfaceKind, Region);
 
 struct Control {
     cancelled: AtomicBool,
@@ -50,6 +50,16 @@ pub(crate) struct SurfaceJob {
     flight: Flight,
 }
 
+impl SurfaceJob {
+    pub(crate) fn run(self) -> SurfaceCompletion {
+        let result = match &self.input {
+            Input::Ground(tiles) => tiles.mesh(&self.flight.control.cancelled),
+            Input::Water(height) => water::mesh(*height),
+        };
+        SurfaceCompletion { key: self.key, position: self.position, result, flight: self.flight }
+    }
+}
+
 struct Flight {
     control: Arc<Control>,
     work: MeshWork,
@@ -66,16 +76,6 @@ pub(crate) struct SurfaceCompletion {
     position: DVec3,
     result: Result<Mesh, MeshError>,
     flight: Flight,
-}
-
-impl SurfaceJob {
-    pub(crate) fn run(self) -> SurfaceCompletion {
-        let result = match &self.input {
-            Input::Ground(tiles) => tiles.mesh(&self.flight.control.cancelled),
-            Input::Water(height) => water::mesh(*height),
-        };
-        SurfaceCompletion { key: self.key, position: self.position, result, flight: self.flight }
-    }
 }
 
 pub(crate) enum SurfaceStep {

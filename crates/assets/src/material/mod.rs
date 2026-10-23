@@ -47,6 +47,12 @@ pub enum TextureRef {
     Asset(AssetId),
 }
 
+impl From<Uuid> for TextureRef {
+    fn from(id: Uuid) -> Self {
+        if id.is_nil() || id == Uuid::max() { Self::Clear } else { Self::Asset(AssetId::new(id)) }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialTexture {
     pub texture: TextureRef,
@@ -89,13 +95,17 @@ impl MaterialDescription {
     }
 }
 
-fn texture_ref(id: Uuid) -> TextureRef {
-    if id.is_nil() || id == Uuid::max() { TextureRef::Clear } else { TextureRef::Asset(AssetId::new(id)) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uuid_texture_references_are_canonical() {
+        assert_eq!(TextureRef::from(Uuid::nil()), TextureRef::Clear);
+        assert_eq!(TextureRef::from(Uuid::max()), TextureRef::Clear);
+        let id = Uuid::from_u128(7);
+        assert_eq!(TextureRef::from(id), TextureRef::Asset(AssetId::new(id)));
+    }
 
     #[test]
     fn color_channel_selection() {

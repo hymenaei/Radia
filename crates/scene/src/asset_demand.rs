@@ -7,17 +7,12 @@ use std::{
     },
 };
 
-use assets::{AlphaMode, Content, Failure, Kind, MaterialDescription, Priority, Request, Resource, Status, TextureRef, TextureSize};
+use assets::{Content, Failure, Kind, MaterialDescription, Priority, Request, Resource, Status, TextureRef, TextureSize};
 use utils::AssetId;
 use uuid::Uuid;
 use world::{Entity, FaceAppearance, MAX_SURFACE_FACES, Region};
 
-use crate::{
-    Alpha, AssetState, Budget, Camera, FaceMaterial, Object, Placement, Resolution,
-    appearance::{apply_overrides, resolve_legacy},
-    budget::Lease,
-    model::Mirror,
-};
+use crate::{AssetState, Budget, Camera, FaceMaterial, Object, Placement, Resolution, appearance, budget::Lease, model::Mirror};
 
 const MAX_TARGETS: usize = crate::MAX_OBJECTS;
 const MAX_FACES: usize = 32_768;
@@ -49,15 +44,15 @@ pub enum AssetChange {
 #[derive(Clone)]
 pub(crate) struct Materials(Arc<Retained>);
 
-struct Retained {
-    faces: Vec<FaceMaterial>,
-    _lease: Lease,
-}
-
 impl Materials {
     pub(crate) fn faces(&self) -> &[FaceMaterial] {
         &self.0.faces
     }
+}
+
+struct Retained {
+    faces: Vec<FaceMaterial>,
+    _lease: Lease,
 }
 
 #[derive(Clone)]
@@ -123,7 +118,7 @@ impl AssetDemand {
         }
     }
 
-    pub(crate) fn camera(&mut self, camera: Camera) {
+    pub(crate) fn set_camera(&mut self, camera: Camera) {
         if self.camera != Some(camera) {
             self.camera = Some(camera);
             self.rescan = true;
@@ -424,21 +419,20 @@ impl AssetDemand {
             .and_then(|appearance| appearance.face(slot))
             .copied()
             .unwrap_or_else(FaceAppearance::default);
-        let (state, maps) = if authored.material_id.is_nil() {
+        let (legacy_state, legacy) = if authored.material_id.is_nil() {
             (None, None)
         } else {
             let id = AssetId::new(authored.material_id);
             let (resolution, content) = self.observe(entity, region, Resource { id, kind: Kind::LegacyMaterial }, size, priority, keys);
-            let maps = match content {
+            let material = match content {
                 Some(Content::Material(material)) => match *material {
-                    MaterialDescription::Legacy(maps) => Some(maps),
+                    MaterialDescription::Legacy(material) => Some(material),
                     _ => None,
                 },
                 _ => None,
             };
-            (Some(AssetState { asset: id, resolution }), maps)
+            (Some(AssetState { asset: id, resolution }), material)
         };
-        let (legacy, alpha) = resolve_legacy(authored, maps, state);
         let (pbr_state, pbr) = if let Some(id) = source.render_materials.as_ref().and_then(|materials| materials.material(slot)) {
             let (resolution, content) = self.observe(entity, region, Resource { id, kind: Kind::PbrMaterial }, size, priority, keys);
             let material = match content {
@@ -447,25 +441,14 @@ impl AssetDemand {
                     _ => None,
                 },
                 _ => None,
-            }
-            .map(|material| {
-                source
-                    .gltf_material_overrides
-                    .as_ref()
-                    .and_then(|overrides| overrides.face(slot))
-                    .map_or(material, |overrides| apply_overrides(material, overrides))
-            });
+            };
             (Some(AssetState { asset: id, resolution }), material)
         } else {
             (None, None)
         };
-        let alpha = pbr.map_or(alpha, |material| match material.alpha_mode {
-            AlphaMode::Opaque => Alpha::Opaque,
-            AlphaMode::Mask => Alpha::Mask(material.alpha_cutoff),
-            AlphaMode::Blend => Alpha::Blend,
-        });
-        let material = pbr.map_or(MaterialDescription::Legacy(legacy), MaterialDescription::Pbr);
-        let mut face = FaceMaterial { slot, material, legacy_state: state, pbr_state, alpha, base_color: None, base_color_state: None };
+        let overrides = source.gltf_material_overrides.as_ref().and_then(|overrides| overrides.face(slot));
+        let (material, alpha) = appearance::resolve(authored, legacy, pbr, overrides);
+        let mut face = FaceMaterial { slot, material, legacy_state, pbr_state, alpha, base_color: None, base_color_state: None };
         if let TextureRef::Asset(id) = face.base_color_texture() {
             let scale = face.material.base_color_texture().transform.scale;
             let repeats = f64::from(scale[0].abs().min(scale[1].abs())).max(1.0 / 64.0);
@@ -477,14 +460,7 @@ impl AssetDemand {
             let (resolution, content) = self.observe(entity, region, Resource { id, kind: Kind::Texture }, size, priority, keys);
             face.base_color_state = Some(AssetState { asset: id, resolution });
             if let Some(Content::Texture(image)) = content {
-                if matches!(face.material, MaterialDescription::Legacy(_))
-                    && face.legacy_state.is_none()
-                    && face.alpha == Alpha::Unknown
-                    && let Some(info) = image.info()
-                {
-                    face.alpha = if info.format.channels().is_multiple_of(2) { Alpha::Blend } else { Alpha::Opaque };
-                }
-                face.base_color = Some(image);
+                face.resolve_base_color(image);
             }
         }
         face

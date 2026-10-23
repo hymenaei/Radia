@@ -1,6 +1,6 @@
 use llsd::{Limits, Value, binary};
 
-use super::{MaterialDescription, MaterialTexture, TextureTransform, texture_ref};
+use super::{MaterialDescription, MaterialTexture, TextureRef, TextureTransform};
 use crate::Failure;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,7 +87,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
         _ => Err(Failure::Malformed),
     };
     let texture = |key| match fields.get(key) {
-        Some(Value::Uuid(id)) => Ok(texture_ref(*id)),
+        Some(Value::Uuid(id)) => Ok(TextureRef::from(*id)),
         _ => Err(Failure::Malformed),
     };
     let Some(Value::Array(color)) = fields.get("SpecColor") else { return Err(Failure::Malformed) };

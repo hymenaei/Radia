@@ -15,6 +15,15 @@ use crate::{
 
 pub struct MeshJob(pub(crate) Work);
 
+impl MeshJob {
+    pub fn run(self) -> MeshCompletion {
+        MeshCompletion(match self.0 {
+            Work::Prim(job) => Completion::Prim(job.run()),
+            Work::Surface(job) => Completion::Surface(job.run()),
+        })
+    }
+}
+
 pub(crate) enum Work {
     Prim(PrimJob),
     Surface(Box<SurfaceJob>),
@@ -25,15 +34,6 @@ pub struct MeshCompletion(pub(crate) Completion);
 pub(crate) enum Completion {
     Prim(PrimCompletion),
     Surface(SurfaceCompletion),
-}
-
-impl MeshJob {
-    pub fn run(self) -> MeshCompletion {
-        MeshCompletion(match self.0 {
-            Work::Prim(job) => Completion::Prim(job.run()),
-            Work::Surface(job) => Completion::Surface(job.run()),
-        })
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -64,7 +64,7 @@ impl MeshPlanner {
         Self { camera: None, meshes: MeshCache::new(budget), targets: HashMap::new(), dirty: false, scanning: false, cursor: None }
     }
 
-    pub(crate) fn camera(&mut self, camera: Camera) {
+    pub(crate) fn set_camera(&mut self, camera: Camera) {
         if self.camera != Some(camera) {
             self.camera = Some(camera);
             self.dirty = true;

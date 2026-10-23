@@ -79,12 +79,6 @@ pub(crate) struct DependencyTraversal {
     seen: HashSet<Dependency>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum Dependency {
-    Entity(Entity),
-    Address(LocalAddress),
-}
-
 impl DependencyTraversal {
     pub(crate) fn enqueue_entity(&mut self, entity: Entity) {
         self.insert(Dependency::Entity(entity));
@@ -128,4 +122,10 @@ impl DependencyTraversal {
     pub(crate) fn clear(&mut self) {
         *self = Self::default();
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Dependency {
+    Entity(Entity),
+    Address(LocalAddress),
 }

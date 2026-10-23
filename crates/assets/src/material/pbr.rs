@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use super::{Filter, MaterialDescription, MaterialTexture, MinFilter, Sampler, Wrap, json, texture_ref};
+use super::{Filter, MaterialDescription, MaterialTexture, MinFilter, Sampler, TextureRef, Wrap, json};
 use crate::Failure;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -120,7 +120,7 @@ fn texture_info(root: &Map<String, Value>, value: &Value) -> Result<MaterialText
     let image = object(index(root, "images", texture.get("source").ok_or(Failure::Malformed)?)?)?;
     let uri = image.get("uri").and_then(Value::as_str).ok_or(Failure::Unsupported)?;
     let id = Uuid::parse_str(uri).map_err(|_| Failure::Unsupported)?;
-    let mut result = MaterialTexture { texture: texture_ref(id), ..MaterialTexture::default() };
+    let mut result = MaterialTexture { texture: TextureRef::from(id), ..MaterialTexture::default() };
     if let Some(value) = texture.get("sampler") {
         result.sampler = sampler(index(root, "samplers", value)?)?;
     }

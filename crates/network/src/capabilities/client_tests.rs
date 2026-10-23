@@ -19,13 +19,15 @@ use tokio::{
 };
 use url::Url;
 
-use super::{RequestDeadline, admit_capability_decode_memory_with_response_limit, decode_admitted_response};
+use super::{DecodeGate, RequestDeadline, admit_capability_decode_memory_with_response_limit, decode_admitted_response};
 use crate::capabilities::budget::{
     LLSD_SCAN_WORKING_BYTES, MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS,
     MAX_LLSD_XML_ELEMENTS, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
 };
-use crate::test_support::http::{LocalServer, response};
-use crate::test_support::{ConcurrentCapabilityTestServer, DecodeGate, test_source};
+use crate::test_support::{
+    http::{ConcurrentCapabilityTestServer, LocalServer, response},
+    simulator::test_source,
+};
 use crate::{
     Error,
     Error::{Capability, CapabilityHttp},
@@ -672,7 +674,7 @@ async fn capability_names_are_bounded() {
 #[tokio::test(flavor = "multi_thread")]
 async fn requests_limit_concurrency() {
     let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS * 2;
-    let server = ConcurrentCapabilityTestServer::start(request_count, Duration::from_millis(75));
+    let mut server = ConcurrentCapabilityTestServer::start(request_count);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
     let mut requests = JoinSet::new();
 
@@ -680,6 +682,15 @@ async fn requests_limit_concurrency() {
         let client = client.clone();
         requests.spawn(async move { client.request_capabilities(&["TestCapability"]).await });
     }
+
+    for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
+        server.next_request().await;
+    }
+    for _ in MAX_CONCURRENT_CAPABILITY_REQUESTS..request_count {
+        server.release_response();
+        server.next_request().await;
+    }
+    let maximum_active = server.finish();
 
     timeout(TEST_TIMEOUT, async {
         while let Some(request) = requests.join_next().await {
@@ -689,7 +700,6 @@ async fn requests_limit_concurrency() {
     .await
     .expect("bounded capability requests should finish");
 
-    let maximum_active = server.finish();
     assert!(maximum_active > 1, "capability requests should remain concurrent");
     assert!(maximum_active <= MAX_CONCURRENT_CAPABILITY_REQUESTS, "too many HTTP requests ran at once");
 }
@@ -697,7 +707,7 @@ async fn requests_limit_concurrency() {
 #[tokio::test(flavor = "multi_thread")]
 async fn shared_budget_bounds_requests() {
     let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS * 2;
-    let server = ConcurrentCapabilityTestServer::start(request_count, Duration::from_millis(150));
+    let mut server = ConcurrentCapabilityTestServer::start(request_count);
     let budget = CapabilityBudget::new();
     let clients = (0..2)
         .map(|_| {
@@ -712,6 +722,15 @@ async fn shared_budget_bounds_requests() {
         requests.spawn(async move { client.request_capabilities(&["TestCapability"]).await });
     }
 
+    for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
+        server.next_request().await;
+    }
+    for _ in MAX_CONCURRENT_CAPABILITY_REQUESTS..request_count {
+        server.release_response();
+        server.next_request().await;
+    }
+    let maximum_active = server.finish();
+
     timeout(TEST_TIMEOUT, async {
         while let Some(request) = requests.join_next().await {
             request.expect("capability request task should finish").expect("local seed request should succeed");
@@ -720,7 +739,6 @@ async fn shared_budget_bounds_requests() {
     .await
     .expect("shared budget requests should finish");
 
-    let maximum_active = server.finish();
     assert!(maximum_active > 1, "the shared budget should allow concurrent requests");
     assert!(maximum_active <= MAX_CONCURRENT_CAPABILITY_REQUESTS, "shared clients exceeded their request budget");
 }

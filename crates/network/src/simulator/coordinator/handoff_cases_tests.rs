@@ -90,7 +90,7 @@ fn overload_logout_keeps_a_pending_promotion_on_the_original_primary() {
 
 async fn run_overload_logout_promotion_test() {
     use crate::event::Event::{Failed, SimulatorDisconnected, SimulatorMessage, SimulatorPromoted};
-    use protocol::lludp::Message::{RegionHandshake, Schema};
+    use protocol::lludp::Message::RegionHandshake;
 
     let mut harness = connected_neighbor().await;
     let target_region = 0x1000_0000_0000_1000;
@@ -111,9 +111,7 @@ async fn run_overload_logout_promotion_test() {
     timeout(WAIT, async {
         loop {
             match next_raw_event(&mut harness.events).await {
-                SimulatorMessage { simulator_id, message: Schema(schema), .. }
-                    if simulator_id == harness.primary_id && schema.schema().name == "TeleportFinish" =>
-                {
+                SimulatorMessage { simulator_id, message: Message::TeleportFinish(_), .. } if simulator_id == harness.primary_id => {
                     break;
                 }
                 Failed(reason) => panic!("session failed before handoff setup: {reason}"),
@@ -234,7 +232,7 @@ async fn run_handoff_send_latency_test() {
 
 async fn run_teleport_finish_scenario(send_count: usize) -> Vec<Duration> {
     use crate::event::Event::{Failed, SimulatorMessage, SimulatorPromoted};
-    use protocol::lludp::Message::{AgentMovementComplete, ChatFromSimulator, RegionHandshake, Schema};
+    use protocol::lludp::Message::{AgentMovementComplete, ChatFromSimulator, RegionHandshake};
 
     let (promotion_entered, promotion_entered_rx) = oneshot::channel();
     let (promotion_release, promotion_release_rx) = oneshot::channel();
@@ -278,9 +276,7 @@ async fn run_teleport_finish_scenario(send_count: usize) -> Vec<Duration> {
     timeout(WAIT, async {
         loop {
             match next_raw_event(&mut harness.events).await {
-                SimulatorMessage { simulator_id, message: Schema(schema), .. }
-                    if simulator_id == harness.primary_id && schema.schema().name == "TeleportFinish" =>
-                {
+                SimulatorMessage { simulator_id, message: Message::TeleportFinish(_), .. } if simulator_id == harness.primary_id => {
                     break;
                 }
                 Failed(reason) => panic!("session failed before destination promotion: {reason}"),

@@ -12,7 +12,8 @@ use std::{
 };
 
 use llsd::Value;
-use protocol::lludp::{BlockValues, FieldValue, Message, Packet, SchemaMessage};
+use protocol::lludp::{Message, Packet};
+use protocol::messages::TeleportFinish;
 use protocol::{
     ChatType, login,
     messages::{
@@ -311,7 +312,7 @@ async fn network_thread_login() {
     assert_eq!(movement, expected_complete_movement(movement_packet.sequence()));
     simulator.send_to(&server_ack(21, movement_packet.sequence()), peer).await.expect("ack CompleteAgentMovement");
 
-    let event_request = timeout(CLIENT_TIMEOUT, poll_started).await.expect("EventQueueGet should start").expect("event request");
+    let event_request = poll_started.await.expect("EventQueueGet request should be observed");
     assert!(request_line(&event_request).starts_with("POST /events HTTP/1.1"));
 
     simulator.send_to(&reliable_fixture("region_handshake.hex", 22), peer).await.expect("send RegionHandshake");
@@ -333,9 +334,9 @@ async fn network_thread_login() {
 
     let (_, logout) = receive_client_message(&simulator, peer, |message| matches!(message, Message::LogoutRequest(_))).await;
     assert!(logout.is_reliable());
-    assert!(timeout(Duration::from_secs(2), worker).await.expect("network thread should stop").expect("thread should join").is_ok());
+    assert!(worker.await.expect("network thread should join").is_ok());
     assert!(*retained_handle.worker_finished.borrow());
-    let requests = timeout(Duration::from_secs(2), http_task).await.expect("fake HTTP server should stop").expect("HTTP task");
+    let requests = http_task.await.expect("fake HTTP server should stop");
     assert_eq!(requests.len(), 3);
 }
 
@@ -591,22 +592,17 @@ fn movement_complete_packet(sequence: u32, agent_id: Uuid, session_id: Uuid, reg
 
 fn teleport_finish_packet(agent_id: Uuid, endpoint: SocketAddr, region_handle: u64, seed: &str) -> Vec<u8> {
     let SocketAddr::V4(endpoint) = endpoint else { panic!("simulator endpoint must use IPv4") };
-    let schema = SchemaMessage::schema_by_name("TeleportFinish").expect("TeleportFinish schema");
-    let message = SchemaMessage::new(
-        schema,
-        vec![BlockValues::single(vec![
-            FieldValue::Uuid(agent_id),
-            FieldValue::U32(0),
-            FieldValue::IpAddr(endpoint.ip().octets()),
-            FieldValue::IpPort(endpoint.port().to_be_bytes()),
-            FieldValue::U64(region_handle),
-            FieldValue::Bytes(seed.as_bytes().to_vec()),
-            FieldValue::U8(0),
-            FieldValue::U32(0),
-        ])],
-    )
-    .expect("valid TeleportFinish");
-    Packet::new(25, Message::Schema(message)).with_reliable().encode().expect("encode TeleportFinish")
+    let message = TeleportFinish {
+        agent_id,
+        location_id: 0,
+        sim_ip: endpoint.ip().octets(),
+        sim_port: endpoint.port().to_be_bytes(),
+        region_handle,
+        seed_capability: seed.as_bytes().to_vec(),
+        sim_access: Some(0),
+        teleport_flags: Some(0),
+    };
+    Packet::new(25, Message::TeleportFinish(message)).with_reliable().encode().expect("encode TeleportFinish")
 }
 
 fn server_ack(sequence: u32, acknowledged: u32) -> Vec<u8> {

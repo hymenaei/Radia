@@ -5,6 +5,7 @@ pub mod region_handle_request;
 pub mod region_handshake;
 pub mod region_handshake_reply;
 pub mod region_id_and_handle_reply;
+pub mod region_info;
 
 pub use self::confirm_enable_simulator::ConfirmEnableSimulator;
 pub use self::disable_simulator::DisableSimulator;
@@ -13,3 +14,4 @@ pub use self::region_handle_request::RegionHandleRequest;
 pub use self::region_handshake::RegionHandshake;
 pub use self::region_handshake_reply::RegionHandshakeReply;
 pub use self::region_id_and_handle_reply::RegionIdAndHandleReply;
+pub use self::region_info::RegionInfo;

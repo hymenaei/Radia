@@ -1,5 +1,8 @@
 use std::{collections::HashMap, fmt, future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
+#[cfg(test)]
+use std::sync;
+
 use llsd::xml;
 use reqwest::Url;
 use serde::Serialize;
@@ -29,6 +32,43 @@ use crate::{
     http::{self, validate_http_url},
     status::NetworkStatusHandle,
 };
+
+#[cfg(test)]
+const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
+pub(crate) struct DecodeGate {
+    entered: sync::mpsc::Sender<()>,
+    released: sync::Mutex<bool>,
+    release: sync::Condvar,
+}
+
+#[cfg(test)]
+impl DecodeGate {
+    pub(crate) fn new() -> (Arc<Self>, sync::mpsc::Receiver<()>) {
+        let (entered, entered_rx) = sync::mpsc::channel();
+        (Arc::new(Self { entered, released: sync::Mutex::new(false), release: sync::Condvar::new() }), entered_rx)
+    }
+
+    pub(crate) fn release(&self) {
+        *self.released.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        self.release.notify_all();
+    }
+
+    pub(crate) fn wait(&self) {
+        if self.entered.send(()).is_err() {
+            return;
+        }
+        let mut released = self.released.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !*released {
+            let (next, result) = self.release.wait_timeout(released, TEST_TIMEOUT).unwrap_or_else(|poisoned| poisoned.into_inner());
+            released = next;
+            if !*released && result.timed_out() {
+                panic!("timed out waiting for test to release decoder");
+            }
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct CapabilityUrl {

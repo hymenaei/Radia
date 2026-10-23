@@ -1,7 +1,5 @@
 use math::{Quat, Vec3};
 use proptest::{prelude::*, test_runner::Config};
-use uuid::Uuid;
-
 use protocol::{
     BlockInstance, BlockValues, ChatType, FieldValue, SchemaMessage,
     lludp::{Message, MessageId, Packet},
@@ -13,29 +11,13 @@ use protocol::{
     },
     schema::{self, ids::*},
 };
-use test_support::{lludp::vectors, parse_hex_fixture};
+use test_support::parse_hex_fixture;
+use uuid::Uuid;
 
-struct CoverageId {
-    name: &'static str,
-    id: MessageId,
-    fixture: &'static str,
-    conformance: &'static str,
-}
-
-macro_rules! typed_message_coverage {
-    ($(
-        $name:literal => $variant:ident, $id:ident, $fixture:expr,
-        $preflight:ident, $conformance:ident, [
-            $(($block:literal, $mode:expr, $fields:literal)),* $(,)?
-        ];
-    )+) => {
-        const TYPED_MESSAGE_IDS: &[CoverageId] = &[
-            $(CoverageId { name: $name, id: $id, fixture: $fixture, conformance: stringify!($conformance) }),+
-        ];
-    };
-}
-
-include!("support/typed_coverage.rs");
+use super::{
+    coverage::{ConformanceCategory, TYPED_MESSAGE_COVERAGE},
+    schema_conforming, schema_values,
+};
 
 fn encode_packet(message: Message) -> Vec<u8> {
     Packet::new(0x0102_0304, message).encode().expect("encode protocol packet")
@@ -50,18 +32,29 @@ fn packet_message_id(bytes: &[u8]) -> MessageId {
 }
 
 #[test]
-fn decoded_inventory_messages_keep_their_declared_ids() {
-    for coverage in TYPED_MESSAGE_IDS {
-        let bytes = parse_hex_fixture(coverage.fixture).expect("inventory fixture is valid hex");
-        let _packet = Packet::decode(&bytes).unwrap_or_else(|error| panic!("decode {} fixture: {error}", coverage.name));
-        assert_eq!(packet_message_id(&bytes), coverage.id, "decoded message ID for {}", coverage.name);
+fn fixtures_check_ids_and_bounds() {
+    for coverage in TYPED_MESSAGE_COVERAGE {
+        let Some(fixture) = coverage.fixture else { continue };
+        let bytes = parse_hex_fixture(fixture).expect("inventory fixture is valid hex");
+        let packet = Packet::decode(&bytes).unwrap_or_else(|error| panic!("decode {} fixture: {error}", coverage.name));
+        let preflight = Packet::preflight(&bytes).unwrap_or_else(|error| panic!("preflight {} fixture: {error}", coverage.name));
+        assert_eq!(preflight.message_id(), coverage.id, "preflight message ID for {}", coverage.name);
+        assert_eq!(preflight.allocation_strategy(), coverage.preflight, "allocation route for {}", coverage.name);
+        assert!(
+            packet.retained_capacity_bytes() <= preflight.retained_capacity_upper_bound(),
+            "preflight bound for {}: retained={}, bound={}",
+            coverage.name,
+            packet.retained_capacity_bytes(),
+            preflight.retained_capacity_upper_bound()
+        );
     }
 }
 
 #[test]
 fn schema_conforming_messages_match_wire_layout() {
-    for coverage in TYPED_MESSAGE_IDS.iter().filter(|coverage| coverage.conformance == "SchemaConforming") {
-        let bytes = parse_hex_fixture(coverage.fixture).expect("inventory fixture is valid hex");
+    for coverage in TYPED_MESSAGE_COVERAGE.iter().filter(|coverage| coverage.conformance == ConformanceCategory::SchemaConforming) {
+        let Some(fixture) = coverage.fixture else { continue };
+        let bytes = parse_hex_fixture(fixture).expect("inventory fixture is valid hex");
         let packet = Packet::decode(&bytes).unwrap_or_else(|error| panic!("decode {} fixture: {error}", coverage.name));
         let typed = packet.message().clone();
         let message_schema = schema::find_by_id(coverage.id).expect("inventory ID has generated schema");
@@ -79,29 +72,34 @@ fn schema_conforming_messages_match_wire_layout() {
     }
 }
 
-mod schema_conforming {
-    include!("support/schema_conforming.rs");
-}
-
-mod schema_values {
-    include!("support/schema_values.rs");
-}
-
-use schema_values::generated_schema_blocks;
-
 proptest! {
     #![proptest_config(Config { cases: 32, ..Config::default() })]
 
     #[test]
     fn schema_values_match_typed_wire(seed in any::<u64>()) {
-        for coverage in TYPED_MESSAGE_IDS.iter().filter(|coverage| coverage.conformance == "SchemaConforming") {
+        for coverage in TYPED_MESSAGE_COVERAGE
+            .iter()
+            .filter(|coverage| coverage.conformance == ConformanceCategory::SchemaConforming)
+        {
             let message_schema = schema::find_by_id(coverage.id).expect("inventory ID has generated schema");
-            let expected_fields = generated_schema_blocks(message_schema, seed);
+            let expected_fields = schema_values::generated_schema_blocks(message_schema, seed);
             let generic = SchemaMessage::new(message_schema, expected_fields.clone())
                 .unwrap_or_else(|error| panic!("construct generated {} schema values: {error}", coverage.name));
             let generic_wire = encode_packet(Message::Schema(generic));
-            let typed = decode_packet(&generic_wire);
-            prop_assert_eq!(packet_message_id(&generic_wire), coverage.id, "generated {} packet ID", coverage.name);
+            let preflight = Packet::preflight(&generic_wire)
+                .unwrap_or_else(|error| panic!("preflight generated {} schema values: {error}", coverage.name));
+            let packet = Packet::decode(&generic_wire)
+                .unwrap_or_else(|error| panic!("decode generated {} schema values: {error}", coverage.name));
+            let typed = packet.message().clone();
+            prop_assert_eq!(preflight.message_id(), coverage.id, "generated {} packet ID", coverage.name);
+            prop_assert_eq!(preflight.allocation_strategy(), coverage.preflight, "generated {} allocation route", coverage.name);
+            prop_assert!(
+                packet.retained_capacity_bytes() <= preflight.retained_capacity_upper_bound(),
+                "generated {} preflight bound: retained={}, bound={}",
+                coverage.name,
+                packet.retained_capacity_bytes(),
+                preflight.retained_capacity_upper_bound()
+            );
             let typed_fields = schema_conforming::schema_conforming_fields(&typed);
             prop_assert_eq!(typed_fields.as_deref(), Some(expected_fields.as_slice()), "generated {} field mapping", coverage.name);
 

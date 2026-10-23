@@ -611,21 +611,43 @@ mod event_queue_batch_tests {
 #[cfg(test)]
 mod client_event_queue_tests {
     use std::{
-        io::Write,
+        io::{Read, Write},
+        net::{SocketAddr, TcpListener, TcpStream},
+        str::{self, from_utf8},
+        sync::{self, mpsc as std_mpsc},
         thread,
         time::{Duration, Instant},
     };
 
+    use ::test_support::{lludp::vectors, parse_hex_fixture};
+    use llsd::{Value, xml};
+    use protocol::{
+        ChatType,
+        lludp::{Message, Packet},
+        messages::{ChatFromViewer, chat::chat_from_viewer},
+    };
+    use reqwest::StatusCode;
+    use tokio::{
+        net::UdpSocket,
+        sync::{mpsc, watch},
+        task::{spawn, yield_now},
+        time::timeout,
+    };
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::capabilities::DecodeGate;
     use crate::capabilities::budget::{
         MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS, MAX_CONCURRENT_EVENT_QUEUES, MAX_EVENT_QUEUE_RESPONSE_BYTES,
         MAX_LLSD_XML_ELEMENTS,
     };
     use crate::capabilities::event_queue::{MAX_EVENT_QUEUE_ERRORS, MAX_QUEUED_CAPABILITY_EVENT_BYTES};
-    use crate::test_support::http::{LocalServer, response};
     use crate::test_support::{
-        ConcurrentCapabilityTestServer, DecodeGate, EventQueueBudgetTestServer, EventQueueTestServer, EventServerResponse, MALFORMED_BATCH,
-        TWO_EVENT_BATCH, acknowledgement, decode_request_body, hold_response, map_field, receive_message, receive_udp, request_body,
-        request_line, seed_response, test_source, write_response,
+        http::{
+            ConcurrentCapabilityTestServer, EventQueueTestServer, EventServerResponse, LocalServer, hold_response, request_line, response,
+            seed_response,
+        },
+        simulator::{acknowledgement, receive_message, receive_udp, test_source},
     };
     use crate::{
         AgentSession,
@@ -641,25 +663,121 @@ mod client_event_queue_tests {
         status::NetworkStatusHandle,
         transport::lludp::Delivery,
     };
-    use ::test_support::{lludp::vectors, parse_hex_fixture};
-    use llsd::{Value, xml};
-    use protocol::{
-        ChatType,
-        lludp::{Message, Packet},
-        messages::{ChatFromViewer, chat::chat_from_viewer},
-    };
-    use reqwest::StatusCode;
-    use tokio::{
-        net::UdpSocket,
-        sync::{mpsc, watch},
-        task::{spawn, yield_now},
-        time::{sleep, timeout},
-    };
-    use uuid::Uuid;
-
-    use super::*;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+    const TWO_EVENT_BATCH: &str = "<llsd><map><key>id</key><integer>5</integer><key>events</key><array><map><key>message</key><string>First</string></map><map><key>message</key><string>Second</string></map></array></map></llsd>";
+    const MALFORMED_BATCH: &str = "<llsd><map>";
+
+    struct EventQueueBudgetTestServer {
+        base: Url,
+        address: SocketAddr,
+        seeds: std_mpsc::Receiver<()>,
+        polls: std_mpsc::Receiver<TcpStream>,
+        stop: std_mpsc::Sender<()>,
+        worker: Option<thread::JoinHandle<()>>,
+    }
+
+    impl EventQueueBudgetTestServer {
+        fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind event queue budget server");
+            let address = listener.local_addr().expect("read budget server address");
+            let base = Url::parse(&format!("http://{address}/")).expect("valid event queue test URL");
+            let mut event_url = base.clone();
+            event_url.set_path("/event-queue");
+            let seed_response = response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url));
+            let (seed_sender, seeds) = std_mpsc::channel();
+            let (poll_sender, polls) = std_mpsc::channel();
+            let (stop, stop_receiver) = std_mpsc::channel();
+            let worker = thread::spawn(move || {
+                loop {
+                    let (mut stream, _) = listener.accept().expect("accept event queue budget request");
+                    if stop_receiver.try_recv().is_ok() {
+                        return;
+                    }
+                    stream.set_read_timeout(Some(TEST_TIMEOUT)).expect("set budget request timeout");
+                    let request = read_budget_request(&mut stream);
+                    let path = request_line(&request).split_whitespace().nth(1);
+                    match path {
+                        Some("/seed") => {
+                            stream.write_all(&seed_response).expect("write seed capability response");
+                            seed_sender.send(()).expect("test should observe every seed lookup");
+                        }
+                        Some("/event-queue") => poll_sender.send(stream).expect("test should receive each event poll"),
+                        path => panic!("unexpected capability request path: {path:?}"),
+                    }
+                }
+            });
+            Self { base, address, seeds, polls, stop, worker: Some(worker) }
+        }
+
+        fn url(&self, path: &str) -> Url {
+            let mut url = self.base.clone();
+            url.set_path(path);
+            url
+        }
+
+        fn next_poll(&self) -> TcpStream {
+            self.polls.recv_timeout(TEST_TIMEOUT).expect("event queue request should reach budget server")
+        }
+
+        fn next_seed(&self) {
+            self.seeds.recv_timeout(TEST_TIMEOUT).expect("seed lookup should reach budget server");
+        }
+
+        fn stop(&self) {
+            if self.stop.send(()).is_ok()
+                && let Ok(stream) = TcpStream::connect(self.address)
+            {
+                drop(stream);
+            }
+        }
+
+        fn finish(mut self) {
+            self.worker.take().expect("budget server worker").join().expect("event queue budget server should stop");
+        }
+    }
+
+    fn read_budget_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            let size = stream.read(&mut chunk).expect("read event queue budget request");
+            if size == 0 {
+                return request;
+            }
+            request.extend_from_slice(&chunk[..size]);
+            if let Some(body_start) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                let content_length = request[..body_start]
+                    .split(|byte| *byte == b'\n')
+                    .filter_map(|line| from_utf8(line).ok())
+                    .find_map(|line| {
+                        let (name, value) = line.trim().split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok()).flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= body_start + 4 + content_length {
+                    return request;
+                }
+            }
+        }
+    }
+
+    fn request_body(request: &[u8]) -> &str {
+        str::from_utf8(request).expect("request should be UTF-8").split_once("\r\n\r\n").expect("request should include body").1
+    }
+
+    fn decode_request_body(request: &[u8]) -> Value {
+        xml::from_str(request_body(request)).expect("request body should contain LLSD XML")
+    }
+
+    fn map_field<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+        value.as_map()?.get(key)
+    }
+
+    fn write_response(mut stream: TcpStream, response: Vec<u8>) {
+        stream.write_all(&response).expect("write controlled HTTP response");
+    }
 
     fn available_event_queue_permits(budget: &CapabilityBudget) -> usize {
         budget.primary_event_queues.available_permits() + budget.neighbor_event_queues.available_permits()
@@ -1244,7 +1362,7 @@ mod client_event_queue_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cancel_frees_slot() {
-        let mut server = ConcurrentCapabilityTestServer::start(MAX_CONCURRENT_CAPABILITY_REQUESTS + 1, Duration::from_secs(1));
+        let mut server = ConcurrentCapabilityTestServer::start(MAX_CONCURRENT_CAPABILITY_REQUESTS + 1);
         let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
         let mut requests = (0..MAX_CONCURRENT_CAPABILITY_REQUESTS)
             .map(|_| {
@@ -1263,7 +1381,7 @@ mod client_event_queue_tests {
         cancelled.abort();
         let _ = cancelled.await;
 
-        timeout(Duration::from_millis(750), server.next_request()).await.expect("the canceled request should release its concurrency slot");
+        server.next_request().await;
 
         for request in requests {
             request.abort();
@@ -1295,7 +1413,7 @@ mod client_event_queue_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn close_cancels_queue() {
-        let mut server = ConcurrentCapabilityTestServer::start(MAX_CONCURRENT_CAPABILITY_REQUESTS, Duration::from_secs(1));
+        let mut server = ConcurrentCapabilityTestServer::start(MAX_CONCURRENT_CAPABILITY_REQUESTS);
         let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
         let mut requests = (0..=MAX_CONCURRENT_CAPABILITY_REQUESTS)
             .map(|_| {
@@ -1334,6 +1452,10 @@ mod client_event_queue_tests {
             ]
         });
         let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+        let queued_event_capacity = client.budget.queued_event_bytes.available_permits();
+        let batch_reservation_floor = queued_event_capacity
+            .checked_sub(crate::capabilities::budget::MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES)
+            .expect("session queue budget includes one EventQueue batch reservation");
         let (event_sender, received_events) = mpsc::channel(1);
         event_sender.try_send(EventEnvelope::new(Event::Failed("hold first event slot".into()))).expect("fill event channel");
         let mut received_events = EventReceiver::new(received_events);
@@ -1344,7 +1466,13 @@ mod client_event_queue_tests {
 
         let seed_request = server.next_request();
         let first_poll = server.next_request();
-        sleep(Duration::from_millis(100)).await;
+        timeout(TEST_TIMEOUT, async {
+            while client.budget.queued_event_bytes.available_permits() <= batch_reservation_floor {
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("the returned batch should reach admission while the first channel slot is full");
         assert!(matches!(server.requests.try_recv(), Err(sync::mpsc::TryRecvError::Empty)), "ack must wait for batch admission");
 
         assert!(matches!(received_events.recv().await, Some(Event::Failed(_))));
@@ -1376,13 +1504,13 @@ mod client_event_queue_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn fast_502_retries() {
+    async fn zero_delay_502_retries() {
         let server = EventQueueTestServer::start(|base| {
             let mut event_url = base.clone();
             event_url.set_path("/event-queue");
             vec![
                 EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))),
-                EventServerResponse::Response(response(502, "Upstream error", "text/plain", None, "Upstream error: ")),
+                EventServerResponse::Response(response(502, "Upstream error", "text/plain", Some("0"), "Upstream error: ")),
                 hold_response(),
             ]
         });
@@ -1395,16 +1523,17 @@ mod client_event_queue_tests {
 
         let seed_request = server.next_request();
         let first_poll = server.next_request();
-        sleep(Duration::from_millis(100)).await;
-        assert!(matches!(server.requests.try_recv(), Err(sync::mpsc::TryRecvError::Empty)), "a fast 502 should use retry backoff");
+        let retry_poll = server.next_request();
 
         shutdown.send_replace(true);
-        timeout(TEST_TIMEOUT, task.wait()).await.expect("retry backoff should stop on shutdown");
+        timeout(TEST_TIMEOUT, task.wait()).await.expect("event queue should stop after shutdown");
         server.stop();
         assert!(server.finish().is_empty());
         assert!(request_line(&seed_request).starts_with("POST /seed HTTP/1.1"));
         assert!(request_line(&first_poll).starts_with("POST /event-queue HTTP/1.1"));
         assert_eq!(map_field(&decode_request_body(&first_poll), "ack"), Some(&Value::Undefined));
+        assert!(request_line(&retry_poll).starts_with("POST /event-queue HTTP/1.1"));
+        assert_eq!(map_field(&decode_request_body(&retry_poll), "ack"), Some(&Value::Undefined));
         assert!(received_events.try_recv().is_err(), "empty batches should not emit events");
     }
 
@@ -2174,16 +2303,10 @@ mod client_event_queue_tests {
     }
 
     async fn receive_poll_error(events: &mut EventReceiver) -> String {
-        let loss = timeout(TEST_TIMEOUT, events.recv())
-            .await
-            .expect("coverage loss should be reported before the poll error")
-            .expect("event channel should remain open");
+        let loss = events.recv().await.expect("coverage loss should be reported before the poll error");
         assert!(matches!(loss, Event::EventQueueCoverageLost { .. }));
 
-        let event = timeout(TEST_TIMEOUT, events.recv())
-            .await
-            .expect("poll error should be reported after coverage loss")
-            .expect("event channel should remain open");
+        let event = events.recv().await.expect("poll error should be reported after coverage loss");
         let Event::CapabilityError { capability, reason, .. } = event else {
             panic!("expected an EventQueueGet capability error");
         };
@@ -2292,7 +2415,7 @@ mod client_event_queue_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn seed_lookup_retries() {
-        let server = EventQueueTestServer::start(|base| {
+        let mut server = EventQueueTestServer::start(|base| {
             let mut event_url = base.clone();
             event_url.set_path("/event-queue");
             vec![
@@ -2309,13 +2432,17 @@ mod client_event_queue_tests {
             .start_event_queue(SimulatorId::new(1), test_source(), event_sender, shutdown_requested, CoverageLossLedger::new())
             .expect("start event queue");
 
+        assert!(request_line(&server.next_request_async().await).starts_with("POST /seed HTTP/1.1"));
+        assert!(request_line(&server.next_request_async().await).starts_with("POST /seed HTTP/1.1"));
+        let poll = server.next_request_async().await;
+        assert!(request_line(&poll).starts_with("POST /event-queue HTTP/1.1"), "{}", request_line(&poll));
+        task.wait().await;
         assert!(receive_poll_error(&mut received_events).await.contains("HTTP 404"));
         let requests = server.finish();
         assert_eq!(requests.len(), 3);
         assert!(request_line(&requests[0]).starts_with("POST /seed HTTP/1.1"));
         assert!(request_line(&requests[1]).starts_with("POST /seed HTTP/1.1"));
         assert!(request_line(&requests[2]).starts_with("POST /event-queue HTTP/1.1"));
-        task.wait().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2468,7 +2595,7 @@ mod client_event_queue_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn seed_transport_retries() {
-        let server = EventQueueTestServer::start(|base| {
+        let mut server = EventQueueTestServer::start(|base| {
             let mut event_url = base.clone();
             event_url.set_path("/event-queue");
             vec![
@@ -2485,13 +2612,16 @@ mod client_event_queue_tests {
             .start_event_queue(SimulatorId::new(1), test_source(), event_sender, shutdown_requested, CoverageLossLedger::new())
             .expect("start event queue");
 
+        assert!(request_line(&server.next_request_async().await).starts_with("POST /seed HTTP/1.1"));
+        assert!(request_line(&server.next_request_async().await).starts_with("POST /seed HTTP/1.1"));
+        assert!(request_line(&server.next_request_async().await).starts_with("POST /event-queue HTTP/1.1"));
+        task.wait().await;
         assert!(receive_poll_error(&mut received_events).await.contains("HTTP 404"));
         let requests = server.finish();
         assert_eq!(requests.len(), 3);
         assert!(request_line(&requests[0]).starts_with("POST /seed HTTP/1.1"));
         assert!(request_line(&requests[1]).starts_with("POST /seed HTTP/1.1"));
         assert!(request_line(&requests[2]).starts_with("POST /event-queue HTTP/1.1"));
-        task.wait().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

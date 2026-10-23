@@ -8,8 +8,7 @@ fn event_batch_preserves_forwarded_order() {
 }
 
 async fn run_event_batch_order_survives_forwarding() {
-    use crate::test_support::http::response;
-    use crate::test_support::{EventQueueTestServer, EventServerResponse};
+    use crate::test_support::http::{EventQueueTestServer, EventServerResponse, response};
 
     let (release, poll_response) = sync::mpsc::channel();
     let batch = r#"<llsd><map><key>id</key><integer>1</integer><key>events</key><array>
@@ -151,8 +150,7 @@ fn stale_cancel_keeps_new_handoff() {
 }
 
 async fn run_stale_cancel() {
-    use crate::test_support::http::response;
-    use crate::test_support::{EventQueueTestServer, EventServerResponse};
+    use crate::test_support::http::{EventQueueTestServer, EventServerResponse, response};
     use llsd::{Map, xml};
 
     let (release, poll_response) = sync::mpsc::channel();
@@ -174,8 +172,7 @@ async fn run_stale_cancel() {
         .expect("handoff packet");
     harness.primary.send_to(&finish, harness.primary_peer).await.expect("announce handoff");
     loop {
-        if matches!(next_raw_event(&mut harness.events).await, Event::SimulatorMessage { message: Message::Schema(schema), .. } if schema.schema().name == "TeleportFinish")
-        {
+        if matches!(next_raw_event(&mut harness.events).await, Event::SimulatorMessage { message: Message::TeleportFinish(_), .. }) {
             break;
         }
     }
@@ -279,7 +276,7 @@ fn disconnect_logs_out_promoted_primary() {
 
 async fn run_disconnect_logs_out_promoted_primary() {
     use crate::event::Event::SimulatorMessage;
-    use protocol::lludp::Message::{RegionHandshake, Schema};
+    use protocol::lludp::Message::RegionHandshake;
 
     let mut harness = Box::pin(connected_neighbor()).await;
     let target_region = 0x1000_0000_0000_1000;
@@ -296,8 +293,8 @@ async fn run_disconnect_logs_out_promoted_primary() {
         loop {
             if matches!(
                 next_raw_event(&mut harness.events).await,
-                SimulatorMessage { simulator_id, message: Schema(schema), .. }
-                    if simulator_id == harness.primary_id && schema.schema().name == "TeleportFinish"
+                SimulatorMessage { simulator_id, message: Message::TeleportFinish(_), .. }
+                    if simulator_id == harness.primary_id
             ) {
                 break;
             }

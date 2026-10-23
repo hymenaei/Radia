@@ -2,14 +2,13 @@ use std::{collections::HashMap, future::pending, net::SocketAddr, num::NonZeroU6
 
 use llsd::{Map, Value};
 use protocol::{
-    BlockValues, FieldValue, SchemaMessage,
     lludp::Message,
     login::ResponseData,
-    messages::TeleportCancel,
     messages::{
         AgentMovementComplete,
         agent::agent_movement_complete::{AgentData, Data, SimData},
     },
+    messages::{TeleportCancel, TeleportFinish},
 };
 use tokio::{
     net::UdpSocket,
@@ -76,23 +75,16 @@ fn teleport_finish_event(agent_id: Uuid, seed: &str) -> Value {
 }
 
 fn teleport_finish(agent_id: Uuid, seed: &str) -> Message {
-    let schema = SchemaMessage::schema_by_name("TeleportFinish").expect("TeleportFinish schema");
-    Message::Schema(
-        SchemaMessage::new(
-            schema,
-            vec![BlockValues::single(vec![
-                FieldValue::Uuid(agent_id),
-                FieldValue::U32(0),
-                FieldValue::IpAddr([192, 0, 2, 4]),
-                FieldValue::IpPort(13_000_u16.to_be_bytes()),
-                FieldValue::U64(0x1234),
-                FieldValue::Bytes(seed.as_bytes().to_vec()),
-                FieldValue::U8(0),
-                FieldValue::U32(0),
-            ])],
-        )
-        .expect("valid TeleportFinish"),
-    )
+    Message::TeleportFinish(TeleportFinish {
+        agent_id,
+        location_id: 0,
+        sim_ip: [192, 0, 2, 4],
+        sim_port: 13_000_u16.to_be_bytes(),
+        region_handle: 0x1234,
+        seed_capability: seed.as_bytes().to_vec(),
+        sim_access: Some(0),
+        teleport_flags: Some(0),
+    })
 }
 
 fn handoff(region_handle: u64, endpoint: &str, seed: &str) -> HandoffTarget {

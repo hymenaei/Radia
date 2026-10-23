@@ -8,7 +8,7 @@ use std::{
 };
 
 use llsd::Value;
-use protocol::{FieldValue, SchemaMessage, lludp::Message, messages::AgentMovementComplete};
+use protocol::{lludp::Message, messages::AgentMovementComplete};
 use tokio::{
     sync::{mpsc, watch},
     task::{Id, JoinSet},
@@ -385,9 +385,8 @@ impl SimulatorCoordinator {
         if source != self.primary.simulator_id || state.is_conflicted() {
             return Ok(());
         }
-        let Message::Schema(schema) = message else { return Ok(()) };
-        match schema.schema().name {
-            "TeleportFinish" => match decode_teleport_finish(message, self.session.agent_id, self.session.session_id) {
+        match message {
+            Message::TeleportFinish(_) => match decode_teleport_finish(message, self.session.agent_id, self.session.session_id) {
                 Ok(handoff) => {
                     self.request_handoff(
                         source,
@@ -403,33 +402,27 @@ impl SimulatorCoordinator {
                     Ok(())
                 }
             },
-            "TeleportFailed" => match schema_field(schema, "AgentID") {
-                Some(FieldValue::Uuid(agent_id)) if *agent_id == self.session.agent_id => {
-                    if teleport_failure_matches(state.pending(), HandoffOrder::Packet(packet_order))
-                        && let Some(pending) = state.take_pending()
-                    {
-                        cancel_pending_handoff(
-                            pending,
-                            self.simulator_id,
-                            &mut setup.state.neighbor_connections,
-                            &mut setup.state.retiring_simulators,
-                            &mut setup.state.preconnect_events,
-                            &mut setup.state.connected_simulators,
-                            &mut setup.state.simulator_capabilities,
-                            &self.coverage_losses,
-                        );
-                    }
-                    Ok(())
+            Message::TeleportFailed(failed) if failed.agent_id == self.session.agent_id => {
+                if teleport_failure_matches(state.pending(), HandoffOrder::Packet(packet_order))
+                    && let Some(pending) = state.take_pending()
+                {
+                    cancel_pending_handoff(
+                        pending,
+                        self.simulator_id,
+                        &mut setup.state.neighbor_connections,
+                        &mut setup.state.retiring_simulators,
+                        &mut setup.state.preconnect_events,
+                        &mut setup.state.connected_simulators,
+                        &mut setup.state.simulator_capabilities,
+                        &self.coverage_losses,
+                    );
                 }
-                Some(FieldValue::Uuid(_)) => {
-                    self.status.record_error("Ignored TeleportFailed for a different agent.");
-                    Ok(())
-                }
-                _ => {
-                    self.status.record_error("Ignored TeleportFailed without a valid agent ID.");
-                    Ok(())
-                }
-            },
+                Ok(())
+            }
+            Message::TeleportFailed(_) => {
+                self.status.record_error("Ignored TeleportFailed for a different agent.");
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -657,42 +650,21 @@ pub(super) fn event_block<'a>(fields: &'a BTreeMap<String, Value>, name: &str) -
 }
 
 pub(super) fn decode_teleport_finish(message: &Message, agent_id: Uuid, session_id: Uuid) -> Result<HandoffTarget, &'static str> {
-    let Message::Schema(schema) = message else {
-        return Err("message is not a schema message");
-    };
-    if schema.schema().name != "TeleportFinish" {
+    let Message::TeleportFinish(finish) = message else {
         return Err("message is not TeleportFinish");
-    }
-    if !matches!(schema_field(schema, "AgentID"), Some(FieldValue::Uuid(value)) if *value == agent_id) {
+    };
+    if finish.agent_id != agent_id {
         return Err("Info.AgentID does not match the authenticated agent");
     }
-    let Some(FieldValue::IpAddr(ip)) = schema_field(schema, "SimIP") else {
-        return Err("Info.SimIP is not an IPv4 address");
-    };
-    let Some(FieldValue::IpPort(port)) = schema_field(schema, "SimPort") else {
-        return Err("Info.SimPort is not a port");
-    };
-    let Some(FieldValue::U64(region_handle)) = schema_field(schema, "RegionHandle") else {
-        return Err("Info.RegionHandle is not an unsigned 64-bit value");
-    };
-    let Some(FieldValue::Bytes(seed)) = schema_field(schema, "SeedCapability") else {
-        return Err("Info.SeedCapability is not a byte string");
-    };
-    let seed = seed.strip_suffix(&[0]).unwrap_or(seed);
+    let seed = finish.seed_capability.strip_suffix(&[0]).unwrap_or(&finish.seed_capability);
     let seed = from_utf8(seed).map_err(|_| "Info.SeedCapability is not UTF-8")?;
-    make_handoff_target(agent_id, session_id, *region_handle, SocketAddr::from((Ipv4Addr::from(*ip), u16::from_be_bytes(*port))), seed)
-}
-
-pub(super) fn schema_field<'a>(schema: &'a SchemaMessage, name: &str) -> Option<&'a FieldValue> {
-    for (block_schema, block_values) in schema.schema().blocks.iter().zip(schema.blocks()) {
-        let instance = block_values.instances.first()?;
-        for (field_schema, field_value) in block_schema.fields.iter().zip(&instance.fields) {
-            if field_schema.name == name {
-                return Some(field_value);
-            }
-        }
-    }
-    None
+    make_handoff_target(
+        agent_id,
+        session_id,
+        finish.region_handle,
+        SocketAddr::from((Ipv4Addr::from(finish.sim_ip), u16::from_be_bytes(finish.sim_port))),
+        seed,
+    )
 }
 
 fn make_handoff_target(
@@ -722,7 +694,7 @@ fn make_handoff_target(
 }
 
 pub(super) fn is_handoff_message(message: &Message) -> bool {
-    matches!(message, Message::Schema(schema) if matches!(schema.schema().name, "TeleportFinish" | "TeleportFailed"))
+    matches!(message, Message::TeleportFinish(_) | Message::TeleportFailed(_))
 }
 
 pub(super) fn is_teleport_cancel(message: &Message, agent_id: Uuid, session_id: Uuid) -> bool {

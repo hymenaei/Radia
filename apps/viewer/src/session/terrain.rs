@@ -8,7 +8,7 @@ use std::{
 
 use futures::{FutureExt, StreamExt, future::BoxFuture, pin_mut, stream::FuturesOrdered};
 use protocol::{
-    lludp::{FieldValue, Message},
+    lludp::Message,
     types::layer_data::{self, terrain},
 };
 use tokio::runtime::Handle;
@@ -40,20 +40,15 @@ impl TerrainDecodeQueue {
     }
 
     pub(super) fn enqueue(&mut self, message: &Message, source: UpdateSource, runtime: &Handle) {
-        let Message::Schema(message) = message else { return };
-        if message.schema().name != "LayerData" {
+        let Message::LayerData(message) = message else { return };
+        if message.layer_type != b'L' {
             return;
         }
-        let [layer, data] = message.blocks() else { return };
-        let [layer] = layer.instances.as_slice() else { return };
-        let [data] = data.instances.as_slice() else { return };
-        let ([FieldValue::U8(b'L')], [FieldValue::Bytes(data)]) = (layer.fields.as_slice(), data.fields.as_slice()) else { return };
-        if data.len() > layer_data::MAX_BYTES {
-            tracing::debug!("land layer exceeded compressed payload limit");
+        if message.data.len() > layer_data::MAX_BYTES {
             return;
         }
         assert!(!self.is_full(), "intake pauses while terrain decoder admission is full");
-        let data = data.clone();
+        let data = message.data.clone();
         let cancelled = Arc::clone(&self.cancelled);
         let span = tracing::Span::current();
         self.jobs.push_back(
@@ -120,12 +115,13 @@ fn decode_terrain_patches(source: UpdateSource, data: &[u8], cancelled: &AtomicB
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::session::world::{SessionWorld, viewer_world_limits};
     use futures::{channel::oneshot, future::ready};
     use network::testing::simulator_id;
-    use protocol::lludp::{BlockValues, SchemaMessage};
+    use protocol::messages::LayerData;
     use world::{OrderEvidence, Region};
+
+    use super::*;
+    use crate::session::world::{SessionWorld, viewer_world_limits};
 
     fn source(order: u32) -> UpdateSource {
         UpdateSource::new(Region::new(1), order, OrderEvidence::Ordered(u64::from(order)), 0)
@@ -136,13 +132,7 @@ mod tests {
     }
 
     fn message(data: Vec<u8>) -> Message {
-        Message::Schema(
-            SchemaMessage::new(
-                SchemaMessage::schema_by_name("LayerData").unwrap(),
-                vec![BlockValues::single(vec![FieldValue::U8(b'L')]), BlockValues::single(vec![FieldValue::Bytes(data)])],
-            )
-            .unwrap(),
-        )
+        Message::LayerData(LayerData { layer_type: b'L', data })
     }
 
     #[tokio::test]

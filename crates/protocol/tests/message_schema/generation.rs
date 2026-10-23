@@ -1,79 +1,22 @@
-#[path = "../build/generate.rs"]
+#[path = "../../build/generate.rs"]
 mod generate;
-#[path = "../build/template.rs"]
+#[path = "../../build/template.rs"]
 mod template;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 
-use protocol::lludp::{AllocationStrategy, Message, MessageId, Packet};
+use protocol::lludp::{Message, MessageId, Packet};
 use protocol::{
     BlockValues, FieldValue, Frequency, LLUdpError, SchemaMessage,
     schema::{
         BlockMode, FieldKind, MESSAGE_COUNT, MESSAGES, MessageFlag,
-        ids::{
-            AGENT_MOVEMENT_COMPLETE, AGENT_THROTTLE, AGENT_UPDATE, CHAT_FROM_SIMULATOR, CHAT_FROM_VIEWER, CLOSE_CIRCUIT,
-            COMPLETE_AGENT_MOVEMENT, COMPLETE_PING_CHECK, CONFIRM_ENABLE_SIMULATOR, DISABLE_SIMULATOR, ENABLE_SIMULATOR,
-            GENERIC_STREAMING_MESSAGE, IMPROVED_TERSE_OBJECT_UPDATE, KILL_OBJECT, LOGOUT_REPLY, LOGOUT_REQUEST, MAP_BLOCK_REPLY,
-            MAP_BLOCK_REQUEST, OBJECT_EXTRA_PARAMS, OBJECT_UPDATE, OBJECT_UPDATE_CACHED, OBJECT_UPDATE_COMPRESSED, OPEN_CIRCUIT,
-            PACKET_ACK, REGION_HANDLE_REQUEST, REGION_HANDSHAKE, REGION_HANDSHAKE_REPLY, REGION_ID_AND_HANDLE_REPLY,
-            REQUEST_MULTIPLE_OBJECTS, START_PING_CHECK, TELEPORT_CANCEL, USE_CIRCUIT_CODE,
-        },
+        ids::{AGENT_UPDATE, CLOSE_CIRCUIT, COMPLETE_PING_CHECK, OPEN_CIRCUIT, PACKET_ACK, USE_CIRCUIT_CODE},
     },
 };
 use test_support::{lludp::vectors, parse_hex_fixture};
 
-struct BlockFacts {
-    name: &'static str,
-    mode: BlockMode,
-    fields: &'static str,
-}
-
-struct TypedMessageCoverage {
-    name: &'static str,
-    id: MessageId,
-    fixture: &'static str,
-    preflight: AllocationStrategy,
-    conformance: ConformanceCategory,
-    blocks: &'static [BlockFacts],
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ConformanceCategory {
-    SchemaConforming,
-    SemanticOverride,
-    CompatibilityOverride,
-    PackedOverride,
-}
-
-macro_rules! typed_message_coverage {
-    ($(
-        $name:literal => $variant:ident, $id:ident, $fixture:expr,
-        $preflight:ident, $conformance:ident, [
-            $(($block:literal, $mode:expr, $fields:literal)),* $(,)?
-        ];
-    )+) => {
-        const TYPED_MESSAGE_COVERAGE: &[TypedMessageCoverage] = &[
-            $(TypedMessageCoverage {
-                name: $name,
-                id: $id,
-                fixture: $fixture,
-                preflight: AllocationStrategy::$preflight,
-                conformance: ConformanceCategory::$conformance,
-                blocks: &[$(BlockFacts { name: $block, mode: $mode, fields: $fields }),*],
-            }),+
-        ];
-
-        fn typed_variant_name(message: &Message) -> Option<&'static str> {
-            match message {
-                $(Message::$variant(_) => Some($name),)+
-                Message::Schema(_) | Message::Unknown { .. } => None,
-            }
-        }
-    };
-}
-
-include!("support/typed_coverage.rs");
+use super::coverage::{ConformanceCategory, TYPED_MESSAGE_COVERAGE, typed_variant_name};
 
 #[test]
 fn schema_covers_messages() {
@@ -87,7 +30,7 @@ fn schema_covers_messages() {
 
 #[test]
 fn typed_inventory_matches_schema_and_fixtures() {
-    assert_eq!(TYPED_MESSAGE_COVERAGE.len(), 30);
+    assert_eq!(TYPED_MESSAGE_COVERAGE.len(), 38);
     let mut schema_conforming = 0;
     let mut semantic_overrides = 0;
     let mut compatibility_overrides = 0;
@@ -117,11 +60,12 @@ fn typed_inventory_matches_schema_and_fixtures() {
             assert_eq!(actual_fields, expected_fields, "field order and count for {}.{}", coverage.name, expected.name);
         }
 
-        let bytes = parse_hex_fixture(coverage.fixture).expect("typed fixture is valid hex");
-        let preflight = Packet::preflight(&bytes).unwrap_or_else(|error| panic!("preflight {} fixture: {error}", coverage.name));
-        assert_eq!(preflight.message_id(), coverage.id, "preflight ID for {}", coverage.name);
         assert_eq!(Message::typed_allocation_strategy(coverage.id), Some(coverage.preflight), "typed route for {}", coverage.name);
         assert_eq!(Message::allocation_strategy(coverage.id), coverage.preflight, "registered route for {}", coverage.name);
+        let Some(fixture) = coverage.fixture else { continue };
+        let bytes = parse_hex_fixture(fixture).expect("typed fixture is valid hex");
+        let preflight = Packet::preflight(&bytes).unwrap_or_else(|error| panic!("preflight {} fixture: {error}", coverage.name));
+        assert_eq!(preflight.message_id(), coverage.id, "preflight ID for {}", coverage.name);
         assert_eq!(preflight.allocation_strategy(), coverage.preflight, "preflight route for {}", coverage.name);
 
         let packet = Packet::decode(&bytes).unwrap_or_else(|error| panic!("decode {} fixture: {error}", coverage.name));
@@ -198,7 +142,7 @@ fn lookup_covers_messages() {
 
 #[test]
 fn generator_emits_schema() {
-    let source = include_str!("../build/message_template.msg");
+    let source = include_str!("../../build/message_template.msg");
     let parsed = template::parse("build/message_template.msg", source).expect("pinned official template parses");
     let generated = generate::generate(&parsed);
     let generated_again = generate::generate(&parsed);
@@ -326,10 +270,10 @@ fn canonical_wire_type(kind: template::FieldKind) -> String {
 
 #[test]
 fn canonical_template_layout_matches_reviewed_snapshot() {
-    let source = include_str!("../build/message_template.msg");
+    let source = include_str!("../../build/message_template.msg");
     let parsed = template::parse("build/message_template.msg", source).expect("pinned official template parses");
     let actual = canonical_layout(&parsed);
-    let expected = normalize_newlines(include_str!("fixtures/message_layout.txt"));
+    let expected = normalize_newlines(include_str!("../fixtures/message_layout.txt"));
     assert!(expected.ends_with('\n'), "reviewed layout snapshot ends with a newline");
     assert!(actual.ends_with('\n'), "canonical layout ends with a newline");
     assert_eq!(expected, actual, "reviewed message layout changed:\n{}", layout_diff(&expected, &actual));

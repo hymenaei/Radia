@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use protocol::{
     BlockInstance, BlockValues, ChatType, FieldValue, LLUdpError, SchemaMessage,
     lludp::{Message, MessageId, Packet, PacketFlags},
@@ -205,7 +207,7 @@ fn map_block_reply_fixture() {
     let packet = Packet::decode(&bytes).expect("decode map reply fixture");
     assert_eq!(packet.sequence(), 0x0102_0304);
     assert!(packet.is_reliable());
-    assert!(matches!(
+    assert_matches!(
         packet.message(),
         Message::MapBlockReply(message)
             if message.agent_data.agent_id == agent_id()
@@ -219,7 +221,7 @@ fn map_block_reply_fixture() {
                 && message.data[0].water_height == 20
                 && message.data[0].agents == 1
                 && message.data[0].map_image_id.is_nil()
-    ));
+    );
 }
 
 #[test]
@@ -298,12 +300,12 @@ fn region_handle_fixtures() {
 
     let reply_bytes = fixture(vectors::REGION_ID_AND_HANDLE_REPLY);
     let decoded = Packet::decode(&reply_bytes).expect("decode region handle reply");
-    assert!(matches!(
+    assert_matches!(
         decoded.message(),
         Message::RegionIdAndHandleReply(RegionIdAndHandleReply {
             reply_block: ReplyBlock { region_id: id, region_handle: 0x0000_2000_0000_2c00 }
         }) if *id == region_id
-    ));
+    );
     assert_eq!(decoded.encode().expect("re-encode region handle reply"), reply_bytes);
 }
 
@@ -500,12 +502,12 @@ fn schema_ext_round_trip() {
     expected.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
 
     let decoded = Packet::decode(&expected).expect("decode generic template packet");
-    assert!(matches!(
+    assert_matches!(
         decoded.message(),
         Message::Schema(message)
             if message.schema().name == "CloseCircuit"
                 && message.trailing_bytes() == [0xde, 0xad, 0xbe, 0xef]
-    ));
+    );
     assert_eq!(decoded.encode().expect("re-encode generic template packet"), expected);
 }
 
@@ -552,13 +554,17 @@ fn trust_keeps_unreliable() {
 
 #[test]
 fn malformed_packets_rejected() {
-    assert!(matches!(Packet::decode(&[]), Err(LLUdpError::TruncatedPacket)));
-    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1]), Err(LLUdpError::TruncatedPacket)));
-    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1, 1]), Err(LLUdpError::TruncatedPacket)));
-    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1, 0, 0xff, 0xff, 0x00]), Err(LLUdpError::TruncatedPacket)));
-    assert!(matches!(Packet::decode(&[0, 0, 0, 0, 1, 0, 0xff, 0xff, 0x00, 0x00]), Err(LLUdpError::InvalidMessageId)));
-    assert!(matches!(Packet::decode(&[0x80, 0, 0, 0, 1, 0, 0x04, 0]), Err(LLUdpError::InvalidZeroCode)));
-    assert!(matches!(Packet::decode(&[0x10, 0, 0, 0, 1, 0, 0x04, 1, 2, 3, 4, 2]), Err(LLUdpError::InvalidAcknowledgementList)));
+    for (case, bytes, expected) in [
+        ("empty packet", &[][..], LLUdpError::TruncatedPacket),
+        ("partial sequence", &[0, 0, 0, 0, 1][..], LLUdpError::TruncatedPacket),
+        ("partial flags", &[0, 0, 0, 0, 1, 1][..], LLUdpError::TruncatedPacket),
+        ("partial high ID", &[0, 0, 0, 0, 1, 0, 0xff, 0xff, 0x00][..], LLUdpError::TruncatedPacket),
+        ("invalid message ID", &[0, 0, 0, 0, 1, 0, 0xff, 0xff, 0x00, 0x00][..], LLUdpError::InvalidMessageId),
+        ("invalid zero code", &[0x80, 0, 0, 0, 1, 0, 0x04, 0][..], LLUdpError::InvalidZeroCode),
+        ("invalid acknowledgement list", &[0x10, 0, 0, 0, 1, 0, 0x04, 1, 2, 3, 4, 2][..], LLUdpError::InvalidAcknowledgementList),
+    ] {
+        assert_eq!(Packet::decode(bytes).map(|_| ()), Err(expected), "reject {case}");
+    }
 }
 
 #[test]

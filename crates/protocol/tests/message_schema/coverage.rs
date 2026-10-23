@@ -1,3 +1,66 @@
+use protocol::lludp::{AllocationStrategy, Message, MessageId};
+use protocol::schema::{
+    BlockMode,
+    ids::{
+        AGENT_MOVEMENT_COMPLETE, AGENT_THROTTLE, AGENT_UPDATE, AVATAR_APPEARANCE, AVATAR_SIT_RESPONSE, CHAT_FROM_SIMULATOR,
+        CHAT_FROM_VIEWER, COMPLETE_AGENT_MOVEMENT, COMPLETE_PING_CHECK, CONFIRM_ENABLE_SIMULATOR, DISABLE_SIMULATOR, ENABLE_SIMULATOR,
+        GENERIC_MESSAGE, GENERIC_STREAMING_MESSAGE, IMPROVED_TERSE_OBJECT_UPDATE, KILL_OBJECT, LAYER_DATA, LOGOUT_REPLY, LOGOUT_REQUEST,
+        MAP_BLOCK_REPLY, MAP_BLOCK_REQUEST, OBJECT_EXTRA_PARAMS, OBJECT_UPDATE, OBJECT_UPDATE_CACHED, OBJECT_UPDATE_COMPRESSED, PACKET_ACK,
+        PARCEL_PROPERTIES, REGION_HANDLE_REQUEST, REGION_HANDSHAKE, REGION_HANDSHAKE_REPLY, REGION_ID_AND_HANDLE_REPLY, REGION_INFO,
+        REQUEST_MULTIPLE_OBJECTS, START_PING_CHECK, TELEPORT_CANCEL, TELEPORT_FAILED, TELEPORT_FINISH, USE_CIRCUIT_CODE,
+    },
+};
+use test_support::lludp::vectors;
+pub(super) struct BlockFacts {
+    pub(super) name: &'static str,
+    pub(super) mode: BlockMode,
+    pub(super) fields: &'static str,
+}
+
+pub(super) struct TypedMessageCoverage {
+    pub(super) name: &'static str,
+    pub(super) id: MessageId,
+    pub(super) fixture: Option<&'static str>,
+    pub(super) preflight: AllocationStrategy,
+    pub(super) conformance: ConformanceCategory,
+    pub(super) blocks: &'static [BlockFacts],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ConformanceCategory {
+    SchemaConforming,
+    SemanticOverride,
+    CompatibilityOverride,
+    PackedOverride,
+}
+
+macro_rules! typed_message_coverage {
+    ($(
+        $name:literal => $variant:ident, $id:ident, $fixture:expr,
+        $preflight:ident, $conformance:ident, [
+            $(($block:literal, $mode:expr, $fields:literal)),* $(,)?
+        ];
+    )+) => {
+        pub(super) const TYPED_MESSAGE_COVERAGE: &[TypedMessageCoverage] = &[
+            $(TypedMessageCoverage {
+                name: $name,
+                id: $id,
+                fixture: if $fixture.is_empty() { None } else { Some($fixture) },
+                preflight: AllocationStrategy::$preflight,
+                conformance: ConformanceCategory::$conformance,
+                blocks: &[$(BlockFacts { name: $block, mode: $mode, fields: $fields }),*],
+            }),+
+        ];
+
+        pub(super) fn typed_variant_name(message: &Message) -> Option<&'static str> {
+            match message {
+                $(Message::$variant(_) => Some($name),)+
+                Message::Schema(_) | Message::Unknown { .. } => None,
+            }
+        }
+    };
+}
+
 typed_message_coverage! {
     "UseCircuitCode" => UseCircuitCode, USE_CIRCUIT_CODE, vectors::USE_CIRCUIT_CODE,
         NoAlloc, SchemaConforming, [
@@ -18,6 +81,15 @@ typed_message_coverage! {
         NoAlloc, SchemaConforming, [
         ("AgentData", BlockMode::Single, "AgentID SessionID"),
         ("RegionInfo", BlockMode::Single, "Flags"),
+    ];
+    "RegionInfo" => RegionInfo, REGION_INFO, "",
+        SchemaDerived, SchemaConforming, [
+        ("AgentData", BlockMode::Single, "AgentID SessionID"),
+        ("RegionInfo", BlockMode::Single, "SimName EstateID ParentEstateID RegionFlags SimAccess MaxAgents BillableFactor ObjectBonusFactor WaterHeight TerrainRaiseLimit TerrainLowerLimit PricePerMeter RedirectGridX RedirectGridY UseEstateSun SunHour"),
+        ("RegionInfo2", BlockMode::Single, "ProductSKU ProductName MaxAgents32 HardMaxAgents HardMaxObjects"),
+        ("RegionInfo3", BlockMode::Variable, "RegionFlagsExtended"),
+        ("RegionInfo5", BlockMode::Variable, "ChatWhisperRange ChatNormalRange ChatShoutRange ChatWhisperOffset ChatNormalOffset ChatShoutOffset ChatFlags"),
+        ("CombatSettings", BlockMode::Variable, "CombatFlags OnDeath DamageThrottle RegenerationRate InvulnerabilyTime DamageLimit"),
     ];
     "AgentMovementComplete" => AgentMovementComplete, AGENT_MOVEMENT_COMPLETE, vectors::AGENT_MOVEMENT_COMPLETE,
         SchemaDerived, SemanticOverride, [
@@ -48,6 +120,15 @@ typed_message_coverage! {
     ];
     "TeleportCancel" => TeleportCancel, TELEPORT_CANCEL, vectors::TELEPORT_CANCEL,
         SchemaDerived, SchemaConforming, [("Info", BlockMode::Single, "AgentID SessionID")];
+    "TeleportFinish" => TeleportFinish, TELEPORT_FINISH, "",
+        SchemaDerived, SchemaConforming, [
+        ("Info", BlockMode::Single, "AgentID LocationID SimIP SimPort RegionHandle SeedCapability SimAccess TeleportFlags"),
+    ];
+    "TeleportFailed" => TeleportFailed, TELEPORT_FAILED, "",
+        SchemaDerived, SchemaConforming, [
+        ("Info", BlockMode::Single, "AgentID Reason"),
+        ("AlertInfo", BlockMode::Variable, "Message ExtraParams"),
+    ];
     "LogoutRequest" => LogoutRequest, LOGOUT_REQUEST, vectors::LOGOUT_REQUEST,
         NoAlloc, SchemaConforming, [
         ("AgentData", BlockMode::Single, "AgentID SessionID"),
@@ -132,5 +213,37 @@ typed_message_coverage! {
         Specialized, SchemaConforming, [
             ("MethodData", BlockMode::Single, "Method"),
             ("DataBlock", BlockMode::Single, "Data"),
+    ];
+    "AvatarAppearance" => AvatarAppearance, AVATAR_APPEARANCE, "",
+        SchemaDerived, SchemaConforming, [
+        ("Sender", BlockMode::Single, "ID IsTrial"),
+        ("ObjectData", BlockMode::Single, "TextureEntry"),
+        ("VisualParam", BlockMode::Variable, "ParamValue"),
+        ("AppearanceData", BlockMode::Variable, "AppearanceVersion CofVersion Flags"),
+        ("AppearanceHover", BlockMode::Variable, "HoverHeight"),
+        ("AttachmentBlock", BlockMode::Variable, "ID AttachmentPoint"),
+    ];
+    "AvatarSitResponse" => AvatarSitResponse, AVATAR_SIT_RESPONSE, "",
+        SchemaDerived, SchemaConforming, [
+        ("SitObject", BlockMode::Single, "ID"),
+        ("SitTransform", BlockMode::Single, "AutoPilot SitPosition SitRotation CameraEyeOffset CameraAtOffset ForceMouselook"),
+    ];
+    "ParcelProperties" => ParcelProperties, PARCEL_PROPERTIES, "",
+        SchemaDerived, SchemaConforming, [
+        ("ParcelData", BlockMode::Single, "RequestResult SequenceID SnapSelection SelfCount OtherCount PublicCount LocalID OwnerID IsGroupOwned AuctionID ClaimDate ClaimPrice RentPrice AABBMin AABBMax Bitmap Area Status SimWideMaxPrims SimWideTotalPrims MaxPrims TotalPrims OwnerPrims GroupPrims OtherPrims SelectedPrims ParcelPrimBonus OtherCleanTime ParcelFlags SalePrice Name Desc MusicURL MediaURL MediaID MediaAutoScale GroupID PassPrice PassHours Category AuthBuyerID SnapshotID UserLocation UserLookAt LandingType RegionPushOverride RegionDenyAnonymous RegionDenyIdentified RegionDenyTransacted"),
+        ("AgeVerificationBlock", BlockMode::Single, "RegionDenyAgeUnverified"),
+        ("RegionAllowAccessBlock", BlockMode::Single, "RegionAllowAccessOverride"),
+        ("ParcelEnvironmentBlock", BlockMode::Single, "ParcelEnvironmentVersion RegionAllowEnvironmentOverride"),
+    ];
+    "GenericMessage" => GenericMessage, GENERIC_MESSAGE, "",
+        SchemaDerived, SchemaConforming, [
+        ("AgentData", BlockMode::Single, "AgentID SessionID TransactionID"),
+        ("MethodData", BlockMode::Single, "Method Invoice"),
+        ("ParamList", BlockMode::Variable, "Parameter"),
+    ];
+    "LayerData" => LayerData, LAYER_DATA, "",
+        SchemaDerived, SchemaConforming, [
+        ("LayerID", BlockMode::Single, "Type"),
+        ("LayerData", BlockMode::Single, "Data"),
     ];
 }

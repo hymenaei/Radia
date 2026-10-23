@@ -6058,7 +6058,6 @@ dependencies = [
  "quick-xml 0.42.0",
  "sha2 0.11.1",
  "test-support",
- "tracing",
  "utils",
  "uuid",
 ]

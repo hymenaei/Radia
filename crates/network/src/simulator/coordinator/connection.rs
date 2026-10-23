@@ -34,7 +34,7 @@ use super::{
     record_coverage_loss, record_event_envelope_loss,
 };
 #[cfg(test)]
-use crate::test_support::SendGate;
+use crate::transport::SendGate;
 use crate::{
     AgentSession,
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},

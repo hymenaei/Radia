@@ -771,15 +771,63 @@ mod tests {
     }
     #[cfg(test)]
     mod body_tests {
-        use super::*;
-
-        use std::time::Instant;
+        use std::{
+            future::pending,
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+            time::Instant,
+        };
 
         use crate::capabilities::ProcessMeasurement;
-        use crate::http::{Client, admit_body_capacity, grow_admitted_body, read_bounded_body, validate_http_url};
+        use crate::http::{
+            Client, ResponseMemoryClass, admit_body_capacity, grow_admitted_body, read_bounded_body, read_bounded_body_admitted,
+            validate_http_url,
+        };
         use crate::test_support::http::{LocalServer, response};
         use reqwest::StatusCode;
         use url::Url;
+
+        use super::*;
+
+        struct HeldBodyServer {
+            address: std::net::SocketAddr,
+            worker: thread::JoinHandle<Vec<Vec<u8>>>,
+        }
+
+        impl HeldBodyServer {
+            fn url(&self, path: &str) -> Url {
+                Url::parse(&format!("http://{}{path}", self.address)).expect("valid local HTTP URL")
+            }
+
+            fn finish(self) -> Vec<Vec<u8>> {
+                self.worker.join().expect("held-body HTTP server should finish")
+            }
+        }
+
+        fn start_held_body(response: Vec<u8>) -> (HeldBodyServer, tokio::sync::oneshot::Sender<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
+            let address = listener.local_addr().expect("read local listener address");
+            let (release_body, body_released) = tokio::sync::oneshot::channel();
+            let worker = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept local HTTP request");
+                stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set local request timeout");
+                let mut request = Vec::new();
+                let mut chunk = [0; 4096];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let size = stream.read(&mut chunk).expect("read local HTTP request");
+                    assert_ne!(size, 0, "local request ended before its headers");
+                    request.extend_from_slice(&chunk[..size]);
+                }
+                let body_start = response.windows(4).position(|window| window == b"\r\n\r\n").expect("response headers are terminated") + 4;
+                stream.write_all(&response[..body_start]).expect("write local response headers");
+                body_released.blocking_recv().expect("test should release the held response body");
+                stream.write_all(&response[body_start..]).expect("write local response body");
+                vec![request]
+            });
+
+            (HeldBodyServer { address, worker }, release_body)
+        }
 
         #[tokio::test]
         async fn redirects_are_not_followed() {
@@ -1080,16 +1128,42 @@ mod tests {
             server.finish();
         }
 
-        #[tokio::test]
+        #[tokio::test(start_paused = true)]
         async fn operation_deadline_covers_body_reading() {
             let response = response(200, "OK", "text/plain", None, "data");
-            let server = LocalServer::start_delayed_body(response, Duration::from_millis(500));
-            let client = Client::new(Some(Duration::from_millis(250)), false, None).expect("build short-timeout HTTP client");
-
-            let error =
-                client.get_bounded_classified("test", &server.url("/body"), 16).await.expect_err("body must share the operation deadline");
+            let (server, release_body) = start_held_body(response);
+            let timeout = Duration::from_millis(250);
+            let started = Instant::now();
+            let deadline = tokio::time::Instant::now() + timeout;
+            let response = reqwest::Client::new().get(server.url("/body")).send().await.expect("receive response headers");
+            let (body_started, body_started_receiver) = tokio::sync::oneshot::channel();
+            let body_read = tokio::spawn(async move {
+                tokio::select! {
+                    biased;
+                    result = read_bounded_body_admitted(
+                        response,
+                        16,
+                        None,
+                        ResponseMemoryClass::Ordinary,
+                        None,
+                        Some(deadline),
+                        started,
+                    ) => result,
+                    _ = async {
+                        body_started.send(()).expect("body read is being observed");
+                        pending::<()>().await;
+                    } => unreachable!(),
+                }
+            });
+            body_started_receiver.await.expect("body read reached the response stream");
+            tokio::time::advance(timeout).await;
+            let error = match body_read.await.expect("body read task should not panic") {
+                Err(error) => error,
+                Ok(_) => panic!("held response body should exceed the operation deadline"),
+            };
 
             assert!(matches!(&error, Error::Timeout { status: Some(StatusCode::OK), .. }), "body read exceeded its deadline: {error:?}");
+            release_body.send(()).expect("local server should still be waiting for the response body release");
             assert_eq!(server.finish().len(), 1);
         }
 

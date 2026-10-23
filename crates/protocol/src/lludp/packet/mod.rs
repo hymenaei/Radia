@@ -1,14 +1,10 @@
 mod frame;
 
-pub use self::frame::{PacketFrame, PacketPreflight, PreflightedPacketFrame};
-
 use std::{mem::size_of, ops::BitOr};
 
-use tracing::Span;
+use crate::lludp::{error::LLUdpError, message::Message, zero_code};
 
-use crate::schema;
-
-use super::{error::LLUdpError, message::Message, zero_code};
+pub use self::frame::{PacketFrame, PacketPreflight, PreflightedPacketFrame};
 
 const FLAG_ZEROCODED: u8 = 0x80;
 const FLAG_RELIABLE: u8 = 0x40;
@@ -209,12 +205,7 @@ impl Packet {
         Ok(packet)
     }
 
-    #[tracing::instrument(
-        name = "protocol.packet.encode", level = "debug", skip_all,
-        fields(sequence = self.header.sequence, message = tracing::field::Empty, datagram_bytes = tracing::field::Empty)
-    )]
     pub fn encode_into(&self, output: &mut Vec<u8>) -> Result<(), LLUdpError> {
-        let output_start = output.len();
         if self.is_resent() && !self.is_reliable() {
             return Err(LLUdpError::InvalidPacketFlags);
         }
@@ -237,9 +228,6 @@ impl Packet {
             }
             output.push(ack_count);
         }
-        let message_name = schema::find_by_id(self.message.id()).map_or("Unknown", |metadata| metadata.name);
-        Span::current().record("message", message_name);
-        Span::current().record("datagram_bytes", output.len() - output_start);
         Ok(())
     }
 
@@ -298,6 +286,8 @@ impl Packet {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use crate::{
         lludp::{AllocationStrategy, MessageId},
         messages::{CompletePingCheck, PacketAck, PingId, circuit::packet_ack::Packets},
@@ -474,7 +464,7 @@ mod tests {
         let preflight = Packet::preflight(&bytes).expect("preflight 255 ACK entries");
         let decoded = Packet::decode(&bytes).expect("decode 255 ACK entries");
         assert!(preflight.retained_capacity_upper_bound() >= decoded.retained_capacity_bytes());
-        assert!(matches!(decoded.message(), Message::PacketAck(message) if message.packets.len() == usize::from(u8::MAX)));
+        assert_matches!(decoded.message(), Message::PacketAck(message) if message.packets.len() == usize::from(u8::MAX));
     }
 
     #[test]
@@ -514,15 +504,16 @@ mod tests {
         }
 
         let truncated = parse_hex_fixture(vectors::OBJECT_UPDATE_COMPRESSED).expect("truncated fixture is valid hex");
-        assert!(matches!(Packet::preflight(&truncated), Err(LLUdpError::TruncatedPacket)));
+        assert_matches!(Packet::preflight(&truncated), Err(LLUdpError::TruncatedPacket));
         assert_eq!(Packet::decode(&truncated), Err(LLUdpError::TruncatedPacket));
 
         for fixture in [vectors::OBJECT_UPDATE, vectors::IMPROVED_TERSE_OBJECT_UPDATE] {
             let mut truncated = parse_hex_fixture(fixture).expect("packed update fixture is valid hex");
             truncated.pop();
 
-            assert!(
-                matches!(Packet::preflight(&truncated), Err(LLUdpError::TruncatedPacket)),
+            assert_matches!(
+                Packet::preflight(&truncated),
+                Err(LLUdpError::TruncatedPacket),
                 "preflight rejects a truncated record in {fixture:?}"
             );
         }

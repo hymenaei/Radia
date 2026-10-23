@@ -196,6 +196,19 @@ impl<'a> Reader<'a> {
         if self.is_empty() { Ok(0) } else { Ok(usize::from(self.u8()?)) }
     }
 
+    pub(crate) fn optional_fixed<T>(
+        &mut self,
+        size: usize,
+        decode: impl FnOnce(&mut Reader<'a>) -> Result<T, LLUdpError>,
+    ) -> Result<Option<T>, LLUdpError> {
+        if self.remaining().len() < size {
+            self.skip_remaining();
+            Ok(None)
+        } else {
+            decode(self).map(Some)
+        }
+    }
+
     pub(crate) fn u8(&mut self) -> Result<u8, LLUdpError> {
         Ok(self.take(1)?[0])
     }
@@ -385,6 +398,17 @@ mod tests {
 
         assert_eq!(writer.finish(), Ok(()));
         assert_eq!(output, [1, 2]);
+    }
+
+    #[test]
+    fn optional_fixed_decodes_or_discards_a_truncated_suffix() {
+        let mut complete = Reader::new(&[1, 0, 0, 0]);
+        assert_eq!(complete.optional_fixed(4, |reader| reader.u32()), Ok(Some(1)));
+        assert!(complete.is_empty());
+
+        let mut truncated = Reader::new(&[1, 0, 0]);
+        assert_eq!(truncated.optional_fixed(4, |reader| reader.u32()), Ok(None));
+        assert!(truncated.is_empty());
     }
 
     #[test]

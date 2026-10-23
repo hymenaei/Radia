@@ -11,12 +11,12 @@ use std::{
 use ::test_support::lludp::fixture;
 use llsd::{Map, Value};
 use protocol::{
-    BlockValues, ChatType, FieldValue, SchemaMessage,
+    ChatType,
     lludp::{Message, Packet},
     login::ResponseData,
     messages::{
         AgentMovementComplete, CacheMissType, ChatFromViewer, CompletePingCheck, ObjectRequest, PacketAck, PingId, RequestAgentData,
-        RequestMultipleObjects, StartPingCheck, TeleportCancel,
+        RequestMultipleObjects, StartPingCheck, TeleportCancel, TeleportFinish,
         agent::agent_movement_complete::{AgentData, Data, SimData},
         chat::chat_from_viewer,
         chat::chat_from_viewer::ChatData,
@@ -392,23 +392,16 @@ fn movement_complete_packet(sequence: u32, agent_id: Uuid, session_id: Uuid, reg
 
 fn teleport_finish_to(agent_id: Uuid, endpoint: SocketAddr, region_handle: u64, seed: &str) -> Message {
     let SocketAddr::V4(endpoint) = endpoint else { panic!("simulator endpoint must use IPv4") };
-    let schema = SchemaMessage::schema_by_name("TeleportFinish").expect("TeleportFinish schema");
-    Message::Schema(
-        SchemaMessage::new(
-            schema,
-            vec![BlockValues::single(vec![
-                FieldValue::Uuid(agent_id),
-                FieldValue::U32(0),
-                FieldValue::IpAddr(endpoint.ip().octets()),
-                FieldValue::IpPort(endpoint.port().to_be_bytes()),
-                FieldValue::U64(region_handle),
-                FieldValue::Bytes(seed.as_bytes().to_vec()),
-                FieldValue::U8(0),
-                FieldValue::U32(0),
-            ])],
-        )
-        .expect("valid TeleportFinish"),
-    )
+    Message::TeleportFinish(TeleportFinish {
+        agent_id,
+        location_id: 0,
+        sim_ip: endpoint.ip().octets(),
+        sim_port: endpoint.port().to_be_bytes(),
+        region_handle,
+        seed_capability: seed.as_bytes().to_vec(),
+        sim_access: Some(0),
+        teleport_flags: Some(0),
+    })
 }
 
 fn ack(sequence: u32, acknowledged: u32) -> Vec<u8> {
@@ -559,7 +552,7 @@ fn set_sequence(bytes: &mut [u8], sequence: u32) {
     bytes[1..5].copy_from_slice(&sequence.to_be_bytes());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn stalled_send_is_isolated() {
     let mut harness = connected_neighbor().await;
     harness.pause_sends.send_replace(true);
@@ -571,6 +564,8 @@ async fn stalled_send_is_isolated() {
         .expect("dispatch primary send");
     timeout(WAIT, harness.send_entered.notified()).await.expect("primary enters local send");
     assert!(matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+    advance(Duration::from_secs(5)).await;
+    assert!(matches!(response.await.expect("stalled primary send should report its age limit"), Err(Error::SimulatorSend(_))));
 
     let neighbor_send = spawn({
         let commands = harness.commands.clone();
@@ -594,8 +589,6 @@ async fn stalled_send_is_isolated() {
     receive_ack(&harness.neighbor, 42).await;
     harness.neighbor.send_to(&start_ping_packet(43, 9, 0), harness.neighbor_peer).await.expect("ping unrelated connection");
     receive_message(&harness.neighbor, |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 9)).await;
-    assert!(matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty)), "primary local send is still pending");
-
     let (abandoned, abandoned_receiver) = oneshot::channel();
     drop(abandoned_receiver);
     harness
@@ -619,7 +612,6 @@ async fn stalled_send_is_isolated() {
             .expect("coordinator task")
             .is_ok()
     );
-    assert!(matches!(response.await, Ok(Err(Error::SimulatorConnectionClosed))));
     assert_eq!(harness.packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
 }
 

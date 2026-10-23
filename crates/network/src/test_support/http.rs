@@ -1,12 +1,20 @@
 use std::{
-    io::{ErrorKind, Read, Write},
+    io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    str::from_utf8,
+    str::{self, from_utf8},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc as std_mpsc,
+    },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use url::Url;
+use reqwest::Url;
+use tokio::{sync::mpsc, time::timeout};
+
+const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct LocalServer {
     address: SocketAddr,
@@ -16,39 +24,18 @@ pub(crate) struct LocalServer {
 impl LocalServer {
     pub(crate) fn start(responses: Vec<Vec<u8>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
-        listener.set_nonblocking(true).expect("set local listener nonblocking");
         let address = listener.local_addr().expect("read local listener address");
         let worker = thread::spawn(move || {
             responses
                 .into_iter()
                 .map(|response| {
-                    let (mut stream, _) = accept_with_timeout(&listener);
-                    stream.set_nonblocking(false).expect("set local stream blocking");
-                    stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set local request timeout");
+                    let (mut stream, _) = accept_connection(&listener);
+                    stream.set_read_timeout(Some(TEST_TIMEOUT)).expect("set local request timeout");
                     let request = read_request(&mut stream);
                     stream.write_all(&response).expect("write local response");
                     request
                 })
                 .collect()
-        });
-
-        Self { address, worker }
-    }
-
-    pub(crate) fn start_delayed_body(response: Vec<u8>, delay: Duration) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
-        listener.set_nonblocking(true).expect("set local listener nonblocking");
-        let address = listener.local_addr().expect("read local listener address");
-        let worker = thread::spawn(move || {
-            let (mut stream, _) = accept_with_timeout(&listener);
-            stream.set_nonblocking(false).expect("set local stream blocking");
-            stream.set_read_timeout(Some(Duration::from_secs(5))).expect("set local request timeout");
-            let request = read_request(&mut stream);
-            let body_start = header_body_start(&response).expect("response headers are terminated") + 4;
-            stream.write_all(&response[..body_start]).expect("write local response headers");
-            thread::sleep(delay);
-            stream.write_all(&response[body_start..]).expect("write delayed local response body");
-            vec![request]
         });
 
         Self { address, worker }
@@ -63,6 +50,171 @@ impl LocalServer {
     }
 }
 
+pub(crate) struct ConcurrentCapabilityTestServer {
+    base: Url,
+    requests: mpsc::UnboundedReceiver<()>,
+    response_release: std_mpsc::Sender<()>,
+    request_count: usize,
+    released_responses: usize,
+    worker: Option<thread::JoinHandle<usize>>,
+}
+
+impl ConcurrentCapabilityTestServer {
+    pub(crate) fn start(request_count: usize) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind capability concurrency server");
+        let address = listener.local_addr().expect("read concurrency server address");
+        let base = Url::parse(&format!("http://{address}/")).expect("valid local capability URL");
+        let mut capability_url = base.clone();
+        capability_url.set_path("/capability");
+        let body = format!("<llsd><map><key>TestCapability</key><string>{capability_url}</string></map></llsd>");
+        let response = response(200, "OK", "application/llsd+xml", None, &body);
+        let (request_sender, requests) = mpsc::unbounded_channel();
+        let (response_release, response_releases) = std_mpsc::channel();
+        let response_releases = Arc::new(Mutex::new(response_releases));
+        let worker = thread::spawn(move || {
+            let active = Arc::new(AtomicUsize::new(0));
+            let maximum_active = Arc::new(AtomicUsize::new(0));
+            let mut handlers = Vec::with_capacity(request_count);
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().expect("accept capability concurrency request");
+                stream.set_read_timeout(Some(TEST_TIMEOUT)).expect("set concurrency request timeout");
+                let response = response.clone();
+                let active = Arc::clone(&active);
+                let maximum_active = Arc::clone(&maximum_active);
+                let request_sender = request_sender.clone();
+                let response_releases = Arc::clone(&response_releases);
+                handlers.push(thread::spawn(move || {
+                    let _request = read_request(&mut stream);
+                    let active_count = active.fetch_add(1, Ordering::Relaxed) + 1;
+                    maximum_active.fetch_max(active_count, Ordering::Relaxed);
+                    let _ = request_sender.send(());
+                    response_releases
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .recv_timeout(TEST_TIMEOUT)
+                        .expect("test should release the capability response");
+                    active.fetch_sub(1, Ordering::Relaxed);
+                    let _ = stream.write_all(&response);
+                }));
+            }
+            drop(request_sender);
+            for handler in handlers {
+                handler.join().expect("capability request handler should finish");
+            }
+            maximum_active.load(Ordering::Relaxed)
+        });
+        Self { base, requests, response_release, request_count, released_responses: 0, worker: Some(worker) }
+    }
+
+    pub(crate) fn url(&self, path: &str) -> Url {
+        let mut url = self.base.clone();
+        url.set_path(path);
+        url
+    }
+
+    pub(crate) async fn next_request(&mut self) {
+        timeout(TEST_TIMEOUT, self.requests.recv())
+            .await
+            .expect("HTTP request should reach capability server")
+            .expect("capability server request stream should remain open");
+    }
+
+    pub(crate) fn release_response(&mut self) {
+        self.response_release.send(()).expect("capability response worker should remain open");
+        self.released_responses += 1;
+    }
+
+    pub(crate) fn finish(mut self) -> usize {
+        for _ in 0..self.request_count.saturating_sub(self.released_responses) {
+            self.response_release.send(()).expect("capability response worker should remain open");
+        }
+        self.worker.take().expect("concurrency server worker").join().expect("concurrency server should stop")
+    }
+}
+
+pub(crate) enum EventServerResponse {
+    Response(Vec<u8>),
+    Hold,
+    Controlled(std_mpsc::Receiver<Vec<u8>>),
+    DropConnection,
+}
+
+pub(crate) struct EventQueueTestServer {
+    base: Url,
+    address: SocketAddr,
+    pub(crate) requests: std_mpsc::Receiver<Vec<u8>>,
+    async_requests: mpsc::UnboundedReceiver<Vec<u8>>,
+    stop: std_mpsc::Sender<()>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl EventQueueTestServer {
+    pub(crate) fn start(responses: impl FnOnce(&Url) -> Vec<EventServerResponse>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind event queue test server");
+        let address = listener.local_addr().expect("read test server address");
+        let base = Url::parse(&format!("http://{address}/")).expect("valid local test URL");
+        let responses = responses(&base);
+        let (request_sender, requests) = std_mpsc::channel();
+        let (async_request_sender, async_requests) = mpsc::unbounded_channel();
+        let (stop, stop_receiver) = std_mpsc::channel();
+        let worker = thread::spawn(move || {
+            for response in responses {
+                let Some((mut stream, _)) = accept_until_stopped(&listener, &stop_receiver) else {
+                    return;
+                };
+                stream.set_read_timeout(Some(TEST_TIMEOUT)).expect("set test request timeout");
+                let request = read_request(&mut stream);
+                request_sender.send(request.clone()).expect("test should read request");
+                match response {
+                    EventServerResponse::Response(response) => {
+                        stream.write_all(&response).expect("write test HTTP response");
+                    }
+                    EventServerResponse::Controlled(response) => {
+                        let response = response.recv_timeout(TEST_TIMEOUT).expect("controlled HTTP response");
+                        stream.write_all(&response).expect("write controlled HTTP response");
+                    }
+                    EventServerResponse::Hold => {
+                        let mut byte = [0];
+                        let _ = stream.read(&mut byte);
+                    }
+                    EventServerResponse::DropConnection => drop(stream),
+                }
+                async_request_sender.send(request).expect("async test should read request");
+            }
+        });
+        Self { base, address, requests, async_requests, stop, worker: Some(worker) }
+    }
+
+    pub(crate) fn url(&self, path: &str) -> Url {
+        let mut url = self.base.clone();
+        url.set_path(path);
+        url
+    }
+
+    pub(crate) fn next_request(&self) -> Vec<u8> {
+        self.requests.recv_timeout(TEST_TIMEOUT).expect("server should receive HTTP request")
+    }
+
+    pub(crate) async fn next_request_async(&mut self) -> Vec<u8> {
+        self.async_requests.recv().await.expect("server should receive HTTP request")
+    }
+
+    pub(crate) fn stop(&self) {
+        if self.stop.send(()).is_ok()
+            && let Ok(stream) = TcpStream::connect(self.address)
+        {
+            drop(stream);
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> Vec<Vec<u8>> {
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("event queue server should stop");
+        }
+        self.requests.try_iter().collect()
+    }
+}
+
 pub(crate) fn response(status: u16, reason: &str, content_type: &str, retry_after: Option<&str>, body: &str) -> Vec<u8> {
     let retry_after = retry_after.map(|value| format!("Retry-After: {value}\r\n")).unwrap_or_default();
     format!(
@@ -72,21 +224,28 @@ pub(crate) fn response(status: u16, reason: &str, content_type: &str, retry_afte
     .into_bytes()
 }
 
-fn accept_with_timeout(listener: &TcpListener) -> (TcpStream, SocketAddr) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match listener.accept() {
-            Ok(connection) => return connection,
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                assert!(Instant::now() < deadline, "no request reached local HTTP server");
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => panic!("accept local HTTP request: {error}"),
-        }
-    }
+pub(crate) fn request_line(request: &[u8]) -> &str {
+    str::from_utf8(request).expect("request should be UTF-8").split("\r\n").next().expect("request line")
 }
 
-pub(crate) fn read_request(stream: &mut TcpStream) -> Vec<u8> {
+pub(crate) fn seed_response(event_url: &Url) -> String {
+    format!("<llsd><map><key>EventQueueGet</key><string>{event_url}</string></map></llsd>")
+}
+
+pub(crate) fn hold_response() -> EventServerResponse {
+    EventServerResponse::Hold
+}
+
+fn accept_connection(listener: &TcpListener) -> (TcpStream, SocketAddr) {
+    listener.accept().expect("accept local HTTP request")
+}
+
+fn accept_until_stopped(listener: &TcpListener, stop: &std_mpsc::Receiver<()>) -> Option<(TcpStream, SocketAddr)> {
+    let connection = listener.accept().expect("accept event queue test connection");
+    if stop.try_recv().is_ok() { None } else { Some(connection) }
+}
+
+fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     let mut request = Vec::new();
     let mut chunk = [0; 4096];
     loop {

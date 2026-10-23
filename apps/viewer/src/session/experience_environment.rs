@@ -4,7 +4,7 @@ use std::{
 };
 
 use llsd::{Limits, Map, Value, binary, notation, xml};
-use protocol::lludp::{FieldValue, Message, SchemaMessage};
+use protocol::lludp::Message;
 use render::scene::{EnvironmentProperty, EnvironmentPush};
 use tokio::sync::mpsc;
 use utils::{AssetId, ExperienceId};
@@ -34,19 +34,16 @@ impl EnvironmentInbox {
 pub(super) struct InvalidPush;
 
 pub(super) fn decode(message: &Message, agent: Uuid) -> Result<Option<EnvironmentPush>, InvalidPush> {
-    let Message::Schema(message) = message else { return Ok(None) };
-    if message.schema().name != "GenericMessage" {
-        return Ok(None);
-    }
-    let Some(FieldValue::Bytes(method)) = field(message, "MethodData", "Method") else { return Err(InvalidPush) };
+    let Message::GenericMessage(message) = message else { return Ok(None) };
+    let method = message.method_data.method.as_slice();
     if method.strip_suffix(&[0]).unwrap_or(method) != b"PushExpEnvironment" {
         return Ok(None);
     }
-    if field(message, "AgentData", "AgentID") != Some(&FieldValue::Uuid(agent)) {
+    if message.agent_data.agent_id != agent {
         return Err(InvalidPush);
     }
-    let Some(FieldValue::Uuid(invoice)) = field(message, "MethodData", "Invoice") else { return Err(InvalidPush) };
-    let Some(FieldValue::Bytes(payload)) = field(message, "ParamList", "Parameter") else { return Err(InvalidPush) };
+    let Some(parameter) = message.param_list.as_ref().and_then(|parameters| parameters.first()) else { return Err(InvalidPush) };
+    let payload = parameter.parameter.as_slice();
     if payload.len() > 255 {
         return Err(InvalidPush);
     }
@@ -84,7 +81,7 @@ pub(super) fn decode(message: &Message, agent: Uuid) -> Result<Option<Environmen
         _ => return Err(InvalidPush),
     };
     let transition = Duration::try_from_secs_f64(seconds.max(0.0)).map_err(|_| InvalidPush)?;
-    let experience = ExperienceId::new(*invoice);
+    let experience = ExperienceId::new(message.method_data.invoice.unwrap_or_else(Uuid::nil));
     match action.as_str() {
         "ClearEnvironment" => Ok(Some(EnvironmentPush::Clear { experience, transition })),
         "PushFullEnvironment" => {
@@ -125,34 +122,19 @@ fn properties(value: Option<&Value>) -> Result<Vec<EnvironmentProperty>, Invalid
         .collect()
 }
 
-fn field<'a>(message: &'a SchemaMessage, block: &str, name: &str) -> Option<&'a FieldValue> {
-    let index = message.schema().blocks.iter().position(|schema| schema.name == block)?;
-    let schema = message.schema().blocks.get(index)?;
-    let field = schema.fields.iter().position(|field| field.name == name)?;
-    if message.field_was_supplied(index, 0, field) != Some(true) {
-        return None;
-    }
-    message.blocks().get(index)?.instances.first()?.fields.get(field)
-}
-
 #[cfg(test)]
 mod tests {
+    use protocol::messages::GenericMessage;
+    use protocol::messages::generic_message::{AgentData, MethodData, Parameter};
+
     use super::*;
-    use protocol::lludp::BlockValues;
 
     fn message(agent: Uuid, invoice: Uuid, body: &str) -> Message {
-        let schema = SchemaMessage::schema_by_name("GenericMessage").unwrap();
-        Message::Schema(
-            SchemaMessage::new(
-                schema,
-                vec![
-                    BlockValues::single(vec![FieldValue::Uuid(agent), FieldValue::Uuid(Uuid::nil()), FieldValue::Uuid(Uuid::nil())]),
-                    BlockValues::single(vec![FieldValue::Bytes(b"PushExpEnvironment\0".to_vec()), FieldValue::Uuid(invoice)]),
-                    BlockValues::single(vec![FieldValue::Bytes(body.as_bytes().to_vec())]),
-                ],
-            )
-            .unwrap(),
-        )
+        Message::GenericMessage(GenericMessage {
+            agent_data: AgentData { agent_id: agent, session_id: Uuid::nil(), transaction_id: Uuid::nil() },
+            method_data: MethodData { method: b"PushExpEnvironment\0".to_vec(), invoice: Some(invoice) },
+            param_list: Some(vec![Parameter { parameter: body.as_bytes().to_vec() }]),
+        })
     }
 
     #[test]

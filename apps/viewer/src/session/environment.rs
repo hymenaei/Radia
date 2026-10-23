@@ -13,7 +13,7 @@ use futures::{
 };
 use llsd::{Limits, Map, Value, notation, xml};
 use network::{Event, PacketOrder, SimulatorId, capabilities::Client};
-use protocol::lludp::{FieldValue, Message, SchemaMessage};
+use protocol::{lludp::Message, messages::ParcelProperties};
 use tokio::{runtime::Handle, sync::Semaphore};
 use uuid::Uuid;
 use world::{
@@ -225,12 +225,10 @@ impl EnvironmentIntake {
                     self.capability(world, *simulator_id, &event.message, &event.body);
                 }
             }
-            Event::SimulatorMessage { simulator_id, packet_order, message: Message::Schema(message), .. }
-                if primary == Some(*simulator_id) =>
-            {
+            Event::SimulatorMessage { simulator_id, packet_order, message, .. } if primary == Some(*simulator_id) => {
                 let Some(region) = world.region_for(*simulator_id) else { return };
-                match message.schema().name {
-                    "ParcelProperties" => match parcel_schema(message) {
+                match message {
+                    Message::ParcelProperties(message) => match parcel_message(message) {
                         Ok(Some(notice)) => {
                             let PacketOrder::Ordered(order) = packet_order else { return };
                             let Some(route) = self.routes.get_mut(&region) else { return };
@@ -241,9 +239,9 @@ impl EnvironmentIntake {
                             self.parcel(world, region, notice);
                         }
                         Ok(None) => {}
-                        Err(error) => tracing::debug!(?error, "invalid parcel environment notification"),
+                        Err(_) => {}
                     },
-                    "RegionInfo" => self.queue(world, region, EnvironmentScope::Region),
+                    Message::RegionInfo(_) => self.queue(world, region, EnvironmentScope::Region),
                     _ => {}
                 }
             }
@@ -259,7 +257,7 @@ impl EnvironmentIntake {
         match parcel_value(body) {
             Ok(Some(notice)) => self.parcel(world, region, notice),
             Ok(None) => {}
-            Err(error) => tracing::debug!(?error, "invalid parcel environment notification"),
+            Err(_) => {}
         }
     }
 
@@ -502,46 +500,33 @@ fn parcel_value(value: &Value) -> Result<Option<ParcelNotice>, FetchError> {
     Ok(Some(ParcelNotice { parcel, sequence, version, overrides }))
 }
 
-fn parcel_schema(message: &SchemaMessage) -> Result<Option<ParcelNotice>, FetchError> {
-    let mut body = Map::new();
-    for (block_index, (schema, block)) in message.schema().blocks.iter().zip(message.blocks()).enumerate() {
-        if !matches!(schema.name, "ParcelData" | "ParcelEnvironmentBlock") {
-            continue;
-        }
-        let mut values = Vec::new();
-        for (instance_index, instance) in block.instances.iter().enumerate() {
-            let mut fields = Map::new();
-            for (field_index, (field, value)) in schema.fields.iter().zip(&instance.fields).enumerate() {
-                if message.field_was_supplied(block_index, instance_index, field_index) != Some(true) {
-                    continue;
-                }
-                match value {
-                    FieldValue::S32(value) => {
-                        fields.insert(field.name.into(), Value::Integer(*value));
-                    }
-                    FieldValue::Bool(value) => {
-                        fields.insert(field.name.into(), Value::Boolean(*value));
-                    }
-                    _ => {}
-                }
-            }
-            values.push(Value::Map(fields));
-        }
-        body.insert(schema.name.into(), Value::Array(values));
+fn parcel_message(message: &ParcelProperties) -> Result<Option<ParcelNotice>, FetchError> {
+    let parcel = &message.parcel_data;
+    let result = parcel.request_result.ok_or(FetchError::Malformed)?;
+    if result == -1 {
+        return Ok(None);
     }
-    parcel_value(&Value::Map(body))
+    if !(0..=1).contains(&result) {
+        return Err(FetchError::Malformed);
+    }
+    let sequence = parcel.sequence_id.ok_or(FetchError::Malformed)?;
+    let parcel = parcel.local_id.and_then(ParcelLocalId::new).ok_or(FetchError::Malformed)?;
+    let version = message.parcel_environment_block.parcel_environment_version.unwrap_or(-2);
+    let overrides = message.parcel_environment_block.region_allow_environment_override.unwrap_or(true);
+    Ok(Some(ParcelNotice { parcel, sequence, version, overrides }))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::session::world::viewer_world_limits;
     use network::testing::simulator_id;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
     use url::Url;
+
+    use super::*;
+    use crate::session::world::viewer_world_limits;
 
     const RESPONSE: &str = r#"<llsd><map><key>environment</key><map>
     <key>region_id</key><uuid>00112233-4455-6677-8899-aabbccddeeff</uuid>

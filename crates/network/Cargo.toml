@@ -3,6 +3,7 @@ name = "network"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autobenches = false
 
 [lints]
 workspace = true
@@ -28,5 +29,5 @@ test-support.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
-name = "capabilities"
+name = "main"
 harness = false

@@ -300,6 +300,8 @@ fn uuid_field(fields: &BTreeMap<String, Value>, name: &'static str) -> Result<Uu
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     fn xml_response(fields: &[(&str, &str)]) -> String {
@@ -386,14 +388,15 @@ mod tests {
             ("message", "<string>Denied</string>"),
             ("reason", "<string>login</string>"),
         ]);
-        assert!(
-            matches!(Response::from_xml(&denied, 64).expect("decode rejection"), Response::Rejected { message, reason } if message == "Denied" && reason == "login")
+        assert_matches!(
+            Response::from_xml(&denied, 64).expect("decode rejection"),
+            Response::Rejected { message, reason } if message == "Denied" && reason == "login"
         );
         let mfa = xml_response(&[("reason", "<string>mfa_challenge</string>")]);
-        assert!(matches!(Response::from_xml(&mfa, 64).expect("decode MFA"), Response::MfaChallenge));
+        assert_matches!(Response::from_xml(&mfa, 64).expect("decode MFA"), Response::MfaChallenge);
         let fault = "<methodResponse><fault><value><struct><member><name>faultCode</name><value><int>7</int></value></member><member><name>faultString</name><value><string>private-fault</string></value></member></struct></value></fault></methodResponse>";
         let error = Response::from_xml(fault, 64).expect_err("XML-RPC fault");
-        assert!(matches!(&error, Error::Fault(value) if value.code() == 7 && value.string() == "private-fault"));
+        assert_matches!(&error, Error::Fault(value) if value.code() == 7 && value.string() == "private-fault");
         assert!(!format!("{error:?}").contains("private-fault"));
         assert_eq!(Response::from_xml("<broken>", 64).expect_err("malformed XML"), Error::InvalidXml);
         assert_eq!(

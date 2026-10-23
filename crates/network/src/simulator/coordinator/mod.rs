@@ -35,7 +35,7 @@ use super::{
 #[cfg(test)]
 use crate::event::send_failure_event;
 #[cfg(test)]
-use crate::test_support::SendGate;
+use crate::transport::SendGate;
 use crate::{
     AgentSession,
     capabilities::{CapabilityBudget, Client, EVENT_QUEUE_NAME, EventQueueExit, EventQueueRoleHandle},

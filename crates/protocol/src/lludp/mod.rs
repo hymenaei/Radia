@@ -1,6 +1,6 @@
 pub(crate) mod codec;
 pub(crate) mod error;
-mod message;
+pub(crate) mod message;
 mod packet;
 pub(crate) mod schema_message;
 pub(crate) mod types;

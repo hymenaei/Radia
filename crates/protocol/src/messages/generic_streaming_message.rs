@@ -1,6 +1,11 @@
 use crate::{
     LLUdpError,
-    lludp::codec::{Reader, Writer},
+    lludp::{
+        codec::{Reader, Writer},
+        message::{AllocationStrategy, TypedMessage},
+        types::MessageId,
+    },
+    schema::ids::GENERIC_STREAMING_MESSAGE,
 };
 
 pub const MAX_DATA_BYTES: usize = 7 * 1024;
@@ -9,6 +14,28 @@ pub const MAX_DATA_BYTES: usize = 7 * 1024;
 pub struct GenericStreamingMessage {
     pub method: u16,
     pub data: Vec<u8>,
+}
+
+impl TypedMessage for GenericStreamingMessage {
+    const ID: MessageId = GENERIC_STREAMING_MESSAGE;
+    const ALLOCATION: AllocationStrategy = AllocationStrategy::Specialized;
+    const INBOUND_ONLY: bool = false;
+
+    fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
+        self::decode(reader)
+    }
+
+    fn encode(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
+        self::encode(self, writer)
+    }
+
+    fn preflight_allocation_bound(payload: &[u8]) -> Result<usize, LLUdpError> {
+        crate::lludp::message::allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
+    }
+
+    fn retained_capacity_bytes(&self) -> usize {
+        crate::lludp::message::allocation::capacity_bytes(self.data.capacity(), std::mem::size_of::<u8>())
+    }
 }
 
 pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<GenericStreamingMessage, LLUdpError> {

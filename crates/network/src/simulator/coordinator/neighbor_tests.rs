@@ -1,11 +1,18 @@
-use super::*;
-use crate::event::EventReceiver;
-use crate::test_support::http::response;
-use crate::test_support::{
-    EventQueueTestServer, EventServerResponse, acknowledgement, crossed_region_events, hold_response, receive_message, receive_udp,
-    request_line, seed_response, simulator_events,
-};
+use std::net::SocketAddrV4;
+
 use ::test_support::{lludp::vectors, parse_hex_fixture};
+use llsd::{Map, Value, xml};
+use reqwest::Url;
+use uuid::Uuid;
+
+use super::*;
+use crate::{
+    event::EventReceiver,
+    test_support::{
+        http::{EventQueueTestServer, EventServerResponse, hold_response, request_line, response, seed_response},
+        simulator::{acknowledgement, receive_message, receive_udp},
+    },
+};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -801,4 +808,61 @@ async fn crossed_region_promotes_after_matching_movement() {
     assert!(primary_requests.len() >= 2, "primary event queue should receive its seed and poll requests");
     neighbor_seed_server.stop();
     let _ = neighbor_seed_server.finish();
+}
+
+fn simulator_events(ip: [u8; 4], port: u16, agent_id: Uuid, seed: &Url) -> String {
+    let simulator = Value::Map(Map::from([
+        ("Handle".to_owned(), Value::Binary(0x1000_0000_0000_1000_u64.to_be_bytes().to_vec().into())),
+        ("IP".to_owned(), Value::Binary(ip.to_vec().into())),
+        ("Port".to_owned(), Value::Integer(i32::from(port))),
+    ]));
+    let enable = Value::Map(Map::from([
+        ("message".to_owned(), Value::String("EnableSimulator".to_owned())),
+        ("body".to_owned(), Value::Map(Map::from([("SimulatorInfo".to_owned(), Value::Array(vec![simulator]))]))),
+    ]));
+    let establish = Value::Map(Map::from([
+        ("message".to_owned(), Value::String("EstablishAgentCommunication".to_owned())),
+        (
+            "body".to_owned(),
+            Value::Map(Map::from([
+                ("agent-id".to_owned(), Value::Uuid(agent_id)),
+                (
+                    "sim-ip-and-port".to_owned(),
+                    Value::String(format!("{}:{}", ip.iter().map(u8::to_string).collect::<Vec<_>>().join("."), port)),
+                ),
+                ("seed-capability".to_owned(), Value::String(seed.to_string())),
+            ])),
+        ),
+    ]));
+    let batch = Value::Map(Map::from([("id".to_owned(), Value::Integer(1)), ("events".to_owned(), Value::Array(vec![enable, establish]))]));
+    xml::to_string(&batch).expect("encode local LLSD event queue response")
+}
+
+fn crossed_region_events(agent_id: Uuid, session_id: Uuid, region_handle: u64, endpoint: SocketAddrV4, seed: &Url) -> String {
+    let crossed_region = Value::Map(Map::from([
+        ("message".to_owned(), Value::String("CrossedRegion".to_owned())),
+        (
+            "body".to_owned(),
+            Value::Map(Map::from([
+                (
+                    "AgentData".to_owned(),
+                    Value::Array(vec![Value::Map(Map::from([
+                        ("AgentID".to_owned(), Value::Uuid(agent_id)),
+                        ("SessionID".to_owned(), Value::Uuid(session_id)),
+                    ]))]),
+                ),
+                (
+                    "RegionData".to_owned(),
+                    Value::Array(vec![Value::Map(Map::from([
+                        ("RegionHandle".to_owned(), Value::Binary(region_handle.to_be_bytes().to_vec().into())),
+                        ("SimIP".to_owned(), Value::Binary(endpoint.ip().octets().to_vec().into())),
+                        ("SimPort".to_owned(), Value::Integer(i32::from(endpoint.port()))),
+                        ("SeedCapability".to_owned(), Value::String(seed.to_string())),
+                    ]))]),
+                ),
+            ])),
+        ),
+    ]));
+    let batch = Value::Map(Map::from([("id".to_owned(), Value::Integer(1)), ("events".to_owned(), Value::Array(vec![crossed_region]))]));
+    xml::to_string(&batch).expect("encode local CrossedRegion event")
 }

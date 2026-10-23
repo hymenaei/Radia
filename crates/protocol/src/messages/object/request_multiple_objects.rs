@@ -1,6 +1,14 @@
 use uuid::Uuid;
 
-use crate::{LLUdpError, lludp::codec::Reader};
+use crate::{
+    LLUdpError,
+    lludp::{
+        codec::{Reader, Writer},
+        message::{AllocationStrategy, TypedMessage},
+        types::MessageId,
+    },
+    schema::ids::REQUEST_MULTIPLE_OBJECTS,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestMultipleObjects {
@@ -42,6 +50,31 @@ impl CacheMissType {
             Self::CrcMismatch => 1,
             Self::Unknown(value) => value,
         }
+    }
+}
+
+impl TypedMessage for RequestMultipleObjects {
+    const ID: MessageId = REQUEST_MULTIPLE_OBJECTS;
+    const ALLOCATION: AllocationStrategy = AllocationStrategy::SchemaDerived;
+    const INBOUND_ONLY: bool = false;
+
+    fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
+        self::decode(reader)
+    }
+
+    fn encode(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
+        writer.uuid(self.agent_data.agent_id);
+        writer.uuid(self.agent_data.session_id);
+        writer.u8(u8::try_from(self.objects.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?);
+        for object in &self.objects {
+            writer.u8(object.cache_miss_type.to_wire());
+            writer.u32(object.local_id);
+        }
+        Ok(())
+    }
+
+    fn retained_capacity_bytes(&self) -> usize {
+        crate::lludp::message::allocation::capacity_bytes(self.objects.capacity(), std::mem::size_of::<ObjectRequest>())
     }
 }
 

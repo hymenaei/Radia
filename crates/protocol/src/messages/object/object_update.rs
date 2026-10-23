@@ -1,15 +1,20 @@
+use math::{Vec3, Vec4};
 use uuid::Uuid;
 
 use crate::{
     LLUdpError,
-    lludp::codec::{Reader, Writer},
+    lludp::{
+        codec::{Reader, Writer},
+        message::{AllocationStrategy, TypedMessage},
+        types::MessageId,
+    },
     messages::object::{
         ExtraParameter, ObjectMotion, ObjectSound, ObjectText, RegionData, add_preflight_capacity, decode_extra_parameters,
         encode_extra_parameters, preflight_capacity, rotation_from_vector3, skip_extra_parameters,
     },
+    schema::ids::OBJECT_UPDATE,
     types::ObjectShape,
 };
-use math::{Vec3, Vec4};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectUpdate {
@@ -50,6 +55,38 @@ pub struct ObjectData {
 struct DecodedMotion {
     motion: ObjectMotion,
     avatar_collision_plane: Option<Vec4>,
+}
+
+impl TypedMessage for ObjectUpdate {
+    const ID: MessageId = OBJECT_UPDATE;
+    const ALLOCATION: AllocationStrategy = AllocationStrategy::Specialized;
+    const INBOUND_ONLY: bool = true;
+
+    fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
+        self::decode(reader)
+    }
+
+    fn encode(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
+        self.region_data.encode(writer);
+        let count = u8::try_from(self.objects.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
+        writer.u8(count);
+        for object in &self.objects {
+            encode_fields(object, writer)?;
+        }
+        Ok(())
+    }
+
+    fn preflight_allocation_bound(payload: &[u8]) -> Result<usize, LLUdpError> {
+        crate::lludp::message::allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
+    }
+
+    fn retained_capacity_bytes(&self) -> usize {
+        let mut bytes = crate::lludp::message::allocation::capacity_bytes(self.objects.capacity(), std::mem::size_of::<ObjectData>());
+        for object in &self.objects {
+            crate::lludp::message::allocation::add_object_update_capacity(&mut bytes, object);
+        }
+        bytes
+    }
 }
 
 pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdate, LLUdpError> {

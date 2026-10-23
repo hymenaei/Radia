@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput};
 use llsd::Value;
 use network::capabilities::{CapabilityUrl, Client};
 use reqwest::Url;
@@ -19,6 +19,11 @@ use serde::Serialize;
 use tokio::runtime::Builder;
 
 const REQUESTED_CAPABILITIES: &[&str] = &["EventQueueGet", "FetchInventory2", "GetTexture"];
+
+pub fn bench(c: &mut Criterion) {
+    bench_seed_discovery(c);
+    bench_capability_post(c);
+}
 
 struct LoopbackServer {
     address: SocketAddr,
@@ -159,6 +164,3 @@ fn bench_capability_post(c: &mut Criterion) {
     });
     group.finish();
 }
-
-criterion_group!(benches, bench_seed_discovery, bench_capability_post);
-criterion_main!(benches);

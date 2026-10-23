@@ -6,8 +6,10 @@ use protocol::{
     BlockInstance, BlockValues, ChatType, FieldValue, SchemaMessage,
     lludp::{Message, MessageId, Packet},
     messages::{
-        AgentUpdate, ChatFromViewer, RegionHandshake, agent_update, chat_from_viewer,
-        region_handshake::{RegionInfo1, RegionInfo2, RegionInfo3, RegionInfo4},
+        AgentUpdate, ChatFromViewer, RegionHandshake,
+        agent::agent_update,
+        chat::chat_from_viewer,
+        region::region_handshake::{RegionInfo1, RegionInfo2, RegionInfo3, RegionInfo4},
     },
     schema::{self, ids::*},
 };

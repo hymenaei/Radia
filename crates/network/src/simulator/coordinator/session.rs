@@ -21,8 +21,8 @@ use protocol::{
     lludp::{Message, Packet},
     login::ResponseData,
     messages::{
-        ChatFromViewer, CompletePingCheck, LogoutRequest, PacketAck, PingId, chat_from_viewer, chat_from_viewer::ChatData, logout_request,
-        packet_ack::Packets,
+        ChatFromViewer, CompletePingCheck, LogoutRequest, PacketAck, PingId, agent::logout_request, chat::chat_from_viewer,
+        chat::chat_from_viewer::ChatData, circuit::packet_ack::Packets,
     },
 };
 use tokio::{

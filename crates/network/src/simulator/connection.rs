@@ -13,9 +13,11 @@ use protocol::{
     messages::{
         AgentThrottle, CompleteAgentMovement, CompletePingCheck, LogoutRequest, PingId, RegionHandshakeReply, ThrottleRates,
         UseCircuitCode,
-        agent_throttle::{AgentData, Throttle},
-        complete_agent_movement, logout_request, region_handshake_reply,
-        use_circuit_code::CircuitCode,
+        agent::agent_throttle::{AgentData, Throttle},
+        agent::complete_agent_movement,
+        agent::logout_request,
+        circuit::use_circuit_code::CircuitCode,
+        region::region_handshake_reply,
     },
     schema::ids::PACKET_ACK,
 };
@@ -2022,8 +2024,8 @@ mod tests {
         ChatType,
         lludp::{Message, Packet},
         messages::{
-            AgentMovementComplete, ChatFromViewer, CompletePingCheck, PacketAck, PingId, agent_movement_complete, chat_from_viewer,
-            packet_ack::Packets,
+            AgentMovementComplete, ChatFromViewer, CompletePingCheck, PacketAck, PingId, agent::agent_movement_complete,
+            chat::chat_from_viewer, circuit::packet_ack::Packets,
         },
     };
     use test_support::{lludp::vectors, parse_hex_fixture};

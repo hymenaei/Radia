@@ -7,23 +7,15 @@ pub const MAX_TEXTURE_FACES: usize = 45;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextureFace {
     pub texture_id: Uuid,
-
     pub color: [u8; 4],
-
     pub scale_s: f32,
     pub scale_t: f32,
-
     pub offset_s: f32,
     pub offset_t: f32,
-
     pub rotation: f32,
-
     pub bump_shiny_fullbright: u8,
-
     pub media_texgen: u8,
-
     pub glow: f32,
-
     pub material_id: Uuid,
 }
 

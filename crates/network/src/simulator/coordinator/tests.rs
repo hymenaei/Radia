@@ -37,10 +37,10 @@ use protocol::{
     messages::{
         AgentMovementComplete, CacheMissType, ChatFromViewer, CompletePingCheck, ObjectRequest, PacketAck, PingId, RequestAgentData,
         RequestMultipleObjects, StartPingCheck, TeleportCancel,
-        agent_movement_complete::{AgentData, Data, SimData},
-        chat_from_viewer,
-        chat_from_viewer::ChatData,
-        packet_ack::Packets,
+        agent::agent_movement_complete::{AgentData, Data, SimData},
+        chat::chat_from_viewer,
+        chat::chat_from_viewer::ChatData,
+        circuit::packet_ack::Packets,
     },
 };
 use tokio::{

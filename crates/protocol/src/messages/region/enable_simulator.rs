@@ -1,6 +1,5 @@
 use std::net::Ipv4Addr;
 
-/// Describes a simulator endpoint made available to the viewer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EnableSimulator {
     pub simulator_info: SimulatorInfo,

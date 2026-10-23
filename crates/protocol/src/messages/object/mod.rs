@@ -1,20 +1,47 @@
+pub mod improved_terse_object_update;
+pub mod kill_object;
+pub mod object_extra_params;
+pub mod object_update;
+pub mod object_update_cached;
+pub mod object_update_compressed;
+pub mod request_multiple_objects;
+
+pub use self::improved_terse_object_update::{ImprovedTerseObjectUpdate, ObjectBlock};
+pub use self::kill_object::KillObject;
+pub use self::object_extra_params::{ExtraParamUpdate, ObjectExtraParams};
+pub use self::object_update::{ObjectData, ObjectUpdate};
+pub use self::object_update_cached::{CachedObjectReference, ObjectUpdateCached};
+pub use self::object_update_compressed::{ObjectSpecificData, ObjectUpdateCompressed};
+pub use self::request_multiple_objects::{CacheMissType, ObjectRequest, RequestAgentData, RequestMultipleObjects};
+
+use std::mem::size_of;
+
+use math::{Quat, Vec3};
 use uuid::Uuid;
 
 use crate::{
     LLUdpError,
     lludp::codec::{Reader, Writer},
+    types::{TextureEntry, decode_texture_entry as decode_texture_entry_payload},
 };
-use math::{Quat, Vec3, Vec4};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PingId {
-    pub ping_id: u8,
-}
+pub const MAX_TEXTURE_ENTRY_BYTES: usize = 4095;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RegionData {
     pub region_handle: u64,
     pub time_dilation: u16,
+}
+
+impl RegionData {
+    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
+        Ok(Self { region_handle: reader.u64()?, time_dilation: reader.u16()? })
+    }
+
+    pub(crate) fn encode(self, writer: &mut Writer<'_>) {
+        writer.u64(self.region_handle);
+        writer.u16(self.time_dilation);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,17 +73,6 @@ pub struct ObjectSound {
     pub radius: f32,
 }
 
-impl RegionData {
-    pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
-        Ok(Self { region_handle: reader.u64()?, time_dilation: reader.u16()? })
-    }
-
-    pub(crate) fn encode(self, writer: &mut Writer<'_>) {
-        writer.u64(self.region_handle);
-        writer.u16(self.time_dilation);
-    }
-}
-
 pub(crate) fn rotation_from_vector3(value: Vec3) -> Quat {
     let remainder = 1.0 - value.length_squared();
     let w = if remainder > 0.0 { remainder.sqrt() } else { 0.0 };
@@ -66,42 +82,6 @@ pub(crate) fn rotation_from_vector3(value: Vec3) -> Quat {
 pub(crate) fn rotation_from_u16(values: [u16; 4]) -> Quat {
     let [x, y, z, w] = values.map(|value| decode_quantized(value, -1.0, 1.0));
     Quat::from_xyzw(x, y, z, w)
-}
-
-pub(crate) fn validate_vector3(value: Vec3) -> Result<(), LLUdpError> {
-    if value.x.is_finite() && value.y.is_finite() && value.z.is_finite() { Ok(()) } else { Err(LLUdpError::InvalidMessage) }
-}
-
-pub(crate) fn write_finite_vector3(writer: &mut Writer<'_>, value: Vec3) -> Result<(), LLUdpError> {
-    validate_vector3(value)?;
-    writer.vector3(value);
-    Ok(())
-}
-
-pub(crate) fn read_vector4(reader: &mut Reader<'_>) -> Result<Vec4, LLUdpError> {
-    Ok(Vec4::new(reader.f32()?, reader.f32()?, reader.f32()?, reader.f32()?))
-}
-
-pub(crate) fn write_finite_vector4(writer: &mut Writer<'_>, value: Vec4) -> Result<(), LLUdpError> {
-    if value.is_finite() {
-        writer.f32(value.x);
-        writer.f32(value.y);
-        writer.f32(value.z);
-        writer.f32(value.w);
-        Ok(())
-    } else {
-        Err(LLUdpError::InvalidMessage)
-    }
-}
-
-pub(crate) fn read_variable1<'a>(reader: &mut Reader<'a>) -> Result<&'a [u8], LLUdpError> {
-    let len = usize::from(reader.u8()?);
-    reader.take(len)
-}
-
-pub(crate) fn read_variable2<'a>(reader: &mut Reader<'a>) -> Result<&'a [u8], LLUdpError> {
-    let len = usize::from(reader.u16()?);
-    reader.take(len)
 }
 
 pub(crate) fn decode_extra_parameters(reader: &mut Reader<'_>) -> Result<Vec<ExtraParameter>, LLUdpError> {
@@ -139,18 +119,6 @@ pub(crate) fn encode_extra_parameters(parameters: &[ExtraParameter], writer: &mu
     Ok(())
 }
 
-pub(crate) fn write_variable1(writer: &mut Writer<'_>, value: &[u8]) -> Result<(), LLUdpError> {
-    writer.u8(u8::try_from(value.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?);
-    writer.bytes(value);
-    Ok(())
-}
-
-pub(crate) fn write_variable2(writer: &mut Writer<'_>, value: &[u8]) -> Result<(), LLUdpError> {
-    writer.u16(u16::try_from(value.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?);
-    writer.bytes(value);
-    Ok(())
-}
-
 pub(crate) fn decode_quantized(value: u16, lower: f32, upper: f32) -> f32 {
     let normalized = f32::from(value) * (1.0 / f32::from(u16::MAX));
     let delta = upper - lower;
@@ -165,6 +133,22 @@ pub(crate) fn encode_quantized(value: f32, lower: f32, upper: f32) -> Result<u16
     }
     let scaled = ((value - lower) / (upper - lower)) * f32::from(u16::MAX);
     Ok(scaled.round().clamp(0.0, f32::from(u16::MAX)) as u16)
+}
+
+pub(crate) fn preflight_capacity<T>(count: usize) -> Result<usize, LLUdpError> {
+    count.checked_mul(size_of::<T>()).ok_or(LLUdpError::AllocationBoundOverflow)
+}
+
+pub(crate) fn add_preflight_capacity<T>(total: &mut usize, count: usize) -> Result<(), LLUdpError> {
+    *total = total.checked_add(preflight_capacity::<T>(count)?).ok_or(LLUdpError::AllocationBoundOverflow)?;
+    Ok(())
+}
+
+pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpError> {
+    if bytes.len() > MAX_TEXTURE_ENTRY_BYTES {
+        return Err(LLUdpError::InvalidMessage);
+    }
+    decode_texture_entry_payload(bytes).map_err(|_| LLUdpError::InvalidMessage)
 }
 
 #[cfg(test)]

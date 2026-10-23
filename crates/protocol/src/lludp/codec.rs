@@ -1,55 +1,9 @@
-use std::str::from_utf8;
+use std::str;
 
+use math::{DVec3, Quat, Vec3, Vec4};
 use uuid::Uuid;
 
 use super::{error::LLUdpError, types::quaternion_from_xyz};
-use math::{DVec3, Quat, Vec3};
-
-fn canonical_quaternion_xyz(value: Quat) -> Result<[f32; 3], LLUdpError> {
-    let mut components = [f64::from(value.x), f64::from(value.y), f64::from(value.z), f64::from(value.w)];
-    if components.iter().any(|component| !component.is_finite()) {
-        return Err(LLUdpError::InvalidMessage);
-    }
-
-    let scale = components.iter().map(|component| component.abs()).fold(0.0, f64::max);
-    if scale == 0.0 {
-        return Err(LLUdpError::InvalidMessage);
-    }
-
-    for component in &mut components {
-        *component /= scale;
-    }
-    let length = components.iter().map(|component| component * component).sum::<f64>().sqrt();
-    for component in &mut components {
-        *component /= length;
-    }
-
-    let reverse = if components[3] == 0.0 {
-        components[..3].iter().find(|component| **component != 0.0).is_some_and(|component| *component < 0.0)
-    } else {
-        components[3] < 0.0
-    };
-    if reverse {
-        for component in &mut components {
-            *component = -*component;
-        }
-    }
-
-    let mut xyz = [components[0] as f32, components[1] as f32, components[2] as f32];
-    for component in &mut xyz {
-        if *component == 0.0 {
-            *component = 0.0;
-        }
-    }
-    Ok(xyz)
-}
-
-fn validate_ll_string(value: &str) -> Result<(), LLUdpError> {
-    if value.contains('\0') {
-        return Err(LLUdpError::InvalidMessage);
-    }
-    Ok(())
-}
 
 pub(crate) struct Writer<'a> {
     output: &'a mut Vec<u8>,
@@ -148,6 +102,37 @@ impl<'a> Writer<'a> {
         self.f32(value.x);
         self.f32(value.y);
         self.f32(value.z);
+    }
+
+    pub(crate) fn finite_vector3(&mut self, value: Vec3) -> Result<(), LLUdpError> {
+        if !value.is_finite() {
+            return Err(LLUdpError::InvalidMessage);
+        }
+        self.vector3(value);
+        Ok(())
+    }
+
+    pub(crate) fn finite_vector4(&mut self, value: Vec4) -> Result<(), LLUdpError> {
+        if !value.is_finite() {
+            return Err(LLUdpError::InvalidMessage);
+        }
+        self.f32(value.x);
+        self.f32(value.y);
+        self.f32(value.z);
+        self.f32(value.w);
+        Ok(())
+    }
+
+    pub(crate) fn variable1(&mut self, value: &[u8]) -> Result<(), LLUdpError> {
+        self.u8(u8::try_from(value.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?);
+        self.bytes(value);
+        Ok(())
+    }
+
+    pub(crate) fn variable2(&mut self, value: &[u8]) -> Result<(), LLUdpError> {
+        self.u16(u16::try_from(value.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?);
+        self.bytes(value);
+        Ok(())
     }
 
     pub(crate) fn vector3d(&mut self, value: DVec3) {
@@ -267,6 +252,20 @@ impl<'a> Reader<'a> {
         Ok(Vec3::new(self.f32()?, self.f32()?, self.f32()?))
     }
 
+    pub(crate) fn vector4(&mut self) -> Result<Vec4, LLUdpError> {
+        Ok(Vec4::new(self.f32()?, self.f32()?, self.f32()?, self.f32()?))
+    }
+
+    pub(crate) fn variable1(&mut self) -> Result<&'a [u8], LLUdpError> {
+        let length = usize::from(self.u8()?);
+        self.take(length)
+    }
+
+    pub(crate) fn variable2(&mut self) -> Result<&'a [u8], LLUdpError> {
+        let length = usize::from(self.u16()?);
+        self.take(length)
+    }
+
     pub(crate) fn vector3d(&mut self) -> Result<DVec3, LLUdpError> {
         Ok(DVec3::new(self.f64()?, self.f64()?, self.f64()?))
     }
@@ -276,28 +275,69 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn variable1_string(&mut self) -> Result<String, LLUdpError> {
-        let len = usize::from(self.u8()?);
-        let bytes = self.take(len)?;
-        decode_string(bytes)
+        decode_string(self.variable1()?)
     }
 
     pub(crate) fn variable2_string(&mut self) -> Result<String, LLUdpError> {
-        let bytes = self.take(2)?;
-        let len = usize::from(u16::from_le_bytes([bytes[0], bytes[1]]));
-        let bytes = self.take(len)?;
-        decode_string(bytes)
+        decode_string(self.variable2()?)
     }
+}
+
+fn canonical_quaternion_xyz(value: Quat) -> Result<[f32; 3], LLUdpError> {
+    let mut components = [f64::from(value.x), f64::from(value.y), f64::from(value.z), f64::from(value.w)];
+    if components.iter().any(|component| !component.is_finite()) {
+        return Err(LLUdpError::InvalidMessage);
+    }
+
+    let scale = components.iter().map(|component| component.abs()).fold(0.0, f64::max);
+    if scale == 0.0 {
+        return Err(LLUdpError::InvalidMessage);
+    }
+
+    for component in &mut components {
+        *component /= scale;
+    }
+    let length = components.iter().map(|component| component * component).sum::<f64>().sqrt();
+    for component in &mut components {
+        *component /= length;
+    }
+
+    let reverse = if components[3] == 0.0 {
+        components[..3].iter().find(|component| **component != 0.0).is_some_and(|component| *component < 0.0)
+    } else {
+        components[3] < 0.0
+    };
+    if reverse {
+        for component in &mut components {
+            *component = -*component;
+        }
+    }
+
+    let mut xyz = [components[0] as f32, components[1] as f32, components[2] as f32];
+    for component in &mut xyz {
+        if *component == 0.0 {
+            *component = 0.0;
+        }
+    }
+    Ok(xyz)
+}
+
+fn validate_ll_string(value: &str) -> Result<(), LLUdpError> {
+    if value.contains('\0') {
+        return Err(LLUdpError::InvalidMessage);
+    }
+    Ok(())
 }
 
 fn decode_string(bytes: &[u8]) -> Result<String, LLUdpError> {
     let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
-    from_utf8(&bytes[..end]).map(str::to_owned).map_err(|_| LLUdpError::InvalidUtf8)
+    str::from_utf8(&bytes[..end]).map(str::to_owned).map_err(|_| LLUdpError::InvalidUtf8)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::error::LLUdpError;
     use super::{Reader, Writer};
+    use crate::lludp::LLUdpError;
     use math::Quat;
 
     fn encode_quaternion(value: Quat) -> Result<Vec<u8>, LLUdpError> {

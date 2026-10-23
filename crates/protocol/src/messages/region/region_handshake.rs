@@ -18,13 +18,9 @@ pub struct RegionInfo1 {
     pub water_height: f32,
     pub billable_factor: f32,
     pub cache_id: Uuid,
-
     pub terrain_base: [Uuid; 4],
-
     pub terrain_detail: [Uuid; 4],
-
     pub terrain_start_heights: [f32; 4],
-
     pub terrain_height_ranges: [f32; 4],
 }
 

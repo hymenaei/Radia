@@ -3,13 +3,10 @@ use crate::{
     lludp::codec::{Reader, Writer},
 };
 
-/// Largest accepted `Data` payload, below the message's 8 KiB ceiling.
 pub const MAX_DATA_BYTES: usize = 7 * 1024;
 
-/// Streams method-tagged bytes to the viewer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GenericStreamingMessage {
-    /// Method number describing how to decode `data`.
     pub method: u16,
     pub data: Vec<u8>,
 }

@@ -25,7 +25,7 @@ use protocol::{
     messages::TeleportCancel,
     messages::{
         AgentMovementComplete,
-        agent_movement_complete::{AgentData, Data, SimData},
+        agent::agent_movement_complete::{AgentData, Data, SimData},
     },
 };
 use std::{collections::HashMap, future::pending, net::SocketAddr, num::NonZeroU64, time::Duration};

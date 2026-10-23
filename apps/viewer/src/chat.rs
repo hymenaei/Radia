@@ -11,7 +11,7 @@ use protocol::{
     ChatType,
     messages::{
         ChatFromViewer,
-        chat_from_viewer::{AgentData, ChatData},
+        chat::chat_from_viewer::{AgentData, ChatData},
     },
 };
 

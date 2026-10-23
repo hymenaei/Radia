@@ -1,3 +1,5 @@
+pub use dxr::{Fault, Value};
+
 use std::{
     collections::BTreeMap,
     error, fmt,
@@ -8,8 +10,6 @@ use dxr::{FaultResponse, MethodCall, MethodResponse};
 use md5::{Digest, Md5};
 use quick_xml::{Reader, events::Event};
 use uuid::Uuid;
-
-pub use dxr::{Fault, Value};
 
 const MAX_LOGIN_XML_ELEMENTS: usize = 262_144;
 
@@ -34,7 +34,6 @@ impl StartLocation {
 pub struct Request<'a> {
     pub first_name: &'a str,
     pub last_name: &'a str,
-
     pub password: &'a str,
     pub start: &'a StartLocation,
     pub channel: &'a str,
@@ -63,7 +62,7 @@ impl Request<'_> {
         for (name, value) in [
             ("first", self.first_name.to_owned()),
             ("last", self.last_name.to_owned()),
-            ("passwd", format!("$1${digest:x}")),
+            ("passwd", format!("$1${}", utils::hex_lower(&digest))),
             ("start", self.start.login_parameter()),
             ("channel", self.channel.to_owned()),
             ("version", self.version.to_owned()),
@@ -176,7 +175,7 @@ impl Response {
             agent_id: uuid_field(&fields, "agent_id")?,
             session_id: uuid_field(&fields, "session_id")?,
             circuit_code: integer_field(&fields, "circuit_code")?.try_into().map_err(|_| Error::InvalidField("circuit_code"))?,
-            seed_capability: string_field(&fields, "seed_capability").ok_or(Error::MissingField("seed_capability"))?,
+            seed_capability: required_string_field(&fields, "seed_capability")?.to_owned(),
             mfa_hash: string_field(&fields, "mfa_hash"),
             data: ResponseData::from_fields(fields),
         };
@@ -266,6 +265,14 @@ fn string_field(fields: &BTreeMap<String, Value>, name: &str) -> Option<String> 
     }
 }
 
+fn required_string_field<'a>(fields: &'a BTreeMap<String, Value>, name: &'static str) -> Result<&'a str, Error> {
+    match fields.get(name) {
+        Some(Value::String(value)) => Ok(value),
+        Some(_) => Err(Error::InvalidField(name)),
+        None => Err(Error::MissingField(name)),
+    }
+}
+
 fn ip_field(fields: &BTreeMap<String, Value>, name: &'static str) -> Result<IpAddr, Error> {
     match fields.get(name) {
         Some(Value::String(value)) => value.parse().map_err(|_| Error::InvalidField(name)),
@@ -282,13 +289,13 @@ fn integer_field(fields: &BTreeMap<String, Value>, name: &'static str) -> Result
         Some(Value::Integer(value)) => Ok(i64::from(*value)),
         Some(Value::Long(value)) => Ok(*value),
         Some(Value::String(value)) => value.parse().map_err(|_| Error::InvalidField(name)),
-        _ => Err(Error::MissingField(name)),
+        Some(_) => Err(Error::InvalidField(name)),
+        None => Err(Error::MissingField(name)),
     }
 }
 
 fn uuid_field(fields: &BTreeMap<String, Value>, name: &'static str) -> Result<Uuid, Error> {
-    let value = string_field(fields, name).ok_or(Error::MissingField(name))?;
-    Uuid::parse_str(&value).map_err(|_| Error::InvalidField(name))
+    Uuid::parse_str(required_string_field(fields, name)?).map_err(|_| Error::InvalidField(name))
 }
 
 #[cfg(test)]
@@ -425,6 +432,23 @@ mod tests {
     }
 
     #[test]
+    fn wrong_field_types_are_invalid() {
+        let original = success("<string>127.0.0.1</string>");
+        for (field, value) in [
+            ("sim_port", "<string>13000</string>"),
+            ("circuit_code", "<int>1</int>"),
+            ("agent_id", "<string>00112233-4455-6677-8899-aabbccddeeff</string>"),
+            ("seed_capability", "<string>https://example.test/seed</string>"),
+        ] {
+            let xml = original.replace(
+                &format!("<name>{field}</name><value>{value}</value>"),
+                &format!("<name>{field}</name><value><boolean>1</boolean></value>"),
+            );
+            assert_eq!(Response::from_xml(&xml, 64).expect_err("wrong field type"), Error::InvalidField(field), "{field}");
+        }
+    }
+
+    #[test]
     fn caller_depth_limit() {
         let shallow = xml_response(&[
             ("login", "<boolean>0</boolean>"),
@@ -443,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn xml_preflight_bounds_start_and_empty_elements() {
+    fn xml_preflight_counts_empty_elements() {
         assert_eq!(preflight_xml("<root><empty/><child></child></root>", 2, 3), Ok(()));
         assert_eq!(preflight_xml("<root><empty/><child></child></root>", 2, 2), Err(Error::ElementLimitExceeded));
         assert_eq!(preflight_xml("<root><empty/></root>", 1, 3), Err(Error::DepthExceeded));
@@ -451,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn response_rejects_excessive_element_count_before_decode() {
+    fn response_bounds_element_count() {
         let items = "<value><string>x</string></value>".repeat(MAX_LOGIN_XML_ELEMENTS / 2 + 1);
         let xml =
             format!("<methodResponse><params><param><value><array><data>{items}</data></array></value></param></params></methodResponse>");

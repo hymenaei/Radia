@@ -5,7 +5,7 @@ use protocol::{
     messages::{
         CacheMissType, CachedObjectReference, ExtraParameter, KillObject, ObjectData, ObjectMotion, ObjectRequest, ObjectSound,
         ObjectSpecificData, ObjectText, ObjectUpdate, ObjectUpdateCached, RegionData, RequestAgentData, RequestMultipleObjects,
-        improved_terse_object_update, kill_object,
+        object::improved_terse_object_update, object::kill_object,
     },
     types::ObjectShape,
 };

@@ -1,4 +1,3 @@
-/// Acknowledges packets received reliably.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PacketAck {
     pub packets: Vec<Packets>,

@@ -1,5 +1,3 @@
-//! Shared memory admission for simulator packets and retained events.
-
 use std::{
     mem::size_of,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -17,7 +15,7 @@ pub(super) const MAX_QUEUED_SIMULATOR_EVENT_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const MAX_QUEUED_NEIGHBOR_EVENT_BYTES: usize = 24 * 1024 * 1024;
 pub(super) const MAX_NEIGHBOR_CONNECTION_EVENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PACKET_RETENTION_PERMITS: usize = 3;
-/// Covers a maximum datagram decode plus PacketAck entries, trailing bytes, header and appended ACKs.
+
 pub(super) const MAX_PACKET_ACK_DECODE_BYTES: usize = 32 * 1024;
 
 pub(crate) struct EventRetention {
@@ -311,7 +309,7 @@ mod tests {
     use ::test_support::{lludp::vectors, parse_hex_fixture};
     use protocol::{
         lludp::{Message, MessageId, Packet},
-        messages::{PacketAck, packet_ack::Packets},
+        messages::{PacketAck, circuit::packet_ack::Packets},
     };
     use tokio::sync::mpsc;
 

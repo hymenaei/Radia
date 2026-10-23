@@ -1,17 +1,30 @@
-use std::mem::size_of;
-
 use uuid::Uuid;
 
 use crate::{
     LLUdpError,
     lludp::codec::{Reader, Writer},
-    messages::common::{
-        ExtraParameter, ObjectSound, ObjectText, RegionData, decode_extra_parameters, encode_extra_parameters, read_variable2,
-        rotation_from_vector3, skip_extra_parameters, write_finite_vector3, write_variable2,
+    messages::object::{
+        ExtraParameter, ObjectSound, ObjectText, RegionData, add_preflight_capacity, decode_extra_parameters, encode_extra_parameters,
+        preflight_capacity, rotation_from_vector3, skip_extra_parameters,
     },
-    types::{ObjectShape, TextureEntry, decode_texture_entry as decode_texture_entry_payload},
+    types::ObjectShape,
 };
 use math::{Quat, Vec3};
+
+const SPECIAL_HAS_SCRATCH_PAD: u32 = 0x001;
+const SPECIAL_HAS_TREE_DATA: u32 = 0x002;
+const SPECIAL_HAS_TEXT: u32 = 0x004;
+const SPECIAL_HAS_LEGACY_PARTICLE_SYSTEM: u32 = 0x008;
+const SPECIAL_HAS_SOUND: u32 = 0x010;
+const SPECIAL_HAS_PARENT: u32 = 0x020;
+const SPECIAL_HAS_TEXTURE_ANIMATION: u32 = 0x040;
+const SPECIAL_HAS_ANGULAR_VELOCITY: u32 = 0x080;
+const SPECIAL_HAS_NAME_VALUE: u32 = 0x100;
+const SPECIAL_HAS_MEDIA_URL: u32 = 0x200;
+const SPECIAL_HAS_PARTICLE_SYSTEM: u32 = 0x400;
+const SPECIAL_OBJECT_FIELDS: u32 = 0x7ff;
+const VOLUME_PCODE: u8 = 9;
+const LEGACY_PARTICLE_SYSTEM_SIZE: usize = 86;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectUpdateCompressed {
@@ -55,30 +68,6 @@ pub enum ObjectSpecificData {
     ScratchPad(Vec<u8>),
 }
 
-const SPECIAL_HAS_SCRATCH_PAD: u32 = 0x001;
-const SPECIAL_HAS_TREE_DATA: u32 = 0x002;
-const SPECIAL_HAS_TEXT: u32 = 0x004;
-const SPECIAL_HAS_LEGACY_PARTICLE_SYSTEM: u32 = 0x008;
-const SPECIAL_HAS_SOUND: u32 = 0x010;
-const SPECIAL_HAS_PARENT: u32 = 0x020;
-const SPECIAL_HAS_TEXTURE_ANIMATION: u32 = 0x040;
-const SPECIAL_HAS_ANGULAR_VELOCITY: u32 = 0x080;
-const SPECIAL_HAS_NAME_VALUE: u32 = 0x100;
-const SPECIAL_HAS_MEDIA_URL: u32 = 0x200;
-const SPECIAL_HAS_PARTICLE_SYSTEM: u32 = 0x400;
-const SPECIAL_OBJECT_FIELDS: u32 = 0x7ff;
-const VOLUME_PCODE: u8 = 9;
-const LEGACY_PARTICLE_SYSTEM_SIZE: usize = 86;
-
-pub const MAX_TEXTURE_ENTRY_BYTES: usize = 4095;
-
-pub fn decode_texture_entry(bytes: &[u8]) -> Result<Option<TextureEntry>, LLUdpError> {
-    if bytes.len() > MAX_TEXTURE_ENTRY_BYTES {
-        return Err(LLUdpError::InvalidMessage);
-    }
-    decode_texture_entry_payload(bytes).map_err(|_| LLUdpError::InvalidMessage)
-}
-
 pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdateCompressed, LLUdpError> {
     let region_data = RegionData::decode(reader)?;
     let count = reader.terminal_variable_count()?;
@@ -86,7 +75,7 @@ pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdateCompressed, 
 
     for _ in 0..count {
         let update_flags = reader.u32()?;
-        let packed_data = read_variable2(reader)?;
+        let packed_data = reader.variable2()?;
         let mut data = Reader::new(packed_data);
         let id = data.uuid()?;
         let local_id = data.u32()?;
@@ -190,7 +179,7 @@ pub(crate) fn preflight_allocation_bytes(payload: &[u8]) -> Result<usize, LLUdpE
 
     for _ in 0..count {
         reader.take(4)?;
-        let packed_data = read_variable2(&mut reader)?;
+        let packed_data = reader.variable2()?;
         let mut data = Reader::new(packed_data);
         data.take(16)?;
         data.take(4)?;
@@ -249,15 +238,6 @@ pub(crate) fn preflight_allocation_bytes(payload: &[u8]) -> Result<usize, LLUdpE
     Ok(allocation_bytes)
 }
 
-fn preflight_capacity<T>(count: usize) -> Result<usize, LLUdpError> {
-    count.checked_mul(size_of::<T>()).ok_or(LLUdpError::AllocationBoundOverflow)
-}
-
-fn add_preflight_capacity<T>(total: &mut usize, count: usize) -> Result<(), LLUdpError> {
-    *total = total.checked_add(preflight_capacity::<T>(count)?).ok_or(LLUdpError::AllocationBoundOverflow)?;
-    Ok(())
-}
-
 fn skip_c_string(reader: &mut Reader<'_>) -> Result<(), LLUdpError> {
     let len = reader.remaining().iter().position(|byte| *byte == 0).ok_or(LLUdpError::TruncatedPacket)?;
     reader.take(len.checked_add(1).ok_or(LLUdpError::AllocationBoundOverflow)?)?;
@@ -281,7 +261,7 @@ pub(crate) fn encode_fields(object: &ObjectData, writer: &mut Writer<'_>) -> Res
         encode_object_data(object, &mut data)?;
         data.finish().map_err(|_| LLUdpError::VariableFieldTooLong)?;
     }
-    write_variable2(writer, &packed_data)
+    writer.variable2(&packed_data)
 }
 
 fn encode_object_data(object: &ObjectData, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
@@ -321,15 +301,15 @@ fn encode_object_data(object: &ObjectData, writer: &mut Writer<'_>) -> Result<()
     writer.u32(object.crc);
     writer.u8(object.material);
     writer.u8(object.click_action);
-    write_finite_vector3(writer, object.scale)?;
-    write_finite_vector3(writer, object.position)?;
+    writer.finite_vector3(object.scale)?;
+    writer.finite_vector3(object.position)?;
     writer.quaternion_xyz(object.rotation)?;
 
     let special_code = special_code_for(object);
     writer.u32(special_code);
     writer.uuid(object.owner_id);
     if let Some(angular_velocity) = object.angular_velocity {
-        write_finite_vector3(writer, angular_velocity)?;
+        writer.finite_vector3(angular_velocity)?;
     }
     if special_code & SPECIAL_HAS_PARENT != 0 {
         writer.u32(object.parent_local_id);

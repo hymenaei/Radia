@@ -5,26 +5,20 @@ use uuid::Uuid;
 use crate::{
     LLUdpError,
     lludp::codec::{Reader, Writer},
-    messages::common::read_variable1,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectExtraParams {
     pub agent_id: Uuid,
-
     pub session_id: Uuid,
-
     pub object_data: Vec<ExtraParamUpdate>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtraParamUpdate {
     pub local_id: u32,
-
     pub parameter_type: u16,
-
     pub in_use: bool,
-
     pub data: Vec<u8>,
 }
 
@@ -39,7 +33,7 @@ pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectExtraParams, LLUdp
         let parameter_type = reader.u16()?;
         let in_use = reader.u8()? != 0;
         let parameter_size = reader.u32()?;
-        let data = read_variable1(reader)?;
+        let data = reader.variable1()?;
         if usize::try_from(parameter_size).ok() != Some(data.len()) {
             return Err(LLUdpError::InvalidMessage);
         }
@@ -77,7 +71,7 @@ pub(crate) fn preflight_allocation_bytes(payload: &[u8]) -> Result<usize, LLUdpE
     for _ in 0..count {
         reader.take(7)?;
         let parameter_size = reader.u32()?;
-        let data = read_variable1(&mut reader)?;
+        let data = reader.variable1()?;
         if usize::try_from(parameter_size).ok() != Some(data.len()) {
             return Err(LLUdpError::InvalidMessage);
         }

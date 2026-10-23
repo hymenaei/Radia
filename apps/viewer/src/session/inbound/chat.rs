@@ -1,5 +1,5 @@
 use network::AgentSession;
-use protocol::{Audible, ChatSourceType, ChatType, messages::chat_from_simulator::ChatData};
+use protocol::{Audible, ChatSourceType, ChatType, messages::chat::chat_from_simulator::ChatData};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ChatMessage {
@@ -31,7 +31,7 @@ pub(crate) fn format_avatar_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use math::Vec3;
-    use protocol::{Audible, ChatSourceType, ChatType, messages::chat_from_simulator::ChatData};
+    use protocol::{Audible, ChatSourceType, ChatType, messages::chat::chat_from_simulator::ChatData};
     use uuid::Uuid;
 
     use super::display_message;

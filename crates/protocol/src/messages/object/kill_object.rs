@@ -1,6 +1,5 @@
 use crate::{LLUdpError, lludp::codec::Reader};
 
-/// Simulator removal notification containing object IDs.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KillObject {
     pub object_data: Vec<ObjectData>,

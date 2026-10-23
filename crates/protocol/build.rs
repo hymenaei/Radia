@@ -1,5 +1,3 @@
-// The vendored template tracks https://github.com/secondlife/master-message-template/blob/d5445ef1ccb26864236653bbe91d6878bb2277fc/message_template.msg.
-// The local copy removes trailing whitespace and one final blank line.
 #[path = "build/mod.rs"]
 mod build;
 
@@ -15,7 +13,7 @@ fn main() {
 
     let source = fs::read_to_string("build/message_template.msg").expect("read vendored Second Life message template");
     let normalized_source = source.replace("\r\n", "\n").replace('\r', "\n");
-    let actual_hash = format!("{:x}", Sha256::digest(normalized_source.as_bytes()));
+    let actual_hash = utils::hex_lower(&Sha256::digest(normalized_source.as_bytes()));
     if actual_hash != PINNED_TEMPLATE_SHA256 {
         panic!(
             "vendored message template from upstream commit {PINNED_TEMPLATE_COMMIT} has normalized SHA-256 {actual_hash}, expected {PINNED_TEMPLATE_SHA256}; review the template and update its pin intentionally"

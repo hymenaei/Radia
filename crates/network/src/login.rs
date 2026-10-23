@@ -330,7 +330,7 @@ mod tests {
         Audible, ChatSourceType, ChatType,
         lludp::Message,
         login,
-        messages::{ChatFromSimulator, chat_from_simulator::ChatData},
+        messages::{ChatFromSimulator, chat::chat_from_simulator::ChatData},
     };
     use std::net::SocketAddr;
     use url::Url;

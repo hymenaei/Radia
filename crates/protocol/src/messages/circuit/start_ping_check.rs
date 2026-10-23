@@ -1,6 +1,5 @@
-use super::common::PingId;
+use super::PingId;
 
-/// Requests a circuit ping and reports the oldest unacknowledged packet.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StartPingCheck {
     pub ping_id: PingId,

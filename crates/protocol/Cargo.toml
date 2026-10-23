@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 uuid.workspace = true
+utils.workspace = true
 dxr = { workspace = true, features = ["i8"] }
 md-5.workspace = true
 quick-xml.workspace = true
@@ -17,6 +18,7 @@ tracing.workspace = true
 
 [build-dependencies]
 sha2.workspace = true
+utils.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

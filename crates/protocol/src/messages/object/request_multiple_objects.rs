@@ -23,9 +23,7 @@ pub struct ObjectRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheMissType {
     Full,
-
     CrcMismatch,
-
     Unknown(u8),
 }
 

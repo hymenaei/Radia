@@ -7,7 +7,6 @@ pub const MAX_RENDER_MATERIAL_BINDINGS: usize = MAX_TEXTURE_FACES;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderMaterialBinding {
     pub face_index: u8,
-
     pub material_id: Uuid,
 }
 

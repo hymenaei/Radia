@@ -1,10 +1,8 @@
-use crate::{LLUdpError, lludp::codec::Reader, messages::common::RegionData};
+use crate::{LLUdpError, lludp::codec::Reader, messages::object::RegionData};
 
-/// Cache keys advertised by the simulator for one region.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectUpdateCached {
     pub region_data: RegionData,
-    /// Cached object records in packet order.
     pub objects: Vec<CachedObjectReference>,
 }
 

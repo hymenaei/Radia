@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 uuid.workspace = true
+math.workspace = true
 utils.workspace = true
 llsd.workspace = true
 flate2.workspace = true
@@ -19,8 +20,8 @@ jpeg2k = { workspace = true, features = ["openjpeg-sys", "strict-mode"] }
 
 [dev-dependencies]
 criterion.workspace = true
-proptest.workspace = true
 test-support.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "texture"

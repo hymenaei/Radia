@@ -82,6 +82,14 @@ impl Drop for TextureInner {
 #[derive(Clone)]
 pub struct TextureHandle(Arc<TextureInner>);
 
+impl PartialEq for TextureHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for TextureHandle {}
+
 impl fmt::Debug for TextureHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TextureHandle").field("id", &self.id()).field("asset", &self.0.asset).field("info", &self.info()).finish()
@@ -215,13 +223,14 @@ impl TextureDecodeJob {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::time::Instant;
 
     use test_support::texture::{RGBA_J2C, RGBA_RAW};
     use uuid::Uuid;
 
     use super::*;
-    use crate::{Content, Kind, Priority, Request, Resource, Status, Store};
+    use crate::{Content, Kind, LoadJob, Priority, Request, Resource, Status, Store};
 
     fn loaded() -> (TextureHandle, Budget) {
         let budget = Budget::default();
@@ -230,10 +239,10 @@ mod tests {
         let now = Instant::now();
         let resource = Resource { id: AssetId::new(Uuid::from_u128(1)), kind: Kind::Texture };
         let demand = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
-        let mut job = store.next_job(now).unwrap();
-        assert!(store.try_start_decode(&mut job));
-        let result = job.prepare(RGBA_J2C.to_vec());
-        store.complete(job, result, now);
+        let LoadJob::Fetch(job) = store.next_job(now).unwrap() else { panic!("fresh texture request unexpectedly used cached source") };
+        let input = job.complete(Ok(RGBA_J2C.to_vec())).expect("fixture response fits");
+        let completion = store.start_decode(input).expect("decode admission").run();
+        store.complete(completion, now);
         let Status::Ready(Content::Texture(texture)) = demand.status() else { panic!("fixture must load") };
         (texture, budget)
     }
@@ -291,7 +300,7 @@ mod tests {
         drop(texture);
         assert!(!weak.is_alive(), "in-flight input retention does not retain the resource handle");
         assert!(budget.stats().charged_bytes > 0, "the running job still owns source bytes and scratch admission");
-        assert!(matches!(job.run(), Err(Failure::Cancelled)));
+        assert_matches!(job.run().err(), Some(Failure::Cancelled));
         assert_eq!(budget.stats().charged_bytes, 0);
     }
 
@@ -301,7 +310,7 @@ mod tests {
         let job = texture.decode_job().unwrap();
         let replacement = texture.image().unwrap();
         texture.install(replacement.clone(), None);
-        assert!(matches!(job.run(), Err(Failure::Cancelled)));
+        assert_matches!(job.run().err(), Some(Failure::Cancelled));
         assert_eq!(texture.image().unwrap().pixels().as_ptr(), replacement.pixels().as_ptr());
     }
 }

@@ -11,7 +11,7 @@ use world::{
     AttachmentPoint, CoordinateFrame, Entity, FieldUpdate, Kind,
     Kind::{Avatar, Object},
     LinearMotion, LocalAddress, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_REGION_PAGE_BYTES,
-    MediaEntry, ObjectDetailResult, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
+    MediaEntry, ObjectDetailResult, ObjectListItem, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
     OrderEvidence::Ordered,
     Parent, ParentUpdate,
     ParentUpdate::{Local, Root},
@@ -87,8 +87,6 @@ fn borrowed_queries_expose_current_state() {
     };
     assert!(matches!(world.patch_region(first, first_info.clone()).unwrap().outcome, world::RegionOutcome::Patched { .. }));
     assert_eq!(world.region(first), Some(&first_info));
-    assert_eq!(first.get(), 1);
-    assert_eq!(first_info.handle.unwrap().get(), (256_u64 << 32) | 512);
     assert_eq!(first_info.handle.unwrap().origin(), DVec3::new(256.0, 512.0, 0.0));
     assert_eq!(world.region(Region::new(99)), None);
 
@@ -119,18 +117,15 @@ fn borrowed_queries_expose_current_state() {
     assert_eq!(view.id(), uuid(20));
     assert_eq!(view.kind(), Object);
     assert_eq!(view.address(), LocalAddress::new(first, local_id(1)));
-    assert_eq!(view.address().local_id(), local_id(1));
     assert_eq!(view.parent(), Parent::Root);
     assert_eq!(view.position(), Some(Vec3::new(3.0, 4.0, 5.0)));
     assert_eq!(view.rotation(), Some(Quat::IDENTITY));
     assert_eq!(view.scale(), Some(Vec3::splat(2.0)));
-    assert_eq!(view.local_transform().unwrap().scale, Vec3::splat(2.0));
     assert_eq!(view.linear_motion(), LinearMotion { velocity: Some(Vec3::X), acceleration: Some(Vec3::Y) });
     assert_eq!(view.angular_velocity(), Some(Vec3::Z));
     assert_eq!(view.shape(), None);
     assert_eq!(view.appearance(), None);
     assert_eq!(view.attachment_point(), NonZeroU8::new(7).map(AttachmentPoint::new));
-    assert_eq!(view.attachment_point().unwrap().get(), 7);
     assert_eq!(view.sit_target(), None);
     assert_eq!(view.properties().owner_id, None);
     assert_eq!(view.coordinate_frame().unwrap(), CoordinateFrame::RegionRelative { region: first });
@@ -223,7 +218,7 @@ fn sparse_avatar_queries_fit_small_work_budgets() {
 }
 
 #[test]
-fn object_page_skips_insert_behind_cursor() {
+fn list_page_skips_insert_behind_cursor() {
     let region = Region::new(5);
     let mut limits = world_limits();
     limits.max_entities = 4;
@@ -234,13 +229,13 @@ fn object_page_skips_insert_behind_cursor() {
     entity(world.observe_object(object(region, 2, 20, 2, Object, Root)).unwrap());
     let barrier = world.read_barrier();
 
-    let first = world.object_page(None, 1).unwrap();
+    let first = world.object_list_page(None, 1).unwrap();
     assert_eq!(first.hydration_revision, barrier.revision);
     assert_eq!(first.objects.iter().map(|item| item.id).collect::<Vec<_>>(), [uuid(10)]);
     let cursor = first.next.expect("second object remains");
 
     let inserted = entity(world.observe_object(object(region, 3, 5, 3, Object, Root)).unwrap());
-    let second = world.object_page(Some(cursor), 1).unwrap();
+    let second = world.object_list_page(Some(cursor), 1).unwrap();
 
     assert_eq!(second.objects.iter().map(|item| item.id).collect::<Vec<_>>(), [uuid(20)]);
     assert_eq!(second.next, None);
@@ -263,14 +258,10 @@ fn list_pages_return_identity() {
     let entity = entity(world.observe_object(child).unwrap());
 
     let page = world.object_list_page(None, 1).unwrap();
-    let item = world.object_list_item(entity).unwrap();
 
-    assert_eq!(page.hydration_revision, item.hydration_revision);
-    assert_eq!(page.objects, [item.item]);
-    assert_eq!(item.item.id, uuid(190));
-    assert_eq!(item.item.kind, Object);
-    assert_eq!(item.item.address, LocalAddress::new(region, local_id(1)));
-    assert_eq!(world.object_summary(entity).unwrap().summary.pose, Ok(PoseState::Unresolved(UnresolvedReason::PendingParent)));
+    assert_eq!(page.hydration_revision, world.revision());
+    assert_eq!(page.objects, [ObjectListItem { entity, id: uuid(190), kind: Object, address: LocalAddress::new(region, local_id(1)) }]);
+    assert_eq!(world.object(entity).unwrap().world_pose(), Ok(PoseState::Unresolved(UnresolvedReason::PendingParent)));
 }
 
 #[test]
@@ -418,7 +409,7 @@ fn summaries_follow_parent_and_region_pose_changes() {
     child.pose = Some(Pose { position: Some(Vec3::new(2.0, 3.0, 4.0)), rotation: None });
     let child = entity(world.observe_object(child).unwrap());
 
-    let summary = world.object_summary(child).unwrap().summary;
+    let summary = world.object_detail(child).unwrap().summary;
 
     assert_eq!(summary.parent, Parent::Resolved(parent));
     assert_eq!(summary.local_transform.position(), Some(Vec3::new(2.0, 3.0, 4.0)));
@@ -432,14 +423,14 @@ fn summaries_follow_parent_and_region_pose_changes() {
         pose: Some(Pose { position: None, rotation: Some(Quat::IDENTITY) }),
         ..ObjectPatch::new(source(region, 4), local_id(2))
     }));
-    assert_eq!(world.object_summary(child).unwrap().summary.pose, Ok(PoseState::Unresolved(UnresolvedReason::MissingRegionOrigin)));
+    assert_eq!(world.object(child).unwrap().world_pose(), Ok(PoseState::Unresolved(UnresolvedReason::MissingRegionOrigin)));
     let barrier = world.read_barrier();
     apply_ok(world.patch_region(region, RegionInfo { origin: Some(DVec3::new(256.0, 512.0, 0.0)), ..RegionInfo::default() }));
     let page = world.change_page(barrier.changes, 1).unwrap();
     assert!(matches!(page.records[0].change, WorldChange::RegionUpdated(updated) if updated == region));
     assert_eq!(page.completed_revision, world.revision());
     let expected = WorldPose { position: DVec3::new(259.0, 515.0, 4.0), rotation: Quat::IDENTITY };
-    assert_eq!(world.object_summary(child).unwrap().summary.pose, Ok(PoseState::Resolved(expected)));
+    assert_eq!(world.object(child).unwrap().world_pose(), Ok(PoseState::Resolved(expected)));
 
     let barrier = world.read_barrier();
     apply_ok(world.patch_object(ObjectPatch {
@@ -630,20 +621,17 @@ fn foreign_handles_and_zero_limits_are_rejected() {
     assert!(matches!(second.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
     let selected = entity(first.observe_object(object(region, 1, 90, 1, Object, Root)).unwrap());
     entity(first.observe_object(object(region, 2, 91, 2, Object, Root)).unwrap());
-    let cursor = first.object_page(None, 1).unwrap().next.expect("second object remains");
     let list_cursor = first.object_list_page(None, 1).unwrap().next.expect("second list item remains");
     let barrier = first.read_barrier();
 
-    assert_eq!(second.object_page(Some(cursor), 1), Err(WorldReadError::StaleSession));
     assert_eq!(second.object_list_page(Some(list_cursor), 1), Err(WorldReadError::StaleSession));
-    assert_eq!(second.object_list_item(selected), Err(WorldReadError::StaleSession));
     assert_eq!(second.object_detail(selected), Err(WorldReadError::StaleSession));
     assert_eq!(second.object_media(selected), Err(WorldReadError::StaleSession));
     assert_eq!(second.object_detail_batch(&[selected]), Err(WorldReadError::StaleSession));
     assert_eq!(first.object_detail_batch(&[]), Err(WorldReadError::InvalidLimit));
     assert_eq!(first.object_detail_batch(&[selected; MAX_OBJECT_DETAIL_BATCH_ITEMS + 1]), Err(WorldReadError::InvalidLimit));
     assert_eq!(second.change_page(barrier.changes, 1), Err(WorldReadError::StaleSession));
-    assert_eq!(first.object_page(None, 0), Err(WorldReadError::InvalidLimit));
+    assert_eq!(first.object_list_page(None, 0), Err(WorldReadError::InvalidLimit));
     assert_eq!(first.change_page(barrier.changes, 0), Err(WorldReadError::InvalidLimit));
 }
 
@@ -664,7 +652,6 @@ fn region_pages_follow_active_regions() {
     let page = world.region_page(Some(cursor), 1).unwrap();
     assert_eq!(page.regions.iter().map(|summary| summary.region).collect::<Vec<_>>(), [second]);
     assert_eq!(page.next, None);
-    assert_eq!(world.region_summary(second).unwrap().unwrap().summary.region, second);
 }
 
 #[test]
@@ -681,7 +668,6 @@ fn region_page_rejects_a_large_name() {
     ));
 
     assert_eq!(world.region_page(None, 1), Err(WorldReadError::TooLarge));
-    assert_eq!(world.region_summary(region), Err(WorldReadError::TooLarge));
 }
 
 #[test]

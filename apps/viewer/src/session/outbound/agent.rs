@@ -1,6 +1,6 @@
 use math::{DVec3, Quat, Vec3};
 use protocol::messages::{AgentMovementComplete, AgentUpdate, agent::agent_update::AgentData};
-use scene::Camera;
+use render::scene::Camera;
 use uuid::Uuid;
 
 use crate::DEFAULT_DRAW_DISTANCE;

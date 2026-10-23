@@ -1,6 +1,7 @@
-use math::normal_matrix;
+use math::{normal_matrix, DVec3, Frustum, Mat4, Vec3};
 
-use super::{Camera, DVec3, FaceParams, Frustum, INSTANCE_BYTES, Instance, Mat4, TRANSFORM_BYTES, Vec3};
+use super::{Instance, TRANSFORM_BYTES};
+use crate::{material::FaceParams, pipeline::INSTANCE_BYTES, scene::Camera};
 
 pub(super) fn model(instance: &Instance, origin: DVec3) -> Mat4 {
     Mat4::from_scale_rotation_translation(instance.scale, instance.rotation, (instance.position - origin).as_vec3())
@@ -65,7 +66,7 @@ mod tests {
         assert_eq!(
             attributes,
             [0.125, 0.25, 0.5, 0.75, 2.0, 3.0, 4.0, 0.0, 5.0, 6.0, 7.0, 0.0, 1.0, 2.0, 0.7, 1.0, 8.0, 9.0, 10.0, 0.0],
-            "studio shader locations 10 through 14 consume five vec4 attributes"
+            "surface shader locations 10 through 14 consume five vec4 attributes"
         );
         assert_eq!(bytes.len(), 192, "GPU instance stride");
     }

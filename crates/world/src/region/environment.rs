@@ -2,7 +2,7 @@ use std::{fmt, sync::Arc};
 
 use utils::AssetId;
 
-use crate::{ApplyError, Region, RegionApplied, RegionOutcome, UpdateSource, WorldRevision, identity::WorldId, update::FieldStamp};
+use crate::{ApplyError, Region, RegionApplied, UpdateSource, WorldRevision, identity::WorldId, update::FieldStamp};
 use crate::{World, WorldChange, newer_field};
 
 pub const MAX_ENVIRONMENT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
@@ -177,15 +177,15 @@ impl World {
     pub fn observe_agent_parcel(&mut self, source: UpdateSource, parcel: Option<ParcelLocalId>) -> Result<RegionApplied, ApplyError> {
         let region = source.region();
         self.require_active_region(region)?;
-        let Some(stamp) = source.stamp() else { return Ok(unchanged()) };
+        let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
         let environment = &self.regions[&region].environment;
         if !newer_field(fence, environment.parcel_fence) {
-            return Ok(unchanged());
+            return Ok(RegionApplied::unchanged());
         }
         if environment.selected_parcel.map(|(parcel, _)| parcel) == parcel {
             self.regions.get_mut(&region).expect("active region").environment.parcel_fence = Some(fence);
-            return Ok(unchanged());
+            return Ok(RegionApplied::unchanged());
         }
         self.ensure_revision_available()?;
         let revision = WorldRevision(self.revision().get() + 1);
@@ -194,8 +194,7 @@ impl World {
         environment.parcel = None;
         environment.selected_parcel = parcel.map(|parcel| (parcel, revision));
         environment.parcel_fence = Some(fence);
-        let revision = self.publish_changes(vec![WorldChange::EnvironmentUpdated(region)]).expect("parcel selection changed");
-        Ok(RegionApplied { outcome: RegionOutcome::Patched { revision }, recovery_cancellations: Vec::new() })
+        Ok(self.publish_region_patch(WorldChange::EnvironmentUpdated(region)))
     }
 
     pub fn observe_environment(
@@ -205,23 +204,23 @@ impl World {
         assignment: EnvironmentAssignment,
     ) -> Result<RegionApplied, ApplyError> {
         if target.world != self.id || self.environment_target(target.region, target.scope) != Some(target) {
-            return Ok(unchanged());
+            return Ok(RegionApplied::unchanged());
         }
         if source.region() != target.region {
             return Err(ApplyError::InvalidValue { field: "environment_region" });
         }
         assignment.validate()?;
-        let Some(stamp) = source.stamp() else { return Ok(unchanged()) };
+        let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
         let current = self.regions[&target.region].environment.assignment(target.scope);
         if !newer_field(fence, current.as_ref().map(|current| current.fence)) {
-            return Ok(unchanged());
+            return Ok(RegionApplied::unchanged());
         }
         if let Some(current) = current
             && let (Some(incoming), Some(previous)) = (assignment.version, current.assignment.version)
             && (incoming < previous || (incoming == previous && assignment != current.assignment))
         {
-            return Ok(unchanged());
+            return Ok(RegionApplied::unchanged());
         }
         let same = current.as_ref().is_some_and(|current| current.assignment == assignment);
         let bytes =
@@ -240,10 +239,9 @@ impl World {
         *slot = Some(Observed { assignment, fence });
         self.environment_bytes = bytes;
         if same {
-            return Ok(unchanged());
+            return Ok(RegionApplied::unchanged());
         }
-        let revision = self.publish_changes(vec![WorldChange::EnvironmentUpdated(target.region)]).expect("environment changed");
-        Ok(RegionApplied { outcome: RegionOutcome::Patched { revision }, recovery_cancellations: Vec::new() })
+        Ok(self.publish_region_patch(WorldChange::EnvironmentUpdated(target.region)))
     }
 }
 
@@ -252,8 +250,4 @@ fn assignment_bytes(assignment: &EnvironmentAssignment) -> usize {
         EnvironmentSource::Inline(bytes) => bytes.len() + 2 * size_of::<usize>(),
         EnvironmentSource::Inherit | EnvironmentSource::Asset(_) => 0,
     }
-}
-
-fn unchanged() -> RegionApplied {
-    RegionApplied { outcome: RegionOutcome::Unchanged, recovery_cancellations: Vec::new() }
 }

@@ -1,16 +1,14 @@
 use std::{num::NonZeroU32, time::Instant};
 
+use super::Effects;
 use crate::UpdateAuthority::Untracked;
-use crate::history::{
-    WorldChange::{EntityRemoved, EntityUpdated},
-    WorldChangeClasses,
-};
+use crate::history::WorldChange::EntityRemoved;
 use crate::update::{FieldStamp, Stamp};
 use crate::{
-    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, ObjectMedia, Parent, PoseState, Recovery, Region,
-    UpdateAuthority, UpdateSource,
+    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, ObjectMedia, Parent, PoseState, Region, UpdateAuthority,
+    UpdateSource,
 };
-use crate::{RecentBatch, RecentObject, World, WorldChange, WorldEntityRemovalReason, newer_field};
+use crate::{RecentObject, World, WorldEntityRemovalReason, newer_field};
 
 #[derive(Clone, Copy)]
 pub(super) enum RemovalCause {
@@ -27,6 +25,7 @@ impl RemovalCause {
             Self::RegionRetired => None,
         }
     }
+
     fn reason(self) -> WorldEntityRemovalReason {
         match self {
             Self::Killed(_) => WorldEntityRemovalReason::Killed,
@@ -35,6 +34,7 @@ impl RemovalCause {
             Self::RegionRetired => WorldEntityRemovalReason::RegionRetired,
         }
     }
+
     fn tombstone_stamp(self) -> Option<Stamp> {
         match self {
             Self::Killed(stamp) | Self::ParentCascade(stamp) => Some(stamp),
@@ -50,75 +50,39 @@ impl World {
             return Ok(Applied::unchanged());
         }
         let address = LocalAddress::new(source.region, local_id);
-        if self.entity_at(address).is_some_and(|entity| self.store.record(entity).is_some_and(|record| self.self_agent == Some(record.id)))
-        {
+        let live = self.entity_at(address).map(|entity| {
+            let record = self.store.record(entity).expect("address index contains a live entity");
+            (entity, record.id, record.state.binding.fence())
+        });
+        if live.is_some_and(|(_, id, _)| self.self_agent == Some(id)) {
             return Ok(Applied::unchanged());
         }
         let Some(stamp) = source.stamp() else {
-            return Ok(Applied::deferred(
-                DeferredReason::AmbiguousOrder,
-                Recovery::from_targets(vec![address], self.limits.max_recovery_targets),
-            ));
+            return Ok(self.defer(DeferredReason::AmbiguousOrder, address));
         };
-        if let Some(entity) = self.entity_at(address) {
-            let (id, binding_fence) = {
-                let record = self.store.record(entity).expect("address index contains a live entity");
-                (record.id, record.state.binding.fence())
-            };
+        if let Some((entity, id, binding_fence)) = live {
             if stamp <= binding_fence {
                 return Ok(Applied::unchanged());
             }
             self.ensure_revision_available()?;
-            let mut changes = Vec::new();
-            let mut recovery_targets = Vec::new();
-            let mut recovery_cancellations = Vec::new();
-            let mut recent = RecentBatch::default();
-            self.remove_entity(
-                entity,
-                RemovalCause::Killed(stamp),
-                None,
-                &mut changes,
-                &mut recovery_targets,
-                &mut recovery_cancellations,
-                &mut recent,
-            );
-            self.recent.apply_batch(recent);
-            return Ok(self
-                .finish_mutation(
-                    ApplyOutcome::Removed(id),
-                    changes,
-                    Recovery::from_targets(recovery_targets, self.limits.max_recovery_targets),
-                )
-                .with_recovery_cancellations(recovery_cancellations));
+            let mut effects = Effects::default();
+            self.remove_entity(entity, RemovalCause::Killed(stamp), None, &mut effects);
+            return Ok(self.finish(ApplyOutcome::Removed(id), effects));
         }
         if let Some(tombstone) = self.tombstones.get(&address) {
             if stamp <= *tombstone {
                 return Ok(Applied::unchanged());
             }
         } else if self.floors.get(&source.region).is_some_and(|floor| stamp <= *floor) {
-            return Ok(Applied::deferred(
-                DeferredReason::AmbiguousOrder,
-                Recovery::from_targets(vec![address], self.limits.max_recovery_targets),
-            ));
+            return Ok(self.defer(DeferredReason::AmbiguousOrder, address));
         }
-        if !self.tombstone_would_change(address, stamp) {
-            return Ok(Applied::unchanged());
-        }
-        if self.insert_tombstone(address, stamp) {
-            return Ok(self.finish_mutation(ApplyOutcome::TombstoneRecorded(address), Vec::new(), Recovery::default()));
+        if self.tombstone_would_change(address, stamp) && self.insert_tombstone(address, stamp) {
+            return Ok(Applied::new(ApplyOutcome::TombstoneRecorded(address)));
         }
         Ok(Applied::unchanged())
     }
-    pub(super) fn remove_entity(
-        &mut self,
-        entity: Entity,
-        cause: RemovalCause,
-        preserve_child: Option<Entity>,
-        changes: &mut Vec<WorldChange>,
-        recovery_targets: &mut Vec<LocalAddress>,
-        recovery_cancellations: &mut Vec<LocalAddress>,
-        recent_batch: &mut RecentBatch,
-    ) {
+
+    pub(super) fn remove_entity(&mut self, entity: Entity, cause: RemovalCause, preserve_child: Option<Entity>, effects: &mut Effects) {
         let mut first = Some((entity, cause, false));
         let mut pending = Vec::new();
         while let Some((entity, cause, expanded)) = first.take().or_else(|| pending.pop()) {
@@ -149,7 +113,7 @@ impl World {
                 })
                 .expect("removal traversal contains only live entities");
             if let Some(recent) = recent {
-                recent_batch.push(recent, Instant::now());
+                effects.recent.push(recent, Instant::now());
             }
             let children = if expanded { None } else { self.children.remove(&entity) };
             if expanded || children.as_ref().is_none_or(|children| children.is_empty()) {
@@ -159,8 +123,8 @@ impl World {
                 if let Some(stamp) = cause.tombstone_stamp() {
                     self.insert_tombstone(address, stamp);
                 }
-                changes.push(EntityRemoved { id, entity, address, reason });
-                recovery_cancellations.push(address);
+                effects.changes.push(EntityRemoved { id, entity, address, reason });
+                effects.recovery_cancellations.push(address);
                 continue;
             }
             let children = children.expect("an unexpanded parent has children");
@@ -186,17 +150,13 @@ impl World {
                 } else {
                     self.set_parent(child, Parent::Pending { address, expected_uuid: Some(id) });
                     self.advance_parent_fence(child, invalidation, address.region);
-                    recovery_targets.push(child_address);
-                    changes.push(EntityUpdated {
-                        id: child_id,
-                        entity: child,
-                        classes: WorldChangeClasses::RELATIONSHIP | WorldChangeClasses::POSE,
-                    });
-                    self.invalidate_subtree(child, changes);
+                    effects.recovery_targets.push(child_address);
+                    self.relink_changed(child, child_id, effects);
                 }
             }
         }
     }
+
     fn advance_parent_fence(&mut self, child: Entity, invalidation: Option<Stamp>, invalidation_region: Region) {
         let Some(stamp) = invalidation
             .filter(|_| self.store.record(child).is_some_and(|record| record.state.binding.address.region == invalidation_region))

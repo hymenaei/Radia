@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use network::SimulatorId;
 use uuid::Uuid;
 use world::{
-    AgentHandoff, Appearance, Applied, ApplyError,
+    Appearance, Applied, ApplyError,
     ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded},
     EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, MAX_QUERY_STATE_MAINTENANCE_WORK,
     ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, ParcelLocalId, Region, RegionApplied, RegionHandle, RegionInfo,
@@ -235,7 +235,7 @@ impl SessionWorld {
 
     pub(super) fn maintain_query_state(&mut self) -> bool {
         match self.world.maintain_query_state(QUERY_STATE_MAINTENANCE_WORK_PER_QUANTUM) {
-            Ok(progress) => progress.has_dirty_pressure,
+            Ok(progress) => progress.dirty_scopes > 0,
             Err(error) => {
                 tracing::warn!(?error, "could not maintain World query state");
                 false
@@ -534,16 +534,7 @@ impl SessionWorld {
             return (true, None);
         }
         let Some(from) = self.region_for(from_simulator).filter(|region| *region == current_region) else { return (false, None) };
-        let handoff = AgentHandoff {
-            source: observation.source,
-            local_id: observation.local_id,
-            parent: observation.parent,
-            pose: observation.pose,
-            linear_motion: observation.linear_motion,
-            angular_velocity: observation.angular_velocity,
-            scale: observation.scale,
-        };
-        let applied = match self.world.handoff_agent(from, handoff) {
+        let applied = match self.world.handoff_agent(from, observation) {
             Ok(applied) => applied,
             Err(error) => {
                 tracing::debug!(?error, "agent region handoff is waiting for valid source state");
@@ -593,16 +584,6 @@ fn apply_operation(world: &mut World, operation: ObjectOperation) -> Result<Appl
     match operation {
         ObjectOperation::Observe(observation) => world.observe_object(observation),
         ObjectOperation::Patch(patch) => world.patch_object(patch),
-        ObjectOperation::RenderMaterialsPatch(mut patch) => {
-            let address = LocalAddress::new(patch.source.region(), patch.local_id);
-            let allows_render_materials = world.entity_at(address).is_none_or(|entity| {
-                world.object(entity).is_some_and(|object| object.kind() == Kind::Object && object.appearance() == Some(Appearance::Surface))
-            });
-            if !allows_render_materials {
-                patch.render_materials = None;
-            }
-            world.patch_object(patch)
-        }
         ObjectOperation::Remove { source, local_id } => world.remove_object(source, local_id),
         ObjectOperation::Cached { .. } => unreachable!("cached operations are recovery intents"),
     }
@@ -641,8 +622,8 @@ mod tests {
     use uuid::Uuid;
     use world::{
         Appearance, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FieldUpdate, Kind, LocalAddress,
-        MAX_AVATAR_TEXTURE_SLOTS, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, Parent, ParentUpdate, Pose,
-        Region, RegionHandle, RegionInfo, RenderMaterials, Shape, UpdateSource,
+        MAX_AVATAR_TEXTURE_SLOTS, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, Parent, ParentUpdate,
+        PbrMaterialAssignments, Pose, Region, RegionHandle, RegionInfo, Shape, UpdateSource,
     };
 
     use crate::session::inbound::{AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation};
@@ -941,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn render_materials_require_volume_and_region() {
+    fn pbr_assignments_preserve_partial_region_state() {
         let first_simulator = simulator_id();
         let second_simulator = simulator_id();
         let mut session = SessionWorld::new(viewer_world_limits());
@@ -949,19 +930,19 @@ mod tests {
         let second_region = session.register_simulator(second_simulator, None).expect("register second simulator");
         let local_id = NonZeroU32::new(7).expect("nonzero local ID");
 
-        let non_volume = observation(first_region, 1, 0x701, local_id, ParentUpdate::Root);
-        apply_one(&mut session, first_simulator, first_region, ObjectOperation::Observe(non_volume));
+        let partial = observation(first_region, 1, 0x701, local_id, ParentUpdate::Root);
+        apply_one(&mut session, first_simulator, first_region, ObjectOperation::Observe(partial));
 
         let mut volume = observation(second_region, 1, 0x702, local_id, ParentUpdate::Root);
         volume.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
         volume.appearance = FieldUpdate::Set(Appearance::Surface);
-        volume.render_materials = Some(RenderMaterials::new(vec![(0, AssetId::new(Uuid::from_u128(0x720)))]).unwrap());
+        volume.pbr_materials = Some(PbrMaterialAssignments::new(vec![(0, AssetId::new(Uuid::from_u128(0x720)))]).unwrap());
         apply_one(&mut session, second_simulator, second_region, ObjectOperation::Observe(volume));
 
         let incremental_patch = |region, order, material_id| {
             let mut patch = ObjectPatch::new(UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0), local_id);
-            patch.render_materials = Some(RenderMaterials::new(vec![(0, AssetId::new(Uuid::from_u128(material_id)))]).unwrap());
-            ObjectOperation::RenderMaterialsPatch(patch)
+            patch.pbr_materials = Some(PbrMaterialAssignments::new(vec![(0, AssetId::new(Uuid::from_u128(material_id)))]).unwrap());
+            ObjectOperation::Patch(patch)
         };
 
         apply_one(&mut session, first_simulator, first_region, incremental_patch(first_region, 2, 0x730));
@@ -969,16 +950,20 @@ mod tests {
             let state = session.world();
             let first = state.object(state.entity_at(LocalAddress::new(first_region, local_id)).unwrap()).unwrap();
             let second = state.object(state.entity_at(LocalAddress::new(second_region, local_id)).unwrap()).unwrap();
-            assert_eq!(first.render_materials(), None);
-            assert_eq!(second.render_materials().unwrap().material(0), Some(AssetId::new(Uuid::from_u128(0x720))));
+            assert_eq!(first.pbr_materials().unwrap().material(0), Some(AssetId::new(Uuid::from_u128(0x730))));
+            assert_eq!(second.pbr_materials().unwrap().material(0), Some(AssetId::new(Uuid::from_u128(0x720))));
         }
+
+        let mut classify = ObjectPatch::new(UpdateSource::new(first_region, 3, OrderEvidence::Ordered(3), 0), local_id);
+        classify.appearance = FieldUpdate::Set(Appearance::Surface);
+        apply_one(&mut session, first_simulator, first_region, ObjectOperation::Patch(classify));
 
         apply_one(&mut session, second_simulator, second_region, incremental_patch(second_region, 2, 0x731));
         let state = session.world();
         let first = state.object(state.entity_at(LocalAddress::new(first_region, local_id)).unwrap()).unwrap();
         let second = state.object(state.entity_at(LocalAddress::new(second_region, local_id)).unwrap()).unwrap();
-        assert_eq!(first.render_materials(), None);
-        assert_eq!(second.render_materials().unwrap().material(0), Some(AssetId::new(Uuid::from_u128(0x731))));
+        assert_eq!(first.pbr_materials().unwrap().material(0), Some(AssetId::new(Uuid::from_u128(0x730))));
+        assert_eq!(second.pbr_materials().unwrap().material(0), Some(AssetId::new(Uuid::from_u128(0x731))));
     }
 
     #[test]

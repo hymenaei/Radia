@@ -31,7 +31,7 @@ llsd.workspace = true
 uuid.workspace = true
 utils.workspace = true
 assets.workspace = true
-scene.workspace = true
+render.workspace = true
 math.workspace = true
 network.workspace = true
 protocol.workspace = true
@@ -50,7 +50,6 @@ keyring = { workspace = true, features = ["windows-native"] }
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 egui.workspace = true
 egui-winit.workspace = true
-render.workspace = true
 winit.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

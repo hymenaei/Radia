@@ -4,6 +4,7 @@ use std::{
 };
 
 use math::{DQuat, DVec3, ray_intersects_bounds, ray_triangle_intersection};
+use render::scene;
 
 use crate::DEFAULT_DRAW_DISTANCE;
 

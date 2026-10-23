@@ -15,7 +15,7 @@ use gpui::{
 };
 use gpui_component::{Root, Theme, ThemeMode};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-use scene::Camera;
+use render::scene::Camera;
 use tokio::runtime::Handle;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use tokio::sync::watch;

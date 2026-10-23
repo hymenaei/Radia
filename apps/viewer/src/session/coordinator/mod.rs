@@ -23,7 +23,7 @@ use futures::{
 };
 use network::{AgentSession, CoverageLoss, CoverageSource, Delivery, Event, Grid, PacketOrder, SimulatorId};
 use protocol::lludp::Message;
-use scene::Camera;
+use render::scene::{Camera, EnvironmentPush};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 use tracing::Instrument;
@@ -370,7 +370,7 @@ pub(crate) async fn drain_session(
         if let SimulatorPromoted { simulator_id, .. } = &event
             && let Some(region) = session_world.region_for(*simulator_id)
         {
-            let push = scene::EnvironmentPush::Clear { experience: None, transition: Duration::ZERO };
+            let push = EnvironmentPush::Clear { experience: None, transition: Duration::ZERO };
             if let Err(error) = environment_pushes.try_send(EnvironmentCommand { region, push }) {
                 tracing::error!(%error, "experience environment crossing reset could not be admitted");
                 mailbox.publish(ViewerUpdate::Failed("The environment update queue is unavailable.".into()));

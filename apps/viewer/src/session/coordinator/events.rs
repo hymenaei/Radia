@@ -323,7 +323,7 @@ pub(super) fn conflicts_with_handoff_observation(operation: &ObjectOperation, ob
     match operation {
         ObjectOperation::Observe(candidate) => candidate.id != observation.id,
         ObjectOperation::Remove { .. } => true,
-        ObjectOperation::Patch(_) | ObjectOperation::RenderMaterialsPatch(_) | ObjectOperation::Cached { .. } => false,
+        ObjectOperation::Patch(_) | ObjectOperation::Cached { .. } => false,
     }
 }
 

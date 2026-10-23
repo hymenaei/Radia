@@ -1,6 +1,7 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet},
+    fmt,
     sync::{
         Arc, Weak,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -12,9 +13,9 @@ use tokio::sync::watch;
 use utils::AssetId;
 
 use crate::{
-    Blob, Budget, Content, Prepared, TextureEvents, TextureHandle, TextureSize, WeakTexture,
+    Blob, Budget, Content, TextureEvents, TextureHandle, TextureSize, WeakTexture,
     budget::{Reservation, TEXTURE_WORK_BYTES, WORK_BYTES},
-    content::{Finished, StoredContent},
+    content::{Finished, Prepared, StoredContent},
 };
 
 pub const MAX_ASSET_ROUTES: usize = 33;
@@ -128,6 +129,13 @@ pub enum Status<C = Content> {
 }
 
 impl<C> Status<C> {
+    pub fn content(&self) -> Option<&C> {
+        match self {
+            Self::Ready(content) | Self::Refining(content) | Self::RefinementFailed { content, .. } => Some(content),
+            _ => None,
+        }
+    }
+
     fn map<T>(self, content: impl FnOnce(C) -> T) -> Status<T> {
         match self {
             Self::Queued => Status::Queued,
@@ -162,15 +170,8 @@ impl Status<StoredContent> {
     }
 }
 
-impl Status {
-    pub fn content(&self) -> Option<&Content> {
-        match self {
-            Self::Ready(content) | Self::Refining(content) | Self::RefinementFailed { content, .. } => Some(content),
-            _ => None,
-        }
-    }
-
-    fn retaining(self, ready: Option<&Content>) -> Self {
+impl<C: Clone> Status<C> {
+    pub fn retaining(self, ready: Option<&C>) -> Self {
         match (ready, &self) {
             (Some(content), Self::Fetching | Self::Decoding | Self::Queued) => Self::Refining(content.clone()),
             (Some(content), Self::Failed { failure, .. }) => Self::RefinementFailed { content: content.clone(), failure: *failure },
@@ -188,7 +189,6 @@ pub enum AdmissionError {
 
 struct Counter {
     count: AtomicUsize,
-    total: Arc<AtomicUsize>,
     wake: watch::Sender<()>,
 }
 
@@ -202,7 +202,6 @@ struct Lease {
 impl Drop for Lease {
     fn drop(&mut self) {
         self.counter.count.fetch_sub(1, Ordering::AcqRel);
-        self.counter.total.fetch_sub(1, Ordering::AcqRel);
         self.counter.wake.send_replace(());
     }
 }
@@ -220,7 +219,7 @@ impl Demand {
 
     pub async fn changed(&mut self) -> Status {
         if self.status.changed().await.is_err() {
-            return Status::StaleSession;
+            return self.status();
         }
         self.status.borrow_and_update().upgrade()
     }
@@ -253,7 +252,12 @@ impl RouteState {
 enum LoadPhase {
     Idle,
     Queued,
-    Running { generation: u64, route: Route, life: Weak<()>, cancelled: watch::Sender<bool>, decoding: bool },
+    Running { generation: u64, route: Route, life: Weak<()>, cancelled: watch::Sender<bool>, stage: Stage },
+}
+
+enum Stage {
+    Fetching,
+    Decoding,
 }
 
 struct AssetEntry {
@@ -297,7 +301,7 @@ impl AssetEntry {
     }
 }
 
-pub struct LoadJob {
+struct Job {
     resource: Resource,
     route: Route,
     generation: u64,
@@ -305,45 +309,19 @@ pub struct LoadJob {
     _life: Arc<()>,
     cancelled: watch::Receiver<bool>,
     size: TextureSize,
-    source: Option<Blob>,
-    decode_admitted: bool,
 }
 
-impl LoadJob {
-    pub fn prepare(&self, bytes: Vec<u8>) -> Result<Prepared, Failure> {
-        if !self.decode_admitted {
-            return Err(Failure::Malformed);
-        }
-        match &self.source {
-            Some(source) => crate::content::prepare_cached(self.resource, self.size, source, || self.is_cancelled()),
-            None => crate::content::prepare_cancellable(self.resource, self.size, bytes, || self.is_cancelled()),
-        }
+impl fmt::Debug for Job {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Job").field("resource", &self.resource).field("route", &self.route).finish_non_exhaustive()
     }
+}
 
-    pub fn has_source(&self) -> bool {
-        self.source.is_some()
-    }
-
-    pub fn retain_response(&mut self, capacity: usize) -> Result<(), Failure> {
-        if self.decode_admitted || capacity > self.resource.kind.max_response_bytes() {
-            return Err(Failure::TooLarge);
-        }
-        if !self.reservation.resize(capacity) {
-            return Err(Failure::TooLarge);
-        }
-        Ok(())
-    }
-
-    pub fn resource(&self) -> Resource {
-        self.resource
-    }
-    pub fn route(&self) -> Route {
-        self.route
-    }
-    pub fn is_cancelled(&self) -> bool {
+impl Job {
+    fn is_cancelled(&self) -> bool {
         *self.cancelled.borrow()
     }
-    pub fn cancelled(&self) -> impl Future<Output = ()> + Send + use<> {
+    fn cancelled(&self) -> impl Future<Output = ()> + Send + use<> {
         let mut cancelled = self.cancelled.clone();
         async move {
             if *cancelled.borrow() {
@@ -352,6 +330,162 @@ impl LoadJob {
             cancelled.changed().await.unwrap_or(());
         }
     }
+
+    fn fail(self, failure: Failure) -> LoadCompletion {
+        let failure = if self.is_cancelled() { Failure::Cancelled } else { failure };
+        LoadCompletion { job: self, result: Err(failure) }
+    }
+}
+
+#[derive(Debug)]
+pub struct FetchFailure {
+    job: Job,
+    failure: Failure,
+}
+
+impl FetchFailure {
+    fn new(job: Job, failure: Failure) -> Self {
+        let failure = if job.is_cancelled() { Failure::Cancelled } else { failure };
+        Self { job, failure }
+    }
+
+    pub fn failure(&self) -> Failure {
+        self.failure
+    }
+}
+
+impl From<FetchFailure> for LoadCompletion {
+    fn from(fetch: FetchFailure) -> Self {
+        Self { job: fetch.job, result: Err(fetch.failure) }
+    }
+}
+
+#[derive(Debug)]
+pub struct FetchJob(Job);
+
+impl FetchJob {
+    pub fn resource(&self) -> Resource {
+        self.0.resource
+    }
+    pub fn route(&self) -> Route {
+        self.0.route
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+    pub fn cancelled(&self) -> impl Future<Output = ()> + Send + use<> {
+        self.0.cancelled()
+    }
+
+    pub fn complete(self, response: Result<Vec<u8>, Failure>) -> Result<DecodeInput, FetchFailure> {
+        let bytes = match response {
+            Ok(bytes) if !self.0.is_cancelled() => bytes,
+            Ok(_) => return Err(FetchFailure::new(self.0, Failure::Cancelled)),
+            Err(failure) => return Err(FetchFailure::new(self.0, failure)),
+        };
+        if bytes.capacity() > self.0.resource.kind.max_response_bytes() {
+            return Err(FetchFailure::new(self.0, Failure::TooLarge));
+        }
+        let mut job = self.0;
+        if !job.reservation.resize(bytes.capacity()) {
+            return Err(FetchFailure::new(job, Failure::TooLarge));
+        }
+        Ok(DecodeInput { job, source: DecodeSource::Response(bytes) })
+    }
+}
+
+#[derive(Debug)]
+pub enum LoadJob {
+    Fetch(FetchJob),
+    Decode(DecodeInput),
+}
+
+impl LoadJob {
+    pub fn fail(self, failure: Failure) -> LoadCompletion {
+        match self {
+            Self::Fetch(job) => job.0.fail(failure),
+            Self::Decode(input) => input.fail(failure),
+        }
+    }
+}
+
+enum DecodeSource {
+    Response(Vec<u8>),
+    Cached(Blob),
+}
+
+pub struct DecodeInput {
+    source: DecodeSource,
+    job: Job,
+}
+
+impl fmt::Debug for DecodeInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let source = match &self.source {
+            DecodeSource::Response(_) => "response",
+            DecodeSource::Cached(_) => "cached",
+        };
+        f.debug_struct("DecodeInput")
+            .field("resource", &self.job.resource)
+            .field("route", &self.job.route)
+            .field("source", &source)
+            .finish()
+    }
+}
+
+impl DecodeInput {
+    pub fn resource(&self) -> Resource {
+        self.job.resource
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.job.is_cancelled()
+    }
+    pub fn fail(self, failure: Failure) -> LoadCompletion {
+        self.job.fail(failure)
+    }
+}
+
+#[derive(Debug)]
+pub struct DecodeJob(DecodeInput);
+
+impl DecodeJob {
+    pub fn run(self) -> LoadCompletion {
+        let DecodeInput { job, source } = self.0;
+        let result = match source {
+            DecodeSource::Response(bytes) => crate::content::prepare_cancellable(job.resource, job.size, bytes, || job.is_cancelled()),
+            DecodeSource::Cached(source) => crate::content::prepare_cached(job.size, &source, || job.is_cancelled()),
+        };
+        LoadCompletion { job, result }
+    }
+
+    pub fn resource(&self) -> Resource {
+        self.0.resource()
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+}
+
+pub struct LoadCompletion {
+    result: Result<Prepared, Failure>,
+    job: Job,
+}
+
+impl fmt::Debug for LoadCompletion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LoadCompletion")
+            .field("resource", &self.job.resource)
+            .field("route", &self.job.route)
+            .field("failure", &self.result.as_ref().err())
+            .finish()
+    }
+}
+
+impl LoadCompletion {
+    pub fn failure(&self) -> Option<Failure> {
+        self.result.as_ref().err().copied()
+    }
 }
 
 pub struct Store {
@@ -359,7 +493,6 @@ pub struct Store {
     sequence: u64,
     routes: BTreeSet<Route>,
     entries: BTreeMap<Resource, AssetEntry>,
-    demands: Arc<AtomicUsize>,
     budget: Budget,
     closed: bool,
     textures: TextureEvents,
@@ -384,7 +517,6 @@ impl Store {
             sequence: 0,
             routes: BTreeSet::new(),
             entries: BTreeMap::new(),
-            demands: Arc::new(AtomicUsize::new(0)),
             budget,
             closed: false,
             textures: TextureEvents::default(),
@@ -395,8 +527,8 @@ impl Store {
         self.budget.wake().subscribe()
     }
 
-    pub fn priority(&self, job: &LoadJob) -> Priority {
-        self.entries.get(&job.resource).map_or(Priority::Background, AssetEntry::effective_priority)
+    pub fn priority(&self, input: &DecodeInput) -> Priority {
+        self.entries.get(&input.job.resource).map_or(Priority::Background, AssetEntry::effective_priority)
     }
 
     pub fn register_route(&mut self) -> Result<Route, AdmissionError> {
@@ -468,7 +600,7 @@ impl Store {
         let view = entry.views.entry(route).or_insert_with(|| {
             let (status, _) = watch::channel(Status::Queued);
             RouteState {
-                counter: Arc::new(Counter { count: AtomicUsize::new(0), total: Arc::clone(&self.demands), wake }),
+                counter: Arc::new(Counter { count: AtomicUsize::new(0), wake }),
                 status,
                 attempts: 0,
                 failed: None,
@@ -483,20 +615,14 @@ impl Store {
         }
         let status = match &entry.phase {
             LoadPhase::Idle => ready.as_ref().map_or(Status::Queued, |content| Status::Ready(content.clone())),
-            LoadPhase::Running { decoding, .. } => {
-                if *decoding {
-                    Status::Decoding
-                } else {
-                    Status::Fetching
-                }
-            }
+            LoadPhase::Running { stage: Stage::Decoding, .. } => Status::Decoding,
+            LoadPhase::Running { stage: Stage::Fetching, .. } => Status::Fetching,
             LoadPhase::Queued => {
                 view.failed.as_ref().map_or(Status::Queued, |failed| Status::Failed { failure: failed.failure, retry_at: failed.retry_at })
             }
         };
         view.publish_status(status.retaining(ready.as_ref()));
         view.counter.count.fetch_add(1, Ordering::AcqRel);
-        self.demands.fetch_add(1, Ordering::AcqRel);
         let lease = Arc::new(Lease { counter: Arc::clone(&view.counter), size: request.size(), priority, _texture: texture });
         view.leases.retain(|lease| lease.strong_count() > 0);
         view.leases.push(Arc::downgrade(&lease));
@@ -506,11 +632,16 @@ impl Store {
     pub fn maintain(&mut self, now: Instant) {
         for entry in self.entries.values_mut() {
             let ready = entry.ready();
+            let mut desired = None;
+            let mut priority = Priority::Background;
             for view in entry.views.values_mut() {
-                view.leases.retain(|lease| lease.strong_count() > 0);
+                view.leases.retain(|weak| {
+                    let Some(lease) = weak.upgrade() else { return false };
+                    desired = desired.max(lease.size);
+                    priority = priority.max(lease.priority);
+                    true
+                });
             }
-            let desired = entry.requested_size();
-            let priority = entry.effective_priority();
             if priority != entry.priority {
                 for view in entry.views.values_mut() {
                     if now >= view.deadline && view.failed.as_ref().is_none_or(|failed| failed.failure == Failure::Deadline) {
@@ -523,7 +654,7 @@ impl Store {
             entry.priority = priority;
             if entry.target != desired {
                 entry.target = desired;
-                if entry.ready().is_some() {
+                if ready.is_some() {
                     for view in entry.views.values_mut() {
                         view.failed = None;
                         view.attempts = 0;
@@ -535,18 +666,11 @@ impl Store {
                 }
             }
             if matches!(entry.phase, LoadPhase::Queued)
-                && let Some(content) = entry.ready()
+                && let Some(content) = ready.as_ref()
+                && content_satisfies(content, desired)
             {
-                let satisfied = match &content {
-                    Content::Texture(image) => {
-                        desired.is_none_or(|size| image.info().is_some_and(|info| info.discard == size.discard_level(info.source_size)))
-                    }
-                    Content::Material(_) | Content::Environment(_) => true,
-                };
-                if satisfied {
-                    entry.phase = LoadPhase::Idle;
-                    entry.broadcast_status(Status::Ready(content.clone()));
-                }
+                entry.phase = LoadPhase::Idle;
+                entry.broadcast_status(Status::Ready((*content).clone()));
             }
             if let LoadPhase::Running { life, cancelled, route, .. } = &entry.phase {
                 if !entry.has_active_demand() || entry.views.get(route).is_none_or(|view| now >= view.deadline) {
@@ -578,7 +702,7 @@ impl Store {
     pub fn next_job(&mut self, now: Instant) -> Option<LoadJob> {
         self.maintain(now);
         if self.closed
-            || self.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { decoding: false, .. })).count()
+            || self.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Fetching, .. })).count()
                 >= MAX_ASSET_FETCHES
         {
             return None;
@@ -602,7 +726,7 @@ impl Store {
             .min_by_key(|(_, _, used)| *used)
             .map(|(resource, route, _)| (resource, route))?;
         let bytes = resource.kind.max_response_bytes();
-        let headroom = if self.entries.values().any(|entry| matches!(entry.phase, LoadPhase::Running { decoding: true, .. })) {
+        let headroom = if self.entries.values().any(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })) {
             0
         } else {
             TEXTURE_WORK_BYTES.saturating_sub(bytes)
@@ -617,47 +741,43 @@ impl Store {
             entry.views.get_mut(&route).expect("selected route").deadline = now + DEMAND_DEADLINE;
         }
         entry.views.get_mut(&route).expect("selected route").attempts += 1;
-        entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&life), cancelled, decoding: false };
+        entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&life), cancelled, stage: Stage::Fetching };
         entry.broadcast_status(Status::Fetching);
-        Some(LoadJob {
-            resource,
-            route,
-            generation,
-            reservation,
-            _life: life,
-            cancelled: receiver,
-            size: entry.target.unwrap_or_default(),
-            source: entry.texture().and_then(|texture| texture.source()),
-            decode_admitted: false,
+        let source = entry.texture().and_then(|texture| texture.source());
+        let job =
+            Job { resource, route, generation, reservation, _life: life, cancelled: receiver, size: entry.target.unwrap_or_default() };
+        Some(match source {
+            Some(source) => LoadJob::Decode(DecodeInput { source: DecodeSource::Cached(source), job }),
+            None => LoadJob::Fetch(FetchJob(job)),
         })
     }
 
-    pub fn try_start_decode(&mut self, job: &mut LoadJob) -> bool {
-        if self.closed || job.is_cancelled() || job.route.store != self.id {
-            return false;
+    pub fn start_decode(&mut self, mut input: DecodeInput) -> Result<DecodeJob, DecodeInput> {
+        if self.closed || input.is_cancelled() || input.job.route.store != self.id {
+            return Err(input);
         }
-        if self.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { decoding: true, .. })).count()
+        if self.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })).count()
             >= MAX_ASSET_DECODES
         {
-            return false;
+            return Err(input);
         }
-        if !self.entries.get(&job.resource).is_some_and(
-            |entry| matches!(entry.phase, LoadPhase::Running { generation, decoding: false, .. } if generation == job.generation),
+        if !self.entries.get(&input.job.resource).is_some_and(
+            |entry| matches!(entry.phase, LoadPhase::Running { generation, stage: Stage::Fetching, .. } if generation == input.job.generation),
         ) {
-            return false;
+            return Err(input);
         }
-        if !job.reservation.resize(job.resource.kind.work_bytes()) {
-            return false;
+        if !input.job.reservation.resize(input.job.resource.kind.work_bytes()) {
+            return Err(input);
         }
-        let entry = self.entries.get_mut(&job.resource).expect("validated running job");
-        let LoadPhase::Running { decoding, .. } = &mut entry.phase else { unreachable!("validated running phase") };
-        *decoding = true;
-        job.decode_admitted = true;
+        let entry = self.entries.get_mut(&input.job.resource).expect("validated running job");
+        let LoadPhase::Running { stage, .. } = &mut entry.phase else { unreachable!("validated running phase") };
+        *stage = Stage::Decoding;
         entry.broadcast_status(Status::Decoding);
-        true
+        Ok(DecodeJob(input))
     }
 
-    pub fn complete(&mut self, job: LoadJob, result: Result<Prepared, Failure>, now: Instant) {
+    pub fn complete(&mut self, completion: LoadCompletion, now: Instant) {
+        let LoadCompletion { job, result } = completion;
         if self.closed || job.route.store != self.id {
             return;
         }
@@ -673,7 +793,7 @@ impl Store {
         {
             return;
         }
-        match result.and_then(|prepared| prepared.finish(job.resource, job.size, job.reservation)) {
+        match result.and_then(|prepared| prepared.finish(job.reservation)) {
             Ok((content, source)) => {
                 entry.used = now;
                 if job.resource.kind == Kind::Texture
@@ -691,12 +811,7 @@ impl Store {
                     }
                     Finished::Other(content) => content,
                 };
-                let satisfied = match &content {
-                    Content::Texture(image) => entry
-                        .requested_size()
-                        .is_none_or(|size| image.info().is_some_and(|info| info.discard == size.discard_level(info.source_size))),
-                    Content::Material(_) | Content::Environment(_) => true,
-                };
+                let satisfied = content_satisfies(&content, entry.requested_size());
                 if satisfied {
                     entry.phase = LoadPhase::Idle;
                 }
@@ -722,17 +837,14 @@ impl Store {
                     _ => None,
                 };
                 view.failed = Some(FailureRecord { failure, retry_at, expires: now + NEGATIVE_TTL });
-                view.publish_status(match ready.as_ref() {
-                    Some(content) => Status::RefinementFailed { content: content.clone(), failure },
-                    None => Status::Failed { failure, retry_at },
-                });
+                view.publish_status(Status::Failed { failure, retry_at }.retaining(ready.as_ref()));
                 for (route, view) in &entry.views {
                     if *route != job.route && view.count() > 0 {
                         let status = view
                             .failed
                             .as_ref()
                             .map_or(Status::Queued, |failed| Status::Failed { failure: failed.failure, retry_at: failed.retry_at });
-                        view.publish_status(status.retaining(entry.ready().as_ref()));
+                        view.publish_status(status.retaining(ready.as_ref()));
                     }
                 }
             }
@@ -771,6 +883,15 @@ impl Store {
         }
         self.entries.clear();
         self.routes.clear();
+    }
+}
+
+fn content_satisfies(content: &Content, desired: Option<TextureSize>) -> bool {
+    match content {
+        Content::Texture(image) => {
+            desired.is_none_or(|size| image.info().is_some_and(|info| info.discard == size.discard_level(info.source_size)))
+        }
+        Content::Material(_) | Content::Environment(_) => true,
     }
 }
 

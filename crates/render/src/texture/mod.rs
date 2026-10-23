@@ -697,7 +697,7 @@ fn binding(device: &Device, layout: &BindGroupLayout, view: &TextureView, settin
 #[cfg(test)]
 mod fixtures {
     use super::*;
-    use assets::{Budget, Content, Kind, Request, Resource, Status};
+    use assets::{Budget, Content, Kind, LoadJob, Request, Resource, Status};
     use std::time::Instant;
     use test_support::texture::{GRAY_ALPHA_J2C, RGBA_J2C};
     use utils::AssetId;
@@ -714,10 +714,10 @@ mod fixtures {
         let now = Instant::now();
         let resource = Resource { id: AssetId::new(Uuid::from_u128(id)), kind: Kind::Texture };
         let demand = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
-        let mut job = store.next_job(now).unwrap();
-        assert!(store.try_start_decode(&mut job));
-        let result = job.prepare(bytes.to_vec());
-        store.complete(job, result, now);
+        let LoadJob::Fetch(job) = store.next_job(now).unwrap() else { panic!("fresh texture request unexpectedly used cached source") };
+        let input = job.complete(Ok(bytes.to_vec())).expect("fixture response fits");
+        let completion = store.start_decode(input).expect("decode admission").run();
+        store.complete(completion, now);
         let Status::Ready(Content::Texture(texture)) = demand.status() else { panic!("fixture must decode") };
         texture
     }

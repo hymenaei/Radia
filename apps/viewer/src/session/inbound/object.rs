@@ -1,5 +1,6 @@
 use std::num::{NonZeroU8, NonZeroU32};
 
+use math::UvTransform;
 use protocol::{
     lludp::{
         Message,
@@ -17,9 +18,9 @@ use protocol::{
 use utils::AssetId;
 use uuid::Uuid;
 use world::{
-    Appearance, AttachmentPoint, FaceAppearance, FieldUpdate, Kind, LinearMotion, LocalAddress, MotionPatch, ObjectObservation,
-    ObjectPatch, OrderEvidence, ParentUpdate, Pose, PrimShape, Region, RegionHandle, RenderMaterials, SculptFlags, SculptType, Shape,
-    SurfaceAppearance, UpdateSource,
+    Appearance, AttachmentPoint, FaceAppearance, FieldUpdate, Kind, LinearMotion, LocalAddress, ObjectObservation, ObjectPatch,
+    OrderEvidence, ParentUpdate, PbrMaterialAssignments, Pose, PrimShape, Region, RegionHandle, SculptFlags, SculptType, Shape,
+    SurfaceAppearance, TextureMapping, UpdateSource,
 };
 
 use crate::session::object_media::media_version;
@@ -49,7 +50,6 @@ pub(crate) struct ObjectBatch {
 pub(crate) enum ObjectOperation {
     Observe(ObjectObservation),
     Patch(ObjectPatch),
-    RenderMaterialsPatch(ObjectPatch),
     Remove { source: UpdateSource, local_id: NonZeroU32 },
     Cached { source: UpdateSource, local_id: NonZeroU32 },
 }
@@ -58,7 +58,7 @@ impl ObjectOperation {
     pub(crate) fn source(&self) -> UpdateSource {
         match self {
             Self::Observe(observation) => observation.source,
-            Self::Patch(patch) | Self::RenderMaterialsPatch(patch) => patch.source,
+            Self::Patch(patch) => patch.source,
             Self::Remove { source, .. } | Self::Cached { source, .. } => *source,
         }
     }
@@ -66,7 +66,7 @@ impl ObjectOperation {
     pub(crate) fn address(&self) -> LocalAddress {
         let (source, local_id) = match self {
             Self::Observe(observation) => (observation.source, observation.local_id),
-            Self::Patch(patch) | Self::RenderMaterialsPatch(patch) => (patch.source, patch.local_id),
+            Self::Patch(patch) => (patch.source, patch.local_id),
             Self::Remove { source, local_id } | Self::Cached { source, local_id } => (*source, *local_id),
         };
         LocalAddress::new(source.region(), local_id)
@@ -112,7 +112,7 @@ pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderE
             sequence,
             order,
             update.object_data.iter().filter(|parameter| parameter.parameter_type == RENDER_MATERIAL_EXTRA_PARAM_TYPE),
-            render_material_patch,
+            pbr_materials_patch,
             &mut invalid_blocks,
             &mut invalid_fields,
         ),
@@ -125,11 +125,11 @@ pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderE
             &mut invalid_blocks,
             &mut invalid_fields,
         ),
-        GenericStreamingMessage(message) => match super::gltf::decode_message(message) {
+        GenericStreamingMessage(message) => match super::pbr::decode_message(message) {
             Some(Ok(decoded)) => {
                 let source = UpdateSource::new(region, sequence, order, 0);
                 let mut patch = ObjectPatch::new(source, decoded.local_id);
-                patch.gltf_material_overrides = Some(decoded.overrides);
+                patch.pbr_material_overrides = Some(decoded.overrides);
                 vec![Some(ObjectOperation::Patch(patch))]
             }
             Some(Err(())) => {
@@ -274,7 +274,7 @@ fn full_observation(block: &ObjectData, source: UpdateSource, invalid_fields: &m
     } else {
         None
     };
-    let render_materials = render_materials(block.pcode, &block.extra_parameters, invalid_fields);
+    let pbr_materials = pbr_materials(block.pcode, &block.extra_parameters, invalid_fields);
     Ok(ObjectOperation::Observe(ObjectObservation {
         source,
         id,
@@ -289,7 +289,7 @@ fn full_observation(block: &ObjectData, source: UpdateSource, invalid_fields: &m
         shape: classification.shape,
         appearance: classification.appearance,
         surface_appearance,
-        render_materials,
+        pbr_materials,
     }))
 }
 
@@ -310,7 +310,7 @@ fn compressed_observation(
     } else {
         None
     };
-    let render_materials = render_materials(block.pcode, &block.extra_parameters, invalid_fields);
+    let pbr_materials = pbr_materials(block.pcode, &block.extra_parameters, invalid_fields);
     Ok(ObjectOperation::Observe(ObjectObservation {
         source,
         id,
@@ -325,7 +325,7 @@ fn compressed_observation(
         shape: classification.shape,
         appearance: classification.appearance,
         surface_appearance,
-        render_materials,
+        pbr_materials,
     }))
 }
 
@@ -336,7 +336,7 @@ fn terse_patch(
 ) -> Result<ObjectOperation, InvalidBlock> {
     let mut patch = ObjectPatch::new(source, local_id(block.local_id)?);
     patch.pose = Some(Pose { position: Some(block.motion.position), rotation: Some(block.motion.rotation) });
-    patch.linear_motion = MotionPatch { velocity: Some(block.motion.velocity), acceleration: Some(block.motion.acceleration) };
+    patch.linear_motion = LinearMotion { velocity: Some(block.motion.velocity), acceleration: Some(block.motion.acceleration) };
     patch.angular_velocity = Some(block.motion.angular_velocity);
     patch.attachment_point = attachment_point(block.state);
     if !block.avatar {
@@ -365,9 +365,9 @@ fn surface_appearance(entry: TextureEntry) -> Option<SurfaceAppearance> {
     SurfaceAppearance::new(default_face, overrides).ok()
 }
 
-fn render_materials(pcode: u8, extra_parameters: &[ExtraParameter], invalid_fields: &mut usize) -> Option<RenderMaterials> {
+fn pbr_materials(pcode: u8, extra_parameters: &[ExtraParameter], invalid_fields: &mut usize) -> Option<PbrMaterialAssignments> {
     if pcode != VOLUME_PCODE {
-        return (object_kind(pcode) == Kind::Object).then(RenderMaterials::default);
+        return (object_kind(pcode) == Kind::Object).then(PbrMaterialAssignments::default);
     }
 
     let mut materials = None;
@@ -375,8 +375,10 @@ fn render_materials(pcode: u8, extra_parameters: &[ExtraParameter], invalid_fiel
     for extra_parameter in extra_parameters.iter().filter(|p| p.parameter_type == RENDER_MATERIAL_EXTRA_PARAM_TYPE) {
         found = true;
         match decode_render_material_bindings(&extra_parameter.data).map_err(|_| ()).and_then(|bindings| {
-            RenderMaterials::new(bindings.into_iter().map(|binding| (binding.face_index, AssetId::new(binding.material_id))).collect())
-                .map_err(|_| ())
+            PbrMaterialAssignments::new(
+                bindings.into_iter().map(|binding| (binding.face_index, AssetId::new(binding.material_id))).collect(),
+            )
+            .map_err(|_| ())
         }) {
             Ok(value) => materials = Some(value),
             Err(()) => {
@@ -386,35 +388,38 @@ fn render_materials(pcode: u8, extra_parameters: &[ExtraParameter], invalid_fiel
         }
     }
 
-    if found { materials } else { Some(RenderMaterials::default()) }
+    if found { materials } else { Some(PbrMaterialAssignments::default()) }
 }
 
-fn render_material_patch(block: &ExtraParamUpdate, source: UpdateSource, _: &mut usize) -> Result<ObjectOperation, InvalidBlock> {
+fn pbr_materials_patch(block: &ExtraParamUpdate, source: UpdateSource, _: &mut usize) -> Result<ObjectOperation, InvalidBlock> {
     let materials = if block.in_use {
         let bindings = decode_render_material_bindings(&block.data).map_err(|_| InvalidBlock)?;
-        RenderMaterials::new(bindings.into_iter().map(|binding| (binding.face_index, AssetId::new(binding.material_id))).collect())
+        PbrMaterialAssignments::new(bindings.into_iter().map(|binding| (binding.face_index, AssetId::new(binding.material_id))).collect())
             .map_err(|_| InvalidBlock)?
     } else {
-        RenderMaterials::default()
+        PbrMaterialAssignments::default()
     };
     let mut patch = ObjectPatch::new(source, local_id(block.local_id)?);
-    patch.render_materials = Some(materials);
-    Ok(ObjectOperation::RenderMaterialsPatch(patch))
+    patch.pbr_materials = Some(materials);
+    Ok(ObjectOperation::Patch(patch))
 }
 
 fn face_appearance(face: &TextureFace) -> FaceAppearance {
     FaceAppearance {
-        texture_id: face.texture_id,
+        texture: (!face.texture_id.is_nil() && face.texture_id != Uuid::max()).then(|| AssetId::new(face.texture_id)),
         color: face.color,
-        scale_s: face.scale_s,
-        scale_t: face.scale_t,
-        offset_s: face.offset_s,
-        offset_t: face.offset_t,
-        rotation: face.rotation,
-        bump_shiny_fullbright: face.bump_shiny_fullbright,
-        media_texgen: face.media_texgen,
+        transform: UvTransform { offset: [face.offset_s, face.offset_t], scale: [face.scale_s, face.scale_t], rotation: face.rotation },
+        bump: face.bump_shiny_fullbright & 0x1f,
+        shiny: face.bump_shiny_fullbright >> 6,
+        fullbright: face.bump_shiny_fullbright & 0x20 != 0,
+        mapping: match (face.media_texgen >> 1) & 3 {
+            0 => TextureMapping::Default,
+            1 => TextureMapping::Planar,
+            value => TextureMapping::Unsupported(value),
+        },
+        media: face.media_texgen & 1 != 0,
         glow: face.glow,
-        material_id: face.material_id,
+        material: (!face.material_id.is_nil()).then(|| AssetId::new(face.material_id)),
     }
 }
 

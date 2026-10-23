@@ -193,7 +193,7 @@ impl AvatarAppearance {
     }
 
     pub(crate) fn heap_bytes(&self) -> usize {
-        self.visual_params.capacity() * size_of::<(AvatarVisualParamIndex, u8)>()
+        self.visual_params.len() * size_of::<(AvatarVisualParamIndex, u8)>()
             + self.texture_slots.as_ref().map_or(0, |_| size_of::<AvatarTextureSlots>())
     }
 

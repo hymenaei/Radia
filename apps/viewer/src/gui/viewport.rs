@@ -14,6 +14,7 @@ use futures::{
     channel::mpsc::{Receiver, Sender, channel},
     executor::block_on,
 };
+use render::scene;
 use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
@@ -580,7 +581,7 @@ impl SceneWindow {
     fn draw(&mut self) -> Result<(bool, bool), String> {
         if self.camera.is_none()
             && let Some(feed) = &self.feed
-            && let Some(object) = feed.view.objects().find(|object| object.detail().summary.id == feed.agent_id)
+            && let Some(object) = feed.agent()
             && let Ok(world::WorldTransformState::Resolved(transform)) = object.detail().world_transform
         {
             self.camera = Some(OrbitCamera::new(transform.pose.position));

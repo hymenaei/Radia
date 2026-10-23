@@ -5,8 +5,8 @@ use uuid::Uuid;
 
 use crate::update::{FieldStamp, Stamp};
 use crate::{
-    Appearance, AttachmentPoint, AvatarAppearance, GltfMaterialOverrides, Kind, LinearMotion, LocalAddress, ObjectMedia, ObjectObservation,
-    Parent, Properties, PropertiesProvenance, PropertyProvenance, Region, RenderMaterials, Shape, SitTarget, SurfaceAppearance, Transform,
+    Appearance, AttachmentPoint, AvatarAppearance, Kind, LinearMotion, LocalAddress, ObjectMedia, Parent, PbrMaterialAssignments,
+    PbrMaterialOverrides, Properties, PropertiesProvenance, PropertyProvenance, Region, Shape, SitTarget, SurfaceAppearance, Transform,
     UpdateAuthority, UpdateSource, WorldPose,
 };
 
@@ -54,8 +54,8 @@ pub(crate) struct Fences {
     pub(crate) shape: Option<RegionalStamp>,
     pub(crate) appearance: Option<RegionalStamp>,
     pub(crate) texture_entry: Option<RegionalStamp>,
-    pub(crate) render_materials: Option<RegionalStamp>,
-    pub(crate) gltf_material_overrides: Option<RegionalStamp>,
+    pub(crate) pbr_materials: Option<RegionalStamp>,
+    pub(crate) pbr_material_overrides: Option<RegionalStamp>,
     pub(crate) avatar_appearance: Option<RegionalStamp>,
     pub(crate) sit_target: Option<RegionalStamp>,
 }
@@ -97,7 +97,7 @@ pub(crate) struct ObjectRecord {
     pub(crate) state: ObjectState,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ObjectState {
     pub(crate) transform: Transform,
     pub(crate) binding: Binding,
@@ -112,6 +112,21 @@ pub(crate) struct ObjectState {
 }
 
 impl ObjectState {
+    pub(crate) fn new(binding: Binding) -> Self {
+        Self {
+            transform: Transform::default(),
+            binding,
+            parent: Parent::Unknown,
+            linear_motion: LinearMotion::default(),
+            angular_velocity: None,
+            attachment_point: None,
+            frame_generation: 0,
+            position_frame_generation: None,
+            rotation_frame_generation: None,
+            provisional_pose: None,
+        }
+    }
+
     pub(crate) fn has_current_local_pose(&self) -> bool {
         self.transform.position().is_some()
             && self.transform.rotation().is_some()
@@ -119,32 +134,11 @@ impl ObjectState {
             && self.rotation_frame_generation == Some(self.frame_generation)
     }
 
-    pub(crate) fn accepts_observation(&self, ordering: &ObjectOrdering, observation: &ObjectObservation, stamp: Stamp) -> bool {
-        let field_stamp = FieldStamp { authority: observation.source.authority(), stamp };
-        self.binding.address.region != observation.source.region
-            || stamp > self.binding.fence
-            || observation
-                .pose
-                .is_some_and(|pose| (pose.position.is_some() || pose.rotation.is_some()) && newer_field(field_stamp, ordering.fences.pose))
-            || observation.linear_motion.is_some_and(|motion| {
-                (motion.velocity.is_some() || motion.acceleration.is_some()) && newer_field(field_stamp, ordering.fences.linear_motion)
-            })
-            || observation.angular_velocity.is_some_and(|_| newer_field(field_stamp, ordering.fences.angular_velocity))
-            || observation.scale.is_some_and(|_| newer_field(field_stamp, ordering.fences.scale))
-            || (observation.attachment_point.is_present() && newer_field(field_stamp, ordering.fences.attachment_point))
-            || (observation.shape.is_present() && newer_region_field(observation.source.region, field_stamp, ordering.fences.shape))
-            || (observation.appearance.is_present()
-                && newer_region_field(observation.source.region, field_stamp, ordering.fences.appearance))
-            || (observation.kind != Kind::Avatar
-                && observation.surface_appearance.is_some()
-                && newer_region_field(observation.source.region, field_stamp, ordering.fences.texture_entry))
-            || (observation.kind != Kind::Avatar
-                && observation.render_materials.is_some()
-                && newer_region_field(observation.source.region, field_stamp, ordering.fences.render_materials))
-            || newer_field(field_stamp, ordering.fences.parent)
-    }
-
     pub(crate) fn reset_region_relative(&mut self) {
+        self.transform = Transform { scale: self.transform.scale, ..Transform::default() };
+        self.parent = Parent::Unknown;
+        self.linear_motion = LinearMotion::default();
+        self.angular_velocity = None;
         self.attachment_point = None;
         self.position_frame_generation = None;
         self.rotation_frame_generation = None;
@@ -157,8 +151,8 @@ pub(crate) struct ObjectContent {
     pub(crate) shape: Option<Shape>,
     pub(crate) appearance: Option<Appearance>,
     pub(crate) surface_appearance: Option<Arc<SurfaceAppearance>>,
-    pub(crate) render_materials: Option<Arc<RenderMaterials>>,
-    pub(crate) gltf_material_overrides: Option<Arc<GltfMaterialOverrides>>,
+    pub(crate) pbr_materials: Option<Arc<PbrMaterialAssignments>>,
+    pub(crate) pbr_material_overrides: Option<Arc<PbrMaterialOverrides>>,
     pub(crate) object_media: Option<Arc<ObjectMedia>>,
     pub(crate) avatar_appearance: Option<Arc<AvatarAppearance>>,
     pub(crate) sit_target: Option<SitTarget>,
@@ -171,8 +165,8 @@ impl ObjectContent {
         shape: None,
         appearance: None,
         surface_appearance: None,
-        render_materials: None,
-        gltf_material_overrides: None,
+        pbr_materials: None,
+        pbr_material_overrides: None,
         object_media: None,
         avatar_appearance: None,
         sit_target: None,
@@ -191,13 +185,21 @@ impl Default for ObjectContent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct ObjectOrdering {
     pub(crate) fences: Fences,
     pub(crate) parent_rejection_barrier: Option<ParentRejectionBarrier>,
 }
 
 impl ObjectOrdering {
+    pub(crate) fn protects_parent(&self) -> bool {
+        self.fences.parent.is_some_and(|fence| fence.authority == UpdateAuthority::Tracked) || self.parent_rejection_barrier.is_some()
+    }
+
+    pub(crate) fn admits_parent(&self, source: UpdateSource, stamp: Stamp) -> bool {
+        self.parent_rejection_barrier.is_none_or(|barrier| barrier.admits(source, stamp))
+    }
+
     pub(crate) fn reset_region_relative(&mut self) {
         self.fences.pose = None;
         self.fences.frame = None;

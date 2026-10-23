@@ -1,33 +1,34 @@
+mod batching;
 mod frame;
 mod instance;
 mod mesh;
+mod storage;
 
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use assets::{Priority, TextureId};
-use math::{DVec3, Frustum, Mat4, Quat, Vec3};
-use scene::{Camera, FaceMaterial, MeshId, Placement, PreparedMesh, SceneView, SharedMesh, SurfaceKind, ViewVersion};
+use assets::TextureId;
+use math::{DVec3, Quat, Vec3};
 use wgpu::{
-    Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Device, Extent3d, IndexFormat, Queue, RenderPass, Texture, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, IndexFormat, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 
+use self::batching::{DrawCommand, MAX_FACE_INSTANCES};
+use self::mesh::GpuMesh;
+use self::storage::Storage;
+use crate::scene::{Camera, MeshId, SharedMesh, ViewVersion};
 use crate::{
-    appearance::FaceParams,
-    studio::{INSTANCE_BYTES, Pipeline, ScenePipelines},
-    texture::{TextureCompletion, TextureJob, TextureKey, TextureState, Textures},
-    water::{COLOR, Water},
+    pipeline::{INSTANCE_BYTES, SurfacePipelines, Water},
+    texture::{TextureCompletion, TextureJob, TextureState, Textures},
 };
-use instance::{instance_base, is_visible, packed_instance};
-use mesh::{GpuMesh, buffer};
 
 const MESH_BYTES: usize = 64 * 1024 * 1024;
 const DEPTH_BYTES: usize = 128 * 1024 * 1024;
@@ -35,8 +36,6 @@ const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MESH_UPLOADS: usize = 16;
 const MAX_MESHES: usize = 1024;
 const MAX_INSTANCES: usize = 16_384;
-const MAX_FACE_INSTANCES: usize = 65_536;
-const MAX_DRAWS: usize = 8192;
 const TRANSFORM_BYTES: usize = 112;
 
 #[derive(Clone, Copy, Default)]
@@ -61,12 +60,17 @@ pub struct Stats {
 #[derive(Default)]
 struct Accounting {
     bytes: AtomicUsize,
+    mesh_revision: AtomicU64,
     depth: AtomicUsize,
     peak: AtomicUsize,
     frames: AtomicUsize,
 }
 
 impl Accounting {
+    fn mesh_state(&self) -> MeshState {
+        MeshState { bytes: self.bytes.load(Ordering::Acquire), revision: self.mesh_revision.load(Ordering::Acquire) }
+    }
+
     fn reserve(self: &Arc<Self>, bytes: usize, resource: Resource) -> Option<Lease> {
         let (account, limit) = match resource {
             Resource::Mesh => (&self.bytes, MESH_BYTES),
@@ -79,6 +83,12 @@ impl Accounting {
         }
         Some(Lease { memory: self.clone(), bytes, resource })
     }
+}
+
+#[derive(Clone, Copy, Default, Eq, PartialEq)]
+struct MeshState {
+    bytes: usize,
+    revision: u64,
 }
 
 struct Lease {
@@ -127,17 +137,8 @@ pub struct PickFace {
 
 enum ShadingMode {
     Studio,
-    Ground,
+    Terrain,
     Water,
-}
-
-struct DrawCommand {
-    key: MeshId,
-    pipeline: Pipeline,
-    first: u32,
-    count: u32,
-    indices: Range<u32>,
-    texture: Option<TextureKey>,
 }
 
 struct Depth {
@@ -158,13 +159,13 @@ struct FramePreparationKey {
 struct FramePreparation {
     key: FramePreparationKey,
     textures: TextureState,
-    mesh_bytes: usize,
+    meshes: MeshState,
     more_meshes: bool,
 }
 
 impl FramePreparation {
-    fn reusable(&self, key: &FramePreparationKey, textures: TextureState, mesh_bytes: usize) -> bool {
-        self.key == *key && self.textures == textures && self.mesh_bytes == mesh_bytes && !self.more_meshes
+    fn reusable(&self, key: &FramePreparationKey, textures: TextureState, meshes: MeshState) -> bool {
+        self.key == *key && self.textures == textures && self.meshes == meshes && !self.more_meshes
     }
 }
 
@@ -180,13 +181,14 @@ struct PrepareTimes {
 pub(crate) struct GeometryRenderer {
     queue: Queue,
     memory: Arc<Accounting>,
-    studio: ScenePipelines,
+    pipelines: SurfacePipelines,
     water: Water,
     textures: Textures,
     requested_textures: HashSet<TextureId>,
     instances: Buffer,
     depth: Option<Depth>,
     meshes: HashMap<MeshId, GpuMesh>,
+    storage: Storage,
     retired: Vec<GpuMesh>,
     draws: Vec<DrawCommand>,
     visible: Vec<Instance>,
@@ -203,25 +205,24 @@ impl GeometryRenderer {
 
     pub(crate) fn needs_frame(&self) -> bool {
         self.prepared.as_ref().is_some_and(|prepared| {
-            prepared.more_meshes
-                || prepared.textures != self.textures.state()
-                || prepared.mesh_bytes != self.memory.bytes.load(Ordering::Acquire)
+            prepared.more_meshes || prepared.textures != self.textures.state() || prepared.meshes != self.memory.mesh_state()
         }) || self.textures.uploading()
     }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
-        let studio = ScenePipelines::new(device, format, &textures.layout);
+        let pipelines = SurfacePipelines::new(device, format, &textures.layout);
         Self {
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
-            studio,
+            pipelines,
             textures,
             requested_textures: HashSet::new(),
             water: Water::new(device, format),
             instances: buffer(device, "Face instances", MAX_FACE_INSTANCES * INSTANCE_BYTES, BufferUsages::VERTEX),
             depth: None,
             meshes: HashMap::new(),
+            storage: Storage::default(),
             retired: Vec::new(),
             draws: Vec::new(),
             visible: Vec::new(),
@@ -295,18 +296,33 @@ impl GeometryRenderer {
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
         self.water.draw(pass);
-        self.draw_meshes(pass, &self.draws);
-    }
-
-    fn draw_meshes(&self, pass: &mut RenderPass<'_>, draws: &[DrawCommand]) {
         pass.set_vertex_buffer(1, self.instances.slice(..));
-        for draw in draws {
-            self.studio.bind_pipeline(pass, draw.pipeline);
-            pass.set_bind_group(1, self.textures.binding(draw.texture), &[]);
-            let mesh = &self.meshes[&draw.key];
-            pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-            pass.set_index_buffer(mesh.indices.slice(..), IndexFormat::Uint32);
-            pass.draw_indexed(draw.indices.clone(), 0, draw.first..draw.first + draw.count);
+        let mut pipeline = None;
+        let mut texture = None;
+        let mut buffers = None;
+        for draw in &self.draws {
+            if pipeline != Some(draw.pipeline) {
+                self.pipelines.bind_pipeline(pass, draw.pipeline);
+                pipeline = Some(draw.pipeline);
+            }
+            if texture != Some(draw.texture) {
+                pass.set_bind_group(1, self.textures.binding(draw.texture), &[]);
+                texture = Some(draw.texture);
+            }
+            let mesh = &self.meshes[&draw.mesh];
+            let allocation = &mesh.allocation;
+            if buffers.is_none_or(|bound| !Arc::ptr_eq(bound, allocation.buffers())) {
+                pass.set_vertex_buffer(0, allocation.buffers().vertices.slice(..));
+                pass.set_index_buffer(allocation.buffers().indices.slice(..), IndexFormat::Uint32);
+                buffers = Some(allocation.buffers());
+            }
+            let index_offset = allocation.indices().start;
+            let base_vertex = i32::try_from(allocation.vertices().start).expect("mesh page fits the GPU budget");
+            pass.draw_indexed(
+                draw.indices.start + index_offset..draw.indices.end + index_offset,
+                base_vertex,
+                draw.first..draw.first + draw.count,
+            );
         }
     }
 
@@ -335,6 +351,18 @@ impl Drop for GeometryRenderer {
         });
     }
 }
+
+fn buffer(device: &Device, label: &str, bytes: usize, usage: BufferUsages) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some(label),
+        size: bytes as u64,
+        usage: usage | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+#[cfg(test)]
+mod fixtures;
 
 #[cfg(test)]
 mod tests {

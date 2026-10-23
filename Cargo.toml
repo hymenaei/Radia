@@ -11,7 +11,6 @@ members = [
     "crates/world",
     "crates/render",
     "crates/assets",
-    "crates/scene",
 ]
 default-members = ["apps/viewer"]
 
@@ -24,12 +23,11 @@ license = "LGPL-2.1-only"
 assets = { path = "crates/assets" }
 llsd = { path = "crates/llsd" }
 math = { path = "crates/math" }
-utils = { path = "crates/utils" }
-test-support = { path = "crates/test-support" }
 network = { path = "crates/network" }
 protocol = { path = "crates/protocol" }
 render = { path = "crates/render" }
-scene = { path = "crates/scene" }
+test-support = { path = "crates/test-support" }
+utils = { path = "crates/utils" }
 world = { path = "crates/world" }
 
 base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
@@ -56,7 +54,7 @@ intel_tex_2 = "=0.5.0"
 jpeg2k = { version = "=0.10.1", default-features = false }
 keyring = { version = "=3.6.3", default-features = false }
 md-5 = { version = "=0.11.0", default-features = false }
-proptest = "=1.11.0"
+proptest = { version = "=1.12.0", default-features = false, features = ["std"] }
 quick-xml = "=0.42.0"
 reqwest = { version = "=0.13.5", default-features = false, features = [
     "rustls",
@@ -75,7 +73,11 @@ tokio = { version = "1", features = [
 ] }
 tracing = "0.1"
 tracing-appender = "=0.2.5"
-tracing-subscriber = { version = "0.3", features = ["json", "chrono", "env-filter"] }
+tracing-subscriber = { version = "0.3", features = [
+    "json",
+    "chrono",
+    "env-filter",
+] }
 tracing-tracy = { version = "=0.12.0", default-features = false, features = [
     "enable",
     "ondemand",
@@ -93,14 +95,14 @@ winit = { version = "=0.30.13", default-features = false, features = [
 ] }
 
 [workspace.lints.clippy]
-correctness = { level = "deny", priority = -1 }
 complexity = { level = "deny", priority = -1 }
-suspicious = { level = "deny", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+large_enum_variant = "allow"
 perf = { level = "deny", priority = -1 }
 redundant_clone = "deny"
-upper_case_acronyms = "allow"
+suspicious = { level = "deny", priority = -1 }
 too_many_arguments = "allow"
-large_enum_variant = "allow"
+upper_case_acronyms = "allow"
 
 [profile.dev]
 debug = "line-tables-only"

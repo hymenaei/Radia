@@ -4,9 +4,8 @@ use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput, m
 use math::{Quat, Vec3};
 use uuid::Uuid;
 use world::{
-    AgentHandoff,
     ApplyOutcome::{AgentHandedOff, Introduced, Removed},
-    ObjectPatch,
+    Kind, ObjectObservation, ObjectPatch,
     ParentUpdate::{Local, Root},
     Pose, World,
 };
@@ -165,18 +164,7 @@ fn bench_agent_handoff(group: &mut BenchmarkGroup<'_, WallTime>) {
                 let (from, to) = if in_source { (agent.region, destination) } else { (destination, agent.region) };
                 let applied = scene
                     .world
-                    .handoff_agent(
-                        from,
-                        AgentHandoff {
-                            source: source(to, source_order),
-                            local_id: agent.local_id,
-                            parent: Root,
-                            pose: None,
-                            linear_motion: None,
-                            angular_velocity: None,
-                            scale: None,
-                        },
-                    )
+                    .handoff_agent(from, ObjectObservation::new(source(to, source_order), agent.id, agent.local_id, Kind::Avatar, Root))
                     .expect("agent handoff");
                 assert!(matches!(&applied.outcome, AgentHandedOff(_)));
                 in_source = !in_source;

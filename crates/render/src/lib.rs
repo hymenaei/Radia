@@ -1,8 +1,8 @@
-mod appearance;
 mod geometry;
-mod studio;
+pub mod material;
+mod pipeline;
+pub mod scene;
 mod texture;
-mod water;
 
 pub use geometry::{Instance, PickFace, Stats};
 pub use texture::CompressionQuality;
@@ -19,7 +19,6 @@ use std::{
 
 use egui::{ClippedPrimitive, TexturesDelta};
 use egui_wgpu::{RendererOptions, ScreenDescriptor};
-use scene::{Camera, SceneView};
 use wgpu::{
     AdapterInfo, Backends, Color, CommandEncoderDescriptor, CreateSurfaceError, CurrentSurfaceTexture, Device, DeviceDescriptor,
     ErrorFilter, InstanceDescriptor, LoadOp, Operations, PollError, PollType, PowerPreference, PresentMode, Queue,
@@ -27,7 +26,8 @@ use wgpu::{
     RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureViewDescriptor,
 };
 
-use geometry::GeometryRenderer;
+use crate::geometry::GeometryRenderer;
+use crate::scene::{Camera, SceneView};
 
 #[derive(Debug)]
 pub enum Error {
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn shaders_validate() {
         for (name, source) in [
-            ("studio", include_str!("shaders/studio.wgsl")),
+            ("surface", include_str!("shaders/surface.wgsl")),
             ("water", include_str!("shaders/water.wgsl")),
             ("mipmap", include_str!("shaders/mipmap.wgsl")),
         ] {

@@ -1,26 +1,20 @@
-use math::flips_winding;
-
-use super::{
-    COLOR, Camera, CommandEncoder, Device, DrawCommand, Duration, FaceMaterial, FaceParams, FramePreparation, FramePreparationKey, Frustum,
-    GeometryRenderer, HashMap, HashSet, INSTANCE_BYTES, Instance, Instant, MAX_DRAWS, MAX_FACE_INSTANCES, MAX_INSTANCES, MeshId, Ordering,
-    PickFace, Pipeline, Placement, PrepareTimes, PreparedMesh, Priority, Quat, SceneView, ShadingMode, Stats, SurfaceKind, TextureKey,
-    Vec3, instance_base, is_visible, packed_instance,
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
 };
 
-struct Group {
-    first: (u8, u128, u16, u8),
-    bytes: Vec<u8>,
-    count: u32,
-}
+use assets::Priority;
+use math::{flips_winding, Frustum, Quat, Vec3};
+use wgpu::{CommandEncoder, Device};
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
-struct DrawKey {
-    mesh: MeshId,
-    start: u32,
-    end: u32,
-    pipeline: Pipeline,
-    texture: Option<TextureKey>,
-}
+use super::{FramePreparation, FramePreparationKey, GeometryRenderer, Instance, MAX_INSTANCES, PickFace, PrepareTimes, ShadingMode, Stats};
+use crate::geometry::{
+    batching::{Batches, DrawKey},
+    instance::{instance_base, is_visible, packed_instance},
+};
+use crate::material::{FaceMaterial, FaceParams};
+use crate::pipeline::{COLOR, Pipeline};
+use crate::scene::{Camera, Placement, PreparedMesh, SceneView, SurfaceKind};
 
 impl GeometryRenderer {
     pub(crate) fn prepare(
@@ -40,11 +34,7 @@ impl GeometryRenderer {
             let upload_started = Instant::now();
             self.textures.upload(device, encoder, self.epoch);
             times.textures = upload_started.elapsed();
-            if self
-                .prepared
-                .as_ref()
-                .is_some_and(|prepared| prepared.reusable(&key, self.textures.state(), self.memory.bytes.load(Ordering::Acquire)))
-            {
+            if self.prepared.as_ref().is_some_and(|prepared| prepared.reusable(&key, self.textures.state(), self.memory.mesh_state())) {
                 self.stats.uploaded_bytes = 0;
                 self.memory_stats();
                 self.record_prepare(started, times, 0);
@@ -54,9 +44,8 @@ impl GeometryRenderer {
         let visibility_started = Instant::now();
         self.epoch = self.epoch.checked_add(1).expect("render frame space exhausted");
         self.stats = Stats::default();
-        self.draws.clear();
         self.visible.clear();
-        let projection = self.studio.update_camera_uniform(&self.queue, camera, size);
+        let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size);
         self.water.update(&self.queue, view, camera, projection, water_height);
         let objects = view.objects().filter_map(|object| {
             let (Some((_, mesh)), Placement::Ready(transform)) = (object.mesh(), object.placement()) else { return None };
@@ -77,9 +66,9 @@ impl GeometryRenderer {
         let surfaces = view.surfaces().filter_map(|surface| {
             let PreparedMesh::Ready(mesh) = &surface.mesh else { return None };
             let (kind, index, shading) = match surface.kind {
-                SurfaceKind::Ground(patch) => {
+                SurfaceKind::Terrain(patch) => {
                     let (x, y) = patch.coordinates();
-                    (1, u16::from(y) * 16 + u16::from(x), ShadingMode::Ground)
+                    (1, u16::from(y) * 16 + u16::from(x), ShadingMode::Terrain)
                 }
                 SurfaceKind::Water => (0, 0, ShadingMode::Water),
             };
@@ -112,7 +101,7 @@ impl GeometryRenderer {
         let requests_started = Instant::now();
         self.requested_textures.clear();
         let mut request = |face: &FaceMaterial, priority| {
-            let Some(texture) = &face.base_color else { return };
+            let Some(texture) = face.base_color_texture.as_ref().and_then(|binding| binding.image()) else { return };
             if self.requested_textures.contains(&texture.id()) {
                 return;
             }
@@ -150,10 +139,8 @@ impl GeometryRenderer {
         }
         times.textures += upload_started.elapsed();
         let faces_started = Instant::now();
-        let mut groups: HashMap<DrawKey, Group> = HashMap::new();
-        let mut blended = Vec::new();
+        let mut batches = Batches::default();
         let mut uploaded = 0;
-        let mut count = 0;
         let mut pending_meshes = HashSet::new();
         let mut pending_textures = HashSet::new();
         for (id, mut instance, faces) in candidates {
@@ -168,7 +155,7 @@ impl GeometryRenderer {
                 }
                 let mut params = FaceParams::new(faces.and_then(|faces| faces.iter().find(|material| material.slot == face.slot)));
                 match instance.shading {
-                    ShadingMode::Ground => {
+                    ShadingMode::Terrain => {
                         params.color = [0.18, 0.23, 0.13, 1.0];
                         params.params[0] = 1.0;
                     }
@@ -196,28 +183,18 @@ impl GeometryRenderer {
                         (true, false, false) => Pipeline::Blend,
                         (false, true, _) => Pipeline::DoubleSided,
                         (false, false, true) => Pipeline::FlippedWinding,
-                        (false, false, false) => Pipeline::Studio,
+                        (false, false, false) => Pipeline::Surface,
                     }
                 };
                 let key = DrawKey { mesh: instance.mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture };
-                if count == MAX_FACE_INSTANCES
-                    || (groups.len() + blended.len() >= MAX_DRAWS && (params.blend || !groups.contains_key(&key)))
-                {
-                    self.stats.omitted_faces += 1;
-                    continue;
-                }
-                count += 1;
-                let bytes = packed_instance(&base, &params, instance.scale);
                 let order = (id.0, id.1, id.2, face.slot);
-                if params.blend {
+                let distance_squared = params.blend.then(|| {
                     let center = self.meshes[&key.mesh].centers[index];
                     let relative = instance.position - camera.position() + (instance.rotation * (center * instance.scale)).as_dvec3();
-                    blended.push((relative.length_squared(), order, key, bytes));
-                } else {
-                    let group = groups.entry(key).or_insert_with(|| Group { first: order, bytes: Vec::new(), count: 0 });
-                    group.first = group.first.min(order);
-                    group.bytes.extend(bytes);
-                    group.count += 1;
+                    relative.length_squared()
+                });
+                if !batches.push(key, order, distance_squared, || packed_instance(&base, &params, instance.scale)) {
+                    continue;
                 }
                 instance.faces.push(PickFace { indices: face.indices.clone(), double_sided: params.double_sided });
             }
@@ -227,34 +204,8 @@ impl GeometryRenderer {
         }
         times.faces = faces_started.elapsed();
         let instances_started = Instant::now();
-        let mut bytes = Vec::with_capacity(count * INSTANCE_BYTES);
-        let mut groups: Vec<_> = groups.into_iter().collect();
-        groups.sort_unstable_by_key(|(_, group)| group.first);
-        for (key, group) in groups {
-            let first = (bytes.len() / INSTANCE_BYTES) as u32;
-            bytes.extend(group.bytes);
-            self.draws.push(DrawCommand {
-                key: key.mesh,
-                pipeline: key.pipeline,
-                first,
-                count: group.count,
-                indices: key.start..key.end,
-                texture: key.texture,
-            });
-        }
-        blended.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-        for (_, _, key, instance) in blended {
-            let first = (bytes.len() / INSTANCE_BYTES) as u32;
-            bytes.extend(instance);
-            self.draws.push(DrawCommand {
-                key: key.mesh,
-                pipeline: key.pipeline,
-                first,
-                count: 1,
-                indices: key.start..key.end,
-                texture: key.texture,
-            });
-        }
+        self.stats.omitted_faces = batches.omitted();
+        let bytes = batches.finish(&mut self.draws);
         if !bytes.is_empty() {
             self.queue.write_buffer(&self.instances, 0, &bytes);
         }
@@ -264,7 +215,7 @@ impl GeometryRenderer {
         self.prepared = Some(FramePreparation {
             key,
             textures: self.textures.state(),
-            mesh_bytes: self.stats.mesh_bytes,
+            meshes: self.memory.mesh_state(),
             more_meshes: !pending_meshes.is_empty() && uploaded > 0,
         });
         self.stats.pending_textures = pending_textures.len();
@@ -299,9 +250,10 @@ impl GeometryRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::MeshState;
+    use crate::scene::{Budget, Reconciler};
     use crate::texture::TextureState;
     use math::DVec3;
-    use scene::{Budget, Reconciler};
 
     fn prepare_key(view: &SceneView) -> FramePreparationKey {
         FramePreparationKey {
@@ -320,30 +272,37 @@ mod tests {
     fn preparation_tracks_scene_inputs() {
         let (mut scene, view) = Reconciler::new(Budget::default());
         let (_other_scene, other) = Reconciler::new(Budget::default());
-        let prepared = FramePreparation { key: prepare_key(&view), textures: texture_state(), mesh_bytes: 0, more_meshes: false };
-        assert!(prepared.reusable(&prepare_key(&view), texture_state(), 0));
+        let prepared =
+            FramePreparation { key: prepare_key(&view), textures: texture_state(), meshes: MeshState::default(), more_meshes: false };
+        assert!(prepared.reusable(&prepare_key(&view), texture_state(), MeshState::default()));
         let mut moved = prepare_key(&view);
         moved.camera = Camera::new(DVec3::X, Vec3::X, 1.0, [720, 720]).unwrap();
-        assert!(!prepared.reusable(&moved, texture_state(), 0), "camera movement changes origin-relative transforms and blend sorting");
+        assert!(
+            !prepared.reusable(&moved, texture_state(), MeshState::default()),
+            "camera movement changes origin-relative transforms and blend sorting"
+        );
         let mut resized = prepare_key(&view);
         resized.size[0] = 1600;
-        assert!(!prepared.reusable(&resized, texture_state(), 0), "aspect ratio changes visibility");
+        assert!(!prepared.reusable(&resized, texture_state(), MeshState::default()), "aspect ratio changes visibility");
         let mut quality = prepare_key(&view);
         quality.camera = quality.camera.with_quality(128.0, 2.0).unwrap();
-        assert!(!prepared.reusable(&quality, texture_state(), 0));
+        assert!(!prepared.reusable(&quality, texture_state(), MeshState::default()));
         let mut water = prepare_key(&view);
         water.water_height = Some(21.0);
-        assert!(!prepared.reusable(&water, texture_state(), 0));
-        assert!(!prepared.reusable(&prepare_key(&other), texture_state(), 0), "another login cannot reuse the old scene");
+        assert!(!prepared.reusable(&water, texture_state(), MeshState::default()));
+        assert!(
+            !prepared.reusable(&prepare_key(&other), texture_state(), MeshState::default()),
+            "another login cannot reuse the old scene"
+        );
         scene.close();
-        assert!(!prepared.reusable(&prepare_key(&view), texture_state(), 0), "session closure invalidates cached draws");
+        assert!(!prepared.reusable(&prepare_key(&view), texture_state(), MeshState::default()), "session closure invalidates cached draws");
     }
 
     #[test]
     fn preparation_tracks_gpu_progress() {
         let (_scene, view) = Reconciler::new(Budget::default());
         let state = texture_state();
-        let mut prepared = FramePreparation { key: prepare_key(&view), textures: state, mesh_bytes: 0, more_meshes: false };
+        let mut prepared = FramePreparation { key: prepare_key(&view), textures: state, meshes: MeshState::default(), more_meshes: false };
         for (reason, changed) in [
             ("image readiness or cancellation", TextureState { revision: 1, ..state }),
             ("handle release or asset change", TextureState { lifecycle: 1, ..state }),
@@ -351,10 +310,17 @@ mod tests {
             ("conversion admission", TextureState { jobs: 1, ..state }),
             ("soft cap change", TextureState { cap: 64 * 1024 * 1024, ..state }),
         ] {
-            assert!(!prepared.reusable(&prepare_key(&view), changed, 0), "{reason} must allow preparation to progress");
+            assert!(!prepared.reusable(&prepare_key(&view), changed, MeshState::default()), "{reason} must allow preparation to progress");
         }
-        assert!(!prepared.reusable(&prepare_key(&view), state, 4), "mesh retirement can unblock uploads");
+        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState { bytes: 4, revision: 0 }), "mesh retirement can unblock uploads");
+        assert!(
+            !prepared.reusable(&prepare_key(&view), state, MeshState { bytes: 0, revision: 1 }),
+            "released ranges can unblock uploads without changing page bytes"
+        );
         prepared.more_meshes = true;
-        assert!(!prepared.reusable(&prepare_key(&view), state, 0), "per-frame upload limits must not strand remaining meshes");
+        assert!(
+            !prepared.reusable(&prepare_key(&view), state, MeshState::default()),
+            "per-frame upload limits must not strand remaining meshes"
+        );
     }
 }

@@ -6,9 +6,10 @@ use crate::history::{
     WorldChange::{EntityUpdated, SubtreeInvalidated},
     WorldChangeClasses,
 };
+use crate::mutation::Effects;
 use crate::update::{FieldStamp, Stamp};
 use crate::{AttachmentPoint, Entity, Kind, LocalAddress, Parent, ParentUpdate, Region};
-use crate::{Binding, World, WorldChange};
+use crate::{Binding, World};
 use ParentResolution::{Accepted, Cycle};
 
 pub(crate) enum ParentResolution {
@@ -63,10 +64,10 @@ impl World {
         false
     }
 
-    pub(crate) fn invalidate_subtree(&self, root: Entity, changes: &mut Vec<WorldChange>) {
+    pub(crate) fn invalidate_subtree(&self, root: Entity, effects: &mut Effects) {
         if self.children.get(&root).is_some_and(|children| !children.is_empty()) {
             let id = self.store.record(root).expect("a subtree root is live").id;
-            changes.push(SubtreeInvalidated { id, entity: root });
+            effects.changes.push(SubtreeInvalidated { id, entity: root });
         }
     }
 
@@ -134,10 +135,10 @@ impl World {
         }
     }
 
-    pub(crate) fn apply_parent(&mut self, child: Entity, parent: Parent, recovery_targets: &mut Vec<LocalAddress>) {
+    pub(crate) fn apply_parent(&mut self, child: Entity, parent: Parent, effects: &mut Effects) {
         self.set_parent(child, parent);
         if let Parent::Pending { address, .. } = parent {
-            recovery_targets.push(address);
+            effects.recovery_targets.push(address);
         }
     }
 
@@ -187,14 +188,7 @@ impl World {
         }
     }
 
-    pub(crate) fn pend_source_children(
-        &mut self,
-        parent: Entity,
-        old_address: LocalAddress,
-        parent_uuid: Uuid,
-        changes: &mut Vec<WorldChange>,
-        recovery_targets: &mut Vec<LocalAddress>,
-    ) {
+    pub(crate) fn pend_source_children(&mut self, parent: Entity, old_address: LocalAddress, parent_uuid: Uuid, effects: &mut Effects) {
         let children = self.children.remove(&parent).unwrap_or_default();
         for child in children.into_values() {
             let Some((child_parent, child_address, child_uuid)) =
@@ -207,25 +201,17 @@ impl World {
             }
 
             self.set_parent(child, Parent::Pending { address: old_address, expected_uuid: Some(parent_uuid) });
-            recovery_targets.push(child_address);
-            changes.push(EntityUpdated {
-                id: child_uuid,
-                entity: child,
-                classes: WorldChangeClasses::RELATIONSHIP | WorldChangeClasses::POSE,
-            });
-            self.invalidate_subtree(child, changes);
+            effects.recovery_targets.push(child_address);
+            self.relink_changed(child, child_uuid, effects);
         }
     }
 
-    pub(crate) fn resolve_waiting_children(
-        &mut self,
-        address: LocalAddress,
-        parent: Entity,
-        parent_uuid: Uuid,
-        changes: &mut Vec<WorldChange>,
-        recovery_targets: &mut Vec<LocalAddress>,
-        recovery_cancellations: &mut Vec<LocalAddress>,
-    ) {
+    pub(crate) fn relink_changed(&self, child: Entity, id: Uuid, effects: &mut Effects) {
+        effects.changes.push(EntityUpdated { id, entity: child, classes: WorldChangeClasses::RELATIONSHIP | WorldChangeClasses::POSE });
+        self.invalidate_subtree(child, effects);
+    }
+
+    pub(crate) fn resolve_waiting_children(&mut self, address: LocalAddress, parent: Entity, parent_uuid: Uuid, effects: &mut Effects) {
         let waiting = self.pending_children.get(&address).cloned().unwrap_or_default();
         let binding = self.store.record(parent).expect("address index contains a live parent").state.binding;
         for child in waiting {
@@ -236,26 +222,20 @@ impl World {
             };
             let Parent::Pending { expected_uuid, .. } = parent_state else { continue };
             if !binding.admits_parent_link(expected_uuid, parent_stamp, parent_uuid) {
-                recovery_targets.push(child_address);
+                effects.recovery_targets.push(child_address);
                 continue;
             }
             if self.would_cycle(child, parent) {
                 if expected_uuid.is_none() {
                     self.set_parent(child, Parent::Pending { address, expected_uuid: Some(parent_uuid) });
-                    changes.push(EntityUpdated {
-                        id: uuid,
-                        entity: child,
-                        classes: WorldChangeClasses::RELATIONSHIP | WorldChangeClasses::POSE,
-                    });
-                    self.invalidate_subtree(child, changes);
+                    self.relink_changed(child, uuid, effects);
                 }
-                recovery_targets.push(child_address);
+                effects.recovery_targets.push(child_address);
                 continue;
             }
             self.set_parent(child, Parent::Resolved(parent));
-            changes.push(EntityUpdated { id: uuid, entity: child, classes: WorldChangeClasses::RELATIONSHIP | WorldChangeClasses::POSE });
-            self.invalidate_subtree(child, changes);
-            recovery_cancellations.push(child_address);
+            self.relink_changed(child, uuid, effects);
+            effects.recovery_cancellations.push(child_address);
         }
     }
 

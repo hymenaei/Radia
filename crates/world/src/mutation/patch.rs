@@ -1,23 +1,17 @@
-use std::sync::Arc;
-
 use uuid::Uuid;
 
-use super::fields::{
-    apply_field_update, content_change_classes, field_at_or_after, has_pose, is_exact_negation, mark_pose_components, normalized_rotation,
-    observable_change_classes, patch_motion, pose_is_accepted, pose_update_changes_observable, reject_untrusted_patch_groups,
-    retain_stored_orientation, validate_patch, validate_uuid, validate_vec3,
-};
+use super::Effects;
+use super::fields::{Draft, Fields, Origin, Settlement, normalized_rotation, validate_uuid, validate_vec3};
 use crate::history::WorldChange::EntityUpdated;
 use crate::history::WorldChangeClasses;
 use crate::object::relationships::ParentResolution;
 use crate::update::FieldStamp;
 use crate::{
-    Appearance, Applied, ApplyError, ApplyOutcome, AvatarAppearance, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason,
-    Kind, LocalAddress, ObjectBindingTarget, ObjectMedia, ObjectPatch, Parent, PoseState, PropertiesPatch, PropertyProvenance, Recovery,
-    Rejections, SitTarget, UpdateAuthority, UpdateSource,
+    Applied, ApplyError, ApplyOutcome, AvatarAppearance, DeferredReason, FieldGroup, FieldRejectionReason, LocalAddress,
+    ObjectBindingTarget, ObjectPatch, PropertiesPatch, PropertyProvenance, Recovery, Rejections, SitTarget, UpdateAuthority, UpdateSource,
 };
-use crate::{Object, ObjectRecordRef, ParentRejectionBarrier, RegionalStamp, World, newer_field, newer_region_field};
-use FieldRejectionReason::{ParentCycle, ParentDependsOnRejectedParent, UntrustedSource};
+use crate::{ObjectContent, RegionalStamp, World, newer_field, newer_region_field};
+use FieldRejectionReason::UntrustedSource;
 use UpdateAuthority::{Tracked, Untracked};
 
 const UNKNOWN_COF_VERSION: i32 = -1;
@@ -25,337 +19,86 @@ const UNKNOWN_COF_VERSION: i32 = -1;
 impl World {
     pub fn patch_object(&mut self, patch: ObjectPatch) -> Result<Applied, ApplyError> {
         let source = patch.source;
-        let local_id = patch.local_id;
         self.require_active_region(source.region)?;
+        let address = LocalAddress::new(source.region, patch.local_id);
         let Some(stamp) = source.stamp() else {
-            return Ok(Applied::deferred(
-                DeferredReason::AmbiguousOrder,
-                Recovery::from_targets(vec![LocalAddress::new(source.region, local_id)], self.limits.max_recovery_targets),
-            ));
+            return Ok(self.defer(DeferredReason::AmbiguousOrder, address));
         };
-        let address = LocalAddress::new(source.region, local_id);
         let Some(entity) = self.entity_at(address) else {
             return Ok(self.unknown_address(address, stamp));
         };
-        let has_update = patch.pose.is_some_and(|pose| pose.position.is_some() || pose.rotation.is_some())
-            || patch.linear_motion.velocity.is_some()
-            || patch.linear_motion.acceleration.is_some()
-            || patch.angular_velocity.is_some()
-            || patch.scale.is_some()
-            || patch.parent.is_some()
-            || patch.attachment_point.is_present()
-            || patch.shape.is_present()
-            || patch.appearance.is_present()
-            || patch.surface_appearance.is_some()
-            || patch.render_materials.is_some()
-            || patch.gltf_material_overrides.is_some()
-            || patch.avatar_appearance.is_some();
+        let origin = Origin { source, stamp };
+        let (parent_update, mut fields) = Fields::patched(patch);
+        let advance_binding = parent_update.is_some() || fields.orders_binding();
         let mut read = self.store.read(entity.0);
         let (record, content, ordering) = read.get().expect("address index contains a complete entity");
-        let object = Object { entity, record: ObjectRecordRef::Borrowed { record, content }, world: self };
-        let data = &record.state;
-        let transform = object.transform();
-        let kind = object.kind();
-        let object_parent = object.parent();
-        let id = object.id();
-        let incoming_rotation = patch.pose.and_then(|pose| pose.rotation);
-        let current_rotation = transform.rotation();
-        let (mut patch, mut rejections) = validate_patch(patch);
-        if patch.object_media.is_some() && (kind != Kind::Object || object.content().appearance != Some(Appearance::Surface)) {
-            rejections.push(FieldRejection {
-                group: FieldGroup::ObjectMedia,
-                reason: FieldRejectionReason::InvalidValue { field: "object_media" },
-            });
-            patch.object_media = None;
+        let content = content.unwrap_or(&ObjectContent::EMPTY);
+        let (id, kind, before) = (record.id, record.kind, record.state);
+
+        let mut rejections = fields.validate(before.transform.rotation());
+        let appearance = fields.next_appearance(content.appearance, &ordering.fences, origin);
+        fields.reject_unsupported(kind, appearance, &mut rejections);
+        if self.self_agent == Some(id)
+            && let Some(update) = &fields.avatar_appearance
+        {
+            let current = content.avatar_appearance.as_deref().and_then(AvatarAppearance::cof_version).unwrap_or(UNKNOWN_COF_VERSION);
+            if update.cof_version().unwrap_or(UNKNOWN_COF_VERSION) <= current {
+                rejections.reject(FieldGroup::AvatarAppearance, FieldRejectionReason::StaleVersion);
+                fields.avatar_appearance = None;
+            }
         }
-        if patch.avatar_appearance.is_some() && kind != Kind::Avatar {
-            rejections.push(FieldRejection {
-                group: FieldGroup::AvatarAppearance,
-                reason: FieldRejectionReason::InvalidValue { field: "avatar_appearance" },
-            });
-            patch.avatar_appearance = None;
-        }
-        if patch.gltf_material_overrides.is_some() && (kind != Kind::Object || object.content().appearance != Some(Appearance::Surface)) {
-            rejections.push(FieldRejection {
-                group: FieldGroup::GltfMaterialOverrides,
-                reason: FieldRejectionReason::InvalidValue { field: "gltf_material_overrides" },
-            });
-            patch.gltf_material_overrides = None;
-        }
-        let stale_avatar_appearance = self.self_agent == Some(id)
-            && patch.avatar_appearance.as_ref().is_some_and(|update| {
-                let incoming = update.cof_version().unwrap_or(UNKNOWN_COF_VERSION);
-                let current =
-                    object.content().avatar_appearance.as_deref().and_then(AvatarAppearance::cof_version).unwrap_or(UNKNOWN_COF_VERSION);
-                incoming <= current
-            });
-        if stale_avatar_appearance {
-            rejections.push(FieldRejection { group: FieldGroup::AvatarAppearance, reason: FieldRejectionReason::StaleVersion });
-            patch.avatar_appearance = None;
-        }
-        if let Some(pose) = patch.pose.as_mut() {
-            retain_stored_orientation(current_rotation, incoming_rotation, &mut pose.rotation);
-        }
-        let field_stamp = FieldStamp { authority: source.authority(), stamp };
-        let parent_candidate = patch.parent.is_some()
-            && newer_field(field_stamp, ordering.fences.parent)
-            && ordering.parent_rejection_barrier.is_none_or(|barrier| barrier.admits(source, stamp));
-        let (parent, parent_cycle) = if parent_candidate {
-            let update = patch.parent.expect("candidate parent update is present");
-            match self.resolve_parent(source.region, local_id, update, field_stamp, Some(entity)) {
+        let parent_admitted = newer_field(origin.field(), ordering.fences.parent) && ordering.admits_parent(source, stamp);
+        let (parent, parent_cycle) = match parent_update.filter(|_| parent_admitted) {
+            Some(update) => match self.resolve_parent(source.region, address.local_id, update, origin.field(), Some(entity)) {
                 ParentResolution::Accepted(parent) => (Some(parent), false),
                 ParentResolution::Cycle => (None, true),
-            }
-        } else {
-            (None, false)
+            },
+            None => (None, false),
         };
-        if parent_cycle {
-            rejections.push(FieldRejection { group: FieldGroup::Parent, reason: ParentCycle });
-            if patch.pose.is_some_and(|pose| pose.position.is_some() || pose.rotation.is_some()) {
-                rejections.push(FieldRejection { group: FieldGroup::Pose, reason: ParentDependsOnRejectedParent });
-                patch.pose = None;
-            }
-        } else if source.authority() == Untracked
-            && patch.parent.is_some()
-            && (ordering.fences.parent.is_some_and(|fence| fence.authority == Tracked) || ordering.parent_rejection_barrier.is_some())
-        {
-            rejections.push(FieldRejection { group: FieldGroup::Parent, reason: UntrustedSource });
+        let untrusted_parent = source.authority() == Untracked && parent_update.is_some() && ordering.protects_parent();
+        fields.reject_parent(parent_cycle, untrusted_parent, &mut rejections);
+        if source.authority() == Untracked {
+            fields.reject_untrusted(&ordering.fences, &mut rejections);
         }
-        reject_untrusted_patch_groups(&patch, &ordering.fences, source.authority(), &mut rejections);
-        let parent_is_newer = parent_candidate && !parent_cycle;
-        let next_parent = if parent_is_newer { parent.expect("newer parent update was resolved") } else { data.parent };
-        let motion_update_is_newer = (patch.linear_motion.velocity.is_some() || patch.linear_motion.acceleration.is_some())
-            && newer_field(field_stamp, ordering.fences.linear_motion);
-        let angular_velocity_update_is_newer =
-            patch.angular_velocity.is_some() && newer_field(field_stamp, ordering.fences.angular_velocity);
-        let scale_update_is_newer = patch.scale.is_some() && newer_field(field_stamp, ordering.fences.scale);
-        let attachment_update_is_newer = patch.attachment_point.is_present() && newer_field(field_stamp, ordering.fences.attachment_point);
-        let shape_update_is_newer = patch.shape.is_present() && newer_region_field(source.region, field_stamp, ordering.fences.shape);
-        let appearance_update_is_newer =
-            patch.appearance.is_present() && newer_region_field(source.region, field_stamp, ordering.fences.appearance);
-        let texture_entry_update_is_newer = kind != Kind::Avatar
-            && patch.surface_appearance.is_some()
-            && newer_region_field(source.region, field_stamp, ordering.fences.texture_entry);
-        let render_materials_update_is_newer = kind != Kind::Avatar
-            && patch.render_materials.is_some()
-            && newer_region_field(source.region, field_stamp, ordering.fences.render_materials);
-        let gltf_material_overrides_update_is_newer = patch.gltf_material_overrides.is_some()
-            && newer_region_field(source.region, field_stamp, ordering.fences.gltf_material_overrides);
-        let avatar_appearance_update_is_newer =
-            patch.avatar_appearance.is_some() && newer_region_field(source.region, field_stamp, ordering.fences.avatar_appearance);
-        let mut next_avatar_appearance = avatar_appearance_update_is_newer.then(|| {
-            let mut appearance = object.content().avatar_appearance.as_deref().cloned().unwrap_or_default();
-            appearance.apply(patch.avatar_appearance.take().expect("newer avatar appearance update is present"));
-            appearance
-        });
-        let mut object_media_update_is_newer = source.authority() == Tracked
-            && patch
-                .object_media
-                .as_ref()
-                .is_some_and(|update| object.content().object_media.as_deref().is_none_or(|current| update.version() > current.version()));
-        let mut next_object_media = object_media_update_is_newer.then(|| {
-            let mut media = object.content().object_media.as_deref().cloned().unwrap_or_default();
-            media.apply(patch.object_media.as_ref().expect("newer ObjectMedia update is present"));
-            media
-        });
-        if let Some(next) = next_object_media.as_ref() {
-            let current_bytes = object.content().object_media.as_deref().map_or(0, ObjectMedia::retained_bytes);
-            let next_total = self.object_media_bytes.saturating_sub(current_bytes).saturating_add(next.retained_bytes());
-            if next_total > crate::MAX_OBJECT_MEDIA_BYTES {
-                rejections.push(FieldRejection {
-                    group: FieldGroup::ObjectMedia,
-                    reason: FieldRejectionReason::ResourceLimit { field: "object_media" },
-                });
-                patch.object_media = None;
-                next_object_media = None;
-                object_media_update_is_newer = false;
-            }
-        }
-        let next_attachment_point = if attachment_update_is_newer {
-            apply_field_update(data.attachment_point, patch.attachment_point)
-        } else {
-            data.attachment_point
-        };
-        let frame_changed = self.relationship_frame_changed(data.parent, next_parent, data.attachment_point, next_attachment_point);
-        let next_frame_fence = if frame_changed { Some(field_stamp) } else { ordering.fences.frame };
-        let next_frame_generation = if frame_changed {
-            data.frame_generation.checked_add(1).ok_or(ApplyError::FrameGenerationExhausted)?
-        } else {
-            data.frame_generation
-        };
-        let pose_is_accepted = pose_is_accepted(patch.pose, field_stamp, Some(&ordering.fences), next_frame_fence);
-        if patch.pose.is_some_and(has_pose)
-            && newer_field(field_stamp, ordering.fences.pose)
-            && !field_at_or_after(field_stamp, next_frame_fence)
-        {
-            rejections.push(FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::StaleFrame });
-        }
-        if !pose_is_accepted
-            && !parent_is_newer
-            && !motion_update_is_newer
-            && !angular_velocity_update_is_newer
-            && !scale_update_is_newer
-            && !attachment_update_is_newer
-            && !shape_update_is_newer
-            && !appearance_update_is_newer
-            && !texture_entry_update_is_newer
-            && !render_materials_update_is_newer
-            && !gltf_material_overrides_update_is_newer
-            && !avatar_appearance_update_is_newer
-            && !object_media_update_is_newer
-            && !(parent_cycle && source.authority() == Tracked)
-            && !(has_update && source.authority() == Tracked && stamp > data.binding.fence())
-        {
+        let next_parent = parent.unwrap_or(before.parent);
+        let next_attachment = fields.next_attachment_point(before.attachment_point, &ordering.fences, origin);
+        let frame_changed = self.relationship_frame_changed(before.parent, next_parent, before.attachment_point, next_attachment);
+        let detach_snapshot = parent.and_then(|next| self.detach_snapshot(entity, kind, before.parent, next));
+
+        let mut draft = Draft::new(before, *ordering, content);
+        let frame = draft.plan_frame(frame_changed, origin)?;
+        let pose_accepted = draft.accept_pose(&fields, origin, frame, &mut rejections);
+        let pose_affects_descendants = pose_accepted && draft.pose_changes(fields.pose);
+        let settlement =
+            Settlement { frame, pose_accepted, detach_snapshot, parent_applied: parent.is_some(), parent_cycle, advance_binding };
+        draft.update(fields, kind, origin, settlement, self.object_media_bytes, &mut rejections);
+        if draft.is_unchanged(&before, ordering) {
             return Ok(Applied::unchanged().with_rejections(rejections));
         }
-        let pose_affects_descendants = pose_update_changes_observable(data, ordering, patch.pose, field_stamp, next_frame_fence);
-        let detach_snapshot = if parent_is_newer
-            && next_parent == Parent::Root
-            && kind == Kind::Avatar
-            && matches!(data.parent, Parent::Resolved(parent) if self.store.record(parent).is_some_and(|record| record.kind != Kind::Avatar))
-        {
-            match self.resolve_pose(entity).ok() {
-                Some(PoseState::Resolved(pose)) => Some(pose),
-                Some(PoseState::Unresolved(_) | PoseState::Provisional { .. }) | None => None,
-            }
-        } else {
-            None
-        };
-        let parent_changed = parent_is_newer && object_parent != next_parent;
-        let mut object_media_size_delta = None;
-        let mut data = *data;
-        let mut content = (shape_update_is_newer
-            || appearance_update_is_newer
-            || texture_entry_update_is_newer
-            || render_materials_update_is_newer
-            || gltf_material_overrides_update_is_newer
-            || avatar_appearance_update_is_newer
-            || object_media_update_is_newer)
-            .then(|| object.content().clone());
-        let mut ordering = *ordering;
-        data.frame_generation = next_frame_generation;
-        if frame_changed {
-            data.provisional_pose = None;
-            ordering.fences.frame = next_frame_fence;
-        }
-        if let Some(pose) = patch.pose.filter(|_| pose_is_accepted) {
-            if let Some(position) = pose.position {
-                data.transform.position = Some(position);
-            }
-            if let Some(rotation) = pose.rotation
-                && !data.transform.rotation.is_some_and(|current| is_exact_negation(current, rotation))
-            {
-                data.transform.rotation = Some(rotation);
-            }
-            ordering.fences.pose = Some(field_stamp);
-        }
-        if motion_update_is_newer {
-            patch_motion(&mut data.linear_motion, patch.linear_motion);
-            ordering.fences.linear_motion = Some(field_stamp);
-        }
-        if let Some(value) = patch.angular_velocity.filter(|_| angular_velocity_update_is_newer) {
-            data.angular_velocity = Some(value);
-            ordering.fences.angular_velocity = Some(field_stamp);
-        }
-        if let Some(value) = patch.scale.filter(|_| scale_update_is_newer) {
-            data.transform.scale = Some(value);
-            ordering.fences.scale = Some(field_stamp);
-        }
-        if attachment_update_is_newer {
-            data.attachment_point = next_attachment_point;
-            ordering.fences.attachment_point = Some(field_stamp);
-        }
-        if let Some(content) = content.as_mut() {
-            if shape_update_is_newer {
-                content.shape = apply_field_update(content.shape, patch.shape);
-                ordering.fences.shape = Some(RegionalStamp { region: source.region, stamp: field_stamp });
-            }
-            if appearance_update_is_newer {
-                content.appearance = apply_field_update(content.appearance, patch.appearance);
-                ordering.fences.appearance = Some(RegionalStamp { region: source.region, stamp: field_stamp });
-            }
-            if texture_entry_update_is_newer {
-                let value = patch.surface_appearance.take().expect("newer TextureEntry update is present");
-                if content.surface_appearance.as_deref() != Some(&value) {
-                    content.surface_appearance = Some(Arc::new(value));
-                }
-                ordering.fences.texture_entry = Some(RegionalStamp { region: source.region, stamp: field_stamp });
-            }
-            if render_materials_update_is_newer {
-                let value = patch.render_materials.take().expect("newer RenderMaterials update is present");
-                if content.render_materials.as_deref() != (!value.is_empty()).then_some(&value) {
-                    content.render_materials = (!value.is_empty()).then(|| Arc::new(value));
-                }
-                ordering.fences.render_materials = Some(RegionalStamp { region: source.region, stamp: field_stamp });
-            }
-            if gltf_material_overrides_update_is_newer {
-                let value = patch.gltf_material_overrides.take().expect("newer GLTF material override update is present");
-                if content.gltf_material_overrides.as_deref() != (!value.is_empty()).then_some(&value) {
-                    content.gltf_material_overrides = (!value.is_empty()).then(|| Arc::new(value));
-                }
-                ordering.fences.gltf_material_overrides = Some(RegionalStamp { region: source.region, stamp: field_stamp });
-            }
-            if avatar_appearance_update_is_newer {
-                let value = next_avatar_appearance.take().expect("newer avatar appearance was merged");
-                content.avatar_appearance = Some(Arc::new(value));
-                ordering.fences.avatar_appearance = Some(RegionalStamp { region: source.region, stamp: field_stamp });
-            }
-            if object_media_update_is_newer {
-                let value = next_object_media.take().expect("newer ObjectMedia update has been applied");
-                object_media_size_delta =
-                    Some((content.object_media.as_deref().map_or(0, ObjectMedia::retained_bytes), value.retained_bytes()));
-                content.object_media = Some(Arc::new(value));
-            }
-        }
-        if pose_is_accepted {
-            if let Some(pose) = patch.pose {
-                mark_pose_components(&mut data, pose);
-            }
-            data.provisional_pose = None;
-        } else if let Some(snapshot) = detach_snapshot {
-            data.provisional_pose = Some(snapshot);
-        }
-        if parent_is_newer {
-            ordering.fences.parent = Some(field_stamp);
-            ordering.parent_rejection_barrier = None;
-        } else if parent_cycle && source.authority() == Tracked {
-            ordering.parent_rejection_barrier = Some(ParentRejectionBarrier { region: source.region, stamp });
-        }
-        if has_update {
-            data.binding.advance_fence(source, stamp);
-        }
-        let change_classes = observable_change_classes(&object.record.state, object_parent, &data, next_parent);
-        let change_classes =
-            content.as_ref().map_or(change_classes, |content| change_classes | content_change_classes(object.content(), content));
-        drop(object);
-        drop(read);
-        let observable_change = !change_classes.is_empty();
-        if observable_change {
+        let change_classes = draft.change_classes(&before, next_parent);
+        if !change_classes.is_empty() {
             self.ensure_revision_available()?;
         }
-        self.store.commit(entity, data, content, ordering);
-        if let Some((old_bytes, new_bytes)) = object_media_size_delta {
-            self.object_media_bytes = self.object_media_bytes.saturating_sub(old_bytes).saturating_add(new_bytes);
+        let media_bytes = draft.media_bytes();
+        let (state, content, ordering) = draft.into_parts();
+        drop(read);
+
+        self.store.commit(entity, state, content, ordering);
+        if let Some((old, new)) = media_bytes {
+            self.object_media_bytes = self.object_media_bytes.saturating_sub(old).saturating_add(new);
         }
-        let mut changes = Vec::new();
-        let mut recovery_targets = Vec::new();
-        if let Some(parent) = parent.filter(|_| parent_is_newer) {
-            self.apply_parent(entity, parent, &mut recovery_targets);
+        let mut effects = Effects::default();
+        if let Some(parent) = parent {
+            self.apply_parent(entity, parent, &mut effects);
         }
-        if observable_change {
-            changes.push(EntityUpdated { id, entity, classes: change_classes });
+        if !change_classes.is_empty() {
+            effects.changes.push(EntityUpdated { id, entity, classes: change_classes });
         }
-        if frame_changed || parent_changed || pose_affects_descendants {
-            self.invalidate_subtree(entity, &mut changes);
+        if frame_changed || parent.is_some_and(|parent| parent != before.parent) || pose_affects_descendants {
+            self.invalidate_subtree(entity, &mut effects);
         }
-        Ok(self
-            .finish_mutation(
-                if observable_change { ApplyOutcome::Updated(entity) } else { ApplyOutcome::Unchanged },
-                changes,
-                Recovery::from_targets(recovery_targets, self.limits.max_recovery_targets),
-            )
-            .with_rejections(rejections)
-            .with_recovery_satisfied(parent_is_newer))
+        let outcome = if change_classes.is_empty() { ApplyOutcome::Unchanged } else { ApplyOutcome::Updated(entity) };
+        Ok(self.finish(outcome, effects).with_rejections(rejections).with_recovery_satisfied(parent.is_some()))
     }
 
     pub fn patch_properties(
@@ -368,38 +111,33 @@ impl World {
         self.require_active_region(source.region)?;
         validate_uuid(response_id, "object_id")?;
         if response_id != target.id || target.address.region != source.region || !self.object_binding_target_is_current(target) {
-            return Ok(self.finish_mutation(ApplyOutcome::IgnoredStale, Vec::new(), Recovery::default()));
+            return Ok(Applied::new(ApplyOutcome::IgnoredStale));
         }
         let Some(stamp) = source.stamp() else {
-            return Ok(Applied::deferred(
-                DeferredReason::AmbiguousOrder,
-                Recovery::from_targets(vec![target.address], self.limits.max_recovery_targets),
-            ));
+            return Ok(self.defer(DeferredReason::AmbiguousOrder, target.address));
         };
         let entity = target.entity;
-        let has_property_update = patch.owner_id.is_some() || patch.creator_id.is_some();
-        let (mut data, mut content, ordering) = {
+        let (mut state, mut content, ordering) = {
             let object = self.object(entity).expect("current properties target names a live entity");
             (object.record.state, object.content().clone(), *object.ordering())
         };
         let properties = content.properties;
         let provenance = content.properties_provenance;
-        let owner_fence = provenance.owner.map(RegionalStamp::from);
-        let creator_fence = provenance.creator.map(RegionalStamp::from);
         let field_stamp = FieldStamp { authority: source.authority(), stamp };
         let mut rejections = Rejections::default();
-        let owner_untrusted = patch.owner_id.is_some()
-            && source.authority() == Untracked
-            && owner_fence.is_some_and(|fence| fence.stamp.authority == Tracked);
-        let creator_untrusted = patch.creator_id.is_some()
-            && source.authority() == Untracked
-            && creator_fence.is_some_and(|fence| fence.stamp.authority == Tracked);
+        let untrusted = |value: Option<Uuid>, fence: Option<PropertyProvenance>| {
+            value.is_some() && source.authority() == Untracked && fence.is_some_and(|fence| fence.authority == Tracked)
+        };
+        let owner_untrusted = untrusted(patch.owner_id, provenance.owner);
+        let creator_untrusted = untrusted(patch.creator_id, provenance.creator);
         if owner_untrusted || creator_untrusted {
-            rejections.push(FieldRejection { group: FieldGroup::Properties, reason: UntrustedSource });
+            rejections.reject(FieldGroup::Properties, UntrustedSource);
         }
-        let owner_is_newer = patch.owner_id.is_some() && !owner_untrusted && newer_region_field(source.region, field_stamp, owner_fence);
-        let creator_is_newer =
-            patch.creator_id.is_some() && !creator_untrusted && newer_region_field(source.region, field_stamp, creator_fence);
+        let newer = |value: Option<Uuid>, untrusted: bool, fence: Option<PropertyProvenance>| {
+            value.is_some() && !untrusted && newer_region_field(source.region, field_stamp, fence.map(RegionalStamp::from))
+        };
+        let owner_is_newer = newer(patch.owner_id, owner_untrusted, provenance.owner);
+        let creator_is_newer = newer(patch.creator_id, creator_untrusted, provenance.creator);
         let next_provenance = PropertyProvenance {
             region: source.region,
             authority: source.authority(),
@@ -412,62 +150,54 @@ impl World {
         if observable_change {
             self.ensure_revision_available()?;
         }
-        if owner_is_newer && let Some(value) = patch.owner_id {
-            content.properties.owner_id = Some(value);
+        if owner_is_newer {
+            content.properties.owner_id = patch.owner_id;
             content.properties_provenance.owner = Some(next_provenance);
         }
-        if creator_is_newer && let Some(value) = patch.creator_id {
-            content.properties.creator_id = Some(value);
+        if creator_is_newer {
+            content.properties.creator_id = patch.creator_id;
             content.properties_provenance.creator = Some(next_provenance);
         }
-        if has_property_update {
-            data.binding.advance_fence(source, stamp);
+        if patch.owner_id.is_some() || patch.creator_id.is_some() {
+            state.binding.advance_fence(source, stamp);
         }
-        self.store.commit(entity, data, Some(content), ordering);
-        let changes = if observable_change {
-            vec![EntityUpdated { id: response_id, entity, classes: WorldChangeClasses::PROPERTIES }]
+        self.store.commit(entity, state, Some(content), ordering);
+        let (outcome, changes) = if observable_change {
+            (ApplyOutcome::Updated(entity), vec![EntityUpdated { id: response_id, entity, classes: WorldChangeClasses::PROPERTIES }])
         } else {
-            Vec::new()
+            (ApplyOutcome::Unchanged, Vec::new())
         };
-        Ok(self
-            .finish_mutation(
-                if observable_change { ApplyOutcome::Updated(entity) } else { ApplyOutcome::Unchanged },
-                changes,
-                Recovery::default(),
-            )
-            .with_rejections(rejections))
+        Ok(self.finish(outcome, Effects::from_changes(changes)).with_rejections(rejections))
     }
 
     pub fn patch_sit_target(&mut self, source: UpdateSource, id: Uuid, target: Option<SitTarget>) -> Result<Applied, ApplyError> {
         self.require_active_region(source.region)?;
         validate_uuid(id, "object_id")?;
+        let entity = self.entity(id);
         let Some(stamp) = source.stamp() else {
-            let recovery_address = self
-                .entity(id)
-                .and_then(|entity| self.object(entity))
-                .map(|object| object.address())
-                .filter(|address| address.region == source.region);
-            return Ok(Applied::deferred(
-                DeferredReason::AmbiguousOrder,
-                recovery_address
-                    .map_or_else(Recovery::default, |address| Recovery::from_targets(vec![address], self.limits.max_recovery_targets)),
-            ));
+            let address = entity.and_then(|entity| self.object(entity)).map(|object| object.address());
+            return Ok(match address.filter(|address| address.region == source.region) {
+                Some(address) => self.defer(DeferredReason::AmbiguousOrder, address),
+                None => Applied::deferred(DeferredReason::AmbiguousOrder, Recovery::default()),
+            });
         };
-        let Some(entity) = self.entity(id) else {
+        let Some(entity) = entity else {
             return Ok(Applied::deferred(DeferredReason::UnknownObject, Recovery::default()));
         };
-        let object = self.object(entity).expect("UUID index contains a live entity");
-        if object.address().region != source.region {
-            return Ok(Applied::unchanged());
-        }
+        let (mut state, mut content, mut ordering) = {
+            let object = self.object(entity).expect("UUID index contains a live entity");
+            if object.address().region != source.region {
+                return Ok(Applied::unchanged());
+            }
+            (object.record.state, object.content().clone(), *object.ordering())
+        };
 
         let mut rejections = Rejections::default();
         let target = match target {
             Some(mut target) => {
-                let invalid_position = validate_vec3(Some(target.position), "sit_position").err();
                 let rotation = normalized_rotation(target.rotation);
-                if let Some(reason) = invalid_position.or_else(|| rotation.as_ref().err().copied()) {
-                    rejections.push(FieldRejection { group: FieldGroup::SitTarget, reason });
+                if let Some(reason) = validate_vec3(Some(target.position), "sit_position").err().or_else(|| rotation.err()) {
+                    rejections.reject(FieldGroup::SitTarget, reason);
                     return Ok(Applied::unchanged().with_rejections(rejections));
                 }
                 target.rotation = rotation.expect("sit-target rotation was validated");
@@ -476,39 +206,29 @@ impl World {
             None => None,
         };
 
-        let (sit_target, sit_target_fence) = (object.content().sit_target, object.ordering().fences.sit_target);
-        drop(object);
+        let fence = ordering.fences.sit_target;
         let field_stamp = FieldStamp { authority: source.authority(), stamp };
-        let protected = source.authority() == Untracked && sit_target_fence.is_some_and(|fence| fence.stamp.authority == Tracked);
+        let protected = source.authority() == Untracked && fence.is_some_and(|fence| fence.stamp.authority == Tracked);
         if protected {
-            rejections.push(FieldRejection { group: FieldGroup::SitTarget, reason: UntrustedSource });
+            rejections.reject(FieldGroup::SitTarget, UntrustedSource);
         }
-        let accepted = !protected && newer_region_field(source.region, field_stamp, sit_target_fence);
-        let observable_change = accepted && sit_target != target;
+        if protected || !newer_region_field(source.region, field_stamp, fence) {
+            return Ok(Applied::unchanged().with_rejections(rejections));
+        }
+        let observable_change = content.sit_target != target;
         if observable_change {
             self.ensure_revision_available()?;
         }
-        if !accepted {
-            return Ok(Applied::unchanged().with_rejections(rejections));
-        }
-
-        let (mut data, mut content, mut ordering) = {
-            let object = self.object(entity).expect("sit target is live");
-            (object.record.state, object.content().clone(), *object.ordering())
-        };
         content.sit_target = target;
         ordering.fences.sit_target = Some(RegionalStamp { region: source.region, stamp: field_stamp });
-        data.binding.advance_fence(source, stamp);
-        self.store.commit(entity, data, Some(content), ordering);
-        let changes =
-            if observable_change { vec![EntityUpdated { id, entity, classes: WorldChangeClasses::RELATIONSHIP }] } else { Vec::new() };
-        Ok(self
-            .finish_mutation(
-                if observable_change { ApplyOutcome::Updated(entity) } else { ApplyOutcome::Unchanged },
-                changes,
-                Recovery::default(),
-            )
-            .with_rejections(rejections))
+        state.binding.advance_fence(source, stamp);
+        self.store.commit(entity, state, Some(content), ordering);
+        let (outcome, changes) = if observable_change {
+            (ApplyOutcome::Updated(entity), vec![EntityUpdated { id, entity, classes: WorldChangeClasses::RELATIONSHIP }])
+        } else {
+            (ApplyOutcome::Unchanged, Vec::new())
+        };
+        Ok(self.finish(outcome, Effects::from_changes(changes)).with_rejections(rejections))
     }
 }
 

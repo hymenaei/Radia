@@ -5,7 +5,24 @@ mod patch;
 mod region;
 
 use super::World;
-use crate::{Applied, ApplyError, ApplyOutcome, Recovery, Rejections, WorldChange, WorldRevision};
+use crate::{
+    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, Parent, PoseState, RecentBatch, Recovery, RegionApplied,
+    RegionOutcome, WorldChange, WorldPose, WorldRevision,
+};
+
+#[derive(Default)]
+pub(crate) struct Effects {
+    pub(crate) changes: Vec<WorldChange>,
+    pub(crate) recovery_targets: Vec<LocalAddress>,
+    pub(crate) recovery_cancellations: Vec<LocalAddress>,
+    pub(crate) recent: RecentBatch,
+}
+
+impl Effects {
+    fn from_changes(changes: Vec<WorldChange>) -> Self {
+        Self { changes, ..Self::default() }
+    }
+}
 
 impl World {
     pub(super) fn ensure_revision_available(&self) -> Result<(), ApplyError> {
@@ -17,13 +34,39 @@ impl World {
         self.journal.append(changes, self.limits.max_journal_entries, self.limits.max_journal_changes)
     }
 
-    fn finish_mutation(&mut self, outcome: ApplyOutcome, changes: Vec<WorldChange>, recovery: Recovery) -> Applied {
+    pub(super) fn publish_region_patch(&mut self, change: WorldChange) -> RegionApplied {
+        let revision = self.publish_changes(vec![change]).expect("a region patch journals its change");
+        RegionApplied::new(RegionOutcome::Patched { revision })
+    }
+
+    pub(super) fn recovery(&self, targets: Vec<LocalAddress>) -> Recovery {
+        Recovery::from_targets(targets, self.limits.max_recovery_targets)
+    }
+
+    pub(super) fn defer(&self, reason: DeferredReason, address: LocalAddress) -> Applied {
+        Applied::deferred(reason, self.recovery(vec![address]))
+    }
+
+    fn detach_snapshot(&self, entity: Entity, kind: Kind, current: Parent, next: Parent) -> Option<WorldPose> {
+        let leaves_object =
+            matches!(current, Parent::Resolved(parent) if self.store.record(parent).is_some_and(|record| record.kind != Kind::Avatar));
+        if kind != Kind::Avatar || next != Parent::Root || !leaves_object {
+            return None;
+        }
+        match self.resolve_pose(entity) {
+            Ok(PoseState::Resolved(pose)) => Some(pose),
+            Ok(PoseState::Unresolved(_) | PoseState::Provisional { .. }) | Err(_) => None,
+        }
+    }
+
+    fn finish(&mut self, outcome: ApplyOutcome, effects: Effects) -> Applied {
+        self.recent.apply_batch(effects.recent);
+        let recovery = self.recovery(effects.recovery_targets);
         Applied {
-            outcome,
-            revision: self.publish_changes(changes),
+            revision: self.publish_changes(effects.changes),
             recovery,
-            recovery_cancellations: Vec::new(),
-            rejections: Rejections::default(),
+            recovery_cancellations: effects.recovery_cancellations,
+            ..Applied::new(outcome)
         }
     }
 }

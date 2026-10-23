@@ -97,23 +97,13 @@ enum Data {
     Environment(EnvironmentDescription),
 }
 
-pub struct Prepared {
-    resource: Resource,
+pub(crate) struct Prepared {
     data: Data,
     source: Option<Vec<u8>>,
-    size: TextureSize,
 }
 
 impl Prepared {
-    pub(crate) fn finish(
-        self,
-        resource: Resource,
-        size: TextureSize,
-        mut reservation: Reservation,
-    ) -> Result<(Finished, Option<Blob>), Failure> {
-        if self.resource != resource || self.size != size {
-            return Err(Failure::Malformed);
-        }
+    pub(crate) fn finish(self, mut reservation: Reservation) -> Result<(Finished, Option<Blob>), Failure> {
         let source = self
             .source
             .map(|bytes| reservation.split(bytes.capacity()).and_then(|part| part.finish(bytes)).map_err(|_| Failure::TooLarge))
@@ -156,15 +146,10 @@ pub(crate) fn prepare_cancellable(
     if cancelled() {
         return Err(Failure::Cancelled);
     }
-    Ok(Prepared { resource, data, source: (resource.kind == Kind::Texture).then_some(bytes), size })
+    Ok(Prepared { data, source: (resource.kind == Kind::Texture).then_some(bytes) })
 }
 
-pub(crate) fn prepare_cached(
-    resource: Resource,
-    size: TextureSize,
-    source: &Blob,
-    cancelled: impl Fn() -> bool,
-) -> Result<Prepared, Failure> {
+pub(crate) fn prepare_cached(size: TextureSize, source: &Blob, cancelled: impl Fn() -> bool) -> Result<Prepared, Failure> {
     let data = Data::Texture(texture::decode(source, size, cancelled)?);
-    Ok(Prepared { resource, data, source: None, size })
+    Ok(Prepared { data, source: None })
 }

@@ -3,7 +3,7 @@ use std::collections::{
     Bound::{Excluded, Unbounded},
 };
 
-use crate::{ApplyError, Region, RegionApplied, RegionOutcome, UpdateSource, WorldReadError, WorldRevision, update::FieldStamp};
+use crate::{ApplyError, Region, RegionApplied, UpdateSource, WorldReadError, WorldRevision, update::FieldStamp};
 use crate::{World, WorldChange, WorldId, newer_field};
 
 pub const TERRAIN_PATCH_SIZE: usize = 16;
@@ -91,15 +91,15 @@ impl World {
     pub fn observe_terrain_patch(&mut self, source: UpdateSource, patch: TerrainPatch) -> Result<RegionApplied, ApplyError> {
         let region = source.region();
         self.require_active_region(region)?;
-        let Some(stamp) = source.stamp() else { return Ok(unchanged()) };
+        let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
         let current = self.regions[&region].terrain.patches.get(&patch.id);
         if !newer_field(fence, current.map(|current| current.fence)) {
-            return Ok(unchanged());
+            return Ok(RegionApplied::unchanged());
         }
         if current.is_some_and(|current| current.patch == patch) {
             self.regions.get_mut(&region).expect("active region").terrain.patches.get_mut(&patch.id).expect("known patch").fence = fence;
-            return Ok(unchanged());
+            return Ok(RegionApplied::unchanged());
         }
         let new_patch = current.is_none();
         if new_patch && self.terrain_patches >= MAX_TERRAIN_PATCHES {
@@ -109,8 +109,7 @@ impl World {
         let id = patch.id;
         self.regions.get_mut(&region).expect("active region").terrain.patches.insert(id, ObservedPatch { patch, fence });
         self.terrain_patches += usize::from(new_patch);
-        let revision = self.publish_changes(vec![WorldChange::TerrainPatchUpdated { region, patch: id }]).expect("changed patch");
-        Ok(RegionApplied { outcome: RegionOutcome::Patched { revision }, recovery_cancellations: Vec::new() })
+        Ok(self.publish_region_patch(WorldChange::TerrainPatchUpdated { region, patch: id }))
     }
     pub fn observe_water_height(&mut self, source: UpdateSource, height: f32) -> Result<RegionApplied, ApplyError> {
         let region = source.region();
@@ -118,20 +117,19 @@ impl World {
         if !height.is_finite() {
             return Err(ApplyError::InvalidValue { field: "water_height" });
         }
-        let Some(stamp) = source.stamp() else { return Ok(unchanged()) };
+        let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
         let current = self.regions[&region].terrain.water;
         if !newer_field(fence, current.map(|(_, fence)| fence)) {
-            return Ok(unchanged());
+            return Ok(RegionApplied::unchanged());
         }
         if current.is_some_and(|(current, _)| current == height) {
             self.regions.get_mut(&region).expect("active region").terrain.water = Some((height, fence));
-            return Ok(unchanged());
+            return Ok(RegionApplied::unchanged());
         }
         self.ensure_revision_available()?;
         self.regions.get_mut(&region).expect("active region").terrain.water = Some((height, fence));
-        let revision = self.publish_changes(vec![WorldChange::WaterHeightUpdated(region)]).expect("changed water height");
-        Ok(RegionApplied { outcome: RegionOutcome::Patched { revision }, recovery_cancellations: Vec::new() })
+        Ok(self.publish_region_patch(WorldChange::WaterHeightUpdated(region)))
     }
     pub fn terrain_page(
         &self,
@@ -172,10 +170,6 @@ impl World {
             next,
         }))
     }
-}
-
-fn unchanged() -> RegionApplied {
-    RegionApplied { outcome: RegionOutcome::Unchanged, recovery_cancellations: Vec::new() }
 }
 
 #[cfg(test)]

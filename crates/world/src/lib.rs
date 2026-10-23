@@ -12,9 +12,9 @@ pub use history::recent::{MAX_RECENT_OBJECT_BYTES, MAX_RECENT_OBJECTS, RECENT_OB
 pub use history::{WorldChange, WorldChangeClasses, WorldEntityRemovalReason};
 pub use identity::{Entity, LocalAddress, ObjectBindingTarget, Region, RegionHandle, RegionInfo};
 pub use object::appearance::{
-    Appearance, FaceAppearance, GLTF_TEXTURE_INFO_COUNT, GltfAlphaMode, GltfMaterialOverride, GltfMaterialOverrides,
-    GltfMaterialOverridesError, GltfTextureTransform, MAX_RENDER_MATERIAL_BINDINGS, MAX_SURFACE_FACES, RenderMaterials,
-    RenderMaterialsError, SurfaceAppearance, SurfaceAppearanceError,
+    Appearance, FaceAppearance, MAX_PBR_MATERIAL_BINDINGS, MAX_SURFACE_FACES, PbrAlphaMode, PbrMaterialAssignments,
+    PbrMaterialAssignmentsError, PbrMaterialOverride, PbrMaterialOverrides, PbrMaterialOverridesError, PbrTextureOverride,
+    PbrTextureTransformOverride, SurfaceAppearance, SurfaceAppearanceError, TextureMapping,
 };
 pub use object::avatar::{
     AvatarAppearance, AvatarAppearanceError, AvatarAppearanceUpdate, AvatarBakeSlot, AvatarTextureSlot, AvatarTextureSlots,
@@ -26,17 +26,16 @@ pub use object::media::{
 };
 pub use object::shape::{PrimShape, SculptFlags, SculptType, Shape};
 pub use object::transform::{
-    AttachmentPoint, CoordinateFrame, LinearMotion, LocalTransform, MotionPatch, Pose, PoseError, PoseState, SitTarget, Transform,
-    UnresolvedReason, WorldPose, WorldTransform, WorldTransformState,
+    AttachmentPoint, CoordinateFrame, LinearMotion, LocalTransform, Pose, PoseError, PoseState, SitTarget, Transform, UnresolvedReason,
+    WorldPose, WorldTransform, WorldTransformState,
 };
 pub use object::view::{Object, Objects};
 pub use object::{Kind, Parent, ParentUpdate, Properties, PropertiesPatch, PropertiesProvenance, PropertyProvenance};
 pub use query::read::{
     MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_MEDIA_READ_BYTES,
     MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetail, ObjectDetailBatch,
-    ObjectDetailResult, ObjectListItem, ObjectListItemRead, ObjectListPage, ObjectMediaRead, ObjectPage, ObjectPageCursor, ObjectSummary,
-    ObjectSummaryRead, RegionPage, RegionPageCursor, RegionSummary, RegionSummaryRead, WorldChangeCursor, WorldChangePage,
-    WorldChangeRecord, WorldReadBarrier, WorldReadError,
+    ObjectDetailResult, ObjectListItem, ObjectListPage, ObjectMediaRead, ObjectPageCursor, ObjectSummary, RegionPage, RegionPageCursor,
+    RegionSummary, WorldChangeCursor, WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError,
 };
 pub use query::spatial::{MAX_QUERY_STATE_MAINTENANCE_WORK, QueryStateMaintenance};
 pub use query::{
@@ -52,9 +51,9 @@ pub use region::terrain::{
     TerrainPageCursor, TerrainPatch, TerrainPatchError, TerrainPatchId,
 };
 pub use update::{
-    AgentHandoff, Applied, ApplyError, ApplyOutcome, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate,
-    ObjectObservation, ObjectPatch, OrderEvidence, Recovery, RegionApplied, RegionOutcome, Rejections, UpdateAuthority, UpdateSource,
-    WorldLimits, WorldRevision,
+    Applied, ApplyError, ApplyOutcome, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, ObjectObservation,
+    ObjectPatch, OrderEvidence, Recovery, RegionApplied, RegionOutcome, Rejections, UpdateAuthority, UpdateSource, WorldLimits,
+    WorldRevision,
 };
 
 use std::collections::{BTreeMap, HashMap, HashSet};

@@ -139,7 +139,7 @@ impl ObjectStore {
                 .ecs
                 .query_one_mut::<(&mut ObjectRecord, &mut ObjectOrdering)>(entity.0)
                 .expect("mutation target has its required components");
-            record.state = state;
+            record.state = ObjectState { parent: record.state.parent, ..state };
             *stored_ordering = ordering;
         }
         if let Some(content) = content {

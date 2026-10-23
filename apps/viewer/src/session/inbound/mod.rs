@@ -1,7 +1,7 @@
 mod avatar;
 mod chat;
-mod gltf;
 mod object;
+mod pbr;
 
 pub(super) use avatar::{AvatarAppearanceMessage, SitTargetUpdate, decode_avatar_appearance_update, decode_sit_target_update};
 pub(crate) use chat::{ChatMessage, display_message, format_avatar_name};

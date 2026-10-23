@@ -6,7 +6,7 @@ use std::{
 
 use futures::{channel::mpsc, stream::StreamExt};
 use network::{AgentSession, Grid, MfaChallenge};
-use scene::Camera;
+use render::scene::Camera;
 use tokio::sync::watch;
 use uuid::Uuid;
 

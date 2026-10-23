@@ -3,8 +3,8 @@ use math::{Quat, Vec3};
 use uuid::Uuid;
 
 use crate::{
-    Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, GltfMaterialOverrides, Kind, LinearMotion, LocalAddress,
-    LocalTransform, ObjectMedia, Parent, PoseError, PoseState, Properties, PropertiesProvenance, RenderMaterials, Shape, SitTarget,
+    Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, Kind, LinearMotion, LocalAddress, LocalTransform, ObjectMedia,
+    Parent, PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Properties, PropertiesProvenance, Shape, SitTarget,
     SurfaceAppearance, Transform, WorldTransformState,
 };
 use crate::{ObjectContent, ObjectOrdering, ObjectRecord, ObjectRecordRef, World};
@@ -85,12 +85,12 @@ impl<'a> Object<'a> {
         self.content().surface_appearance.as_deref()
     }
 
-    pub fn render_materials(&self) -> Option<&RenderMaterials> {
-        self.content().render_materials.as_deref()
+    pub fn pbr_materials(&self) -> Option<&PbrMaterialAssignments> {
+        self.content().pbr_materials.as_deref()
     }
 
-    pub fn gltf_material_overrides(&self) -> Option<&GltfMaterialOverrides> {
-        self.content().gltf_material_overrides.as_deref()
+    pub fn pbr_material_overrides(&self) -> Option<&PbrMaterialOverrides> {
+        self.content().pbr_material_overrides.as_deref()
     }
 
     pub fn object_media(&self) -> Option<&ObjectMedia> {

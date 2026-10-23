@@ -120,7 +120,7 @@ fn texture_info(root: &Map<String, Value>, value: &Value) -> Result<MaterialText
     let image = object(index(root, "images", texture.get("source").ok_or(Failure::Malformed)?)?)?;
     let uri = image.get("uri").and_then(Value::as_str).ok_or(Failure::Unsupported)?;
     let id = Uuid::parse_str(uri).map_err(|_| Failure::Unsupported)?;
-    let mut result = MaterialTexture { texture: TextureRef::from(id), ..MaterialTexture::default() };
+    let mut result = MaterialTexture { source: TextureRef::from(id), ..MaterialTexture::default() };
     if let Some(value) = texture.get("sampler") {
         result.sampler = sampler(index(root, "samplers", value)?)?;
     }
@@ -248,9 +248,10 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::material::{TextureRef, TextureTransform};
+    use math::UvTransform;
     use utils::AssetId;
+
+    use super::*;
 
     fn pbr_description(json: &[u8]) -> PbrMaterial {
         let MaterialDescription::Pbr(material) = decode(json).unwrap() else { panic!("expected PBR") };
@@ -262,7 +263,7 @@ mod tests {
         assert_eq!(pbr_description(br#"{"asset":{"version":"2.0"},"materials":[{}]}"#), PbrMaterial::default());
         let material = pbr_description(br#"{"asset":{"version":"2.0"},"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0.2,0.4,0.6,0.8]},"alphaMode":"BLEND","doubleSided":true}]}"#);
         assert_eq!(material.base_color_factor, [0.2, 0.4, 0.6, 0.8]);
-        assert_eq!(material.base_color.texture, TextureRef::Absent);
+        assert_eq!(material.base_color.source, TextureRef::Absent);
         assert_eq!(material.alpha_mode, PbrAlphaMode::Blend);
         assert!(material.double_sided);
         assert_eq!(pbr_description(br#"{"asset":{"version":"2.0"},"materials":[{"alphaCutoff":1.25}]}"#).alpha_cutoff, 1.25);
@@ -312,7 +313,7 @@ mod tests {
             (material.emissive, 4),
             (material.occlusion, 5),
         ] {
-            assert_eq!(info.texture, TextureRef::Asset(AssetId::new(Uuid::from_u128(id))));
+            assert_eq!(info.source, TextureRef::Asset(AssetId::new(Uuid::from_u128(id))));
         }
         assert_eq!(material.metallic, 0.3);
         assert_eq!(material.roughness, 0.7);
@@ -324,7 +325,7 @@ mod tests {
         assert_eq!(material.normal.sampler, Sampler::default());
         let info = material.metallic_roughness;
         assert_eq!(info.tex_coord, 3);
-        assert_eq!(info.transform, TextureTransform { offset: [-0.25, 0.75], scale: [-2.0, 0.0], rotation: -1.0 });
+        assert_eq!(info.transform, UvTransform { offset: [-0.25, 0.75], scale: [-2.0, 0.0], rotation: -1.0 });
         assert_eq!(
             info.sampler,
             Sampler {
@@ -360,14 +361,14 @@ mod tests {
     #[test]
     fn texture_transform_and_clear() {
         let material = pbr_description(TEXTURED.as_bytes());
-        assert_eq!(material.base_color.texture, TextureRef::Asset(AssetId::new(Uuid::from_u128(0x00112233445566778899aabbccddeeff))));
-        assert_eq!(material.base_color.transform, TextureTransform { offset: [0.25, -0.5], scale: [2.0, 3.0], rotation: 1.5 });
+        assert_eq!(material.base_color.source, TextureRef::Asset(AssetId::new(Uuid::from_u128(0x00112233445566778899aabbccddeeff))));
+        assert_eq!(material.base_color.transform, UvTransform { offset: [0.25, -0.5], scale: [2.0, 3.0], rotation: 1.5 });
         assert_eq!(material.alpha_mode, PbrAlphaMode::Mask);
         assert_eq!(material.alpha_cutoff, 0.25);
         assert!(!material.double_sided);
         for clear in ["00000000-0000-0000-0000-000000000000", "ffffffff-ffff-ffff-ffff-ffffffffffff"] {
             let json = TEXTURED.replace("00112233-4455-6677-8899-aabbccddeeff", clear);
-            assert_eq!(pbr_description(json.as_bytes()).base_color.texture, TextureRef::Clear);
+            assert_eq!(pbr_description(json.as_bytes()).base_color.source, TextureRef::Clear);
         }
     }
 

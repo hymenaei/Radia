@@ -58,17 +58,10 @@ async fn cancelled_queues_release_packet_memory() {
             .try_send(SimulatorEvent::Simulator(EventEnvelope::new(Event::Failed("occupy intake".into()))))
             .expect("fill neighbor intake");
         let mut queue = VecDeque::new();
-        let mut closing = false;
-        let mut deadline = None;
-        let mut reason = None;
-        assert!(queue_neighbor_event(
-            &events,
-            &mut queue,
-            retained_packet_event(neighbor, id, endpoint, &wire),
-            &mut closing,
-            &mut deadline,
-            &mut reason
-        ));
+        assert_eq!(
+            queue_neighbor_event(&events, &mut queue, retained_packet_event(neighbor, id, endpoint, &wire)),
+            NeighborEventQueueOutcome::Queued
+        );
         neighbor_queues.push(queue);
         receivers.push(receiver);
     }

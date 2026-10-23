@@ -178,7 +178,7 @@ impl<'a> CoordinatorRuntime<'a> {
                     coordinator.apply_logout_attempt_result(result)?;
                 }
                 _ = &mut session_deadline, if !startup.is_ready() && !*disconnect_requested.borrow() => {
-                    tracing::warn!("Simulator session timed out");
+                    tracing::warn!("simulator session timed out");
                     return Err("Timed out while establishing the simulator session.".into());
                 }
                 _ = time::sleep_until(run_state.logout_deadline.unwrap_or_else(|| time::Instant::now() + LOGOUT_TIMEOUT)), if run_state.logout_deadline.is_some() => {
@@ -330,7 +330,7 @@ impl<'a> CoordinatorRuntime<'a> {
                                     && *simulator_id == coordinator.simulator_id
                                     && startup.observe_primary_message(message, coordinator.session.agent_id, coordinator.session.session_id)
                                 {
-                                        tracing::info!("Simulator session ready");
+                                        tracing::info!("simulator session ready");
                                         coordinator.status.set_circuit_established(true);
                                         coordinator.status.set_lifecycle(NetworkLifecycle::Connected);
                                         coordinator.primary.state.send_replace(PrimaryState::Ready { generation: 0 });
@@ -387,10 +387,22 @@ impl<'a> CoordinatorRuntime<'a> {
                                                 && connection.endpoint == promotion.handoff.endpoint
                                         })
                                     else {
+                                        tracing::info!(
+                                            simulator = promotion.target.get(),
+                                            region = promotion.handoff.region_handle,
+                                            reason = "destination circuit is stale",
+                                            "simulator handoff failed"
+                                        );
                                         coordinator.status.record_error("Ignored movement completion from a stale destination circuit.");
                                         continue;
                                     };
                                     let Some(next_primary) = PrimaryRoute::from_neighbor(promotion.handoff.region_handle, connection) else {
+                                        tracing::info!(
+                                            simulator = promotion.target.get(),
+                                            region = promotion.handoff.region_handle,
+                                            reason = "destination primary route is unavailable",
+                                            "simulator handoff failed"
+                                        );
                                         coordinator.status.record_error("Could not activate the destination simulator without a primary-state route.");
                                         continue;
                                     };
@@ -401,6 +413,12 @@ impl<'a> CoordinatorRuntime<'a> {
                                             (capabilities.client.clone(), capabilities.event_queue_role.clone())
                                         })
                                     else {
+                                        tracing::info!(
+                                            simulator = promotion.target.get(),
+                                            region = promotion.handoff.region_handle,
+                                            reason = "destination capabilities are unavailable",
+                                            "simulator handoff failed"
+                                        );
                                         coordinator.status.record_error("Ignored movement completion without destination capabilities.");
                                         continue;
                                     };
@@ -414,16 +432,16 @@ impl<'a> CoordinatorRuntime<'a> {
                                     if run_state.logout_deadline.is_some() {
                                         continue;
                                     }
-                                    #[cfg(test)]
-                                    if let Some(gate) = coordinator.promotion_gate.take() {
-                                        let _ = gate.entered.send(());
-                                        let _ = gate.release.await;
-                                    }
                                     let mut session = coordinator.session.clone();
                                     session.simulator_address = promotion.handoff.endpoint;
                                     session.seed_capability = promotion.handoff.seed_capability;
                                     let role_generation = promotion.generation.get();
                                     coordinator.promote_primary(next_primary, role_generation);
+                                    tracing::info!(
+                                        simulator = promotion.target.get(),
+                                        region = promotion.handoff.region_handle,
+                                        "simulator promoted"
+                                    );
                                     active_primary_event_queue.set_primary(false);
                                     promoted_event_queue.set_primary(true);
                                     active_primary_event_queue = promoted_event_queue;
@@ -501,6 +519,7 @@ impl<'a> CoordinatorRuntime<'a> {
                                 {
                                     cancel_pending_handoff(
                                         pending,
+                                        "teleport cancelled",
                                         coordinator.simulator_id,
                                         &mut run_state.neighbor_connections,
                                         &mut run_state.retiring_simulators,
@@ -516,7 +535,18 @@ impl<'a> CoordinatorRuntime<'a> {
                             if is_current_simulator(simulator_id, coordinator.simulator_id, &run_state.neighbor_connections)
                                 || run_state.retiring_simulators.contains(&simulator_id)
                             {
-                                if handoff_state.pending().is_some_and(|pending| pending.target == simulator_id) {
+                                if let Some(pending) = handoff_state.pending().filter(|pending| pending.target == simulator_id) {
+                                    let reason = match &outcome {
+                                        SimulatorTaskOutcome::Finished(Err(_)) => "destination connection ended with an error",
+                                        SimulatorTaskOutcome::Finished(Ok(())) => "destination connection ended before promotion",
+                                        SimulatorTaskOutcome::ConnectFailed(_) => "destination connection failed",
+                                    };
+                                    tracing::info!(
+                                        simulator = simulator_id.get(),
+                                        region = pending.handoff.region_handle,
+                                        reason,
+                                        "simulator handoff failed"
+                                    );
                                     handoff_state.take_pending();
                                 }
                                 let connection_region = region_handle.or_else(|| {
@@ -798,7 +828,6 @@ impl<'a> CoordinatorRuntime<'a> {
                             }
 
                             let result = queue_primary_message(
-                                coordinator.primary.simulator_id,
                                 &coordinator.primary.commands,
                                 coordinator.session.agent_id,
                                 coordinator.session.session_id,
@@ -834,7 +863,7 @@ impl<'a> CoordinatorRuntime<'a> {
                             let result = if simulator_id == coordinator.simulator_id && !startup.is_ready() {
                                 Err(ConnectionQueueFailure { error: Error::SimulatorNotReady, completion: completion.take() })
                             } else if let Some(commands) = commands {
-                                queue_connection_message(simulator_id, commands, message, delivery, completion.take(), cancel_target, false)
+                                queue_connection_message(commands, message, delivery, completion.take(), cancel_target, false)
                             } else {
                                 Err(ConnectionQueueFailure { error: Error::SimulatorUnavailable, completion: completion.take() })
                             };

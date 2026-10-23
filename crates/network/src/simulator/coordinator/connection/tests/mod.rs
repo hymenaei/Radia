@@ -1,3 +1,7 @@
+mod admission;
+mod lifecycle;
+mod outbound;
+
 use std::{
     collections::HashSet,
     future, io,
@@ -24,7 +28,7 @@ use tokio::{
     net::UdpSocket,
     spawn,
     sync::{mpsc, oneshot, watch},
-    task::JoinHandle,
+    task::{JoinHandle, yield_now},
     time::{advance, timeout},
 };
 use url::Url;
@@ -37,16 +41,17 @@ use crate::{
     event::{Event, SimulatorId},
     status::NetworkStatusHandle,
     transport::{
-        lludp::{MAX_PENDING_PACKETS, NEW_RELIABLE_ACK_CAPACITY},
+        UdpTransport,
+        lludp::{KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, NEW_RELIABLE_ACK_CAPACITY, ReceiveAdmission},
         pacing::OutboundBudget,
     },
 };
 
-use crate::simulator::coordinator::handoff::{HandoffEvidence, HandoffGeneration, HandoffState, PendingPromotion};
-use crate::simulator::coordinator::{
+use crate::simulator::admission::{
     MAX_CONCURRENT_PACKET_DECODES, MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES,
-    SimulatorMemoryBudget,
 };
+use crate::simulator::coordinator::SimulatorMemoryBudget;
+use crate::simulator::coordinator::handoff::{HandoffEvidence, HandoffGeneration, HandoffState, PendingPromotion};
 
 use super::*;
 
@@ -174,7 +179,7 @@ async fn connect_test_primary_with_coverage(
             primary_state: None,
             budget: budget.handle(),
             owned_budget: Some(budget),
-            send_gate: None,
+            transport: None,
         },
     )
     .await
@@ -198,7 +203,7 @@ async fn connect_test_neighbor_with_coverage(
             primary_state: None,
             budget: budget.handle(),
             owned_budget: Some(budget),
-            send_gate: None,
+            transport: None,
         },
     )
     .await
@@ -287,9 +292,3 @@ async fn run_budget_retry(role: ConnectionRole) {
         assert_eq!(budget_view.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
     }
 }
-
-mod admission;
-
-mod lifecycle;
-
-mod outbound;

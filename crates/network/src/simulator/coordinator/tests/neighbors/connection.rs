@@ -1,6 +1,6 @@
 use std::net::SocketAddrV4;
 
-use ::test_support::{lludp::vectors, parse_hex_fixture};
+use ::test_support::lludp::fixture;
 use llsd::{Map, Value, xml};
 use reqwest::Url;
 use uuid::Uuid;
@@ -692,13 +692,13 @@ async fn crossed_region_promotes_after_matching_movement() {
     assert!(matches!(movement.message(), Message::CompleteAgentMovement(_)));
     primary.send_to(&acknowledgement(41, movement.sequence()), movement_peer).await.expect("ack primary movement request");
 
-    let mut primary_handshake = parse_hex_fixture(vectors::REGION_HANDSHAKE).expect("parse handshake fixture");
+    let mut primary_handshake = fixture("region_handshake.hex");
     primary_handshake[0] |= 0x40;
     set_sequence(&mut primary_handshake, 22);
     primary.send_to(&primary_handshake, primary_peer).await.expect("send primary region handshake");
     let reply = receive_message(&primary, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
     primary.send_to(&acknowledgement(42, reply.sequence()), primary_peer).await.expect("ack primary handshake reply");
-    let mut primary_movement_complete = parse_hex_fixture(vectors::AGENT_MOVEMENT_COMPLETE).expect("parse movement completion fixture");
+    let mut primary_movement_complete = fixture("agent_movement_complete.hex");
     primary_movement_complete[0] |= 0x40;
     set_sequence(&mut primary_movement_complete, 23);
     primary.send_to(&primary_movement_complete, primary_peer).await.expect("complete primary movement");
@@ -727,7 +727,7 @@ async fn crossed_region_promotes_after_matching_movement() {
         }
     };
 
-    let mut neighbor_handshake = parse_hex_fixture(vectors::REGION_HANDSHAKE).expect("parse handshake fixture");
+    let mut neighbor_handshake = fixture("region_handshake.hex");
     neighbor_handshake[0] |= 0x40;
     set_sequence(&mut neighbor_handshake, 41);
     neighbor.send_to(&neighbor_handshake, neighbor_peer).await.expect("send destination region handshake");
@@ -748,7 +748,7 @@ async fn crossed_region_promotes_after_matching_movement() {
     .encode()
     .expect("encode mismatched movement completion");
     neighbor.send_to(&wrong_movement, neighbor_peer).await.expect("send mismatched movement completion");
-    let mut barrier = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse chat fixture");
+    let mut barrier = fixture("chat_from_simulator.hex");
     barrier[0] |= 0x40;
     set_sequence(&mut barrier, 45);
     neighbor.send_to(&barrier, neighbor_peer).await.expect("send post-movement barrier");

@@ -66,13 +66,14 @@ impl PreconnectEvents {
     pub(super) fn remove(&mut self, simulator_id: SimulatorId) -> VecDeque<EventEnvelope> {
         self.take(simulator_id)
     }
+}
 
-    #[cfg(test)]
+#[cfg(test)]
+impl PreconnectEvents {
     pub(super) fn len(&self) -> usize {
         self.len
     }
 
-    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.len == 0
     }

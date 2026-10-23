@@ -297,6 +297,7 @@ impl SimulatorCoordinator {
                     let current = state.take_pending().expect("same-destination handoff remains pending");
                     cancel_pending_handoff(
                         current,
+                        "destination connection is no longer active",
                         self.simulator_id,
                         &mut setup.state.neighbor_connections,
                         &mut setup.state.retiring_simulators,
@@ -310,6 +311,7 @@ impl SimulatorCoordinator {
                     let current = state.take_pending().expect("replaceable handoff remains pending");
                     cancel_pending_handoff(
                         current,
+                        "newer teleport finish received",
                         self.simulator_id,
                         &mut setup.state.neighbor_connections,
                         &mut setup.state.retiring_simulators,
@@ -324,6 +326,7 @@ impl SimulatorCoordinator {
                     state.conflict(&current);
                     cancel_pending_handoff(
                         current,
+                        "conflicting handoff announcement",
                         self.simulator_id,
                         &mut setup.state.neighbor_connections,
                         &mut setup.state.retiring_simulators,
@@ -364,13 +367,21 @@ impl SimulatorCoordinator {
             &mut setup.state.neighbor_event_queue_owners,
             &mut setup.state.simulator_capabilities,
         ) {
+            tracing::info!(
+                simulator = simulator_id.get(),
+                region = handoff.region_handle,
+                reason = "destination capabilities failed",
+                "simulator handoff failed"
+            );
             self.status.record_error(format!("Could not start destination simulator capabilities: {error}"));
             if let Some(connection) = setup.state.neighbor_connections.get_mut(&handoff.region_handle) {
                 connection.queue_handoff_command(HandoffCommand::Cancel);
             }
             return Ok(());
         }
+        let region_handle = handoff.region_handle;
         state.set_pending(PendingPromotion { source, target: simulator_id, generation, handoff, evidence });
+        tracing::info!(simulator = simulator_id.get(), region = region_handle, "simulator promotion started");
         Ok(())
     }
 
@@ -408,6 +419,7 @@ impl SimulatorCoordinator {
                 {
                     cancel_pending_handoff(
                         pending,
+                        "teleport failed",
                         self.simulator_id,
                         &mut setup.state.neighbor_connections,
                         &mut setup.state.retiring_simulators,
@@ -517,6 +529,7 @@ pub(super) fn teleport_failure_matches(pending: Option<&PendingPromotion>, order
 
 pub(super) fn cancel_pending_handoff(
     current: PendingPromotion,
+    reason: &'static str,
     root_simulator_id: SimulatorId,
     neighbor_connections: &mut HashMap<u64, SimulatorConnectionState>,
     retiring_simulators: &mut HashSet<SimulatorId>,
@@ -525,6 +538,7 @@ pub(super) fn cancel_pending_handoff(
     simulator_capabilities: &mut HashMap<SimulatorId, SimulatorCapabilitySession>,
     coverage_losses: &CoverageLossLedger,
 ) {
+    tracing::info!(simulator = current.target.get(), region = current.handoff.region_handle, reason, "simulator handoff cancelled");
     if current.target == root_simulator_id {
         if let Some(connection) =
             neighbor_connections.get_mut(&current.handoff.region_handle).filter(|connection| connection.simulator_id == current.target)
@@ -540,7 +554,9 @@ pub(super) fn cancel_pending_handoff(
         for event in preconnect_events.remove(connection.simulator_id) {
             record_event_envelope_loss(coverage_losses, event, CoverageLossReason::EventAdmission);
         }
-        connected_simulators.remove(&connection.simulator_id);
+        if connected_simulators.remove(&connection.simulator_id) && !connection.abort.is_finished() {
+            connection.log_disconnected(current.handoff.region_handle);
+        }
         remove_simulator_capability(simulator_capabilities, connection.simulator_id);
         connection.abort.abort();
     }
@@ -755,7 +771,7 @@ mod tests {
         let mut connection = SimulatorCoordinator::connect(
             session,
             ResponseData::default(),
-            crate::simulator::coordinator::test_options(NetworkStatusHandle::default()),
+            crate::simulator::coordinator::tests::test_options(NetworkStatusHandle::default()),
         )
         .await
         .expect("coordinator startup")

@@ -622,8 +622,7 @@ async fn run_client(
             coverage_losses,
             session: options,
             startup_disconnect: Some(disconnect_requested.clone()),
-            #[cfg(test)]
-            root_send_gate: None,
+            root_transport: None,
         },
     )
     .await?

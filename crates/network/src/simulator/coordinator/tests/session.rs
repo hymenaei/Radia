@@ -14,14 +14,15 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use super::{AGENT_ID, SESSION_ID, chat_message, connect_with_status, login_session, set_sequence};
+use super::{
+    AGENT_ID, LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, SESSION_ID, chat_message, connect_with_status, login_session,
+    send_logout_with_deadline, set_sequence,
+};
 use crate::{
     Error,
     event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY},
     session::{COMMAND_CAPACITY, Command},
-    simulator::coordinator::{
-        LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, LogoutUnavailable, MAX_PENDING_SIMULATOR_EVENTS, send_logout_with_deadline,
-    },
+    simulator::coordinator::{LogoutUnavailable, MAX_PENDING_SIMULATOR_EVENTS},
     simulator::run_session,
     status::{NetworkLifecycle, NetworkStatusHandle},
     transport::UdpTransport,

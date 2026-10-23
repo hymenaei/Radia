@@ -3,7 +3,7 @@ mod coordinator;
 
 pub(crate) use admission::EventRetention;
 #[cfg(test)]
-pub(crate) use coordinator::run_session;
+pub(crate) use coordinator::tests::run_session;
 pub(crate) use coordinator::{SimulatorCoordinator, SimulatorCoordinatorOptions};
 
 pub(super) const MAX_NEIGHBOR_SIMULATORS: usize = 32;

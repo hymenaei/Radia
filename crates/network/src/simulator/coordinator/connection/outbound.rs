@@ -128,11 +128,6 @@ impl OutboundQueue {
         None
     }
 
-    #[cfg(test)]
-    pub(super) fn pop_next(&mut self) -> Option<QueuedMessage> {
-        self.pop_next_matching(|_| true)
-    }
-
     pub(super) fn expire(&mut self, now: Instant) -> Vec<QueuedMessage> {
         let mut expired = Vec::new();
         let mut retained = VecDeque::with_capacity(self.messages.len());
@@ -167,6 +162,13 @@ impl OutboundQueue {
     pub(super) fn drain(&mut self) -> Vec<QueuedMessage> {
         self.charged_bytes = 0;
         self.messages.drain(..).collect()
+    }
+}
+
+#[cfg(test)]
+impl OutboundQueue {
+    pub(super) fn pop_next(&mut self) -> Option<QueuedMessage> {
+        self.pop_next_matching(|_| true)
     }
 }
 

@@ -1,3 +1,10 @@
+mod coordination;
+mod coverage;
+mod handoff;
+mod neighbors;
+mod session;
+mod startup;
+
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::{Future, pending},
@@ -28,12 +35,14 @@ use tokio::{
     net::{TcpListener, UdpSocket},
     runtime, spawn,
     sync::{Notify, Semaphore, mpsc, oneshot, watch},
-    task::JoinHandle,
+    task,
+    task::{Id, JoinError, JoinHandle},
     time::{advance, timeout},
 };
 use url::Url;
 use uuid::Uuid;
 
+use crate::event::send_failure_event;
 use crate::{
     AgentSession, Error, Grid,
     capabilities::{CapabilityBudget, Client, EventQueueExit},
@@ -41,24 +50,36 @@ use crate::{
     event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY, PacketOrder::Ordered, SimulatorId},
     session::{COMMAND_CAPACITY, Command, DEFAULT_UPSTREAM_BYTES_PER_SECOND, NETWORK_THREAD_STACK_SIZE},
     simulator::coordinator::{
-        CoordinatorRunState, EventQueueRoleHandle, LogoutOutcome, LogoutUnavailable, PromotionSetup, SessionStartup, SimulatorCommand,
-        SimulatorMemoryBudget, SimulatorTaskOutcome, neighbor_completion_event,
+        CoordinatorRunState, EventQueueRoleHandle, PromotionSetup, SessionStartup, SimulatorCommand, SimulatorMemoryBudget,
+        SimulatorTaskOutcome, neighbor_completion_event,
     },
-    simulator::{EventRetention, SimulatorCoordinator},
+    simulator::{
+        EventRetention, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, SimulatorCoordinator,
+        admission::{
+            MAX_CONCURRENT_PACKET_DECODES, MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES,
+            MAX_QUEUED_SIMULATOR_EVENT_BYTES,
+        },
+    },
     status::{NetworkLifecycle, NetworkStatusHandle},
     transport::{
-        UdpTransport,
+        SendGate, UdpTransport,
         lludp::{Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS},
+        pacing::OutboundBudgetHandle,
     },
+};
+
+use super::logout::{LogoutAttemptError, LogoutOutcome, LogoutUnavailable, send_logout_with_deadline};
+use crate::simulator::coordinator::event_routing::NeighborEventQueueOutcome;
+use crate::simulator::coordinator::handoff::{
+    FinishOrder, HandoffDecision, HandoffEvidence, PendingPromotion, arbitrate_handoff, decode_teleport_finish, handoff_cancellation,
+    same_handoff_destination,
 };
 
 use super::*;
 use super::{
-    CoordinatorGate, EVENT_BACKLOG_DISCONNECT_REASON, HandoffState, HandoffTarget, LOGOUT_TIMEOUT, MAX_CONCURRENT_PACKET_DECODES,
-    MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PENDING_SIMULATOR_EVENTS,
-    MAX_PRECONNECT_EVENTS, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENTS,
-    NEIGHBOR_COMMAND_CAPACITY, PreconnectEvents, PreconnectOutcome, ReplacementGate, SimulatorCapabilitySession, SimulatorConnection,
-    SimulatorConnectionState, SimulatorEvent, queue_neighbor_event, queue_until_connected, run_session,
+    EVENT_BACKLOG_DISCONNECT_REASON, HandoffState, HandoffTarget, LOGOUT_TIMEOUT, MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS,
+    MAX_QUEUED_SIMULATOR_EVENTS, NEIGHBOR_COMMAND_CAPACITY, PreconnectEvents, PreconnectOutcome, SimulatorCapabilitySession,
+    SimulatorConnection, SimulatorConnectionState, SimulatorEvent, queue_neighbor_event, queue_until_connected,
 };
 
 const AGENT_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
@@ -68,8 +89,53 @@ const WAIT: Duration = Duration::from_secs(2);
 const SESSION_EVENT_CAPACITY: usize = 2;
 const TEST_EVENT_CAPACITY: usize = CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY;
 
+pub(crate) async fn run_session(
+    session: AgentSession,
+    commands: mpsc::Receiver<Command>,
+    events: mpsc::Sender<EventEnvelope>,
+    disconnect_requested: watch::Receiver<bool>,
+) -> Result<(), String> {
+    run_session_with_status(session, commands, events, disconnect_requested, NetworkStatusHandle::default(), None).await
+}
+
+pub(super) fn test_options(status: NetworkStatusHandle) -> SimulatorCoordinatorOptions {
+    SimulatorCoordinatorOptions {
+        status,
+        coverage_losses: CoverageLossLedger::new(),
+        session: SessionOptions::default(),
+        startup_disconnect: None,
+        root_transport: None,
+    }
+}
+
+fn neighbor_event_queue_task_failure(
+    error: &JoinError,
+    owners: &mut HashMap<Id, (SimulatorId, SocketAddr)>,
+    primary_id: SimulatorId,
+    connections: &HashMap<u64, SimulatorConnectionState>,
+) -> Option<Event> {
+    let (simulator_id, source) = owners.remove(&error.id())?;
+    neighbor_event_queue_failure(simulator_id, source, EventQueueExit::TaskFailed, primary_id, connections)
+}
+
+fn remove_failed_neighbor(
+    error: &JoinError,
+    connections: &mut HashMap<u64, SimulatorConnectionState>,
+) -> Option<(u64, SimulatorId, SocketAddr)> {
+    let region_handle =
+        connections.iter().find(|(_, connection)| connection.abort.id() == error.id()).map(|(region_handle, _)| *region_handle)?;
+    let connection = connections.remove(&region_handle)?;
+    Some((region_handle, connection.simulator_id, connection.endpoint))
+}
+
 fn coordinator_options(status: NetworkStatusHandle) -> SimulatorCoordinatorOptions {
-    super::test_options(status)
+    test_options(status)
+}
+
+async fn gated_transport(session: &AgentSession, status: &NetworkStatusHandle, send_gate: SendGate) -> Result<UdpTransport, String> {
+    let mut transport = UdpTransport::connect_with_status(session.simulator_address, status.clone()).await?;
+    transport.set_send_gate(send_gate);
+    Ok(transport)
 }
 
 async fn connect_with_status(
@@ -80,6 +146,33 @@ async fn connect_with_status(
     SimulatorCoordinator::connect(session, login_data, coordinator_options(status))
         .await?
         .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())
+}
+
+pub(super) async fn run_session_with_status(
+    session: AgentSession,
+    commands: mpsc::Receiver<Command>,
+    events: mpsc::Sender<EventEnvelope>,
+    disconnect_requested: watch::Receiver<bool>,
+    status: NetworkStatusHandle,
+    packet_memory_sender: Option<oneshot::Sender<SimulatorMemoryBudget>>,
+) -> Result<(), String> {
+    let failure_events = events.clone();
+    let mut failure_shutdown = disconnect_requested.clone();
+    let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
+    let result = async {
+        let connection = SimulatorCoordinator::connect(session, ResponseData::default(), coordinator_options(status))
+            .await?
+            .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())?;
+        if let Some(sender) = packet_memory_sender {
+            let _ = sender.send(connection.packet_memory.clone());
+        }
+        connection.run(commands, events, disconnect_requested, terminal_event_permit).await
+    }
+    .await;
+    if let Err(error) = &result {
+        send_failure_event(&failure_events, error.clone(), &mut failure_shutdown).await;
+    }
+    result
 }
 
 async fn connect_with_coverage(
@@ -102,7 +195,7 @@ async fn connect_with_status_and_send_gate(
     send_gate: SendGate,
 ) -> Result<SimulatorCoordinator, String> {
     let mut options = coordinator_options(status);
-    options.root_send_gate = Some(send_gate);
+    options.root_transport = Some(gated_transport(&session, &options.status, send_gate).await?);
     SimulatorCoordinator::connect(session, login_data, options)
         .await?
         .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())
@@ -116,7 +209,7 @@ async fn connect_with_gate_and_disconnect(
     disconnect_requested: watch::Receiver<bool>,
 ) -> Result<Option<SimulatorCoordinator>, String> {
     let mut options = coordinator_options(status);
-    options.root_send_gate = Some(send_gate);
+    options.root_transport = Some(gated_transport(&session, &options.status, send_gate).await?);
     options.startup_disconnect = Some(disconnect_requested);
     SimulatorCoordinator::connect(session, login_data, options).await
 }
@@ -132,6 +225,10 @@ pub(super) async fn connect_test_connection(
     owned_budget: Option<OutboundBudget>,
     send_gate: Option<SendGate>,
 ) -> Result<SimulatorConnection, String> {
+    let transport = match send_gate {
+        Some(send_gate) => Some(gated_transport(&session, &status, send_gate).await?),
+        None => None,
+    };
     let (budget, owned_budget) = match (budget, owned_budget) {
         (Some(budget), owned_budget) => (budget, owned_budget),
         (None, Some(owned_budget)) => (owned_budget.handle(), Some(owned_budget)),
@@ -142,7 +239,7 @@ pub(super) async fn connect_test_connection(
     };
     SimulatorConnection::connect(
         session,
-        SimulatorConnectionOptions { simulator_id, region_handle, status, coverage_losses, primary_state, budget, owned_budget, send_gate },
+        SimulatorConnectionOptions { simulator_id, region_handle, status, coverage_losses, primary_state, budget, owned_budget, transport },
     )
     .await
 }
@@ -252,6 +349,21 @@ fn run_large_stack_test<F: Future<Output = ()> + 'static>(test: fn() -> F) {
         .expect("handoff test completes");
 }
 
+fn run_large_paused_stack_test<F: Future<Output = ()> + 'static>(test: fn() -> F) {
+    thread::Builder::new()
+        .name("network-coordinator-test".into())
+        .stack_size(NETWORK_THREAD_STACK_SIZE)
+        .spawn(move || {
+            let mut builder = runtime::Builder::new_current_thread();
+            builder.enable_all();
+            builder.start_paused(true);
+            builder.build().expect("coordinator runtime").block_on(test());
+        })
+        .expect("coordinator test thread")
+        .join()
+        .expect("coordinator test completes");
+}
+
 fn duration_percentiles(samples: &[Duration]) -> Option<(Duration, Duration, Duration)> {
     if samples.is_empty() {
         return None;
@@ -263,26 +375,14 @@ fn duration_percentiles(samples: &[Duration]) -> Option<(Duration, Duration, Dur
 }
 
 async fn connected_neighbor() -> NeighborHarness {
-    connected_neighbor_with_options(Url::parse("http://127.0.0.1:1/seed").expect("fixture seed"), None, None).await
+    connected_neighbor_with_seed(Url::parse("http://127.0.0.1:1/seed").expect("fixture seed")).await
 }
 
 async fn connected_neighbor_with_seed(seed: Url) -> NeighborHarness {
-    connected_neighbor_with_options(seed, None, None).await
+    connected_neighbor_with_options(seed).await
 }
 
-async fn connected_neighbor_with_promotion_gate(gate: CoordinatorGate) -> NeighborHarness {
-    connected_neighbor_with_options(Url::parse("http://127.0.0.1:1/seed").expect("fixture seed"), Some(gate), None).await
-}
-
-async fn connected_neighbor_with_replacement_gate(gate: ReplacementGate) -> NeighborHarness {
-    connected_neighbor_with_options(Url::parse("http://127.0.0.1:1/seed").expect("fixture seed"), None, Some(gate)).await
-}
-
-async fn connected_neighbor_with_options(
-    seed: Url,
-    promotion_gate: Option<CoordinatorGate>,
-    replacement_gate: Option<ReplacementGate>,
-) -> NeighborHarness {
+async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
     let primary_endpoint = primary.local_addr().expect("primary simulator address");
@@ -292,7 +392,7 @@ async fn connected_neighbor_with_options(
     let (disconnect, disconnect_requested) = watch::channel(false);
     let status = NetworkStatusHandle::default();
     let (send_gate, pause_sends, send_entered) = UdpTransport::new_send_gate();
-    let mut connection = connect_with_status_and_send_gate(
+    let connection = connect_with_status_and_send_gate(
         AgentSession { seed_capability: seed, ..login_session(primary_endpoint) },
         ResponseData::default(),
         status.clone(),
@@ -300,8 +400,6 @@ async fn connected_neighbor_with_options(
     )
     .await
     .expect("connect primary simulator");
-    connection.promotion_gate = promotion_gate;
-    connection.replacement_gate = replacement_gate;
     let packet_memory = connection.packet_memory.clone();
     let terminal = event_sender.clone().reserve_owned().await.expect("reserve terminal event");
     let client = spawn(connection.run(command_receiver, event_sender, disconnect_requested, terminal));
@@ -532,8 +630,12 @@ fn set_sequence(bytes: &mut [u8], sequence: u32) {
     bytes[1..5].copy_from_slice(&sequence.to_be_bytes());
 }
 
-#[tokio::test(start_paused = true)]
-async fn stalled_send_is_isolated() {
+#[test]
+fn stalled_send_is_isolated() {
+    run_large_paused_stack_test(run_stalled_send_is_isolated);
+}
+
+async fn run_stalled_send_is_isolated() {
     let mut harness = connected_neighbor().await;
     harness.pause_sends.send_replace(true);
     let (completed, mut response) = oneshot::channel();
@@ -641,22 +743,3 @@ async fn abandoned_send_does_not_block() {
 
     harness.shutdown().await;
 }
-
-#[path = "coordination_tests.rs"]
-mod coordination;
-#[path = "coverage_tests.rs"]
-mod coverage;
-#[path = "handoff_cases_tests.rs"]
-mod handoff_cases;
-#[path = "handoff_return_tests.rs"]
-mod handoff_return;
-#[path = "neighbor_tests.rs"]
-mod neighbor;
-#[path = "neighbor_control_tests.rs"]
-mod neighbor_control;
-#[path = "routing_tests.rs"]
-mod routing;
-#[path = "session_tests.rs"]
-mod session;
-#[path = "startup_tests.rs"]
-mod startup;

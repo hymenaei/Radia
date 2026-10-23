@@ -90,11 +90,6 @@ impl SimulatorMemoryBudget {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn with_test_limits(global: usize, neighbors: usize, neighbor_connection: usize) -> Self {
-        Self::with_limits(MemoryLimits { global, neighbors, primary_connection: global, neighbor_connection })
-    }
-
     pub(super) fn for_neighbor(&self) -> Self {
         Self {
             decode_slots: Arc::clone(&self.decode_slots),
@@ -209,25 +204,28 @@ impl SimulatorMemoryBudget {
             retained_capacity_upper_bound,
         })
     }
+}
 
-    #[cfg(test)]
+#[cfg(test)]
+impl SimulatorMemoryBudget {
+    pub(super) fn with_test_limits(global: usize, neighbors: usize, neighbor_connection: usize) -> Self {
+        Self::with_limits(MemoryLimits { global, neighbors, primary_connection: global, neighbor_connection })
+    }
+
     pub(super) fn reserve_bytes_for_test(&self, bytes: usize) -> Result<PacketMemoryReservation, PacketMemoryError> {
         self.reserve_bytes(bytes, bytes)
     }
 
-    #[cfg(test)]
     pub(super) fn global_available_bytes(&self) -> usize {
         let shared = lock_unpoisoned(&self.shared.usage);
         self.shared.limits.global.saturating_sub(shared.global)
     }
 
-    #[cfg(test)]
     pub(super) fn neighbor_available_bytes(&self) -> usize {
         let shared = lock_unpoisoned(&self.shared.usage);
         self.shared.limits.neighbors.saturating_sub(shared.neighbors)
     }
 
-    #[cfg(test)]
     pub(super) fn connection_available_bytes(&self) -> usize {
         let _shared = lock_unpoisoned(&self.shared.usage);
         let connection = lock_unpoisoned(&self.connection);

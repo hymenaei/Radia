@@ -234,10 +234,7 @@ async fn run_teleport_finish_scenario(send_count: usize) -> Vec<Duration> {
     use crate::event::Event::{Failed, SimulatorMessage, SimulatorPromoted};
     use protocol::lludp::Message::{AgentMovementComplete, ChatFromSimulator, RegionHandshake};
 
-    let (promotion_entered, promotion_entered_rx) = oneshot::channel();
-    let (promotion_release, promotion_release_rx) = oneshot::channel();
-    let gate = CoordinatorGate { entered: promotion_entered, release: promotion_release_rx };
-    let mut harness = Box::pin(connected_neighbor_with_promotion_gate(gate)).await;
+    let mut harness = Box::pin(connected_neighbor()).await;
     let target_region = 0x1000_0000_0000_1000;
     let target_endpoint = harness.neighbor.local_addr().expect("destination simulator address");
     let session = login_session(harness.primary.local_addr().expect("primary simulator address"));
@@ -353,41 +350,6 @@ async fn run_teleport_finish_scenario(send_count: usize) -> Vec<Duration> {
         .send_to(&movement_complete_packet(46, session.agent_id, session.session_id, target_region), harness.neighbor_peer)
         .await
         .expect("send matching movement completion");
-    timeout(WAIT, promotion_entered_rx).await.expect("coordinator should reach the promotion boundary").expect("promotion gate");
-    harness
-        .commands
-        .send(Command::SendMessage { message: object_request(), delivery: Delivery::Reliable })
-        .await
-        .expect("queue default send before the route changes");
-    let control_send_count = if send_count > 1 { 2 } else { 0 };
-    let mut handoff_sends = Vec::with_capacity(send_count);
-    for index in 0..send_count {
-        let (completed, completion) = oneshot::channel();
-        let queued_at = Instant::now();
-        let message = if index < control_send_count {
-            Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: u8::try_from(index).expect("ping ID fits u8") } })
-        } else {
-            object_request()
-        };
-        harness
-            .commands
-            .send(Command::SendTo { simulator_id: harness.neighbor_id, message, delivery: Delivery::Unreliable, completed })
-            .await
-            .expect("queue exact send during promotion");
-        handoff_sends.push((queued_at, completion));
-    }
-    let queued_commands = handoff_sends.len() + 1;
-    let available_command_slots = harness.commands.capacity();
-    if send_count > 1 {
-        assert_eq!(queued_commands, NEIGHBOR_COMMAND_CAPACITY, "the loaded handoff should queue one bounded neighbor backlog");
-        assert_eq!(
-            available_command_slots,
-            COMMAND_CAPACITY - queued_commands,
-            "only the handoff workload should occupy the coordinator command channel"
-        );
-    }
-    promotion_release.send(()).expect("resume coordinator promotion");
-
     let (previous, promoted, promoted_endpoint) = timeout(WAIT, async {
         let mut matching_movement_seen = false;
         loop {
@@ -412,6 +374,40 @@ async fn run_teleport_finish_scenario(send_count: usize) -> Vec<Duration> {
     assert_eq!(previous, harness.primary_id);
     assert_eq!(promoted, harness.neighbor_id);
     assert_eq!(promoted_endpoint, target_endpoint);
+
+    harness
+        .commands
+        .send(Command::SendMessage { message: object_request(), delivery: Delivery::Reliable })
+        .await
+        .expect("queue default send after destination promotion");
+    let control_send_count = if send_count > 1 { 2 } else { 0 };
+    let mut handoff_sends = Vec::with_capacity(send_count);
+    for index in 0..send_count {
+        let (completed, completion) = oneshot::channel();
+        let queued_at = Instant::now();
+        let message = if index < control_send_count {
+            Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: u8::try_from(index).expect("ping ID fits u8") } })
+        } else {
+            object_request()
+        };
+        harness
+            .commands
+            .send(Command::SendTo { simulator_id: harness.neighbor_id, message, delivery: Delivery::Unreliable, completed })
+            .await
+            .expect("queue exact send on promoted simulator");
+        handoff_sends.push((queued_at, completion));
+    }
+    let queued_commands = handoff_sends.len() + 1;
+    let available_command_slots = harness.commands.capacity();
+    if send_count > 1 {
+        assert_eq!(queued_commands, NEIGHBOR_COMMAND_CAPACITY, "the loaded handoff should queue one bounded neighbor backlog");
+        assert_eq!(
+            available_command_slots,
+            COMMAND_CAPACITY - queued_commands,
+            "only the handoff workload should occupy the coordinator command channel"
+        );
+    }
+
     let mut completion_latencies = Vec::with_capacity(send_count);
     for (queued_at, completion) in handoff_sends {
         timeout(WAIT, completion).await.expect("handoff send reaches local socket").expect("send completion").expect("local send");

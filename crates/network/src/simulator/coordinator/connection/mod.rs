@@ -27,11 +27,6 @@ use super::{
     SimulatorEvent, SimulatorMemoryBudget, SimulatorRequest, connection_message_has_application_event, finish_logout, queue_neighbor_event,
     record_coverage_loss, record_event_envelope_loss,
 };
-#[cfg(test)]
-use crate::transport::{
-    SendGate,
-    lludp::{KEEPALIVE_TIMEOUT, ReceiveAdmission},
-};
 use crate::{
     AgentSession,
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
@@ -44,9 +39,6 @@ use crate::{
         pacing::{ConnectionPacer, OutboundBudget, OutboundBudgetHandle, TrafficClass},
     },
 };
-#[cfg(test)]
-use tokio::task::yield_now;
-
 use outbound::*;
 
 const MAX_PENDING_SENDS: usize = 8;
@@ -77,8 +69,7 @@ pub(super) struct SimulatorConnectionOptions {
     pub(super) primary_state: Option<watch::Receiver<PrimaryState>>,
     pub(super) budget: OutboundBudgetHandle,
     pub(super) owned_budget: Option<OutboundBudget>,
-    #[cfg(test)]
-    pub(super) send_gate: Option<SendGate>,
+    pub(super) transport: Option<UdpTransport>,
 }
 
 pub(super) struct SimulatorConnection {
@@ -165,8 +156,7 @@ impl SimulatorConnection {
             primary_state,
             budget,
             owned_budget,
-            #[cfg(test)]
-            send_gate,
+            transport,
         } = options;
         let is_primary = region_handle.is_none();
         let pacer = budget.register(simulator_id.get(), is_primary).await?;
@@ -174,14 +164,9 @@ impl SimulatorConnection {
             let initial_state = if is_primary { PrimaryState::Connecting } else { PrimaryState::Neighbor { generation: 0 } };
             watch::channel(initial_state).1
         });
-        let socket = UdpTransport::connect_with_status(session.simulator_address, status.clone()).await?;
-        #[cfg(test)]
-        let socket = {
-            let mut socket = socket;
-            if let Some(send_gate) = send_gate {
-                socket.set_send_gate(send_gate);
-            }
-            socket
+        let socket = match transport {
+            Some(transport) => transport,
+            None => UdpTransport::connect_with_status(session.simulator_address, status.clone()).await?,
         };
         let socket = Arc::new(socket);
         let circuit_status = if is_primary { status.clone() } else { status.for_circuit() };

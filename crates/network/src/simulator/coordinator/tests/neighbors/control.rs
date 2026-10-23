@@ -1,7 +1,11 @@
 use super::*;
 
-#[tokio::test]
-async fn enable_overflow_keeps_primary_responsive() {
+#[test]
+fn enable_overflow_keeps_primary_responsive() {
+    run_large_stack_test(run_enable_overflow_keeps_primary_responsive);
+}
+
+async fn run_enable_overflow_keeps_primary_responsive() {
     let mut harness = Box::pin(connected_neighbor()).await;
     let mut sockets = Vec::with_capacity(MAX_NEIGHBOR_SIMULATORS);
     for _ in 0..MAX_NEIGHBOR_SIMULATORS {

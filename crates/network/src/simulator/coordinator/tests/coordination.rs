@@ -19,8 +19,6 @@ use tokio::{
 use url::Url;
 use uuid::Uuid;
 
-use super::capability_events::redact_seed_capability;
-use super::handoff::{matches_handoff_cancellation, matches_pending_promotion};
 use super::{
     CoordinatorRunState, EVENT_BACKLOG_DISCONNECT_REASON, FinishOrder, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffAnnouncement,
     HandoffDecision, HandoffEvidence, HandoffGeneration, HandoffOrder, HandoffState, HandoffTarget, NEIGHBOR_COMMAND_CAPACITY,
@@ -29,6 +27,8 @@ use super::{
     handoff_cancellation, is_teleport_cancel, neighbor_completion_event, neighbor_event_queue_failure, neighbor_event_queue_task_failure,
     remove_failed_neighbor, retry_pending_handoff_commands, same_handoff_destination, teleport_failure_matches,
 };
+use crate::simulator::coordinator::capability_events::redact_seed_capability;
+use crate::simulator::coordinator::handoff::{matches_handoff_cancellation, matches_pending_promotion};
 use crate::{
     AgentSession, Grid,
     capabilities::EventQueueExit,
@@ -429,14 +429,14 @@ fn teleport_cancel_and_crossing_seed_are_redacted() {
 
     let mut redacted = crossed_region(Uuid::from_u128(1), Uuid::from_u128(2));
     redact_seed_capability(&mut redacted);
-    let fields = super::handoff::event_fields(&redacted).expect("crossed region event");
-    let region = super::handoff::event_block(fields, "RegionData").expect("region data block");
+    let fields = crate::simulator::coordinator::handoff::event_fields(&redacted).expect("crossed region event");
+    let region = crate::simulator::coordinator::handoff::event_block(fields, "RegionData").expect("region data block");
     assert_eq!(region.get("SeedCapability"), Some(&Value::String("[redacted]".into())));
 
     let mut finish = teleport_finish_event(Uuid::from_u128(1), "https://sim.invalid/private");
     redact_seed_capability(&mut finish);
-    let fields = super::handoff::event_fields(&finish).expect("teleport finish event");
-    let info = super::handoff::event_block(fields, "Info").expect("teleport finish info");
+    let fields = crate::simulator::coordinator::handoff::event_fields(&finish).expect("teleport finish event");
+    let info = crate::simulator::coordinator::handoff::event_block(fields, "Info").expect("teleport finish info");
     assert_eq!(info.get("SeedCapability"), Some(&Value::String("[redacted]".into())));
 }
 

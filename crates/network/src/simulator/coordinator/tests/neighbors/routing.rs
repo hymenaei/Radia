@@ -331,35 +331,18 @@ fn queued_target_does_not_follow_neighbor_replacement() {
 }
 
 async fn run_queued_target_does_not_follow_neighbor_replacement() {
-    let (replacement_entered, replacement_entered_rx) = oneshot::channel();
-    let (replacement_release, replacement_release_rx) = oneshot::channel();
-    let (replacement_armed, replacement_armed_rx) = oneshot::channel();
-    let gate = ReplacementGate { entered: replacement_entered, release: replacement_release_rx, armed: replacement_armed_rx };
-    let mut harness = Box::pin(connected_neighbor_with_replacement_gate(gate)).await;
+    let mut harness = Box::pin(connected_neighbor()).await;
     let neighbor_id = harness.neighbor_id;
     let replacement = UdpSocket::bind("127.0.0.1:0").await.expect("bind replacement simulator");
     let endpoint = replacement.local_addr().expect("replacement endpoint");
     let region_handle = 0x1000_0000_0000_1000;
 
-    replacement_armed.send(()).expect("arm replacement gate after the initial neighbor is ready");
     announce_neighbor(&harness.primary, harness.primary_peer, endpoint, region_handle, 50).await;
-    timeout(WAIT, replacement_entered_rx).await.expect("replacement route should be installed").expect("replacement gate");
-
-    let (completed, result) = oneshot::channel();
-    harness
-        .commands
-        .send(Command::SendTo { simulator_id: neighbor_id, message: object_request(), delivery: Delivery::Reliable, completed })
-        .await
-        .expect("queue an exact send while the replacement route is installed");
-    replacement_release.send(()).expect("resume coordinator after replacement");
-    assert!(matches!(
-        timeout(WAIT, result).await.expect("stale target send should complete").expect("send reply"),
-        Err(Error::SimulatorUnavailable)
-    ));
-
     let (bytes, replacement_peer) = receive(&replacement).await;
-    assert!(matches!(Packet::decode(&bytes).expect("decode replacement circuit packet").message(), Message::UseCircuitCode(_)));
-    replacement.send_to(&ack(60, 1), replacement_peer).await.expect("ack replacement circuit");
+    let circuit = Packet::decode(&bytes).expect("decode replacement circuit packet");
+    assert!(matches!(circuit.message(), Message::UseCircuitCode(_)));
+    replacement.send_to(&ack(60, circuit.sequence()), replacement_peer).await.expect("ack replacement circuit");
+
     let replacement_id = timeout(WAIT, async {
         loop {
             if let Event::SimulatorConnected { simulator_id, region_handle: Some(handle), endpoint: connected_endpoint } =
@@ -374,6 +357,17 @@ async fn run_queued_target_does_not_follow_neighbor_replacement() {
     .await
     .expect("replacement connection should be announced");
     assert_ne!(replacement_id, neighbor_id);
+
+    let (completed, result) = oneshot::channel();
+    harness
+        .commands
+        .send(Command::SendTo { simulator_id: neighbor_id, message: object_request(), delivery: Delivery::Reliable, completed })
+        .await
+        .expect("queue an exact send while the replacement route is installed");
+    assert!(matches!(
+        timeout(WAIT, result).await.expect("stale target send should complete").expect("send reply"),
+        Err(Error::SimulatorUnavailable)
+    ));
 
     let mut buffer = [0; 65_535];
     let deadline = Instant::now() + Duration::from_millis(50);

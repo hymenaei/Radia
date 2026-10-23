@@ -3,12 +3,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-use math::{DQuat, DVec3, ray_intersects_bounds, ray_triangle_intersection};
+use math::{DQuat, DVec3};
 use render::scene;
 
 use crate::DEFAULT_DRAW_DISTANCE;
 
 const FOCUS_TIME: Duration = Duration::from_millis(400);
+
+struct Transition {
+    start: Instant,
+    position: DVec3,
+    focus: DVec3,
+}
 
 pub(crate) struct OrbitCamera {
     focus: DVec3,
@@ -101,66 +107,6 @@ impl OrbitCamera {
         let distance = (self.offset.length() * fraction).clamp(self.minimum, 240.0f64.min(f64::from(self.draw_distance) - 1.0));
         self.offset = self.offset.normalize() * distance;
     }
-}
-
-struct Transition {
-    start: Instant,
-    position: DVec3,
-    focus: DVec3,
-}
-
-pub(crate) fn pick_world_point(
-    instances: &[render::Instance],
-    camera: scene::Camera,
-    cursor: [f64; 2],
-    size: [u32; 2],
-) -> Result<Option<DVec3>, ()> {
-    let forward = camera.direction().as_dvec3();
-    let right = forward.cross(DVec3::Z).normalize_or(DVec3::X);
-    let up = right.cross(forward);
-    let height = f64::from(size[1]);
-    let tangent = (camera.vertical_fov() * 0.5).tan();
-    let ray = (forward
-        + right * ((2.0 * cursor[0] - f64::from(size[0])) / height * tangent)
-        + up * ((height - 2.0 * cursor[1]) / height * tangent))
-        .normalize();
-    let mut closest = camera.draw_distance() as f32;
-    let mut found = false;
-    let mut work = 0;
-    for instance in instances {
-        if !instance.pickable {
-            continue;
-        }
-        let inverse = instance.rotation.conjugate();
-        let origin = inverse * (camera.position() - instance.position).as_vec3() / instance.scale;
-        let direction = inverse * ray.as_vec3() / instance.scale;
-        if !origin.is_finite() || !direction.is_finite() {
-            continue;
-        }
-        if !ray_intersects_bounds(origin, direction, instance.mesh.mesh().bounds(), closest) {
-            continue;
-        }
-        let mesh = instance.mesh.mesh();
-        for (indices, double_sided) in instance.faces.iter().flat_map(|face| {
-            mesh.indices()[face.indices.start as usize..face.indices.end as usize]
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .map(move |indices| (indices, face.double_sided))
-        }) {
-            if work == 250_000 {
-                return Err(());
-            }
-            work += 1;
-            let triangle = indices.map(|index| mesh.vertices()[index as usize].position);
-            let Some(distance) = ray_triangle_intersection(origin, direction, triangle, double_sided) else { continue };
-            if distance >= 0.05 && distance < closest {
-                closest = distance;
-                found = true;
-            }
-        }
-    }
-    Ok(found.then(|| camera.position() + ray * f64::from(closest)))
 }
 
 #[cfg(test)]

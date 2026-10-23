@@ -34,7 +34,7 @@ use winit::{
 
 use crate::{
     DEFAULT_DRAW_DISTANCE,
-    gui::camera::{self, OrbitCamera},
+    gui::camera::OrbitCamera,
     scene_feed::SceneFeed,
 };
 
@@ -347,12 +347,7 @@ impl ApplicationHandler for WindowApp {
                     && let (Some(renderer), Some(observation), Some(camera)) = (&active.renderer, active.last_camera, &mut active.camera)
                 {
                     let size = active.window.inner_size();
-                    match camera::pick_world_point(
-                        renderer.instances(),
-                        observation,
-                        [active.cursor.x, active.cursor.y],
-                        [size.width, size.height],
-                    ) {
+                    match renderer.pick(observation, observation.ray([active.cursor.x, active.cursor.y], [size.width, size.height])) {
                         Ok(Some(point)) => {
                             camera.focus(point, Instant::now());
                             let origin = active.cursor;
@@ -370,7 +365,7 @@ impl ApplicationHandler for WindowApp {
                             }
                         }
                         Ok(None) => {}
-                        Err(()) => tracing::debug!("scene focus pick exceeded its work limit"),
+                        Err(error) => tracing::debug!(%error, "scene focus pick exceeded its work limit"),
                     }
                 }
             }

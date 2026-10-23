@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use super::support::{
     BTreeMap, BTreeSet, Budget, DVec3, Detail, FieldUpdate, Instant, Kind, NonZeroU32, ObjectObservation, ObjectPatch, ParentUpdate,
     Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, Region, RegionInfo, Shape, Status, Uuid, Vec3,
@@ -318,15 +320,15 @@ fn descendant_pose_updates() {
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     for obj in view.objects().filter(|obj| obj.detail().summary.id != Uuid::from_u128(1)) {
-        assert!(matches!(obj.placement(), Placement::Hidden(_)));
+        assert_matches!(obj.placement(), Placement::Hidden(_));
     }
     let _ = world.patch_region(Region::new(2), RegionInfo { origin: Some(DVec3::new(100.0, 0.0, 0.0)), ..RegionInfo::default() }).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     let root = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(2)).unwrap();
-    assert!(matches!(root.placement(), Placement::Ready(transform) if transform.pose.position.x == 108.0));
+    assert_matches!(root.placement(), Placement::Ready(transform) if transform.pose.position.x == 108.0);
     let child = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(3)).unwrap();
-    assert!(matches!(child.placement(), Placement::Hidden(_)));
+    assert_matches!(child.placement(), Placement::Hidden(_));
     let mut child = ObjectObservation::new(
         source(2, 2),
         Uuid::from_u128(3),
@@ -349,7 +351,7 @@ fn pending_parent_arrival() {
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
-    assert!(matches!(view.objects().next().unwrap().placement(), Placement::Hidden(_)));
+    assert_matches!(view.objects().next().unwrap().placement(), Placement::Hidden(_));
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 2);
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
@@ -383,4 +385,65 @@ fn own_signed_dimensions() {
     settle(&mut scene, &mut view, &world, &mut now);
     let child = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(2)).unwrap();
     assert_eq!(child.placement(), Placement::Hidden(render::scene::HiddenReason::InvalidDimensions));
+}
+
+#[test]
+fn abandoned_read_recovers() {
+    let world = world();
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+
+    let ReconcileStep::Read(job) = scene.poll(now) else {
+        panic!("expected initial read");
+    };
+    assert_matches!(job.query(), ReadQuery::Barrier, "initial reads establish a barrier");
+    drop(job);
+
+    let ReconcileStep::Publish(status) = scene.poll(now) else {
+        panic!("expected read failure status");
+    };
+    view.apply(status).unwrap();
+    assert_matches!(view.status(), Status::Recovering { reason: RecoveryReason::ReadFailed, attempt: 1 });
+
+    let ReconcileStep::Wait(until) = scene.poll(now) else {
+        panic!("expected recovery backoff");
+    };
+    now = until;
+    let ReconcileStep::Read(barrier) = scene.poll(now) else {
+        panic!("expected recovery barrier");
+    };
+    assert_matches!(barrier.query(), ReadQuery::Barrier, "recovery starts with a fresh barrier");
+    let result = reply(&world, &barrier);
+    scene.complete_read(barrier, result, now);
+    settle(&mut scene, &mut view, &world, &mut now);
+
+    assert_eq!(view.status(), Status::Ready);
+    let retained = view.region(Region::new(1)).expect("recovery restores region");
+    assert_eq!(retained.summary().region, Region::new(1));
+    assert_eq!(retained.summary().info.resolved_origin(), Some(DVec3::ZERO));
+}
+
+#[test]
+fn foreign_read_is_ignored() {
+    let world = world();
+    let (mut owner, _) = Reconciler::new(Budget::default());
+    let (mut receiver, _) = Reconciler::new(Budget::default());
+    let now = Instant::now();
+
+    let ReconcileStep::Read(foreign) = owner.poll(now) else {
+        panic!("expected owner read");
+    };
+    let ReconcileStep::Read(local) = receiver.poll(now) else {
+        panic!("expected receiver read");
+    };
+    let result = reply(&world, &local);
+
+    receiver.complete_read(foreign, Err(ReadFailure::Busy), now);
+    assert_eq!(receiver.status(), Status::Loading);
+    receiver.complete_read(local, result, now);
+
+    let ReconcileStep::Read(next) = receiver.poll(now) else {
+        panic!("foreign job must not replace the local read");
+    };
+    assert_matches!(next.query(), ReadQuery::Regions(None), "the receiver keeps its own read sequence");
 }

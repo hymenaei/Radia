@@ -529,5 +529,274 @@ fn cap(mesh: &mut Builder, profile: &Profile, ring: &Ring, top: bool) -> Result<
 }
 
 #[cfg(test)]
-#[path = "prim_tests.rs"]
-mod tests;
+mod tests {
+    use std::assert_matches;
+    use std::{collections::HashMap, f32::consts::PI, sync::atomic::AtomicBool};
+
+    use assets::mesh::{MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh};
+    use math::{Vec2, Vec3};
+    use proptest::prelude::*;
+    use world::PrimShape;
+
+    use super::{Detail, MeshBuildError, tessellate};
+
+    fn generate(shape: PrimShape) -> Mesh {
+        tessellate(shape, Detail::High, &AtomicBool::new(false)).unwrap()
+    }
+
+    fn volume(mesh: &Mesh) -> f32 {
+        mesh.indices()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|tri| {
+                let a = mesh.vertices()[tri[0] as usize].position;
+                let b = mesh.vertices()[tri[1] as usize].position;
+                let c = mesh.vertices()[tri[2] as usize].position;
+                a.dot(b.cross(c)) / 6.0
+            })
+            .sum()
+    }
+
+    fn close(a: Vec3, b: Vec3) {
+        assert!(a.distance(b) < 2e-5, "{a:?} != {b:?}");
+    }
+
+    fn position_key(position: Vec3) -> [i32; 3] {
+        position.to_array().map(|component| (component * 100_000.0).round() as i32)
+    }
+
+    fn assert_closed(mesh: &Mesh, shape: &str) {
+        let mut edges: HashMap<([i32; 3], [i32; 3]), (usize, i32)> = HashMap::new();
+        for triangle in mesh.indices().as_chunks::<3>().0 {
+            let points = triangle.map(|index| position_key(mesh.vertices()[index as usize].position));
+            for (start, end) in [(points[0], points[1]), (points[1], points[2]), (points[2], points[0])] {
+                if start == end {
+                    continue;
+                }
+                let (edge, direction) = if start < end { ((start, end), 1) } else { ((end, start), -1) };
+                let entry = edges.entry(edge).or_default();
+                entry.0 += 1;
+                entry.1 += direction;
+            }
+        }
+        assert!(!edges.is_empty(), "{shape} must contain triangles");
+        for (edge, (count, direction)) in edges {
+            assert!(count >= 2 && count.is_multiple_of(2), "{shape} edge {edge:?} has a boundary");
+            assert_eq!(direction, 0, "{shape} edge {edge:?} must have opposite winding");
+        }
+    }
+
+    fn assert_lod_invariants(mesh: &Mesh, detail: Detail) -> prop::test_runner::TestCaseResult {
+        prop_assert!(mesh.vertices().len() <= MAX_MESH_VERTICES, "{detail:?} vertex budget");
+        prop_assert!(
+            !mesh.indices().is_empty() && mesh.indices().len().is_multiple_of(3) && mesh.indices().len() / 3 <= MAX_MESH_INDICES / 3,
+            "{detail:?} triangle budget"
+        );
+        prop_assert!(mesh.faces().len() <= 9, "{detail:?} face budget");
+        prop_assert!(mesh.bounds().min.cmplt(mesh.bounds().max).all(), "{detail:?} bounds have nonzero extent on every axis");
+        prop_assert!(mesh.indices().iter().all(|index| (*index as usize) < mesh.vertices().len()), "{detail:?} index is in range");
+        for vertex in mesh.vertices() {
+            prop_assert!(vertex.position.is_finite() && vertex.uv.is_finite() && vertex.normal.is_finite());
+            prop_assert!(vertex.position.length() <= 3.0, "normalized bound used by camera planning");
+            prop_assert!((vertex.normal.length() - 1.0).abs() < 1e-5);
+            prop_assert!(vertex.position.cmpge(mesh.bounds().min).all() && vertex.position.cmple(mesh.bounds().max).all());
+        }
+        for (slot, face) in mesh.faces().iter().enumerate() {
+            prop_assert_eq!(usize::from(face.slot), slot);
+            prop_assert!(face.indices.start <= face.indices.end && face.indices.end as usize <= mesh.indices().len());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn box_face_layout() {
+        let mesh = generate(PrimShape::default());
+        assert_eq!(mesh.faces().len(), 6);
+        close(mesh.bounds().min, Vec3::splat(-0.5));
+        close(mesh.bounds().max, Vec3::splat(0.5));
+        assert!((volume(&mesh) - 1.0).abs() < 1e-5);
+        for (slot, (face, expected)) in mesh.faces().iter().zip([Vec3::Z, -Vec3::Y, Vec3::X, Vec3::Y, -Vec3::X, -Vec3::Z]).enumerate() {
+            assert_eq!(face.slot, slot as u8, "box face slots follow Second Life material order");
+            for index in &mesh.indices()[face.indices.start as usize..face.indices.end as usize] {
+                let vertex = mesh.vertices()[*index as usize];
+                close(vertex.normal, expected);
+                if face.slot == 0 {
+                    assert!(vertex.uv.distance(Vec2::new(vertex.position.x + 0.5, vertex.position.y + 0.5)) < 1e-5);
+                }
+                if face.slot == 5 {
+                    assert!(vertex.uv.distance(Vec2::new(vertex.position.x + 0.5, 0.5 - vertex.position.y)) < 1e-5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn modified_prim_volumes() {
+        let cases = [
+            (PrimShape { profile_hollow: 25000, ..PrimShape::default() }, 0.75),
+            (PrimShape { profile_begin: 6250, profile_end: 6250, ..PrimShape::default() }, 0.75),
+            (PrimShape { profile_begin: 6250, profile_end: 6250, profile_hollow: 12500, ..PrimShape::default() }, 0.703125),
+            (PrimShape { path_shear_x: 25, path_shear_y: -20, ..PrimShape::default() }, 1.0),
+            (PrimShape { path_scale_x: 150, path_scale_y: 150, ..PrimShape::default() }, 7.0 / 12.0),
+            (PrimShape { path_begin: 12500, path_end: 12500, ..PrimShape::default() }, 0.5),
+        ];
+        for (shape, expected) in cases {
+            let mesh = generate(shape);
+            assert!((volume(&mesh) - expected).abs() < 2e-5, "shape {shape:?}: {} != {expected}", volume(&mesh));
+        }
+        let hollow = generate(PrimShape { profile_hollow: 25000, ..PrimShape::default() });
+        assert_eq!(hollow.faces().len(), 7);
+        for face in [hollow.faces().first().unwrap(), hollow.faces().last().unwrap()] {
+            for triangle in hollow.indices()[face.indices.start as usize..face.indices.end as usize].as_chunks::<3>().0 {
+                let [a, b, c] = [triangle[0], triangle[1], triangle[2]].map(|i| hollow.vertices()[i as usize].position.truncate());
+                let signs = [(b - a).perp_dot(-a), (c - b).perp_dot(-b), (a - c).perp_dot(-c)];
+                assert!(!(signs.iter().all(|s| *s > 1e-7) || signs.iter().all(|s| *s < -1e-7)), "cap must leave the hollow center empty");
+            }
+        }
+    }
+
+    #[test]
+    fn base_prim_geometry() {
+        let cylinder = generate(PrimShape { profile_curve: 0, ..PrimShape::default() });
+        assert_eq!(cylinder.faces().len(), 3);
+        close(cylinder.bounds().min, Vec3::splat(-0.5));
+        close(cylinder.bounds().max, Vec3::splat(0.5));
+        assert!((volume(&cylinder) - PI * 0.25).abs() < 0.02);
+        let sphere = generate(PrimShape { path_curve: 0x20, profile_curve: 5, ..PrimShape::default() });
+        assert_eq!(sphere.faces().len(), 1);
+        close(sphere.bounds().min, Vec3::splat(-0.5));
+        close(sphere.bounds().max, Vec3::splat(0.5));
+        assert!((volume(&sphere) - PI / 6.0).abs() < 0.03, "sphere volume {}", volume(&sphere));
+        let torus =
+            generate(PrimShape { path_curve: 0x20, profile_curve: 0, path_scale_x: 150, path_scale_y: 150, ..PrimShape::default() });
+        assert_eq!(torus.faces().len(), 1);
+        close(torus.bounds().min, Vec3::new(-0.25, -0.5, -0.5));
+        close(torus.bounds().max, Vec3::new(0.25, 0.5, 0.5));
+        assert!((volume(&torus) - PI * PI / 32.0).abs() < 0.02);
+        for profile in 2..=4 {
+            let triangle = generate(PrimShape { profile_curve: profile, ..PrimShape::default() });
+            assert_eq!(triangle.faces().len(), 5);
+            assert!((volume(&triangle) - 3.0_f32.sqrt() * 3.0 / 16.0).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn closed_prims_have_no_boundary_edges() {
+        for (name, shape) in [
+            ("box", PrimShape::default()),
+            ("cylinder", PrimShape { profile_curve: 0, ..PrimShape::default() }),
+            ("sphere", PrimShape { path_curve: 0x20, profile_curve: 5, ..PrimShape::default() }),
+            ("torus", PrimShape { path_curve: 0x20, profile_curve: 0, path_scale_x: 150, path_scale_y: 150, ..PrimShape::default() }),
+        ] {
+            assert_closed(&generate(shape), name);
+        }
+    }
+
+    #[test]
+    fn collapsed_path_keeps_face() {
+        let mesh = generate(PrimShape { path_curve: 0x10, path_scale_x: 200, path_scale_y: 200, ..PrimShape::default() });
+
+        assert!(mesh.faces()[0].indices.is_empty());
+        assert!(mesh.faces().iter().any(|face| !face.indices.is_empty()));
+    }
+
+    #[test]
+    fn flexible_shape_and_uv_seams() {
+        let flexible = generate(PrimShape { path_curve: 0x80, profile_curve: 0, ..PrimShape::default() });
+        assert_eq!(flexible.faces().len(), 3);
+        close(flexible.bounds().min, Vec3::splat(-0.5));
+        close(flexible.bounds().max, Vec3::splat(0.5));
+        assert!((volume(&flexible) - PI * 0.25).abs() < 0.02);
+        let a = flexible.vertices().iter().find(|v| v.uv == Vec2::ZERO).unwrap();
+        let b = flexible.vertices().iter().find(|v| v.uv == Vec2::X).unwrap();
+        close(a.position, b.position);
+        close(a.normal, b.normal);
+        assert_ne!(a.uv, b.uv);
+    }
+
+    #[test]
+    fn circular_path_constraints() {
+        let shape = PrimShape {
+            path_curve: 0x20,
+            path_scale_x: 100,
+            path_scale_y: 150,
+            path_revolutions: 100,
+            path_radius_offset: 80,
+            ..PrimShape::default()
+        };
+        let mesh = generate(shape);
+        let centers: Vec<_> = mesh
+            .faces()
+            .iter()
+            .filter_map(|face| {
+                let vertices = &mesh.indices()[face.indices.start as usize..face.indices.end as usize];
+                vertices.iter().map(|i| mesh.vertices()[*i as usize]).find(|v| v.uv == Vec2::splat(0.5)).map(|v| v.position)
+            })
+            .collect();
+        assert!(centers.iter().any(|p| p.distance(Vec3::new(-5.0 / 14.0, 0.25, 0.0)) < 2e-5));
+        assert!(centers.iter().any(|p| p.distance(Vec3::new(5.0 / 14.0, -0.25, 0.0)) < 2e-5));
+        let clamped = generate(PrimShape { path_radius_offset: 0, ..shape });
+        assert!((volume(&mesh) - volume(&clamped)).abs() < 1e-5, "radius offset is clamped by the circular path bounds");
+
+        let tapered = generate(PrimShape {
+            path_curve: 0x20,
+            path_scale_x: 150,
+            path_scale_y: 150,
+            path_taper_y: 50,
+            path_radius_offset: 80,
+            ..PrimShape::default()
+        });
+        let cap = &tapered.faces()[0];
+        assert!(tapered.indices()[cap.indices.start as usize..cap.indices.end as usize].iter().any(|i| {
+            let v = tapered.vertices()[*i as usize];
+            v.uv == Vec2::splat(0.5) && v.position.distance(Vec3::new(0.0, 0.125, 0.0)) < 2e-5
+        }));
+    }
+
+    #[test]
+    fn generation_errors() {
+        let cancel = AtomicBool::new(false);
+        for (shape, expected) in [
+            (PrimShape { profile_curve: 15, ..PrimShape::default() }, MeshBuildError::UnsupportedShape),
+            (PrimShape { path_curve: 0x11, ..PrimShape::default() }, MeshBuildError::UnsupportedShape),
+            (PrimShape { profile_begin: 50000, ..PrimShape::default() }, MeshBuildError::InvalidParameters),
+        ] {
+            assert_matches!(tessellate(shape, Detail::Low, &cancel).err(), Some(error) if error == expected, "shape {shape:?}");
+        }
+        assert_matches!(tessellate(PrimShape::default(), Detail::Low, &AtomicBool::new(true)).err(), Some(MeshBuildError::Cancelled));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+        #[test]
+        fn valid_prim_lods_stay_bounded(
+            profile in 0u8..6,
+            hole in 0u8..4,
+            path in prop::sample::select(vec![0x10u8, 0x20, 0x30, 0x40, 0x80]),
+            cuts in prop::array::uniform4(0u16..20000),
+            hollow in 0u16..=30000,
+            scales in prop::array::uniform2(25u8..176),
+            shear in prop::array::uniform2(-50i8..=50),
+            twist in prop::array::uniform2(-100i8..=100),
+            taper in prop::array::uniform2(-80i8..=80),
+            radius in -80i8..=80,
+            revolutions in 0u8..=200,
+            skew in -95i8..=95,
+        ) {
+            let shape = PrimShape {
+                profile_curve: profile | (hole << 4), path_curve: path,
+                profile_begin: cuts[0], profile_end: cuts[1], path_begin: cuts[2], path_end: cuts[3], profile_hollow: hollow,
+                path_scale_x: if path == 0x20 && profile != 5 { 100 + scales[0] % 76 } else { scales[0] },
+                path_scale_y: if path == 0x20 && profile != 5 { 150 + scales[1] % 26 } else { scales[1] },
+                path_shear_x: shear[0], path_shear_y: shear[1], path_twist_begin: twist[0], path_twist: twist[1],
+                path_taper_x: taper[0], path_taper_y: taper[1], path_radius_offset: radius, path_revolutions: revolutions, path_skew: skew,
+            };
+            for detail in [Detail::Lowest, Detail::Low, Detail::Medium, Detail::High] {
+                let mesh = tessellate(shape, detail, &AtomicBool::new(false))
+                    .map_err(|error| prop::test_runner::TestCaseError::fail(format!("valid shape {shape:?} failed at {detail:?}: {error:?}")))?;
+                assert_lod_invariants(&mesh, detail)?;
+            }
+        }
+    }
+}

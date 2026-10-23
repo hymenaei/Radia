@@ -6,15 +6,15 @@ use std::{
 use utils::AssetId;
 use uuid::Uuid;
 
+pub const MAX_SURFACE_FACES: usize = 45;
+pub const MAX_RENDER_MATERIAL_BINDINGS: usize = MAX_SURFACE_FACES;
+pub const GLTF_TEXTURE_INFO_COUNT: usize = 4;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Appearance {
     Surface,
     Avatar,
 }
-
-pub const MAX_SURFACE_FACES: usize = 45;
-pub const MAX_RENDER_MATERIAL_BINDINGS: usize = MAX_SURFACE_FACES;
-pub const GLTF_TEXTURE_INFO_COUNT: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FaceAppearance {
@@ -46,6 +46,17 @@ impl Default for FaceAppearance {
             glow: 0.0,
             material_id: Uuid::nil(),
         }
+    }
+}
+
+impl FaceAppearance {
+    fn has_finite_values(self) -> bool {
+        self.scale_s.is_finite()
+            && self.scale_t.is_finite()
+            && self.offset_s.is_finite()
+            && self.offset_t.is_finite()
+            && self.rotation.is_finite()
+            && self.glow.is_finite()
     }
 }
 
@@ -99,17 +110,6 @@ impl SurfaceAppearance {
 
     pub(crate) fn heap_bytes(&self) -> usize {
         self.overrides.capacity() * size_of::<(u8, FaceAppearance)>()
-    }
-}
-
-impl FaceAppearance {
-    fn has_finite_values(self) -> bool {
-        self.scale_s.is_finite()
-            && self.scale_t.is_finite()
-            && self.offset_s.is_finite()
-            && self.offset_t.is_finite()
-            && self.rotation.is_finite()
-            && self.glow.is_finite()
     }
 }
 

@@ -1,7 +1,9 @@
-use super::{MAX_ENVIRONMENT_BYTES, MAX_TERRAIN_PATCHES, World};
-use crate::{Entity, LocalAddress, ObjectMedia, Parent};
 use std::collections::{BTreeMap, HashMap, HashSet};
+
 use uuid::Uuid;
+
+use crate::{Entity, LocalAddress, ObjectMedia, Parent};
+use crate::{MAX_ENVIRONMENT_BYTES, MAX_TERRAIN_PATCHES, World};
 
 impl World {
     pub fn check_invariants(&self) -> Result<(), &'static str> {

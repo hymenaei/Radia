@@ -20,7 +20,7 @@ const RESPONSE: &str = r#"<llsd><map><key>environment</key><map>
 </map></map></map></llsd>"#;
 
 fn scope() -> EnvironmentScope {
-    EnvironmentScope::Parcel(ParcelId::new(42).unwrap())
+    EnvironmentScope::Parcel(ParcelLocalId::new(42).unwrap())
 }
 
 #[test]
@@ -75,12 +75,12 @@ fn parcel_notifications_preserve_sentinels() {
     .unwrap();
     assert_eq!(
         parcel_value(&value).unwrap(),
-        Some(ParcelNotice { parcel: ParcelId::new(42).unwrap(), sequence: 0, version: -1, overrides: false })
+        Some(ParcelNotice { parcel: ParcelLocalId::new(42).unwrap(), sequence: 0, version: -1, overrides: false })
     );
     let legacy: Value = notation::from_slice(br#"{'ParcelData':[{'RequestResult':i0,'SequenceID':i1,'LocalID':i0}]}"#).unwrap();
     assert_eq!(
         parcel_value(&legacy).unwrap(),
-        Some(ParcelNotice { parcel: ParcelId::new(0).unwrap(), sequence: 1, version: -2, overrides: true })
+        Some(ParcelNotice { parcel: ParcelLocalId::new(0).unwrap(), sequence: 1, version: -2, overrides: true })
     );
     let empty: Value = notation::from_slice(br#"{'ParcelData':[{'RequestResult':i-1}]}"#).unwrap();
     assert_eq!(parcel_value(&empty).unwrap(), None);
@@ -96,13 +96,13 @@ async fn parcel_transitions_reject_late_results() {
     let client = Client::new(Url::parse("http://127.0.0.1:1/").unwrap()).unwrap();
     let mut intake = EnvironmentIntake::new(Handle::current());
     intake.routes.insert(region, Route { client, parcel: None, parcel_order: None });
-    let notice = ParcelNotice { parcel: ParcelId::new(42).unwrap(), sequence: 1, version: 7, overrides: true };
+    let notice = ParcelNotice { parcel: ParcelLocalId::new(42).unwrap(), sequence: 1, version: 7, overrides: true };
     intake.parcel(&mut world, region, ParcelNotice { sequence: -10000, ..notice });
     assert_eq!(world.world().environment(region).unwrap().parcel, None, "selected parcels do not select the avatar parcel");
     intake.parcel(&mut world, region, notice);
     let old = intake.queued.remove(&(region, scope())).unwrap();
     intake.order.clear();
-    intake.parcel(&mut world, region, ParcelNotice { parcel: ParcelId::new(43).unwrap(), sequence: 2, ..notice });
+    intake.parcel(&mut world, region, ParcelNotice { parcel: ParcelLocalId::new(43).unwrap(), sequence: 2, ..notice });
     intake.parcel(&mut world, region, ParcelNotice { sequence: 3, ..notice });
     intake.queued.clear();
     intake.order.clear();
@@ -111,7 +111,7 @@ async fn parcel_transitions_reject_late_results() {
     intake.parcel(&mut world, region, ParcelNotice { sequence: 0, overrides: false, ..notice });
     let parcel = world.world().environment(region).unwrap().parcel.unwrap();
     assert_eq!(parcel.assignment.unwrap().source, EnvironmentSource::Inherit, "disabling parcel overrides clears active settings");
-    intake.parcel(&mut world, region, ParcelNotice { sequence: 1, parcel: ParcelId::new(43).unwrap(), ..notice });
+    intake.parcel(&mut world, region, ParcelNotice { sequence: 1, parcel: ParcelLocalId::new(43).unwrap(), ..notice });
     assert_eq!(
         world.world().environment(region).unwrap().parcel.unwrap().parcel,
         notice.parcel,
@@ -167,7 +167,7 @@ async fn capability_fetch_reaches_world() {
     let client = Client::new(Url::parse(&format!("http://{address}/seed")).unwrap()).unwrap();
     let mut intake = EnvironmentIntake::new(Handle::current());
     intake.routes.insert(region, Route { client, parcel: None, parcel_order: None });
-    intake.parcel(&mut world, region, ParcelNotice { parcel: ParcelId::new(42).unwrap(), sequence: 1, version: 7, overrides: true });
+    intake.parcel(&mut world, region, ParcelNotice { parcel: ParcelLocalId::new(42).unwrap(), sequence: 1, version: 7, overrides: true });
     let Err(Some(completion)) = intake.select(pending::<()>()).await else { panic!("environment completion missing") };
     intake.complete(&mut world, *completion);
     let observed = world.world().environment(region).unwrap().parcel.unwrap().assignment.unwrap();

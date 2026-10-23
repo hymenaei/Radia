@@ -1,26 +1,21 @@
-use super::lifecycle::RemovalCause;
-use crate::ParentUpdate::Local;
-
-use super::super::journal::WorldChange::{EntityAdded, EntityRebound, EntityTransferred, EntityUpdated};
-use super::super::journal::WorldChangeClasses;
-use super::super::relationships::ParentResolution;
-use super::super::{
-    Binding, ObjectContent, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RecentBatch, World, newer_field,
-};
-use crate::update::FieldStamp;
-use crate::{
-    AgentHandoff, Applied, ApplyError, ApplyOutcome, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, Kind,
-    LinearMotion, LocalAddress, ObjectObservation, Parent, PoseState, Recovery, Region, Transform, UpdateAuthority,
-};
-
-use FieldRejectionReason::{ParentCycle, ParentDependsOnRejectedParent, UntrustedSource};
-use UpdateAuthority::{Tracked, Untracked};
-
 use super::fields::{
     apply_field_update, apply_observation_values, content_change_classes, field_at_or_after, field_is_protected, has_pose,
     mark_pose_components, observable_change_classes, pose_is_accepted, pose_update_changes_observable, reject_untrusted_observation_groups,
     retain_stored_orientation, validate_observation, validate_uuid,
 };
+use super::lifecycle::RemovalCause;
+use crate::ParentUpdate::Local;
+use crate::history::WorldChange::{EntityAdded, EntityRebound, EntityTransferred, EntityUpdated};
+use crate::history::WorldChangeClasses;
+use crate::object::relationships::ParentResolution;
+use crate::update::FieldStamp;
+use crate::{
+    AgentHandoff, Applied, ApplyError, ApplyOutcome, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, Kind,
+    LinearMotion, LocalAddress, ObjectObservation, Parent, PoseState, Recovery, Region, Transform, UpdateAuthority,
+};
+use crate::{Binding, ObjectContent, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RecentBatch, World, newer_field};
+use FieldRejectionReason::{ParentCycle, ParentDependsOnRejectedParent, UntrustedSource};
+use UpdateAuthority::{Tracked, Untracked};
 
 struct ObservationPlan {
     data: ObjectState,
@@ -497,7 +492,7 @@ mod tests {
         OrderEvidence::Ordered, ParentUpdate::Root, Pose, Region, UpdateSource, WorldRevision,
     };
 
-    use super::super::tests::{observation, test_world};
+    use crate::mutation::tests::{observation, test_world};
 
     #[test]
     fn handoff_revision_exhaustion_is_atomic() {

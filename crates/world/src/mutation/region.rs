@@ -1,8 +1,8 @@
-use super::super::journal::WorldChange::{RegionAdopted, RegionRetired, RegionUpdated};
-use super::super::{RecentBatch, RegionState, World, newer_field};
 use super::lifecycle::RemovalCause;
+use crate::history::WorldChange::{RegionAdopted, RegionRetired, RegionUpdated};
 use crate::update::FieldStamp;
 use crate::{ApplyError, Region, RegionApplied, RegionInfo, RegionOutcome, UpdateSource};
+use crate::{RecentBatch, RegionState, World, newer_field};
 
 impl World {
     pub fn adopt_region(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
@@ -20,7 +20,6 @@ impl World {
         let revision = self.publish_changes(vec![RegionAdopted(region)]).expect("adopting a region journals a change");
         Ok(RegionApplied { outcome: RegionOutcome::Adopted { revision }, recovery_cancellations: Vec::new() })
     }
-
     pub fn patch_region(&mut self, region: Region, info: RegionInfo) -> Result<RegionApplied, ApplyError> {
         self.require_active_region(region)?;
         self.validate_region_info(&info)?;
@@ -28,7 +27,6 @@ impl World {
         let merged = self.merge_region_info(&current.info, &info)?;
         self.commit_region_metadata(region, merged, current.name_fence)
     }
-
     pub fn observe_region_metadata(&mut self, source: UpdateSource, mut info: RegionInfo) -> Result<RegionApplied, ApplyError> {
         let region = source.region();
         self.require_active_region(region)?;
@@ -46,7 +44,6 @@ impl World {
         }
         self.commit_region_metadata(region, merged, name_fence)
     }
-
     fn commit_region_metadata(
         &mut self,
         region: Region,
@@ -69,7 +66,6 @@ impl World {
         let revision = self.publish_changes(vec![RegionUpdated(region)]).expect("patching a region journals a change");
         Ok(RegionApplied { outcome: RegionOutcome::Patched { revision }, recovery_cancellations: Vec::new() })
     }
-
     pub fn retire_region(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
         if self.retired.contains(&region) {
             return Ok(RegionApplied { outcome: RegionOutcome::Unchanged, recovery_cancellations: Vec::new() });
@@ -103,7 +99,6 @@ impl World {
         let revision = self.publish_changes(changes).expect("retiring a region journals a change");
         Ok(RegionApplied { outcome: RegionOutcome::Retired { revision, entities_removed: removed }, recovery_cancellations })
     }
-
     fn validate_region_info(&self, info: &RegionInfo) -> Result<(), ApplyError> {
         if info.region_id.is_some_and(|id| id.is_nil()) {
             return Err(ApplyError::InvalidValue { field: "region_id" });
@@ -119,7 +114,6 @@ impl World {
         }
         Ok(())
     }
-
     fn merge_region_info(&self, current: &RegionInfo, incoming: &RegionInfo) -> Result<RegionInfo, ApplyError> {
         fn merge<T: Copy + PartialEq>(current: Option<T>, incoming: Option<T>, field: &'static str) -> Result<Option<T>, ApplyError> {
             match (current, incoming) {
@@ -147,7 +141,6 @@ impl World {
 mod tests {
     use super::*;
     use crate::{ApplyError::RevisionExhausted, WorldLimits, WorldRevision};
-
     fn limits() -> WorldLimits {
         WorldLimits {
             max_region_registrations: 2,
@@ -163,7 +156,6 @@ mod tests {
             max_recovery_targets: 2,
         }
     }
-
     #[test]
     fn failed_name_commit_does_not_advance_ordering() {
         let region = Region::new(1);
@@ -180,14 +172,12 @@ mod tests {
         let _ = world.observe_region_metadata(source(20), name("Next")).unwrap();
         assert_eq!(world.region(region).unwrap().name.as_deref(), Some("Next"));
     }
-
     #[test]
     fn revision_exhaustion_keeps_region_active() {
         let region = Region::new(1);
         let mut world = World::new(limits());
         let _ = world.adopt_region(region).expect("adopt region");
         world.journal.revision = WorldRevision(u64::MAX);
-
         assert!(matches!(world.retire_region(region), Err(RevisionExhausted)));
         assert!(world.region(region).is_some());
         assert!(!world.retired.contains(&region));

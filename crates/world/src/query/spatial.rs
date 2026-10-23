@@ -1,35 +1,33 @@
+#[cfg(feature = "invariants")]
+use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Bound::{Excluded, Unbounded};
 use std::time::Instant;
 
-#[cfg(feature = "invariants")]
-use std::collections::HashSet;
-
-use crate::PoseError;
 use math::DVec3;
 use uuid::Uuid;
 
-use super::{World, WorldChangeClasses, pose::MAX_PARENT_EDGES};
+use crate::PoseError;
 use crate::{Entity, Parent, PoseState, Region};
+use crate::{World, WorldChangeClasses, object::pose::MAX_PARENT_EDGES};
 
 const CELL_SIZE: f64 = 32.0;
 const MAX_DIRTY_ROOTS_PER_REGION: usize = 48;
-
 pub const MAX_QUERY_STATE_MAINTENANCE_WORK: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) struct Cell {
+pub(crate) struct Cell {
     x: i64,
     y: i64,
     z: i64,
 }
 
 impl Cell {
-    pub(super) fn for_position(position: DVec3) -> Option<Self> {
+    pub(crate) fn for_position(position: DVec3) -> Option<Self> {
         Some(Self { x: cell_coordinate(position.x)?, y: cell_coordinate(position.y)?, z: cell_coordinate(position.z)? })
     }
 
-    pub(super) fn range(center: DVec3, radius: f64) -> Option<CellRange> {
+    pub(crate) fn range(center: DVec3, radius: f64) -> Option<CellRange> {
         let extent = DVec3::splat(radius);
         let min = Self::for_position(center - extent)?;
         let max = Self::for_position(center + extent)?;
@@ -37,23 +35,14 @@ impl Cell {
     }
 }
 
-fn cell_coordinate(value: f64) -> Option<i64> {
-    let cell = (value / CELL_SIZE).floor();
-    const I64_UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
-    if !cell.is_finite() || cell < i64::MIN as f64 || cell >= I64_UPPER_EXCLUSIVE {
-        return None;
-    }
-    Some(cell as i64)
-}
-
-pub(super) struct CellRange {
+pub(crate) struct CellRange {
     min: Cell,
     max: Cell,
     next: Option<Cell>,
 }
 
 impl CellRange {
-    pub(super) fn contains_more_than(&self, limit: usize) -> bool {
+    pub(crate) fn contains_more_than(&self, limit: usize) -> bool {
         let limit = limit as u128;
         let dimension = |min: i64, max: i64| (i128::from(max) - i128::from(min) + 1) as u128;
         let mut count = 1_u128;
@@ -86,7 +75,7 @@ impl Iterator for CellRange {
 }
 
 #[derive(Default)]
-pub(super) struct SpatialIndex {
+pub(crate) struct SpatialIndex {
     cells: HashMap<Cell, BTreeMap<Uuid, Entity>>,
     cell_by_entity: HashMap<Entity, (Uuid, Cell)>,
     unresolved: BTreeMap<Region, BTreeMap<Uuid, Entity>>,
@@ -99,112 +88,24 @@ pub(super) struct SpatialIndex {
     unresolved_by_entity: HashMap<Entity, (Uuid, Region)>,
 }
 
-struct DirtyRoot {
-    region: Region,
-    scope: DirtyScope<SubtreeScan>,
-}
-
-#[derive(Default)]
-struct DirtyScope<C = Option<Uuid>> {
-    cursor: C,
-    generation: u64,
-    scan_generation: u64,
-}
-
-impl<C: Default> DirtyScope<C> {
-    fn changed(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-    }
-
-    fn finish_pass(&mut self, cursor: C, complete: bool) -> bool {
-        if !complete {
-            self.cursor = cursor;
-            return false;
-        }
-        if self.generation != self.scan_generation {
-            self.cursor = C::default();
-            self.scan_generation = self.generation;
-            false
-        } else {
-            true
-        }
-    }
-}
-
-#[derive(Default)]
-pub(super) struct SubtreeScan {
-    stack: Vec<SubtreeFrame>,
-    started: bool,
-}
-
-struct SubtreeFrame {
-    entity: Entity,
-    after_child: Option<Uuid>,
-}
-
-impl SubtreeScan {
-    pub(super) fn next(&mut self, world: &World, root: Entity) -> Option<Entity> {
-        if !self.started {
-            self.started = true;
-            self.stack.push(SubtreeFrame { entity: root, after_child: None });
-            return Some(root);
-        }
-        while !self.stack.is_empty() {
-            let depth = self.stack.len() - 1;
-            let frame = self.stack.last_mut().expect("traversal has a current frame");
-            let next = if depth < MAX_PARENT_EDGES {
-                world
-                    .children
-                    .get(&frame.entity)
-                    .and_then(|children| children.range((frame.after_child.map_or(Unbounded, Excluded), Unbounded)).next())
-            } else {
-                None
-            };
-            if let Some((id, child)) = next {
-                frame.after_child = Some(*id);
-                self.stack.push(SubtreeFrame { entity: *child, after_child: None });
-                return Some(*child);
-            } else {
-                self.stack.pop();
-            }
-        }
-        None
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum DirtyTask {
-    Root(Entity),
-    Region(Region),
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct QueryStateMaintenance {
-    pub work_used: usize,
-
-    pub dirty_scopes: usize,
-
-    pub has_dirty_pressure: bool,
-}
-
 impl SpatialIndex {
-    pub(super) fn candidate_ids(&self, cell: Cell) -> Option<&BTreeMap<Uuid, Entity>> {
+    pub(crate) fn candidate_ids(&self, cell: Cell) -> Option<&BTreeMap<Uuid, Entity>> {
         self.cells.get(&cell)
     }
 
-    pub(super) fn unresolved_ids(&self) -> impl Iterator<Item = (Region, Uuid, Entity)> + '_ {
+    pub(crate) fn unresolved_ids(&self) -> impl Iterator<Item = (Region, Uuid, Entity)> + '_ {
         self.unresolved.iter().flat_map(|(region, ids)| ids.iter().map(|(id, entity)| (*region, *id, *entity)))
     }
 
-    pub(super) fn unresolved_ids_in(&self, region: Region) -> impl Iterator<Item = (Region, Uuid, Entity)> + '_ {
+    pub(crate) fn unresolved_ids_in(&self, region: Region) -> impl Iterator<Item = (Region, Uuid, Entity)> + '_ {
         self.unresolved.get(&region).into_iter().flat_map(move |ids| ids.iter().map(move |(id, entity)| (region, *id, *entity)))
     }
 
-    pub(super) fn dirty_roots_in(&self, region: Region) -> impl Iterator<Item = Entity> + '_ {
+    pub(crate) fn dirty_roots_in(&self, region: Region) -> impl Iterator<Item = Entity> + '_ {
         self.dirty_roots_by_region.get(&region).into_iter().flat_map(|roots| roots.iter().copied())
     }
 
-    pub(super) fn dirty_scope_regions(&self) -> impl Iterator<Item = Region> + '_ {
+    pub(crate) fn dirty_scope_regions(&self) -> impl Iterator<Item = Region> + '_ {
         self.dirty_regions
             .keys()
             .copied()
@@ -324,14 +225,14 @@ impl SpatialIndex {
         !self.dirty_regions.is_empty() || !self.dirty_roots.is_empty()
     }
 
-    pub(super) fn has_dirty_scope_in(&self, region: Option<Region>) -> bool {
+    pub(crate) fn has_dirty_scope_in(&self, region: Option<Region>) -> bool {
         match region {
             Some(region) => self.dirty_regions.contains_key(&region) || self.dirty_roots_by_region.contains_key(&region),
             None => self.has_dirty_scope(),
         }
     }
 
-    pub(super) fn is_region_dirty(&self, region: Region) -> bool {
+    pub(crate) fn is_region_dirty(&self, region: Region) -> bool {
         self.dirty_regions.contains_key(&region)
     }
 
@@ -392,7 +293,7 @@ impl SpatialIndex {
     }
 
     #[cfg(feature = "invariants")]
-    pub(super) fn invariant_error(&self, world: &World) -> Option<&'static str> {
+    pub(crate) fn invariant_error(&self, world: &World) -> Option<&'static str> {
         let mut cached = HashSet::new();
         for (cell, ids) in &self.cells {
             for (id, entity) in ids {
@@ -480,9 +381,125 @@ impl SpatialIndex {
     }
 }
 
+struct DirtyRoot {
+    region: Region,
+    scope: DirtyScope<SubtreeScan>,
+}
+
+#[derive(Default)]
+struct DirtyScope<C = Option<Uuid>> {
+    cursor: C,
+    generation: u64,
+    scan_generation: u64,
+}
+
+impl<C: Default> DirtyScope<C> {
+    fn changed(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn finish_pass(&mut self, cursor: C, complete: bool) -> bool {
+        if !complete {
+            self.cursor = cursor;
+            return false;
+        }
+        if self.generation != self.scan_generation {
+            self.cursor = C::default();
+            self.scan_generation = self.generation;
+            false
+        } else {
+            true
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct SubtreeScan {
+    stack: Vec<SubtreeFrame>,
+    started: bool,
+}
+
+impl SubtreeScan {
+    pub(crate) fn next(&mut self, world: &World, root: Entity) -> Option<Entity> {
+        if !self.started {
+            self.started = true;
+            self.stack.push(SubtreeFrame { entity: root, after_child: None });
+            return Some(root);
+        }
+        while !self.stack.is_empty() {
+            let depth = self.stack.len() - 1;
+            let frame = self.stack.last_mut().expect("traversal has a current frame");
+            let next = if depth < MAX_PARENT_EDGES {
+                world
+                    .children
+                    .get(&frame.entity)
+                    .and_then(|children| children.range((frame.after_child.map_or(Unbounded, Excluded), Unbounded)).next())
+            } else {
+                None
+            };
+            if let Some((id, child)) = next {
+                frame.after_child = Some(*id);
+                self.stack.push(SubtreeFrame { entity: *child, after_child: None });
+                return Some(*child);
+            } else {
+                self.stack.pop();
+            }
+        }
+        None
+    }
+}
+
+struct SubtreeFrame {
+    entity: Entity,
+    after_child: Option<Uuid>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DirtyTask {
+    Root(Entity),
+    Region(Region),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct QueryStateMaintenance {
+    pub work_used: usize,
+    pub dirty_scopes: usize,
+    pub has_dirty_pressure: bool,
+}
+
+#[derive(Clone, Copy)]
+struct AncestorChain {
+    entities: [Option<Entity>; MAX_PARENT_EDGES + 1],
+    len: usize,
+    truncated: bool,
+}
+
+impl Default for AncestorChain {
+    fn default() -> Self {
+        Self { entities: [None; MAX_PARENT_EDGES + 1], len: 0, truncated: false }
+    }
+}
+
+impl AncestorChain {
+    fn contains(self, entity: Entity) -> bool {
+        self.entities[..self.len].contains(&Some(entity))
+    }
+
+    fn push(&mut self, entity: Entity) {
+        if self.len < self.entities.len() {
+            self.entities[self.len] = Some(entity);
+            self.len += 1;
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Entity> {
+        self.entities[..self.len].iter().filter_map(Option::as_ref)
+    }
+}
+
 impl World {
-    pub(super) fn update_spatial_state(&mut self, changes: &[super::WorldChange]) {
-        use super::WorldChange::{
+    pub(crate) fn update_spatial_state(&mut self, changes: &[crate::WorldChange]) {
+        use crate::WorldChange::{
             EntityAdded, EntityRebound, EntityRemoved, EntityTransferred, EntityUpdated, RegionRetired, SubtreeInvalidated,
         };
 
@@ -502,7 +519,7 @@ impl World {
         }
     }
 
-    pub(super) fn mark_spatial_region(&mut self, region: Region) {
+    pub(crate) fn mark_spatial_region(&mut self, region: Region) {
         self.spatial.mark_region(region);
     }
 
@@ -559,7 +576,7 @@ impl World {
         ancestors
     }
 
-    pub(super) fn spatial_is_dirty(&self, entity: Entity) -> bool {
+    pub(crate) fn spatial_is_dirty(&self, entity: Entity) -> bool {
         let Some(object) = self.object(entity) else { return false };
         let region = object.address().region();
         if self.spatial.is_region_dirty(region) {
@@ -569,7 +586,7 @@ impl World {
         ancestors.iter().any(|ancestor| self.spatial.dirty_roots.contains_key(ancestor))
     }
 
-    pub(super) fn refresh_spatial_entity(&mut self, entity: Entity) {
+    pub(crate) fn refresh_spatial_entity(&mut self, entity: Entity) {
         let Some((id, region)) = self.object(entity).map(|object| (object.id(), object.address().region())) else { return };
         let pose = self.resolve_pose(entity);
         self.spatial.refresh(entity, id, region, pose);
@@ -600,9 +617,9 @@ impl World {
         work
     }
 
-    pub fn maintain_query_state(&mut self, work_limit: usize) -> Result<QueryStateMaintenance, super::WorldReadError> {
+    pub fn maintain_query_state(&mut self, work_limit: usize) -> Result<QueryStateMaintenance, crate::WorldReadError> {
         if work_limit == 0 || work_limit > MAX_QUERY_STATE_MAINTENANCE_WORK {
-            return Err(super::WorldReadError::InvalidLimit);
+            return Err(crate::WorldReadError::InvalidLimit);
         }
 
         let mut work_used = 0;
@@ -645,34 +662,13 @@ impl World {
     }
 }
 
-#[derive(Clone, Copy)]
-struct AncestorChain {
-    entities: [Option<Entity>; MAX_PARENT_EDGES + 1],
-    len: usize,
-    truncated: bool,
-}
-
-impl Default for AncestorChain {
-    fn default() -> Self {
-        Self { entities: [None; MAX_PARENT_EDGES + 1], len: 0, truncated: false }
+fn cell_coordinate(value: f64) -> Option<i64> {
+    let cell = (value / CELL_SIZE).floor();
+    const I64_UPPER_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+    if !cell.is_finite() || cell < i64::MIN as f64 || cell >= I64_UPPER_EXCLUSIVE {
+        return None;
     }
-}
-
-impl AncestorChain {
-    fn contains(self, entity: Entity) -> bool {
-        self.entities[..self.len].contains(&Some(entity))
-    }
-
-    fn push(&mut self, entity: Entity) {
-        if self.len < self.entities.len() {
-            self.entities[self.len] = Some(entity);
-            self.len += 1;
-        }
-    }
-
-    fn iter(&self) -> impl Iterator<Item = &Entity> {
-        self.entities[..self.len].iter().filter_map(Option::as_ref)
-    }
+    Some(cell as i64)
 }
 
 #[cfg(test)]

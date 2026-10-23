@@ -2,25 +2,23 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use super::super::journal::WorldChange::EntityUpdated;
-use super::super::journal::WorldChangeClasses;
-use super::super::relationships::ParentResolution;
-use super::super::{Object, ObjectRecordRef, ParentRejectionBarrier, RegionalStamp, World, newer_field, newer_region_field};
+use super::fields::{
+    apply_field_update, content_change_classes, field_at_or_after, has_pose, is_exact_negation, mark_pose_components, normalized_rotation,
+    observable_change_classes, patch_motion, pose_is_accepted, pose_update_changes_observable, reject_untrusted_patch_groups,
+    retain_stored_orientation, validate_patch, validate_uuid, validate_vec3,
+};
+use crate::history::WorldChange::EntityUpdated;
+use crate::history::WorldChangeClasses;
+use crate::object::relationships::ParentResolution;
 use crate::update::FieldStamp;
 use crate::{
     Appearance, Applied, ApplyError, ApplyOutcome, AvatarAppearance, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason,
     Kind, LocalAddress, ObjectBindingTarget, ObjectMedia, ObjectPatch, Parent, PoseState, PropertiesPatch, PropertyProvenance, Recovery,
     Rejections, SitTarget, UpdateAuthority, UpdateSource,
 };
-
+use crate::{Object, ObjectRecordRef, ParentRejectionBarrier, RegionalStamp, World, newer_field, newer_region_field};
 use FieldRejectionReason::{ParentCycle, ParentDependsOnRejectedParent, UntrustedSource};
 use UpdateAuthority::{Tracked, Untracked};
-
-use super::fields::{
-    apply_field_update, content_change_classes, field_at_or_after, has_pose, is_exact_negation, mark_pose_components, normalized_rotation,
-    observable_change_classes, patch_motion, pose_is_accepted, pose_update_changes_observable, reject_untrusted_patch_groups,
-    retain_stored_orientation, validate_patch, validate_uuid, validate_vec3,
-};
 
 const UNKNOWN_COF_VERSION: i32 = -1;
 
@@ -163,7 +161,7 @@ impl World {
         if let Some(next) = next_object_media.as_ref() {
             let current_bytes = object.content().object_media.as_deref().map_or(0, ObjectMedia::retained_bytes);
             let next_total = self.object_media_bytes.saturating_sub(current_bytes).saturating_add(next.retained_bytes());
-            if next_total > super::super::MAX_OBJECT_MEDIA_BYTES {
+            if next_total > crate::MAX_OBJECT_MEDIA_BYTES {
                 rejections.push(FieldRejection {
                     group: FieldGroup::ObjectMedia,
                     reason: FieldRejectionReason::ResourceLimit { field: "object_media" },
@@ -527,8 +525,8 @@ mod tests {
         Region, UpdateSource,
     };
 
-    use super::super::tests::test_world;
-    use crate::world::MAX_OBJECT_MEDIA_BYTES;
+    use crate::MAX_OBJECT_MEDIA_BYTES;
+    use crate::mutation::tests::test_world;
 
     #[test]
     fn invalid_patch_keeps_valid_groups() {

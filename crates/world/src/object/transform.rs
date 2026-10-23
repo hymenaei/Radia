@@ -1,11 +1,13 @@
-use crate::{Entity, LocalAddress, Region};
-use math::{DVec3, Quat, Vec3};
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
     num::NonZeroU8,
 };
+
+use math::{DVec3, Quat, Vec3};
 use uuid::Uuid;
+
+use crate::{Entity, LocalAddress, Region};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WorldPose {
@@ -90,9 +92,9 @@ pub enum WorldTransformState {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Transform {
-    pub(super) position: Option<Vec3>,
-    pub(super) rotation: Option<Quat>,
-    pub(super) scale: Option<Vec3>,
+    pub(crate) position: Option<Vec3>,
+    pub(crate) rotation: Option<Quat>,
+    pub(crate) scale: Option<Vec3>,
 }
 
 impl Transform {

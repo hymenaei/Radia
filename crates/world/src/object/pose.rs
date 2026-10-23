@@ -1,15 +1,15 @@
-use math::{DQuat, DVec3, Quat};
+use math::Quat;
 
-use super::World;
+use crate::World;
 use crate::{
     CoordinateFrame, Entity, Kind, Parent, PoseError, PoseState, RegionInfo, UnresolvedReason, WorldPose, WorldTransform,
     WorldTransformState,
 };
 
-pub(super) const MAX_PARENT_EDGES: usize = 16;
+pub(crate) const MAX_PARENT_EDGES: usize = 16;
 
 impl World {
-    pub(super) fn coordinate_frame(&self, entity: Entity) -> Result<CoordinateFrame, PoseError> {
+    pub(crate) fn coordinate_frame(&self, entity: Entity) -> Result<CoordinateFrame, PoseError> {
         let mut current = entity;
         let mut edges = 0;
 
@@ -43,7 +43,7 @@ impl World {
         }
     }
 
-    pub(super) fn resolve_pose(&self, entity: Entity) -> Result<PoseState, PoseError> {
+    pub(crate) fn resolve_pose(&self, entity: Entity) -> Result<PoseState, PoseError> {
         let state = self.resolve_pose_without_provisional(entity)?;
         if let PoseState::Unresolved(reason) = state
             && let Some(object) = self.store.record(entity)
@@ -77,7 +77,7 @@ impl World {
                         can_resolve = false;
                         None
                     } else {
-                        Some((DVec3::new(position.x as f64, position.y as f64, position.z as f64), to_double_rotation(rotation)))
+                        Some((position.as_dvec3(), rotation.as_dquat()))
                     }
                 }
                 _ => {
@@ -110,7 +110,10 @@ impl World {
                         break;
                     };
                     if let Some((position, rotation)) = accumulated.filter(|_| can_resolve) {
-                        return Ok(PoseState::Resolved(WorldPose { position: origin + position, rotation: to_float_rotation(rotation) }));
+                        return Ok(PoseState::Resolved(WorldPose {
+                            position: origin + position,
+                            rotation: rotation.as_quat().normalize(),
+                        }));
                     }
                     break;
                 }
@@ -141,7 +144,7 @@ impl World {
         Ok(PoseState::Unresolved(unresolved.unwrap_or(UnresolvedReason::PoseNotValidForCurrentFrame)))
     }
 
-    pub(super) fn resolve_transform(&self, entity: Entity) -> Result<WorldTransformState, PoseError> {
+    pub(crate) fn resolve_transform(&self, entity: Entity) -> Result<WorldTransformState, PoseError> {
         let pose = match self.resolve_pose(entity)? {
             PoseState::Resolved(pose) => pose,
             PoseState::Provisional { pose, reason } => return Ok(WorldTransformState::Provisional { pose, reason }),
@@ -166,14 +169,6 @@ fn validate_rotation(rotation: Quat, entity: Entity) -> Result<(), PoseError> {
     }
 }
 
-fn to_double_rotation(rotation: Quat) -> DQuat {
-    DQuat::from_xyzw(rotation.x as f64, rotation.y as f64, rotation.z as f64, rotation.w as f64)
-}
-
-fn to_float_rotation(rotation: DQuat) -> Quat {
-    Quat::from_xyzw(rotation.x as f32, rotation.y as f32, rotation.z as f32, rotation.w as f32).normalize()
-}
-
 fn record_unresolved(current: &mut Option<UnresolvedReason>, next: UnresolvedReason) {
     let rank = |reason| match reason {
         UnresolvedReason::PendingParent => 0,
@@ -196,7 +191,7 @@ mod tests {
         ApplyOutcome::Introduced, Kind::Object, ObjectObservation, OrderEvidence::Ordered, ParentUpdate::Root, Pose, Region, RegionInfo,
         UpdateSource, WorldLimits,
     };
-    use math::Vec3;
+    use math::{DVec3, Vec3};
     use uuid::Uuid;
 
     #[test]

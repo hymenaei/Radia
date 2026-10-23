@@ -3,17 +3,16 @@ use std::{fmt, sync::Arc};
 use utils::AssetId;
 
 use crate::{ApplyError, Region, RegionApplied, RegionOutcome, UpdateSource, WorldRevision, identity::WorldId, update::FieldStamp};
-
-use super::{World, WorldChange, newer_field};
+use crate::{World, WorldChange, newer_field};
 
 pub const MAX_ENVIRONMENT_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_ENVIRONMENT_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_ENVIRONMENT_READ_BYTES: usize = size_of::<EnvironmentRead>() + 2 * MAX_ENVIRONMENT_SOURCE_BYTES + 4 * size_of::<usize>();
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ParcelId(u32);
+pub struct ParcelLocalId(u32);
 
-impl ParcelId {
+impl ParcelLocalId {
     pub fn new(value: i32) -> Option<Self> {
         u32::try_from(value).ok().map(Self)
     }
@@ -26,7 +25,7 @@ impl ParcelId {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EnvironmentScope {
     Region,
-    Parcel(ParcelId),
+    Parcel(ParcelLocalId),
 }
 
 #[derive(Clone, PartialEq)]
@@ -82,7 +81,7 @@ impl EnvironmentAssignment {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParcelEnvironment {
-    pub parcel: ParcelId,
+    pub parcel: ParcelLocalId,
     pub assignment: Option<EnvironmentAssignment>,
 }
 
@@ -99,13 +98,6 @@ impl EnvironmentRead {
         size_of::<Self>()
             + self.region_assignment.as_ref().map_or(0, assignment_bytes)
             + self.parcel.as_ref().and_then(|parcel| parcel.assignment.as_ref()).map_or(0, assignment_bytes)
-    }
-}
-
-fn assignment_bytes(assignment: &EnvironmentAssignment) -> usize {
-    match &assignment.source {
-        EnvironmentSource::Inline(bytes) => bytes.len() + 2 * size_of::<usize>(),
-        EnvironmentSource::Inherit | EnvironmentSource::Asset(_) => 0,
     }
 }
 
@@ -133,15 +125,15 @@ struct Observed {
 }
 
 #[derive(Default)]
-pub(super) struct Environments {
+pub(crate) struct Environments {
     region: Option<Observed>,
     parcel: Option<Observed>,
-    selected_parcel: Option<(ParcelId, WorldRevision)>,
+    selected_parcel: Option<(ParcelLocalId, WorldRevision)>,
     parcel_fence: Option<FieldStamp>,
 }
 
 impl Environments {
-    pub(super) fn source_bytes(&self) -> usize {
+    pub(crate) fn source_bytes(&self) -> usize {
         [&self.region, &self.parcel].into_iter().flatten().map(|observed| observed.assignment.source_bytes()).sum()
     }
 
@@ -182,7 +174,7 @@ impl World {
         Some(EnvironmentTarget { world: self.id, region, scope, parcel_revision })
     }
 
-    pub fn observe_agent_parcel(&mut self, source: UpdateSource, parcel: Option<ParcelId>) -> Result<RegionApplied, ApplyError> {
+    pub fn observe_agent_parcel(&mut self, source: UpdateSource, parcel: Option<ParcelLocalId>) -> Result<RegionApplied, ApplyError> {
         let region = source.region();
         self.require_active_region(region)?;
         let Some(stamp) = source.stamp() else { return Ok(unchanged()) };
@@ -252,6 +244,13 @@ impl World {
         }
         let revision = self.publish_changes(vec![WorldChange::EnvironmentUpdated(target.region)]).expect("environment changed");
         Ok(RegionApplied { outcome: RegionOutcome::Patched { revision }, recovery_cancellations: Vec::new() })
+    }
+}
+
+fn assignment_bytes(assignment: &EnvironmentAssignment) -> usize {
+    match &assignment.source {
+        EnvironmentSource::Inline(bytes) => bytes.len() + 2 * size_of::<usize>(),
+        EnvironmentSource::Inherit | EnvironmentSource::Asset(_) => 0,
     }
 }
 

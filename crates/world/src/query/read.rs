@@ -5,9 +5,9 @@ use std::{
     mem::size_of,
 };
 
+use utils::AssetId;
 use uuid::Uuid;
 
-use super::{Object, World, WorldChange, WorldId};
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance, GltfMaterialOverride,
     LinearMotion, ObjectMedia, PropertiesProvenance, RenderMaterials, SitTarget, SurfaceAppearance, Transform,
@@ -16,7 +16,7 @@ use crate::{
     Entity, GltfMaterialOverrides, Kind, LocalAddress, Parent, PoseError, PoseState, Properties, Region, RegionInfo, Shape, WorldRevision,
     WorldTransformState,
 };
-use utils::AssetId;
+use crate::{Object, World, WorldChange, WorldId};
 
 pub const MAX_OBJECT_PAGE_ITEMS: usize = 256;
 pub const MAX_REGION_PAGE_ITEMS: usize = 64;
@@ -25,6 +25,9 @@ pub const MAX_WORLD_CHANGE_PAGE_ITEMS: usize = 256;
 pub const MAX_OBJECT_DETAIL_BYTES: usize = 64 * 1024;
 pub const MAX_OBJECT_MEDIA_READ_BYTES: usize = 256 * 1024;
 pub const MAX_OBJECT_DETAIL_BATCH_ITEMS: usize = 8;
+pub const MAX_OBJECT_DETAIL_BATCH_BYTES: usize = MAX_OBJECT_DETAIL_BATCH_ITEMS * MAX_OBJECT_DETAIL_BYTES
+    + size_of::<ObjectDetailBatch>()
+    + MAX_OBJECT_DETAIL_BATCH_ITEMS * size_of::<ObjectDetailResult>();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorldReadBarrier {
@@ -159,10 +162,6 @@ pub struct ObjectDetailBatch {
     pub hydration_revision: WorldRevision,
     pub details: Vec<ObjectDetailResult>,
 }
-
-pub const MAX_OBJECT_DETAIL_BATCH_BYTES: usize = MAX_OBJECT_DETAIL_BATCH_ITEMS * MAX_OBJECT_DETAIL_BYTES
-    + size_of::<ObjectDetailBatch>()
-    + MAX_OBJECT_DETAIL_BATCH_ITEMS * size_of::<ObjectDetailResult>();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorldChangeCursor {

@@ -1,10 +1,14 @@
-use crate::{Entity, LocalAddress, Region, TerrainPatchId, WorldRevision};
+pub(crate) mod address;
+pub(crate) mod recent;
+
 use std::{
     collections::VecDeque,
     ops::{BitOr, BitOrAssign},
 };
+
 use uuid::Uuid;
 
+use crate::{Entity, LocalAddress, Region, TerrainPatchId, WorldRevision};
 #[cfg(test)]
 use crate::{OrderEvidence, ParentUpdate};
 
@@ -69,25 +73,25 @@ pub enum WorldChange {
 }
 
 #[derive(Debug)]
-pub(super) struct JournalEntry {
-    pub(super) revision: WorldRevision,
-    pub(super) changes: Box<[WorldChange]>,
+pub(crate) struct JournalEntry {
+    pub(crate) revision: WorldRevision,
+    pub(crate) changes: Box<[WorldChange]>,
 }
 
 #[derive(Debug)]
-pub(super) struct Journal {
-    pub(super) revision: WorldRevision,
-    pub(super) entries: VecDeque<JournalEntry>,
+pub(crate) struct Journal {
+    pub(crate) revision: WorldRevision,
+    pub(crate) entries: VecDeque<JournalEntry>,
     retained_changes: usize,
-    pub(super) lost_through: Option<WorldRevision>,
+    pub(crate) lost_through: Option<WorldRevision>,
 }
 
 impl Journal {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { revision: WorldRevision(0), entries: VecDeque::new(), retained_changes: 0, lost_through: None }
     }
 
-    pub(super) fn append(&mut self, changes: Vec<WorldChange>, max_entries: usize, max_changes: usize) -> Option<WorldRevision> {
+    pub(crate) fn append(&mut self, changes: Vec<WorldChange>, max_entries: usize, max_changes: usize) -> Option<WorldRevision> {
         if changes.is_empty() {
             return None;
         }
@@ -112,7 +116,7 @@ impl Journal {
         Some(next)
     }
 
-    pub(super) fn entry_index(&self, revision: WorldRevision) -> usize {
+    pub(crate) fn entry_index(&self, revision: WorldRevision) -> usize {
         let mut low = 0;
         let mut high = self.entries.len();
         while low < high {
@@ -131,7 +135,7 @@ impl Journal {
     }
 
     #[cfg(feature = "invariants")]
-    pub(super) fn invariants_hold(&self) -> bool {
+    pub(crate) fn invariants_hold(&self) -> bool {
         let mut retained_changes = 0_usize;
         let mut previous_revision = None;
         for entry in &self.entries {

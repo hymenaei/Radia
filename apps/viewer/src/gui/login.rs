@@ -61,6 +61,13 @@ impl SelectItem for SpawnOption {
     }
 }
 
+enum LoginPhase {
+    Idle,
+    Connecting,
+    MfaRequired(MfaChallenge),
+    VerifyingMfa,
+}
+
 pub struct LoginScreen {
     username: gpui::Entity<InputState>,
     password: gpui::Entity<InputState>,
@@ -83,9 +90,7 @@ pub struct LoginScreen {
     assets: Option<AssetHandle>,
     status: Option<String>,
     session: Option<AgentSession>,
-    is_connecting: bool,
-    awaiting_mfa: bool,
-    mfa_challenge: Option<MfaChallenge>,
+    login_phase: LoginPhase,
     credential_warning: Option<String>,
     current_region_name: Option<String>,
     region_lookup: Option<RegionLookup>,
@@ -148,9 +153,7 @@ impl LoginScreen {
             assets: None,
             status: Some("Loading saved login…".into()),
             session: None,
-            is_connecting: false,
-            awaiting_mfa: false,
-            mfa_challenge: None,
+            login_phase: LoginPhase::Idle,
             credential_warning: None,
             current_region_name: None,
             region_lookup: None,
@@ -279,9 +282,13 @@ impl LoginScreen {
             return;
         }
 
-        if self.awaiting_mfa {
-            self.submit_mfa_code(window, cx);
-            return;
+        match self.login_phase {
+            LoginPhase::Idle => {}
+            LoginPhase::MfaRequired(_) => {
+                self.submit_mfa_code(window, cx);
+                return;
+            }
+            LoginPhase::Connecting | LoginPhase::VerifyingMfa => return,
         }
 
         let username = self.username.read(cx).value();
@@ -327,9 +334,7 @@ impl LoginScreen {
         self.presentation_mailbox = None;
         self.chat_screen.update(cx, |chat, cx| chat.clear_session(cx));
         self.session = None;
-        self.is_connecting = true;
-        self.awaiting_mfa = false;
-        self.mfa_challenge = None;
+        self.login_phase = LoginPhase::Connecting;
         self.session_handle = None;
         *self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.current_region_name = None;
@@ -350,7 +355,7 @@ impl LoginScreen {
         let network_session = match Session::start(credentials).map_err(|error| error.to_string()) {
             Ok(session) => session,
             Err(error) => {
-                self.is_connecting = false;
+                self.login_phase = LoginPhase::Idle;
                 self.status = Some(error);
                 cx.notify();
                 return;
@@ -420,9 +425,7 @@ impl LoginScreen {
         if let Some(authentication) = authentication {
             match authentication {
                 AuthenticationUpdate::MfaRequired(challenge) => {
-                    self.is_connecting = false;
-                    self.awaiting_mfa = true;
-                    self.mfa_challenge = Some(challenge);
+                    self.login_phase = LoginPhase::MfaRequired(challenge);
                     self.status = Some("Enter the code from your authenticator.".into());
                 }
                 AuthenticationUpdate::CredentialsUpdated { remembered_login, warning } => {
@@ -444,9 +447,7 @@ impl LoginScreen {
 
         if let Some(ready) = session_ready {
             let SessionReadyUpdate { session, region_lookup, region_name, world_reader, assets, camera, environments } = ready;
-            self.is_connecting = false;
-            self.awaiting_mfa = false;
-            self.mfa_challenge = None;
+            self.login_phase = LoginPhase::Idle;
             tracing::info!(grid = %session.grid.label(), simulator = %session.simulator_address, "connected to simulator");
             let mut warnings = Vec::new();
             if let Some(warning) = self.credential_warning.take() {
@@ -528,9 +529,7 @@ impl LoginScreen {
         crate::gui::end_scene(self.session_generation, cx);
         let was_connected = self.session.is_some();
         tracing::warn!(was_connected, %error, "Viewer session ended after a failure");
-        self.is_connecting = false;
-        self.awaiting_mfa = false;
-        self.mfa_challenge = None;
+        self.login_phase = LoginPhase::Idle;
         self.session = None;
         self.session_handle = None;
         self.world_reader = None;
@@ -611,21 +610,14 @@ impl LoginScreen {
             return;
         }
 
-        let Some(challenge) = self.mfa_challenge.as_ref() else {
-            self.awaiting_mfa = false;
-            self.status = Some("The login request has ended. Sign in again.".into());
-            cx.notify();
-            return;
-        };
+        let LoginPhase::MfaRequired(challenge) = &self.login_phase else { return };
 
-        self.is_connecting = true;
         self.status = None;
         let result = challenge.complete(&code);
         self.mfa_code.update(cx, |input, cx| input.set_value("", window, cx));
         match result {
-            Ok(()) => self.mfa_challenge = None,
+            Ok(()) => self.login_phase = LoginPhase::VerifyingMfa,
             Err(error) => {
-                self.is_connecting = false;
                 self.status = Some(error.to_string());
             }
         }
@@ -648,12 +640,15 @@ impl Render for LoginScreen {
         let password = self.password.read(cx).value();
         let mfa_code = self.mfa_code.read(cx).value();
         let show_region_input = self.spawn_choice == SpawnChoice::Region;
-        let can_submit = if self.awaiting_mfa {
-            !self.storage_loading && !self.is_connecting && !mfa_code.trim().is_empty()
-        } else {
-            !self.storage_loading && !self.is_connecting && !username.trim().is_empty() && !password.is_empty()
-        };
-        let form_disabled = self.storage_loading || self.is_connecting || self.awaiting_mfa;
+        let connecting = matches!(self.login_phase, LoginPhase::Connecting | LoginPhase::VerifyingMfa);
+        let show_mfa = matches!(self.login_phase, LoginPhase::MfaRequired(_) | LoginPhase::VerifyingMfa);
+        let can_submit = !self.storage_loading
+            && match self.login_phase {
+                LoginPhase::Idle => !username.trim().is_empty() && !password.is_empty(),
+                LoginPhase::MfaRequired(_) => !mfa_code.trim().is_empty(),
+                LoginPhase::Connecting | LoginPhase::VerifyingMfa => false,
+            };
+        let form_disabled = self.storage_loading || !matches!(self.login_phase, LoginPhase::Idle);
 
         let theme = Theme::global(cx).colors;
         let content = div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground);
@@ -718,20 +713,14 @@ impl Render for LoginScreen {
                                     .child(div().text_size(px(13.)).text_color(theme.foreground).child("Password"))
                                     .child(Input::new(&self.password).w_full().h(px(42.)).focus_bordered(false).disabled(form_disabled)),
                             )
-                            .when(self.awaiting_mfa, |this| {
+                            .when(show_mfa, |this| {
                                 this.child(
                                     div()
                                         .flex()
                                         .flex_col()
                                         .gap_2()
                                         .child(div().text_size(px(13.)).text_color(theme.foreground).child("Authentication code"))
-                                        .child(
-                                            Input::new(&self.mfa_code)
-                                                .w_full()
-                                                .h(px(42.))
-                                                .focus_bordered(false)
-                                                .disabled(self.is_connecting),
-                                        ),
+                                        .child(Input::new(&self.mfa_code).w_full().h(px(42.)).focus_bordered(false).disabled(connecting)),
                                 )
                             })
                             .child(
@@ -854,7 +843,7 @@ impl Render for LoginScreen {
                     .when_some(self.status.clone(), |this, status| {
                         let color = if self.session.is_some() {
                             theme.success
-                        } else if self.storage_loading || self.is_connecting || self.awaiting_mfa {
+                        } else if form_disabled {
                             theme.muted_foreground
                         } else {
                             theme.danger
@@ -863,12 +852,11 @@ impl Render for LoginScreen {
                     })
                     .child(
                         Button::new("login")
-                            .label(if self.is_connecting {
-                                if self.awaiting_mfa { "Verifying…" } else { "Connecting…" }
-                            } else if self.awaiting_mfa {
-                                "Verify"
-                            } else {
-                                "Log in"
+                            .label(match self.login_phase {
+                                LoginPhase::Idle => "Log in",
+                                LoginPhase::Connecting => "Connecting…",
+                                LoginPhase::MfaRequired(_) => "Verify",
+                                LoginPhase::VerifyingMfa => "Verifying…",
                             })
                             .primary()
                             .w_full()

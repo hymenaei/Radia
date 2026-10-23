@@ -1,12 +1,12 @@
 use std::{collections::BTreeMap, hint::black_box};
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use llsd::{Binary, Map, URI, Value, binary, notation, xml};
+use criterion::{BenchmarkId, Criterion, Throughput};
+use llsd::{Binary, Map, Uri, Value, binary, notation, xml};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Deserialize, Serialize)]
 #[serde(transparent)]
-struct CapabilityMap(BTreeMap<String, URI>);
+struct CapabilityMap(BTreeMap<String, Uri>);
 
 #[derive(Deserialize, Serialize)]
 struct EventBatch {
@@ -58,13 +58,13 @@ fn capabilities() -> CapabilityMap {
         NAMES
             .iter()
             .enumerate()
-            .map(|(index, name)| ((*name).to_owned(), URI::from(format!("https://cap.example.invalid/region/{index:04}"))))
+            .map(|(index, name)| ((*name).to_owned(), Uri::from(format!("https://cap.example.invalid/region/{index:04}"))))
             .collect(),
     )
 }
 
 fn capability_value(capabilities: &CapabilityMap) -> Value {
-    Value::Map(capabilities.0.iter().map(|(name, uri)| (name.clone(), Value::URI(uri.clone()))).collect())
+    Value::Map(capabilities.0.iter().map(|(name, uri)| (name.clone(), Value::Uri(uri.clone()))).collect())
 }
 
 fn event_batch() -> EventBatch {
@@ -245,5 +245,7 @@ fn bench_admission(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_codec, bench_admission);
-criterion_main!(benches);
+pub(crate) fn bench(c: &mut Criterion) {
+    bench_codec(c);
+    bench_admission(c);
+}

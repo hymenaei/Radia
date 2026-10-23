@@ -3,6 +3,7 @@ name = "llsd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autobenches = false
 
 [lints]
 workspace = true
@@ -20,5 +21,5 @@ criterion.workspace = true
 proptest.workspace = true
 
 [[bench]]
-name = "codec"
+name = "main"
 harness = false

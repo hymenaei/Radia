@@ -369,7 +369,7 @@ pub(super) fn decode_crossed_region(body: &Value, agent_id: Uuid, session_id: Uu
     .ok_or("RegionData.SimPort is outside the valid range")?;
     let seed = match region.get("SeedCapability") {
         Some(Value::String(seed)) => seed.as_str(),
-        Some(Value::URI(seed)) => seed.as_str(),
+        Some(Value::Uri(seed)) => seed.as_str(),
         _ => return Err("RegionData.SeedCapability is not an LLSD URI or string"),
     };
     make_handoff_target(agent_id, session_id, u64::from_be_bytes(raw_handle), SocketAddr::from((Ipv4Addr::from(raw_ip), port)), seed)
@@ -397,7 +397,7 @@ pub(super) fn decode_event_teleport_finish(body: &Value, agent_id: Uuid, session
     .ok_or("Info.SimPort is outside the valid range")?;
     let seed = match info.get("SeedCapability") {
         Some(Value::String(seed)) => seed.as_str(),
-        Some(Value::URI(seed)) => seed.as_str(),
+        Some(Value::Uri(seed)) => seed.as_str(),
         _ => return Err("Info.SeedCapability is not an LLSD URI or string"),
     };
     make_handoff_target(agent_id, session_id, u64::from_be_bytes(raw_handle), SocketAddr::from((Ipv4Addr::from(raw_ip), port)), seed)

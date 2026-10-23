@@ -2,21 +2,13 @@ use std::{fmt, io};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A malformed LLSD value, I/O failure, or configured resource limit.
 #[derive(Debug)]
 pub enum Error {
-    /// The underlying reader or writer failed.
     Io(io::Error),
-    /// Input was malformed or could not represent the requested Serde value.
     InvalidValue(String),
-    /// Text input is not valid UTF-8.
     InvalidUtf8,
-    /// Input ended before a complete value was available.
     UnexpectedEof,
-    /// Input contains bytes after its value.
     TrailingData,
-    /// A configured input, nesting, value-count, container-item, string, map-key, binary,
-    /// or encoded-output limit was exceeded.
     LimitExceeded(&'static str),
 }
 

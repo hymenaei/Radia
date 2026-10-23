@@ -19,7 +19,7 @@ Note also which crates are **API Boundaries**. Rules at the boundary are differe
 ```text
 apps/viewer/           # package `viewer`, executable `radia`
 crates/assets/         # package `assets`
-crates/common/llsd/    # package `llsd`
+crates/llsd/    # package `llsd`
 crates/math/           # package `math`
 crates/utils/          # package `utils`
 crates/test-support/ # package `test-support`
@@ -36,7 +36,7 @@ The viewer coordinates the library crates. The common directory is being removed
 
 ### `crates/assets`
 
-### `crates/common/llsd`
+### `crates/llsd`
 
 ### `crates/math`
 

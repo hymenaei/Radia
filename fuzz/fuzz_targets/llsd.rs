@@ -6,7 +6,7 @@ use llsd::{Error, Limits, Value, binary, notation, xml};
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 const MAX_ROUND_TRIP_BYTES: usize = 512 * 1024;
 const INPUT_LIMITS: Limits = Limits {
-    max_input_bytes: MAX_INPUT_BYTES,
+    max_bytes: MAX_INPUT_BYTES,
     max_depth: 16,
     max_values: 512,
     max_container_items: 128,
@@ -14,7 +14,7 @@ const INPUT_LIMITS: Limits = Limits {
     max_map_key_bytes: 256,
     max_binary_bytes: 8 * 1024,
 };
-const ROUND_TRIP_LIMITS: Limits = Limits { max_input_bytes: MAX_ROUND_TRIP_BYTES, ..INPUT_LIMITS };
+const ROUND_TRIP_LIMITS: Limits = Limits { max_bytes: MAX_ROUND_TRIP_BYTES, ..INPUT_LIMITS };
 
 type Decoder = fn(&[u8], Limits) -> llsd::Result<Value>;
 
@@ -64,7 +64,7 @@ fn check_all_round_trips(value: &Value) {
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT_BYTES {
-        let limits = Limits { max_input_bytes: MAX_INPUT_BYTES, ..INPUT_LIMITS };
+        let limits = Limits { max_bytes: MAX_INPUT_BYTES, ..INPUT_LIMITS };
         assert!(matches!(xml::from_slice_with_limits::<Value>(data, limits), Err(Error::LimitExceeded("input bytes"))));
         assert!(matches!(binary::from_slice_with_limits::<Value>(data, limits), Err(Error::LimitExceeded("input bytes"))));
         assert!(matches!(notation::from_slice_with_limits::<Value>(data, limits), Err(Error::LimitExceeded("input bytes"))));

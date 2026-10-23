@@ -13,7 +13,7 @@ uuid = "1"
 math = { path = "../crates/math" }
 libfuzzer-sys = "0.4"
 protocol = { path = "../crates/protocol" }
-llsd = { path = "../crates/common/llsd" }
+llsd = { path = "../crates/llsd" }
 network = { path = "../crates/network" }
 world = { path = "../crates/world", features = ["invariants"] }
 

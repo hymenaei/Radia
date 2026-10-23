@@ -1,0 +1,53 @@
+mod allocation;
+mod de;
+mod ser;
+mod tokens;
+
+pub use self::allocation::{BoundError, value_allocation_bound};
+pub use self::de::from_slice_with_limits;
+
+use std::io::{Read, Write};
+
+use serde::de::DeserializeOwned;
+
+use crate::{Error, Limits, Result, encoding::read_limited};
+
+pub fn from_slice<T: DeserializeOwned>(input: &[u8]) -> Result<T> {
+    from_slice_with_limits(input, Limits::default())
+}
+
+pub fn from_str<T: DeserializeOwned>(input: &str) -> Result<T> {
+    from_slice(input.as_bytes())
+}
+
+pub fn from_reader<T: DeserializeOwned, R: Read>(reader: R) -> Result<T> {
+    from_reader_with_limits(reader, Limits::default())
+}
+
+pub fn from_reader_with_limits<T: DeserializeOwned, R: Read>(mut reader: R, limits: Limits) -> Result<T> {
+    let bytes = read_limited(&mut reader, limits.max_bytes)?;
+    from_slice_with_limits(&bytes, limits)
+}
+
+pub fn to_vec<T: serde::Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
+    crate::serialization::to_vec::<ser::Encoder, _>(value, None)
+}
+
+pub fn to_vec_with_max_bytes<T: serde::Serialize + ?Sized>(value: &T, max_bytes: usize) -> Result<Vec<u8>> {
+    crate::serialization::to_vec::<ser::Encoder, _>(value, Some(max_bytes))
+}
+
+pub fn to_string<T: serde::Serialize + ?Sized>(value: &T) -> Result<String> {
+    String::from_utf8(to_vec(value)?).map_err(|_| Error::InvalidUtf8)
+}
+
+pub fn to_writer<T: serde::Serialize + ?Sized, W: Write>(writer: W, value: &T) -> Result<()> {
+    crate::serialization::to_writer::<ser::Encoder, _, _>(writer, value)
+}
+
+fn normalized_text_len(text: &str) -> usize {
+    if !text.as_bytes().contains(&b'\r') {
+        return text.len();
+    }
+    text.len() - text.as_bytes().windows(2).filter(|pair| *pair == b"\r\n").count()
+}

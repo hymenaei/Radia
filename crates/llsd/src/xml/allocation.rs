@@ -1,5 +1,3 @@
-//! Allocation admission estimates for the built-in XML value decoder.
-
 use std::{
     error, fmt,
     mem::{align_of, size_of},
@@ -7,17 +5,16 @@ use std::{
 
 use crate::{Error, Limits, Value};
 
-use super::{Token, Tokens};
+use super::{
+    normalized_text_len,
+    tokens::{Token, Tokens},
+};
 
-/// XML cannot be scanned within its limits or represented by an allocation estimate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BoundError {
-    /// Invalid XML framing, LLSD structure, or binary length.
     Malformed,
-    /// A configured decoder limit was exceeded.
     LimitExceeded(&'static str),
-    /// Allocation arithmetic exceeds the target's `usize` range.
     Overflow,
 }
 
@@ -42,33 +39,115 @@ impl From<Error> for BoundError {
     }
 }
 
-/// Estimates peak additional live allocations of the current built-in [`Value`] decoder.
-///
-/// The HTTP/input buffer is excluded and must remain separately charged. Scan storage is
-/// O(`limits.max_depth`); scalar text is counted without collecting it. The scanner shares
-/// the XML tokenizer and limits, but does not replace semantic decoding: scalar values and
-/// binary attributes can still be rejected by the decoder after a successful scan.
-///
-/// The estimate includes collection capacity, strings and map keys, overlapping growth and
-/// base64 buffers, parser workspace, and a per-allocation metadata/alignment allowance.
-/// Its collection model follows the current Rust `Vec` growth and `BTreeMap` node layout.
-/// This is an admission estimate for this decoder, not a guaranteed process heap ceiling:
-/// allocator bookkeeping, heap fragmentation, and unrelated allocations are not observable
-/// from XML. It does not bound arbitrary custom Serde output or user deserializer work.
-///
-/// Arithmetic uses the current target's `usize`, including on 32-bit targets. An estimate
-/// that cannot be represented returns [`BoundError::Overflow`] rather than wrapping.
-///
-/// # Errors
-///
-/// Returns [`BoundError::Malformed`] for invalid framing or structure,
-/// [`BoundError::LimitExceeded`] for configured limits, and [`BoundError::Overflow`]
-/// for allocation arithmetic overflow. Callers must secure admission before decoding.
+struct Frame {
+    tag: &'static str,
+    items: usize,
+    expects_value: bool,
+}
+
+#[derive(Default)]
+struct Scalar {
+    bytes: usize,
+    compact: usize,
+    padding: usize,
+}
+
+struct Scanner<'input> {
+    tokens: Tokens<'input>,
+    limits: Limits,
+    values: usize,
+    bytes: usize,
+}
+
+impl Scanner<'_> {
+    fn skip_space(&mut self) -> Result<(), BoundError> {
+        while matches!(
+            self.tokens.peek()?,
+            Some(Token::Text(text) | Token::CharacterReference(text)) if text.trim().is_empty()
+        ) {
+            self.tokens.take()?;
+        }
+        Ok(())
+    }
+
+    fn tag(&mut self) -> Result<(&'static str, bool), BoundError> {
+        self.skip_space()?;
+        match self.tokens.take()? {
+            Some(Token::Start(tag)) => Ok((tag, false)),
+            Some(Token::Empty(tag)) => Ok((tag, true)),
+            _ => Err(BoundError::Malformed),
+        }
+    }
+
+    fn scalar(&mut self, tag: &str, empty: bool) -> Result<Scalar, BoundError> {
+        let mut scalar = Scalar::default();
+        if empty {
+            return Ok(scalar);
+        }
+        loop {
+            let (text, bytes) = match self.tokens.take()? {
+                Some(Token::End(end)) if end == tag => return Ok(scalar),
+                Some(Token::Text(text)) => {
+                    let bytes = normalized_text_len(&text);
+                    (text, bytes)
+                }
+                Some(Token::CharacterReference(text)) => {
+                    let bytes = text.len();
+                    (text, bytes)
+                }
+                _ => return Err(BoundError::Malformed),
+            };
+            scalar.bytes = add(scalar.bytes, bytes)?;
+            let (limit, name) = match tag {
+                "binary" => (self.limits.max_bytes, "input bytes"),
+                "key" => (self.limits.max_map_key_bytes, "map key bytes"),
+                _ => (self.limits.max_string_bytes, "string bytes"),
+            };
+            if scalar.bytes > limit {
+                return Err(BoundError::LimitExceeded(name));
+            }
+            if tag == "binary" {
+                for byte in text.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+                    scalar.compact = add(scalar.compact, 1)?;
+                    scalar.padding = if byte == b'=' { add(scalar.padding, 1)? } else { 0 };
+                }
+            }
+        }
+    }
+
+    fn charge(&mut self, bytes: usize) -> Result<(), BoundError> {
+        self.bytes = add(self.bytes, bytes)?;
+        Ok(())
+    }
+
+    fn text_allocation(&mut self, bytes: usize) -> Result<(), BoundError> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        let capacity = mul(bytes, 2)?.max(8);
+        self.charge(allocation(mul(capacity, 2)?, 2)?)
+    }
+
+    fn collection(&mut self, tag: &str, items: usize) -> Result<(), BoundError> {
+        if items == 0 {
+            return Ok(());
+        }
+        if tag == "array" {
+            let capacity = mul(items, 2)?.max(4);
+            self.charge(allocation(mul(mul(capacity, size_of::<Value>())?, 2)?, 2)?)
+        } else {
+            let nodes = if items <= 11 { 1 } else { add((items - 1) / 5, 2)? };
+            let node_bytes = add(mul(11, size_of::<(String, Value)>())?, mul(16, size_of::<usize>())?)?;
+            self.charge(allocation(mul(nodes, node_bytes)?, nodes)?)
+        }
+    }
+}
+
 pub fn value_allocation_bound(input: &[u8], limits: Limits) -> Result<usize, BoundError> {
-    if input.len() > limits.max_input_bytes {
+    if input.len() > limits.max_bytes {
         return Err(BoundError::LimitExceeded("input bytes"));
     }
-    let mut scan = Scanner { tokens: Tokens::for_bound(input, limits)?, limits, values: 0, bytes: 0 };
+    let mut scan = Scanner { tokens: Tokens::for_allocation_bound(input, limits)?, limits, values: 0, bytes: 0 };
     scan.skip_space()?;
     if !matches!(scan.tokens.take()?, Some(Token::Start("llsd"))) {
         return Err(BoundError::Malformed);
@@ -79,7 +158,7 @@ pub fn value_allocation_bound(input: &[u8], limits: Limits) -> Result<usize, Bou
         scan.skip_space()?;
         if let Some(frame) = frames.last_mut() {
             if matches!(scan.tokens.peek()?, Some(Token::End(tag)) if *tag == frame.tag) {
-                if frame.needs_value {
+                if frame.expects_value {
                     return Err(BoundError::Malformed);
                 }
                 scan.tokens.take()?;
@@ -90,7 +169,7 @@ pub fn value_allocation_bound(input: &[u8], limits: Limits) -> Result<usize, Bou
                 }
                 continue;
             }
-            if frame.tag == "map" && !frame.needs_value {
+            if frame.tag == "map" && !frame.expects_value {
                 let (tag, empty) = scan.tag()?;
                 if tag != "key" {
                     return Err(BoundError::Malformed);
@@ -100,14 +179,14 @@ pub fn value_allocation_bound(input: &[u8], limits: Limits) -> Result<usize, Bou
                     return Err(BoundError::LimitExceeded("map key bytes"));
                 }
                 scan.text_allocation(key.bytes)?;
-                frame.needs_value = true;
+                frame.expects_value = true;
                 continue;
             }
             frame.items = add(frame.items, 1)?;
             if frame.items > limits.max_container_items {
                 return Err(BoundError::LimitExceeded("container items"));
             }
-            frame.needs_value = false;
+            frame.expects_value = false;
         }
         scan.values = add(scan.values, 1)?;
         if scan.values > limits.max_values {
@@ -115,7 +194,7 @@ pub fn value_allocation_bound(input: &[u8], limits: Limits) -> Result<usize, Bou
         }
         scan.charge(allocation(9, 1)?)?;
         let (tag, empty) = scan.tag()?;
-        let attributes = scan.tokens.binary_attribute_bytes;
+        let attributes = scan.tokens.binary_attribute_bytes();
         if attributes != 0 {
             scan.charge(add(mul(attributes, 12)?, allocation(64, 2)?)?)?;
         }
@@ -125,7 +204,7 @@ pub fn value_allocation_bound(input: &[u8], limits: Limits) -> Result<usize, Bou
                 if next_depth > limits.max_depth {
                     return Err(BoundError::LimitExceeded("nesting depth"));
                 }
-                frames.push(Frame { tag, items: 0, needs_value: false });
+                frames.push(Frame { tag, items: 0, expects_value: false });
                 depth = depth.max(next_depth);
                 continue;
             }
@@ -171,107 +250,10 @@ pub fn value_allocation_bound(input: &[u8], limits: Limits) -> Result<usize, Bou
     Ok(scan.bytes)
 }
 
-struct Frame {
-    tag: &'static str,
-    items: usize,
-    needs_value: bool,
-}
-
-#[derive(Default)]
-struct Scalar {
-    bytes: usize,
-    compact: usize,
-    padding: usize,
-}
-
-struct Scanner<'input> {
-    tokens: Tokens<'input>,
-    limits: Limits,
-    values: usize,
-    bytes: usize,
-}
-
-impl Scanner<'_> {
-    fn skip_space(&mut self) -> Result<(), BoundError> {
-        while matches!(
-            self.tokens.peek()?,
-            Some(Token::Text(text) | Token::CharacterReference(text)) if text.trim().is_empty()
-        ) {
-            self.tokens.take()?;
-        }
-        Ok(())
-    }
-
-    fn tag(&mut self) -> Result<(&'static str, bool), BoundError> {
-        self.skip_space()?;
-        match self.tokens.take()? {
-            Some(Token::Start(tag)) => Ok((tag, false)),
-            Some(Token::Empty(tag)) => Ok((tag, true)),
-            _ => Err(BoundError::Malformed),
-        }
-    }
-
-    fn scalar(&mut self, tag: &str, empty: bool) -> Result<Scalar, BoundError> {
-        let mut scalar = Scalar::default();
-        if empty {
-            return Ok(scalar);
-        }
-        loop {
-            match self.tokens.take()? {
-                Some(Token::End(end)) if end == tag => return Ok(scalar),
-                Some(Token::Text(text) | Token::CharacterReference(text)) => {
-                    scalar.bytes = add(scalar.bytes, text.len())?;
-                    let (limit, name) = if tag == "binary" {
-                        (self.limits.max_input_bytes, "input bytes")
-                    } else {
-                        (self.limits.max_string_bytes, "string bytes")
-                    };
-                    if scalar.bytes > limit {
-                        return Err(BoundError::LimitExceeded(name));
-                    }
-                    if tag == "binary" {
-                        for byte in text.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
-                            scalar.compact = add(scalar.compact, 1)?;
-                            scalar.padding = if byte == b'=' { add(scalar.padding, 1)? } else { 0 };
-                        }
-                    }
-                }
-                _ => return Err(BoundError::Malformed),
-            }
-        }
-    }
-
-    fn charge(&mut self, bytes: usize) -> Result<(), BoundError> {
-        self.bytes = add(self.bytes, bytes)?;
-        Ok(())
-    }
-
-    fn text_allocation(&mut self, bytes: usize) -> Result<(), BoundError> {
-        if bytes == 0 {
-            return Ok(());
-        }
-        let capacity = mul(bytes, 2)?.max(8);
-        self.charge(allocation(mul(capacity, 2)?, 2)?)
-    }
-
-    fn collection(&mut self, tag: &str, items: usize) -> Result<(), BoundError> {
-        if items == 0 {
-            return Ok(());
-        }
-        if tag == "array" {
-            let capacity = mul(items, 2)?.max(4);
-            self.charge(allocation(mul(mul(capacity, size_of::<Value>())?, 2)?, 2)?)
-        } else {
-            let nodes = if items <= 11 { 1 } else { add((items - 1) / 5, 2)? };
-            let node_bytes = add(mul(11, size_of::<(String, Value)>())?, mul(16, size_of::<usize>())?)?;
-            self.charge(allocation(mul(nodes, node_bytes)?, nodes)?)
-        }
-    }
-}
-
 fn add(a: usize, b: usize) -> Result<usize, BoundError> {
     a.checked_add(b).ok_or(BoundError::Overflow)
 }
+
 fn mul(a: usize, b: usize) -> Result<usize, BoundError> {
     a.checked_mul(b).ok_or(BoundError::Overflow)
 }
@@ -305,7 +287,7 @@ mod tests {
                     Limits { max_map_key_bytes: n, ..defaults },
                     Limits { max_binary_bytes: n, ..defaults },
                 ] {
-                    if super::super::from_slice_with_limits::<Value>(input, limits).is_ok() {
+                    if crate::xml::from_slice_with_limits::<Value>(input, limits).is_ok() {
                         assert!(value_allocation_bound(input, limits).is_ok(), "accepted input rejected: {input:?}, {limits:?}");
                     }
                 }
@@ -317,7 +299,7 @@ mod tests {
     fn framing_and_input_limits() {
         assert_eq!(value_allocation_bound(b"<llsd><array></map></llsd>", Limits::default()), Err(BoundError::Malformed));
         assert_eq!(
-            value_allocation_bound(b"<llsd><undef/></llsd>", Limits { max_input_bytes: 1, ..Limits::default() }),
+            value_allocation_bound(b"<llsd><undef/></llsd>", Limits { max_bytes: 1, ..Limits::default() }),
             Err(BoundError::LimitExceeded("input bytes"))
         );
     }
@@ -351,7 +333,7 @@ mod tests {
 
         for input in inputs {
             let limits = Limits::default();
-            assert!(super::super::from_slice_with_limits::<Value>(input, limits).is_ok(), "decoder rejected {input:?}");
+            assert!(crate::xml::from_slice_with_limits::<Value>(input, limits).is_ok(), "decoder rejected {input:?}");
             assert!(value_allocation_bound(input, limits).is_ok(), "bound scanner rejected {input:?}");
         }
     }

@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::{fmt::Write, hint::black_box, time::Instant};
 
 use llsd::{Limits, Value, xml};
@@ -33,7 +34,7 @@ fn allocation_bounds() {
         write!(node_boundary, "<key>k{index}</key><map><key>v</key><string>text</string></map>").expect("append nested map");
     }
     node_boundary.push_str("</map></llsd>");
-    let limits = Limits { max_input_bytes: 32 * 1024 * 1024, max_values: 262_144, max_container_items: 262_144, ..Limits::default() };
+    let limits = Limits { max_bytes: 32 * 1024 * 1024, max_values: 262_144, max_container_items: 262_144, ..Limits::default() };
     for (name, input) in [
         ("empty", "<llsd><undef/></llsd>".to_owned()),
         ("depth limit", format!("<llsd>{}<integer>1</integer>{}</llsd>", "<array>".repeat(64), "</array>".repeat(64))),
@@ -44,6 +45,7 @@ fn allocation_bounds() {
         ("flat array growth", flat_array),
         ("large binary", binary),
         ("split scalar growth", split_text),
+        ("normalized line endings", format!("<llsd><string>{}</string></llsd>", "ab\r\n".repeat(50_000))),
         ("nested map nodes", node_boundary),
     ] {
         let (bound, scan_live, scan_peak, scan_ns) = measure(|| xml::value_allocation_bound(black_box(input.as_bytes()), limits).expect("scan valid XML"));
@@ -69,5 +71,37 @@ fn malformed_names_use_bounded_memory() {
         assert_eq!(large_result, Err(xml::BoundError::Malformed));
         assert_eq!((small_live, large_live), (0, 0));
         assert_eq!(large_peak, small_peak, "malformed tag name must not be copied for {prefix:?}");
+    }
+}
+
+#[test]
+fn oversized_keys_stay_bounded() {
+    type Decode = fn(&[u8], Limits) -> Result<Value, llsd::Error>;
+    let large = "x".repeat(1024 * 1024);
+    let binary_map = |key: &str| {
+        let mut bytes = b"{\0\0\0\x01k".to_vec();
+        bytes.extend_from_slice(&(key.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(key.as_bytes());
+        bytes.extend_from_slice(b"!}");
+        bytes
+    };
+    let cases: [(&str, Decode, Vec<u8>, Vec<u8>); 3] = [
+        (
+            "XML",
+            xml::from_slice_with_limits,
+            b"<llsd><map><key>xxx</key><undef/></map></llsd>".to_vec(),
+            format!("<llsd><map><key>{large}</key><undef/></map></llsd>").into_bytes(),
+        ),
+        ("notation", llsd::notation::from_slice_with_limits, b"{'xxx':!}".to_vec(), format!("{{'{large}':!}}").into_bytes()),
+        ("binary", llsd::binary::from_slice_with_limits, binary_map("xxx"), binary_map(&large)),
+    ];
+    for (name, decode, small, large) in cases {
+        let limits = Limits { max_map_key_bytes: 2, ..Limits::default() };
+        let (small_result, small_live, small_peak, _) = measure(|| decode(&small, limits));
+        let (large_result, large_live, large_peak, _) = measure(|| decode(&large, limits));
+        assert_matches!(small_result, Err(llsd::Error::LimitExceeded("map key bytes")), "small key for {name}");
+        assert_matches!(large_result, Err(llsd::Error::LimitExceeded("map key bytes")), "large key for {name}");
+        assert_eq!((small_live, large_live), (0, 0), "failed decode retained storage for {name}");
+        assert!(large_peak <= small_peak + 4096, "oversized key was copied for {name}: {small_peak} -> {large_peak}");
     }
 }

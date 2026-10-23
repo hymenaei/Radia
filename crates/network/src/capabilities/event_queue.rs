@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use llsd::{Binary, Map, URI, Value, xml};
+use llsd::{Binary, Map, Uri, Value, xml};
 use reqwest::{StatusCode, Url};
 use tokio::{
     runtime::Handle,
@@ -956,10 +956,10 @@ fn capability_event_batch_retained_size(events: &[CapabilityEvent], event_capaci
 fn llsd_heap_size(value: &mut Value) -> usize {
     match value {
         Value::String(value) => value.capacity(),
-        Value::URI(uri) => {
+        Value::Uri(uri) => {
             let text = take(uri).into_string();
             let capacity = text.capacity();
-            *uri = URI::from(text);
+            *uri = Uri::from(text);
             capacity
         }
         Value::Binary(binary) => {
@@ -1335,9 +1335,9 @@ mod retained_size_tests {
         let mut uri_text = String::with_capacity(4096);
         uri_text.push_str("uri");
         let uri_capacity = uri_text.capacity();
-        let mut uri = Value::URI(URI::from(uri_text));
+        let mut uri = Value::Uri(Uri::from(uri_text));
         assert_eq!(llsd_heap_size(&mut uri), uri_capacity);
-        assert!(matches!(&uri, Value::URI(value) if value.as_str() == "uri"));
+        assert!(matches!(&uri, Value::Uri(value) if value.as_str() == "uri"));
 
         let mut bytes = Vec::with_capacity(4096);
         bytes.extend_from_slice(b"bin");

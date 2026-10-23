@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
-use llsd::{Binary, Date, Limits, URI, Value, binary, notation, xml};
+use llsd::{Binary, Date, Limits, Uri, Value, binary, notation, xml};
 use proptest::prelude::*;
 use uuid::Uuid;
 
 const CASES: u32 = 96;
+type Decoder = fn(&[u8]) -> Result<Value, llsd::Error>;
 
 fn short_text() -> impl Strategy<Value = String> {
     prop::collection::vec(0x20u8..=0x7e, 0..17).prop_map(|bytes| String::from_utf8(bytes).expect("ASCII bytes are UTF-8"))
@@ -65,7 +66,7 @@ fn values() -> impl Strategy<Value = Value> {
         any::<i32>().prop_map(Value::Integer),
         finite_real().prop_map(Value::Real),
         xml_text().prop_map(Value::String),
-        prop_oneof![short_text(), xml_text()].prop_map(|value| Value::URI(URI::new(value))),
+        prop_oneof![short_text(), xml_text()].prop_map(|value| Value::Uri(Uri::new(value))),
         prop::collection::vec(any::<u8>(), 0..17).prop_map(|bytes| Value::Binary(Binary::from(bytes))),
         (-2_000_000_000i64..=2_000_000_000)
             .prop_filter_map("valid whole-second date", |seconds| Date::from_unix_seconds(seconds as f64).map(Value::Date)),
@@ -84,20 +85,19 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: CASES, .. ProptestConfig::default() })]
 
     #[test]
-    fn xml_input_no_panic(input in prop::collection::vec(any::<u8>(), 0..257)) {
-        let decoded = xml::from_slice::<Value>(&input);
-        let bound = xml::value_allocation_bound(&input, Limits::default());
-        if decoded.is_ok() { prop_assert!(bound.is_ok()); }
-    }
+    fn inputs_do_not_panic(input in prop::collection::vec(any::<u8>(), 0..257)) {
+        let decoders: [(&str, Decoder); 3] = [
+            ("XML", xml::from_slice::<Value>),
+            ("binary", binary::from_slice::<Value>),
+            ("notation", notation::from_slice::<Value>),
+        ];
 
-    #[test]
-    fn binary_input_no_panic(input in prop::collection::vec(any::<u8>(), 0..257)) {
-        let _ = binary::from_slice::<Value>(&input);
-    }
-
-    #[test]
-    fn notation_input_no_panic(input in prop::collection::vec(any::<u8>(), 0..257)) {
-        let _ = notation::from_slice::<Value>(&input);
+        for (format, decode) in decoders {
+            let decoded = decode(&input);
+            if format == "XML" && decoded.is_ok() {
+                prop_assert!(xml::value_allocation_bound(&input, Limits::default()).is_ok(), "{format} accepted input rejected by the allocation bound");
+            }
+        }
     }
 
     #[test]
@@ -124,30 +124,12 @@ proptest! {
         let xml = xml::to_vec(&value).expect("generated LLSD value encodes as XML");
         let binary = binary::to_vec(&value).expect("generated LLSD value encodes as binary");
         let notation = notation::to_vec(&value).expect("generated LLSD value encodes as notation");
+        let limits = Limits::default();
 
-        let decoded_xml = xml::from_slice::<Value>(&xml).expect("decode generated XML");
-        prop_assert!(xml::value_allocation_bound(&xml, Limits::default()).is_ok());
-        let decoded_binary = binary::from_slice::<Value>(&binary).expect("decode generated binary");
-        let decoded_notation = notation::from_slice::<Value>(&notation).expect("decode generated notation");
-
-        prop_assert_eq!(&decoded_xml, &value);
-        prop_assert_eq!(&decoded_binary, &value);
-        prop_assert_eq!(&decoded_notation, &value);
-        prop_assert!(real_bits_match(&decoded_xml, &value), "XML real bits changed: {value:?}");
-        prop_assert!(real_bits_match(&decoded_binary, &value), "binary real bits changed: {value:?}");
-        prop_assert!(real_bits_match(&decoded_notation, &value), "notation real bits changed: {value:?}");
-    }
-
-    #[test]
-    fn finite_reals_roundtrip_with_exact_bits(value in finite_real()) {
-        let value = Value::Real(value);
-        let xml = xml::to_vec(&value).expect("generated finite real encodes as XML");
-        let binary = binary::to_vec(&value).expect("generated finite real encodes as binary");
-        let notation = notation::to_vec(&value).expect("generated finite real encodes as notation");
-
-        let decoded_xml = xml::from_slice::<Value>(&xml).expect("decode generated XML real");
-        let decoded_binary = binary::from_slice::<Value>(&binary).expect("decode generated binary real");
-        let decoded_notation = notation::from_slice::<Value>(&notation).expect("decode generated notation real");
+        let decoded_xml = xml::from_slice_with_limits::<Value>(&xml, limits).expect("decode generated XML within limits");
+        prop_assert!(xml::value_allocation_bound(&xml, limits).is_ok());
+        let decoded_binary = binary::from_slice_with_limits::<Value>(&binary, limits).expect("decode generated binary within limits");
+        let decoded_notation = notation::from_slice_with_limits::<Value>(&notation, limits).expect("decode generated notation within limits");
 
         prop_assert_eq!(&decoded_xml, &value);
         prop_assert_eq!(&decoded_binary, &value);
@@ -158,14 +140,14 @@ proptest! {
     }
 
     #[test]
-    fn xml_allocation_bound_covers_decoder_limits(
+    fn xml_allocation_accepts_decoder_limits(
         value in values(),
-        (max_input_bytes, max_depth, max_values, max_container_items, max_string_bytes, max_map_key_bytes, max_binary_bytes)
+        (max_bytes, max_depth, max_values, max_container_items, max_string_bytes, max_map_key_bytes, max_binary_bytes)
             in (0usize..2048, 0usize..5, 0usize..40, 0usize..8, 0usize..32, 0usize..16, 0usize..32)
     ) {
         let xml = xml::to_vec(&value).expect("generated LLSD value encodes as XML");
         let limits = Limits {
-            max_input_bytes,
+            max_bytes,
             max_depth,
             max_values,
             max_container_items,

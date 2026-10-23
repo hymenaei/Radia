@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use llsd::{Binary, Error, Limits, Value, notation};
 
 #[test]
@@ -16,33 +18,21 @@ fn raw_binary() {
             Value::Binary(Binary::from(b"a\"b".to_vec())),
         ])
     );
-}
-
-#[test]
-fn raw_binary_length() {
     assert!(notation::from_slice::<Value>(b"b(2)\"x\"").is_err());
-    assert!(matches!(
-        notation::from_slice_with_limits::<Value>(b"b(3)\"abc\"", Limits { max_binary_bytes: 2, ..Limits::default() }),
-        Err(Error::LimitExceeded("binary bytes"))
-    ));
 }
 
 #[test]
-fn raw_length_prefixed_strings_preserve_payload_bytes() {
+fn raw_strings_preserve_payload_bytes() {
     let expected = "a\"b\\c,}:# é";
     let encoded = format!("s({})\"{expected}\"", expected.len());
     assert_eq!(notation::from_str::<String>(&encoded).expect("decode raw notation string"), expected);
 
     assert!(notation::from_slice::<String>(b"s(1)\"ab\"").is_err());
-    assert!(matches!(
-        notation::from_slice_with_limits::<String>(b"s(3)\"abc\"", Limits { max_string_bytes: 2, ..Limits::default() }),
-        Err(Error::LimitExceeded("string bytes"))
-    ));
-    assert!(matches!(notation::from_slice::<String>(b"s(1)\"\xff\""), Err(Error::InvalidUtf8)));
+    assert_matches!(notation::from_slice::<String>(b"s(1)\"\xff\""), Err(Error::InvalidUtf8));
 }
 
 #[test]
-fn hex_binary_is_ascii_and_byte_aligned() {
+fn hex_binary_requires_byte_pairs() {
     let expected = Value::Binary(Binary::from(vec![0, 255]));
     for input in [b"b16\"00ff\"".as_slice(), b"b16\"00FF\""] {
         assert_eq!(notation::from_slice::<Value>(input).expect("decode hexadecimal binary"), expected);
@@ -64,10 +54,10 @@ fn binary_text_uses_binary_limit() {
     }
 
     for input in [b"b16\"000102\"".as_slice(), b"b64\"AAEC\"", b"b(3)\"abc\""] {
-        assert!(matches!(notation::from_slice_with_limits::<Value>(input, limits), Err(Error::LimitExceeded("binary bytes"))));
+        assert_matches!(notation::from_slice_with_limits::<Value>(input, limits), Err(Error::LimitExceeded("binary bytes")));
     }
 
-    assert!(matches!(notation::from_slice_with_limits::<Value>(b"'ab'", limits), Err(Error::LimitExceeded("string bytes"))));
+    assert_matches!(notation::from_slice_with_limits::<Value>(b"'ab'", limits), Err(Error::LimitExceeded("string bytes")));
 }
 
 #[test]
@@ -95,9 +85,14 @@ fn control_escapes() {
 }
 
 #[test]
-fn string_limit() {
-    assert!(matches!(
-        notation::from_slice_with_limits::<Value>(b"'ab'", Limits { max_string_bytes: 1, ..Limits::default() }),
-        Err(Error::LimitExceeded("string bytes"))
-    ));
+fn map_keys_obey_byte_limits() {
+    let limits = Limits { max_map_key_bytes: 2, max_string_bytes: 64, ..Limits::default() };
+    for input in [&b"{'long':i1}"[..], &b"{s(4)\"long\":i1}"[..], &b"{'\\x61\\x62\\x63':i1}"[..]] {
+        assert_matches!(notation::from_slice_with_limits::<Value>(input, limits), Err(Error::LimitExceeded("map key bytes")));
+    }
+}
+
+#[test]
+fn escaped_whitespace_is_invalid() {
+    assert!(notation::from_slice_with_limits::<Value>(b"'value\\ x'", Limits::default()).is_err());
 }

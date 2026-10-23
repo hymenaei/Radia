@@ -431,7 +431,7 @@ fn asset_type_field(value: &Value) -> Option<i32> {
 fn string_field(value: &Value) -> Option<String> {
     match value {
         Value::String(value) => Some(value.clone()),
-        Value::URI(value) => Some(value.as_str().to_owned()),
+        Value::Uri(value) => Some(value.as_str().to_owned()),
         _ => None,
     }
 }

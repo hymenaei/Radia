@@ -58,7 +58,7 @@ pub(super) fn decode(message: &Message, agent: Uuid) -> Result<Option<Environmen
     let start = payload.iter().position(|byte| !byte.is_ascii_whitespace()).unwrap_or(payload.len());
     let payload = payload.get(start..).ok_or(InvalidPush)?;
     let limits = Limits {
-        max_input_bytes: 255,
+        max_bytes: 255,
         max_depth: 8,
         max_values: 128,
         max_container_items: 56,

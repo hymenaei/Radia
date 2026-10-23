@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
     "apps/viewer",
-    "crates/common/llsd",
+    "crates/llsd",
     "crates/math",
     "crates/utils",
     "crates/test-support",
@@ -22,7 +22,7 @@ license = "LGPL-2.1-only"
 
 [workspace.dependencies]
 assets = { path = "crates/assets" }
-llsd = { path = "crates/common/llsd" }
+llsd = { path = "crates/llsd" }
 math = { path = "crates/math" }
 utils = { path = "crates/utils" }
 test-support = { path = "crates/test-support" }
@@ -32,7 +32,7 @@ render = { path = "crates/render" }
 scene = { path = "crates/scene" }
 world = { path = "crates/world" }
 
-base64 = "=0.22.1"
+base64 = { version = "=0.23.1", default-features = false, features = ["std"] }
 block_compression = { version = "=0.9.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 criterion = "0.8"

@@ -402,7 +402,7 @@ fn inherited(version: Option<u32>) -> EnvironmentAssignment {
 
 fn decode(bytes: &[u8], requested: EnvironmentScope) -> Result<Response, FetchError> {
     let limits = Limits {
-        max_input_bytes: MAX_ENVIRONMENT_SOURCE_BYTES,
+        max_bytes: MAX_ENVIRONMENT_SOURCE_BYTES,
         max_depth: 16,
         max_values: 32_768,
         max_container_items: 280,

@@ -223,7 +223,7 @@ async fn run_stale_cancel() {
                 ("RegionHandle".into(), Value::Binary(region.to_be_bytes().to_vec().into())),
                 ("SimIP".into(), Value::Binary(target.ip().octets().to_vec().into())),
                 ("SimPort".into(), Value::Integer(i32::from(target.port()))),
-                ("SeedCapability".into(), Value::URI(session.seed_capability.to_string().into())),
+                ("SeedCapability".into(), Value::Uri(session.seed_capability.to_string().into())),
             ]))]),
         ),
         ("Info".into(), Value::Array(vec![Value::Map(Map::new())])),

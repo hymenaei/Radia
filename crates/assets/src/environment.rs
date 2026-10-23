@@ -152,7 +152,7 @@ pub struct Water {
 
 pub(crate) fn decode(bytes: &[u8]) -> Result<EnvironmentDescription, Failure> {
     let limits = Limits {
-        max_input_bytes: 2 * 1024 * 1024,
+        max_bytes: 2 * 1024 * 1024,
         max_depth: 12,
         max_values: 32_768,
         max_container_items: MAX_FRAMES,

@@ -1,6 +1,7 @@
 use std::{
-    fs,
-    io::ErrorKind,
+    fmt::{self, Display, Formatter},
+    fs::{self, File},
+    io::{ErrorKind, Read},
     path::{Path, PathBuf},
 };
 
@@ -10,10 +11,59 @@ use serde_json::{from_str, to_vec_pretty};
 use utils::write_atomic;
 use uuid::Uuid;
 
-use super::FavoriteLocation;
+use super::{FavoriteLocation, favorites::FavoritesError};
 
 const APP_DIRECTORY: &str = "Radia";
 const LOGIN_LOCATIONS_FILE: &str = "login_locations.json";
+const MAX_FAVORITE_STORE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_STORED_AGENTS: usize = 256;
+pub(super) const MAX_FAVORITES_PER_AGENT: usize = 512;
+const MAX_USERNAME_BYTES: usize = 256;
+const MAX_FAVORITE_NAME_BYTES: usize = 512;
+const MAX_REGION_NAME_BYTES: usize = 512;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FavoriteStoreError {
+    DataDirectoryUnavailable,
+    Read { path: PathBuf, detail: String },
+    FileTooLarge { path: PathBuf },
+    InvalidFile { path: PathBuf, detail: String },
+    InvalidStoredValues { path: PathBuf, reason: &'static str },
+    InvalidValuesForSave(&'static str),
+    MissingParentDirectory,
+    CreateDirectory { path: PathBuf, detail: String },
+    Encode(String),
+    SerializedDataTooLarge,
+    Save { path: PathBuf, detail: String },
+    TooManyRefreshedFavorites,
+    Favorites(FavoritesError),
+}
+
+impl Display for FavoriteStoreError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DataDirectoryUnavailable => formatter.write_str("Could not find the roaming application-data directory."),
+            Self::Read { path, detail } => write!(formatter, "Could not read login locations from {}: {detail}", path.display()),
+            Self::FileTooLarge { path } => write!(formatter, "Saved login locations at {} exceed the 4 MiB limit.", path.display()),
+            Self::InvalidFile { path, detail } => write!(formatter, "Saved login locations at {} are invalid: {detail}", path.display()),
+            Self::InvalidStoredValues { path, reason } => {
+                write!(formatter, "Saved login locations at {} are invalid: {reason}.", path.display())
+            }
+            Self::InvalidValuesForSave(reason) => write!(formatter, "Could not save login locations: {reason}."),
+            Self::MissingParentDirectory => formatter.write_str("Login locations need a parent directory."),
+            Self::CreateDirectory { path, detail } => write!(formatter, "Could not create {}: {detail}", path.display()),
+            Self::Encode(detail) => write!(formatter, "Could not encode favorite landmarks: {detail}"),
+            Self::SerializedDataTooLarge => formatter.write_str("Login locations exceed the 4 MiB storage limit."),
+            Self::Save { path, detail } => write!(formatter, "Could not save login locations to {}: {detail}", path.display()),
+            Self::TooManyRefreshedFavorites => {
+                write!(formatter, "Second Life returned more than {MAX_FAVORITES_PER_AGENT} favorite landmarks.")
+            }
+            Self::Favorites(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl std::error::Error for FavoriteStoreError {}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct FavoriteStore {
@@ -22,6 +72,30 @@ pub struct FavoriteStore {
 }
 
 impl FavoriteStore {
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.agents.len() > MAX_STORED_AGENTS {
+            return Err("too many saved accounts");
+        }
+
+        for agent in &self.agents {
+            if agent.username.len() > MAX_USERNAME_BYTES {
+                return Err("a saved username is too long");
+            }
+            if agent.favorites.len() > MAX_FAVORITES_PER_AGENT {
+                return Err("an account has too many saved favorites");
+            }
+            if agent
+                .favorites
+                .iter()
+                .any(|favorite| favorite.name.len() > MAX_FAVORITE_NAME_BYTES || favorite.region_name.len() > MAX_REGION_NAME_BYTES)
+            {
+                return Err("a saved favorite name is too long");
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn favorites_for(&self, grid: Grid, agent_id: Uuid) -> &[FavoriteLocation] {
         let grid = StoredGrid::from(grid);
         self.agents
@@ -108,24 +182,27 @@ pub(crate) fn apply_favorites_refresh(
     grid: Grid,
     agent_id: Uuid,
     username: &str,
-    refresh: Result<Vec<FavoriteLocation>, String>,
-) -> Result<(), String> {
-    let favorites = refresh?;
+    refresh: Result<Vec<FavoriteLocation>, FavoritesError>,
+) -> Result<(), FavoriteStoreError> {
+    let favorites = refresh.map_err(FavoriteStoreError::Favorites)?;
+    if favorites.len() > MAX_FAVORITES_PER_AGENT {
+        return Err(FavoriteStoreError::TooManyRefreshedFavorites);
+    }
     store.replace_favorites(grid, agent_id, username, favorites.clone());
     *current_favorites = favorites;
     Ok(())
 }
 
-pub fn load() -> Result<FavoriteStore, String> {
+pub(crate) fn load() -> Result<FavoriteStore, FavoriteStoreError> {
     load_from(&login_locations_path()?)
 }
 
-pub fn save(favorites: &FavoriteStore) -> Result<(), String> {
+pub(crate) fn save(favorites: &FavoriteStore) -> Result<(), FavoriteStoreError> {
     save_to(&login_locations_path()?, favorites)
 }
 
-fn login_locations_path() -> Result<PathBuf, String> {
-    let roaming_dir = dirs::data_dir().ok_or_else(|| "Could not find the roaming application-data directory.".to_string())?;
+fn login_locations_path() -> Result<PathBuf, FavoriteStoreError> {
+    let roaming_dir = dirs::data_dir().ok_or(FavoriteStoreError::DataDirectoryUnavailable)?;
     Ok(login_locations_path_under(&roaming_dir))
 }
 
@@ -142,32 +219,56 @@ fn normalize_username(username: &str) -> String {
     if last_name.is_empty() { format!("{first_name} resident").to_lowercase() } else { format!("{first_name} {last_name}").to_lowercase() }
 }
 
-fn load_from(path: &Path) -> Result<FavoriteStore, String> {
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
+fn load_from(path: &Path) -> Result<FavoriteStore, FavoriteStoreError> {
+    let file = match File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(FavoriteStore::default()),
-        Err(error) => return Err(format!("Could not read login locations from {}: {error}", path.display())),
+        Err(error) => return Err(FavoriteStoreError::Read { path: path.to_owned(), detail: error.to_string() }),
     };
 
-    from_str(&contents).map_err(|error| format!("Saved login locations at {} are invalid: {error}", path.display()))
+    let mut bytes = Vec::new();
+    file.take((MAX_FAVORITE_STORE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| FavoriteStoreError::Read { path: path.to_owned(), detail: error.to_string() })?;
+    if bytes.len() > MAX_FAVORITE_STORE_BYTES {
+        return Err(FavoriteStoreError::FileTooLarge { path: path.to_owned() });
+    }
+
+    let contents =
+        String::from_utf8(bytes).map_err(|error| FavoriteStoreError::InvalidFile { path: path.to_owned(), detail: error.to_string() })?;
+    let favorites: FavoriteStore =
+        from_str(&contents).map_err(|error| FavoriteStoreError::InvalidFile { path: path.to_owned(), detail: error.to_string() })?;
+    favorites.validate().map_err(|reason| FavoriteStoreError::InvalidStoredValues { path: path.to_owned(), reason })?;
+    Ok(favorites)
 }
 
-fn save_to(path: &Path, favorites: &FavoriteStore) -> Result<(), String> {
-    let directory = path.parent().ok_or_else(|| "Login locations need a parent directory.".to_string())?;
-    fs::create_dir_all(directory).map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
+fn save_to(path: &Path, favorites: &FavoriteStore) -> Result<(), FavoriteStoreError> {
+    favorites.validate().map_err(FavoriteStoreError::InvalidValuesForSave)?;
+    let directory = path.parent().ok_or(FavoriteStoreError::MissingParentDirectory)?;
+    fs::create_dir_all(directory)
+        .map_err(|error| FavoriteStoreError::CreateDirectory { path: directory.to_owned(), detail: error.to_string() })?;
 
-    let contents = to_vec_pretty(favorites).map_err(|error| format!("Could not encode favorite landmarks: {error}"))?;
-    write_atomic(path, &contents).map_err(|error| format!("Could not save login locations to {}: {error}", path.display()))
+    let contents = to_vec_pretty(favorites).map_err(|error| FavoriteStoreError::Encode(error.to_string()))?;
+    if contents.len() > MAX_FAVORITE_STORE_BYTES {
+        return Err(FavoriteStoreError::SerializedDataTooLarge);
+    }
+    write_atomic(path, &contents).map_err(|error| FavoriteStoreError::Save { path: path.to_owned(), detail: error.to_string() })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use network::Grid;
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    use super::{FavoriteStore, apply_favorites_refresh, load_from, login_locations_path_under, save_to};
-    use crate::inventory::FavoriteLocation;
+    use crate::inventory::{FavoriteLocation, favorites::FavoritesError};
+
+    use super::{
+        AgentFavorites, FavoriteStore, FavoriteStoreError, MAX_FAVORITE_STORE_BYTES, MAX_FAVORITES_PER_AGENT, StoredGrid,
+        apply_favorites_refresh, load_from, login_locations_path_under, save_to,
+    };
 
     #[test]
     fn store_round_trips_favorites_by_grid_and_agent() {
@@ -205,10 +306,10 @@ mod tests {
             Grid::Agni,
             agent_id,
             "Example Resident",
-            Err("region lookup failed".into()),
+            Err(FavoritesError::RegionLookup("region lookup failed".into())),
         );
 
-        assert_eq!(result, Err("region lookup failed".into()));
+        assert!(matches!(result, Err(FavoriteStoreError::Favorites(FavoritesError::RegionLookup(_)))));
         assert_eq!(current_favorites, saved);
         assert_eq!(store.favorites_for(Grid::Agni, agent_id), saved);
         assert_eq!(load_from(&path).expect("reload known-good snapshot").favorites_for(Grid::Agni, agent_id), saved);
@@ -219,5 +320,93 @@ mod tests {
         assert!(store.favorites_for(Grid::Agni, agent_id).is_empty());
         save_to(&path, &store).expect("persist successful empty snapshot");
         assert!(load_from(&path).expect("reload empty snapshot").favorites_for(Grid::Agni, agent_id).is_empty());
+    }
+
+    #[test]
+    fn oversized_favorite_refresh_keeps_previous_snapshot() {
+        let agent_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        let saved = vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
+        let mut store = FavoriteStore::default();
+        store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone());
+        let mut current_favorites = saved.clone();
+        let oversized =
+            vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }; MAX_FAVORITES_PER_AGENT + 1];
+
+        let result = apply_favorites_refresh(&mut current_favorites, &mut store, Grid::Agni, agent_id, "Example Resident", Ok(oversized));
+
+        assert_eq!(result, Err(FavoriteStoreError::TooManyRefreshedFavorites));
+        assert_eq!(current_favorites, saved);
+        assert_eq!(store.favorites_for(Grid::Agni, agent_id), saved);
+    }
+
+    #[test]
+    fn load_rejects_oversized_store_before_parsing() {
+        let test_directory = tempdir().expect("create temporary login locations directory");
+        let path = login_locations_path_under(test_directory.path());
+        fs::create_dir_all(path.parent().expect("login locations have a parent directory")).expect("create login locations directory");
+        fs::write(&path, vec![b' '; MAX_FAVORITE_STORE_BYTES + 1]).expect("write oversized login locations");
+
+        let error = load_from(&path).expect_err("oversized login locations must be rejected");
+        assert_eq!(error, FavoriteStoreError::FileTooLarge { path });
+    }
+
+    #[test]
+    fn load_rejects_corrupted_store_file() {
+        let test_directory = tempdir().expect("create temporary login locations directory");
+        let path = login_locations_path_under(test_directory.path());
+        fs::create_dir_all(path.parent().expect("login locations have a parent directory")).expect("create login locations directory");
+        fs::write(&path, b"{ invalid json").expect("write corrupted login locations");
+
+        let error = load_from(&path).expect_err("corrupted login locations must not load as an empty store");
+
+        assert!(matches!(error, FavoriteStoreError::InvalidFile { .. }));
+        assert!(error.to_string().contains("Saved login locations at"));
+        assert!(error.to_string().contains("are invalid:"));
+    }
+
+    #[test]
+    fn load_rejects_excessive_favorites() {
+        let test_directory = tempdir().expect("create temporary login locations directory");
+        let path = login_locations_path_under(test_directory.path());
+        fs::create_dir_all(path.parent().expect("login locations have a parent directory")).expect("create login locations directory");
+        let oversized = FavoriteStore {
+            agents: vec![AgentFavorites {
+                grid: StoredGrid::Agni,
+                agent_id: Uuid::from_u128(1),
+                username: "Example Resident".into(),
+                favorites: vec![
+                    FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 };
+                    MAX_FAVORITES_PER_AGENT + 1
+                ],
+            }],
+        };
+        fs::write(&path, serde_json::to_vec(&oversized).expect("encode oversized favorite list")).expect("write oversized favorite list");
+
+        let error = load_from(&path).expect_err("excessive favorite count must be rejected");
+        assert_eq!(error, FavoriteStoreError::InvalidStoredValues { path, reason: "an account has too many saved favorites" });
+    }
+
+    #[test]
+    fn save_rejects_favorite_names_outside_storage_limits() {
+        let test_directory = tempdir().expect("create temporary login locations directory");
+        let path = login_locations_path_under(test_directory.path());
+        let oversized = FavoriteStore {
+            agents: vec![AgentFavorites {
+                grid: StoredGrid::Agni,
+                agent_id: Uuid::from_u128(1),
+                username: "Example Resident".into(),
+                favorites: vec![FavoriteLocation {
+                    name: "x".repeat(super::MAX_FAVORITE_NAME_BYTES + 1),
+                    region_name: "Ahern".into(),
+                    x: 1,
+                    y: 2,
+                    z: 3,
+                }],
+            }],
+        };
+
+        let error = save_to(&path, &oversized).expect_err("out-of-limit favorite must not be persisted");
+        assert_eq!(error, FavoriteStoreError::InvalidValuesForSave("a saved favorite name is too long"));
+        assert!(!path.exists());
     }
 }

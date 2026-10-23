@@ -16,17 +16,17 @@ pub(crate) async fn save_favorite_store(
     lock: WriteLock,
     generation: Arc<AtomicU64>,
     expected_generation: u64,
-) -> Option<Result<(), String>> {
+) -> Option<Result<(), favorite_store::FavoriteStoreError>> {
     save_if_current(store, lock, generation, expected_generation, |store| favorite_store::save(&store)).await
 }
 
-async fn save_if_current<T>(
+async fn save_if_current<T, E>(
     value: T,
     lock: WriteLock,
     generation: Arc<AtomicU64>,
     expected_generation: u64,
-    save: impl FnOnce(T) -> Result<(), String>,
-) -> Option<Result<(), String>> {
+    save: impl FnOnce(T) -> Result<(), E>,
+) -> Option<Result<(), E>> {
     let _guard = lock.lock().await;
     (generation.load(Ordering::Acquire) == expected_generation).then(|| save(value))
 }
@@ -45,8 +45,9 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    use super::*;
     use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
+
+    use super::*;
 
     #[test]
     fn stale_favorite_snapshot_is_ignored() {

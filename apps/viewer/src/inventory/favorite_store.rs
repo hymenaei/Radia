@@ -156,18 +156,7 @@ fn save_to(path: &Path, favorites: &FavoriteStore) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
 
     let contents = to_vec_pretty(favorites).map_err(|error| format!("Could not encode favorite landmarks: {error}"))?;
-    let temporary_path = path.with_extension("json.tmp");
-    fs::write(&temporary_path, contents)
-        .map_err(|error| format!("Could not write login locations to {}: {error}", temporary_path.display()))?;
-    if let Err(error) = fs::rename(&temporary_path, path) {
-        if let Err(cleanup_error) = fs::remove_file(&temporary_path)
-            && cleanup_error.kind() != ErrorKind::NotFound
-        {
-            tracing::warn!(%cleanup_error, path = %temporary_path.display(), "could not remove temporary login locations");
-        }
-        return Err(format!("Could not save login locations to {}: {error}", path.display()));
-    }
-    Ok(())
+    utils::write_atomic(path, &contents).map_err(|error| format!("Could not save login locations to {}: {error}", path.display()))
 }
 
 #[cfg(test)]

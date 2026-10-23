@@ -3,7 +3,6 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    process::id,
     sync::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicU64, Ordering},
@@ -21,7 +20,6 @@ const MIN_VISIBLE_TITLEBAR_WIDTH: f32 = 64.0;
 const MIN_VISIBLE_TITLEBAR_HEIGHT: f32 = 24.0;
 const TITLEBAR_HEIGHT: f32 = 48.0;
 
-static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 static SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 type StoredWindowGeometries = BTreeMap<String, StoredWindowGeometry>;
@@ -147,20 +145,7 @@ fn save_geometry(path: &Path, key: &str, geometry: StoredWindowGeometry) -> std:
     geometries.insert(key.to_owned(), geometry);
     let contents = to_vec(&geometries).map_err(std::io::Error::other)?;
     fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))?;
-
-    let temp_id = NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
-    let temp_path = path.with_extension(format!("{}-{temp_id}.tmp", id()));
-    fs::write(&temp_path, contents)?;
-    if let Err(error) = fs::rename(&temp_path, path) {
-        if let Err(cleanup_error) = fs::remove_file(&temp_path)
-            && cleanup_error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(%cleanup_error, path = %temp_path.display(), "could not remove temporary window geometry");
-        }
-        return Err(error);
-    }
-
-    Ok(())
+    utils::write_atomic(path, &contents)
 }
 
 fn clamp_size(size: StoredWindowSize, minimum: StoredWindowSize) -> StoredWindowSize {

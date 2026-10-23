@@ -6,12 +6,13 @@ use super::lifecycle::RemovalCause;
 use crate::ParentUpdate::Local;
 use crate::UpdateAuthority::Untracked;
 use crate::history::WorldChange::{EntityAdded, EntityRebound, EntityTransferred, EntityUpdated};
+use crate::mutation::facet::FacetSet;
 use crate::object::relationships::ParentResolution;
 use crate::{
     Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, ObjectObservation, Parent, ParentUpdate, Region,
     Rejections,
 };
-use crate::{Binding, ObjectContent, ObjectOrdering, ObjectRecord, ObjectState, World, newer_field};
+use crate::{Binding, ObjectOrdering, ObjectRecord, ObjectState, World, newer_field};
 
 struct Observed {
     id: Uuid,
@@ -92,13 +93,13 @@ impl World {
         self.ensure_revision_available()?;
 
         let state = ObjectState::new(Binding::new(address, 0, origin.stamp, address_was_reused.then_some(origin.stamp)));
-        let mut draft = Draft::new(state, ObjectOrdering::default(), &ObjectContent::EMPTY);
+        let mut draft = Draft::new(state, ObjectOrdering::default(), FacetSet::default());
         let frame = draft.plan_frame(false, origin)?;
         let pose_accepted = draft.accept_pose(&fields, origin, frame, &mut rejections);
         let settlement =
             Settlement { frame, pose_accepted, detach_snapshot: None, parent_applied: true, parent_cycle: false, advance_binding: false };
         draft.update(fields, kind, origin, settlement, self.object_media_bytes, &mut rejections);
-        let (state, content, ordering) = draft.into_parts();
+        let (state, facets, ordering) = draft.into_parts();
 
         let mut effects = Effects::default();
         if let Some(displaced) = displaced {
@@ -106,7 +107,8 @@ impl World {
         }
         self.recent.remove(id);
         self.tombstones.remove(&address);
-        let entity = self.store.insert(ObjectRecord { id, kind, state }, content.unwrap_or_default(), ordering);
+        let facets = facets.map(|changes| changes.after).unwrap_or_default();
+        let entity = self.store.insert(ObjectRecord { id, kind, state }, facets, ordering);
         self.apply_parent(entity, parent, &mut effects);
         self.resolve_waiting_children(address, entity, id, &mut effects);
         effects.changes.push(EntityAdded { id, entity, address });
@@ -117,14 +119,18 @@ impl World {
         let Observed { id, kind, parent: parent_update, address, origin, mut fields, mut rejections } = observed;
         let source = origin.source;
         let mut read = self.store.read(entity.0);
-        let (record, content, ordering) = read.get().expect("UUID index contains a complete entity");
-        let content = content.unwrap_or(&ObjectContent::EMPTY);
+        let (record, ordering) = read.get().expect("UUID index contains a complete entity");
         let before = record.state;
         let old_binding = before.binding;
         if record.kind != kind {
             return Err(ApplyError::KindMismatch { current: record.kind, observed: kind });
         }
         let transfer = old_binding.address.region != source.region;
+        let facets = if transfer || fields.has_facet_updates() {
+            self.store.facets(entity.0, &fields.facets, transfer)
+        } else {
+            FacetSet::default()
+        };
         if transfer && self.self_agent == Some(id) && !allow_agent_handoff {
             return Err(ApplyError::InvalidValue { field: "agent_handoff_required" });
         }
@@ -132,7 +138,7 @@ impl World {
         let stale = if binding_changed {
             !transfer && origin.stamp <= old_binding.fence()
         } else {
-            !fields.is_newer_than(&before, &ordering.fences, kind, origin)
+            !fields.is_newer_than(&before, &ordering.fences, &facets, kind, origin)
         };
         if stale {
             return Ok(Applied::new(ApplyOutcome::IgnoredStale).with_rejections(rejections));
@@ -163,7 +169,7 @@ impl World {
         };
         fields.reject_parent(parent_cycle, source.authority() == Untracked && ordering.protects_parent(), &mut rejections);
         if source.authority() == Untracked {
-            fields.reject_untrusted(&ordering.fences, &mut rejections);
+            fields.reject_untrusted(&ordering.fences, &facets, &mut rejections);
         }
         let address_generation = if binding_changed {
             old_binding.address_generation.checked_add(1).ok_or(ApplyError::AddressGenerationExhausted)?
@@ -177,13 +183,11 @@ impl World {
         let detach_snapshot =
             (parent_applied && !transfer).then(|| self.detach_snapshot(entity, kind, before.parent, next_parent)).flatten();
 
-        let mut draft = Draft::new(before, *ordering, content);
+        let mut draft = Draft::new(before, *ordering, facets);
         if transfer {
             draft.state.reset_region_relative();
             draft.ordering.reset_region_relative();
-            if draft.content().sit_target.is_some() {
-                draft.content_mut().sit_target = None;
-            }
+            draft.reset_region_relative();
         }
         if binding_changed {
             draft.state.binding = Binding::new(address, address_generation, origin.stamp, address_was_reused.then_some(origin.stamp));
@@ -200,7 +204,7 @@ impl World {
         if binding_changed || displaced.is_some() || !change_classes.is_empty() || waiting_children_change {
             self.ensure_revision_available()?;
         }
-        let (state, content, ordering) = draft.into_parts();
+        let (state, facets, ordering) = draft.into_parts();
         drop(read);
 
         let mut effects = Effects::default();
@@ -220,7 +224,7 @@ impl World {
             }
             self.tombstones.remove(&address);
         }
-        self.store.commit(entity, state, content, ordering);
+        self.store.commit(entity, state, facets, None, ordering);
         if binding_changed {
             self.insert_tombstone(old_binding.address, if transfer { old_binding.fence() } else { origin.stamp });
         }

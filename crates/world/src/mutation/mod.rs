@@ -1,3 +1,4 @@
+pub(crate) mod facet;
 mod fields;
 mod lifecycle;
 mod observe;

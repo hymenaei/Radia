@@ -8,6 +8,22 @@ mod query;
 mod region;
 mod update;
 
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use uuid::Uuid;
+
+use crate::history::Journal;
+use crate::history::address::Tombstones;
+use crate::history::recent::{RecentBatch, RecentStore};
+use crate::identity::WorldId;
+use crate::object::components::{
+    Binding, Fences, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field, newer_region_field,
+};
+use crate::object::storage::ObjectStore;
+use crate::query::spatial::SpatialIndex;
+use crate::region::RegionState;
+use crate::update::Stamp;
+
 pub use history::recent::{MAX_RECENT_OBJECT_BYTES, MAX_RECENT_OBJECTS, RECENT_OBJECT_TTL, RecentObject};
 pub use history::{WorldChange, WorldChangeClasses, WorldEntityRemovalReason};
 pub use identity::{Entity, LocalAddress, ObjectBindingTarget, Region, RegionHandle, RegionInfo};
@@ -55,23 +71,6 @@ pub use update::{
     ObjectPatch, OrderEvidence, Recovery, RegionApplied, RegionOutcome, Rejections, UpdateAuthority, UpdateSource, WorldLimits,
     WorldRevision,
 };
-
-use std::collections::{BTreeMap, HashMap, HashSet};
-
-use uuid::Uuid;
-
-use crate::identity::WorldId;
-use crate::update::Stamp;
-use history::Journal;
-use history::address::Tombstones;
-use history::recent::{RecentBatch, RecentStore};
-use object::components::{
-    Binding, Fences, ObjectContent, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field,
-    newer_region_field,
-};
-use object::storage::{ObjectRecordRef, ObjectStore};
-use query::spatial::SpatialIndex;
-use region::RegionState;
 
 const MAX_OBJECT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 
@@ -161,12 +160,12 @@ impl World {
     }
 
     pub fn object(&self, entity: Entity) -> Option<Object<'_>> {
-        let record = self.store.object(entity)?;
-        Some(Object { entity, record, world: self })
+        let entry = self.store.object(entity)?;
+        Some(Object::new(entry, self))
     }
 
     pub fn objects(&self) -> Objects<'_> {
-        Objects { records: self.store.objects(), world: self }
+        Objects { entries: self.store.objects(), world: self }
     }
 
     pub fn object_count(&self) -> usize {

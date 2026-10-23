@@ -1,40 +1,14 @@
-use std::{
-    collections::{BTreeSet, HashMap},
-    ops::Deref,
-};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
-use hecs::{QueryBorrow, QueryOne, Ref, ViewBorrow};
+use hecs::{EntityBuilder, EntityRef, Iter, QueryOne, Ref, ViewBorrow};
 use uuid::Uuid;
 
 use crate::identity::WorldId;
-use crate::{Entity, Kind, LocalAddress, Parent, Region};
-use crate::{ObjectContent, ObjectOrdering, ObjectRecord, ObjectState};
-
-#[derive(Clone)]
-pub(crate) enum ObjectRecordRef<'a> {
-    Owned { record: Ref<'a, ObjectRecord>, content: Option<Ref<'a, ObjectContent>> },
-    Borrowed { record: &'a ObjectRecord, content: Option<&'a ObjectContent> },
-}
-
-impl Deref for ObjectRecordRef<'_> {
-    type Target = ObjectRecord;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::Owned { record, .. } => record,
-            Self::Borrowed { record, .. } => record,
-        }
-    }
-}
-
-impl ObjectRecordRef<'_> {
-    pub(crate) fn content(&self) -> &ObjectContent {
-        match self {
-            Self::Owned { content, .. } => content.as_deref().unwrap_or(&ObjectContent::EMPTY),
-            Self::Borrowed { content, .. } => content.unwrap_or(&ObjectContent::EMPTY),
-        }
-    }
-}
+use crate::mutation::facet::{FacetChanges, FacetSet, FacetUpdates};
+use crate::object::components::{Fenced, ObjectProperties};
+use crate::{Entity, Kind, LocalAddress, ObjectMedia, Parent, Region};
+use crate::{ObjectOrdering, ObjectRecord, ObjectState};
 
 pub(crate) struct ObjectStore {
     world: WorldId,
@@ -88,13 +62,17 @@ impl ObjectStore {
         self.entities.iter().map(|(id, entity)| (*id, *entity))
     }
 
-    pub(crate) fn insert(&mut self, record: ObjectRecord, content: ObjectContent, ordering: ObjectOrdering) -> Entity {
+    pub(crate) fn insert(&mut self, record: ObjectRecord, facets: FacetSet, ordering: ObjectOrdering) -> Entity {
         let id = record.id;
         let address = record.state.binding.address;
         let kind = record.kind;
         assert!(!self.entities.contains_key(&id), "new object UUID is already live");
         assert!(!self.addresses.contains_key(&address), "new object address is already occupied");
-        let entity = if content.is_empty() { self.ecs.spawn((record, ordering)) } else { self.ecs.spawn((record, content, ordering)) };
+        let mut builder = EntityBuilder::new();
+        builder.add(record);
+        builder.add(ordering);
+        facets.add_components(&mut builder);
+        let entity = self.ecs.spawn(builder.build());
         let entity = Entity(entity, self.world);
         self.entities.insert(id, entity);
         self.ids.insert(id);
@@ -119,7 +97,14 @@ impl ObjectStore {
         self.remove_region_id(address.region(), id);
     }
 
-    pub(crate) fn commit(&mut self, entity: Entity, state: ObjectState, content: Option<ObjectContent>, ordering: ObjectOrdering) {
+    pub(crate) fn commit(
+        &mut self,
+        entity: Entity,
+        state: ObjectState,
+        facets: Option<FacetChanges>,
+        properties: Option<ObjectProperties>,
+        ordering: ObjectOrdering,
+    ) {
         let (id, previous) = {
             let record = self.record(entity).expect("mutation target is live");
             (record.id, record.state.binding.address)
@@ -142,13 +127,16 @@ impl ObjectStore {
             record.state = ObjectState { parent: record.state.parent, ..state };
             *stored_ordering = ordering;
         }
-        if let Some(content) = content {
-            if content.is_empty() {
-                if self.ecs.satisfies::<&ObjectContent>(entity.0) {
-                    self.ecs.remove_one::<ObjectContent>(entity.0).expect("content component is present");
+        if let Some(facets) = facets {
+            facets.apply(&mut self.ecs, entity.0);
+        }
+        if let Some(properties) = properties {
+            if properties.is_empty() {
+                if self.ecs.satisfies::<&ObjectProperties>(entity.0) {
+                    self.ecs.remove_one::<ObjectProperties>(entity.0).expect("properties component is present");
                 }
             } else {
-                self.ecs.insert_one(entity.0, content).expect("content mutation target is live");
+                self.ecs.insert_one(entity.0, properties).expect("properties mutation target is live");
             }
         }
     }
@@ -168,22 +156,50 @@ impl ObjectStore {
         self.ecs.get::<&ObjectRecord>(entity.0).ok()
     }
 
-    pub(crate) fn object(&self, entity: Entity) -> Option<ObjectRecordRef<'_>> {
+    pub(crate) fn object(&self, entity: Entity) -> Option<EntityRef<'_>> {
         if entity.1 != self.world {
             return None;
         }
-        let entry = self.ecs.entity(entity.0).ok()?;
-        let record = entry.get::<&ObjectRecord>().expect("every object has a record");
-        let content = entry.get::<&ObjectContent>();
-        Some(ObjectRecordRef::Owned { record, content })
+        self.ecs.entity(entity.0).ok()
     }
 
-    pub(crate) fn objects(&self) -> QueryBorrow<'_, (hecs::Entity, &ObjectRecord, Option<&ObjectContent>)> {
-        self.ecs.query::<(hecs::Entity, &ObjectRecord, Option<&ObjectContent>)>()
+    pub(crate) fn facets(&self, entity: hecs::Entity, updates: &FacetUpdates, reset: bool) -> FacetSet {
+        FacetSet::read(self.ecs.entity(entity).expect("facet read target is live"), updates, reset)
     }
 
-    pub(crate) fn object_view(&self) -> ViewBorrow<'_, (&ObjectRecord, Option<&ObjectContent>)> {
-        self.ecs.view::<(&ObjectRecord, Option<&ObjectContent>)>()
+    pub(crate) fn properties(&self, entity: hecs::Entity) -> ObjectProperties {
+        self.ecs
+            .entity(entity)
+            .expect("properties read target is live")
+            .get::<&ObjectProperties>()
+            .map(|properties| *properties)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn sit_target(&self, entity: hecs::Entity) -> Fenced<crate::SitTarget> {
+        self.ecs
+            .entity(entity)
+            .expect("sit-target read target is live")
+            .get::<&Fenced<crate::SitTarget>>()
+            .map(|component| (*component).clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn removal_data(&self, entity: hecs::Entity) -> (Uuid, Kind, ObjectState, ObjectProperties, usize) {
+        let entry = self.ecs.entity(entity).expect("removal target is live");
+        let mut query = entry.query::<(&ObjectRecord, Option<&ObjectProperties>, Option<&Fenced<Arc<ObjectMedia>>>)>();
+        let (record, properties, object_media) = query.get().expect("every object has a record");
+        (
+            record.id,
+            record.kind,
+            record.state,
+            properties.copied().unwrap_or_default(),
+            object_media.and_then(|component| component.value.as_deref()).map_or(0, ObjectMedia::retained_bytes),
+        )
+    }
+
+    pub(crate) fn objects(&self) -> Iter<'_> {
+        self.ecs.iter()
     }
 
     pub(crate) fn records(&self) -> ViewBorrow<'_, &ObjectRecord> {
@@ -194,8 +210,8 @@ impl ObjectStore {
         self.ecs.view::<(&ObjectRecord, &ObjectOrdering)>()
     }
 
-    pub(crate) fn read(&self, entity: hecs::Entity) -> QueryOne<'_, (&ObjectRecord, Option<&ObjectContent>, &ObjectOrdering)> {
-        self.ecs.query_one::<(&ObjectRecord, Option<&ObjectContent>, &ObjectOrdering)>(entity)
+    pub(crate) fn read(&self, entity: hecs::Entity) -> QueryOne<'_, (&ObjectRecord, &ObjectOrdering)> {
+        self.ecs.query_one::<(&ObjectRecord, &ObjectOrdering)>(entity)
     }
 
     pub(crate) fn read_ordered(&self, entity: hecs::Entity) -> QueryOne<'_, (&ObjectRecord, &ObjectOrdering)> {
@@ -241,6 +257,14 @@ impl ObjectStore {
             if record.kind == Kind::Avatar {
                 avatars.insert(id);
             }
+        }
+        if self
+            .ecs
+            .query::<(hecs::Entity, &ObjectRecord)>()
+            .iter()
+            .any(|(entity, _)| self.ecs.entity(entity).is_ok_and(|entry| !FacetSet::components_valid(entry)))
+        {
+            return Err("empty facet components are stored");
         }
         if self.regions != regions || self.avatars != avatars {
             return Err("region or avatar indexes disagree with stored state");

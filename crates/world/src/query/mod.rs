@@ -12,13 +12,12 @@ use std::{
     time::Instant,
 };
 
-use hecs::ViewBorrow;
 use math::DVec3;
 use uuid::Uuid;
 
 use crate::{AttachmentPoint, Entity, Kind, PoseState, Properties, PropertiesProvenance, Region, WorldPose, WorldRevision};
 use crate::{
-    Object, ObjectContent, ObjectListItem, ObjectRecord, ObjectRecordRef, RecentObject, World, WorldId, WorldReadError,
+    Object, ObjectListItem, RecentObject, World, WorldId, WorldReadError,
     query::spatial::{Cell, CellRange, SubtreeScan},
 };
 
@@ -217,12 +216,11 @@ pub struct WorldQueryPage {
     pub next: Option<WorldQueryCursor>,
 }
 
-struct QueryRun<'a> {
+struct QueryRun {
     world: WorldId,
     query: WorldQuery,
     revision: WorldRevision,
     recent_expires_at: Option<Instant>,
-    objects: Option<ViewBorrow<'a, (&'a ObjectRecord, Option<&'a ObjectContent>)>>,
     remaining: usize,
     result_limit: usize,
     incomplete: Option<QueryIncompleteReason>,
@@ -232,13 +230,12 @@ struct QueryRun<'a> {
     unresolved_complete: bool,
 }
 
-impl QueryRun<'_> {
-    fn object<'b>(&'b self, world: &'b World, entity: Entity) -> Option<Object<'b>> {
+impl QueryRun {
+    fn object<'b>(&self, world: &'b World, entity: Entity) -> Option<Object<'b>> {
         if entity.1 != world.id {
             return None;
         }
-        let (record, content) = self.objects.as_ref()?.get(entity.0)?;
-        Some(Object { entity, record: ObjectRecordRef::Borrowed { record, content }, world })
+        world.object(entity)
     }
 
     fn spend(&mut self, amount: usize) -> bool {
@@ -341,7 +338,6 @@ impl World {
             revision: self.revision(),
             recent_expires_at: cursor
                 .map_or_else(|| if has_recent { self.recent.next_expiry_after(now) } else { None }, |cursor| cursor.recent_expires_at),
-            objects: live.then(|| self.store.object_view()),
             remaining: budget.work,
             result_limit: budget.results,
             incomplete: None,
@@ -375,7 +371,7 @@ impl World {
         Ok(run.finish(next))
     }
 
-    fn query_live_page(&self, after: Option<Uuid>, run: &mut QueryRun<'_>) -> Option<WorldQueryCursor> {
+    fn query_live_page(&self, after: Option<Uuid>, run: &mut QueryRun) -> Option<WorldQueryCursor> {
         let ids = self.live_ids(run.query)?;
         let mut ids = ids.range((after.map_or(Unbounded, Excluded), Unbounded));
         let mut last_evaluated = after;
@@ -411,7 +407,7 @@ impl World {
         Some(run.cursor(QueryCursorPhase::Live, Some(after)))
     }
 
-    fn query_spatial_live(&self, run: &mut QueryRun<'_>) -> bool {
+    fn query_spatial_live(&self, run: &mut QueryRun) -> bool {
         let sphere = run.query.sphere.expect("spatial query has a sphere");
         let cells = Cell::range(sphere.center, sphere.radius).expect("query construction validated the sphere bounds");
         let candidates = self.live_ids(run.query);
@@ -438,7 +434,7 @@ impl World {
         })
     }
 
-    fn query_spatial_entity_ids(&self, ids: impl Iterator<Item = Uuid>, sphere: Sphere, run: &mut QueryRun<'_>) -> bool {
+    fn query_spatial_entity_ids(&self, ids: impl Iterator<Item = Uuid>, sphere: Sphere, run: &mut QueryRun) -> bool {
         for id in ids {
             if !run.spend(1) {
                 return false;
@@ -451,7 +447,7 @@ impl World {
         true
     }
 
-    fn query_spatial_cells(&self, sphere: Sphere, mut cells: CellRange, run: &mut QueryRun<'_>) {
+    fn query_spatial_cells(&self, sphere: Sphere, mut cells: CellRange, run: &mut QueryRun) {
         let track_seen = self.spatial.has_dirty_scope_in(run.query.region);
         loop {
             if run.exhaust_work() {
@@ -481,7 +477,7 @@ impl World {
         }
     }
 
-    fn query_dirty_live(&self, sphere: Sphere, run: &mut QueryRun<'_>) {
+    fn query_dirty_live(&self, sphere: Sphere, run: &mut QueryRun) {
         if let Some(region) = run.query.region {
             self.query_dirty_region(region, sphere, run);
             return;
@@ -498,7 +494,7 @@ impl World {
         }
     }
 
-    fn query_dirty_region(&self, region: Region, sphere: Sphere, run: &mut QueryRun<'_>) -> bool {
+    fn query_dirty_region(&self, region: Region, sphere: Sphere, run: &mut QueryRun) -> bool {
         if run.exhaust_work() || !run.spend(1) {
             return false;
         }
@@ -535,11 +531,11 @@ impl World {
         true
     }
 
-    fn collect_dirty(&self, entity: Entity, sphere: Sphere, run: &mut QueryRun<'_>) -> bool {
+    fn collect_dirty(&self, entity: Entity, sphere: Sphere, run: &mut QueryRun) -> bool {
         !run.seen_entities.insert(entity) || self.collect_spatial(entity, sphere, run)
     }
 
-    fn collect_spatial(&self, entity: Entity, sphere: Sphere, run: &mut QueryRun<'_>) -> bool {
+    fn collect_spatial(&self, entity: Entity, sphere: Sphere, run: &mut QueryRun) -> bool {
         if let Some(item) = self.live_item(entity, Some(sphere), run)
             && !run.push(item)
         {
@@ -548,14 +544,14 @@ impl World {
         run.incomplete.is_none()
     }
 
-    fn query_unresolved(&self, run: &mut QueryRun<'_>) {
+    fn query_unresolved(&self, run: &mut QueryRun) {
         match run.query.region {
             Some(region) => self.query_unresolved_ids(self.spatial.unresolved_ids_in(region), run),
             None => self.query_unresolved_ids(self.spatial.unresolved_ids(), run),
         }
     }
 
-    fn query_unresolved_ids(&self, mut unresolved: impl Iterator<Item = (Region, Uuid, Entity)>, run: &mut QueryRun<'_>) {
+    fn query_unresolved_ids(&self, mut unresolved: impl Iterator<Item = (Region, Uuid, Entity)>, run: &mut QueryRun) {
         loop {
             if run.remaining == 0 {
                 run.unresolved_complete = false;
@@ -580,7 +576,7 @@ impl World {
         }
     }
 
-    fn query_recent(&self, after: Option<Uuid>, now: Instant, run: &mut QueryRun<'_>) -> Option<WorldQueryCursor> {
+    fn query_recent(&self, after: Option<Uuid>, now: Instant, run: &mut QueryRun) -> Option<WorldQueryCursor> {
         let query = run.query;
         let mut recent = self.recent.iter_after(after);
         let mut last_evaluated = after;
@@ -615,7 +611,7 @@ impl World {
             .then(|| run.cursor(QueryCursorPhase::Recent, last_evaluated))
     }
 
-    fn live_item(&self, entity: Entity, sphere: Option<Sphere>, run: &mut QueryRun<'_>) -> Option<WorldQueryItem> {
+    fn live_item(&self, entity: Entity, sphere: Option<Sphere>, run: &mut QueryRun) -> Option<WorldQueryItem> {
         let object = run.object(self, entity)?;
         let id = object.id();
         if !live_matches_without_pose(&object, run.query) {

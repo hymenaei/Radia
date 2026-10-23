@@ -1,12 +1,9 @@
-use std::sync::Arc;
-
 use math::Vec3;
 use uuid::Uuid;
 
 use crate::update::{FieldStamp, Stamp};
 use crate::{
-    Appearance, AttachmentPoint, AvatarAppearance, Kind, LinearMotion, LocalAddress, ObjectMedia, Parent, PbrMaterialAssignments,
-    PbrMaterialOverrides, Properties, PropertiesProvenance, PropertyProvenance, Region, Shape, SitTarget, SurfaceAppearance, Transform,
+    AttachmentPoint, Kind, LinearMotion, LocalAddress, Parent, Properties, PropertiesProvenance, PropertyProvenance, Region, Transform,
     UpdateAuthority, UpdateSource, WorldPose,
 };
 
@@ -51,13 +48,24 @@ pub(crate) struct Fences {
     pub(crate) scale: Option<FieldStamp>,
     pub(crate) parent: Option<FieldStamp>,
     pub(crate) attachment_point: Option<FieldStamp>,
-    pub(crate) shape: Option<RegionalStamp>,
-    pub(crate) appearance: Option<RegionalStamp>,
-    pub(crate) texture_entry: Option<RegionalStamp>,
-    pub(crate) pbr_materials: Option<RegionalStamp>,
-    pub(crate) pbr_material_overrides: Option<RegionalStamp>,
-    pub(crate) avatar_appearance: Option<RegionalStamp>,
-    pub(crate) sit_target: Option<RegionalStamp>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Fenced<T> {
+    pub(crate) value: Option<T>,
+    pub(crate) fence: Option<RegionalStamp>,
+}
+
+impl<T> Fenced<T> {
+    pub(crate) fn is_stored(&self) -> bool {
+        self.value.is_some() || self.fence.is_some()
+    }
+}
+
+impl<T> Default for Fenced<T> {
+    fn default() -> Self {
+        Self { value: None, fence: None }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,42 +154,15 @@ impl ObjectState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ObjectContent {
-    pub(crate) shape: Option<Shape>,
-    pub(crate) appearance: Option<Appearance>,
-    pub(crate) surface_appearance: Option<Arc<SurfaceAppearance>>,
-    pub(crate) pbr_materials: Option<Arc<PbrMaterialAssignments>>,
-    pub(crate) pbr_material_overrides: Option<Arc<PbrMaterialOverrides>>,
-    pub(crate) object_media: Option<Arc<ObjectMedia>>,
-    pub(crate) avatar_appearance: Option<Arc<AvatarAppearance>>,
-    pub(crate) sit_target: Option<SitTarget>,
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ObjectProperties {
     pub(crate) properties: Properties,
     pub(crate) properties_provenance: PropertiesProvenance,
 }
 
-impl ObjectContent {
-    pub(crate) const EMPTY: Self = Self {
-        shape: None,
-        appearance: None,
-        surface_appearance: None,
-        pbr_materials: None,
-        pbr_material_overrides: None,
-        object_media: None,
-        avatar_appearance: None,
-        sit_target: None,
-        properties: Properties { owner_id: None, creator_id: None },
-        properties_provenance: PropertiesProvenance { owner: None, creator: None },
-    };
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self == &Self::EMPTY
-    }
-}
-
-impl Default for ObjectContent {
-    fn default() -> Self {
-        Self::EMPTY
+impl ObjectProperties {
+    pub(crate) fn is_empty(self) -> bool {
+        self == Self::default()
     }
 }
 
@@ -208,7 +189,6 @@ impl ObjectOrdering {
         self.fences.scale = None;
         self.fences.parent = None;
         self.fences.attachment_point = None;
-        self.fences.sit_target = None;
         self.parent_rejection_barrier = None;
     }
 }

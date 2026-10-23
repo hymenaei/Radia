@@ -1,18 +1,19 @@
 use uuid::Uuid;
 
 use super::Effects;
+use super::facet::{FacetChanges, FacetSet};
 use super::fields::{Draft, Fields, Origin, Settlement, normalized_rotation, validate_uuid, validate_vec3};
+use crate::FieldRejectionReason::UntrustedSource;
+use crate::UpdateAuthority::{Tracked, Untracked};
 use crate::history::WorldChange::EntityUpdated;
 use crate::history::WorldChangeClasses;
 use crate::object::relationships::ParentResolution;
 use crate::update::FieldStamp;
 use crate::{
     Applied, ApplyError, ApplyOutcome, AvatarAppearance, DeferredReason, FieldGroup, FieldRejectionReason, LocalAddress,
-    ObjectBindingTarget, ObjectPatch, PropertiesPatch, PropertyProvenance, Recovery, Rejections, SitTarget, UpdateAuthority, UpdateSource,
+    ObjectBindingTarget, ObjectPatch, PropertiesPatch, PropertyProvenance, Recovery, Rejections, SitTarget, UpdateSource,
 };
-use crate::{ObjectContent, RegionalStamp, World, newer_field, newer_region_field};
-use FieldRejectionReason::UntrustedSource;
-use UpdateAuthority::{Tracked, Untracked};
+use crate::{RegionalStamp, World, newer_field, newer_region_field};
 
 const UNKNOWN_COF_VERSION: i32 = -1;
 
@@ -31,20 +32,20 @@ impl World {
         let (parent_update, mut fields) = Fields::patched(patch);
         let advance_binding = parent_update.is_some() || fields.orders_binding();
         let mut read = self.store.read(entity.0);
-        let (record, content, ordering) = read.get().expect("address index contains a complete entity");
-        let content = content.unwrap_or(&ObjectContent::EMPTY);
+        let (record, ordering) = read.get().expect("address index contains a complete entity");
+        let facets = if fields.has_facet_updates() { self.store.facets(entity.0, &fields.facets, false) } else { FacetSet::default() };
         let (id, kind, before) = (record.id, record.kind, record.state);
 
         let mut rejections = fields.validate(before.transform.rotation());
-        let appearance = fields.next_appearance(content.appearance, &ordering.fences, origin);
+        let appearance = fields.next_appearance(&facets, origin);
         fields.reject_unsupported(kind, appearance, &mut rejections);
         if self.self_agent == Some(id)
-            && let Some(update) = &fields.avatar_appearance
+            && let Some(update) = &fields.facets.avatar_appearance
         {
-            let current = content.avatar_appearance.as_deref().and_then(AvatarAppearance::cof_version).unwrap_or(UNKNOWN_COF_VERSION);
+            let current = facets.avatar_appearance.value.as_deref().and_then(AvatarAppearance::cof_version).unwrap_or(UNKNOWN_COF_VERSION);
             if update.cof_version().unwrap_or(UNKNOWN_COF_VERSION) <= current {
                 rejections.reject(FieldGroup::AvatarAppearance, FieldRejectionReason::StaleVersion);
-                fields.avatar_appearance = None;
+                fields.facets.avatar_appearance = None;
             }
         }
         let parent_admitted = newer_field(origin.field(), ordering.fences.parent) && ordering.admits_parent(source, stamp);
@@ -58,14 +59,14 @@ impl World {
         let untrusted_parent = source.authority() == Untracked && parent_update.is_some() && ordering.protects_parent();
         fields.reject_parent(parent_cycle, untrusted_parent, &mut rejections);
         if source.authority() == Untracked {
-            fields.reject_untrusted(&ordering.fences, &mut rejections);
+            fields.reject_untrusted(&ordering.fences, &facets, &mut rejections);
         }
         let next_parent = parent.unwrap_or(before.parent);
         let next_attachment = fields.next_attachment_point(before.attachment_point, &ordering.fences, origin);
         let frame_changed = self.relationship_frame_changed(before.parent, next_parent, before.attachment_point, next_attachment);
         let detach_snapshot = parent.and_then(|next| self.detach_snapshot(entity, kind, before.parent, next));
 
-        let mut draft = Draft::new(before, *ordering, content);
+        let mut draft = Draft::new(before, *ordering, facets);
         let frame = draft.plan_frame(frame_changed, origin)?;
         let pose_accepted = draft.accept_pose(&fields, origin, frame, &mut rejections);
         let pose_affects_descendants = pose_accepted && draft.pose_changes(fields.pose);
@@ -80,10 +81,10 @@ impl World {
             self.ensure_revision_available()?;
         }
         let media_bytes = draft.media_bytes();
-        let (state, content, ordering) = draft.into_parts();
+        let (state, facets, ordering) = draft.into_parts();
         drop(read);
 
-        self.store.commit(entity, state, content, ordering);
+        self.store.commit(entity, state, facets, None, ordering);
         if let Some((old, new)) = media_bytes {
             self.object_media_bytes = self.object_media_bytes.saturating_sub(old).saturating_add(new);
         }
@@ -117,12 +118,11 @@ impl World {
             return Ok(self.defer(DeferredReason::AmbiguousOrder, target.address));
         };
         let entity = target.entity;
-        let (mut state, mut content, ordering) = {
+        let (mut state, mut properties, ordering) = {
             let object = self.object(entity).expect("current properties target names a live entity");
-            (object.record.state, object.content().clone(), *object.ordering())
+            (object.record().state, self.store.properties(entity.0), *object.ordering())
         };
-        let properties = content.properties;
-        let provenance = content.properties_provenance;
+        let provenance = properties.properties_provenance;
         let field_stamp = FieldStamp { authority: source.authority(), stamp };
         let mut rejections = Rejections::default();
         let untrusted = |value: Option<Uuid>, fence: Option<PropertyProvenance>| {
@@ -145,23 +145,24 @@ impl World {
             block_ordinal: stamp.block_ordinal,
             source_sequence: source.sequence(),
         };
-        let observable_change = (owner_is_newer && (properties.owner_id != patch.owner_id || provenance.owner != Some(next_provenance)))
-            || (creator_is_newer && (properties.creator_id != patch.creator_id || provenance.creator != Some(next_provenance)));
+        let observable_change = (owner_is_newer
+            && (properties.properties.owner_id != patch.owner_id || provenance.owner != Some(next_provenance)))
+            || (creator_is_newer && (properties.properties.creator_id != patch.creator_id || provenance.creator != Some(next_provenance)));
         if observable_change {
             self.ensure_revision_available()?;
         }
         if owner_is_newer {
-            content.properties.owner_id = patch.owner_id;
-            content.properties_provenance.owner = Some(next_provenance);
+            properties.properties.owner_id = patch.owner_id;
+            properties.properties_provenance.owner = Some(next_provenance);
         }
         if creator_is_newer {
-            content.properties.creator_id = patch.creator_id;
-            content.properties_provenance.creator = Some(next_provenance);
+            properties.properties.creator_id = patch.creator_id;
+            properties.properties_provenance.creator = Some(next_provenance);
         }
         if patch.owner_id.is_some() || patch.creator_id.is_some() {
             state.binding.advance_fence(source, stamp);
         }
-        self.store.commit(entity, state, Some(content), ordering);
+        self.store.commit(entity, state, None, Some(properties), ordering);
         let (outcome, changes) = if observable_change {
             (ApplyOutcome::Updated(entity), vec![EntityUpdated { id: response_id, entity, classes: WorldChangeClasses::PROPERTIES }])
         } else {
@@ -184,12 +185,12 @@ impl World {
         let Some(entity) = entity else {
             return Ok(Applied::deferred(DeferredReason::UnknownObject, Recovery::default()));
         };
-        let (mut state, mut content, mut ordering) = {
+        let (mut state, sit_target, ordering) = {
             let object = self.object(entity).expect("UUID index contains a live entity");
             if object.address().region != source.region {
                 return Ok(Applied::unchanged());
             }
-            (object.record.state, object.content().clone(), *object.ordering())
+            (object.record().state, self.store.sit_target(entity.0), *object.ordering())
         };
 
         let mut rejections = Rejections::default();
@@ -206,7 +207,7 @@ impl World {
             None => None,
         };
 
-        let fence = ordering.fences.sit_target;
+        let fence = sit_target.fence;
         let field_stamp = FieldStamp { authority: source.authority(), stamp };
         let protected = source.authority() == Untracked && fence.is_some_and(|fence| fence.stamp.authority == Tracked);
         if protected {
@@ -215,14 +216,17 @@ impl World {
         if protected || !newer_region_field(source.region, field_stamp, fence) {
             return Ok(Applied::unchanged().with_rejections(rejections));
         }
-        let observable_change = content.sit_target != target;
+        let observable_change = sit_target.value != target;
         if observable_change {
             self.ensure_revision_available()?;
         }
-        content.sit_target = target;
-        ordering.fences.sit_target = Some(RegionalStamp { region: source.region, stamp: field_stamp });
+        let before = FacetSet { sit_target, ..FacetSet::default() };
+        let mut facets = before.clone();
+        facets.sit_target.value = target;
+        facets.sit_target.fence = Some(RegionalStamp { region: source.region, stamp: field_stamp });
         state.binding.advance_fence(source, stamp);
-        self.store.commit(entity, state, Some(content), ordering);
+        let changes = FacetChanges::new(before, facets);
+        self.store.commit(entity, state, Some(changes), None, ordering);
         let (outcome, changes) = if observable_change {
             (ApplyOutcome::Updated(entity), vec![EntityUpdated { id, entity, classes: WorldChangeClasses::RELATIONSHIP }])
         } else {

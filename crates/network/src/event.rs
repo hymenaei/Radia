@@ -1,18 +1,18 @@
-use std::net::SocketAddr;
 use std::{
     fmt,
+    net::SocketAddr,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use llsd::Value;
 use protocol::lludp::Message;
 use protocol::login::ResponseData;
-#[cfg(test)]
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::{mpsc, watch};
 
-use crate::simulator::EventRetention;
-use crate::{AgentSession, capabilities::Client, coverage::CoverageWatermark, session::MfaChallenge};
+use crate::{
+    AgentSession, capabilities::Client, circuit::admission::PacketMemoryReservation, coverage::CoverageWatermark, session::MfaChallenge,
+};
 
 pub(crate) const CLIENT_EVENT_CAPACITY: usize = 32;
 pub(crate) const PRIMARY_TERMINAL_EVENT_CAPACITY: usize = 1;
@@ -23,13 +23,12 @@ static NEXT_SIMULATOR_ID: AtomicU64 = AtomicU64::new(1);
 pub struct SimulatorId(u64);
 
 impl SimulatorId {
-    pub const fn get(self) -> u64 {
-        self.0
+    pub const fn new(id: u64) -> Self {
+        Self(id)
     }
 
-    #[cfg(test)]
-    pub(crate) const fn new(generation: u64) -> Self {
-        Self(generation)
+    pub const fn get(self) -> u64 {
+        self.0
     }
 
     pub(crate) fn allocate() -> Option<Self> {
@@ -56,6 +55,25 @@ pub(crate) enum EventSendOutcome {
     Shutdown,
 }
 
+pub(crate) struct EventRetention {
+    _charge: EventRetentionCharge,
+}
+
+impl EventRetention {
+    pub(crate) fn from_permits(permits: Vec<OwnedSemaphorePermit>) -> Self {
+        Self { _charge: EventRetentionCharge::Permits { _permits: permits } }
+    }
+
+    pub(crate) fn from_packet_reservation(reservation: PacketMemoryReservation) -> Self {
+        Self { _charge: EventRetentionCharge::Packet { _reservation: reservation } }
+    }
+}
+
+enum EventRetentionCharge {
+    Permits { _permits: Vec<OwnedSemaphorePermit> },
+    Packet { _reservation: PacketMemoryReservation },
+}
+
 pub struct CapabilityEvent {
     pub message: String,
     pub body: Value,
@@ -77,21 +95,6 @@ pub(crate) struct EventEnvelope {
 impl EventEnvelope {
     pub(crate) fn new(event: Event) -> Self {
         Self { event, retained_bytes: None, coverage_watermark: None }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_retained_bytes(event: Event, permit: OwnedSemaphorePermit) -> Self {
-        Self::with_retention(event, EventRetention::from_permits(vec![permit]))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_retention(event: Event, retention: EventRetention) -> Self {
-        Self { event, retained_bytes: Some(retention), coverage_watermark: None }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_coverage_watermark(event: Event, coverage_watermark: CoverageWatermark) -> Self {
-        Self { event, retained_bytes: None, coverage_watermark: Some(coverage_watermark) }
     }
 
     pub(crate) fn with_retention_and_coverage(event: Event, retention: EventRetention, coverage_watermark: CoverageWatermark) -> Self {
@@ -121,28 +124,6 @@ impl EventEnvelope {
 impl From<Event> for EventEnvelope {
     fn from(event: Event) -> Self {
         Self::new(event)
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct EventReceiver(mpsc::Receiver<EventEnvelope>);
-
-#[cfg(test)]
-impl EventReceiver {
-    pub(crate) fn new(receiver: mpsc::Receiver<EventEnvelope>) -> Self {
-        Self(receiver)
-    }
-
-    pub(crate) async fn recv(&mut self) -> Option<Event> {
-        self.0.recv().await.map(EventEnvelope::into_event)
-    }
-
-    pub(crate) fn try_recv(&mut self) -> Result<Event, mpsc::error::TryRecvError> {
-        self.0.try_recv().map(EventEnvelope::into_event)
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 }
 
@@ -290,7 +271,8 @@ mod redaction_tests {
 
     use llsd::Value;
 
-    use super::{Event, SimulatorId};
+    use super::Event;
+    use crate::fixtures::test_simulator_id;
 
     #[test]
     fn event_debug_hides_server_errors_and_endpoints() {
@@ -298,7 +280,7 @@ mod redaction_tests {
         assert!(!format!("{event:?}").contains("server-session-secret"));
 
         let event = Event::CapabilityEvent {
-            simulator_id: SimulatorId::new(1),
+            simulator_id: test_simulator_id(1),
             source: "192.0.2.90:13000".parse().expect("valid endpoint"),
             message: "session-event-secret".into(),
             body: Value::String("event-body-secret".into()),
@@ -309,7 +291,7 @@ mod redaction_tests {
         assert!(!debug.contains("event-body-secret"));
 
         let event = Event::CapabilityError {
-            simulator_id: SimulatorId::new(2),
+            simulator_id: test_simulator_id(2),
             source: "192.0.2.91:13000".parse().expect("valid endpoint"),
             capability: "private-capability-name".into(),
             reason: "origin-error-secret".into(),
@@ -318,10 +300,10 @@ mod redaction_tests {
         for secret in ["192.0.2.91", "private-capability-name", "origin-error-secret"] {
             assert!(!debug.contains(secret));
         }
-        assert!(matches!(&event, Event::CapabilityError { reason, .. } if reason == "origin-error-secret"));
+        std::assert_matches!(&event, Event::CapabilityError { reason, .. } if reason == "origin-error-secret");
 
         let event = Event::SimulatorFailed {
-            simulator_id: SimulatorId::new(3),
+            simulator_id: test_simulator_id(3),
             region_handle: Some(0x1234),
             endpoint: "192.0.2.92:13000".parse().expect("valid endpoint"),
             reason: "simulator-error-secret".into(),

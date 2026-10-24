@@ -22,7 +22,7 @@ mod tests {
     };
 
     use math::Vec3;
-    use network::{Event, Event::SimulatorMessage, PacketOrder, PacketOrder::Ordered, SimulatorId, testing::simulator_id};
+    use network::{Event, Event::SimulatorMessage, PacketOrder, PacketOrder::Ordered, SimulatorId};
     use protocol::{
         Audible, ChatSourceType, ChatType,
         lludp::Message,
@@ -41,6 +41,7 @@ mod tests {
     use crate::session::coordinator::events::WorldHandoff;
     use crate::session::coordinator::input::Input;
     use crate::session::world::{IngestSummary, SessionWorld, viewer_world_limits};
+    use crate::test_helpers::simulator_id;
     use crate::world_reader::WorldReadHost;
 
     pub(super) fn region_handshake(name: &str) -> Message {

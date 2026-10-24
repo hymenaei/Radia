@@ -585,7 +585,7 @@ fn parcel_message(message: &ParcelProperties) -> Result<Option<ParcelNotice>, Fe
 
 #[cfg(test)]
 mod tests {
-    use network::testing::simulator_id;
+    use crate::test_helpers::simulator_id;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,

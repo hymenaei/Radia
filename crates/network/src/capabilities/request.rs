@@ -203,97 +203,6 @@ fn string_value(value: &Value) -> Option<&str> {
 }
 
 #[cfg(test)]
-pub(crate) mod allocation_measurement {
-    use std::{
-        alloc::{GlobalAlloc, Layout, System},
-        cell::Cell,
-    };
-
-    use super::*;
-
-    struct CountingAllocator;
-
-    #[derive(Clone, Copy, Default)]
-    struct AllocationCount {
-        live: i128,
-        peak: i128,
-        active: bool,
-    }
-
-    thread_local! {
-        static ALLOCATION_COUNT: Cell<AllocationCount> = const { Cell::new(AllocationCount { live: 0, peak: 0, active: false }) };
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: CountingAllocator = CountingAllocator;
-
-    unsafe impl GlobalAlloc for CountingAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let ptr = unsafe { System.alloc(layout) };
-            if !ptr.is_null() {
-                account(layout.size() as i128);
-            }
-            ptr
-        }
-
-        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            let ptr = unsafe { System.alloc_zeroed(layout) };
-            if !ptr.is_null() {
-                account(layout.size() as i128);
-            }
-            ptr
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            unsafe { System.dealloc(ptr, layout) };
-            account(-(layout.size() as i128));
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            let resized = unsafe { System.realloc(ptr, layout, new_size) };
-            if !resized.is_null() {
-                account(new_size as i128);
-                account(-(layout.size() as i128));
-            }
-            resized
-        }
-    }
-
-    fn account(bytes: i128) {
-        ALLOCATION_COUNT
-            .try_with(|count| {
-                let mut state = count.get();
-                state.live += bytes;
-                if state.active {
-                    state.peak = state.peak.max(state.live);
-                }
-                count.set(state);
-            })
-            .unwrap_or_default();
-    }
-
-    pub(crate) fn measure<T>(operation: impl FnOnce() -> T) -> (T, i128, i128, u128) {
-        let baseline = ALLOCATION_COUNT.with(|count| {
-            let mut state = count.get();
-            state.active = true;
-            state.peak = state.live;
-            count.set(state);
-            state.live
-        });
-        let started = Instant::now();
-        let value = operation();
-        let elapsed = started.elapsed().as_nanos();
-        let (live, peak) = ALLOCATION_COUNT.with(|count| {
-            let mut state = count.get();
-            state.active = false;
-            count.set(state);
-            (state.live - baseline, state.peak - baseline)
-        });
-        (value, live, peak, elapsed)
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use std::{future::poll_fn, sync::Arc, task::Poll, time::Duration};
 
@@ -304,6 +213,7 @@ mod tests {
     use crate::{
         Error,
         capabilities::{CapabilityBudget, CapabilityUrl, Client},
+        fixtures::http::client_with_request_timeout,
         http::{self, ErrorKind},
     };
 
@@ -339,9 +249,11 @@ mod tests {
     #[tokio::test]
     async fn deadline_covers_admission_wait() {
         let budget = CapabilityBudget::new();
-        let client = Client::new_with_budget(Url::parse("http://127.0.0.1:9/seed").expect("seed URL"), budget.clone())
-            .expect("active Tokio runtime")
-            .with_request_timeout(Duration::from_millis(30));
+        let client = client_with_request_timeout(
+            Client::new_with_budget(Url::parse("http://127.0.0.1:9/seed").expect("seed URL"), budget.clone())
+                .expect("active Tokio runtime"),
+            Duration::from_millis(30),
+        );
         let url = CapabilityUrl::parse("http://127.0.0.1:9/capability").expect("capability URL");
         let held = Arc::clone(&budget.ordinary_requests)
             .acquire_many_owned(MAX_CONCURRENT_CAPABILITY_REQUESTS as u32)
@@ -353,11 +265,11 @@ mod tests {
             .await
             .expect_err("a request waiting for admission must hit its deadline");
 
-        assert!(matches!(
+        std::assert_matches!(
             error,
             Error::CapabilityHttp(http::Error { kind: ErrorKind::Timeout, status: None, elapsed, .. })
                 if elapsed >= Duration::from_millis(20) && elapsed < Duration::from_millis(500)
-        ));
+        );
         assert_eq!(budget.ordinary_requests.available_permits(), 0);
         drop(held);
         assert_eq!(budget.ordinary_requests.available_permits(), MAX_CONCURRENT_CAPABILITY_REQUESTS);

@@ -7,8 +7,9 @@ use std::{
     },
 };
 
+use crate::test_helpers::simulator_id;
 use math::{DVec3, Vec3};
-use network::{SimulatorId, testing::simulator_id};
+use network::SimulatorId;
 use tokio::sync::oneshot::channel;
 use utils::AssetId;
 use uuid::Uuid;

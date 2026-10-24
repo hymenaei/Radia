@@ -236,9 +236,11 @@ mod tests {
     };
 
     use futures::{StreamExt, channel::oneshot, stream};
-    use network::{Event, SimulatorId, testing::simulator_id};
+    use network::{Event, SimulatorId};
     use protocol::{lludp::Message::KillObject, messages::object::kill_object};
     use tokio::runtime::Handle;
+
+    use crate::test_helpers::simulator_id;
     use uuid::Uuid;
     use world::{Appearance, ApplyOutcome::Introduced, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, UpdateSource};
 

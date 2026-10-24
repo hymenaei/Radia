@@ -196,7 +196,9 @@ pub(crate) enum ViewerUpdate {
 
 #[cfg(test)]
 mod tests {
-    use network::{PacketOrder::Ordered, testing::simulator_id};
+    use network::PacketOrder::Ordered;
+
+    use crate::test_helpers::simulator_id;
 
     use crate::session::coordinator::events::{SimulatorScope, decode_simulator_world_update, handle_simulator_message};
     use crate::session::coordinator::tests::{chat_message, region_handshake};

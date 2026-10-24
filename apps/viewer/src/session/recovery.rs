@@ -439,12 +439,14 @@ pub(super) fn recovery_request(agent_data: RequestAgentData, addresses: &[LocalA
 mod tests {
     use std::{collections::HashSet, num::NonZeroU32, time::Duration};
 
-    use network::{Error, testing::simulator_id};
+    use network::Error;
     use protocol::lludp::{Message, Packet};
     use protocol::messages::{CacheMissType::Full, RequestAgentData};
     use tokio::time::Instant;
     use uuid::Uuid;
     use world::{LocalAddress, Region};
+
+    use crate::test_helpers::simulator_id;
 
     use super::{
         MAX_RECOVERY_OBJECTS_PER_REQUEST, MAX_RECOVERY_REQUEST_BYTES, RECOVERY_ENTRY_BYTES, RECOVERY_IDLE_WAIT, RECOVERY_MAX_AGE,

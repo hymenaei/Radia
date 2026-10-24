@@ -459,8 +459,8 @@ pub(super) fn media_version(value: &str) -> Option<u32> {
 mod tests {
     use std::num::NonZeroU32;
 
+    use crate::test_helpers::simulator_id;
     use llsd::{Map, Value};
-    use network::testing::simulator_id;
     use uuid::Uuid;
     use world::{
         Appearance, FieldUpdate, Kind, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MediaControls, ObjectMediaError, ObjectObservation,

@@ -36,7 +36,7 @@ Provides shared geometry and numeric primitives, with selected `glam` types re-e
 
 ### `crates/network`
 
-Owns login and session lifecycle, LLUDP delivery, capability requests, simulator routing, handoff, and teardown. Session events carry source-specific ordering evidence, while bounded command and event admission preserve protocol order and report coverage loss separately from ordinary failure. World and rendering state belong elsewhere.
+Owns login, session lifecycle, simulator links, and capability traffic. A session coordinates the network thread, primary and neighbor links, event routing, handoff, logout, and capability-event decoding. Each circuit owns one simulator's UDP socket, LLUDP ordering and delivery state, send pacing, and bounded packet admission. Capability discovery and event queues share the bounded HTTP client; event envelopes carry retained-memory charges with their events. Session events include source-specific ordering evidence, while bounded command and event admission preserve protocol order and report coverage loss separately from ordinary failure. World and rendering state belong elsewhere.
 
 ### `crates/protocol`
 

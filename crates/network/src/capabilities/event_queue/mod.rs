@@ -25,7 +25,7 @@ use self::decode::{capability_event_batch_retained_size, decode_admitted_event_b
 #[cfg(test)]
 use self::decode::{decode_event_batch, llsd_heap_size, queued_event_retained_size};
 #[cfg(test)]
-use super::budget::{MAX_CONCURRENT_EVENT_QUEUES, MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES};
+use super::budget::MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES;
 use super::{
     budget::{
         MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
@@ -35,9 +35,9 @@ use super::{
 };
 use crate::{
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
+    event::EventRetention,
     event::{CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventSendOutcome, SimulatorId},
     http::{self, Response},
-    simulator::EventRetention,
 };
 
 const EVENT_QUEUE_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -45,12 +45,12 @@ const EVENT_QUEUE_RETRY_INCREMENT: Duration = Duration::from_secs(3);
 const MIN_EMPTY_POLL_DURATION: Duration = Duration::from_secs(10);
 const EVENT_QUEUE_ADMISSION_RETRY: Duration = Duration::from_secs(1);
 const MAX_EVENT_QUEUE_RETRY_AFTER: Duration = Duration::from_secs(30);
-pub(crate) const MAX_EVENT_QUEUE_ERRORS: u32 = 15;
+const MAX_EVENT_QUEUE_ERRORS: u32 = 15;
 const SEED_LOOKUP_RETRY_LIMIT: u32 = 5;
 const MAX_SEED_RETRY_AFTER: Duration = Duration::from_secs(30);
 pub(crate) const EVENT_QUEUE_NAME: &str = "EventQueueGet";
 const LINDEN_HTTP_INTERNAL_ERROR: u16 = 499;
-pub(crate) const MAX_QUEUED_CAPABILITY_EVENT_BYTES: usize = 256 * 1024;
+const MAX_QUEUED_CAPABILITY_EVENT_BYTES: usize = 256 * 1024;
 
 static NEXT_EVENT_QUEUE_INCARNATION: AtomicU64 = AtomicU64::new(1);
 
@@ -128,7 +128,7 @@ impl EventQueueRoleHandle {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RetryOutcome {
+enum RetryOutcome {
     Retry,
     Stopped,
     LimitReached,
@@ -286,6 +286,11 @@ impl EventQueueLossNotifier {
     fn was_notified(&self) -> bool {
         self.notified.load(Ordering::Acquire)
     }
+}
+
+struct PollResources {
+    event_queue: Option<OwnedSemaphorePermit>,
+    batch: Option<OwnedSemaphorePermit>,
 }
 
 async fn acquire_budget_permit(budget: Arc<Semaphore>, stop: &Stop) -> Option<OwnedSemaphorePermit> {
@@ -488,11 +493,6 @@ async fn notify_loss_then(pending_loss: &mut PendingEventQueueLoss, reason: Stri
     exit_after_send(pending_loss.notify(reason).await, sent)
 }
 
-struct PollResources {
-    event_queue: Option<OwnedSemaphorePermit>,
-    batch: Option<OwnedSemaphorePermit>,
-}
-
 #[tracing::instrument(name = "capabilities.event_queue", level = "debug", skip_all, fields(simulator = context.simulator_id.get()), ret)]
 pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut primary: watch::Receiver<bool>) -> EventQueueExit {
     if stop.is_stopped() {
@@ -686,7 +686,7 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
     }
 }
 
-pub(crate) async fn post_event_queue(
+async fn post_event_queue(
     client: &http::Client,
     url: &Url,
     acknowledge: &Value,
@@ -792,7 +792,7 @@ async fn send_event_queue_error(events: &mpsc::Sender<EventEnvelope>, event: Eve
     }
 }
 
-pub(crate) fn event_queue_retry_delay(error_count: u32) -> Duration {
+fn event_queue_retry_delay(error_count: u32) -> Duration {
     EVENT_QUEUE_RETRY_DELAY + EVENT_QUEUE_RETRY_INCREMENT * error_count
 }
 
@@ -800,7 +800,7 @@ fn event_queue_retry_delay_with_hint(error_count: u32, retry_after: Option<Durat
     retry_after.map(|delay| delay.min(MAX_EVENT_QUEUE_RETRY_AFTER)).unwrap_or_else(|| event_queue_retry_delay(error_count))
 }
 
-pub(crate) fn expected_empty_poll(status: StatusCode, elapsed: Duration) -> bool {
+fn expected_empty_poll(status: StatusCode, elapsed: Duration) -> bool {
     elapsed >= MIN_EMPTY_POLL_DURATION
         && matches!(
             status,
@@ -808,7 +808,7 @@ pub(crate) fn expected_empty_poll(status: StatusCode, elapsed: Duration) -> bool
         )
 }
 
-pub(super) fn retryable_event_queue_error(status: StatusCode) -> bool {
+fn retryable_event_queue_error(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS
         || status.as_u16() == LINDEN_HTTP_INTERNAL_ERROR
         || matches!(
@@ -817,14 +817,13 @@ pub(super) fn retryable_event_queue_error(status: StatusCode) -> bool {
         )
 }
 
-pub(crate) fn seed_capability_retry_delay(retry_count: u32) -> Duration {
+fn seed_capability_retry_delay(retry_count: u32) -> Duration {
     Duration::from_secs(1 << retry_count.saturating_sub(1).min(3))
 }
 
-pub(crate) fn seed_retry_delay(retry_count: u32, retry_after: Option<Duration>) -> Duration {
+fn seed_retry_delay(retry_count: u32, retry_after: Option<Duration>) -> Duration {
     retry_after.map(|delay| delay.min(MAX_SEED_RETRY_AFTER)).unwrap_or_else(|| seed_capability_retry_delay(retry_count))
 }
 
 #[cfg(test)]
-#[path = "../event_queue_tests.rs"]
 mod tests;

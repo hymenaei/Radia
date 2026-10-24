@@ -367,16 +367,17 @@ pub(super) fn report_queued_failure(
     pending: &mut VecDeque<SimulatorEvent>,
     simulator_id: SimulatorId,
     mut queued: QueuedMessage,
-    error: String,
+    error: Error,
 ) -> Result<(), String> {
+    let message = error.to_string();
     let has_completion = queued.completion.is_some();
     if let Some(completion) = queued.completion.take() {
-        let _ = completion.send(Err(Error::SimulatorSend(error.clone())));
+        let _ = completion.send(Err(error));
     }
     if queued.report_failure || queued.cancel_target.is_some() {
-        queue_send_notification(events, pending, simulator_id, queued.cancel_target, Some(error), queued.report_failure)?;
+        queue_send_notification(events, pending, simulator_id, queued.cancel_target, Some(message), queued.report_failure)?;
     } else if !has_completion {
-        return Err(error);
+        return Err(message);
     }
     Ok(())
 }

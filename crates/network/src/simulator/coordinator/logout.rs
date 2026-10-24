@@ -43,7 +43,7 @@ impl PendingLogout {
     pub(super) async fn wait(&mut self) -> Result<(), LogoutAttemptError> {
         match time::timeout_at(self.deadline, &mut self.completion).await {
             Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(error))) => Err(LogoutAttemptError::Unexpected(error.to_string())),
+            Ok(Ok(Err(error))) => Err(logout_completion_error(error)),
             Ok(Err(_)) => Err(LogoutAttemptError::Unavailable(LogoutUnavailable::ConnectionEnded)),
             Err(_) => Err(LogoutAttemptError::Unavailable(LogoutUnavailable::Deadline)),
         }
@@ -54,6 +54,13 @@ impl PendingLogout {
 pub(super) enum LogoutAttemptError {
     Unavailable(LogoutUnavailable),
     Unexpected(String),
+}
+
+fn logout_completion_error(error: Error) -> LogoutAttemptError {
+    match error {
+        Error::SimulatorLogoutSendAgeExpired => LogoutAttemptError::Unavailable(LogoutUnavailable::Deadline),
+        error => LogoutAttemptError::Unexpected(error.to_string()),
+    }
 }
 
 impl SimulatorCoordinator {
@@ -84,7 +91,7 @@ impl SimulatorCoordinator {
                     response
                         .await
                         .map_err(|_| LogoutAttemptError::Unavailable(LogoutUnavailable::ConnectionEnded))?
-                        .map_err(|error| LogoutAttemptError::Unexpected(error.to_string()))
+                        .map_err(logout_completion_error)
                 },
                 LogoutUnavailable::Deadline,
             )

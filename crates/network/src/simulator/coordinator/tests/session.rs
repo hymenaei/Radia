@@ -15,8 +15,8 @@ use tokio::{
 use uuid::Uuid;
 
 use super::{
-    AGENT_ID, LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, SESSION_ID, chat_message, connect_with_status, login_session,
-    send_logout_with_deadline, set_sequence,
+    AGENT_ID, LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, PendingLogout, SESSION_ID, chat_message, connect_with_status,
+    login_session, send_logout_with_deadline, set_sequence,
 };
 use crate::{
     Error,
@@ -113,6 +113,15 @@ async fn logout_failure_preserves_unexpected_error() {
         send_logout_with_deadline(send, LogoutUnavailable::Deadline).await,
         Err(LogoutAttemptError::Unexpected("socket send failed".into()))
     );
+}
+
+#[tokio::test]
+async fn logout_transport_failure_is_unexpected() {
+    let (completion, response) = oneshot::channel();
+    completion.send(Err(Error::SimulatorSend("socket send failed".into()))).expect("deliver transport failure");
+    let mut pending = PendingLogout { completion: response, deadline: Instant::now() + LOGOUT_TIMEOUT };
+
+    assert_eq!(pending.wait().await, Err(LogoutAttemptError::Unexpected("socket send failed".into())));
 }
 
 #[tokio::test]

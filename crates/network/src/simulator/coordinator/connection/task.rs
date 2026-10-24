@@ -12,7 +12,7 @@ use tokio::{
 
 use super::{
     ACK_INTERVAL, ConnectionRole, ConnectionTask, LOGOUT_TIMEOUT, MAX_PENDING_SEND_NOTIFICATIONS, MAX_PRECONNECT_EVENTS,
-    MAX_QUEUED_SIMULATOR_EVENTS, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorMemoryBudget, SimulatorRequest,
+    MAX_QUEUED_SIMULATOR_EVENTS, MAX_SEND_AGE, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorMemoryBudget, SimulatorRequest,
     active_queue_class, expire_deferred_retries, expire_pending_send, fail_queued_on_close, finish_logout, flush_send_notifications,
     lifecycle::{LogoutAction, Phase, RunControl},
     logout_message, message_class,
@@ -41,9 +41,18 @@ enum SelectedEvent {
     AckTick,
     EventDelivery(Result<mpsc::OwnedPermit<SimulatorEvent>, mpsc::error::SendError<()>>),
     PingTick,
+    SendAgeDeadline,
     Command(Option<SimulatorCommand>),
     Datagram(std::io::Result<usize>),
     Yield,
+}
+
+fn send_age_expiry_error(queued: &QueuedMessage) -> Error {
+    if matches!(&queued.message, Message::LogoutRequest(_)) {
+        Error::SimulatorLogoutSendAgeExpired
+    } else {
+        Error::SimulatorSend(super::SEND_QUEUE_EXPIRED.into())
+    }
 }
 
 pub(super) async fn run(
@@ -116,6 +125,7 @@ impl ConnectionTask {
                 continue;
             }
 
+            let pending_send_deadline = self.pending_send_deadline();
             let selected = tokio::select! {
                 biased;
                 sent = async {
@@ -134,6 +144,12 @@ impl ConnectionTask {
                         None => pending().await,
                     }
                 }, if self.logout_commands.is_some() => SelectedEvent::Logout(logout),
+                _ = async {
+                    match pending_send_deadline {
+                        Some(deadline) => time::sleep_until(deadline).await,
+                        None => pending().await,
+                    }
+                }, if pending_send_deadline.is_some() => SelectedEvent::SendAgeDeadline,
                 _ = time::sleep_until(self.phase.deadline().unwrap_or_else(|| Instant::now() + LOGOUT_TIMEOUT)),
                     if self.phase.deadline().is_some() => SelectedEvent::TeardownDeadline,
                 _ = time::sleep_until(self.last_udp_received + KEEPALIVE_TIMEOUT),
@@ -174,6 +190,10 @@ impl ConnectionTask {
                     Self::deliver_event(permit, &mut self.pending_notifications, &mut self.pending_events, &mut self.event_delivery_turn)
                 }
                 SelectedEvent::PingTick => self.ping_tick()?,
+                SelectedEvent::SendAgeDeadline => {
+                    self.expire_sends()?;
+                    RunControl::Continue
+                }
                 SelectedEvent::Command(command) => self.command(command)?,
                 SelectedEvent::Datagram(received) => self.receive_datagram(received, &receive_buffer)?,
                 SelectedEvent::Yield => {
@@ -191,27 +211,24 @@ impl ConnectionTask {
         expire_deferred_retries(&self.connection.circuit, &mut self.deferred_retries, Instant::now())?;
         if self.pending_notifications.is_empty() {
             for queued in self.outbound.expire(Instant::now()) {
-                report_queued_failure(
-                    &self.events,
-                    &mut self.pending_notifications,
-                    self.connection.simulator_id,
-                    queued,
-                    super::SEND_QUEUE_EXPIRED.into(),
-                )?;
+                let error = send_age_expiry_error(&queued);
+                report_queued_failure(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued, error)?;
             }
         }
         match expire_pending_send(&mut self.pending_send, Instant::now()) {
-            Some(PendingSendExpiration::QueuedMessage(queued)) => report_queued_failure(
-                &self.events,
-                &mut self.pending_notifications,
-                self.connection.simulator_id,
-                queued,
-                super::SEND_QUEUE_EXPIRED.into(),
-            )?,
+            Some(PendingSendExpiration::QueuedMessage(queued)) => {
+                let error = send_age_expiry_error(&queued);
+                report_queued_failure(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued, error)?;
+            }
             Some(PendingSendExpiration::ReliableRetry) => return Err(super::RELIABLE_RETRY_EXPIRED.into()),
             None => {}
         }
         Ok(())
+    }
+
+    fn pending_send_deadline(&self) -> Option<Instant> {
+        let pending = self.pending_send.as_ref()?;
+        pending.queued_message.as_ref().map(|queued| queued.queued_at + MAX_SEND_AGE).or(pending.retry_deadline)
     }
 
     fn begin_draining_when_ready(&mut self) {
@@ -256,7 +273,7 @@ impl ConnectionTask {
                         &mut self.pending_notifications,
                         self.connection.simulator_id,
                         queued,
-                        error.clone(),
+                        Error::SimulatorSend(error.clone()),
                     )?;
                     return Err(error);
                 }
@@ -292,7 +309,13 @@ impl ConnectionTask {
         match next {
             Ok(next) => self.pending_send = next,
             Err((Some(queued), error)) => {
-                report_queued_failure(&self.events, &mut self.pending_notifications, self.connection.simulator_id, *queued, error)?;
+                report_queued_failure(
+                    &self.events,
+                    &mut self.pending_notifications,
+                    self.connection.simulator_id,
+                    *queued,
+                    Error::SimulatorSend(error),
+                )?;
                 return Ok(false);
             }
             Err((None, error)) => return Err(error),
@@ -353,7 +376,7 @@ impl ConnectionTask {
                         &mut self.pending_notifications,
                         self.connection.simulator_id,
                         queued,
-                        error.clone(),
+                        Error::SimulatorSend(error.clone()),
                     )?;
                 }
                 if was_logout {

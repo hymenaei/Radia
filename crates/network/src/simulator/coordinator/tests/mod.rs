@@ -68,7 +68,7 @@ use crate::{
     },
 };
 
-use super::logout::{LogoutAttemptError, LogoutOutcome, LogoutUnavailable, send_logout_with_deadline};
+use super::logout::{LogoutAttemptError, LogoutOutcome, LogoutUnavailable, PendingLogout, send_logout_with_deadline};
 use crate::simulator::coordinator::event_routing::NeighborEventQueueOutcome;
 use crate::simulator::coordinator::handoff::{
     FinishOrder, HandoffDecision, HandoffEvidence, PendingPromotion, arbitrate_handoff, decode_teleport_finish, handoff_cancellation,
@@ -691,6 +691,46 @@ async fn run_stalled_send_is_isolated() {
     assert!(harness.client.await.expect("coordinator task").is_ok());
     assert!(started.elapsed() <= LOGOUT_TIMEOUT + WAIT, "bounded shutdown despite stalled send");
     assert_eq!(harness.packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
+}
+
+#[test]
+fn stalled_logout_is_unavailable() {
+    run_large_paused_stack_test(run_stalled_logout_is_unavailable);
+}
+
+async fn run_stalled_logout_is_unavailable() {
+    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+    let status = NetworkStatusHandle::default();
+    let (send_gate, pause_sends, send_entered) = UdpTransport::new_send_gate();
+    let mut coordinator = connect_with_status_and_send_gate(
+        login_session(simulator.local_addr().expect("simulator address")),
+        ResponseData::default(),
+        status.clone(),
+        send_gate,
+    )
+    .await
+    .expect("connect root simulator circuit");
+    receive(&simulator).await;
+    pause_sends.send_replace(true);
+    let (first_logout, first_response) = oneshot::channel();
+    coordinator.primary.logout.send(first_logout).await.expect("start a stalled logout send");
+    timeout(WAIT, send_entered.notified()).await.expect("logout should enter the stalled local send");
+    advance(Duration::from_secs(1)).await;
+    coordinator.logout_attempted = true;
+    coordinator.pending_primary_logout =
+        Some(PendingLogout { completion: first_response, deadline: tokio::time::Instant::now() + LOGOUT_TIMEOUT });
+    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (events, _event_receiver) = mpsc::channel(TEST_EVENT_CAPACITY);
+    let terminal_event = events.clone().reserve_owned().await.expect("reserve terminal event");
+    let (_disconnect, disconnect_requested) = watch::channel(true);
+
+    let result = coordinator.run(command_receiver, events, disconnect_requested, terminal_event).await;
+
+    assert!(result.is_ok());
+    assert_eq!(
+        status.snapshot().last_error.as_deref(),
+        Some("Simulator logout request was not sent before disconnect completed: the bounded logout send deadline expired")
+    );
 }
 
 #[tokio::test]

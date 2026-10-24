@@ -135,17 +135,6 @@ pub(crate) struct Circuit {
 
 impl Circuit {
     pub(crate) fn new() -> Self {
-        Self::new_inner()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_sequence(next_sequence: u32) -> Self {
-        let mut circuit = Self::new();
-        circuit.next_sequence = next_sequence;
-        circuit
-    }
-
-    fn new_inner() -> Self {
         Self {
             next_sequence: 1,
             pending: HashMap::new(),
@@ -162,6 +151,13 @@ impl Circuit {
             pending_pings: HashMap::new(),
             quarantined_ping_ids: HashMap::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_sequence(next_sequence: u32) -> Self {
+        let mut circuit = Self::new();
+        circuit.next_sequence = next_sequence;
+        circuit
     }
 
     pub(crate) fn retry_timeout(&self) -> Duration {

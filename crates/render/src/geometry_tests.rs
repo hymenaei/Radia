@@ -1,5 +1,5 @@
 use super::*;
-use scene::{Budget, SceneReconciler};
+use scene::{Budget, Reconciler};
 
 fn prepare_key(view: &SceneView) -> FramePreparationKey {
     FramePreparationKey {
@@ -16,8 +16,8 @@ fn texture_state() -> TextureState {
 
 #[test]
 fn preparation_tracks_scene_inputs() {
-    let (mut scene, view) = SceneReconciler::new(Budget::default());
-    let (_other_scene, other) = SceneReconciler::new(Budget::default());
+    let (mut scene, view) = Reconciler::new(Budget::default());
+    let (_other_scene, other) = Reconciler::new(Budget::default());
     let prepared = FramePreparation { key: prepare_key(&view), textures: texture_state(), mesh_bytes: 0, more_meshes: false };
     assert!(prepared.reusable(&prepare_key(&view), texture_state(), 0));
     let mut moved = prepare_key(&view);
@@ -39,7 +39,7 @@ fn preparation_tracks_scene_inputs() {
 
 #[test]
 fn preparation_tracks_gpu_progress() {
-    let (_scene, view) = SceneReconciler::new(Budget::default());
+    let (_scene, view) = Reconciler::new(Budget::default());
     let state = texture_state();
     let mut prepared = FramePreparation { key: prepare_key(&view), textures: state, mesh_bytes: 0, more_meshes: false };
     for (reason, changed) in [

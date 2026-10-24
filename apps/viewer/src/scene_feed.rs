@@ -13,7 +13,7 @@ use futures::{
 };
 use scene::{
     ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep,
-    SceneReconciler, SceneView,
+    Reconciler, SceneView,
 };
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
@@ -140,7 +140,7 @@ impl SceneFeed {
     ) -> Self {
         static MEMORY: OnceLock<Budget> = OnceLock::new();
         let budget = MEMORY.get_or_init(Budget::default).clone();
-        let (scene, view) = SceneReconciler::new(budget.clone());
+        let (scene, view) = Reconciler::new(budget.clone());
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
@@ -148,7 +148,7 @@ impl SceneFeed {
         Self { runtime, view, budget, agent_id, water_height: None, camera, incoming, _cancel: cancel }
     }
 
-    pub(crate) fn camera(&self, camera: Camera) {
+    pub(crate) fn set_camera(&self, camera: Camera) {
         self.camera.send_if_modified(|previous| {
             if *previous == Some(camera) {
                 false
@@ -203,7 +203,7 @@ async fn execute_world_read(reader: &WorldReader, job: &ReadJob) -> Result<ReadR
 }
 
 async fn run(
-    mut scene: SceneReconciler,
+    mut scene: Reconciler,
     sources: SceneSources,
     sender: mpsc::Sender<Batch>,
     runtime: Handle,
@@ -221,7 +221,7 @@ async fn run(
     let mut meshes = FuturesUnordered::new();
     loop {
         if let Some(camera) = *camera.borrow_and_update() {
-            scene.camera(camera);
+            scene.set_camera(camera);
         }
         let until = match scene.poll(Instant::now()) {
             ReconcileStep::Asset(change) => {
@@ -283,7 +283,7 @@ async fn run(
                     Some(command) => if let Err(error) = scene.push_environment(command.region, command.push) { tracing::warn!(?error, "experience environment push rejected"); },
                     None => break,
                 },
-                (job, reply) = reading => scene.complete(job, reply, Instant::now()),
+                (job, reply) = reading => scene.complete_read(job, reply, Instant::now()),
                 completion = building => match completion {
                     Ok(completion) => scene.complete_mesh(completion),
                     Err(error) => {

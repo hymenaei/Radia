@@ -37,13 +37,6 @@ impl Default for Accounting {
 #[derive(Clone, Default)]
 pub struct Budget(Arc<Accounting>);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MemoryStats {
-    pub charged_bytes: usize,
-    pub resident_bytes: usize,
-    pub high_water_bytes: usize,
-}
-
 impl Budget {
     pub fn stats(&self) -> MemoryStats {
         MemoryStats {
@@ -70,23 +63,25 @@ impl Budget {
             .ok()?;
         let used = self.0.charged.fetch_add(bytes, Ordering::AcqRel);
         self.0.high_water.fetch_max(used + bytes, Ordering::AcqRel);
-        Some(Reservation { budget: self.clone(), bytes, resident: false })
+        Some(Reservation { budget: self.clone(), bytes })
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MemoryStats {
+    pub charged_bytes: usize,
+    pub resident_bytes: usize,
+    pub high_water_bytes: usize,
 }
 
 pub(crate) struct Reservation {
     budget: Budget,
     bytes: usize,
-    resident: bool,
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        if self.resident {
-            self.budget.0.resident.fetch_sub(self.bytes, Ordering::AcqRel);
-        } else {
-            self.budget.0.working.fetch_sub(self.bytes, Ordering::AcqRel);
-        }
+        self.budget.0.working.fetch_sub(self.bytes, Ordering::AcqRel);
         self.budget.0.charged.fetch_sub(self.bytes, Ordering::AcqRel);
         self.budget.0.wake.send_replace(());
     }
@@ -94,9 +89,6 @@ impl Drop for Reservation {
 
 impl Reservation {
     pub(crate) fn resize(&mut self, bytes: usize) -> bool {
-        if self.resident {
-            return false;
-        }
         if bytes > self.bytes {
             let Some(mut extra) = self.budget.reserve(bytes - self.bytes) else { return false };
             extra.bytes = 0;
@@ -112,23 +104,20 @@ impl Reservation {
     }
 
     pub(crate) fn split(&mut self, bytes: usize) -> Result<Self, ()> {
-        if self.resident || bytes > self.bytes {
+        if bytes > self.bytes {
             return Err(());
         }
         self.bytes -= bytes;
-        Ok(Self { budget: self.budget.clone(), bytes, resident: false })
+        Ok(Self { budget: self.budget.clone(), bytes })
     }
-    pub(crate) fn retain(mut self, capacity: usize) -> Result<Self, ()> {
+    pub(crate) fn retain(mut self, capacity: usize) -> Result<Resident, ()> {
         if capacity > self.bytes {
             return Err(());
         }
-        self.budget.0.charged.fetch_sub(self.bytes - capacity, Ordering::AcqRel);
-        self.budget.0.working.fetch_sub(self.bytes, Ordering::AcqRel);
-        self.bytes = capacity;
-        self.resident = true;
+        self.budget.0.working.fetch_sub(capacity, Ordering::AcqRel);
+        self.bytes -= capacity;
         self.budget.0.resident.fetch_add(capacity, Ordering::AcqRel);
-        self.budget.0.wake.send_replace(());
-        Ok(self)
+        Ok(Resident { budget: self.budget.clone(), bytes: capacity })
     }
 
     pub(crate) fn finish(self, bytes: Vec<u8>) -> Result<Blob, ()> {
@@ -137,9 +126,22 @@ impl Reservation {
     }
 }
 
+pub(crate) struct Resident {
+    budget: Budget,
+    bytes: usize,
+}
+
+impl Drop for Resident {
+    fn drop(&mut self) {
+        self.budget.0.resident.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.budget.0.charged.fetch_sub(self.bytes, Ordering::AcqRel);
+        self.budget.0.wake.send_replace(());
+    }
+}
+
 struct BlobInner {
     bytes: Vec<u8>,
-    _reservation: Reservation,
+    _reservation: Resident,
 }
 
 #[derive(Clone)]

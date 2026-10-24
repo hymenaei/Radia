@@ -9,12 +9,12 @@ use assets::{Request, TextureSize};
 use math::{DVec3, Quat, Vec3};
 use proptest::prelude::*;
 use scene::{
-    Alpha, AssetChange, AssetRequest, AssetTicket, Budget, Camera, Detail, EnvironmentProperty, EnvironmentPush, ExperienceId, Mesh,
-    Placement, PreparedMesh, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, RecoveryReason, Resolution, SceneReconciler,
-    SceneView, Status, SurfaceKind,
+    Alpha, AssetChange, AssetRequest, AssetTicket, Budget, Camera, Detail, EnvironmentProperty, EnvironmentPush, Mesh, Placement,
+    PreparedMesh, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, RecoveryReason, Resolution, SceneView, Status,
+    SurfaceKind,
 };
 use test_support::texture::{GRAY_4096_J2C, RGBA_J2C};
-use utils::AssetId;
+use utils::{AssetId, ExperienceId};
 use uuid::Uuid;
 use world::{
     Appearance, EnvironmentAssignment, EnvironmentScope, EnvironmentSource, FaceAppearance, FieldUpdate, GltfAlphaMode,
@@ -81,11 +81,11 @@ fn reply(world: &World, job: &ReadJob) -> Result<ReadReply, ReadFailure> {
     result.map_err(ReadFailure::World)
 }
 
-fn settle(scene: &mut SceneReconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> usize {
+fn settle(scene: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> usize {
     settle_work(scene, view, world, now).0
 }
 
-fn settle_work(scene: &mut SceneReconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> (usize, usize) {
+fn settle_work(scene: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> (usize, usize) {
     let work = settle_materials(scene, view, world, now);
     assert!(work.requested.is_empty(), "geometry fixture unexpectedly requested assets");
     (work.reads, work.builds)
@@ -99,7 +99,7 @@ struct AssetWork {
     released: Vec<AssetTicket>,
 }
 
-fn settle_materials(scene: &mut SceneReconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> AssetWork {
+fn settle_materials(scene: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> AssetWork {
     let mut work = AssetWork::default();
     for _ in 0..20_000 {
         match scene.poll(*now) {
@@ -108,7 +108,7 @@ fn settle_materials(scene: &mut SceneReconciler, view: &mut SceneView, world: &W
             ReconcileStep::Read(job) => {
                 work.reads += 1;
                 let result = reply(world, &job);
-                scene.complete(job, result, *now);
+                scene.complete_read(job, result, *now);
             }
             ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
             ReconcileStep::Build(job) => {
@@ -159,7 +159,7 @@ fn environment_changes_follow_world() {
     let mut world = world();
     let region = Region::new(1);
     let budget = Budget::default();
-    let (mut scene, mut view) = SceneReconciler::new(budget.clone());
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.environment(region).unwrap().region_assignment, None);
@@ -194,8 +194,8 @@ fn environment_changes_follow_world() {
 
 #[test]
 fn versions_fence_sessions_and_close() {
-    let (mut scene, view) = SceneReconciler::new(Budget::default());
-    let (_other_scene, other) = SceneReconciler::new(Budget::default());
+    let (mut scene, view) = Reconciler::new(Budget::default());
+    let (_other_scene, other) = Reconciler::new(Budget::default());
     let version = view.version();
     assert_eq!(view.sequence(), other.sequence());
     assert_eq!(version, view.version(), "unchanged publication keeps its version");
@@ -224,9 +224,9 @@ fn unseen_objects_get_baselines() {
         );
         let _ = world.patch_object(patch).unwrap();
     }
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    scene.camera(camera(0.0));
+    scene.set_camera(camera(0.0));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     for id in [103, 203] {
         assert!(
@@ -243,7 +243,7 @@ fn unseen_objects_get_baselines() {
     assert!(object.mesh().is_none(), "baseline loading does not require preparing off-camera geometry");
     scene.complete_asset(baseline.ticket, prepared_asset(baseline.request, GRAY_4096_J2C.to_vec()));
     settle_materials(&mut scene, &mut view, &world, &mut now);
-    scene.camera(Camera::new(DVec3::ZERO, -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());
+    scene.set_camera(Camera::new(DVec3::ZERO, -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     let current = work
         .requested
@@ -264,15 +264,15 @@ fn larger_visible_objects_build_first() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 100.0, 1);
     add(&mut world, 2, 2, ParentUpdate::Root, 10.0, 2);
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    scene.camera(camera(0.0));
+    scene.set_camera(camera(0.0));
     let mut first = None;
     for _ in 0..2000 {
         match scene.poll(now) {
             ReconcileStep::Read(job) => {
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Publish(batch) => {
                 view.apply(batch).unwrap();
@@ -301,18 +301,18 @@ fn view_bounds_control_texture_priority() {
     patch.surface_appearance =
         Some(SurfaceAppearance::new(FaceAppearance { texture_id: Uuid::from_u128(101), ..FaceAppearance::default() }, Vec::new()).unwrap());
     let _ = world.patch_object(patch).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    scene.camera(camera(0.0));
+    scene.set_camera(camera(0.0));
     let first = settle_materials(&mut scene, &mut view, &world, &mut now);
     let baseline = first.requested.last().unwrap();
     assert_eq!(baseline.priority, Priority::Background, "off-screen objects cannot compete with visible textures");
     assert_eq!(baseline.request, Request::Texture { id: AssetId::new(Uuid::from_u128(101)), size: TextureSize::new(32) });
-    scene.camera(Camera::new(DVec3::ZERO, Vec3::X, std::f64::consts::FRAC_PI_2, [2000, 1000]).unwrap());
+    scene.set_camera(Camera::new(DVec3::ZERO, Vec3::X, std::f64::consts::FRAC_PI_2, [2000, 1000]).unwrap());
     let wide = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(wide.released.contains(&baseline.ticket));
     assert_eq!(wide.requested.last().unwrap().priority, Priority::Visible, "viewport changes refresh the actual visible demand");
-    scene.camera(camera(0.0));
+    scene.set_camera(camera(0.0));
     let narrow = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(narrow.requested.last().unwrap().priority, Priority::Background, "leaving the view preserves baseline coverage");
 }
@@ -328,9 +328,9 @@ fn shared_textures_follow_camera() {
         );
         let _ = world.patch_object(patch).unwrap();
     }
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    scene.camera(camera(0.0));
+    scene.set_camera(camera(0.0));
     let first = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
     assert_eq!(first.request, Request::Texture { id: AssetId::new(Uuid::from_u128(100)), size: TextureSize::new(128) });
     let ready = prepared_asset(first.request, GRAY_4096_J2C.to_vec());
@@ -365,7 +365,7 @@ fn shared_textures_follow_camera() {
         [32; 2],
         "stale quality cannot replace current imagery"
     );
-    scene.camera(camera(99.0));
+    scene.set_camera(camera(99.0));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(work.requested.len(), 1);
     let Request::Texture { size, .. } = work.requested[0].request else { panic!("expected texture demand") };
@@ -409,9 +409,9 @@ fn material_arrival_preserves_geometry() {
         .unwrap(),
     );
     let _ = world.patch_object(patch).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    scene.camera(camera(0.0));
+    scene.set_camera(camera(0.0));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(work.requested.len(), 2, "two faces share one material request and one fallback texture request");
     let request = work.requested.iter().find(|request| request.request.resource().kind == assets::Kind::PbrMaterial).unwrap();
@@ -453,6 +453,19 @@ fn material_arrival_preserves_geometry() {
     let face = &view.objects().next().unwrap().materials().unwrap()[1];
     assert!(face.base_color.is_some());
     assert_eq!(face.base_color_state.unwrap().resolution, Resolution::Ready);
+
+    let mut patch = ObjectPatch::new(source(1, 3), NonZeroU32::new(1).unwrap());
+    patch.render_materials = Some(RenderMaterials::new(Vec::new()).unwrap());
+    assert!(world.patch_object(patch).unwrap().revision.is_some(), "removing PBR bindings must change World state");
+    scene.notify_world_change();
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+    let object = view.objects().next().unwrap();
+    assert_eq!(object.mesh().unwrap().1.id(), mesh, "removing PBR bindings must preserve geometry");
+    let face = &object.materials().unwrap()[0];
+    assert!(matches!(face.material, assets::MaterialDescription::Legacy(_)));
+    assert_eq!(face.pbr_state, None, "removed bindings cannot retain PBR resolution state");
+    assert_eq!(face.base_color(), [1.0, 0.0, 0.0, 128.0 / 255.0], "removing PBR restores authored diffuse properties");
+    assert_eq!(face.alpha, Alpha::Blend);
 }
 
 #[test]
@@ -463,9 +476,9 @@ fn binding_edits_reject_old_completion() {
     let old = AssetId::new(Uuid::from_u128(9));
     patch.render_materials = Some(RenderMaterials::new(vec![(0, old)]).unwrap());
     let _ = world.patch_object(patch).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    scene.camera(camera(0.0));
+    scene.set_camera(camera(0.0));
     let first = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
     scene.complete_asset(first.ticket, material_asset(old));
     let image = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
@@ -509,9 +522,9 @@ fn shared_demand_releases_last_user() {
         );
         let _ = world.patch_object(patch).unwrap();
     }
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    scene.camera(camera(0.0));
+    scene.set_camera(camera(0.0));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(work.requested.len(), 1);
     let ticket = work.requested[0].ticket;
@@ -552,9 +565,9 @@ fn regional_demands_have_no_cache_cap() {
         let _ = world.patch_object(patch).unwrap();
     }
     let budget = Budget::default();
-    let (mut scene, mut view) = SceneReconciler::new(budget.clone());
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
-    scene.camera(camera(0.0));
+    scene.set_camera(camera(0.0));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     let active: Vec<_> = work.requested.iter().filter(|request| !work.released.contains(&request.ticket)).collect();
     assert_eq!(active.len(), 4200, "all observed faces receive demand without a 4096-interest cache cutoff");
@@ -585,9 +598,9 @@ fn shared_texture_outlives_scene() {
         );
         let _ = world.patch_object(patch).unwrap();
     }
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    scene.camera(camera(0.0));
+    scene.set_camera(camera(0.0));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(work.requested.len(), 1, "faces share one texture demand");
     let ready = prepared_asset(Request::new(work.requested[0].request.resource()), GRAY_4096_J2C.to_vec());
@@ -627,15 +640,15 @@ fn mesh_reuse_and_replacement() {
         add(&mut world, id, id as u32, ParentUpdate::Root, 100.0, id as u64);
     }
     let budget = Budget::default();
-    let (mut scene, mut view) = SceneReconciler::new(budget.clone());
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
-    scene.camera(camera(-300.0));
+    scene.set_camera(camera(-300.0));
     settle(&mut scene, &mut view, &world, &mut now);
     let meshes: Vec<_> = view.objects().map(|object| object.mesh().map(|(key, mesh)| (key, mesh.clone())).unwrap()).collect();
     assert_eq!(meshes[0].0.detail, Detail::Lowest);
     assert_eq!(meshes[0].1.id(), meshes[1].1.id());
 
-    scene.camera(camera(99.0));
+    scene.set_camera(camera(99.0));
     let job = loop {
         match scene.poll(now) {
             ReconcileStep::Publish(batch) => {
@@ -673,7 +686,7 @@ fn mesh_reuse_and_replacement() {
 fn mesh_progress_during_read() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 100.0, 1);
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let revision = view.revision();
@@ -682,7 +695,7 @@ fn mesh_progress_during_read() {
     let ReconcileStep::Read(held) = scene.poll(now) else {
         panic!("expected World read");
     };
-    scene.camera(camera(99.0));
+    scene.set_camera(camera(99.0));
     let mut built = 0;
     for _ in 0..20 {
         match scene.poll(now) {
@@ -701,7 +714,7 @@ fn mesh_progress_during_read() {
     assert_eq!(positions(&view)[&1], 100.0);
     assert_eq!(view.revision(), revision);
     let result = reply(&world, &held);
-    scene.complete(held, result, now);
+    scene.complete_read(held, result, now);
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(positions(&view)[&1], 150.0);
     assert_eq!(view.revision(), Some(world.revision()));
@@ -714,11 +727,11 @@ fn mesh_progress_during_read() {
         panic!("expected journal read");
     };
     let result = reply(&world, &changes);
-    scene.complete(changes, result, now);
+    scene.complete_read(changes, result, now);
     let ReconcileStep::Read(details) = scene.poll(now) else {
         panic!("expected hydration");
     };
-    scene.complete(details, Err(ReadFailure::Busy), now);
+    scene.complete_read(details, Err(ReadFailure::Busy), now);
     let ReconcileStep::Publish(status) = scene.poll(now) else {
         panic!("expected recovery status");
     };
@@ -733,11 +746,11 @@ fn camera_updates_preserve_progress() {
     for id in 1..=300 {
         add(&mut world, id, id as u32, ParentUpdate::Root, 100.0, id as u64);
     }
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     for turn in 0..30 {
-        scene.camera(camera(-300.0 - f64::from(turn)));
+        scene.set_camera(camera(-300.0 - f64::from(turn)));
         match scene.poll(now) {
             ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
             ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
@@ -759,14 +772,14 @@ fn mesh_admission_recovery() {
         patch.shape = FieldUpdate::Set(Shape::Prim(world::PrimShape { profile_begin: id as u16, ..Default::default() }));
         let _ = world.patch_object(patch).unwrap();
     }
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    scene.camera(camera(-300.0));
+    scene.set_camera(camera(-300.0));
     for _ in 0..30_000 {
         match scene.poll(now) {
             ReconcileStep::Read(job) => {
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
             ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
@@ -801,21 +814,21 @@ fn mesh_admission_recovery() {
 fn quality_updates() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 100.0, 1);
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    scene.camera(camera(0.0));
+    scene.set_camera(camera(0.0));
     settle(&mut scene, &mut view, &world, &mut now);
     let revision = view.revision();
     assert_eq!(view.objects().next().unwrap().mesh().unwrap().0.detail, Detail::Low);
 
-    scene.camera(camera(0.0).with_quality(32.0, 1.0).unwrap());
+    scene.set_camera(camera(0.0).with_quality(32.0, 1.0).unwrap());
     settle(&mut scene, &mut view, &world, &mut now);
     assert!(view.objects().next().unwrap().mesh().is_none());
 
-    scene.camera(camera(0.0).with_quality(512.0, 4.0).unwrap());
+    scene.set_camera(camera(0.0).with_quality(512.0, 4.0).unwrap());
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.objects().next().unwrap().mesh().unwrap().0.detail, Detail::Medium);
-    scene.camera(camera(0.0).with_quality(512.0, 0.25).unwrap());
+    scene.set_camera(camera(0.0).with_quality(512.0, 0.25).unwrap());
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.objects().next().unwrap().mesh().unwrap().0.detail, Detail::Lowest);
     assert_eq!(view.revision(), revision);
@@ -827,7 +840,7 @@ fn bootstrap_identity_changes() {
     for id in 2..302 {
         add(&mut world, id, id as u32, ParentUpdate::Root, id as f32, id as u64);
     }
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     loop {
         let job = match scene.poll(now) {
@@ -841,7 +854,7 @@ fn bootstrap_identity_changes() {
         };
         let objects = matches!(job.query(), ReadQuery::Objects(None));
         let result = reply(&world, &job);
-        scene.complete(job, result, now);
+        scene.complete_read(job, result, now);
         if objects {
             break;
         }
@@ -864,7 +877,7 @@ fn descendant_pose_updates() {
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     add(&mut world, 2, 2, ParentUpdate::Local(NonZeroU32::new(1).unwrap()), 2.0, 2);
     add(&mut world, 3, 3, ParentUpdate::Local(NonZeroU32::new(2).unwrap()), 3.0, 3);
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(positions(&view), BTreeMap::from([(1, 10.0), (2, 12.0), (3, 15.0)]));
@@ -916,7 +929,7 @@ fn descendant_pose_updates() {
 fn pending_parent_arrival() {
     let mut world = world();
     add(&mut world, 2, 2, ParentUpdate::Local(NonZeroU32::new(1).unwrap()), 2.0, 1);
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     assert!(matches!(view.objects().next().unwrap().placement(), Placement::Hidden(_)));
@@ -937,7 +950,7 @@ fn own_signed_dimensions() {
     let mut child = ObjectPatch::new(source(1, 4), NonZeroU32::new(2).unwrap());
     child.scale = Some(Vec3::new(-2.0, 3.0, 4.0));
     let _ = world.patch_object(child).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let child = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(2)).unwrap();
@@ -961,7 +974,7 @@ fn atomic_region_retirement() {
     for id in 1..301 {
         add(&mut world, id, id as u32, ParentUpdate::Root, 0.0, id as u64);
     }
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let _ = world.retire_region(Region::new(1)).unwrap();
@@ -974,7 +987,7 @@ fn atomic_region_retirement() {
                 if let Ok(ReadReply::Changes(page)) = &result {
                     partial |= page.records.last().is_some_and(|record| record.revision > page.completed_revision);
                 }
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
                 assert_eq!(view.objects().count(), 300);
             }
             ReconcileStep::Publish(batch) => {
@@ -996,7 +1009,7 @@ fn history_recovery_backoff() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     let budget = Budget::default();
-    let (mut scene, mut view) = SceneReconciler::new(budget.clone());
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let retained = budget.charged_bytes();
@@ -1006,7 +1019,7 @@ fn history_recovery_backoff() {
         let ReconcileStep::Read(job) = scene.poll(now) else {
             panic!("expected recovery read");
         };
-        scene.complete(job, Err(ReadFailure::World(WorldReadError::ResyncRequired)), now);
+        scene.complete_read(job, Err(ReadFailure::World(WorldReadError::ResyncRequired)), now);
         let ReconcileStep::Publish(batch) = scene.poll(now) else {
             panic!("expected recovery status");
         };
@@ -1036,7 +1049,7 @@ fn publication_backpressure_and_close() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
     let budget = Budget::default();
-    let (mut scene, mut view) = SceneReconciler::new(budget.clone());
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     move_root(&mut world, 20.0, 2);
@@ -1045,7 +1058,7 @@ fn publication_backpressure_and_close() {
         match scene.poll(now) {
             ReconcileStep::Read(job) => {
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Publish(batch) => break batch,
             ReconcileStep::Continue => {}
@@ -1065,7 +1078,7 @@ fn publication_backpressure_and_close() {
     };
     let result = reply(&world, &job);
     scene.close();
-    scene.complete(job, result, now);
+    scene.complete_read(job, result, now);
     assert!(matches!(scene.poll(now), ReconcileStep::Closed));
     assert_eq!(view.objects().count(), 0);
     assert_eq!(view.status(), Status::Closed);
@@ -1080,7 +1093,7 @@ fn publication_backpressure_and_close() {
 fn hydration_identity_conflicts() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 1.0, 1);
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     add(&mut world, 2, 2, ParentUpdate::Root, 2.0, 2);
@@ -1090,7 +1103,7 @@ fn hydration_identity_conflicts() {
     };
     let old_page = reply(&world, &job);
     add(&mut world, 2, 1, ParentUpdate::Root, 3.0, 3);
-    scene.complete(job, old_page, now);
+    scene.complete_read(job, old_page, now);
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(ids(&view), BTreeSet::from([2]));
     assert_eq!(positions(&view), BTreeMap::from([(2, 3.0)]));
@@ -1104,7 +1117,7 @@ fn hydration_identity_conflicts() {
 fn abandoned_publication_recovery() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 1.0, 1);
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     move_root(&mut world, 2.0, 2);
@@ -1113,7 +1126,7 @@ fn abandoned_publication_recovery() {
         match scene.poll(now) {
             ReconcileStep::Read(job) => {
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Publish(batch) => {
                 drop(batch);
@@ -1139,7 +1152,7 @@ fn terrain_and_water_lifetimes() {
     let first = world::TerrainPatch::new(0, 0, Box::new([7.0; 256])).unwrap();
     let _ = world.observe_terrain_patch(source(1, 1), first).unwrap();
     let _ = world.observe_water_height(source(1, 2), 0.0).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.patch_count(), 1);
@@ -1171,7 +1184,7 @@ fn terrain_loading_keeps_history() {
         }
     }
     let _ = world.observe_water_height(source(1, 300), 20.0).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     let mut terrain_reads = 0;
     for _ in 0..10_000 {
@@ -1183,7 +1196,7 @@ fn terrain_loading_keeps_history() {
                     move_root(&mut world, terrain_reads as f32, 1000 + terrain_reads);
                     scene.notify_world_change();
                 }
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
             ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
@@ -1211,7 +1224,7 @@ fn terrain_prepares_during_publication() {
         let patch = TerrainPatch::new(x, 0, Box::new([1.0; 256])).unwrap();
         let _ = world.observe_terrain_patch(source(1, u64::from(x) + 1), patch).unwrap();
     }
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     for x in 0..8 {
@@ -1224,7 +1237,7 @@ fn terrain_prepares_during_publication() {
         match scene.poll(now) {
             ReconcileStep::Read(job) => {
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Publish(batch) => break batch,
             ReconcileStep::Build(job) => running.push(job),
@@ -1244,7 +1257,7 @@ fn terrain_prepares_during_publication() {
             }
             ReconcileStep::Read(job) => {
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Continue => {}
             ReconcileStep::Wait(_) | ReconcileStep::Idle => break,
@@ -1272,7 +1285,7 @@ fn terrain_streams_during_bootstrap() {
         let _ = world.observe_terrain_patch(source(1, u64::from(x) + 400), patch).unwrap();
     }
     let _ = world.observe_water_height(source(1, 500), 20.0).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     let mut observed = false;
     for _ in 0..1000 {
@@ -1286,7 +1299,7 @@ fn terrain_streams_during_bootstrap() {
                     assert_eq!(view.revision(), None, "progressive startup must not acknowledge unreconciled World changes");
                 }
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
             ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
@@ -1308,13 +1321,13 @@ fn bootstrap_ignores_frame_latency() {
     for id in 1..=300 {
         add(&mut world, id, id as u32, ParentUpdate::Root, 0.0, id as u64);
     }
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     let held = loop {
         match scene.poll(now) {
             ReconcileStep::Read(job) => {
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Publish(batch) => break batch,
             ReconcileStep::Continue => {}
@@ -1325,7 +1338,7 @@ fn bootstrap_ignores_frame_latency() {
         match scene.poll(now) {
             ReconcileStep::Read(job) => {
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
             ReconcileStep::Continue => {}
@@ -1350,18 +1363,18 @@ fn startup_failure_retains_terrain() {
     }
     let patch = TerrainPatch::new(0, 0, Box::new([1.0; 256])).unwrap();
     let _ = world.observe_terrain_patch(source(1, 400), patch).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     loop {
         match scene.poll(now) {
             ReconcileStep::Read(job) if matches!(job.query(), ReadQuery::Objects(_)) => {
                 assert_eq!(ground_mesh(&view, 1, 0, 0).bounds().min.z, 1.0);
-                scene.complete(job, Err(ReadFailure::Busy), now);
+                scene.complete_read(job, Err(ReadFailure::Busy), now);
                 break;
             }
             ReconcileStep::Read(job) => {
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
             ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
@@ -1386,7 +1399,7 @@ fn startup_failure_retains_terrain() {
                     checked = true;
                 }
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
             ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
@@ -1414,14 +1427,14 @@ fn water_precedes_ground_builds() {
     let _ = world.adopt_region(Region::new(2)).unwrap();
     let _ = world.patch_region(Region::new(2), RegionInfo { origin: Some(DVec3::X * 256.0), ..RegionInfo::default() }).unwrap();
     let _ = world.observe_water_height(source(2, 1), 25.0).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     let mut appeared = BTreeSet::new();
     for _ in 0..1000 {
         match scene.poll(now) {
             ReconcileStep::Read(job) => {
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Publish(batch) => {
                 view.apply(batch).unwrap();
@@ -1467,7 +1480,7 @@ fn terrain_samples_and_gaps() {
         .unwrap()
     };
     let _ = world.observe_terrain_patch(source(1, 1), plane(0, 0)).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let mesh = ground_mesh(&view, 1, 0, 0);
@@ -1505,7 +1518,7 @@ fn terrain_extent_validation() {
     for dimensions in [[0, 0], [512, 256]] {
         let mut world = world();
         let _ = world.observe_terrain_patch(source(1, 1), TerrainPatch::new(0, 0, Box::new([0.0; 256])).unwrap()).unwrap();
-        let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+        let (mut scene, mut view) = Reconciler::new(Budget::default());
         let now = Instant::now();
         loop {
             match scene.poll(now) {
@@ -1513,10 +1526,10 @@ fn terrain_extent_validation() {
                     let mut result = reply(&world, &job);
                     if let Ok(ReadReply::Terrain(Some(page))) = &mut result {
                         page.dimensions = dimensions;
-                        scene.complete(job, result, now);
+                        scene.complete_read(job, result, now);
                         break;
                     }
-                    scene.complete(job, result, now);
+                    scene.complete_read(job, result, now);
                 }
                 ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
                 ReconcileStep::Continue => {}
@@ -1535,7 +1548,7 @@ fn terrain_region_edges() {
     let _ = world.adopt_region(Region::new(2)).unwrap();
     let _ = world.patch_region(Region::new(2), RegionInfo { origin: Some(origin + DVec3::X * 256.0), ..RegionInfo::default() }).unwrap();
     let _ = world.observe_terrain_patch(source(1, 1), TerrainPatch::new(15, 0, Box::new([10.0; 256])).unwrap()).unwrap();
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(ground_mesh(&view, 1, 15, 0).bounds().max.x, 15.0, "active neighbor without samples must not be clamped");
@@ -1581,7 +1594,7 @@ fn terrain_rebuild_bounds() {
         }
     }
     let budget = Budget::default();
-    let (mut scene, mut view) = SceneReconciler::new(budget.clone());
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
     assert_eq!(settle_work(&mut scene, &mut view, &world, &mut now).1, 256);
     let ids = |view: &SceneView| {
@@ -1629,13 +1642,13 @@ fn retired_terrain_jobs() {
     let mut world = world();
     let _ = world.observe_terrain_patch(source(1, 1), TerrainPatch::new(0, 0, Box::new([f32::MAX; 256])).unwrap()).unwrap();
     let budget = Budget::default();
-    let (mut scene, mut view) = SceneReconciler::new(budget.clone());
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
     let job = loop {
         match scene.poll(now) {
             ReconcileStep::Read(job) => {
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
             }
             ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
             ReconcileStep::Build(job) => break job,
@@ -1671,7 +1684,7 @@ fn bounded_reconciliation() {
         add(&mut world, id, id as u32, parent, 1.0, id as u64);
     }
     let budget = Budget::default();
-    let (mut scene, mut view) = SceneReconciler::new(budget.clone());
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
     let start = Instant::now();
     let bootstrap_reads = settle(&mut scene, &mut view, &world, &mut now);
@@ -1704,7 +1717,7 @@ fn recovery_memory_admission() {
     let mut world = world();
     add(&mut world, 1, 1, ParentUpdate::Root, 1.0, 1);
     let budget = Budget::default();
-    let (mut scene, mut view) = SceneReconciler::new(budget.clone());
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let retained = budget.charged_bytes();
@@ -1712,7 +1725,7 @@ fn recovery_memory_admission() {
     let ReconcileStep::Read(job) = scene.poll(now) else {
         panic!("expected journal read");
     };
-    scene.complete(job, Err(ReadFailure::World(WorldReadError::ResyncRequired)), now);
+    scene.complete_read(job, Err(ReadFailure::World(WorldReadError::ResyncRequired)), now);
     let ReconcileStep::Publish(status) = scene.poll(now) else {
         panic!("expected recovery status");
     };
@@ -1726,7 +1739,7 @@ fn recovery_memory_admission() {
     };
     let mut oversized = world.read_barrier();
     oversized.object_count = scene::MAX_OBJECTS + 1;
-    scene.complete(job, Ok(ReadReply::Barrier(oversized)), now);
+    scene.complete_read(job, Ok(ReadReply::Barrier(oversized)), now);
     let ReconcileStep::Publish(status) = scene.poll(now) else {
         panic!("expected capacity status");
     };
@@ -1742,7 +1755,7 @@ fn recovery_memory_admission() {
             ReconcileStep::Read(job) => {
                 let details = matches!(job.query(), ReadQuery::Details(_));
                 let result = reply(&world, &job);
-                scene.complete(job, result, now);
+                scene.complete_read(job, result, now);
                 if details {
                     break;
                 }
@@ -1761,7 +1774,7 @@ proptest! {
     #[test]
     fn incarnation_churn(ops in prop::collection::vec((0u8..3, 1u32..17), 1..100)) {
         let mut world = world();
-        let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+        let (mut scene, mut view) = Reconciler::new(Budget::default());
         let mut now = Instant::now();
         settle(&mut scene, &mut view, &world, &mut now);
         let mut expected = BTreeMap::new();
@@ -1787,7 +1800,7 @@ fn experience_properties_keep_current_owner() {
     let world = world();
     let region = world.region_page(None, 1).unwrap().regions[0].region;
     let budget = Budget::default();
-    let (mut scene, mut view) = SceneReconciler::new(budget.clone());
+    let (mut scene, mut view) = Reconciler::new(budget.clone());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let a = ExperienceId::new(Uuid::from_u128(10)).unwrap();
@@ -1822,7 +1835,7 @@ fn experience_properties_keep_current_owner() {
     assert_eq!(environment.sky_properties()["gamma"].source(), b"r2.0");
     scene.notify_world_change();
     let ReconcileStep::Read(job) = scene.poll(now) else { panic!("expected journal read") };
-    scene.complete(job, Err(ReadFailure::World(WorldReadError::ResyncRequired)), now);
+    scene.complete_read(job, Err(ReadFailure::World(WorldReadError::ResyncRequired)), now);
     settle(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.viewer_environment().unwrap().sky_properties()["gamma"].experience(), b, "World resync must preserve viewer overrides");
     let retained = view.viewer_environment().unwrap().clone();
@@ -1842,7 +1855,7 @@ fn experience_properties_keep_current_owner() {
 fn experience_assets_order_and_clear() {
     let world = world();
     let region = world.region_page(None, 1).unwrap().regions[0].region;
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let a = ExperienceId::new(Uuid::from_u128(10)).unwrap();
@@ -1881,7 +1894,7 @@ fn experience_assets_order_and_clear() {
 fn cleared_sky_restores_experience_day() {
     let world = world();
     let region = world.region_page(None, 1).unwrap().regions[0].region;
-    let (mut scene, mut view) = SceneReconciler::new(Budget::default());
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let a = ExperienceId::new(Uuid::from_u128(10)).unwrap();

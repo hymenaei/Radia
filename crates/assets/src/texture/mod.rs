@@ -1,6 +1,10 @@
-use jpeg2k::DecodeParameters;
+mod handle;
+mod header;
 
-use crate::{Blob, Failure, budget::Reservation, texture_header};
+pub use handle::{ImageInfo, TextureDecodeJob, TextureEvents, TextureHandle, TextureId, TextureUsage, WeakTexture};
+
+use crate::{Blob, Failure, budget::Reservation};
+use jpeg2k::DecodeParameters;
 
 pub const MAX_TEXTURE_EDGE: u32 = 2048;
 pub const MAX_SOURCE_EDGE: u32 = 4096;
@@ -51,6 +55,13 @@ impl PixelFormat {
             Self::Rgba8 => 4,
         }
     }
+
+    pub const fn alpha(self) -> Alpha {
+        match self {
+            Self::GrayAlpha8 | Self::Rgba8 => Alpha::Straight,
+            Self::Gray8 | Self::Rgb8 => Alpha::Opaque,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,10 +101,7 @@ impl Image {
         ColorSpace::Srgb
     }
     pub const fn alpha(&self) -> Alpha {
-        match self.format {
-            PixelFormat::GrayAlpha8 | PixelFormat::Rgba8 => Alpha::Straight,
-            _ => Alpha::Opaque,
-        }
+        self.format.alpha()
     }
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
@@ -122,7 +130,7 @@ pub(crate) fn decode(bytes: &[u8], target: TextureSize, cancelled: impl Fn() -> 
     if cancelled() {
         return Err(Failure::Cancelled);
     }
-    let (stream, header) = texture_header::preflight(bytes, &cancelled)?;
+    let (stream, header) = header::preflight(bytes, &cancelled)?;
     let source_size = [header.width, header.height];
     let discard = target.discard_level(source_size);
     let reduce = u32::from(discard.min(header.levels));
@@ -242,7 +250,7 @@ mod tests {
     fn cancelled_decode_retains_work() {
         let bytes = RGBA_J2C;
         let checks = Cell::new(0);
-        texture_header::preflight(bytes, &|| {
+        header::preflight(bytes, &|| {
             checks.set(checks.get() + 1);
             false
         })

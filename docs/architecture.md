@@ -19,10 +19,10 @@ Note also which crates are **API Boundaries**. Rules at the boundary are differe
 ```text
 apps/viewer/           # package `viewer`, executable `radia`
 crates/assets/         # package `assets`
-crates/llsd/    # package `llsd`
+crates/llsd/           # package `llsd`
 crates/math/           # package `math`
 crates/utils/          # package `utils`
-crates/test-support/ # package `test-support`
+crates/test-support/   # package `test-support`
 crates/network/        # package `network`
 crates/protocol/       # package `protocol`
 crates/render/         # package `render`
@@ -36,6 +36,10 @@ The viewer coordinates the library crates. The common directory is being removed
 
 ### `crates/assets`
 
+Assets owns request admission, bounded decoding, and retained content. Scratch reservations and resident charges are distinct private types. Retaining content consumes its scratch reservation; the resulting charge has no resize or split operations. Resident handles keep data charged until the final owner releases it, independently of scratch-work admission. Closing a job cancellation channel ends the cancellation wait.
+
+Material decoding is grouped by legacy and PBR formats, with shared texture and sampler values in their parent module. Texture decoding, headers, and handle lifetimes share a texture module. Legacy envelope inflation grows with actual content while retaining its fixed decompression limit.
+
 ### `crates/llsd`
 
 ### `crates/math`
@@ -44,7 +48,7 @@ The math crate owns reusable geometry and numeric operations and re-exports sele
 
 ### `crates/utils`
 
-Shared ID newtypes distinguish objects, assets, avatars, groups, regions, parcels, inventory items, and folders. Their UUID representation is private. Wire codecs convert explicitly; subsystem APIs adopt these types during their individual reviews. Numeric region handles and parcel-local identifiers remain separate.
+Shared ID newtypes distinguish objects, assets, avatars, groups, regions, parcels, inventory items, folders, and experiences. ExperienceId rejects nil UUIDs; an absent experience is represented by Option. Their UUID representation is private. Wire codecs convert explicitly; subsystem APIs adopt these types during their individual reviews. Numeric region handles and parcel-local identifiers remain separate.
 
 ### `crates/test-support`
 
@@ -63,6 +67,12 @@ The vendored template is pinned to upstream commit d5445ef1ccb26864236653bbe91d6
 ### `crates/render`
 
 ### `crates/scene`
+
+Scene groups material appearance by legacy and PBR behavior, scene objects and views under model, and reconciliation reads, scheduling, and publication under reconcile. Reconciler remains the sole owner of its mutable state; extracting methods into child modules does not add shared ownership or synchronization.
+
+Meshes assembled from buffers validate size limits, finite vertex data, triangle indices, and face ranges before publication. Render upload can rely on these private construction invariants when indexing mesh data.
+
+Reconciler owns the derived scene and advances bounded reads, asset demand, mesh preparation, and publication. SceneView applies publications and supplies immutable render data. Jobs and batches retain their lifetime and memory charges, so abandoned or stale work cannot become current after recovery or teardown. The read-completion method is complete_read, alongside complete_asset and complete_mesh; camera updates use set_camera. These replace the former SceneReconciler, complete, and camera names without compatibility aliases. Shared ExperienceId comes from utils.
 
 ### `crates/world`
 

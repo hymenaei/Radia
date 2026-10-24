@@ -25,6 +25,7 @@ fn invoice_controls_identity() {
     let Some(EnvironmentPush::Full { experience: actual, asset, transition }) = decode(&push, agent).unwrap() else {
         panic!("full push missing")
     };
+    assert!(decode(&message(agent, Uuid::nil(), body), agent).is_err(), "a full push requires a non-nil experience ID");
     assert_eq!(actual.uuid(), experience);
     assert_eq!(asset.uuid(), Uuid::from_u128(4));
     assert_eq!(transition, Duration::from_millis(2500));

@@ -17,10 +17,6 @@ use crate::{
     content::{Finished, StoredContent},
 };
 
-#[cfg(test)]
-#[path = "store_tests.rs"]
-mod tests;
-
 pub const MAX_ASSET_ROUTES: usize = 33;
 pub const MAX_ASSET_DECODES: usize = 2;
 pub const MAX_ASSET_FETCHES: usize = 8;
@@ -34,12 +30,6 @@ pub enum Kind {
     PbrMaterial,
     LegacyMaterial,
     Environment,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum Priority {
-    Background,
-    Visible,
 }
 
 impl Kind {
@@ -56,6 +46,12 @@ impl Kind {
             Self::PbrMaterial | Self::LegacyMaterial | Self::Environment => 2 * 1024 * 1024,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Priority {
+    Background,
+    Visible,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -157,7 +153,11 @@ impl Status<StoredContent> {
                     failure: *failure,
                 })
             }
-            other => other.clone().map(|_| unreachable!("content variants handled")),
+            Self::Queued => Status::Queued,
+            Self::Fetching => Status::Fetching,
+            Self::Decoding => Status::Decoding,
+            Self::Failed { failure, retry_at } => Status::Failed { failure: *failure, retry_at: *retry_at },
+            Self::StaleSession => Status::StaleSession,
         }
     }
 }
@@ -191,6 +191,7 @@ struct Counter {
     total: Arc<AtomicUsize>,
     wake: watch::Sender<()>,
 }
+
 struct Lease {
     counter: Arc<Counter>,
     size: Option<TextureSize>,
@@ -230,6 +231,7 @@ struct FailureRecord {
     retry_at: Option<Instant>,
     expires: Instant,
 }
+
 struct RouteState {
     counter: Arc<Counter>,
     status: watch::Sender<Status<StoredContent>>,
@@ -263,6 +265,7 @@ struct AssetEntry {
     target: Option<TextureSize>,
     priority: Priority,
 }
+
 impl AssetEntry {
     fn ready(&self) -> Option<Content> {
         self.ready.as_ref().and_then(StoredContent::upgrade)
@@ -287,8 +290,9 @@ impl AssetEntry {
         self.views.values().any(|view| view.count() > 0)
     }
     fn broadcast_status(&self, status: Status) {
+        let ready = self.ready();
         for view in self.views.values().filter(|view| view.count() > 0) {
-            view.publish_status(status.clone().retaining(self.ready().as_ref()));
+            view.publish_status(status.clone().retaining(ready.as_ref()));
         }
     }
 }
@@ -345,7 +349,7 @@ impl LoadJob {
             if *cancelled.borrow() {
                 return;
             }
-            let _ = cancelled.changed().await;
+            cancelled.changed().await.unwrap_or(());
         }
     }
 }
@@ -769,3 +773,7 @@ impl Store {
         self.routes.clear();
     }
 }
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;

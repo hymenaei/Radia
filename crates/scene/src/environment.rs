@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, VecDeque},
+    mem::size_of,
     sync::Arc,
     time::Duration,
 };
@@ -35,13 +36,6 @@ pub enum EnvironmentPushError {
 #[derive(Clone)]
 pub struct ExperienceSetting(Arc<Setting>);
 
-struct Setting {
-    experience: ExperienceId,
-    environment: Environment,
-    transition: Duration,
-    _lease: Lease,
-}
-
 impl ExperienceSetting {
     pub fn experience(&self) -> ExperienceId {
         self.0.experience
@@ -54,15 +48,15 @@ impl ExperienceSetting {
     }
 }
 
-#[derive(Clone)]
-pub struct ExperienceProperty(Arc<Property>);
-
-struct Property {
+struct Setting {
     experience: ExperienceId,
-    source: Arc<[u8]>,
+    environment: Environment,
     transition: Duration,
     _lease: Lease,
 }
+
+#[derive(Clone)]
+pub struct ExperienceProperty(Arc<Property>);
 
 impl ExperienceProperty {
     pub fn experience(&self) -> ExperienceId {
@@ -74,6 +68,13 @@ impl ExperienceProperty {
     pub fn transition(&self) -> Duration {
         self.0.transition
     }
+}
+
+struct Property {
+    experience: ExperienceId,
+    source: Arc<[u8]>,
+    transition: Duration,
+    _lease: Lease,
 }
 
 #[derive(Clone, Default)]
@@ -88,11 +89,6 @@ struct State {
 
 #[derive(Clone)]
 pub struct ViewerEnvironment(Arc<Snapshot>);
-
-struct Snapshot {
-    state: State,
-    _lease: Lease,
-}
 
 impl ViewerEnvironment {
     pub fn sky(&self) -> Option<&ExperienceSetting> {
@@ -110,6 +106,11 @@ impl ViewerEnvironment {
     pub fn clear_transition(&self) -> Duration {
         self.0.state.clear_transition
     }
+}
+
+struct Snapshot {
+    state: State,
+    _lease: Lease,
 }
 
 struct Pending {

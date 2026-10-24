@@ -85,3 +85,20 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Value, Failure> {
     decoder.end().map_err(|_| Failure::Malformed)?;
     Ok(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignored_fields_stay_bounded() {
+        let nested = format!(r#"{{"asset":{{"version":"2.0"}},"extras":{}0{}}}"#, "[".repeat(17), "]".repeat(17));
+        assert_eq!(parse(nested.as_bytes()), Err(Failure::Malformed));
+        let wide = format!(r#"{{"asset":{{"version":"2.0"}},"extras":[{}0]}}"#, "0,".repeat(512));
+        assert_eq!(parse(wide.as_bytes()), Err(Failure::Malformed));
+        let values = format!(r#"{{"asset":{{"version":"2.0"}},"extras":[{}[]]}}"#, format!("[{}0],", "0,".repeat(499)).repeat(9));
+        assert_eq!(parse(values.as_bytes()), Err(Failure::Malformed));
+        assert_eq!(parse(&vec![b' '; 2 * 1024 * 1024 + 1]), Err(Failure::TooLarge));
+        assert_eq!(parse(br#"{"asset":1,"asset":2}"#), Err(Failure::Malformed));
+    }
+}

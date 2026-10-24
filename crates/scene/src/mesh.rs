@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
+    mem::size_of,
     ops::Range,
     sync::{
         Arc,
@@ -12,17 +13,14 @@ use math::{Bounds, Vec2, Vec3};
 
 use crate::budget::Lease;
 
+pub const MAX_MESH_VERTICES: usize = 32_768;
+pub const MAX_MESH_INDICES: usize = 196_608;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MeshId(u64);
 
 #[derive(Clone)]
 pub struct SharedMesh(Arc<Retained>);
-
-struct Retained {
-    id: MeshId,
-    mesh: Mesh,
-    _lease: Lease,
-}
 
 impl SharedMesh {
     pub(crate) fn new(mesh: Mesh, lease: Lease) -> Self {
@@ -40,8 +38,11 @@ impl SharedMesh {
     }
 }
 
-pub const MAX_MESH_VERTICES: usize = 32_768;
-pub const MAX_MESH_INDICES: usize = 196_608;
+struct Retained {
+    id: MeshId,
+    mesh: Mesh,
+    _lease: Lease,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vertex {
@@ -65,12 +66,29 @@ pub struct Mesh {
 
 impl Mesh {
     pub(crate) fn from_parts(vertices: Vec<Vertex>, indices: Vec<u32>, faces: Vec<Face>) -> Result<Self, MeshError> {
+        if vertices.len() > MAX_MESH_VERTICES || indices.len() > MAX_MESH_INDICES || faces.len() > 9 {
+            return Err(MeshError::TooComplex);
+        }
         if indices.is_empty() {
             return Err(MeshError::Degenerate);
+        }
+        if !indices.len().is_multiple_of(3)
+            || indices.iter().any(|&index| index as usize >= vertices.len())
+            || faces.iter().any(|face| {
+                face.indices.start > face.indices.end
+                    || face.indices.end as usize > indices.len()
+                    || !face.indices.start.is_multiple_of(3)
+                    || !face.indices.end.is_multiple_of(3)
+            })
+        {
+            return Err(MeshError::InvalidParameters);
         }
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);
         for vertex in &vertices {
+            if !vertex.position.is_finite() || !vertex.normal.is_finite() || !vertex.uv.is_finite() {
+                return Err(MeshError::InvalidParameters);
+            }
             min = min.min(vertex.position);
             max = max.max(vertex.position);
         }
@@ -214,4 +232,56 @@ fn root(parents: &mut [usize], mut index: usize) -> usize {
         index = parents[index];
     }
     index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vertex() -> Vertex {
+        Vertex { position: Vec3::ZERO, normal: Vec3::Z, uv: Vec2::ZERO }
+    }
+
+    #[test]
+    fn from_parts_rejects_invalid_indices() {
+        let vertices = vec![vertex(); 3];
+        let face = Face { slot: 0, indices: 0..3 };
+        assert!(matches!(Mesh::from_parts(vertices.clone(), vec![0, 1, 3], vec![face.clone()]), Err(MeshError::InvalidParameters)));
+        assert!(matches!(
+            Mesh::from_parts(vertices.clone(), vec![0, 1, 2], vec![Face { indices: 0..4, ..face }]),
+            Err(MeshError::InvalidParameters)
+        ));
+        assert!(matches!(
+            Mesh::from_parts(vertices.clone(), vec![0, 1, 2], vec![Face { indices: 1..3, ..face }]),
+            Err(MeshError::InvalidParameters)
+        ));
+        assert!(matches!(Mesh::from_parts(vertices, vec![0, 1], vec![]), Err(MeshError::InvalidParameters)));
+    }
+
+    #[test]
+    fn from_parts_rejects_nonfinite_vertices() {
+        for invalid in [
+            Vertex { position: Vec3::NAN, ..vertex() },
+            Vertex { normal: Vec3::splat(f32::INFINITY), ..vertex() },
+            Vertex { uv: Vec2::splat(f32::NEG_INFINITY), ..vertex() },
+        ] {
+            assert!(matches!(
+                Mesh::from_parts(vec![vertex(), invalid, vertex()], vec![0, 1, 2], vec![]),
+                Err(MeshError::InvalidParameters)
+            ));
+        }
+    }
+
+    #[test]
+    fn from_parts_enforces_mesh_limits() {
+        assert!(matches!(Mesh::from_parts(vec![vertex(); MAX_MESH_VERTICES + 1], vec![0, 1, 2], vec![]), Err(MeshError::TooComplex)));
+        assert!(matches!(Mesh::from_parts(vec![vertex(); 3], vec![0; MAX_MESH_INDICES + 1], vec![]), Err(MeshError::TooComplex)));
+        assert!(matches!(
+            Mesh::from_parts(vec![vertex(); 3], vec![0, 1, 2], vec![Face { slot: 0, indices: 0..3 }; 10]),
+            Err(MeshError::TooComplex)
+        ));
+        let mesh = Mesh::from_parts(vec![vertex(); MAX_MESH_VERTICES], vec![0; MAX_MESH_INDICES], vec![]).unwrap();
+        assert_eq!(mesh.vertices().len(), MAX_MESH_VERTICES);
+        assert_eq!(mesh.indices().len(), MAX_MESH_INDICES);
+    }
 }

@@ -16,13 +16,40 @@ pub(crate) struct EnvironmentCommand {
     pub(crate) push: EnvironmentPush,
 }
 
+pub(crate) struct EnvironmentSender(mpsc::Sender<EnvironmentCommand>);
+
+impl EnvironmentSender {
+    pub(crate) fn try_send(&self, command: EnvironmentCommand) -> Result<(), mpsc::error::TrySendError<EnvironmentCommand>> {
+        self.0.try_send(command)
+    }
+
+    pub(crate) fn clear_region(&self, region: Region) -> Result<(), String> {
+        let push = EnvironmentPush::Clear { experience: None, transition: Duration::ZERO };
+        self.try_send(EnvironmentCommand { region, push }).map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn publish(&self, message: &Message, agent: Uuid, region: Region, simulator: network::SimulatorId) -> Result<(), String> {
+        match decode(message, agent) {
+            Ok(Some(push)) => {
+                self.try_send(EnvironmentCommand { region, push }).map_err(|error| error.to_string())?;
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(_) => {
+                tracing::debug!(simulator = simulator.get(), region = region.get(), "invalid experience environment push");
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct EnvironmentInbox(Arc<Mutex<Option<mpsc::Receiver<EnvironmentCommand>>>>);
 
 impl EnvironmentInbox {
-    pub(crate) fn channel() -> (mpsc::Sender<EnvironmentCommand>, Self) {
+    pub(crate) fn channel() -> (EnvironmentSender, Self) {
         let (sender, receiver) = mpsc::channel(64);
-        (sender, Self(Arc::new(Mutex::new(Some(receiver)))))
+        (EnvironmentSender(sender), Self(Arc::new(Mutex::new(Some(receiver)))))
     }
 
     pub(crate) fn take(&self) -> Option<mpsc::Receiver<EnvironmentCommand>> {

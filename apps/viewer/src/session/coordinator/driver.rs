@@ -15,10 +15,10 @@ use futures::{
 use math::DVec3;
 use network::{AgentSession, CoverageLoss, CoverageSource, Delivery, Event, Grid, PacketOrder, SimulatorId, capabilities::Client};
 use protocol::{lludp::Message, login::ResponseData};
-use render::scene::{Camera, EnvironmentPush};
+use render::scene::Camera;
 use tokio::{
     runtime::Handle,
-    sync::{mpsc, watch},
+    sync::watch,
     time::{Interval, MissedTickBehavior},
 };
 use tracing::Instrument;
@@ -38,7 +38,7 @@ use crate::{
     session::{
         RegionLookup, Session, SessionHandle, agent,
         environment::{Completion, EnvironmentIntake},
-        experience_environment::{self, EnvironmentCommand, EnvironmentInbox},
+        experience_environment::{EnvironmentInbox, EnvironmentSender},
         inbound::object_media_requests,
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
         recovery::{self, RecoveryScheduler},
@@ -72,7 +72,7 @@ struct SessionDriver {
     reads: WorldReadHost,
     terrain: TerrainDecodeQueue,
     environments: EnvironmentIntake,
-    environment_pushes: mpsc::Sender<EnvironmentCommand>,
+    environment_pushes: EnvironmentSender,
     environment_inbox: EnvironmentInbox,
     assets: AssetCoordinator,
     terrain_received: bool,
@@ -308,13 +308,12 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
-                if let Some(region) = self.session_world.region_for(simulator_id) {
-                    let push = EnvironmentPush::Clear { experience: None, transition: Duration::ZERO };
-                    if let Err(error) = self.environment_pushes.try_send(EnvironmentCommand { region, push }) {
-                        tracing::error!(simulator = simulator_id.get(), region = region.get(), %error, "experience environment crossing reset could not be admitted");
-                        self.mailbox.publish(ViewerUpdate::Failed("The environment update queue is unavailable.".into()));
-                        return ControlFlow::Break(());
-                    }
+                if let Some(region) = self.session_world.region_for(simulator_id)
+                    && let Err(error) = self.environment_pushes.clear_region(region)
+                {
+                    tracing::error!(simulator = simulator_id.get(), region = region.get(), %error, "experience environment crossing reset could not be admitted");
+                    self.mailbox.publish(ViewerUpdate::Failed("The environment update queue is unavailable.".into()));
+                    return ControlFlow::Break(());
                 }
                 self.environments.simulator_promoted(
                     &mut self.session_world,
@@ -456,17 +455,9 @@ impl SessionDriver {
         if matches!(packet_order, PacketOrder::Ordered(_))
             && Some(simulator_id) == self.primary_simulator
             && let (Some(agent), Some(region)) = (self.active_session.as_ref(), self.session_world.region_for(simulator_id))
+            && let Err(error) = self.environment_pushes.publish(&message, agent.agent_id, region, simulator_id)
         {
-            match experience_environment::decode(&message, agent.agent_id) {
-                Ok(Some(push)) => match self.environment_pushes.try_send(EnvironmentCommand { region, push }) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "experience environment push could not be admitted")
-                    }
-                },
-                Ok(None) => {}
-                Err(_) => tracing::debug!(simulator = simulator_id.get(), region = region.get(), "invalid experience environment push"),
-            }
+            tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "experience environment push could not be admitted");
         }
 
         let media_requests = self

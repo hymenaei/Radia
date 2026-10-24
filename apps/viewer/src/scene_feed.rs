@@ -630,7 +630,7 @@ mod tests {
             water: Vec::new(),
             transition: Duration::ZERO,
         };
-        assert!(pushes.send(crate::session::EnvironmentCommand { region, push }).await.is_ok());
+        assert!(pushes.try_send(crate::session::EnvironmentCommand { region, push }).is_ok());
         feed.view.apply(batch).unwrap();
         assert_eq!(feed.view.object_count(), 1);
         {

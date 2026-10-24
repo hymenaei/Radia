@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px};
 use gpui_component::{
-    StyledExt, Theme,
+    Theme,
     button::{Button, ButtonVariants as _},
     input::{Input, InputState},
 };
@@ -19,38 +19,6 @@ use crate::session::{ChatMessage, format_avatar_name};
 
 const MAX_CHAT_HISTORY_MESSAGES: usize = 500;
 const MAX_CHAT_HISTORY_BYTES: usize = 1024 * 1024;
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-pub(crate) struct ChatWindow {
-    chat: gpui::Entity<ChatScreen>,
-    _geometry: gpui::Subscription,
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-impl ChatWindow {
-    pub(crate) fn new(chat: gpui::Entity<ChatScreen>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self { chat, _geometry: crate::gui::window_geometry::observe("chat", window, cx) }
-    }
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-impl Render for ChatWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::global(cx).colors;
-        let title = self.chat.update(cx, |chat, cx| chat.titlebar_content(cx));
-        let action = div().into_any_element();
-        let content = div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground);
-        #[cfg(target_os = "windows")]
-        let content = content.child(crate::gui::components::window_chrome::windows_titlebar(window.is_maximized(), title, action, theme));
-        #[cfg(target_os = "linux")]
-        let content = if let Some(titlebar) = crate::gui::components::window_chrome::linux_titlebar(window, title, action) {
-            content.child(titlebar)
-        } else {
-            content
-        };
-        content.child(div().flex_1().min_h_0().child(self.chat.clone()))
-    }
-}
 
 pub struct ChatScreen {
     session: Option<AgentSession>,
@@ -91,17 +59,6 @@ impl ChatScreen {
         self.message_bytes = 0;
         self.transcript_scroll = gpui::ScrollHandle::new();
         cx.notify();
-    }
-
-    pub(crate) fn titlebar_content(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = Theme::global(cx).colors;
-
-        div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(div().text_sm().font_semibold().text_color(theme.foreground).child("Nearby Chat"))
-            .into_any_element()
     }
 
     pub fn set_region_name(&mut self, region_name: String, cx: &mut Context<Self>) {

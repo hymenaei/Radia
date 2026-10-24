@@ -1,7 +1,8 @@
 use std::{
-    future::Future,
+    future::{Future, poll_fn},
     io::{self, ErrorKind},
     sync::Arc,
+    sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, Wake, Waker},
     thread,
     time::{Duration, Instant},
@@ -13,6 +14,7 @@ use serde::Serialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net, runtime,
+    sync::Notify,
     task::{JoinSet, spawn},
     time::timeout,
 };
@@ -35,6 +37,23 @@ use crate::{
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Default)]
+struct SerializationProbe {
+    count: Arc<AtomicUsize>,
+    serialized: Arc<Notify>,
+}
+
+impl Serialize for SerializationProbe {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.serialized.notify_one();
+        serializer.serialize_str("admitted")
+    }
+}
 
 async fn read_request_headers(stream: &mut net::TcpStream) -> io::Result<()> {
     let mut request = Vec::new();
@@ -411,18 +430,95 @@ async fn oversized_declared_capability_body_is_rejected_before_reading() {
 
 #[tokio::test]
 async fn request_body_is_bounded() {
-    let server = LocalServer::start(vec![]);
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let body = "<llsd><undef/></llsd>";
+    let server = LocalServer::start(vec![response(200, "OK", "application/llsd+xml", None, body)]);
+    let budget = CapabilityBudget::new();
+    let client =
+        Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget).expect("active Tokio runtime");
     let url = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
     let payload = Value::String("N".repeat(MAX_CAPABILITY_REQUEST_BODY_BYTES + 1));
 
-    let error = client
-        .post_with_response_limit(&url, &payload, MAX_CAPABILITY_RESPONSE_BYTES)
-        .await
-        .expect_err("an oversized request body should fail");
+    for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
+        let error = client
+            .post_with_response_limit(&url, &payload, MAX_CAPABILITY_RESPONSE_BYTES)
+            .await
+            .expect_err("an oversized request body should fail");
+        assert!(matches!(error, Capability(_)));
+    }
 
-    assert!(matches!(error, Capability(_)));
-    assert!(server.finish().is_empty(), "an oversized request must not be sent");
+    let value = timeout(TEST_TIMEOUT, client.post_with_response_limit(&url, &Value::Undefined, body.len()))
+        .await
+        .expect("encoding failures should release their request permits")
+        .expect("valid request after encoding failures");
+
+    assert_eq!(value, Value::Undefined);
+    assert_eq!(server.finish().len(), 1, "oversized requests must not be sent");
+}
+
+#[tokio::test]
+async fn posts_encode_after_admission() {
+    let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS + 2;
+    let mut server = ConcurrentCapabilityTestServer::start(request_count);
+    let budget = CapabilityBudget::new();
+    let client =
+        Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget).expect("active Tokio runtime");
+    let held_url = CapabilityUrl::parse(server.url("/held").as_str()).expect("valid held URL");
+    let post_url = CapabilityUrl::parse(server.url("/post").as_str()).expect("valid POST URL");
+    let mut held_requests = JoinSet::new();
+
+    for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
+        let client = client.clone();
+        let url = held_url.clone();
+        held_requests.spawn(async move { client.get_bytes_with_response_limit(&url, MAX_CAPABILITY_RESPONSE_BYTES).await });
+    }
+    for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
+        server.next_request().await;
+    }
+
+    let value_probe = SerializationProbe::default();
+    let bytes_probe = SerializationProbe::default();
+    let mut value_post = Box::pin(client.post_with_response_limit(&post_url, &value_probe, MAX_CAPABILITY_RESPONSE_BYTES));
+    let mut bytes_post = Box::pin(client.post_bytes_with_response_limit(&post_url, &bytes_probe, MAX_CAPABILITY_RESPONSE_BYTES));
+
+    assert!(poll_fn(|context| Poll::Ready(value_post.as_mut().poll(context))).await.is_pending());
+    assert!(poll_fn(|context| Poll::Ready(bytes_post.as_mut().poll(context))).await.is_pending());
+    assert_eq!(value_probe.count.load(Ordering::Relaxed), 0, "LLSD value POST must wait before serializing");
+    assert_eq!(bytes_probe.count.load(Ordering::Relaxed), 0, "raw body POST must wait before serializing");
+
+    server.release_response();
+    timeout(TEST_TIMEOUT, held_requests.join_next())
+        .await
+        .expect("a held request should finish")
+        .expect("one held request task")
+        .expect("held request task should succeed")
+        .expect("held request should return a body");
+    assert!(poll_fn(|context| Poll::Ready(value_post.as_mut().poll(context))).await.is_pending());
+    timeout(TEST_TIMEOUT, value_probe.serialized.notified()).await.expect("value POST should serialize after admission");
+    assert_eq!(value_probe.count.load(Ordering::Relaxed), 1);
+    server.next_request().await;
+
+    server.release_response();
+    timeout(TEST_TIMEOUT, held_requests.join_next())
+        .await
+        .expect("another held request should finish")
+        .expect("one held request task")
+        .expect("held request task should succeed")
+        .expect("held request should return a body");
+    assert!(poll_fn(|context| Poll::Ready(bytes_post.as_mut().poll(context))).await.is_pending());
+    timeout(TEST_TIMEOUT, bytes_probe.serialized.notified()).await.expect("raw body POST should serialize after admission");
+    assert_eq!(bytes_probe.count.load(Ordering::Relaxed), 1);
+    server.next_request().await;
+
+    server.finish();
+    timeout(TEST_TIMEOUT, async {
+        while let Some(request) = held_requests.join_next().await {
+            request.expect("held request task should finish").expect("held request should succeed");
+        }
+        value_post.await.expect("LLSD POST should succeed");
+        bytes_post.await.expect("raw body POST should succeed");
+    })
+    .await
+    .expect("admitted POSTs and held requests should finish");
 }
 
 #[tokio::test]

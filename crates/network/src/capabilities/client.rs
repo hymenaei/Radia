@@ -173,6 +173,7 @@ impl Client {
     {
         validate_response_limit(max_response_bytes)?;
         let deadline = RequestDeadline::new(self.request_timeout);
+        let permit = self.acquire_request_permit(deadline).await?;
         let body = encode_request(payload)?;
         if deadline.expired() {
             return Err(deadline.error());
@@ -181,7 +182,7 @@ impl Client {
         let url = url.clone();
         self.on_runtime(async move {
             let (response, permit) = client
-                .run_with_permit(deadline, |http, permit| async move {
+                .run_with_admitted_permit(deadline, permit, |http, permit| async move {
                     let response = post_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
                     Ok((response, permit))
                 })
@@ -209,6 +210,7 @@ impl Client {
     {
         validate_response_limit(max_response_bytes)?;
         let deadline = RequestDeadline::new(self.request_timeout);
+        let permit = self.acquire_request_permit(deadline).await?;
         let body = encode_request(payload)?;
         if deadline.expired() {
             return Err(deadline.error());
@@ -217,7 +219,7 @@ impl Client {
         let url = url.clone();
         self.on_runtime(async move {
             let (response, permit) = client
-                .run_with_permit(deadline, |http, permit| async move {
+                .run_with_admitted_permit(deadline, permit, |http, permit| async move {
                     let response = post_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
                     Ok((response, permit))
                 })
@@ -252,6 +254,19 @@ impl Client {
         Fut: Future<Output = Result<T, Error>>,
     {
         let permit = self.acquire_request_permit(deadline).await?;
+        self.run_with_admitted_permit(deadline, permit, operation).await
+    }
+
+    async fn run_with_admitted_permit<T, F, Fut>(
+        &self,
+        deadline: RequestDeadline,
+        permit: OwnedSemaphorePermit,
+        operation: F,
+    ) -> Result<T, Error>
+    where
+        F: FnOnce(http::Client, OwnedSemaphorePermit) -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
         self.race_request(deadline, operation(self.http.clone(), permit)).await
     }
 

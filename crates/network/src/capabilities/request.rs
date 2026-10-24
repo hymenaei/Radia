@@ -308,7 +308,7 @@ mod tests {
         status::NetworkStatusHandle,
     };
 
-    use super::super::budget::{MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS};
+    use crate::capabilities::budget::{MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS};
 
     #[tokio::test]
     async fn cancel_before_admission_releases_no_slot() {

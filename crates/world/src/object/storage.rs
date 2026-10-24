@@ -199,18 +199,10 @@ impl ObjectStore {
             .unwrap_or_default()
     }
 
-    pub(crate) fn removal_data(&mut self, entity: hecs::Entity) -> (Uuid, Kind, ObjectState, ObjectProperties, usize) {
-        let (record, properties, object_media) = self
-            .ecs
-            .query_one_mut::<(&ObjectRecord, Option<&ObjectProperties>, Option<&Fenced<Arc<ObjectMedia>>>)>(entity)
-            .expect("every object has a record");
-        (
-            record.id,
-            record.kind,
-            record.state,
-            properties.copied().unwrap_or_default(),
-            object_media.and_then(|component| component.value.as_deref()).map_or(0, ObjectMedia::retained_bytes),
-        )
+    pub(crate) fn removal_data(&mut self, entity: hecs::Entity) -> (Uuid, ObjectState, usize) {
+        let (record, object_media) =
+            self.ecs.query_one_mut::<(&ObjectRecord, Option<&Fenced<Arc<ObjectMedia>>>)>(entity).expect("every object has a record");
+        (record.id, record.state, object_media.and_then(|component| component.value.as_deref()).map_or(0, ObjectMedia::retained_bytes))
     }
 
     pub(crate) fn objects(&self) -> QueryBorrow<'_, (hecs::Entity, &ObjectRecord)> {

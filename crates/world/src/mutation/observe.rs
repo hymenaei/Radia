@@ -105,7 +105,6 @@ impl World {
         if let Some(displaced) = displaced {
             self.remove_entity(displaced, RemovalCause::AddressReplaced(origin.stamp), None, &mut effects);
         }
-        self.recent.remove(id);
         self.tombstones.remove(&address);
         let facets = facets.map(|changes| changes.after).unwrap_or_default();
         let entity = self.store.insert(ObjectRecord { id, kind, state }, facets, ordering);

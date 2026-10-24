@@ -60,7 +60,7 @@ Provides shared domain ID newtypes and small general-purpose helpers such as ato
 
 Owns accepted simulator state for regions, objects, relationships, poses, appearances, terrain, media, and environment. Mutations validate and plan before committing state and indexes. Full observations and partial patches share one field pipeline for validation, authority, and freshness; separate update clocks preserve untouched fields. PBR assignments remain distinct from face overrides. Agent handoff is an observation from the destination region that may move the self agent.
 
-Bounded reads and change history expose completeness and unresolved relationships. Ordered queries resume by cursor. Spatial queries report `ResultLimit` without a cursor, and expired history requires resynchronization.
+Bounded reads and change history expose current state, unresolved relationships, and whether more data is available. Consumers resynchronize when journal history has been evicted.
 
 ## Keeping this file sharp
 

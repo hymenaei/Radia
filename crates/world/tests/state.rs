@@ -672,7 +672,7 @@ proptest::proptest! {
 
     #[test]
     fn mutation_sequences_preserve_world_indexes(
-        operations in proptest::collection::vec((0_u8..6, 0_u8..3, 0_u8..16, 0_u8..8, 1_u8..32, 0_u8..9, 0_u8..32), 1..128)
+        operations in proptest::collection::vec((0_u8..5, 0_u8..3, 0_u8..16, 0_u8..8, 1_u8..32, 0_u8..9, 0_u8..32), 1..128)
     ) {
         let regions = [Region::new(700), Region::new(701), Region::new(702)];
         let mut world_limits = limits();
@@ -748,9 +748,7 @@ proptest::proptest! {
                     };
                     let _ = world.patch_object(patch).expect("apply valid attachment update");
                 }
-                _ => {
-                    let _ = world.maintain_query_state(usize::from(value as u8) + 1).expect("maintain generated query state");
-                }
+                5.. => panic!("operation generator is bounded to 0..5"),
             }
 
             proptest::prop_assert_eq!(world.check_invariants(), Ok(()));

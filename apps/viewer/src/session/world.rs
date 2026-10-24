@@ -5,9 +5,8 @@ use uuid::Uuid;
 use world::{
     Appearance, Applied, ApplyError,
     ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded},
-    EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, MAX_QUERY_STATE_MAINTENANCE_WORK,
-    ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, ParcelLocalId, Region, RegionApplied, RegionHandle, RegionInfo,
-    RegionOutcome, UpdateSource, World, WorldLimits,
+    EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
+    OrderEvidence, ParcelLocalId, Region, RegionApplied, RegionHandle, RegionInfo, RegionOutcome, UpdateSource, World, WorldLimits,
 };
 
 use super::{
@@ -24,7 +23,6 @@ const MAX_WORLD_JOURNAL_ENTRIES: usize = 4_096;
 const MAX_REGION_NAME_BYTES: usize = 256;
 const MAX_INGEST_DIAGNOSTIC_ADDRESSES: usize = 8;
 const MAX_OBJECTS_PER_INTAKE_QUANTUM: usize = 32;
-const QUERY_STATE_MAINTENANCE_WORK_PER_QUANTUM: usize = MAX_QUERY_STATE_MAINTENANCE_WORK / 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IngestStatus {
@@ -247,16 +245,6 @@ impl SessionWorld {
         self.world.observe_environment(target, source, assignment)
     }
 
-    pub(super) fn maintain_query_state(&mut self) -> bool {
-        match self.world.maintain_query_state(QUERY_STATE_MAINTENANCE_WORK_PER_QUANTUM) {
-            Ok(progress) => progress.dirty_scopes > 0,
-            Err(error) => {
-                tracing::warn!(?error, "could not maintain world query state");
-                false
-            }
-        }
-    }
-
     pub(super) fn set_self_agent(&mut self, simulator_id: SimulatorId, agent_id: Uuid) {
         let region = self.region_for(simulator_id).map(|region| region.get());
         if let Err(error) = self.world.set_self_agent(agent_id) {
@@ -422,7 +410,6 @@ impl SessionWorld {
             if empty {
                 break;
             }
-            self.maintain_query_state();
             if has_more {
                 tokio::task::yield_now().await;
             }

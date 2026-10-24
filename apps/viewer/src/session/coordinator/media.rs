@@ -307,7 +307,7 @@ mod tests {
         assert!(world.world().object(target.binding.entity()).is_none());
 
         let input = select_drain_input(&mut reads, pending(), media.next_result(), pending(), pending(), pending(), ready(())).await;
-        assert!(matches!(input, input::Input::QueryStateMaintenance));
+        assert!(matches!(input, input::Input::CameraTick));
         let input = select_drain_input(&mut reads, pending(), media.next_result(), pending(), pending(), ready(()), pending()).await;
         assert!(matches!(input, input::Input::Cancelled));
     }

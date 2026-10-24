@@ -7,7 +7,7 @@ mod presentation;
 
 pub(crate) use self::driver::{CredentialPersistence, drain_session};
 #[cfg(test)]
-use self::input::{next_query_state_maintenance_delay, select_drain_input};
+use self::input::{next_camera_tick_delay, select_drain_input};
 pub(crate) use self::persistence::{WriteLock, save_favorite_store, write_lock};
 pub(crate) use self::presentation::{
     AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionReadyUpdate, ViewerUpdate,
@@ -144,20 +144,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dirty_queries_back_off_repairs() {
-        let elapsed = Duration::from_millis(15);
-        assert_eq!(super::next_query_state_maintenance_delay(elapsed, false), Duration::from_millis(10));
-        assert_eq!(super::next_query_state_maintenance_delay(elapsed, true), Duration::from_millis(1));
-    }
-
     #[tokio::test(start_paused = true)]
-    async fn query_state_maintenance_keeps_phase() {
-        let maintenance_started = tokio::time::Instant::now().into_std();
-        let mut maintenance = ready(()).boxed().fuse();
+    async fn camera_tick_keeps_phase() {
+        let camera_tick_started = tokio::time::Instant::now().into_std();
+        let mut camera_tick = ready(()).boxed().fuse();
         let world = SessionWorld::new(viewer_world_limits());
         let mut reads = WorldReadHost::new(world.world(), Handle::current());
-        assert_eq!(super::next_query_state_maintenance_delay(Duration::ZERO, false), Duration::from_millis(25));
+        assert_eq!(super::next_camera_tick_delay(Duration::ZERO), Duration::from_millis(25));
 
         let result = super::select_drain_input(
             &mut reads,
@@ -166,16 +159,15 @@ mod tests {
             std::future::pending(),
             std::future::pending(),
             std::future::pending(),
-            &mut maintenance,
+            &mut camera_tick,
         )
         .await;
-        assert!(matches!(result, Input::QueryStateMaintenance));
+        assert!(matches!(result, Input::CameraTick));
 
         tokio::time::advance(Duration::from_millis(30)).await;
-        let delay =
-            super::next_query_state_maintenance_delay(tokio::time::Instant::now().into_std().duration_since(maintenance_started), false);
+        let delay = super::next_camera_tick_delay(tokio::time::Instant::now().into_std().duration_since(camera_tick_started));
         assert_eq!(delay, Duration::from_millis(20));
-        maintenance = tokio::time::sleep(delay).boxed().fuse();
+        camera_tick = tokio::time::sleep(delay).boxed().fuse();
         let simulator_id = simulator_id();
         let mut events = stream::iter([SimulatorConnected {
             simulator_id,
@@ -189,7 +181,7 @@ mod tests {
             std::future::pending(),
             std::future::pending(),
             std::future::pending(),
-            &mut maintenance,
+            &mut camera_tick,
         )
         .await;
         assert!(matches!(result, Input::Event(Some(_))));
@@ -201,16 +193,15 @@ mod tests {
             std::future::pending(),
             std::future::pending(),
             std::future::pending(),
-            &mut maintenance,
+            &mut camera_tick,
         )
         .await;
-        assert!(matches!(result, Input::QueryStateMaintenance));
+        assert!(matches!(result, Input::CameraTick));
 
         tokio::time::advance(Duration::from_millis(45)).await;
-        let delay =
-            super::next_query_state_maintenance_delay(tokio::time::Instant::now().into_std().duration_since(maintenance_started), false);
+        let delay = super::next_camera_tick_delay(tokio::time::Instant::now().into_std().duration_since(camera_tick_started));
         assert_eq!(delay, Duration::from_millis(5));
-        maintenance = tokio::time::sleep(delay).boxed().fuse();
+        camera_tick = tokio::time::sleep(delay).boxed().fuse();
         let result = super::select_drain_input(
             &mut reads,
             std::future::pending(),
@@ -218,11 +209,11 @@ mod tests {
             std::future::pending(),
             std::future::pending(),
             std::future::pending(),
-            &mut maintenance,
+            &mut camera_tick,
         )
         .await;
 
-        assert!(matches!(result, Input::QueryStateMaintenance));
+        assert!(matches!(result, Input::CameraTick));
     }
 
     pub(super) fn agent_update(agent_id: Uuid, local_id: u32, region_handle: u64) -> Message {

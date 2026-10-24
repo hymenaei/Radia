@@ -9,7 +9,7 @@ use world::{
     FieldUpdate,
     Kind::Object,
     MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_MEDIA_WHITELIST_ENTRIES, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_MEDIA_READ_BYTES,
-    MAX_QUERY_STATE_MAINTENANCE_WORK, MAX_SURFACE_FACES, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
+    MAX_SURFACE_FACES, MediaEntry, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
     OrderEvidence::Ordered,
     ParentUpdate::{Local, Root},
     Pose, Region, UpdateSource, World, WorldLimits,
@@ -59,12 +59,6 @@ fn world_memory_baseline() {
                 observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
                 observation.scale = Some(Vec3::ONE);
                 assert!(matches!(world.observe_object(observation).expect("insert benchmark object").outcome, Introduced(_)));
-            }
-            loop {
-                let maintenance = world.maintain_query_state(MAX_QUERY_STATE_MAINTENANCE_WORK).expect("maintain query state");
-                if maintenance.dirty_scopes == 0 {
-                    break;
-                }
             }
             world
         });

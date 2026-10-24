@@ -26,7 +26,7 @@ use world::UpdateSource;
 use super::{
     WriteLock,
     events::{SimulatorScope, WorldHandoff, handle_simulator_message, order_evidence, route_recovery_targets},
-    input::{Input, next_query_state_maintenance_delay, select_drain_input},
+    input::{Input, next_camera_tick_delay, select_drain_input},
     media::ObjectMediaIntake,
     presentation::{AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, SessionReadyUpdate, ViewerUpdate},
 };
@@ -84,8 +84,8 @@ struct SessionDriver {
     last_camera: Option<(SimulatorId, DVec3, Camera)>,
     camera_sent: Option<Instant>,
     region_lookup: Option<RegionLookup>,
-    query_state_maintenance_started: Instant,
-    query_state_maintenance: BoxFuture<'static, ()>,
+    camera_tick_started: Instant,
+    camera_tick: BoxFuture<'static, ()>,
     media: ObjectMediaIntake,
     recovery_queue: Arc<Mutex<RecoveryScheduler>>,
     recovery_wake: futures_mpsc::Sender<()>,
@@ -127,8 +127,8 @@ impl SessionDriver {
             ),
         );
 
-        let query_state_maintenance_started = tokio::time::Instant::now().into_std();
-        let query_state_maintenance = futures::future::ready(()).boxed();
+        let camera_tick_started = tokio::time::Instant::now().into_std();
+        let camera_tick = futures::future::ready(()).boxed();
 
         Self {
             session,
@@ -154,8 +154,8 @@ impl SessionDriver {
             last_camera: None,
             camera_sent: None,
             region_lookup: None,
-            query_state_maintenance_started,
-            query_state_maintenance,
+            camera_tick_started,
+            camera_tick,
             media,
             recovery_queue,
             recovery_wake,
@@ -175,7 +175,7 @@ impl SessionDriver {
                 self.terrain.next_completion(),
                 self.environments.next_completion(),
                 self.cancellation.clone(),
-                &mut self.query_state_maintenance,
+                &mut self.camera_tick,
             )
             .await;
             let flow = match input {
@@ -197,8 +197,8 @@ impl SessionDriver {
                     self.handle_world_read(request);
                     ControlFlow::Continue(())
                 }
-                Input::QueryStateMaintenance => {
-                    self.handle_maintenance();
+                Input::CameraTick => {
+                    self.handle_camera_tick();
                     ControlFlow::Continue(())
                 }
             };
@@ -227,7 +227,7 @@ impl SessionDriver {
         request.serve(self.session_world.world());
     }
 
-    fn handle_maintenance(&mut self) {
+    fn handle_camera_tick(&mut self) {
         if let (Some(simulator), Some(session), Some(view)) = (self.primary_simulator, &self.active_session, *self.observations.borrow())
             && let Some(origin) = self
                 .session_world
@@ -259,9 +259,8 @@ impl SessionDriver {
                 }
             }
         }
-        let has_dirty_pressure = self.session_world.maintain_query_state();
-        let elapsed = tokio::time::Instant::now().into_std().duration_since(self.query_state_maintenance_started);
-        self.query_state_maintenance = tokio::time::sleep(next_query_state_maintenance_delay(elapsed, has_dirty_pressure)).boxed();
+        let elapsed = tokio::time::Instant::now().into_std().duration_since(self.camera_tick_started);
+        self.camera_tick = tokio::time::sleep(next_camera_tick_delay(elapsed)).boxed();
     }
 
     fn handle_media_result(&mut self, result: Option<ObjectMediaResult>) {

@@ -1,5 +1,4 @@
 pub(crate) mod address;
-pub(crate) mod recent;
 
 use std::{
     collections::VecDeque,

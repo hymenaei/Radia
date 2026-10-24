@@ -553,7 +553,7 @@ fn stale_observation_fills_only_unset_groups() {
 }
 
 #[test]
-fn property_patch_independent_of_spatial() {
+fn property_patch_advances_revision() {
     let region = Region::new(16);
     let mut world = with_region(region);
     let created = world.observe_object(object(source(region, 1), 160, 1, Object, Root)).unwrap();

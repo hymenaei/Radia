@@ -1,4 +1,5 @@
 pub mod asset_coordinator;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) mod camera;
 pub mod gui;
 pub mod inventory;

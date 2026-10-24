@@ -1,105 +1,72 @@
-use std::fmt::{self, Display, Formatter};
-
-use network::Grid;
-use serde::{Deserialize, Serialize};
 #[cfg(target_os = "windows")]
-use serde_json::{from_str, to_string};
+mod backend {
+    use std::fmt::{self, Display, Formatter};
 
-#[cfg(target_os = "windows")]
-const SERVICE: &str = "radia.login";
+    use network::Grid;
+    use serde_json::{from_str, to_string};
 
-#[derive(Clone, Deserialize, Serialize)]
-pub(crate) struct RememberedLogin {
-    pub(crate) username: String,
-    pub(crate) password: String,
-    #[serde(default)]
-    pub(crate) mfa_hash: String,
-}
+    use super::RememberedLogin;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum CredentialStoreError {
-    Open(String),
-    Read(String),
-    InvalidSavedData(String),
-    Encode(String),
-    Save(String),
-    Remove(String),
-    #[cfg(not(target_os = "windows"))]
-    Unsupported,
-}
+    const SERVICE: &str = "radia.login";
 
-impl Display for CredentialStoreError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Open(detail) => write!(formatter, "Could not open Windows Credential Manager: {detail}"),
-            Self::Read(detail) => write!(formatter, "Could not read saved login: {detail}"),
-            Self::InvalidSavedData(detail) => write!(formatter, "Saved login data is invalid: {detail}"),
-            Self::Encode(detail) => write!(formatter, "Could not encode saved login: {detail}"),
-            Self::Save(detail) => write!(formatter, "Could not save login to Windows Credential Manager: {detail}"),
-            Self::Remove(detail) => write!(formatter, "Could not remove saved login: {detail}"),
-            #[cfg(not(target_os = "windows"))]
-            Self::Unsupported => formatter.write_str("Secure login storage is available on Windows only."),
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) enum CredentialStoreError {
+        Open(String),
+        Read(String),
+        InvalidSavedData(String),
+        Encode(String),
+        Save(String),
+        Remove(String),
+    }
+
+    impl Display for CredentialStoreError {
+        fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Open(detail) => write!(formatter, "Could not open Windows Credential Manager: {detail}"),
+                Self::Read(detail) => write!(formatter, "Could not read saved login: {detail}"),
+                Self::InvalidSavedData(detail) => write!(formatter, "Saved login data is invalid: {detail}"),
+                Self::Encode(detail) => write!(formatter, "Could not encode saved login: {detail}"),
+                Self::Save(detail) => write!(formatter, "Could not save login to Windows Credential Manager: {detail}"),
+                Self::Remove(detail) => write!(formatter, "Could not remove saved login: {detail}"),
+            }
         }
     }
-}
 
-impl std::error::Error for CredentialStoreError {}
+    impl std::error::Error for CredentialStoreError {}
 
-#[cfg(target_os = "windows")]
-pub(crate) fn load(grid: Grid) -> Result<Option<RememberedLogin>, CredentialStoreError> {
-    let entry = keyring::Entry::new(SERVICE, grid_key(grid)).map_err(|error| CredentialStoreError::Open(error.to_string()))?;
+    pub(crate) fn load(grid: Grid) -> Result<Option<RememberedLogin>, CredentialStoreError> {
+        let entry = keyring::Entry::new(SERVICE, grid_key(grid)).map_err(|error| CredentialStoreError::Open(error.to_string()))?;
 
-    match entry.get_password() {
-        Ok(value) => from_str(&value).map(Some).map_err(|error| CredentialStoreError::InvalidSavedData(error.to_string())),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(CredentialStoreError::Read(error.to_string())),
+        match entry.get_password() {
+            Ok(value) => from_str(&value).map(Some).map_err(|error| CredentialStoreError::InvalidSavedData(error.to_string())),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(CredentialStoreError::Read(error.to_string())),
+        }
     }
-}
 
-#[cfg(target_os = "windows")]
-pub(crate) fn save(grid: Grid, login: &RememberedLogin) -> Result<(), CredentialStoreError> {
-    let entry = keyring::Entry::new(SERVICE, grid_key(grid)).map_err(|error| CredentialStoreError::Open(error.to_string()))?;
-    let value = to_string(login).map_err(|error| CredentialStoreError::Encode(error.to_string()))?;
-    entry.set_password(&value).map_err(|error| CredentialStoreError::Save(error.to_string()))
-}
-
-#[cfg(target_os = "windows")]
-pub(crate) fn clear(grid: Grid) -> Result<(), CredentialStoreError> {
-    let entry = keyring::Entry::new(SERVICE, grid_key(grid)).map_err(|error| CredentialStoreError::Open(error.to_string()))?;
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(CredentialStoreError::Remove(error.to_string())),
+    pub(crate) fn save(grid: Grid, login: &RememberedLogin) -> Result<(), CredentialStoreError> {
+        let entry = keyring::Entry::new(SERVICE, grid_key(grid)).map_err(|error| CredentialStoreError::Open(error.to_string()))?;
+        let value = to_string(login).map_err(|error| CredentialStoreError::Encode(error.to_string()))?;
+        entry.set_password(&value).map_err(|error| CredentialStoreError::Save(error.to_string()))
     }
-}
 
-#[cfg(target_os = "windows")]
-fn grid_key(grid: Grid) -> &'static str {
-    match grid {
-        Grid::Agni => "agni",
-        Grid::Aditi => "aditi",
+    pub(crate) fn clear(grid: Grid) -> Result<(), CredentialStoreError> {
+        let entry = keyring::Entry::new(SERVICE, grid_key(grid)).map_err(|error| CredentialStoreError::Open(error.to_string()))?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(CredentialStoreError::Remove(error.to_string())),
+        }
     }
-}
 
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn load(_: Grid) -> Result<Option<RememberedLogin>, CredentialStoreError> {
-    Ok(None)
-}
+    fn grid_key(grid: Grid) -> &'static str {
+        match grid {
+            Grid::Agni => "agni",
+            Grid::Aditi => "aditi",
+        }
+    }
 
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn save(_: Grid, _: &RememberedLogin) -> Result<(), CredentialStoreError> {
-    Err(CredentialStoreError::Unsupported)
-}
-
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn clear(_: Grid) -> Result<(), CredentialStoreError> {
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn keyring_failure_is_typed() {
+    #[cfg(test)]
+    mod tests {
         use std::any::Any;
 
         use network::Grid;
@@ -118,14 +85,65 @@ mod tests {
             }
         }
 
-        keyring::set_default_credential_builder(Box::new(FailingCredentialBuilder));
+        #[test]
+        fn keyring_failure_is_typed() {
+            keyring::set_default_credential_builder(Box::new(FailingCredentialBuilder));
 
-        let error = match load(Grid::Agni) {
-            Err(error) => error,
-            Ok(_) => panic!("keyring access failure must be reported"),
-        };
+            let error = match load(Grid::Agni) {
+                Err(error) => error,
+                Ok(_) => panic!("keyring access failure must be reported"),
+            };
 
-        assert!(matches!(&error, CredentialStoreError::Open(_)));
-        assert!(error.to_string().starts_with("Could not open Windows Credential Manager:"));
+            std::assert_matches!(&error, CredentialStoreError::Open(_));
+            assert!(error.to_string().starts_with("Could not open Windows Credential Manager:"));
+        }
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod backend {
+    use std::fmt::{self, Display, Formatter};
+
+    use network::Grid;
+
+    use super::RememberedLogin;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub(crate) enum CredentialStoreError {
+        Unsupported,
+    }
+
+    impl Display for CredentialStoreError {
+        fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Unsupported => formatter.write_str("Secure login storage is available on Windows only."),
+            }
+        }
+    }
+
+    impl std::error::Error for CredentialStoreError {}
+
+    pub(crate) fn load(_: Grid) -> Result<Option<RememberedLogin>, CredentialStoreError> {
+        Ok(None)
+    }
+
+    pub(crate) fn save(_: Grid, _: &RememberedLogin) -> Result<(), CredentialStoreError> {
+        Err(CredentialStoreError::Unsupported)
+    }
+
+    pub(crate) fn clear(_: Grid) -> Result<(), CredentialStoreError> {
+        Ok(())
+    }
+}
+
+use serde::{Deserialize, Serialize};
+
+pub(crate) use backend::{CredentialStoreError, clear, load, save};
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct RememberedLogin {
+    pub(crate) username: String,
+    pub(crate) password: String,
+    #[serde(default)]
+    pub(crate) mfa_hash: String,
 }

@@ -1,4 +1,6 @@
 use std::{
+    error::Error,
+    fmt::{self, Display},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -16,13 +18,69 @@ pub(crate) struct EnvironmentCommand {
     pub(crate) push: EnvironmentPush,
 }
 
+#[derive(Debug)]
+pub(crate) enum EnvironmentQueueError {
+    Full,
+    Closed,
+}
+
+impl Display for EnvironmentQueueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Full => f.write_str("channel is full"),
+            Self::Closed => f.write_str("channel is closed"),
+        }
+    }
+}
+
+impl Error for EnvironmentQueueError {}
+
+impl From<mpsc::error::TrySendError<EnvironmentCommand>> for EnvironmentQueueError {
+    fn from(error: mpsc::error::TrySendError<EnvironmentCommand>) -> Self {
+        match error {
+            mpsc::error::TrySendError::Full(_) => Self::Full,
+            mpsc::error::TrySendError::Closed(_) => Self::Closed,
+        }
+    }
+}
+
+pub(crate) struct EnvironmentSender(mpsc::Sender<EnvironmentCommand>);
+
+impl EnvironmentSender {
+    pub(crate) fn try_send(&self, command: EnvironmentCommand) -> Result<(), EnvironmentQueueError> {
+        self.0.try_send(command).map_err(EnvironmentQueueError::from)
+    }
+
+    pub(crate) fn clear_region(&self, region: Region) -> Result<(), EnvironmentQueueError> {
+        let push = EnvironmentPush::Clear { experience: None, transition: Duration::ZERO };
+        self.try_send(EnvironmentCommand { region, push })
+    }
+
+    pub(crate) fn publish(
+        &self,
+        message: &Message,
+        agent: Uuid,
+        region: Region,
+        simulator: network::SimulatorId,
+    ) -> Result<(), EnvironmentQueueError> {
+        match decode(message, agent) {
+            Ok(Some(push)) => self.try_send(EnvironmentCommand { region, push }),
+            Ok(None) => Ok(()),
+            Err(_) => {
+                tracing::debug!(simulator = simulator.get(), region = region.get(), "invalid experience environment push");
+                Ok(())
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct EnvironmentInbox(Arc<Mutex<Option<mpsc::Receiver<EnvironmentCommand>>>>);
 
 impl EnvironmentInbox {
-    pub(crate) fn channel() -> (mpsc::Sender<EnvironmentCommand>, Self) {
+    pub(crate) fn channel() -> (EnvironmentSender, Self) {
         let (sender, receiver) = mpsc::channel(64);
-        (sender, Self(Arc::new(Mutex::new(Some(receiver)))))
+        (EnvironmentSender(sender), Self(Arc::new(Mutex::new(Some(receiver)))))
     }
 
     pub(crate) fn take(&self) -> Option<mpsc::Receiver<EnvironmentCommand>> {

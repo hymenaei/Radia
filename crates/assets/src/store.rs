@@ -479,6 +479,10 @@ impl DecodeInput {
 pub struct DecodeJob(DecodeInput);
 
 impl DecodeJob {
+    pub fn fail(self, failure: Failure) -> LoadCompletion {
+        self.0.fail(failure)
+    }
+
     pub fn run(self) -> LoadCompletion {
         let DecodeInput { job, source } = self.0;
         let result = match source {

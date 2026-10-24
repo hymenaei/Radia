@@ -88,7 +88,7 @@ pub(crate) fn bench(c: &mut Criterion) {
                         jobs.push(job);
                     }
                     for decode in std::mem::take(decodes) {
-                        store.complete(decode.run(), *now);
+                        store.complete(decode.fail(Failure::NotFound), *now);
                     }
                     let completed = jobs.len();
                     for job in jobs {
@@ -96,7 +96,7 @@ pub(crate) fn bench(c: &mut Criterion) {
                             LoadJob::Fetch(fetch) => store.complete(LoadJob::Fetch(fetch).fail(Failure::NotFound), *now),
                             LoadJob::Decode(input) => {
                                 let decode = store.start_decode(input).expect("benchmark decode admission");
-                                store.complete(decode.run(), *now);
+                                store.complete(decode.fail(Failure::NotFound), *now);
                             }
                         }
                     }

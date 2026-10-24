@@ -3689,8 +3689,8 @@ pub(crate) mod tests {
                         let active_count = active.fetch_add(1, Ordering::Relaxed) + 1;
                         maximum_active.fetch_max(active_count, Ordering::Relaxed);
                         thread::sleep(response_delay);
-                        let _ = stream.write_all(&response);
                         active.fetch_sub(1, Ordering::Relaxed);
+                        let _ = stream.write_all(&response);
                     }));
                 }
                 drop(request_sender);

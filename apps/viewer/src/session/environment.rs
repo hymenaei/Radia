@@ -239,7 +239,7 @@ impl EnvironmentIntake {
                             self.parcel(world, region, notice);
                         }
                         Ok(None) => {}
-                        Err(_) => {}
+                        Err(error) => tracing::debug!(?error, "invalid parcel environment notification"),
                     },
                     Message::RegionInfo(_) => self.queue(world, region, EnvironmentScope::Region),
                     _ => {}
@@ -257,7 +257,7 @@ impl EnvironmentIntake {
         match parcel_value(body) {
             Ok(Some(notice)) => self.parcel(world, region, notice),
             Ok(None) => {}
-            Err(_) => {}
+            Err(error) => tracing::debug!(?error, "invalid parcel environment notification"),
         }
     }
 

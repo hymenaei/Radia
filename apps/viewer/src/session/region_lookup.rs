@@ -14,7 +14,7 @@ use protocol::{
     messages::{
         MapBlockRequest, RegionHandleRequest,
         map::map_block_reply,
-        map::map_block_request::{self as map_block_request, PositionData},
+        map::map_block_request::{self, PositionData},
         region::region_handle_request::RequestBlock,
     },
 };

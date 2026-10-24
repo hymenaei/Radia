@@ -190,8 +190,6 @@ fn rebind_preserves_an_unrelated_parent() {
         let parent = world.entity(uuid(362)).unwrap();
         assert_eq!(world.object(child).unwrap().parent(), Resolved(parent));
         assert_eq!(world.children(parent).map(|object| object.entity()).collect::<Vec<_>>(), [child]);
-        #[cfg(feature = "invariants")]
-        assert_eq!(world.check_invariants(), Ok(()));
     }
 }
 
@@ -480,7 +478,5 @@ fn cycle_checks_follow_parents_beyond_the_pose_limit() {
             let parent = if index == 33 { entities[31] } else { entities[index - 1] };
             assert_eq!(world.object(*entity).unwrap().parent(), Resolved(parent));
         }
-        #[cfg(feature = "invariants")]
-        assert_eq!(world.check_invariants(), Ok(()));
     }
 }

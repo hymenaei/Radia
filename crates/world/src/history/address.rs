@@ -1,4 +1,4 @@
-#[cfg(feature = "invariants")]
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::{
     collections::{BTreeSet, HashMap},
@@ -7,10 +7,10 @@ use std::{
 
 use uuid::Uuid;
 
-#[cfg(feature = "invariants")]
+#[cfg(test)]
 use crate::RegionState;
 use crate::World;
-#[cfg(feature = "invariants")]
+#[cfg(test)]
 use crate::object::storage::ObjectStore;
 use crate::update::Stamp;
 use crate::{Applied, ApplyOutcome, DeferredReason, LocalAddress, Region, WorldLimits};
@@ -68,20 +68,24 @@ impl Tombstones {
     fn oldest_in_region(&self, region: Region) -> Option<(Stamp, NonZeroU32)> {
         self.oldest_by_region.get(&region)?.first().copied()
     }
+}
 
-    #[cfg(feature = "invariants")]
-    pub(crate) fn invariants_hold(&self, active_regions: &BTreeMap<Region, RegionState>, store: &ObjectStore) -> bool {
-        self.by_address.len() == self.oldest_by_region.values().map(BTreeSet::len).sum::<usize>()
-            && self.by_address.iter().all(|(address, stamp)| {
-                active_regions.contains_key(&address.region())
-                    && store.entity_at(*address).is_none()
-                    && self.oldest_by_region.get(&address.region()).is_some_and(|entries| entries.contains(&(*stamp, address.local_id())))
-            })
-            && self.oldest_by_region.iter().all(|(region, entries)| {
-                !entries.is_empty()
-                    && entries.iter().all(|(stamp, local_id)| self.by_address.get(&LocalAddress::new(*region, *local_id)) == Some(stamp))
-            })
-    }
+#[cfg(test)]
+pub(crate) fn tombstones_invariants_hold(
+    tombstones: &Tombstones,
+    active_regions: &BTreeMap<Region, RegionState>,
+    store: &ObjectStore,
+) -> bool {
+    tombstones.by_address.len() == tombstones.oldest_by_region.values().map(BTreeSet::len).sum::<usize>()
+        && tombstones.by_address.iter().all(|(address, stamp)| {
+            active_regions.contains_key(&address.region())
+                && store.entity_at(*address).is_none()
+                && tombstones.oldest_by_region.get(&address.region()).is_some_and(|entries| entries.contains(&(*stamp, address.local_id())))
+        })
+        && tombstones.oldest_by_region.iter().all(|(region, entries)| {
+            !entries.is_empty()
+                && entries.iter().all(|(stamp, local_id)| tombstones.by_address.get(&LocalAddress::new(*region, *local_id)) == Some(stamp))
+        })
 }
 
 impl World {

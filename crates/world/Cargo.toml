@@ -8,9 +8,6 @@ autobenches = false
 [lib]
 bench = false
 
-[features]
-invariants = []
-
 [lints]
 workspace = true
 

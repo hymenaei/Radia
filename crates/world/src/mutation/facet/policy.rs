@@ -147,10 +147,6 @@ macro_rules! define_facets {
                 )+
             }
 
-            #[cfg(feature = "invariants")]
-            pub(crate) fn components_valid(entry: EntityRef<'_>) -> bool {
-                true $(&& entry.get::<&Fenced<$ty>>().map_or(true, |component| component.is_stored()))+
-            }
         }
 
         impl FacetUpdates {
@@ -218,6 +214,11 @@ macro_rules! define_facets {
                     }
                 )+
             }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn components_valid(entry: EntityRef<'_>) -> bool {
+            true $(&& entry.get::<&Fenced<$ty>>().map_or(true, |component| component.is_stored()))+
         }
     };
 }

@@ -180,8 +180,6 @@ Each crate has one `main` benchmark target. Replace the package and Criterion fi
 - `cargo profile`: viewer profiling build with Tracy.
 - `cargo flamegraph`: requires a configured profiler backend; WSL2 may restrict Linux `perf`.
 
-Pass Criterion arguments only to Criterion benchmarks.
-
 ## Dependencies
 
 ```bash

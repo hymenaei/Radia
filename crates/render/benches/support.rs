@@ -2,7 +2,7 @@ use std::{f64::consts::PI, num::NonZeroU32, time::Instant};
 
 use math::{DVec3, Quat, Vec3};
 use render::scene::{
-    AssetChange, Budget, Camera, MeshJob, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView, Status,
+    AssetChange, Budget, Camera, Detail, MeshJob, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView, Status,
 };
 use utils::AssetId;
 use uuid::Uuid;
@@ -74,7 +74,7 @@ pub fn scene_world(count: usize, region_count: usize) -> (World, Vec<Row>) {
     (world, rows)
 }
 
-pub fn prim_job(shape: PrimShape, detail: render::scene::Detail) -> (Reconciler, MeshJob) {
+pub fn prim_job(shape: PrimShape, detail: Detail) -> (Reconciler, MeshJob) {
     let (mut world, rows) = scene_world(1, 1);
     let row = &rows[0];
     let mut patch = ObjectPatch::new(UpdateSource::new(row.region, 200_000, Ordered(200_000), 0), row.local_id);
@@ -170,14 +170,13 @@ pub fn settle(world: &World, expected_objects: usize) -> (Reconciler, SceneView,
 
 pub fn update_one_percent(world: &mut World, rows: &[Row], order: &mut u64, generation: u64) {
     let changed = (rows.len() / 100).max(1);
+    let offset = (generation % 2) as f32;
     for (index, row) in rows.iter().take(changed).enumerate() {
         let current = *order;
         *order += 1;
         let mut patch = ObjectPatch::new(UpdateSource::new(row.region, current as u32, Ordered(current), 0), row.local_id);
-        patch.pose = Some(Pose {
-            position: Some(Vec3::new(100.0 + generation as f32 + index as f32 / 100.0, 0.0, 0.0)),
-            rotation: Some(Quat::IDENTITY),
-        });
+        patch.pose =
+            Some(Pose { position: Some(Vec3::new(100.0 + offset + index as f32 / 100.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
         let _applied = world.patch_object(patch).expect("benchmark object update");
     }
 }
@@ -205,12 +204,12 @@ pub fn first_publish(reconciler: &mut Reconciler, view: &mut SceneView, world: &
     panic!("object update did not converge");
 }
 
-fn camera(detail: render::scene::Detail) -> Camera {
+fn camera(detail: Detail) -> Camera {
     let (distance, height) = match detail {
-        render::scene::Detail::Lowest => (10.0, 16),
-        render::scene::Detail::Low => (10.0, 80),
-        render::scene::Detail::Medium => (8.0, 256),
-        render::scene::Detail::High => (3.0, 256),
+        Detail::Lowest => (10.0, 16),
+        Detail::Low => (10.0, 80),
+        Detail::Medium => (8.0, 256),
+        Detail::High => (3.0, 256),
     };
     Camera::new(DVec3::new(0.0, 0.0, distance), -Vec3::Z, PI / 2.0, [height, height]).expect("benchmark camera")
 }

@@ -77,7 +77,7 @@ Do not add comments or doc comments to source, except a concise safety comment o
 
 ## Testing
 
-- Use [rust-testing](.agents\skills\rust-testing\SKILL.md) for all Rust test work.
+- Use [rust-testing](.agents/skills/rust-testing/SKILL.md) for all Rust test work.
 - Smallest proof first. Run tests and clippy for the crates you touched. Run the workspace-wide suite only when asked, because CI owns it.
 - Test behavior through public APIs. Skip tests that assert callback wiring or mirror the implementation.
 - Use property-based or stateful tests where operations interact (reordering, reparenting, stale updates, ID reuse). Generators must be domain-valid and failures reproducible.
@@ -94,10 +94,10 @@ Do not add comments or doc comments to source, except a concise safety comment o
 
 ## Documentation
 
-- [architecture.md](docs\architecture.md): high-level architecture, subsystem responsibilities, state ownership, data flow, crate boundaries, and dependencies.
-- [reference.md](docs\reference.md): guidance for consulting the official Second Life viewer, including which systems to study, which to reference only for behavior, and which implementations to ignore.
-- [tooling.md](docs\tooling.md): commands, testing, fuzzing, benchmarks, profiling, analysis.
-- [vision.md](docs\vision.md): product direction and architectural principles. Follow when making architectural and product decisions.
+- [architecture.md](docs/architecture.md): high-level architecture, subsystem responsibilities, state ownership, data flow, crate boundaries, and dependencies.
+- [reference.md](docs/reference.md): guidance for consulting the official Second Life viewer, including which systems to study, which to reference only for behavior, and which implementations to ignore.
+- [tooling.md](docs/tooling.md): commands, testing, fuzzing, benchmarks, profiling, analysis.
+- [vision.md](docs/vision.md): product direction and architectural principles. Follow when making architectural and product decisions.
 
 Durable architecture and decisions go in these docs. Do not describe crate layout or data flow in this file.
 

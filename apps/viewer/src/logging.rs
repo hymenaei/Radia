@@ -9,9 +9,10 @@ use std::{
 use chrono::{Duration, Local};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{
-    EnvFilter,
+    EnvFilter, Layer,
     fmt::{self, time::ChronoLocal},
-    prelude::*,
+    layer::SubscriberExt,
+    util::SubscriberInitExt,
 };
 
 const LOG_DIR: &str = "target/logs";

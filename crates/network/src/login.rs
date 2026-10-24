@@ -1,5 +1,3 @@
-pub use protocol::login::StartLocation;
-
 use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -19,12 +17,143 @@ use crate::{
     http::{Client, validate_http_url},
 };
 
+pub use protocol::login::StartLocation;
+
 const LOGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_LOGIN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LOGIN_XML_DEPTH: usize = 64;
 const MAX_CONCURRENT_LOGIN_OPERATIONS: usize = 2;
 
 static LOGIN_OPERATION_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+pub(crate) enum LoginError {
+    LoginUrlParse(url::ParseError),
+    InvalidLoginUrl(crate::http::Error),
+    RequestEncoding(login::Error),
+    OperationAdmissionTimeout(time::error::Elapsed),
+    OperationAdmissionUnavailable(tokio::sync::AcquireError),
+    HttpClient(reqwest::Error),
+    RequestTimeout(time::error::Elapsed),
+    Http(crate::http::Error),
+    InvalidUtf8(std::str::Utf8Error),
+    ResponseProcessingTimeout(time::error::Elapsed),
+    ResponseProcessing(tokio::task::JoinError),
+    GatewayHtmlError(StatusCode),
+    HtmlInsteadOfXmlRpc(StatusCode),
+    ProtocolResponse(login::Error),
+    ExcessiveNesting(StatusCode),
+    TooManyElements(StatusCode),
+    MalformedXmlRpc { error: login::Error, status: StatusCode, content_type: String },
+    NonSuccessHttpStatus { status: StatusCode, content_type: String },
+    Rejected { message: String, reason: String },
+    InvalidAuthenticatedData(AuthenticatedDataError),
+}
+
+impl fmt::Debug for LoginError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::LoginUrlParse(_) => "LoginUrlParse",
+            Self::InvalidLoginUrl(_) => "InvalidLoginUrl",
+            Self::RequestEncoding(_) => "RequestEncoding",
+            Self::OperationAdmissionTimeout(_) => "OperationAdmissionTimeout",
+            Self::OperationAdmissionUnavailable(_) => "OperationAdmissionUnavailable",
+            Self::HttpClient(_) => "HttpClient",
+            Self::RequestTimeout(_) => "RequestTimeout",
+            Self::Http(_) => "Http",
+            Self::InvalidUtf8(_) => "InvalidUtf8",
+            Self::ResponseProcessingTimeout(_) => "ResponseProcessingTimeout",
+            Self::ResponseProcessing(_) => "ResponseProcessing",
+            Self::GatewayHtmlError(_) => "GatewayHtmlError",
+            Self::HtmlInsteadOfXmlRpc(_) => "HtmlInsteadOfXmlRpc",
+            Self::ProtocolResponse(_) => "ProtocolResponse",
+            Self::ExcessiveNesting(_) => "ExcessiveNesting",
+            Self::TooManyElements(_) => "TooManyElements",
+            Self::MalformedXmlRpc { .. } => "MalformedXmlRpc",
+            Self::NonSuccessHttpStatus { .. } => "NonSuccessHttpStatus",
+            Self::Rejected { .. } => "Rejected { [REDACTED] }",
+            Self::InvalidAuthenticatedData(_) => "InvalidAuthenticatedData",
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum AuthenticatedDataError {
+    SimulatorIp,
+    SimulatorPort,
+    CapabilityUrl,
+}
+
+impl fmt::Display for LoginError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LoginUrlParse(error) => write!(formatter, "{error}"),
+            Self::InvalidLoginUrl(_) => formatter.write_str("The login server URL is invalid."),
+            Self::RequestEncoding(error) | Self::ProtocolResponse(error) => write!(formatter, "{error}"),
+            Self::OperationAdmissionTimeout(_) => {
+                formatter.write_str("Could not contact Second Life: the login operation exceeded its deadline while waiting for admission.")
+            }
+            Self::OperationAdmissionUnavailable(_) => {
+                formatter.write_str("Could not prepare the login request: login operation admission is unavailable.")
+            }
+            Self::HttpClient(error) => write!(formatter, "Could not prepare the login request: {error}"),
+            Self::RequestTimeout(_) => formatter.write_str("Could not contact Second Life: the login operation exceeded its deadline."),
+            Self::Http(error) => write!(formatter, "Could not contact Second Life: {error}"),
+            Self::InvalidUtf8(_) => formatter.write_str("Second Life returned an XML-RPC login response that is not valid UTF-8."),
+            Self::ResponseProcessingTimeout(_) => formatter.write_str("Second Life's login response exceeded the processing deadline."),
+            Self::ResponseProcessing(error) => write!(formatter, "Could not parse the Second Life login response: {error}"),
+            Self::GatewayHtmlError(status) => {
+                write!(formatter, "Second Life's login gateway returned an HTML error (HTTP {status}). Retry in a few minutes.")
+            }
+            Self::HtmlInsteadOfXmlRpc(status) => {
+                write!(formatter, "Second Life returned an HTML page instead of an XML-RPC login response (HTTP {status}).")
+            }
+            Self::ExcessiveNesting(status) => {
+                write!(formatter, "Second Life returned an XML-RPC login response with excessive nesting (HTTP {status}).")
+            }
+            Self::TooManyElements(status) => {
+                write!(formatter, "Second Life returned an XML-RPC login response with too many elements (HTTP {status}).")
+            }
+            Self::MalformedXmlRpc { status, content_type, .. } | Self::NonSuccessHttpStatus { status, content_type } => {
+                let content_type = if content_type.is_empty() { "no content type" } else { content_type };
+                write!(formatter, "Second Life returned an invalid XML-RPC login response (HTTP {status}, {content_type}).")
+            }
+            Self::Rejected { message, reason } => match (message.is_empty(), reason.is_empty()) {
+                (false, false) => write!(formatter, "{message} ({reason})"),
+                (false, true) => formatter.write_str(message),
+                (true, false) => formatter.write_str(reason),
+                (true, true) => formatter.write_str("Second Life rejected the login."),
+            },
+            Self::InvalidAuthenticatedData(error) => match error {
+                AuthenticatedDataError::SimulatorIp => formatter.write_str("Second Life returned an invalid sim_ip address."),
+                AuthenticatedDataError::SimulatorPort => formatter.write_str("Second Life returned an invalid simulator port."),
+                AuthenticatedDataError::CapabilityUrl => formatter.write_str("Second Life returned an invalid simulator capability URL."),
+            },
+        }
+    }
+}
+
+impl std::error::Error for LoginError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::LoginUrlParse(error) => Some(error),
+            Self::InvalidLoginUrl(error) | Self::Http(error) => Some(error),
+            Self::RequestEncoding(error) | Self::ProtocolResponse(error) => Some(error),
+            Self::OperationAdmissionTimeout(error) | Self::RequestTimeout(error) | Self::ResponseProcessingTimeout(error) => Some(error),
+            Self::OperationAdmissionUnavailable(error) => Some(error),
+            Self::HttpClient(error) => Some(error),
+            Self::InvalidUtf8(error) => Some(error),
+            Self::ResponseProcessing(error) => Some(error),
+            Self::MalformedXmlRpc { error, .. } => Some(error),
+            Self::GatewayHtmlError(_)
+            | Self::HtmlInsteadOfXmlRpc(_)
+            | Self::ExcessiveNesting(_)
+            | Self::TooManyElements(_)
+            | Self::NonSuccessHttpStatus { .. }
+            | Self::Rejected { .. }
+            | Self::InvalidAuthenticatedData(_) => None,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AgentSession {
@@ -128,19 +257,11 @@ pub(crate) async fn login_at_url(
     mfa_token: &str,
     mfa_hash: &str,
     login_url: &str,
-) -> Result<LoginResponse, String> {
-    let login_url = match Url::parse(login_url) {
-        Ok(url) => url,
-        Err(error) => {
-            let error = error.to_string();
-            return Err(error);
-        }
-    };
+) -> Result<LoginResponse, LoginError> {
+    let login_url = Url::parse(login_url).map_err(LoginError::LoginUrlParse)?;
     let result = login_request(credentials, mfa_token, mfa_hash, &login_url).await;
-    match &result {
-        Ok(LoginResponse::Authenticated { .. }) => {}
-        Ok(LoginResponse::MfaChallenge) => tracing::info!("Login response requires MFA"),
-        Err(_) => tracing::warn!("Login response rejected"),
+    if matches!(&result, Ok(LoginResponse::MfaChallenge)) {
+        tracing::info!("Login response requires MFA");
     }
     result
 }
@@ -151,13 +272,18 @@ pub(crate) async fn login_at(
     mfa_token: &str,
     mfa_hash: &str,
     login_url: &Url,
-) -> Result<LoginResponse, String> {
+) -> Result<LoginResponse, LoginError> {
     login_request(credentials, mfa_token, mfa_hash, login_url).await
 }
 
 #[tracing::instrument(name = "network.login.request", level = "debug", skip_all, fields(grid = ?credentials.grid))]
-async fn login_request(credentials: &LoginCredentials, mfa_token: &str, mfa_hash: &str, login_url: &Url) -> Result<LoginResponse, String> {
-    validate_http_url(login_url).map_err(|_| "The login server URL is invalid.".to_string())?;
+async fn login_request(
+    credentials: &LoginCredentials,
+    mfa_token: &str,
+    mfa_hash: &str,
+    login_url: &Url,
+) -> Result<LoginResponse, LoginError> {
+    validate_http_url(login_url).map_err(LoginError::InvalidLoginUrl)?;
     let body = login::Request {
         first_name: &credentials.first_name,
         last_name: &credentials.last_name,
@@ -176,76 +302,65 @@ async fn login_request(credentials: &LoginCredentials, mfa_token: &str, mfa_hash
         options: &["inventory-skeleton"],
     }
     .to_xml()
-    .map_err(|error| error.to_string())?;
+    .map_err(LoginError::RequestEncoding)?;
     let deadline = time::Instant::now() + LOGIN_REQUEST_TIMEOUT;
     let operation_permit = time::timeout_at(
         deadline,
         Arc::clone(LOGIN_OPERATION_SLOTS.get_or_init(|| Arc::new(Semaphore::new(MAX_CONCURRENT_LOGIN_OPERATIONS)))).acquire_owned(),
     )
     .await
-    .map_err(|_| "Could not contact Second Life: the login operation exceeded its deadline while waiting for admission.".to_string())?
-    .map_err(|_| "Could not prepare the login request: login operation admission is unavailable.".to_string())?;
+    .map_err(LoginError::OperationAdmissionTimeout)?
+    .map_err(LoginError::OperationAdmissionUnavailable)?;
     let client = Client::new(Some(LOGIN_REQUEST_TIMEOUT), true, Some(concat!("Radia/", env!("CARGO_PKG_VERSION"))))
-        .map_err(|error| format!("Could not prepare the login request: {error}"))?;
+        .map_err(LoginError::HttpClient)?;
     tracing::debug!("Login request started");
     let response =
         time::timeout_at(deadline, client.post("login", login_url, "text/xml", None, body.into_bytes(), MAX_LOGIN_RESPONSE_BYTES))
             .await
-            .map_err(|_| "Could not contact Second Life: the login operation exceeded its deadline.".to_string())?
-            .map_err(|error| format!("Could not contact Second Life: {error}"))?;
+            .map_err(LoginError::RequestTimeout)?
+            .map_err(LoginError::Http)?;
     let status = response.status;
     let content_type = response.headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default().to_owned();
     let crate::http::Response { body, .. } = response;
     let parse = spawn_blocking_with_permit(operation_permit, move || {
-        from_utf8(&body)
-            .map_err(|_| "Second Life returned an XML-RPC login response that is not valid UTF-8.".to_string())
-            .and_then(|body| parse_login_response(body, status, &content_type))
+        from_utf8(&body).map_err(LoginError::InvalidUtf8).and_then(|body| parse_login_response(body, status, &content_type))
     });
-    let (response, _operation_permit) = time::timeout_at(deadline, parse)
-        .await
-        .map_err(|_| "Second Life's login response exceeded the processing deadline.".to_string())?
-        .map_err(|error| format!("Could not parse the Second Life login response: {error}"))?;
+    let (response, _operation_permit) =
+        time::timeout_at(deadline, parse).await.map_err(LoginError::ResponseProcessingTimeout)?.map_err(LoginError::ResponseProcessing)?;
     let response = response?;
 
     match response {
         login::Response::MfaChallenge => Ok(LoginResponse::MfaChallenge),
-        login::Response::Rejected { message, reason } => Err(match (message.is_empty(), reason.is_empty()) {
-            (false, false) => format!("{message} ({reason})"),
-            (false, true) => message,
-            (true, false) => reason,
-            (true, true) => "Second Life rejected the login.".into(),
-        }),
+        login::Response::Rejected { message, reason } => Err(LoginError::Rejected { message, reason }),
         login::Response::Authenticated(value) => authenticated_response(*value, credentials),
     }
 }
 
-fn parse_login_response(body: &str, status: StatusCode, content_type: &str) -> Result<login::Response, String> {
+fn parse_login_response(body: &str, status: StatusCode, content_type: &str) -> Result<login::Response, LoginError> {
     let body_start = body.trim_start();
     let is_html = has_ascii_prefix(body_start, b"<!doctype html")
         || has_ascii_prefix(body_start, b"<html")
         || content_type.split(';').next().is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("text/html"));
     if is_html && contains_ascii_case_insensitive(body.as_bytes(), b"errors.edgesuite.net") {
-        return Err(format!("Second Life's login gateway returned an HTML error (HTTP {status}). Retry in a few minutes."));
+        return Err(LoginError::GatewayHtmlError(status));
     }
     if is_html {
-        return Err(format!("Second Life returned an HTML page instead of an XML-RPC login response (HTTP {status})."));
+        return Err(LoginError::HtmlInsteadOfXmlRpc(status));
     }
     match login::Response::from_xml(body, MAX_LOGIN_XML_DEPTH) {
-        Err(login::Error::Fault(fault)) => return Err(fault.to_string()),
-        Err(login::Error::DepthExceeded) => {
-            return Err(format!("Second Life returned an XML-RPC login response with excessive nesting (HTTP {status})."));
-        }
-        Err(login::Error::ElementLimitExceeded) => {
-            return Err(format!("Second Life returned an XML-RPC login response with too many elements (HTTP {status})."));
-        }
+        Err(error @ login::Error::Fault(_)) => return Err(LoginError::ProtocolResponse(error)),
+        Err(login::Error::DepthExceeded) => return Err(LoginError::ExcessiveNesting(status)),
+        Err(login::Error::ElementLimitExceeded) => return Err(LoginError::TooManyElements(status)),
         Ok(response) if status.is_success() => return Ok(response),
-        Err(error) if status.is_success() && !matches!(error, login::Error::InvalidXml) => return Err(error.to_string()),
-        _ => {}
+        Err(error) if status.is_success() && !matches!(error, login::Error::InvalidXml) => {
+            return Err(LoginError::ProtocolResponse(error));
+        }
+        Err(error) => {
+            return Err(LoginError::MalformedXmlRpc { error, status, content_type: content_type.to_owned() });
+        }
+        Ok(_) => {}
     }
-    Err(format!(
-        "Second Life returned an invalid XML-RPC login response (HTTP {status}, {}).",
-        if content_type.is_empty() { "no content type" } else { content_type }
-    ))
+    Err(LoginError::NonSuccessHttpStatus { status, content_type: content_type.to_owned() })
 }
 
 fn has_ascii_prefix(value: &str, prefix: &[u8]) -> bool {
@@ -266,17 +381,17 @@ fn platform_name() -> &'static str {
     }
 }
 
-fn authenticated_response(value: login::Authenticated, credentials: &LoginCredentials) -> Result<LoginResponse, String> {
+fn authenticated_response(value: login::Authenticated, credentials: &LoginCredentials) -> Result<LoginResponse, LoginError> {
     let ip = value.simulator_address.ip();
     if ip.is_unspecified() || ip.is_multicast() || ip == IpAddr::V4(Ipv4Addr::BROADCAST) {
-        return Err("Second Life returned an invalid sim_ip address.".into());
+        return Err(LoginError::InvalidAuthenticatedData(AuthenticatedDataError::SimulatorIp));
     }
     if value.simulator_address.port() == 0 {
-        return Err("Second Life returned an invalid simulator port.".into());
+        return Err(LoginError::InvalidAuthenticatedData(AuthenticatedDataError::SimulatorPort));
     }
     let seed_capability =
-        Url::parse(&value.seed_capability).map_err(|_| "Second Life returned an invalid simulator capability URL.".to_string())?;
-    validate_http_url(&seed_capability).map_err(|_| "Second Life returned an invalid simulator capability URL.".to_string())?;
+        Url::parse(&value.seed_capability).map_err(|_| LoginError::InvalidAuthenticatedData(AuthenticatedDataError::CapabilityUrl))?;
+    validate_http_url(&seed_capability).map_err(|_| LoginError::InvalidAuthenticatedData(AuthenticatedDataError::CapabilityUrl))?;
     let session = AgentSession {
         first_name: value.first_name.unwrap_or_else(|| credentials.first_name.clone()),
         last_name: value.last_name.unwrap_or_else(|| credentials.last_name.clone()),
@@ -310,6 +425,24 @@ mod tests {
     const AGENT_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
     const SESSION_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
     const FOLDER_ID: &str = "12345678-1234-5678-1234-567812345678";
+
+    #[test]
+    fn http_error_keeps_source() {
+        let error = super::LoginError::Http(crate::http::Error::resource_exhausted("response too large"));
+
+        let source = std::error::Error::source(&error).expect("HTTP error should remain the source");
+        assert_eq!(source.to_string(), "response too large");
+        assert_eq!(error.to_string(), "Could not contact Second Life: response too large");
+    }
+
+    #[test]
+    fn rejected_debug_redacts_text() {
+        let error = super::LoginError::Rejected { message: "private grid message".into(), reason: "private reason".into() };
+
+        assert!(!format!("{error:?}").contains("private grid message"));
+        assert!(!format!("{error:?}").contains("private reason"));
+        assert_eq!(error.to_string(), "private grid message (private reason)");
+    }
 
     #[tokio::test]
     async fn local_login_succeeds() {
@@ -398,7 +531,8 @@ mod tests {
         let error = login_at(&credentials(), "", "", &url).await.expect_err("local grid should reject this login");
         server.finish();
 
-        assert_eq!(error, "Credentials were rejected (login)");
+        std::assert_matches!(&error, super::LoginError::Rejected { .. });
+        assert_eq!(error.to_string(), "Credentials were rejected (login)");
     }
 
     #[tokio::test]
@@ -406,13 +540,15 @@ mod tests {
         let fault = "<methodResponse><fault><value><struct><member><name>faultCode</name><value><int>7</int></value></member><member><name>faultString</name><value><string>Denied</string></value></member></struct></value></fault></methodResponse>";
         let server = LocalServer::start(vec![response(500, "Error", "text/xml", None, fault)]);
         let error = login_at(&credentials(), "", "", &server.url("/login.cgi")).await.expect_err("XML-RPC fault on HTTP error");
-        assert_eq!(error, "Server Fault 7: Denied");
+        std::assert_matches!(&error, super::LoginError::ProtocolResponse(login::Error::Fault(_)));
+        assert_eq!(error.to_string(), "Server Fault 7: Denied");
         assert_eq!(server.finish().len(), 1);
 
         let body = successful_response("<string>127.0.0.1</string>");
         let server = LocalServer::start(vec![response(500, "Error", "text/xml", None, &body)]);
         let error = login_at(&credentials(), "", "", &server.url("/login.cgi")).await.expect_err("HTTP failure cannot authenticate");
-        assert!(error.contains("invalid XML-RPC login response (HTTP 500"));
+        std::assert_matches!(&error, super::LoginError::NonSuccessHttpStatus { .. });
+        assert!(error.to_string().contains("invalid XML-RPC login response (HTTP 500"));
         assert_eq!(server.finish().len(), 1);
     }
 
@@ -430,7 +566,8 @@ mod tests {
         let error = login_at(&credentials(), "", "", &server.url("/login.cgi")).await.expect_err("invalid UTF-8 must be rejected");
         server.finish();
 
-        assert_eq!(error, "Second Life returned an XML-RPC login response that is not valid UTF-8.");
+        std::assert_matches!(&error, super::LoginError::InvalidUtf8(_));
+        assert_eq!(error.to_string(), "Second Life returned an XML-RPC login response that is not valid UTF-8.");
     }
 
     #[tokio::test]
@@ -443,7 +580,8 @@ mod tests {
         let error = login_at(&credentials(), "", "", &server.url("/login.cgi")).await.expect_err("deep XML must be rejected");
         server.finish();
 
-        assert!(error.contains("excessive nesting"));
+        std::assert_matches!(&error, super::LoginError::ExcessiveNesting(reqwest::StatusCode::OK));
+        assert!(error.to_string().contains("excessive nesting"));
     }
 
     #[tokio::test]
@@ -467,7 +605,7 @@ mod tests {
             ("inventory-skeleton", &inventory),
         ]);
 
-        let (parsed, retained_bytes, peak_bytes, elapsed_ns): (Result<login::Response, String>, i128, i128, u128) =
+        let (parsed, retained_bytes, peak_bytes, elapsed_ns): (Result<login::Response, super::LoginError>, i128, i128, u128) =
             crate::capabilities::measure_allocations(|| super::parse_login_response(&body, reqwest::StatusCode::OK, "text/xml"));
         let parsed = parsed.expect("crowded login response should decode");
         let login::Response::Authenticated(parsed) = parsed else { panic!("expected authenticated response") };
@@ -503,7 +641,8 @@ mod tests {
             let error = login_at(&credentials(), "", "", &url).await.expect_err("simulator IP must be unicast");
             server.finish();
 
-            assert_eq!(error, "Second Life returned an invalid sim_ip address.");
+            std::assert_matches!(&error, super::LoginError::InvalidAuthenticatedData(super::AuthenticatedDataError::SimulatorIp));
+            assert_eq!(error.to_string(), "Second Life returned an invalid sim_ip address.");
         }
     }
 
@@ -524,7 +663,8 @@ mod tests {
         let error = login_at(&credentials(), "", "", &url).await.expect_err("port zero cannot identify a simulator endpoint");
         server.finish();
 
-        assert_eq!(error, "Second Life returned an invalid simulator port.");
+        std::assert_matches!(&error, super::LoginError::InvalidAuthenticatedData(super::AuthenticatedDataError::SimulatorPort));
+        assert_eq!(error.to_string(), "Second Life returned an invalid simulator port.");
     }
 
     #[tokio::test]
@@ -536,7 +676,8 @@ mod tests {
         let error = login_at(&credentials(), "", "", &url).await.expect_err("out-of-range simulator IP must be rejected");
         server.finish();
 
-        assert_eq!(error, "Second Life returned an invalid sim_ip address.");
+        std::assert_matches!(&error, super::LoginError::ProtocolResponse(login::Error::InvalidField("sim_ip")));
+        assert_eq!(error.to_string(), "Second Life returned an invalid sim_ip address.");
     }
 
     #[tokio::test]
@@ -566,9 +707,9 @@ mod tests {
         let requests = server.finish();
 
         assert_eq!(requests.len(), 1, "an ambiguous gateway response must not replay login or MFA credentials");
-        assert!(error.contains("HTTP 503"));
-        assert!(!error.contains("after 3 attempts"));
-        assert!(!error.contains("<html>"));
+        assert!(error.to_string().contains("HTTP 503"));
+        assert!(!error.to_string().contains("after 3 attempts"));
+        assert!(!error.to_string().contains("<html>"));
     }
 
     #[test]
@@ -580,7 +721,8 @@ mod tests {
         )
         .expect_err("gateway HTML should be identified without normalizing the whole body");
 
-        assert!(error.contains("login gateway returned an HTML error (HTTP 503"));
+        std::assert_matches!(&error, super::LoginError::GatewayHtmlError(reqwest::StatusCode::SERVICE_UNAVAILABLE));
+        assert!(error.to_string().contains("login gateway returned an HTML error (HTTP 503"));
     }
 
     #[test]
@@ -589,7 +731,8 @@ mod tests {
         let error = super::parse_login_response(&body, reqwest::StatusCode::OK, "text/xml")
             .expect_err("excessive element counts are rejected before XML-RPC deserialization");
 
-        assert!(error.contains("too many elements"), "unexpected parser error: {error}");
+        std::assert_matches!(&error, super::LoginError::TooManyElements(reqwest::StatusCode::OK));
+        assert!(error.to_string().contains("too many elements"), "unexpected parser error: {error}");
     }
 
     #[test]

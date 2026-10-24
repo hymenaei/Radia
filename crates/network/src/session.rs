@@ -33,7 +33,7 @@ use crate::{
         CLIENT_EVENT_CAPACITY, Event, EventEnvelope, EventSendOutcome, PRIMARY_TERMINAL_EVENT_CAPACITY, SimulatorId, send_client_event,
         send_failure_event,
     },
-    login::{LoginResponse, login_at_url},
+    login::{LoginError, LoginResponse, login_at_url},
     simulator::{CoordinatorError, SimulatorCoordinator, SimulatorCoordinatorOptions},
     transport::lludp::Delivery,
 };
@@ -46,14 +46,14 @@ const MAX_OUTBOUND_OBJECT_REQUESTS: usize = u8::MAX as usize;
 
 #[derive(Debug)]
 enum SessionError {
-    Login(String),
+    Login(LoginError),
     Simulator(CoordinatorError),
 }
 
 impl fmt::Display for SessionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Login(error) => formatter.write_str(error),
+            Self::Login(error) => write!(formatter, "{error}"),
             Self::Simulator(error) => error.fmt(formatter),
         }
     }
@@ -62,7 +62,7 @@ impl fmt::Display for SessionError {
 impl StdError for SessionError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            Self::Login(_) => None,
+            Self::Login(error) => Some(error),
             Self::Simulator(error) => Some(error),
         }
     }

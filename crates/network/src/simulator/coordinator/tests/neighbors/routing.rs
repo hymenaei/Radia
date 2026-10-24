@@ -122,11 +122,9 @@ async fn replacing_neighbor_releases_queued_state() {
     let (capability_events, _capability_event_receiver) = mpsc::channel(8);
     let mut setup =
         PromotionSetup { state: &mut run_state, neighbor_requests, application_events, neighbor_events, shutdown, capability_events };
+    let root_simulator_id = connection.simulator_id;
 
-    connection
-        .start_neighbor(connection.simulator_id, region_handle, old_endpoint, None, &mut setup)
-        .await
-        .expect("start initial neighbor");
+    connection.start_neighbor(root_simulator_id, region_handle, old_endpoint, None, &mut setup).await.expect("start initial neighbor");
     let _ = receive(&old_neighbor).await;
     let old_id = setup.state.neighbor_connections.get(&region_handle).expect("old neighbor is tracked").simulator_id;
 
@@ -148,7 +146,7 @@ async fn replacing_neighbor_releases_queued_state() {
     assert!(packet_memory.global_available_bytes() < MAX_QUEUED_SIMULATOR_EVENT_BYTES);
 
     connection
-        .start_neighbor(connection.simulator_id, region_handle, new_endpoint, None, &mut setup)
+        .start_neighbor(root_simulator_id, region_handle, new_endpoint, None, &mut setup)
         .await
         .expect("replace unannounced neighbor");
     let _ = receive(&new_neighbor).await;

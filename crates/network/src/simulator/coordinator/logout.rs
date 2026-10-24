@@ -5,7 +5,7 @@ use tokio::{
     time::{self, Instant},
 };
 
-use super::{CoordinatorError, LOGOUT_TIMEOUT, SimulatorCoordinator};
+use super::{CoordinatorError, CoordinatorRuntime, CoordinatorState, LOGOUT_TIMEOUT, RuntimeAction};
 use crate::error::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,7 +70,7 @@ fn logout_completion_error(error: Error) -> LogoutAttemptError {
     }
 }
 
-impl SimulatorCoordinator {
+impl CoordinatorState {
     pub(super) async fn disconnect_once(&mut self, logout_already_sent: bool) -> Result<LogoutOutcome, CoordinatorError> {
         tracing::info!(logout_already_sent, "simulator disconnect started");
         self.finish_pending_logout().await?;
@@ -161,8 +161,45 @@ impl SimulatorCoordinator {
     }
 }
 
+impl CoordinatorRuntime<'_> {
+    pub(super) async fn handle_disconnect_changed(&mut self) -> Result<RuntimeAction, CoordinatorError> {
+        self.coordinator.graceful_disconnect(self.coordinator.logout_request_sent).await?;
+        Ok(RuntimeAction::Exit(Ok(())))
+    }
+
+    pub(super) fn handle_primary_logout_completed(
+        &mut self,
+        result: Result<(), LogoutAttemptError>,
+    ) -> Result<RuntimeAction, CoordinatorError> {
+        self.coordinator.pending_primary_logout = None;
+        self.coordinator.apply_logout_attempt_result(result)?;
+        Ok(RuntimeAction::Continue)
+    }
+
+    pub(super) async fn handle_logout_deadline(&mut self) -> Result<RuntimeAction, CoordinatorError> {
+        self.coordinator.finish_pending_logout().await?;
+        if *self.disconnect_requested.borrow() {
+            self.coordinator.neighbor_cancellation.send_replace(true);
+            return Ok(RuntimeAction::Exit(Ok(())));
+        }
+        Ok(RuntimeAction::Exit(finish_coordinator_logout(self.run_state.disconnect_reason)))
+    }
+
+    pub(super) async fn handle_event_receiver_closed(&mut self) -> Result<RuntimeAction, CoordinatorError> {
+        self.coordinator.graceful_disconnect(false).await?;
+        Ok(RuntimeAction::Exit(Ok(())))
+    }
+}
+
 pub(super) fn finish_logout(reason: Option<&'static str>) -> Option<&'static str> {
     reason
+}
+
+pub(super) fn finish_coordinator_logout(reason: Option<&'static str>) -> Result<(), CoordinatorError> {
+    match finish_logout(reason) {
+        Some(reason) => Err(CoordinatorError::ShutdownReason(reason)),
+        None => Ok(()),
+    }
 }
 
 pub(super) async fn send_logout_with_deadline(

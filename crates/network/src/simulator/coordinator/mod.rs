@@ -12,6 +12,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     num::NonZeroU64,
+    ops::{Deref, DerefMut},
     time::Duration,
 };
 
@@ -19,7 +20,7 @@ use llsd::Value;
 use protocol::{lludp::Message, login::ResponseData};
 use tokio::{
     sync::{mpsc, oneshot, watch},
-    task::{AbortHandle, Id, JoinSet},
+    task::{AbortHandle, Id, JoinError, JoinSet},
     time::{self, Instant},
 };
 use url::Url;
@@ -47,8 +48,9 @@ use handoff::{
     decode_event_teleport_finish, is_teleport_cancel, teleport_failure_matches,
 };
 use logout::{LogoutUnavailable, PendingLogout, finish_logout};
-use neighbors::{is_current_neighbor, neighbor_completion_event, neighbor_event_queue_failure};
-use runtime::CoordinatorRuntime;
+#[cfg(test)]
+use neighbors::{neighbor_completion_event, neighbor_event_queue_failure};
+use runtime::{CoordinatorRuntime, RuntimeAction};
 use startup::SessionStartup;
 
 pub(crate) use error::CoordinatorError;
@@ -69,6 +71,7 @@ const EVENT_BACKLOG_DISCONNECT_REASON: &str = "The simulator connection closed b
 const NEIGHBOR_PRECONNECT_OVERFLOW_REASON: &str = "The neighbor simulator exceeded its bounded pre-connect event buffer.";
 
 type ConnectionTaskResult = (SimulatorId, Option<u64>, SocketAddr, SimulatorTaskOutcome);
+type NeighborEventQueueJoin = Option<Result<(Id, (SimulatorId, SocketAddr, EventQueueExit)), JoinError>>;
 
 struct ConnectionQueueFailure {
     error: Error,
@@ -224,14 +227,16 @@ pub(crate) struct SimulatorCoordinatorOptions {
 }
 
 pub(crate) struct SimulatorCoordinator {
+    coordinator: CoordinatorState,
+    runtime_inputs: CoordinatorRuntimeInputs,
+}
+
+pub(crate) struct CoordinatorState {
     simulator_id: SimulatorId,
     primary: PrimaryRoute,
     root_connection_abort: Option<AbortHandle>,
     neighbor_events: mpsc::Sender<SimulatorEvent>,
-    neighbor_event_receiver: Option<mpsc::Receiver<SimulatorEvent>>,
     neighbor_requests: mpsc::Sender<SimulatorRequest>,
-    neighbor_request_receiver: Option<mpsc::Receiver<SimulatorRequest>>,
-    root_connection_workers: Option<JoinSet<ConnectionTaskResult>>,
     neighbor_cancellation: watch::Sender<bool>,
     root_connection_failed: bool,
     logout_request_sent: bool,
@@ -250,7 +255,27 @@ pub(crate) struct SimulatorCoordinator {
     handoff_generation: Option<u64>,
 }
 
-impl Drop for SimulatorCoordinator {
+pub(super) struct CoordinatorRuntimeInputs {
+    neighbor_event_receiver: mpsc::Receiver<SimulatorEvent>,
+    neighbor_request_receiver: mpsc::Receiver<SimulatorRequest>,
+    root_connection_workers: JoinSet<ConnectionTaskResult>,
+}
+
+impl Deref for SimulatorCoordinator {
+    type Target = CoordinatorState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.coordinator
+    }
+}
+
+impl DerefMut for SimulatorCoordinator {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.coordinator
+    }
+}
+
+impl Drop for CoordinatorState {
     fn drop(&mut self) {
         self.neighbor_cancellation.send_replace(true);
         self.coverage_losses.retire(self.simulator_id, CoverageSource::Lludp);
@@ -258,7 +283,7 @@ impl Drop for SimulatorCoordinator {
     }
 }
 
-impl SimulatorCoordinator {
+impl CoordinatorState {
     fn promote_primary(&mut self, next: PrimaryRoute, role_generation: u64) {
         self.primary.memory.promote_to(&next.memory);
         self.primary.state.send_replace(PrimaryState::Neighbor { generation: role_generation });
@@ -277,7 +302,9 @@ impl SimulatorCoordinator {
         self.handoff_generation = Some(generation);
         NonZeroU64::new(generation).map(HandoffGeneration::new)
     }
+}
 
+impl SimulatorCoordinator {
     #[tracing::instrument(name = "simulator.connect", level = "info", skip_all)]
     pub(crate) async fn connect(
         session: AgentSession,
@@ -288,30 +315,51 @@ impl SimulatorCoordinator {
     }
 
     pub(crate) async fn run(
-        mut self,
+        self,
         commands: mpsc::Receiver<Command>,
         events: mpsc::Sender<EventEnvelope>,
         disconnect_requested: watch::Receiver<bool>,
         terminal_event_permit: mpsc::OwnedPermit<EventEnvelope>,
     ) -> Result<(), CoordinatorError> {
-        let simulator_id = self.simulator_id;
-        let result = self.run_inner(commands, events, disconnect_requested).await;
-        if let Some(outbound_budget) = self.outbound_budget.take() {
+        let Self { mut coordinator, runtime_inputs } = self;
+        let simulator_id = coordinator.simulator_id;
+        let result = match CoordinatorRuntime::start(&mut coordinator, runtime_inputs, commands, events, disconnect_requested).await {
+            Ok(mut runtime) => {
+                let result = runtime.run().await;
+                runtime.shutdown().await;
+                result
+            }
+            Err(error) => Err(error),
+        };
+        if let Some(outbound_budget) = coordinator.outbound_budget.take() {
             outbound_budget.shutdown().await;
         }
-        self.finish_capability_request_waiters().await;
-        if !self.root_connection_failed || self.primary.simulator_id != simulator_id {
-            Self::publish_primary_terminal_event(
+        coordinator.finish_capability_request_waiters().await;
+        if !coordinator.root_connection_failed || coordinator.primary.simulator_id != simulator_id {
+            CoordinatorState::publish_primary_terminal_event(
                 terminal_event_permit,
-                self.primary.simulator_id,
-                self.primary.region_handle,
-                self.primary.endpoint,
+                coordinator.primary.simulator_id,
+                coordinator.primary.region_handle,
+                coordinator.primary.endpoint,
                 &result,
             );
         }
         result
     }
 
+    #[cfg(test)]
+    fn publish_primary_terminal_event(
+        permit: mpsc::OwnedPermit<EventEnvelope>,
+        simulator_id: SimulatorId,
+        region_handle: Option<u64>,
+        endpoint: SocketAddr,
+        result: &Result<(), CoordinatorError>,
+    ) {
+        CoordinatorState::publish_primary_terminal_event(permit, simulator_id, region_handle, endpoint, result);
+    }
+}
+
+impl CoordinatorState {
     fn new_capability_client(&mut self, seed: Url) -> Result<Client, CoordinatorError> {
         if self.capability_request_waiters.len() >= MAX_TRACKED_CAPABILITY_CLIENTS {
             return Err(CoordinatorError::CapabilityClientLimit);
@@ -344,22 +392,13 @@ impl SimulatorCoordinator {
         permit.send(EventEnvelope::new(event));
     }
 
-    async fn run_inner(
-        &mut self,
-        commands: mpsc::Receiver<Command>,
-        events: mpsc::Sender<EventEnvelope>,
-        disconnect_requested: watch::Receiver<bool>,
-    ) -> Result<(), CoordinatorError> {
-        CoordinatorRuntime::start(self, commands, events, disconnect_requested).await?.run().await
-    }
     async fn publish_event(
         &mut self,
         events: &mpsc::Sender<EventEnvelope>,
-        pending_events: &mut VecDeque<EventEnvelope>,
+        state: &mut CoordinatorRunState,
         event: impl Into<EventEnvelope>,
-        logout_deadline: &mut Option<Instant>,
-        disconnect_reason: &mut Option<&'static str>,
     ) -> Result<(), CoordinatorError> {
+        let CoordinatorRunState { pending_events, logout_deadline, disconnect_reason, .. } = state;
         let event = event.into();
         if logout_deadline.is_some() && is_application_event(&event.event) {
             if let Some(watermark) = event.coverage_watermark() {
@@ -476,15 +515,13 @@ impl SimulatorCoordinator {
         remove_simulator_capability(&mut state.simulator_capabilities, simulator_id);
         self.publish_event(
             events,
-            &mut state.pending_events,
+            state,
             Event::SimulatorFailed {
                 simulator_id,
                 region_handle: Some(region_handle),
                 endpoint: connection.endpoint,
                 reason: error.to_string(),
             },
-            &mut state.logout_deadline,
-            &mut state.disconnect_reason,
         )
         .await
     }
@@ -497,9 +534,7 @@ impl SimulatorCoordinator {
         state: &mut CoordinatorRunState,
     ) -> Result<(), CoordinatorError> {
         match queue_until_connected(&state.connected_simulators, &mut state.preconnect_events, simulator_id, event) {
-            PreconnectOutcome::Ready(event) => {
-                self.publish_event(events, &mut state.pending_events, event, &mut state.logout_deadline, &mut state.disconnect_reason).await
-            }
+            PreconnectOutcome::Ready(event) => self.publish_event(events, state, event).await,
             PreconnectOutcome::Buffered => Ok(()),
             PreconnectOutcome::Full => self.fail_preconnect_overflow(simulator_id, events, state).await,
         }
@@ -510,16 +545,12 @@ impl SimulatorCoordinator {
         simulator_id: SimulatorId,
         event: impl Into<EventEnvelope>,
         events: &mpsc::Sender<EventEnvelope>,
-        pending_events: &mut VecDeque<EventEnvelope>,
-        preconnect_events: &mut PreconnectEvents,
-        connected_simulators: &mut HashSet<SimulatorId>,
-        logout_deadline: &mut Option<Instant>,
-        disconnect_reason: &mut Option<&'static str>,
+        state: &mut CoordinatorRunState,
     ) -> Result<(), CoordinatorError> {
-        self.publish_event(events, pending_events, event, logout_deadline, disconnect_reason).await?;
-        connected_simulators.insert(simulator_id);
-        for event in preconnect_events.take(simulator_id) {
-            self.publish_event(events, pending_events, event, logout_deadline, disconnect_reason).await?;
+        self.publish_event(events, state, event).await?;
+        state.connected_simulators.insert(simulator_id);
+        for event in state.preconnect_events.take(simulator_id) {
+            self.publish_event(events, state, event).await?;
         }
         Ok(())
     }
@@ -527,21 +558,17 @@ impl SimulatorCoordinator {
     async fn publish_session_ready(
         &mut self,
         events: &mpsc::Sender<EventEnvelope>,
-        pending_events: &mut VecDeque<EventEnvelope>,
-        logout_deadline: &mut Option<Instant>,
-        disconnect_reason: &mut Option<&'static str>,
+        state: &mut CoordinatorRunState,
     ) -> Result<(), CoordinatorError> {
         self.publish_event(
             events,
-            pending_events,
+            state,
             Event::SessionReady {
                 simulator_id: self.simulator_id,
                 session: Box::new(self.session.clone()),
                 capabilities: self.capabilities.clone(),
                 login_data: self.login_data.clone(),
             },
-            logout_deadline,
-            disconnect_reason,
         )
         .await
     }

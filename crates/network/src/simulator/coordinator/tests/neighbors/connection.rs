@@ -79,12 +79,13 @@ async fn neighbor_task_limit_preserves_current() {
     };
     let target_region = 0x1000_0000_0000_1000;
     let mut sockets = Vec::with_capacity(MAX_NEIGHBOR_CONNECTION_TASKS + 1);
+    let root_simulator_id = connection.simulator_id;
 
     for index in 0..MAX_NEIGHBOR_SIMULATORS {
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
         let region_handle = if index == 0 { target_region } else { 0x2000_0000_0000_0000 + index as u64 };
         connection
-            .start_neighbor(connection.simulator_id, region_handle, socket.local_addr().expect("neighbor address"), None, &mut setup)
+            .start_neighbor(root_simulator_id, region_handle, socket.local_addr().expect("neighbor address"), None, &mut setup)
             .await
             .expect("start a neighbor circuit");
         let (bytes, _) = receive(&socket).await;
@@ -98,10 +99,7 @@ async fn neighbor_task_limit_preserves_current() {
     for _ in 0..MAX_NEIGHBOR_SIMULATORS {
         let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind replacement simulator");
         let endpoint = socket.local_addr().expect("replacement address");
-        connection
-            .start_neighbor(connection.simulator_id, target_region, endpoint, None, &mut setup)
-            .await
-            .expect("replace target neighbor");
+        connection.start_neighbor(root_simulator_id, target_region, endpoint, None, &mut setup).await.expect("replace target neighbor");
         let (bytes, peer) = receive(&socket).await;
         assert!(matches!(Packet::decode(&bytes).expect("decode replacement bootstrap").message(), Message::UseCircuitCode(_)));
         current_peer = Some(peer);
@@ -114,7 +112,7 @@ async fn neighbor_task_limit_preserves_current() {
     let rejected = UdpSocket::bind("127.0.0.1:0").await.expect("bind rejected simulator");
     let rejected_endpoint = rejected.local_addr().expect("rejected endpoint");
     connection
-        .start_neighbor(connection.simulator_id, target_region, rejected_endpoint, None, &mut setup)
+        .start_neighbor(root_simulator_id, target_region, rejected_endpoint, None, &mut setup)
         .await
         .expect("reject a replacement at the task cap");
 
@@ -154,7 +152,7 @@ async fn neighbor_task_limit_preserves_current() {
     let recovered = UdpSocket::bind("127.0.0.1:0").await.expect("bind recovered simulator");
     let recovered_endpoint = recovered.local_addr().expect("recovered endpoint");
     connection
-        .start_neighbor(connection.simulator_id, target_region, recovered_endpoint, None, &mut setup)
+        .start_neighbor(root_simulator_id, target_region, recovered_endpoint, None, &mut setup)
         .await
         .expect("task capacity should recover after canceled workers are joined");
     let (bytes, _) = receive(&recovered).await;
@@ -174,6 +172,7 @@ async fn neighbor_simulator_limit_is_bounded() {
             .await
             .expect("connect primary circuit");
     let _ = receive(&primary).await;
+    let root_simulator_id = connection.simulator_id;
 
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(32);
     let mut run_state = CoordinatorRunState::new();
@@ -192,7 +191,7 @@ async fn neighbor_simulator_limit_is_bounded() {
         let endpoint = socket.local_addr().expect("neighbor address");
         let region_handle = 0x1000_0000_0000_0000 + index as u64;
         connection
-            .start_neighbor(connection.simulator_id, region_handle, endpoint, None, &mut setup)
+            .start_neighbor(root_simulator_id, region_handle, endpoint, None, &mut setup)
             .await
             .expect("process neighbor announcement");
 
@@ -671,7 +670,7 @@ async fn crossed_region_promotes_after_matching_movement() {
     let (event_sender, received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let mut received_events = EventReceiver::new(received_events);
     let (_disconnect, shutdown) = watch::channel(false);
-    let worker = spawn(run_session(session, command_receiver, event_sender, shutdown));
+    let worker = spawn(run_session(session.clone(), command_receiver, event_sender, shutdown));
 
     let (primary_packet, primary_peer) = receive_udp(&primary).await;
     assert!(matches!(Packet::decode(&primary_packet).expect("decode primary circuit").message(), Message::UseCircuitCode(_)));
@@ -700,83 +699,9 @@ async fn crossed_region_promotes_after_matching_movement() {
             _ => {}
         }
     };
-    let (neighbor_packet, neighbor_peer) = receive_udp(&neighbor).await;
-    let neighbor_packet = Packet::decode(&neighbor_packet).expect("decode destination circuit");
-    assert!(matches!(neighbor_packet.message(), Message::UseCircuitCode(_)));
-    neighbor.send_to(&acknowledgement(40, neighbor_packet.sequence()), neighbor_peer).await.expect("ack destination circuit");
-    let neighbor_id = loop {
-        match timeout(TEST_TIMEOUT, received_events.recv()).await.expect("receive destination events").expect("event channel remains open")
-        {
-            Event::SimulatorConnected { simulator_id, endpoint, region_handle: Some(handle) }
-                if endpoint == neighbor_endpoint && handle == region_handle =>
-            {
-                break simulator_id;
-            }
-            _ => {}
-        }
-    };
-
-    let mut neighbor_handshake = fixture("region_handshake.hex");
-    neighbor_handshake[0] |= 0x40;
-    set_sequence(&mut neighbor_handshake, 41);
-    neighbor.send_to(&neighbor_handshake, neighbor_peer).await.expect("send destination region handshake");
-    let reply = receive_message(&neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
-    let movement = receive_message(&neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
-    neighbor.send_to(&acknowledgement(42, reply.sequence()), neighbor_peer).await.expect("ack destination handshake reply");
-    neighbor.send_to(&acknowledgement(43, movement.sequence()), neighbor_peer).await.expect("ack destination movement request");
-
-    let wrong_movement = Packet::new(
-        44,
-        Message::AgentMovementComplete(AgentMovementComplete {
-            agent_data: AgentData { agent_id, session_id },
-            data: Data { region_handle: region_handle + 1, ..Default::default() },
-            sim_data: SimData::default(),
-        }),
-    )
-    .with_reliable()
-    .encode()
-    .expect("encode mismatched movement completion");
-    neighbor.send_to(&wrong_movement, neighbor_peer).await.expect("send mismatched movement completion");
-    let mut barrier = fixture("chat_from_simulator.hex");
-    barrier[0] |= 0x40;
-    set_sequence(&mut barrier, 45);
-    neighbor.send_to(&barrier, neighbor_peer).await.expect("send post-movement barrier");
-    loop {
-        match timeout(TEST_TIMEOUT, received_events.recv())
-            .await
-            .expect("receive before destination promotion")
-            .expect("event channel remains open")
-        {
-            Event::SimulatorMessage { simulator_id, message: Message::ChatFromSimulator(_), .. } if simulator_id == neighbor_id => {
-                break;
-            }
-            Event::SimulatorPromoted { .. } => panic!("mismatched movement completion must not promote the destination"),
-            _ => {}
-        }
-    }
-
-    let matching_movement = Packet::new(
-        46,
-        Message::AgentMovementComplete(AgentMovementComplete {
-            agent_data: AgentData { agent_id, session_id },
-            data: Data { region_handle, ..Default::default() },
-            sim_data: SimData::default(),
-        }),
-    )
-    .with_reliable()
-    .encode()
-    .expect("encode matching movement completion");
-    neighbor.send_to(&matching_movement, neighbor_peer).await.expect("send matching movement completion");
-    let (previous, promoted, promoted_endpoint) = loop {
-        if let Event::SimulatorPromoted { previous_simulator_id, simulator_id, session, .. } =
-            timeout(TEST_TIMEOUT, received_events.recv()).await.expect("receive destination promotion").expect("event channel remains open")
-        {
-            break (previous_simulator_id, simulator_id, session.simulator_address);
-        }
-    };
-    assert_eq!(previous, primary_id);
-    assert_eq!(promoted, neighbor_id);
-    assert_eq!(promoted_endpoint, neighbor_endpoint);
+    let (neighbor_id, neighbor_peer) =
+        prepare_crossed_region_destination(&neighbor, neighbor_endpoint, region_handle, &session, &mut received_events).await;
+    promote_crossed_region(&neighbor, neighbor_peer, region_handle, &session, primary_id, neighbor_id, &mut received_events).await;
 
     commands
         .send(Command::SendMessage {
@@ -797,6 +722,99 @@ async fn crossed_region_promotes_after_matching_movement() {
     assert!(primary_requests.len() >= 2, "primary event queue should receive its seed and poll requests");
     neighbor_seed_server.stop();
     let _ = neighbor_seed_server.finish();
+}
+
+async fn prepare_crossed_region_destination(
+    neighbor: &UdpSocket,
+    neighbor_endpoint: SocketAddr,
+    region_handle: u64,
+    session: &AgentSession,
+    received_events: &mut EventReceiver,
+) -> (SimulatorId, SocketAddr) {
+    let (neighbor_packet, neighbor_peer) = receive_udp(neighbor).await;
+    let neighbor_packet = Packet::decode(&neighbor_packet).expect("decode destination circuit");
+    assert!(matches!(neighbor_packet.message(), Message::UseCircuitCode(_)));
+    neighbor.send_to(&acknowledgement(40, neighbor_packet.sequence()), neighbor_peer).await.expect("ack destination circuit");
+    let neighbor_id = loop {
+        match timeout(TEST_TIMEOUT, received_events.recv()).await.expect("receive destination events").expect("event channel remains open")
+        {
+            Event::SimulatorConnected { simulator_id, endpoint, region_handle: Some(handle) }
+                if endpoint == neighbor_endpoint && handle == region_handle =>
+            {
+                break simulator_id;
+            }
+            _ => {}
+        }
+    };
+    let mut neighbor_handshake = fixture("region_handshake.hex");
+    neighbor_handshake[0] |= 0x40;
+    set_sequence(&mut neighbor_handshake, 41);
+    neighbor.send_to(&neighbor_handshake, neighbor_peer).await.expect("send destination region handshake");
+    let reply = receive_message(neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
+    let movement = receive_message(neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
+    neighbor.send_to(&acknowledgement(42, reply.sequence()), neighbor_peer).await.expect("ack destination handshake reply");
+    neighbor.send_to(&acknowledgement(43, movement.sequence()), neighbor_peer).await.expect("ack destination movement request");
+    let wrong_movement = Packet::new(
+        44,
+        Message::AgentMovementComplete(AgentMovementComplete {
+            agent_data: AgentData { agent_id: session.agent_id, session_id: session.session_id },
+            data: Data { region_handle: region_handle + 1, ..Default::default() },
+            sim_data: SimData::default(),
+        }),
+    )
+    .with_reliable()
+    .encode()
+    .expect("encode mismatched movement completion");
+    neighbor.send_to(&wrong_movement, neighbor_peer).await.expect("send mismatched movement completion");
+    let mut barrier = fixture("chat_from_simulator.hex");
+    barrier[0] |= 0x40;
+    set_sequence(&mut barrier, 45);
+    neighbor.send_to(&barrier, neighbor_peer).await.expect("send post-movement barrier");
+    loop {
+        match timeout(TEST_TIMEOUT, received_events.recv())
+            .await
+            .expect("receive before destination promotion")
+            .expect("event channel remains open")
+        {
+            Event::SimulatorMessage { simulator_id, message: Message::ChatFromSimulator(_), .. } if simulator_id == neighbor_id => break,
+            Event::SimulatorPromoted { .. } => panic!("mismatched movement completion must not promote the destination"),
+            _ => {}
+        }
+    }
+    (neighbor_id, neighbor_peer)
+}
+
+async fn promote_crossed_region(
+    neighbor: &UdpSocket,
+    neighbor_peer: SocketAddr,
+    region_handle: u64,
+    session: &AgentSession,
+    primary_id: SimulatorId,
+    neighbor_id: SimulatorId,
+    received_events: &mut EventReceiver,
+) {
+    let matching_movement = Packet::new(
+        46,
+        Message::AgentMovementComplete(AgentMovementComplete {
+            agent_data: AgentData { agent_id: session.agent_id, session_id: session.session_id },
+            data: Data { region_handle, ..Default::default() },
+            sim_data: SimData::default(),
+        }),
+    )
+    .with_reliable()
+    .encode()
+    .expect("encode matching movement completion");
+    neighbor.send_to(&matching_movement, neighbor_peer).await.expect("send matching movement completion");
+    let (previous, promoted, promoted_endpoint) = loop {
+        if let Event::SimulatorPromoted { previous_simulator_id, simulator_id, session, .. } =
+            timeout(TEST_TIMEOUT, received_events.recv()).await.expect("receive destination promotion").expect("event channel remains open")
+        {
+            break (previous_simulator_id, simulator_id, session.simulator_address);
+        }
+    };
+    assert_eq!(previous, primary_id);
+    assert_eq!(promoted, neighbor_id);
+    assert_eq!(promoted_endpoint, neighbor.local_addr().expect("destination simulator address"));
 }
 
 fn simulator_events(ip: [u8; 4], port: u16, agent_id: Uuid, seed: &Url) -> String {

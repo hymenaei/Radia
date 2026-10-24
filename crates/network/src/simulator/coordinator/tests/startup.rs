@@ -400,11 +400,7 @@ async fn capability_events_wait_for_simulator_connection() {
             simulator_id,
             Event::SimulatorConnected { simulator_id, region_handle: None, endpoint },
             &events,
-            &mut run_state.pending_events,
-            &mut run_state.preconnect_events,
-            &mut run_state.connected_simulators,
-            &mut run_state.logout_deadline,
-            &mut run_state.disconnect_reason,
+            &mut run_state,
         )
         .await
         .expect("publish connection before buffered events");

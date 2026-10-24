@@ -180,6 +180,35 @@ async fn promoted_logout_bypasses_full_queue() {
     let (promoted_send, _) = receive_packet(&simulator).await;
     assert!(matches!(promoted_send.message(), Message::CompletePingCheck(_)));
 
+    let pending_response = fill_promoted_outbound_queue(&commands, &simulator, agent_id, session_id).await;
+
+    pause_sends.send_replace(true);
+    let (logout_completed, logout_response) = oneshot::channel();
+    logout_commands.send(logout_completed).await.expect("request priority logout");
+    timeout(WAIT, send_entered.notified()).await.expect("logout should reach the paused local send");
+
+    let (repeated_logout_completed, mut repeated_logout_response) = oneshot::channel();
+    logout_commands.send(repeated_logout_completed).await.expect("repeat priority logout");
+    assert!(timeout(Duration::from_millis(25), &mut repeated_logout_response).await.is_err());
+
+    pause_sends.send_replace(false);
+    let (logout_packet, _) = receive_packet(&simulator).await;
+    assert!(matches!(logout_packet.message(), Message::LogoutRequest(_)));
+    assert!(logout_response.await.expect("logout completion").is_ok(), "logout local send completes despite a full ordinary queue");
+    assert!(repeated_logout_response.await.expect("repeated logout completion").is_ok());
+    assert!(matches!(pending_response.await, Ok(Err(Error::SimulatorConnectionClosed))));
+
+    shutdown.send_replace(true);
+    assert!(timeout(WAIT, worker).await.expect("stop connection worker").expect("join connection worker").is_ok());
+    budget.shutdown().await;
+}
+
+async fn fill_promoted_outbound_queue(
+    commands: &mpsc::Sender<SimulatorCommand>,
+    simulator: &UdpSocket,
+    agent_id: Uuid,
+    session_id: Uuid,
+) -> oneshot::Receiver<Result<(), Error>> {
     let make_chat = |message: String| {
         Message::ChatFromViewer(ChatFromViewer {
             agent_data: chat_from_viewer::AgentData { agent_id, session_id },
@@ -199,7 +228,7 @@ async fn promoted_logout_bypasses_full_queue() {
         })
         .await
         .expect("queue first chat");
-    let (first_sent, _) = receive_packet(&simulator).await;
+    let (first_sent, _) = receive_packet(simulator).await;
     assert!(matches!(first_sent.message(), Message::ChatFromViewer(_)));
 
     let (pending_completed, pending_response) = oneshot::channel();
@@ -240,26 +269,7 @@ async fn promoted_logout_bypasses_full_queue() {
         timeout(WAIT, full_response).await.expect("full queue response").expect("completion sender"),
         Err(Error::SimulatorCommandQueueFull)
     ));
-
-    pause_sends.send_replace(true);
-    let (logout_completed, logout_response) = oneshot::channel();
-    logout_commands.send(logout_completed).await.expect("request priority logout");
-    timeout(WAIT, send_entered.notified()).await.expect("logout should reach the paused local send");
-
-    let (repeated_logout_completed, mut repeated_logout_response) = oneshot::channel();
-    logout_commands.send(repeated_logout_completed).await.expect("repeat priority logout");
-    assert!(timeout(Duration::from_millis(25), &mut repeated_logout_response).await.is_err());
-
-    pause_sends.send_replace(false);
-    let (logout_packet, _) = receive_packet(&simulator).await;
-    assert!(matches!(logout_packet.message(), Message::LogoutRequest(_)));
-    assert!(logout_response.await.expect("logout completion").is_ok(), "logout local send completes despite a full ordinary queue");
-    assert!(repeated_logout_response.await.expect("repeated logout completion").is_ok());
-    assert!(matches!(pending_response.await, Ok(Err(Error::SimulatorConnectionClosed))));
-
-    shutdown.send_replace(true);
-    assert!(timeout(WAIT, worker).await.expect("stop connection worker").expect("join connection worker").is_ok());
-    budget.shutdown().await;
+    pending_response
 }
 
 #[tokio::test(start_paused = true)]

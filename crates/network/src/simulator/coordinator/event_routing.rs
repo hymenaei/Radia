@@ -3,10 +3,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::{sync::mpsc, time::Instant};
 
 use super::{
-    EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS,
-    MAX_QUEUED_SIMULATOR_EVENTS, SimulatorEvent,
+    ConnectionQueueFailure, CoordinatorError, CoordinatorRuntime, EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD,
+    MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, RuntimeAction, SimulatorEvent, is_teleport_cancel,
+    queue_connection_message, queue_primary_message,
 };
-use crate::event::{EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY, SimulatorId};
+use crate::{
+    error::Error,
+    event::{Event, EventEnvelope, PRIMARY_TERMINAL_EVENT_CAPACITY, SimulatorId},
+    session::Command,
+};
 
 #[derive(Default)]
 pub(super) struct PrimaryEventBacklog {
@@ -191,6 +196,95 @@ pub(super) fn primary_event_queue_size(events: &mpsc::Sender<EventEnvelope>, pen
     let channel_capacity = events.max_capacity().saturating_sub(PRIMARY_TERMINAL_EVENT_CAPACITY);
     let channel_occupancy = events.max_capacity().saturating_sub(events.capacity()).saturating_sub(PRIMARY_TERMINAL_EVENT_CAPACITY);
     (channel_occupancy + pending_events, channel_capacity + MAX_QUEUED_SIMULATOR_EVENTS)
+}
+
+impl CoordinatorRuntime<'_> {
+    pub(super) async fn handle_pending_application_event(
+        &mut self,
+        permit: Result<mpsc::OwnedPermit<EventEnvelope>, mpsc::error::SendError<()>>,
+    ) -> Result<RuntimeAction, CoordinatorError> {
+        match permit {
+            Ok(permit) => {
+                if let Some(event) = self.run_state.pending_events.pop_front() {
+                    permit.send(event);
+                }
+                self.coordinator.event_backlog.update_pending(self.run_state.pending_events.len(), Instant::now());
+                Ok(RuntimeAction::Continue)
+            }
+            Err(_) if self.run_state.logout_deadline.is_none() => {
+                self.coordinator.disconnect_once(false).await?;
+                Ok(RuntimeAction::Exit(Ok(())))
+            }
+            Err(_) => Ok(RuntimeAction::Continue),
+        }
+    }
+
+    pub(super) async fn handle_command(&mut self, command: Option<Command>) -> Result<RuntimeAction, CoordinatorError> {
+        if *self.disconnect_requested.borrow() {
+            self.coordinator.graceful_disconnect(false).await?;
+            return Ok(RuntimeAction::Exit(Ok(())));
+        }
+        match command {
+            Some(Command::SubmitMfaCode(_)) => {}
+            Some(Command::SendMessage { message, delivery }) => {
+                if !self.startup.is_ready() {
+                    self.coordinator
+                        .publish_event(
+                            &self.events,
+                            &mut self.run_state,
+                            Event::SendFailed("The simulator session is still starting.".into()),
+                        )
+                        .await?;
+                    return Ok(RuntimeAction::Continue);
+                }
+
+                let result = queue_primary_message(
+                    &self.coordinator.primary.commands,
+                    self.coordinator.session.agent_id,
+                    self.coordinator.session.session_id,
+                    message,
+                    delivery,
+                    self.handoff_state.cancellation(),
+                );
+                if let Err(failure) = result {
+                    self.coordinator.publish_event(&self.events, &mut self.run_state, Event::SendFailed(failure.error.to_string())).await?;
+                }
+            }
+            Some(Command::SendTo { simulator_id, message, delivery, completed }) => {
+                let cancel_handoff = simulator_id == self.coordinator.primary.simulator_id
+                    && is_teleport_cancel(&message, self.coordinator.session.agent_id, self.coordinator.session.session_id);
+                let cancel_target = cancel_handoff.then(|| self.handoff_state.cancellation()).flatten();
+                let commands = self
+                    .run_state
+                    .neighbor_connections
+                    .values()
+                    .find(|connection| {
+                        connection.simulator_id == simulator_id
+                            && (simulator_id != self.coordinator.simulator_id || !self.coordinator.root_connection_failed)
+                    })
+                    .map(|connection| &connection.commands);
+                let mut completion = Some(completed);
+                let result = if simulator_id == self.coordinator.simulator_id && !self.startup.is_ready() {
+                    Err(ConnectionQueueFailure { error: Error::SimulatorNotReady, completion: completion.take() })
+                } else if let Some(commands) = commands {
+                    queue_connection_message(commands, message, delivery, completion.take(), cancel_target, false)
+                } else {
+                    Err(ConnectionQueueFailure { error: Error::SimulatorUnavailable, completion: completion.take() })
+                };
+                if let Err(failure) = result
+                    && let Some(completion) = failure.completion
+                    && let Err(error) = completion.send(Err(failure.error))
+                {
+                    drop(error);
+                }
+            }
+            None => {
+                self.coordinator.graceful_disconnect(self.coordinator.logout_request_sent).await?;
+                return Ok(RuntimeAction::Exit(Ok(())));
+            }
+        }
+        Ok(RuntimeAction::Continue)
+    }
 }
 
 #[cfg(test)]

@@ -713,9 +713,8 @@ async fn closed_receiver_logs_out() {
     simulator.send_to(&movement_complete, peer).await.expect("send packet as receiver closes");
     assert_eq!(receive(&simulator).await.0, expected_fixture("logout_request.hex", 4, true));
 
-    assert_no_datagram(&simulator);
-
     assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_ok());
+    assert_no_datagram(&simulator);
 }
 
 #[tokio::test]
@@ -735,8 +734,6 @@ async fn disconnect_blocks_movement() {
     let (logout, _) = receive(&simulator).await;
     assert_eq!(logout, expected_fixture("logout_request.hex", 2, true));
 
-    assert_no_datagram(&simulator);
-
     assert!(
         timeout(SIMULATOR_TIMEOUT, client)
             .await
@@ -744,6 +741,7 @@ async fn disconnect_blocks_movement() {
             .expect("session task should not panic")
             .is_ok()
     );
+    assert_no_datagram(&simulator);
 }
 
 #[tokio::test]

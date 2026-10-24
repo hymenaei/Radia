@@ -1,13 +1,12 @@
 use std::io::ErrorKind;
 
-use protocol::lludp::Message;
+use protocol::lludp::{Message, Packet};
 use tokio::time::Instant;
 
 use super::{
     UdpTransport,
     lludp::{Circuit, CircuitError, Delivery, PreparedDatagram, ReceiveError, ReceiveOutcome},
 };
-use protocol::lludp::Packet;
 
 pub(crate) async fn send_message(
     circuit: &mut Circuit,

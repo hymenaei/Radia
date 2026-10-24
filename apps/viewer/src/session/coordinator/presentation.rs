@@ -14,7 +14,7 @@ use crate::{
     asset_coordinator::AssetHandle,
     inventory::{FavoriteLocation, favorite_store::FavoriteStoreError, favorites::FavoritesError},
     remembered_login::{CredentialStoreError, RememberedLogin},
-    session::{ChatMessage, RegionLookup, experience_environment::EnvironmentInbox},
+    session::{ChatMessage, experience_environment::EnvironmentInbox},
     world_reader::WorldReader,
 };
 
@@ -139,7 +139,6 @@ pub(crate) struct SessionReadyUpdate {
     pub(crate) camera: watch::Sender<Option<Camera>>,
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,
-    pub(crate) region_lookup: RegionLookup,
     pub(crate) region_name: Option<String>,
     pub(crate) world_reader: WorldReader,
 }

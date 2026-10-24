@@ -22,7 +22,7 @@ const MAX_USERNAME_BYTES: usize = 256;
 const MAX_FAVORITE_NAME_BYTES: usize = 512;
 const MAX_REGION_NAME_BYTES: usize = 512;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum FavoriteStoreError {
     DataDirectoryUnavailable,
     Read { path: PathBuf, detail: String },
@@ -341,7 +341,7 @@ fn save_to(path: &Path, favorites: &FavoriteStore) -> Result<(), FavoriteStoreEr
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{assert_matches, fs};
 
     use network::Grid;
     use tempfile::tempdir;
@@ -392,10 +392,10 @@ mod tests {
             Grid::Agni,
             agent_id,
             "Example Resident",
-            Err(FavoritesError::RegionLookup("region lookup failed".into())),
+            Err(FavoritesError::RegionLookup(crate::session::RegionLookupError::Canceled)),
         );
 
-        assert!(matches!(result, Err(FavoriteStoreError::Favorites(FavoritesError::RegionLookup(_)))));
+        assert_matches!(result, Err(FavoriteStoreError::Favorites(FavoritesError::RegionLookup(_))));
         assert_eq!(current_favorites, saved);
         assert_eq!(store.favorites_for(Grid::Agni, agent_id), saved);
         assert_eq!(load_from(&path).expect("reload known-good snapshot").favorites_for(Grid::Agni, agent_id), saved);
@@ -420,7 +420,7 @@ mod tests {
 
         let result = apply_favorites_refresh(&mut current_favorites, &mut store, Grid::Agni, agent_id, "Example Resident", Ok(oversized));
 
-        assert_eq!(result, Err(FavoriteStoreError::InvalidRefreshedValues("an account has too many saved favorites")));
+        assert_matches!(result, Err(FavoriteStoreError::InvalidRefreshedValues("an account has too many saved favorites")));
         assert_eq!(current_favorites, saved);
         assert_eq!(store.favorites_for(Grid::Agni, agent_id), saved);
     }
@@ -446,7 +446,7 @@ mod tests {
         let result =
             apply_favorites_refresh(&mut current_favorites, &mut store, Grid::Agni, agent_id, "Example Resident", Ok(large_favorites));
 
-        assert_eq!(result, Err(FavoriteStoreError::RefreshedStoreTooLarge));
+        assert_matches!(result, Err(FavoriteStoreError::RefreshedStoreTooLarge));
         assert_eq!(current_favorites, saved);
         let store_favorites = store.favorites_for(Grid::Agni, agent_id);
         assert_eq!(store_favorites.len(), saved.len());
@@ -472,7 +472,7 @@ mod tests {
 
         let result = apply_favorites_refresh(&mut current_favorites, &mut store, Grid::Agni, agent_id, "Example Resident", Ok(oversized));
 
-        assert_eq!(result, Err(FavoriteStoreError::InvalidRefreshedValues("a saved favorite name is too long")));
+        assert_matches!(result, Err(FavoriteStoreError::InvalidRefreshedValues("a saved favorite name is too long")));
         assert_eq!(current_favorites, saved);
         assert_eq!(store.favorites_for(Grid::Agni, agent_id), saved);
         save_to(&path, &store).expect("rejected refresh must leave a savable snapshot");
@@ -495,7 +495,7 @@ mod tests {
             .remember_agent(Grid::Agni, Uuid::from_u128(MAX_STORED_AGENTS as u128 + 1), "New Account")
             .expect_err("a new account must not exceed the store limit");
 
-        assert_eq!(error, FavoriteStoreError::InvalidSessionValues("too many saved accounts"));
+        assert_matches!(error, FavoriteStoreError::InvalidSessionValues("too many saved accounts"));
         assert_eq!(store.encode_for_storage().expect("encode unchanged store"), before);
         save_to(&path, &store).expect("save store after rejected account");
         assert_eq!(load_from(&path).expect("reload store after rejected account").agents.len(), MAX_STORED_AGENTS);
@@ -509,7 +509,7 @@ mod tests {
         fs::write(&path, vec![b' '; MAX_FAVORITE_STORE_BYTES + 1]).expect("write oversized login locations");
 
         let error = load_from(&path).expect_err("oversized login locations must be rejected");
-        assert_eq!(error, FavoriteStoreError::FileTooLarge { path });
+        assert_matches!(error, FavoriteStoreError::FileTooLarge { path: error_path } if error_path == path);
     }
 
     #[test]
@@ -521,7 +521,7 @@ mod tests {
 
         let error = load_from(&path).expect_err("corrupted login locations must not load as an empty store");
 
-        assert!(matches!(error, FavoriteStoreError::InvalidFile { .. }));
+        assert_matches!(error, FavoriteStoreError::InvalidFile { .. });
         assert!(error.to_string().contains("Saved login locations at"));
         assert!(error.to_string().contains("are invalid:"));
     }
@@ -545,7 +545,11 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&oversized).expect("encode oversized favorite list")).expect("write oversized favorite list");
 
         let error = load_from(&path).expect_err("excessive favorite count must be rejected");
-        assert_eq!(error, FavoriteStoreError::InvalidStoredValues { path, reason: "an account has too many saved favorites" });
+        assert_matches!(
+            error,
+            FavoriteStoreError::InvalidStoredValues { path: error_path, reason: "an account has too many saved favorites" }
+                if error_path == path
+        );
     }
 
     #[test]
@@ -568,7 +572,7 @@ mod tests {
         };
 
         let error = save_to(&path, &oversized).expect_err("out-of-limit favorite must not be persisted");
-        assert_eq!(error, FavoriteStoreError::InvalidValuesForSave("a saved favorite name is too long"));
+        assert_matches!(error, FavoriteStoreError::InvalidValuesForSave("a saved favorite name is too long"));
         assert!(!path.exists());
     }
 }

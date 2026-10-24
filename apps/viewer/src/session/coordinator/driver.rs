@@ -551,7 +551,6 @@ impl SessionDriver {
             camera: self.camera.clone(),
             assets: self.assets.handle(),
             session: session.clone(),
-            region_lookup: lookup.clone(),
             region_name: self.session_world.region_name(simulator_id).map(str::to_owned),
             world_reader: self.reads.reader(),
         }));

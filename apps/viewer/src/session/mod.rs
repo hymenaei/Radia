@@ -17,7 +17,7 @@ pub(crate) use experience_environment::EnvironmentInbox;
 pub(crate) use inbound::{ChatMessage, display_message, format_avatar_name};
 pub(crate) use network::{Session, SessionHandle};
 pub(crate) use outbound::agent;
-pub(crate) use region_lookup::{RegionGridCell, RegionLookup, map_request_coordinates};
+pub(crate) use region_lookup::{RegionGridCell, RegionLookup, RegionLookupError, map_request_coordinates};
 
 #[cfg(test)]
 pub(crate) use experience_environment::EnvironmentCommand;

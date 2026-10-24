@@ -1,4 +1,5 @@
 use std::{
+    assert_matches,
     collections::BTreeMap,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -87,7 +88,7 @@ fn missing_items_rejected() {
     let error = runtime
         .block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id))
         .expect_err("missing items with a nonempty folder is malformed");
-    assert_eq!(error, FavoritesError::InvalidFavoritesItemList);
+    assert_matches!(error, FavoritesError::InvalidFavoritesItemList);
     assert_eq!(error.to_string(), "Second Life returned an invalid Favorites item list.");
     let _ = server.finish();
 }
@@ -134,7 +135,7 @@ fn landmark_asset_request_failure_rejects_partial_results() {
     });
 
     let error = result.expect_err("an asset request failure must reject the incomplete snapshot");
-    assert!(matches!(&error, FavoritesError::FetchLandmarkAsset { .. }), "unexpected error: {error}");
+    assert_matches!(&error, FavoritesError::FetchLandmarkAsset { .. });
     assert!(error.to_string().contains("Could not fetch favorite landmark asset"), "unexpected error: {error}");
 
     let asset_request_count = requests.len().saturating_sub(2);

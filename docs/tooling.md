@@ -230,3 +230,5 @@ cargo mutants -f <file-path>
 Windows is the primary local development platform. The CI workflow builds, lints, and tests on Windows, macOS, and Linux. It runs documentation tests on Linux.
 
 Use WSL2 for Linux builds, fuzzing, corpus management, and fuzz coverage. Confirmed Linux utilities include `cargo-fuzz` and `cargo-binutils`. Prefer `~/Radia` over `/mnt/c/Radia` for Linux build performance. Keep build artifacts separate between platforms. Windows `.exe` tools exposed through WSL's `PATH` do not replace Linux-native installations.
+
+On Linux, remembered login storage uses Secret Service and requires a running provider such as GNOME Keyring or KWallet.

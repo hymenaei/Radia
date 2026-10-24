@@ -44,16 +44,24 @@ tracing-tracy = { workspace = true, optional = true }
 tokio.workspace = true
 world.workspace = true
 
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = { workspace = true, features = ["windows-native"] }
-
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 egui.workspace = true
 egui-winit.workspace = true
 winit.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+keyring = { workspace = true, features = [
+    "async-secret-service",
+    "tokio",
+    "crypto-rust",
+] }
 winit = { workspace = true, features = ["x11", "wayland", "wayland-dlopen"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
 
 [dev-dependencies]
 time.workspace = true

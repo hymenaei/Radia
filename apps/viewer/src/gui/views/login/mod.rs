@@ -627,15 +627,7 @@ mod tests {
     use crate::remembered_login::CredentialStoreError;
 
     fn credential_error(detail: &str) -> CredentialStoreError {
-        #[cfg(target_os = "windows")]
-        {
-            CredentialStoreError::Open(detail.to_owned())
-        }
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
-            let _ = detail;
-            CredentialStoreError::Unsupported
-        }
+        CredentialStoreError::Open(detail.to_owned())
     }
 
     #[test]

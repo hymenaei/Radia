@@ -534,7 +534,7 @@ impl LoginScreen {
         let username = self.username.read(cx).value();
         self.favorites.prepare_session(session.grid, session.agent_id, &username, Some(mailbox), cx);
         if let Some(active) = &mut self.active_session {
-            active.ready = Some(ReadySession { session: session.clone(), _world_reader: world_reader.clone(), _assets: assets.clone() });
+            active.ready = Some(ReadySession { session: session.clone(), _world_reader: world_reader, _assets: assets });
         }
         self.chat_screen.update(cx, |chat, cx| {
             chat.set_session(session.clone(), cx);
@@ -544,10 +544,12 @@ impl LoginScreen {
         });
 
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        if crate::gui::start_scene(self.session_generation, cx) {
+        if crate::gui::start_scene(self.session_generation, cx)
+            && let Some(ready) = self.active_session.as_ref().and_then(|active| active.ready.as_ref())
+        {
             crate::gui::connect_world(
                 self.session_generation,
-                crate::scene_feed::SceneSources { reader: world_reader, environments, assets },
+                crate::scene_feed::SceneSources { reader: ready._world_reader.clone(), environments, assets: ready._assets.clone() },
                 session.agent_id,
                 camera,
                 cx,

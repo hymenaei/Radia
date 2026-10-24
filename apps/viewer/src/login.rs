@@ -444,8 +444,6 @@ impl LoginScreen {
 
         if let Some(ready) = session_ready {
             let SessionReadyUpdate { session, region_lookup, region_name, world_reader, assets, camera, environments } = ready;
-            self.assets = Some(assets.clone());
-            self.world_reader = Some(world_reader.clone());
             self.is_connecting = false;
             self.awaiting_mfa = false;
             self.mfa_challenge = None;
@@ -479,12 +477,17 @@ impl LoginScreen {
             if crate::app::start_scene(self.session_generation, cx) {
                 crate::app::connect_world(
                     self.session_generation,
-                    crate::scene_feed::SceneSources { reader: world_reader, environments, assets },
+                    crate::scene_feed::SceneSources { reader: world_reader.clone(), environments, assets: assets.clone() },
                     session.agent_id,
                     camera,
                     cx,
                 );
             }
+            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+            let _ = (camera, environments);
+
+            self.assets = Some(assets);
+            self.world_reader = Some(world_reader);
         }
 
         if let Some(region_name) = region_name {

@@ -442,6 +442,7 @@ mod tests {
     use network::{Error, testing::simulator_id};
     use protocol::lludp::{Message, Packet};
     use protocol::messages::{CacheMissType::Full, RequestAgentData};
+    use tokio::time::Instant;
     use uuid::Uuid;
     use world::{LocalAddress, Region};
 
@@ -450,7 +451,6 @@ mod tests {
         RECOVERY_MAX_SENDS, RECOVERY_REQUEST_INTERVAL, RECOVERY_RETRY_INTERVAL, RecoveryCompletion, RecoveryIntake, RecoveryScheduler,
         recovery_request,
     };
-    use tokio::time::Instant;
 
     fn address(region: u64, local_id: u32) -> LocalAddress {
         LocalAddress::new(Region::new(region), NonZeroU32::new(local_id).expect("nonzero local ID"))

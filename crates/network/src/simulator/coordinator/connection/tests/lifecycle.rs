@@ -447,3 +447,114 @@ async fn saturated_event_channel_delivers_expired_send_failure() {
     shutdown.send_replace(true);
     assert!(task.await.expect("connection task").is_ok());
 }
+
+#[tokio::test]
+async fn connection_survives_send_failures() {
+    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
+    let simulator_address = simulator.local_addr().expect("simulator address");
+    let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
+    let mut connection = connect_test_neighbor_with_coverage(
+        simulator_id,
+        session(simulator_address),
+        42,
+        NetworkStatusHandle::default(),
+        CoverageLossLedger::new(),
+    )
+    .await
+    .expect("connect neighbor simulator");
+    let (send_gate, pause_sends, send_entered) = UdpTransport::new_send_gate();
+    Arc::get_mut(&mut connection.socket).expect("connection owns socket").set_send_gate(send_gate);
+    let (events, mut received_events) = mpsc::channel(1);
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
+    let (commands, command_receiver) = mpsc::channel(MAX_PENDING_SENDS + MAX_PENDING_SEND_NOTIFICATIONS + 4);
+    let (_logout, logout) = mpsc::channel(1);
+    let task = spawn(connection.run(
+        events.clone(),
+        shutdown_receiver,
+        neighbor_requests,
+        command_receiver,
+        logout,
+        SimulatorMemoryBudget::new().for_neighbor(),
+    ));
+
+    let (use_circuit_code, peer) = receive_packet(&simulator).await;
+    send_ack(&simulator, peer, use_circuit_code.sequence()).await;
+    receive_connected(&mut received_events).await;
+    events
+        .try_send(SimulatorEvent::SendCompleted { simulator_id, cancel_target: None, error: None, report_failure: false })
+        .expect("fill the neighbor event channel");
+    drop(events);
+
+    pause_sends.send_replace(true);
+    commands
+        .send(SimulatorCommand::Send {
+            message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 14 } }),
+            delivery: Delivery::Unreliable,
+            completed: None,
+            cancel_target: None,
+            report_failure: true,
+        })
+        .await
+        .expect("queue the send held at the transport");
+    timeout(WAIT, send_entered.notified()).await.expect("send should enter the gate");
+
+    let failed_sends = MAX_PENDING_SEND_NOTIFICATIONS + 1;
+    let queued_sends = MAX_PENDING_SENDS - 1 + failed_sends;
+    let (first_completed, first_failure) = oneshot::channel();
+    let mut first_completed = Some(first_completed);
+    let (completed, completion) = oneshot::channel();
+    let mut final_completion = Some(completed);
+    for index in 0..queued_sends {
+        commands
+            .send(SimulatorCommand::Send {
+                message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 14 } }),
+                delivery: Delivery::Unreliable,
+                completed: if index == MAX_PENDING_SENDS - 1 {
+                    first_completed.take()
+                } else if index + 1 == queued_sends {
+                    final_completion.take()
+                } else {
+                    None
+                },
+                cancel_target: None,
+                report_failure: true,
+            })
+            .await
+            .expect("queue send behind the held transport operation");
+    }
+
+    assert!(matches!(first_failure.await.expect("first failed send completion"), Err(Error::SimulatorCommandQueueFull)));
+    assert!(matches!(received_events.try_recv(), Ok(SimulatorEvent::SendCompleted { .. })), "remove the channel filler");
+    for _ in 0..failed_sends {
+        let event = timeout(WAIT, received_events.recv()).await.expect("send failure notification is delivered");
+        assert!(matches!(
+            event,
+            Some(SimulatorEvent::SendCompleted { simulator_id: actual, error: Some(_), report_failure: true, .. }) if actual == simulator_id
+        ));
+    }
+    assert!(matches!(completion.await.expect("final send completion"), Err(Error::SimulatorCommandQueueFull)));
+
+    pause_sends.send_replace(false);
+    for _ in 0..MAX_PENDING_SENDS {
+        let (packet, _) = receive_packet(&simulator).await;
+        assert!(matches!(packet.message(), Message::CompletePingCheck(_)));
+    }
+    let (completed, completion) = oneshot::channel();
+    commands
+        .send(SimulatorCommand::Send {
+            message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id: 15 } }),
+            delivery: Delivery::Unreliable,
+            completed: Some(completed),
+            cancel_target: None,
+            report_failure: false,
+        })
+        .await
+        .expect("queue a send after the backlog drains");
+    assert!(completion.await.expect("send completion").is_ok());
+    let (packet, _) = receive_packet(&simulator).await;
+    assert!(matches!(packet.message(), Message::CompletePingCheck(_)));
+
+    shutdown.send_replace(true);
+    assert!(timeout(WAIT, task).await.expect("join connection task").expect("connection task").is_ok());
+}

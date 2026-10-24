@@ -53,6 +53,10 @@ use crate::simulator::admission::{
 use crate::simulator::coordinator::SimulatorMemoryBudget;
 use crate::simulator::coordinator::handoff::{HandoffEvidence, HandoffGeneration, HandoffState, PendingPromotion};
 
+use super::outbound::{
+    MovementSend, OutboundQueue, PendingSend, PendingSendExpiration, PendingSendFuture, PreparedMeta, QueuedMessage, begin_retry_send,
+    expire_deferred_retries, expire_pending_send, preempt_deferred_send, prepare_next_send, prepare_shutdown_send,
+};
 use super::*;
 
 const WAIT: Duration = Duration::from_secs(2);

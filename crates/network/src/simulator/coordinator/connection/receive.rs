@@ -47,6 +47,12 @@ pub(super) struct PacketRejections {
 }
 
 impl PacketRejections {
+    pub(super) fn flush(&mut self) {
+        if self.counts.iter().any(|count| *count > 0) {
+            self.report(Instant::now());
+        }
+    }
+
     fn record(&mut self, kind: RejectionKind) {
         let index = match kind {
             RejectionKind::FrameInspection => 0,

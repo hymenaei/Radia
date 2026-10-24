@@ -90,6 +90,7 @@ pub(super) async fn run(
 impl ConnectionTask {
     async fn run(mut self) -> Result<(), String> {
         let result = self.run_loop().await;
+        self.packet_rejections.flush();
         flush_send_notifications(&self.events, &mut self.pending_notifications, &mut self.shutdown).await;
         tracing::info!(
             role = ?self.connection.current_primary_state().connection_role(),
@@ -156,7 +157,7 @@ impl ConnectionTask {
                         && !self.phase.logout_requested()
                         && self.phase.is_established()
                         && (self.connection.initial_role == ConnectionRole::Neighbor || self.connection.initial_movement_sent) => SelectedEvent::PingTick,
-                command = self.commands.recv(), if !self.commands.is_closed() => SelectedEvent::Command(command),
+                command = self.commands.recv(), if !self.commands.is_closed() && self.pending_notifications.is_empty() => SelectedEvent::Command(command),
                 received = self.connection.socket.recv(&mut receive_buffer) => SelectedEvent::Datagram(received),
                 _ = tokio::task::yield_now(),
                     if !self.event_delivery_turn && (!self.pending_notifications.is_empty() || !self.pending_events.is_empty()) => SelectedEvent::Yield

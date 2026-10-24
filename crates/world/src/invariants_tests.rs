@@ -4,11 +4,16 @@ use math::{Quat, Vec3};
 use uuid::Uuid;
 
 use crate::ApplyError::InvalidValue;
+use crate::ApplyOutcome::{Introduced, Unchanged, Updated};
+use crate::FieldRejectionReason::ParentCycle;
 use crate::FieldUpdate;
 use crate::Kind::{Avatar, Object};
 use crate::OrderEvidence::Ordered;
 use crate::ParentUpdate::{Local, Root};
-use crate::{Appearance, AttachmentPoint, ObjectObservation, ObjectPatch, Pose, Region, RegionInfo, UpdateSource, World, WorldLimits};
+use crate::{
+    Appearance, AttachmentPoint, FieldGroup, FieldRejection, ObjectObservation, ObjectPatch, Parent, ParentUpdate, Pose, Region,
+    RegionInfo, UpdateSource, World, WorldLimits,
+};
 
 fn limits() -> WorldLimits {
     WorldLimits {
@@ -28,6 +33,19 @@ fn limits() -> WorldLimits {
 
 fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
+}
+
+fn local_id(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).expect("test local IDs are nonzero")
+}
+
+fn source(region: Region, order: u64) -> UpdateSource {
+    let sequence = u32::try_from(order).expect("test order fits in a sequence");
+    UpdateSource::new(region, sequence, Ordered(order), 0)
+}
+
+fn object(source: UpdateSource, id: u128, local_id_value: u32, parent: ParentUpdate) -> ObjectObservation {
+    ObjectObservation::new(source, uuid(id), local_id(local_id_value), Object, parent)
 }
 
 proptest::proptest! {
@@ -116,5 +134,48 @@ proptest::proptest! {
 
             proptest::prop_assert_eq!(world.check_invariants(), Ok(()));
         }
+    }
+}
+
+#[test]
+fn cycle_checks_follow_parents_beyond_the_pose_limit() {
+    for use_observation in [false, true] {
+        let region = Region::new(200);
+        let mut world_limits = limits();
+        world_limits.max_entities = 34;
+        world_limits.max_entities_per_region = 34;
+        let mut world = World::new(world_limits);
+        let _ = world.adopt_region(region).unwrap();
+        let mut entities = Vec::new();
+        for local in 1..=34 {
+            let parent = if local == 1 { Root } else { Local(local_id(local - 1)) };
+            let applied = world.observe_object(object(source(region, u64::from(local)), u128::from(local), local, parent)).unwrap();
+            let Introduced(entity) = applied.outcome else { panic!("expected chain introduction") };
+            entities.push(entity);
+        }
+        let valid = ObjectPatch { parent: Some(Local(local_id(32))), ..ObjectPatch::new(source(region, 35), local_id(34)) };
+        assert_eq!(world.patch_object(valid).unwrap().outcome, Updated(entities[33]));
+        assert_eq!(world.object(entities[33]).unwrap().parent(), Parent::Resolved(entities[31]));
+        assert_eq!(world.children(entities[32]).count(), 0);
+        let revision = world.revision();
+        let applied = if use_observation {
+            world.observe_object(object(source(region, 36), 1, 1, Local(local_id(34)))).unwrap()
+        } else {
+            world
+                .patch_object(ObjectPatch { parent: Some(Local(local_id(34))), ..ObjectPatch::new(source(region, 36), local_id(1)) })
+                .unwrap()
+        };
+        assert_eq!(applied.outcome, Unchanged);
+        assert_eq!(
+            applied.rejections.iter().copied().collect::<Vec<_>>(),
+            [FieldRejection { group: FieldGroup::Parent, reason: ParentCycle }]
+        );
+        assert_eq!(world.revision(), revision);
+        assert_eq!(world.object(entities[0]).unwrap().parent(), Parent::Root);
+        for (index, entity) in entities.iter().enumerate().skip(1) {
+            let parent = if index == 33 { entities[31] } else { entities[index - 1] };
+            assert_eq!(world.object(*entity).unwrap().parent(), Parent::Resolved(parent));
+        }
+        assert_eq!(world.check_invariants(), Ok(()));
     }
 }

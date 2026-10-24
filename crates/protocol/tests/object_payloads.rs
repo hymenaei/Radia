@@ -1,7 +1,8 @@
+use protocol::messages::object;
 use protocol::{
     LLUdpError,
     lludp::{Message, Packet},
-    messages::{ExtraParamUpdate, ObjectExtraParams, improved_terse_object_update, object_update, object_update_compressed},
+    messages::{ExtraParamUpdate, ObjectExtraParams, object::improved_terse_object_update},
 };
 use test_support::{lludp::vectors, parse_hex_fixture};
 use uuid::Uuid;
@@ -84,16 +85,13 @@ fn extra_params_respect_variable1_limit() {
 #[test]
 fn texture_entry_paths_enforce_bounds() {
     let payload = vec![0; 47];
-    let regular_limit = vec![0; object_update::MAX_TEXTURE_ENTRY_BYTES];
-    assert!(object_update::decode_texture_entry(&regular_limit).unwrap().is_some());
-    assert_eq!(object_update::decode_texture_entry(&vec![0; object_update::MAX_TEXTURE_ENTRY_BYTES + 1]), Err(LLUdpError::InvalidMessage));
+    let regular_limit = vec![0; object::MAX_TEXTURE_ENTRY_BYTES];
+    assert!(object::decode_texture_entry(&regular_limit).unwrap().is_some());
+    assert_eq!(object::decode_texture_entry(&vec![0; object::MAX_TEXTURE_ENTRY_BYTES + 1]), Err(LLUdpError::InvalidMessage));
 
-    let compressed_limit = vec![0; object_update_compressed::MAX_TEXTURE_ENTRY_BYTES];
-    assert!(object_update_compressed::decode_texture_entry(&compressed_limit).unwrap().is_some());
-    assert_eq!(
-        object_update_compressed::decode_texture_entry(&vec![0; object_update_compressed::MAX_TEXTURE_ENTRY_BYTES + 1]),
-        Err(LLUdpError::InvalidMessage)
-    );
+    let compressed_limit = vec![0; object::MAX_TEXTURE_ENTRY_BYTES];
+    assert!(object::decode_texture_entry(&compressed_limit).unwrap().is_some());
+    assert_eq!(object::decode_texture_entry(&vec![0; object::MAX_TEXTURE_ENTRY_BYTES + 1]), Err(LLUdpError::InvalidMessage));
 
     let binary_data = |payload: &[u8]| {
         let mut field = Vec::with_capacity(payload.len() + 4);

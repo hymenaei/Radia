@@ -1,5 +1,5 @@
 use math::{DVec3, Quat, Vec3};
-use protocol::messages::{AgentMovementComplete, AgentUpdate, agent_update::AgentData};
+use protocol::messages::{AgentMovementComplete, AgentUpdate, agent::agent_update::AgentData};
 use scene::Camera;
 use uuid::Uuid;
 

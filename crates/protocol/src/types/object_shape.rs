@@ -1,11 +1,8 @@
-//! Path and profile values embedded in object-update payloads.
-
 use crate::{
     LLUdpError,
     lludp::codec::{Reader, Writer},
 };
 
-/// Path and profile parameters carried by full and compressed object updates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectShape {
     pub path_curve: u8,

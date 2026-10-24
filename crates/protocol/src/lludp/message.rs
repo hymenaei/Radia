@@ -9,7 +9,7 @@ use super::{
     types::{Audible, ChatSourceType, ChatType, MessageId},
 };
 use crate::{
-    messages::common::{encode_quantized, write_finite_vector3, write_finite_vector4},
+    messages::object::encode_quantized,
     messages::{
         AgentMovementComplete, AgentThrottle, AgentUpdate, ChatFromSimulator, ChatFromViewer, CompleteAgentMovement, CompletePingCheck,
         ConfirmEnableSimulator, DisableSimulator, EnableSimulator, ExtraParamUpdate, GenericStreamingMessage, ImprovedTerseObjectUpdate,
@@ -18,11 +18,13 @@ use crate::{
         RequestMultipleObjects, StartPingCheck, TeleportCancel, UseCircuitCode,
     },
     messages::{
-        agent_movement_complete, agent_throttle, agent_update, chat_from_simulator, chat_from_viewer, complete_agent_movement,
-        confirm_enable_simulator, enable_simulator, generic_streaming_message, improved_terse_object_update, kill_object, logout_reply,
-        logout_request, map_block_reply, map_block_request, object_extra_params, object_update, object_update_cached,
-        object_update_compressed, packet_ack, region_handle_request, region_handshake, region_handshake_reply, region_id_and_handle_reply,
-        request_multiple_objects, teleport_cancel, use_circuit_code,
+        agent::agent_movement_complete, agent::agent_throttle, agent::agent_update, agent::complete_agent_movement, agent::logout_reply,
+        agent::logout_request, agent::teleport_cancel, chat::chat_from_simulator, chat::chat_from_viewer, circuit::packet_ack,
+        circuit::use_circuit_code, generic_streaming_message, map::map_block_reply, map::map_block_request,
+        object::improved_terse_object_update, object::kill_object, object::object_extra_params, object::object_update,
+        object::object_update_cached, object::object_update_compressed, object::request_multiple_objects, region::confirm_enable_simulator,
+        region::enable_simulator, region::region_handle_request, region::region_handshake, region::region_handshake_reply,
+        region::region_id_and_handle_reply,
     },
     schema::{self, ids::*},
 };
@@ -32,7 +34,7 @@ const _: () = {
     assert!(size_of::<packet_ack::Packets>() <= 512);
     assert!(size_of::<logout_reply::InventoryData>() <= 512);
     assert!(size_of::<map_block_reply::Data>() <= 512);
-    assert!(size_of::<crate::messages::common::ExtraParameter>() <= 32);
+    assert!(size_of::<crate::messages::object::ExtraParameter>() <= 32);
     assert!(size_of::<object_update::ObjectData>() <= 512);
     assert!(size_of::<object_update_compressed::ObjectData>() <= 512);
     assert!(size_of::<improved_terse_object_update::ObjectData>() <= 512);
@@ -49,16 +51,11 @@ const _: () = {
     assert!(size_of::<request_multiple_objects::ObjectRequest>() <= size_of::<BlockInstance>() + 2 * size_of::<FieldValue>());
 };
 
-/// Allocation preflight route used before decoding a message ID.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AllocationStrategy {
-    /// The typed body decoder has no packet-driven heap collections.
     NoAlloc,
-    /// Generated block and field metadata safely bounds the typed decoder's retained allocations.
     SchemaDerived,
-    /// The typed body layout needs a dedicated allocation bound.
     Specialized,
-    /// The message ID is unknown and its payload is retained as opaque bytes.
     Opaque,
 }
 
@@ -169,7 +166,6 @@ impl TypedMessageId {
     }
 }
 
-/// The typed LLUDP messages supported by this protocol subset.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Message {
     UseCircuitCode(UseCircuitCode),
@@ -196,22 +192,14 @@ pub enum Message {
     ConfirmEnableSimulator(ConfirmEnableSimulator),
     ObjectUpdate(ObjectUpdate),
     ObjectUpdateCompressed(ObjectUpdateCompressed),
-    /// Partial object and avatar motion data; absent fields do not replace prior state.
     ImprovedTerseObjectUpdate(ImprovedTerseObjectUpdate),
-    /// Cached object references that can trigger a full-data request on a cache miss.
     ObjectUpdateCached(ObjectUpdateCached),
     KillObject(KillObject),
     RequestMultipleObjects(RequestMultipleObjects),
-    /// Incremental ExtraParams changes for simulator-local objects.
     ObjectExtraParams(ObjectExtraParams),
-    /// Method-tagged data streamed to the viewer.
     GenericStreamingMessage(GenericStreamingMessage),
     Schema(SchemaMessage),
-    /// Unrecognized message ID and payload bytes retained without decoding.
-    Unknown {
-        id: MessageId,
-        payload: Vec<u8>,
-    },
+    Unknown { id: MessageId, payload: Vec<u8> },
 }
 
 impl From<AgentUpdate> for Message {
@@ -269,11 +257,6 @@ impl From<GenericStreamingMessage> for Message {
 }
 
 impl Message {
-    /// Returns the allocation preflight route used for this message ID.
-    ///
-    /// Schema-derived preflight is used when the generated wire schema safely bounds the typed decoder's allocations. The RegionHandshake
-    /// compatibility suffix and packed object-update layouts need specialized preflight because their accepted or decoded shapes differ from
-    /// their schema blocks.
     pub fn allocation_strategy(id: MessageId) -> AllocationStrategy {
         if let Some(typed_id) = TypedMessageId::from_id(id) {
             return typed_id.allocation_strategy();
@@ -281,10 +264,6 @@ impl Message {
         if schema::find_by_id(id).is_some() { AllocationStrategy::SchemaDerived } else { AllocationStrategy::Opaque }
     }
 
-    /// Returns the explicit preflight route registered for a handwritten typed decoder.
-    ///
-    /// Schema-only and unknown message IDs return `None`. Typed-message coverage inventories should require `Some` for every typed ID so a
-    /// missing typed route cannot be hidden by the generic schema fallback.
     pub fn typed_allocation_strategy(id: MessageId) -> Option<AllocationStrategy> {
         TypedMessageId::from_id(id).map(TypedMessageId::allocation_strategy)
     }
@@ -410,7 +389,6 @@ impl Message {
         )
     }
 
-    /// Returns the Second Life message-template name, or `Unknown` for an unrecognized message ID.
     pub fn name(&self) -> &'static str {
         schema::find_by_id(self.id()).map_or("Unknown", |message| message.name)
     }
@@ -460,7 +438,6 @@ impl Message {
         schema::find_by_id(self.id()).is_some_and(|metadata| metadata.encoding == schema::MessageEncoding::Zerocoded)
     }
 
-    /// Whether this message requires a trusted circuit according to its template.
     pub fn requires_trusted_circuit(&self) -> bool {
         schema::find_by_id(self.id()).is_some_and(|metadata| metadata.trust == schema::MessageTrust::Trusted)
     }
@@ -681,9 +658,9 @@ impl Message {
                             writer.u8(object.state);
                             writer.u8(u8::from(object.avatar));
                             if let Some(plane) = object.collision_plane {
-                                write_finite_vector4(&mut writer, plane)?;
+                                writer.finite_vector4(plane)?;
                             }
-                            write_finite_vector3(&mut writer, object.motion.position)?;
+                            writer.finite_vector3(object.motion.position)?;
                             write_quantized_vector3(&mut writer, object.motion.velocity, -128.0, 128.0)?;
                             write_quantized_vector3(&mut writer, object.motion.acceleration, -64.0, 64.0)?;
                             for value in
@@ -1033,8 +1010,8 @@ fn add_string_capacity(total: &mut usize, value: &String) {
     add_capacity(total, value.capacity(), size_of::<u8>());
 }
 
-fn add_extra_parameter_capacity(total: &mut usize, parameters: &Vec<crate::messages::common::ExtraParameter>) {
-    add_capacity(total, parameters.capacity(), size_of::<crate::messages::common::ExtraParameter>());
+fn add_extra_parameter_capacity(total: &mut usize, parameters: &Vec<crate::messages::object::ExtraParameter>) {
+    add_capacity(total, parameters.capacity(), size_of::<crate::messages::object::ExtraParameter>());
     for parameter in parameters {
         add_capacity(total, parameter.data.capacity(), size_of::<u8>());
     }

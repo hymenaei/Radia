@@ -25,7 +25,7 @@ use protocol::{
     messages::TeleportCancel,
     messages::{
         AgentMovementComplete,
-        agent_movement_complete::{AgentData, Data, SimData},
+        agent::agent_movement_complete::{AgentData, Data, SimData},
     },
 };
 use std::{collections::HashMap, future::pending, net::SocketAddr, num::NonZeroU64, time::Duration};
@@ -53,7 +53,7 @@ fn crossed_region(agent_id: Uuid, session_id: Uuid) -> Value {
                 ("RegionHandle".to_owned(), Value::Binary(0x1234_u64.to_be_bytes().to_vec().into())),
                 ("SimIP".to_owned(), Value::Binary(vec![192, 0, 2, 4].into())),
                 ("SimPort".to_owned(), Value::Integer(13_000)),
-                ("SeedCapability".to_owned(), Value::URI("https://example.test/seed".into())),
+                ("SeedCapability".to_owned(), Value::Uri("https://example.test/seed".into())),
             ]))]),
         ),
         ("Info".to_owned(), Value::Array(vec![Value::Map(Map::new())])),

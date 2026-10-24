@@ -576,9 +576,9 @@ pub(crate) mod tests {
         lludp::{Message, Packet},
         messages::{
             AgentMovementComplete, ChatFromViewer, CompletePingCheck, PingId,
-            agent_movement_complete::{AgentData, Data, SimData},
-            chat_from_viewer,
-            packet_ack::{PacketAck, Packets},
+            agent::agent_movement_complete::{AgentData, Data, SimData},
+            chat::chat_from_viewer,
+            circuit::packet_ack::{PacketAck, Packets},
         },
     };
     use reqwest::StatusCode;

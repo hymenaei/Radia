@@ -19,7 +19,7 @@ Note also which crates are **API Boundaries**. Rules at the boundary are differe
 ```text
 apps/viewer/           # package `viewer`, executable `radia`
 crates/assets/         # package `assets`
-crates/common/llsd/    # package `llsd`
+crates/llsd/    # package `llsd`
 crates/math/           # package `math`
 crates/utils/          # package `utils`
 crates/test-support/ # package `test-support`
@@ -36,7 +36,7 @@ The viewer coordinates the library crates. The common directory is being removed
 
 ### `crates/assets`
 
-### `crates/common/llsd`
+### `crates/llsd`
 
 ### `crates/math`
 
@@ -51,6 +51,14 @@ Shared ID newtypes distinguish objects, assets, avatars, groups, regions, parcel
 ### `crates/network`
 
 ### `crates/protocol`
+
+Protocol owns wire framing, field codecs, typed messages, and generated metadata from the pinned Second Life message template. Messages are grouped by agent, chat, circuit, region, map, and object responsibilities. Shared object payloads and reconstruction rules belong to the object group; raw field reading and writing belong to the LLUDP codec. Each leaf module retains its protocol message name in snake_case. Root message re-exports keep common type imports concise. Wire names and field layouts remain exact.
+
+Packet framing borrows the datagram and validates allocation bounds before decoded fields are allocated. A preflighted frame binds those bounds to the same input. Packet ownership, encoding, and retained-capacity accounting remain separate from the borrowed frame. Full, compressed, cached, and terse object layouts retain their individual compatibility rules and admission bounds, including permissive object values that the world layer validates independently.
+
+LayerData keeps one shared module for its input limit, bit reader, and error type. Its terrain module owns Decoder, Patch, terrain limits, and coefficient reconstruction. Consumers use layer_data::terrain::{Decoder, Patch} and layer_data::Error. Terrain remains the only supported layer variant. Invalid terrain values preserve later independently framed patches; truncation and framing failures end iteration.
+
+The vendored template is pinned to upstream commit d5445ef1ccb26864236653bbe91d6878bb2277fc. The build checks its normalized SHA-256 digest; the local copy removes trailing whitespace and one final blank line. Login uses the protocol-mandated MD5 representation. Both hash checks use the shared lowercase hexadecimal encoder in utils. Required login fields distinguish absence from invalid types, and UUID parsing borrows their text.
 
 ### `crates/render`
 

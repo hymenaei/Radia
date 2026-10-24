@@ -191,7 +191,7 @@ impl MaterialDescription {
 
 pub(crate) fn legacy(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
     let limits = Limits {
-        max_input_bytes: 4 * 1024 * 1024,
+        max_bytes: 4 * 1024 * 1024,
         max_depth: 16,
         max_values: 4096,
         max_container_items: 512,

@@ -1,65 +1,24 @@
-//! Typed structures for the supported LLUDP messages.
-
-pub mod agent_movement_complete;
-pub mod agent_throttle;
-pub mod agent_update;
-pub mod chat_from_simulator;
-pub mod chat_from_viewer;
-pub mod common;
-pub mod complete_agent_movement;
-pub mod complete_ping_check;
-pub mod confirm_enable_simulator;
-pub mod disable_simulator;
-pub mod enable_simulator;
+pub mod agent;
+pub mod chat;
+pub mod circuit;
 pub mod generic_streaming_message;
-pub mod improved_terse_object_update;
-pub mod kill_object;
-pub mod logout_reply;
-pub mod logout_request;
-pub mod map_block_reply;
-pub mod map_block_request;
-pub mod object_extra_params;
-pub mod object_update;
-pub mod object_update_cached;
-pub mod object_update_compressed;
-pub mod packet_ack;
-pub mod region_handle_request;
-pub mod region_handshake;
-pub mod region_handshake_reply;
-pub mod region_id_and_handle_reply;
-pub mod request_multiple_objects;
-pub mod start_ping_check;
-pub mod teleport_cancel;
-pub mod use_circuit_code;
+pub mod map;
+pub mod object;
+pub mod region;
 
-pub use agent_movement_complete::AgentMovementComplete;
-pub use agent_throttle::{AgentThrottle, ThrottleRates};
-pub use agent_update::AgentUpdate;
-pub use chat_from_simulator::ChatFromSimulator;
-pub use chat_from_viewer::ChatFromViewer;
-pub use common::{ExtraParameter, ObjectMotion, ObjectSound, ObjectText, PingId, RegionData};
-pub use complete_agent_movement::CompleteAgentMovement;
-pub use complete_ping_check::CompletePingCheck;
-pub use confirm_enable_simulator::ConfirmEnableSimulator;
-pub use disable_simulator::DisableSimulator;
-pub use enable_simulator::EnableSimulator;
-pub use generic_streaming_message::GenericStreamingMessage;
-pub use improved_terse_object_update::ImprovedTerseObjectUpdate;
-pub use kill_object::KillObject;
-pub use logout_reply::LogoutReply;
-pub use logout_request::LogoutRequest;
-pub use map_block_reply::MapBlockReply;
-pub use map_block_request::MapBlockRequest;
-pub use object_extra_params::{ExtraParamUpdate, ObjectExtraParams};
-pub use object_update::{ObjectData, ObjectUpdate};
-pub use object_update_cached::{CachedObjectReference, ObjectUpdateCached};
-pub use object_update_compressed::{ObjectSpecificData, ObjectUpdateCompressed};
-pub use packet_ack::PacketAck;
-pub use region_handle_request::RegionHandleRequest;
-pub use region_handshake::RegionHandshake;
-pub use region_handshake_reply::RegionHandshakeReply;
-pub use region_id_and_handle_reply::RegionIdAndHandleReply;
-pub use request_multiple_objects::{CacheMissType, ObjectRequest, RequestAgentData, RequestMultipleObjects};
-pub use start_ping_check::StartPingCheck;
-pub use teleport_cancel::TeleportCancel;
-pub use use_circuit_code::UseCircuitCode;
+pub use self::agent::{
+    AgentMovementComplete, AgentThrottle, AgentUpdate, CompleteAgentMovement, LogoutReply, LogoutRequest, TeleportCancel, ThrottleRates,
+};
+pub use self::chat::{ChatFromSimulator, ChatFromViewer};
+pub use self::circuit::{CompletePingCheck, PacketAck, PingId, StartPingCheck, UseCircuitCode};
+pub use self::generic_streaming_message::GenericStreamingMessage;
+pub use self::map::{MapBlockReply, MapBlockRequest};
+pub use self::object::{
+    CacheMissType, CachedObjectReference, ExtraParamUpdate, ExtraParameter, ImprovedTerseObjectUpdate, KillObject, ObjectData,
+    ObjectExtraParams, ObjectMotion, ObjectRequest, ObjectSound, ObjectSpecificData, ObjectText, ObjectUpdate, ObjectUpdateCached,
+    ObjectUpdateCompressed, RegionData, RequestAgentData, RequestMultipleObjects,
+};
+pub use self::region::{
+    ConfirmEnableSimulator, DisableSimulator, EnableSimulator, RegionHandleRequest, RegionHandshake, RegionHandshakeReply,
+    RegionIdAndHandleReply,
+};

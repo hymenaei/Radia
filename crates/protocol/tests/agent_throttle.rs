@@ -2,7 +2,7 @@ use protocol::{
     lludp::{LLUdpError, Message, Packet},
     messages::{
         AgentThrottle, ThrottleRates,
-        agent_throttle::{AgentData, Throttle},
+        agent::agent_throttle::{AgentData, Throttle},
     },
 };
 use test_support::{lludp::vectors, parse_hex_fixture};

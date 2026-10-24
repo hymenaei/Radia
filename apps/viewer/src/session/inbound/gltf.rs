@@ -6,7 +6,7 @@ use world::{GLTF_TEXTURE_INFO_COUNT, GltfAlphaMode, GltfMaterialOverride, GltfMa
 
 const METHOD: u16 = 0x4175;
 const LLSD_LIMITS: Limits = Limits {
-    max_input_bytes: MAX_DATA_BYTES,
+    max_bytes: MAX_DATA_BYTES,
     max_depth: 8,
     max_values: 2048,
     max_container_items: 256,

@@ -6,7 +6,7 @@ use std::{
 
 use protocol::{
     lludp::{Message, Packet, PacketFlags},
-    messages::{PacketAck, PingId, StartPingCheck, packet_ack::Packets},
+    messages::{PacketAck, PingId, StartPingCheck, circuit::packet_ack::Packets},
 };
 use tokio::time::Instant;
 
@@ -785,9 +785,10 @@ mod protocol_tests {
         messages::{
             CachedObjectReference, ChatFromSimulator, ChatFromViewer, CompletePingCheck, LogoutRequest, ObjectUpdateCached, PingId,
             RegionData, RequestMultipleObjects, StartPingCheck,
-            chat_from_simulator::ChatData,
-            chat_from_viewer, logout_request,
-            request_multiple_objects::{CacheMissType, ObjectRequest, RequestAgentData},
+            agent::logout_request,
+            chat::chat_from_simulator::ChatData,
+            chat::chat_from_viewer,
+            object::request_multiple_objects::{CacheMissType, ObjectRequest, RequestAgentData},
         },
     };
     use std::{net::SocketAddr, time::Duration};

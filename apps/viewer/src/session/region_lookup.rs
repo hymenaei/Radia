@@ -12,9 +12,10 @@ use network::{AgentSession, Delivery, Error, SessionHandle, SimulatorId};
 use protocol::{
     lludp::Message,
     messages::{
-        MapBlockRequest, RegionHandleRequest, map_block_reply,
-        map_block_request::{self, PositionData},
-        region_handle_request::RequestBlock,
+        MapBlockRequest, RegionHandleRequest,
+        map::map_block_reply,
+        map::map_block_request::{self, PositionData},
+        region::region_handle_request::RequestBlock,
     },
 };
 use tokio::runtime::Handle;
@@ -478,7 +479,7 @@ mod tests {
 
     use protocol::{
         lludp::Message::MapBlockReply,
-        messages::{RegionIdAndHandleReply, map_block_reply, region_id_and_handle_reply::ReplyBlock},
+        messages::{RegionIdAndHandleReply, map::map_block_reply, region::region_id_and_handle_reply::ReplyBlock},
     };
     use tokio::{
         spawn,

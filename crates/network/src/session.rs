@@ -974,8 +974,8 @@ mod tests {
         ChatType, login,
         messages::{
             CacheMissType, ChatFromViewer, ObjectRequest, RequestAgentData, RequestMultipleObjects,
-            agent_movement_complete::{AgentData, AgentMovementComplete, Data, SimData},
-            chat_from_viewer,
+            agent::agent_movement_complete::{AgentData, AgentMovementComplete, Data, SimData},
+            chat::chat_from_viewer,
         },
     };
     use tempfile::tempdir;

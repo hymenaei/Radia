@@ -2,7 +2,7 @@ use math::{Quat, Vec3};
 use protocol::{
     lludp::{Message, Message::ImprovedTerseObjectUpdate, Message::ObjectUpdate, Message::ObjectUpdateCompressed, Packet},
     messages::{
-        ExtraParamUpdate, ExtraParameter, GenericStreamingMessage, ObjectExtraParams, StartPingCheck, improved_terse_object_update,
+        ExtraParamUpdate, ExtraParameter, GenericStreamingMessage, ObjectExtraParams, StartPingCheck, object::improved_terse_object_update,
     },
 };
 use std::num::{NonZeroU8, NonZeroU32};

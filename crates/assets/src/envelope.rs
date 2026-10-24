@@ -10,7 +10,7 @@ const MAX_ENVELOPE_BYTES: usize = 4 * 1024 * 1024;
 
 fn limits(input: usize) -> Limits {
     Limits {
-        max_input_bytes: input,
+        max_bytes: input,
         max_depth: 16,
         max_values: 4096,
         max_container_items: 512,

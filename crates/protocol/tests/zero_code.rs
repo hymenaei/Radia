@@ -2,11 +2,12 @@ use math::{Quat, Vec3};
 use protocol::{
     ChatType, LLUdpError,
     lludp::{Message, MessageId, Packet},
-    messages::{AgentUpdate, agent_update::AgentData},
+    messages::{AgentUpdate, agent::agent_update::AgentData},
     messages::{
-        ChatFromViewer, RegionHandshake, chat_from_viewer,
-        chat_from_viewer::ChatData,
-        region_handshake::{RegionInfo1, RegionInfo2, RegionInfo3, RegionInfo4},
+        ChatFromViewer, RegionHandshake,
+        chat::chat_from_viewer,
+        chat::chat_from_viewer::ChatData,
+        region::region_handshake::{RegionInfo1, RegionInfo2, RegionInfo3, RegionInfo4},
     },
 };
 use test_support::{lludp::vectors, parse_hex_fixture};

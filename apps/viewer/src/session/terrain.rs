@@ -9,14 +9,10 @@ use std::{
 use futures::{FutureExt, StreamExt, future::BoxFuture, pin_mut, stream::FuturesOrdered};
 use protocol::{
     lludp::{FieldValue, Message},
-    types::layer_data::{LandError, LandLayer, MAX_LAYER_BYTES},
+    types::layer_data::{self, terrain},
 };
 use tokio::runtime::Handle;
 use world::{TerrainPatch, UpdateSource};
-
-#[cfg(test)]
-#[path = "terrain_tests.rs"]
-mod tests;
 
 const MAX_TERRAIN_JOBS: usize = 4;
 
@@ -52,7 +48,7 @@ impl TerrainDecodeQueue {
         let [layer] = layer.instances.as_slice() else { return };
         let [data] = data.instances.as_slice() else { return };
         let ([FieldValue::U8(b'L')], [FieldValue::Bytes(data)]) = (layer.fields.as_slice(), data.fields.as_slice()) else { return };
-        if data.len() > MAX_LAYER_BYTES {
+        if data.len() > layer_data::MAX_BYTES {
             tracing::debug!("land layer exceeded compressed payload limit");
             return;
         }
@@ -86,7 +82,7 @@ impl TerrainDecodeQueue {
 
 fn decode_terrain_patches(source: UpdateSource, data: &[u8], cancelled: &AtomicBool) -> DecodedTerrain {
     let mut result = DecodedTerrain { source, patches: Vec::new(), rejected: 0 };
-    let layer = match LandLayer::new(b'L', data) {
+    let layer = match terrain::Decoder::new(b'L', data) {
         Ok(layer) => layer,
         Err(_) => {
             result.rejected = 1;
@@ -109,7 +105,7 @@ fn decode_terrain_patches(source: UpdateSource, data: &[u8], cancelled: &AtomicB
             }
             Err(error) => {
                 result.rejected += 1;
-                if error != LandError::NonFinite {
+                if error != layer_data::Error::NonFinite {
                     break;
                 }
             }
@@ -117,3 +113,7 @@ fn decode_terrain_patches(source: UpdateSource, data: &[u8], cancelled: &AtomicB
     }
     result
 }
+
+#[cfg(test)]
+#[path = "terrain_tests.rs"]
+mod tests;

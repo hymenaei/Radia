@@ -528,7 +528,7 @@ impl CapabilityDecodeError {
 }
 
 fn seed_capability_llsd_limits() -> Limits {
-    Limits { max_input_bytes: MAX_SEED_CAPABILITY_RESPONSE_BYTES, ..capability_llsd_limits() }
+    Limits { max_bytes: MAX_SEED_CAPABILITY_RESPONSE_BYTES, ..capability_llsd_limits() }
 }
 
 pub(super) enum LookupError {
@@ -655,7 +655,7 @@ pub(super) fn capability_llsd_limits() -> Limits {
 
 pub(super) fn capability_llsd_limits_with_response_limit(max_response_bytes: usize) -> Limits {
     Limits {
-        max_input_bytes: max_response_bytes,
+        max_bytes: max_response_bytes,
         max_depth: MAX_LLSD_NESTING_DEPTH,
         max_values: MAX_LLSD_XML_ELEMENTS,
         max_container_items: MAX_LLSD_XML_ELEMENTS,
@@ -677,7 +677,7 @@ fn llsd_error(error: llsd::Error) -> String {
 fn string_value(value: &Value) -> Option<&str> {
     match value {
         Value::String(value) => Some(value),
-        Value::URI(value) => Some(value.as_str()),
+        Value::Uri(value) => Some(value.as_str()),
         _ => None,
     }
 }

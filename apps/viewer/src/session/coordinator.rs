@@ -1401,9 +1401,9 @@ mod tests {
         messages::{
             CacheMissType::Full,
             ChatFromSimulator, RequestAgentData,
-            chat_from_simulator::ChatData,
-            kill_object,
-            region_handshake::{RegionHandshake, RegionInfo1},
+            chat::chat_from_simulator::ChatData,
+            object::kill_object,
+            region::region_handshake::{RegionHandshake, RegionInfo1},
         },
     };
     use tempfile::tempdir;

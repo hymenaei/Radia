@@ -1,11 +1,13 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, io::ErrorKind};
 
-use tokio::{
-    net::UdpSocket,
-    time::{Instant, timeout},
-};
+use tokio::{net::UdpSocket, time::Instant};
 
 use super::{Circuit, available_ping_id};
+
+fn assert_no_datagram(socket: &UdpSocket) {
+    let mut buffer = [0; 65_535];
+    std::assert_matches!(socket.try_recv_from(&mut buffer), Err(error) if error.kind() == ErrorKind::WouldBlock);
+}
 
 #[test]
 fn ping_id_selection() {
@@ -29,21 +31,12 @@ async fn skips_ping_when_ids_full() {
 
     assert_eq!(circuit.pending_pings.len(), 256);
     assert_eq!(circuit.next_sequence, next_sequence);
-    let mut buffer = [0; 64];
-    assert!(timeout(Duration::from_millis(20), simulator.recv_from(&mut buffer)).await.is_err());
+    assert_no_datagram(&simulator);
 }
 #[cfg(test)]
 mod protocol_tests {
-    use crate::{
-        event::PacketOrder::{Ambiguous, Degraded, Ordered},
-        status::NetworkStatusHandle,
-        transport::UdpTransport,
-        transport::lludp::{
-            Circuit, DUPLICATE_ACK_HEADROOM, Delivery, KEEPALIVE_TIMEOUT, MAX_NORMAL_DATAGRAM_BYTES, MAX_ORDERED_SEQUENCE_DISTANCE,
-            MAX_PENDING_ACKS, MAX_PENDING_PACKETS, MAX_RECEIVED_RELIABLE_PACKETS, PendingPacket, ReceiveAdmission, ReceiveError,
-            advance_sequence, remove_sent_acks, sequence_age, sequence_is_newer,
-        },
-    };
+    use std::{net::SocketAddr, time::Duration};
+
     use ::test_support::{lludp::vectors, parse_hex_fixture};
     use math::Vec3;
     use protocol::{
@@ -58,12 +51,18 @@ mod protocol_tests {
             object::request_multiple_objects::{CacheMissType, ObjectRequest, RequestAgentData},
         },
     };
-    use std::{net::SocketAddr, time::Duration};
-    use tokio::{
-        net::UdpSocket,
-        time::{Instant, timeout},
-    };
+    use tokio::{net::UdpSocket, time::Instant};
     use uuid::Uuid;
+
+    use crate::{
+        event::PacketOrder::{Ambiguous, Degraded, Ordered},
+        transport::UdpTransport,
+        transport::lludp::{
+            Circuit, CircuitError, DUPLICATE_ACK_HEADROOM, Delivery, KEEPALIVE_TIMEOUT, MAX_NORMAL_DATAGRAM_BYTES,
+            MAX_ORDERED_SEQUENCE_DISTANCE, MAX_PENDING_ACKS, MAX_PENDING_PACKETS, MAX_RECEIVED_RELIABLE_PACKETS, PendingPacket,
+            ReceiveAdmission, ReceiveError, ReceiveOutcome, advance_sequence, remove_sent_acks, sequence_age,
+        },
+    };
 
     fn complete_ping(ping_id: u8) -> Message {
         Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id } })
@@ -73,16 +72,21 @@ mod protocol_tests {
         Message::StartPingCheck(StartPingCheck { ping_id: PingId { ping_id }, oldest_unacked })
     }
 
-    async fn send_ping_at(circuit: &mut Circuit, socket: &UdpTransport, sent_at: Instant) -> Result<(), String> {
+    async fn send_ping_at(circuit: &mut Circuit, socket: &UdpTransport, sent_at: Instant) -> Result<(), CircuitError> {
         let Some(prepared) = circuit.prepare_ping(sent_at)? else {
             return Ok(());
         };
-        socket.send(prepared.bytes()).await.map_err(|error| error.to_string())?;
-        circuit.commit_sent(prepared, sent_at)
+        crate::transport::test_support::send_prepared_at(circuit, socket, prepared, sent_at).await
     }
 
-    #[test]
-    fn prepared_send_commits_after_local_send() {
+    fn receive_packet_at(circuit: &mut Circuit, packet: &Packet, received_at: Instant) -> Result<ReceiveOutcome, ReceiveError> {
+        crate::transport::test_support::receive_packet_at(circuit, packet, received_at)
+    }
+
+    #[tokio::test]
+    async fn prepared_send_commits_after_local_send() {
+        let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+        let transport = UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect fake simulator");
         let mut circuit = Circuit::new();
         let sent_at = Instant::now();
         let prepared = circuit.prepare_message(complete_ping(8), Delivery::Reliable).expect("prepare reliable packet");
@@ -91,14 +95,24 @@ mod protocol_tests {
         assert_eq!(circuit.next_sequence, 1);
         assert!(circuit.pending.is_empty());
 
-        circuit.commit_sent(prepared, sent_at).expect("commit successful local send");
+        crate::transport::test_support::send_prepared_at(&mut circuit, &transport, prepared, sent_at)
+            .await
+            .expect("commit successful local send");
+        let mut bytes = [0; 1024];
+        let (size, _) = simulator.recv_from(&mut bytes).await.expect("receive sent reliable packet");
+        let packet = Packet::decode(&bytes[..size]).expect("decode reliable packet");
+        assert_eq!(packet.sequence(), 1);
+        assert!(packet.is_reliable());
+        assert_eq!(packet.message(), &complete_ping(8));
 
         assert_eq!(circuit.next_sequence, 2);
         assert_eq!(circuit.pending.get(&1).expect("track sent packet").sent_at, sent_at);
     }
 
-    #[test]
-    fn prepared_send_removes_only_carried_acknowledgements() {
+    #[tokio::test]
+    async fn prepared_send_removes_only_carried_acknowledgements() {
+        let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+        let transport = UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect fake simulator");
         let mut circuit = Circuit::new();
         let now = Instant::now();
         receive_at(&mut circuit, &reliable_packet(41), now);
@@ -107,14 +121,20 @@ mod protocol_tests {
         assert_eq!(packet.appended_acks(), &[41]);
 
         receive_at(&mut circuit, &reliable_packet(42), now + Duration::from_millis(1));
-        circuit.commit_sent(prepared, now + Duration::from_millis(2)).expect("commit successful local send");
+        crate::transport::test_support::send_prepared_at(&mut circuit, &transport, prepared, now + Duration::from_millis(2))
+            .await
+            .expect("commit successful local send");
+        let mut bytes = [0; 1024];
+        simulator.recv_from(&mut bytes).await.expect("receive sent packet");
 
         assert_eq!(circuit.pending_acks.iter().copied().collect::<Vec<_>>(), [42]);
         assert_eq!(circuit.pending_ack_sequences, [42].into_iter().collect());
     }
 
-    #[test]
-    fn appended_ack_batches_respect_normal_datagram_limit() {
+    #[tokio::test]
+    async fn appended_ack_batches_respect_normal_datagram_limit() {
+        let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+        let transport = UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect fake simulator");
         let mut circuit = Circuit::new();
         let now = Instant::now();
         for sequence in 1..=u32::from(u8::MAX) {
@@ -132,19 +152,30 @@ mod protocol_tests {
         assert!(!packet.appended_acks().is_empty());
         assert!(packet.appended_acks().len() < usize::from(u8::MAX));
         let acknowledged = packet.appended_acks().len();
-        circuit.commit_sent(prepared, now).expect("commit limited ACK batch");
+        crate::transport::test_support::send_prepared_at(&mut circuit, &transport, prepared, now).await.expect("commit limited ACK batch");
+        let mut bytes = [0; 2048];
+        let (size, _) = simulator.recv_from(&mut bytes).await.expect("receive ACK batch");
+        let sent = Packet::decode(&bytes[..size]).expect("decode sent ACK batch");
+        assert!(sent.appended_acks().len() == acknowledged);
         assert_eq!(circuit.pending_acks.len(), usize::from(u8::MAX) - acknowledged);
 
         let next = circuit.prepare_message(message, Delivery::Unreliable).expect("prepare remaining ACKs");
         assert!(next.bytes().len() <= MAX_NORMAL_DATAGRAM_BYTES);
-        assert_eq!(
-            Packet::decode(next.bytes()).expect("decode remaining batch").appended_acks().len(),
-            usize::from(u8::MAX) - acknowledged
-        );
+        let expected = usize::from(u8::MAX) - acknowledged;
+        assert_eq!(Packet::decode(next.bytes()).expect("decode remaining batch").appended_acks().len(), expected);
+        crate::transport::test_support::send_prepared_at(&mut circuit, &transport, next, now + Duration::from_millis(1))
+            .await
+            .expect("send remaining ACK batch");
+        let (size, _) = simulator.recv_from(&mut bytes).await.expect("receive remaining ACK batch");
+        let sent = Packet::decode(&bytes[..size]).expect("decode remaining ACK batch");
+        assert_eq!(sent.appended_acks().len(), expected);
+        assert!(circuit.pending_acks.is_empty());
     }
 
-    #[test]
-    fn oversized_base_message_leaves_acks_for_standalone_batch() {
+    #[tokio::test]
+    async fn oversized_base_message_leaves_acks_for_standalone_batch() {
+        let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+        let transport = UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect fake simulator");
         let mut circuit = Circuit::new();
         let now = Instant::now();
         for sequence in 1..=u32::from(u8::MAX) {
@@ -158,12 +189,23 @@ mod protocol_tests {
         let prepared = circuit.prepare_message(message, Delivery::Unreliable).expect("prepare compatibility-sized request");
         assert!(prepared.bytes().len() > MAX_NORMAL_DATAGRAM_BYTES);
         assert!(Packet::decode(prepared.bytes()).expect("decode oversized base message").appended_acks().is_empty());
-        circuit.commit_sent(prepared, now).expect("commit base message without ACKs");
+        crate::transport::test_support::send_prepared_at(&mut circuit, &transport, prepared, now)
+            .await
+            .expect("commit base message without ACKs");
+        let mut bytes = [0; 65_535];
+        let (size, _) = simulator.recv_from(&mut bytes).await.expect("receive oversized base message");
+        assert!(bytes[..size].len() > MAX_NORMAL_DATAGRAM_BYTES);
         assert_eq!(circuit.pending_acks.len(), usize::from(u8::MAX));
 
         let acknowledgements = circuit.prepare_acknowledgements().expect("prepare standalone ACKs").expect("ACKs remain pending");
         assert!(acknowledgements.bytes().len() <= MAX_NORMAL_DATAGRAM_BYTES);
         assert_eq!(Packet::decode(acknowledgements.bytes()).expect("decode standalone ACKs").message().name(), "PacketAck");
+        crate::transport::test_support::send_prepared_at(&mut circuit, &transport, acknowledgements, now + Duration::from_millis(1))
+            .await
+            .expect("send standalone acknowledgement batch");
+        let (size, _) = simulator.recv_from(&mut bytes).await.expect("receive standalone acknowledgement batch");
+        assert_eq!(Packet::decode(&bytes[..size]).expect("decode standalone acknowledgements").message().name(), "PacketAck");
+        assert!(circuit.pending_acks.is_empty());
     }
 
     #[test]
@@ -180,22 +222,33 @@ mod protocol_tests {
         assert_eq!(circuit.pending_ack_sequences, [41].into_iter().collect());
     }
 
-    #[test]
-    fn acknowledged_packet_is_not_restored_by_late_retry_commit() {
+    #[tokio::test]
+    async fn acknowledged_packet_is_not_restored_by_late_retry_commit() {
+        let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+        let transport = UdpTransport::connect(simulator.local_addr().expect("simulator address")).await.expect("connect fake simulator");
         let mut circuit = Circuit::new();
-        let sent_at = Instant::now();
+        let sent_at = Instant::now() - Duration::from_secs(6);
         let prepared = circuit.prepare_message(complete_ping(8), Delivery::Reliable).expect("prepare reliable packet");
-        circuit.commit_sent(prepared, sent_at).expect("commit successful local send");
+        crate::transport::test_support::send_prepared_at(&mut circuit, &transport, prepared, sent_at)
+            .await
+            .expect("send original reliable packet");
+        let mut bytes = [0; 1024];
+        simulator.recv_from(&mut bytes).await.expect("receive original packet");
 
-        let retry = circuit.prepare_retransmission(sent_at + Duration::from_secs(6)).expect("prepare due retry").expect("retry is due");
-        circuit.acknowledge_outgoing_ids([1]);
-        circuit.commit_sent(retry, sent_at + Duration::from_secs(6)).expect("commit retry send");
+        let retry_at = sent_at + Duration::from_secs(6);
+        let retry = circuit.prepare_retransmission(retry_at).expect("prepare due retry").expect("retry is due");
+        transport.try_send(retry.bytes()).expect("send prepared retry");
+        let (size, _) = simulator.recv_from(&mut bytes).await.expect("receive sent retry");
+        assert!(Packet::decode(&bytes[..size]).expect("decode resent packet").is_resent());
+        receive_packet_at(&mut circuit, &reliable_packet(2).with_appended_acks(vec![1]), retry_at)
+            .expect("receive acknowledgement before local retry commit");
+        circuit.commit_sent(retry, retry_at).expect("commit retry after ACK");
 
         assert!(!circuit.pending.contains_key(&1));
     }
 
     fn receive_at(circuit: &mut Circuit, packet: &Packet, received_at: Instant) -> bool {
-        match circuit.receive_at(packet, received_at) {
+        match receive_packet_at(circuit, packet, received_at) {
             Ok(outcome) => outcome.is_new_packet,
             Err(error) => panic!(
                 "valid circuit packet {} with {} retained reliable sequences: {error}",
@@ -223,11 +276,11 @@ mod protocol_tests {
             },
         });
 
-        let error =
-            Circuit::new().send(&transport, message, Delivery::Unreliable).await.expect_err("inbound-only message must be rejected");
-        assert!(error.contains("simulator-to-viewer"));
-        let mut buffer = [0; 64];
-        assert!(timeout(Duration::from_millis(20), server.recv_from(&mut buffer)).await.is_err());
+        let error = crate::transport::test_support::send_message(&mut Circuit::new(), &transport, message, Delivery::Unreliable)
+            .await
+            .expect_err("inbound-only message must be rejected");
+        std::assert_matches!(error, CircuitError::InboundOnly);
+        super::assert_no_datagram(&server);
     }
 
     #[test]
@@ -255,7 +308,9 @@ mod protocol_tests {
 
             assert!(message.is_inbound_only(), "{name} must be classified as inbound-only");
             assert!(
-                Circuit::new().prepare_message(message, Delivery::Unreliable).is_err_and(|error| error.contains("simulator-to-viewer")),
+                Circuit::new()
+                    .prepare_message(message, Delivery::Unreliable)
+                    .is_err_and(|error| matches!(error, CircuitError::InboundOnly)),
                 "{name} must be rejected by the Circuit send path"
             );
         }
@@ -272,11 +327,12 @@ mod protocol_tests {
         let unknown = Message::Unknown { id: MessageId::high(0xfe), payload: Vec::new() };
         let mut circuit = Circuit::new();
         for message in [packet.message().clone(), unknown] {
-            let error = circuit.send(&transport, message, Delivery::Unreliable).await.expect_err("message direction is unknown");
-            assert!(error.contains("known viewer-to-simulator direction"));
+            let error = crate::transport::test_support::send_message(&mut circuit, &transport, message, Delivery::Unreliable)
+                .await
+                .expect_err("message direction is unknown");
+            std::assert_matches!(error, CircuitError::UnknownDirection);
         }
-        let mut buffer = [0; 64];
-        assert!(timeout(Duration::from_millis(20), server.recv_from(&mut buffer)).await.is_err());
+        super::assert_no_datagram(&server);
     }
 
     #[tokio::test]
@@ -289,12 +345,13 @@ mod protocol_tests {
             chat_data: chat_from_viewer::ChatData { message: "x".repeat(9_000), chat_type: ChatType::Normal, channel: 0 },
         });
 
-        assert!(circuit.send(&transport, oversized, Delivery::Unreliable).await.is_err());
-        circuit.send(&transport, complete_ping(1), Delivery::Unreliable).await.expect("send valid packet");
+        assert!(crate::transport::test_support::send_message(&mut circuit, &transport, oversized, Delivery::Unreliable).await.is_err());
+        crate::transport::test_support::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Unreliable)
+            .await
+            .expect("send valid packet");
 
         let mut buffer = [0; 64];
-        let (size, _) =
-            timeout(Duration::from_secs(1), server.recv_from(&mut buffer)).await.expect("read simulator datagram").expect("read datagram");
+        let (size, _) = server.recv_from(&mut buffer).await.expect("read datagram");
         let packet = Packet::decode(&buffer[..size]).expect("decode simulator packet");
         assert_eq!(packet.sequence(), 1);
     }
@@ -303,39 +360,35 @@ mod protocol_tests {
     async fn logout_bypasses_window() {
         let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
         let transport = UdpTransport::connect(server.local_addr().expect("simulator address")).await.expect("connect fake simulator");
-        let status = NetworkStatusHandle::new();
-        let mut circuit = Circuit::with_status(status.clone());
+        let mut circuit = Circuit::new();
         let mut buffer = [0; 1024];
 
         for sequence in 1..=MAX_PENDING_PACKETS {
-            circuit.send(&transport, complete_ping(1), Delivery::Reliable).await.expect("fill reliable window");
-            let (size, _) = timeout(Duration::from_secs(1), server.recv_from(&mut buffer))
+            crate::transport::test_support::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable)
                 .await
-                .expect("read simulator datagram")
-                .expect("read datagram");
+                .expect("fill reliable window");
+            let (size, _) = server.recv_from(&mut buffer).await.expect("read datagram");
             let packet = Packet::decode(&buffer[..size]).expect("decode simulator packet");
             assert_eq!(packet.sequence(), sequence as u32);
         }
 
-        let logout_sequence = circuit
-            .send(
-                &transport,
-                Message::LogoutRequest(LogoutRequest {
-                    agent_data: logout_request::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
-                }),
-                Delivery::ReliableNoRetry,
-            )
-            .await
-            .expect("send one final logout packet");
-        let (size, _) =
-            timeout(Duration::from_secs(1), server.recv_from(&mut buffer)).await.expect("read logout request").expect("read datagram");
+        let logout_sequence = crate::transport::test_support::send_message(
+            &mut circuit,
+            &transport,
+            Message::LogoutRequest(LogoutRequest {
+                agent_data: logout_request::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
+            }),
+            Delivery::ReliableNoRetry,
+        )
+        .await
+        .expect("send one final logout packet");
+        let (size, _) = server.recv_from(&mut buffer).await.expect("read datagram");
         let logout = Packet::decode(&buffer[..size]).expect("decode logout request");
 
         assert_eq!(logout.sequence(), logout_sequence);
         assert!(logout.is_reliable());
         assert!(matches!(logout.message(), Message::LogoutRequest(_)));
         assert!(!circuit.has_pending(logout_sequence));
-        assert_eq!(status.snapshot().reliable_packets_pending, MAX_PENDING_PACKETS);
     }
 
     #[test]
@@ -495,19 +548,17 @@ mod protocol_tests {
     async fn bounds_duplicate_history() {
         let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
         let transport = UdpTransport::connect(server.local_addr().expect("simulator address")).await.expect("connect fake simulator");
-        let status = NetworkStatusHandle::new();
-        let mut circuit = Circuit::with_status(status.clone());
+        let mut circuit = Circuit::new();
         let received_at = Instant::now();
         let mut buffer = [0; 2048];
 
         for sequence in 1..=MAX_RECEIVED_RELIABLE_PACKETS as u32 {
             assert!(receive_at(&mut circuit, &reliable_packet(sequence), received_at));
             if sequence % 200 == 0 {
-                circuit.flush_pending_acks(&transport).await.expect("flush fake simulator acknowledgements");
-                let (size, _) = timeout(Duration::from_secs(1), server.recv_from(&mut buffer))
+                crate::transport::test_support::send_acknowledgements(&mut circuit, &transport)
                     .await
-                    .expect("read fake simulator ack")
-                    .expect("receive fake simulator ack");
+                    .expect("flush fake simulator acknowledgements");
+                let (size, _) = server.recv_from(&mut buffer).await.expect("receive fake simulator ack");
                 let ack = Packet::decode(&buffer[..size]).expect("decode fake simulator ack");
                 let Message::PacketAck(message) = ack.message() else {
                     panic!("expected a packet acknowledgement");
@@ -517,26 +568,24 @@ mod protocol_tests {
         }
         let remaining_acks = MAX_RECEIVED_RELIABLE_PACKETS % 200;
         if remaining_acks != 0 {
-            circuit.flush_pending_acks(&transport).await.expect("flush remaining fake simulator acknowledgements");
-            let (size, _) = timeout(Duration::from_secs(1), server.recv_from(&mut buffer))
+            crate::transport::test_support::send_acknowledgements(&mut circuit, &transport)
                 .await
-                .expect("read final fake simulator ack")
-                .expect("receive final fake simulator ack");
+                .expect("flush remaining fake simulator acknowledgements");
+            let (size, _) = server.recv_from(&mut buffer).await.expect("receive final fake simulator ack");
             let ack = Packet::decode(&buffer[..size]).expect("decode final fake simulator ack");
             assert!(matches!(ack.message(), Message::PacketAck(message) if message.packets.len() == remaining_acks));
         }
 
         assert_eq!(
-            circuit.receive_at(&reliable_packet(MAX_RECEIVED_RELIABLE_PACKETS as u32 + 1), received_at),
+            receive_packet_at(&mut circuit, &reliable_packet(MAX_RECEIVED_RELIABLE_PACKETS as u32 + 1), received_at),
             Err(ReceiveError::DuplicateHistoryFull)
         );
-        assert!(status.snapshot().last_error.as_deref().is_some_and(|error| error.contains("duplicate history is full")));
-        circuit.flush_pending_acks(&transport).await.expect("flush no ack for untracked packet");
-        assert!(timeout(Duration::from_millis(20), server.recv_from(&mut buffer)).await.is_err());
+        crate::transport::test_support::send_acknowledgements(&mut circuit, &transport).await.expect("flush no ack for untracked packet");
+        super::assert_no_datagram(&server);
 
         assert!(!receive_at(&mut circuit, &resent_reliable_packet(1), received_at + Duration::from_secs(1)));
-        circuit.flush_pending_acks(&transport).await.expect("re-ack known duplicate");
-        let (size, _) = timeout(Duration::from_secs(1), server.recv_from(&mut buffer)).await.expect("read re-ack").expect("receive re-ack");
+        crate::transport::test_support::send_acknowledgements(&mut circuit, &transport).await.expect("re-ack known duplicate");
+        let (size, _) = server.recv_from(&mut buffer).await.expect("receive re-ack");
         let ack = Packet::decode(&buffer[..size]).expect("decode re-ack");
         assert!(matches!(ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 1));
 
@@ -557,31 +606,24 @@ mod protocol_tests {
         let first_time = Instant::now();
 
         assert!(receive_at(&mut circuit, &reliable_packet(72), first_time));
-        circuit.flush_pending_acks(&transport).await.expect("flush first acknowledgement");
-        let (size, _) = timeout(Duration::from_secs(1), server.recv_from(&mut buffer))
-            .await
-            .expect("read first acknowledgement")
-            .expect("receive first acknowledgement");
+        crate::transport::test_support::send_acknowledgements(&mut circuit, &transport).await.expect("flush first acknowledgement");
+        let (size, _) = server.recv_from(&mut buffer).await.expect("receive first acknowledgement");
         let first_ack = Packet::decode(&buffer[..size]).expect("decode first acknowledgement");
         assert!(matches!(first_ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 72));
 
         assert!(!receive_at(&mut circuit, &reliable_packet(72), first_time + Duration::from_secs(1)));
-        circuit.flush_pending_acks(&transport).await.expect("flush duplicate acknowledgement");
-        let (size, _) = timeout(Duration::from_secs(1), server.recv_from(&mut buffer))
-            .await
-            .expect("read duplicate acknowledgement")
-            .expect("receive duplicate acknowledgement");
+        crate::transport::test_support::send_acknowledgements(&mut circuit, &transport).await.expect("flush duplicate acknowledgement");
+        let (size, _) = server.recv_from(&mut buffer).await.expect("receive duplicate acknowledgement");
         let duplicate_ack = Packet::decode(&buffer[..size]).expect("decode duplicate acknowledgement");
         assert!(
             matches!(duplicate_ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 72)
         );
 
         assert!(!receive_at(&mut circuit, &resent_reliable_packet(72), first_time + Duration::from_secs(2)));
-        circuit.flush_pending_acks(&transport).await.expect("flush resent duplicate acknowledgement");
-        let (size, _) = timeout(Duration::from_secs(1), server.recv_from(&mut buffer))
+        crate::transport::test_support::send_acknowledgements(&mut circuit, &transport)
             .await
-            .expect("read resent duplicate acknowledgement")
-            .expect("receive resent duplicate acknowledgement");
+            .expect("flush resent duplicate acknowledgement");
+        let (size, _) = server.recv_from(&mut buffer).await.expect("receive resent duplicate acknowledgement");
         let resent_ack = Packet::decode(&buffer[..size]).expect("decode resent duplicate acknowledgement");
         assert!(matches!(resent_ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == 72));
     }
@@ -593,30 +635,16 @@ mod protocol_tests {
         assert_eq!(advance_sequence(u32::MAX - 1), u32::MAX);
         assert_eq!(advance_sequence(u32::MAX), 0);
         assert_eq!(sequence_age(0x0100_0000, 0x00ff_ffff), 1);
-        assert!(sequence_is_newer(0x0100_0000, 0x00ff_ffff));
-        assert!(!sequence_is_newer(0x00ff_ffff, 0x0100_0000));
         assert_eq!(sequence_age(0, u32::MAX), 1);
-        assert!(sequence_is_newer(0, u32::MAX));
-        assert!(!sequence_is_newer(u32::MAX, 0));
-    }
-
-    #[test]
-    fn sequence_is_newer_rejects_equal_and_ambiguous_pairs() {
-        assert!(sequence_is_newer(11, 10));
-        assert!(!sequence_is_newer(10, 10));
-        assert!(!sequence_is_newer(1 << 31, 0));
-        assert!(!sequence_is_newer(9, 10));
     }
 
     #[test]
     fn accepts_wide_sequence() {
-        let status = NetworkStatusHandle::new();
-        let mut circuit = Circuit::with_status(status.clone());
+        let mut circuit = Circuit::new();
         let now = Instant::now();
 
-        assert!(circuit.receive_at(&reliable_packet(0x0100_0000), now).expect("valid 32-bit sequence").is_new_packet);
+        assert!(receive_packet_at(&mut circuit, &reliable_packet(0x0100_0000), now).expect("valid 32-bit sequence").is_new_packet);
         circuit.clear_duplicate_list(0x0100_0001, now + Duration::from_secs(1));
-        assert!(status.snapshot().last_error.is_none());
     }
 
     #[test]
@@ -646,7 +674,7 @@ mod protocol_tests {
         let start = Instant::now();
         let mut circuit = Circuit::new();
         for sequence in [0x00ff_fffe, 0x00ff_ffff, 0] {
-            circuit.receive_at(&reliable_packet(sequence), start).expect("receive reliable packet");
+            receive_packet_at(&mut circuit, &reliable_packet(sequence), start).expect("receive reliable packet");
         }
         circuit.pending_acks.clear();
         circuit.pending_ack_sequences.clear();
@@ -662,7 +690,7 @@ mod protocol_tests {
         let now = Instant::now();
 
         let ping = Packet::new(u32::MAX - 1, start_ping(1, 0));
-        let ping = circuit.receive_at(&ping, now).expect("receive inbound ping");
+        let ping = receive_packet_at(&mut circuit, &ping, now).expect("receive inbound ping");
         assert!(ping.is_new_packet);
         assert_eq!(ping.packet_order, Ordered(u64::from(u32::MAX - 1)));
 
@@ -674,7 +702,7 @@ mod protocol_tests {
             }),
         )
         .with_reliable();
-        let object = circuit.receive_at(&object, now).expect("receive reliable object update");
+        let object = receive_packet_at(&mut circuit, &object, now).expect("receive reliable object update");
         assert!(object.is_new_packet);
         assert_eq!(object.packet_order, Ordered(0x1_0000_0000));
     }
@@ -724,43 +752,46 @@ mod protocol_tests {
         let mut buffer = [0; 1024];
 
         let mut circuit = Circuit::new();
-        let outgoing = circuit.send(&transport, complete_ping(1), Delivery::Reliable).await.expect("send reliable packet");
-        timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read outgoing packet").expect("receive packet");
+        let outgoing = crate::transport::test_support::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable)
+            .await
+            .expect("send reliable packet");
+        simulator.recv_from(&mut buffer).await.expect("receive packet");
 
         let now = Instant::now();
-        let anchor = circuit.receive_at(&reliable_packet(20), now).expect("receive anchor packet");
+        let anchor = receive_packet_at(&mut circuit, &reliable_packet(20), now).expect("receive anchor packet");
         assert_eq!(anchor.packet_order, Ordered(20));
         let ambiguous_sequence = 20_u32.wrapping_add(1 << 31);
-        let ambiguous = circuit
-            .receive_at(&reliable_packet(ambiguous_sequence).with_appended_acks(vec![outgoing]), now)
+        let ambiguous = receive_packet_at(&mut circuit, &reliable_packet(ambiguous_sequence).with_appended_acks(vec![outgoing]), now)
             .expect("receive ambiguous reliable packet");
         assert!(ambiguous.is_new_packet);
         assert_eq!(ambiguous.packet_order, Ambiguous);
         assert!(!circuit.has_pending(outgoing), "an ambiguous packet still clears its valid outgoing ACK");
         assert_eq!(circuit.observe_sequence(21), Ordered(21), "isolated ambiguity leaves the anchor usable");
-        circuit.flush_pending_acks(&transport).await.expect("flush ACKs for ambiguous packet");
-        let (size, _) = timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read ACK").expect("receive ACK");
+        crate::transport::test_support::send_acknowledgements(&mut circuit, &transport).await.expect("flush ACKs for ambiguous packet");
+        let (size, _) = simulator.recv_from(&mut buffer).await.expect("receive ACK");
         let ack = Packet::decode(&buffer[..size]).expect("decode ACK");
         assert!(
             matches!(ack.message(), Message::PacketAck(message) if message.packets.iter().map(|packet| packet.id).collect::<Vec<_>>() == [20, ambiguous_sequence])
         );
 
         let mut circuit = Circuit::new();
-        let outgoing = circuit.send(&transport, complete_ping(2), Delivery::Reliable).await.expect("send another reliable packet");
-        timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read outgoing packet").expect("receive packet");
-        let anchor = circuit.receive_at(&reliable_packet(30), now).expect("receive second anchor");
+        let outgoing = crate::transport::test_support::send_message(&mut circuit, &transport, complete_ping(2), Delivery::Reliable)
+            .await
+            .expect("send another reliable packet");
+        simulator.recv_from(&mut buffer).await.expect("receive packet");
+        let anchor = receive_packet_at(&mut circuit, &reliable_packet(30), now).expect("receive second anchor");
         assert_eq!(anchor.packet_order, Ordered(30));
         let jump_sequence = 30 + MAX_ORDERED_SEQUENCE_DISTANCE + 1;
-        let degraded =
-            circuit.receive_at(&reliable_packet(jump_sequence).with_appended_acks(vec![outgoing]), now).expect("receive jump packet");
+        let degraded = receive_packet_at(&mut circuit, &reliable_packet(jump_sequence).with_appended_acks(vec![outgoing]), now)
+            .expect("receive jump packet");
         assert!(degraded.is_new_packet);
         assert_eq!(degraded.packet_order, Degraded);
         assert!(!circuit.has_pending(outgoing), "a degraded packet still clears its valid outgoing ACK");
-        let later = circuit.receive_at(&reliable_packet(jump_sequence + 1), now).expect("receive later degraded packet");
+        let later = receive_packet_at(&mut circuit, &reliable_packet(jump_sequence + 1), now).expect("receive later degraded packet");
         assert!(later.is_new_packet);
         assert_eq!(later.packet_order, Degraded);
-        circuit.flush_pending_acks(&transport).await.expect("flush ACKs for degraded packet");
-        let (size, _) = timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read ACK").expect("receive ACK");
+        crate::transport::test_support::send_acknowledgements(&mut circuit, &transport).await.expect("flush ACKs for degraded packet");
+        let (size, _) = simulator.recv_from(&mut buffer).await.expect("receive ACK");
         let ack = Packet::decode(&buffer[..size]).expect("decode ACK");
         assert!(
             matches!(ack.message(), Message::PacketAck(message) if message.packets.iter().map(|packet| packet.id).collect::<Vec<_>>() == [30, jump_sequence, jump_sequence + 1])
@@ -775,20 +806,20 @@ mod protocol_tests {
         let mut buffer = [0; 1024];
 
         for expected in [0x00ff_fffe_u32, 0x00ff_ffff, 0x0100_0000, 0x0100_0001] {
-            circuit.send(&transport, complete_ping(1), Delivery::Unreliable).await.expect("send packet");
-            let (size, _) =
-                timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read packet").expect("read datagram");
+            crate::transport::test_support::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Unreliable)
+                .await
+                .expect("send packet");
+            let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
             assert_eq!(&buffer[1..5], &expected.to_be_bytes());
             assert_eq!(Packet::decode(&buffer[..size]).expect("decode packet").sequence(), expected);
         }
 
         let mut circuit = Circuit::with_sequence(u32::MAX - 1);
         for expected in [u32::MAX - 1, u32::MAX, 0, 1] {
-            circuit.send(&transport, complete_ping(1), Delivery::Unreliable).await.expect("send wrapped packet");
-            let (size, _) = timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer))
+            crate::transport::test_support::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Unreliable)
                 .await
-                .expect("read wrapped packet")
-                .expect("read datagram");
+                .expect("send wrapped packet");
+            let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
             assert_eq!(&buffer[1..5], &expected.to_be_bytes());
             assert_eq!(Packet::decode(&buffer[..size]).expect("decode wrapped packet").sequence(), expected);
         }
@@ -804,9 +835,8 @@ mod protocol_tests {
         let mut buffer = [0; 1024];
 
         assert!(receive_at(&mut circuit, &reliable_packet(sequence), now));
-        circuit.flush_pending_acks(&transport).await.expect("flush acknowledgement");
-        let (size, _) =
-            timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read acknowledgement").expect("read datagram");
+        crate::transport::test_support::send_acknowledgements(&mut circuit, &transport).await.expect("flush acknowledgement");
+        let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
         let ack = Packet::decode(&buffer[..size]).expect("decode acknowledgement");
         assert!(matches!(ack.message(), Message::PacketAck(message) if message.packets.len() == 1 && message.packets[0].id == sequence));
 
@@ -821,14 +851,14 @@ mod protocol_tests {
         let mut circuit = Circuit::with_sequence(0x0100_0000);
         let mut buffer = [0; 1024];
 
-        circuit.send(&transport, complete_ping(1), Delivery::Reliable).await.expect("send wide reliable packet");
-        let (size, _) =
-            timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read reliable packet").expect("read datagram");
+        crate::transport::test_support::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable)
+            .await
+            .expect("send wide reliable packet");
+        let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
         assert_eq!(Packet::decode(&buffer[..size]).expect("decode reliable packet").sequence(), 0x0100_0000);
 
         send_ping_at(&mut circuit, &transport, Instant::now()).await.expect("send circuit ping");
-        let (size, _) =
-            timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read circuit ping").expect("read datagram");
+        let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
         let packet = Packet::decode(&buffer[..size]).expect("decode circuit ping");
         assert_eq!(packet.sequence(), 0x0100_0001);
         assert_eq!(packet.message(), &start_ping(0, 0x0100_0000));
@@ -844,7 +874,7 @@ mod protocol_tests {
         assert_eq!(circuit.retry_timeout(), Duration::from_secs(5));
         let sent_at = Instant::now();
         send_ping_at(&mut circuit, &transport, sent_at).await.expect("send circuit ping");
-        let (size, _) = timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read ping").expect("read datagram");
+        let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
         let packet = Packet::decode(&buffer[..size]).expect("decode ping");
         let Message::StartPingCheck(message) = packet.message() else {
             panic!("expected circuit ping");
@@ -876,8 +906,7 @@ mod protocol_tests {
         for index in 0..300 {
             let sent_at = start + Duration::from_secs(index * 5);
             send_ping_at(&mut circuit, &transport, sent_at).await.expect("send ping despite lost replies");
-            let (size, _) =
-                timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read ping").expect("receive ping datagram");
+            let (size, _) = simulator.recv_from(&mut buffer).await.expect("receive ping datagram");
             let packet = Packet::decode(&buffer[..size]).expect("decode ping");
             let Message::StartPingCheck(message) = packet.message() else {
                 panic!("expected circuit ping");
@@ -890,8 +919,7 @@ mod protocol_tests {
     }
 
     async fn receive_ping_id(simulator: &UdpSocket, buffer: &mut [u8]) -> u8 {
-        let (size, _) =
-            timeout(Duration::from_secs(1), simulator.recv_from(buffer)).await.expect("read ping").expect("receive ping datagram");
+        let (size, _) = simulator.recv_from(buffer).await.expect("receive ping datagram");
         let packet = Packet::decode(&buffer[..size]).expect("decode ping");
         let Message::StartPingCheck(message) = packet.message() else {
             panic!("expected circuit ping");
@@ -921,7 +949,7 @@ mod protocol_tests {
 
         let just_before_expiry = quarantine_started + Duration::from_secs(30) - Duration::from_nanos(1);
         send_ping_at(&mut circuit, &transport, just_before_expiry).await.expect("skip while all IDs are quarantined");
-        assert!(timeout(Duration::from_millis(20), simulator.recv_from(&mut buffer)).await.is_err());
+        super::assert_no_datagram(&simulator);
 
         let at_expiry = quarantine_started + Duration::from_secs(30);
         send_ping_at(&mut circuit, &transport, at_expiry).await.expect("send when IDs expire");
@@ -937,8 +965,7 @@ mod protocol_tests {
         let mut buffer = [0; 1024];
 
         send_ping_at(&mut circuit, &transport, start).await.expect("send first ping");
-        let (size, _) =
-            timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read first ping").expect("receive ping");
+        let (size, _) = simulator.recv_from(&mut buffer).await.expect("receive ping");
         let first = Packet::decode(&buffer[..size]).expect("decode first ping");
         let Message::StartPingCheck(first) = first.message() else {
             panic!("expected first circuit ping");
@@ -952,8 +979,7 @@ mod protocol_tests {
 
         let next_sent_at = start + Duration::from_secs(32);
         send_ping_at(&mut circuit, &transport, next_sent_at).await.expect("send after expiry");
-        let (size, _) =
-            timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read next ping").expect("receive ping");
+        let (size, _) = simulator.recv_from(&mut buffer).await.expect("receive ping");
         let next = Packet::decode(&buffer[..size]).expect("decode next ping");
         let Message::StartPingCheck(next) = next.message() else {
             panic!("expected next circuit ping");
@@ -976,7 +1002,7 @@ mod protocol_tests {
 
         let sent_at = Instant::now();
         send_ping_at(&mut circuit, &transport, sent_at).await.expect("send circuit ping");
-        let (size, _) = timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read ping").expect("read datagram");
+        let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
         let packet = Packet::decode(&buffer[..size]).expect("decode ping");
         let Message::StartPingCheck(message) = packet.message() else {
             panic!("expected circuit ping");
@@ -993,16 +1019,19 @@ mod protocol_tests {
         let mut circuit = Circuit::new();
         let mut buffer = [0; 1024];
 
-        circuit.send(&transport, complete_ping(1), Delivery::Reliable).await.expect("send reliable packet");
-        circuit.send(&transport, complete_ping(2), Delivery::Reliable).await.expect("send second reliable packet");
+        crate::transport::test_support::send_message(&mut circuit, &transport, complete_ping(1), Delivery::Reliable)
+            .await
+            .expect("send reliable packet");
+        crate::transport::test_support::send_message(&mut circuit, &transport, complete_ping(2), Delivery::Reliable)
+            .await
+            .expect("send second reliable packet");
         for _ in 0..2 {
-            let (size, _) =
-                timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read packet").expect("read datagram");
+            let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
             Packet::decode(&buffer[..size]).expect("decode reliable packet");
         }
 
         send_ping_at(&mut circuit, &transport, Instant::now()).await.expect("send circuit ping");
-        let (size, _) = timeout(Duration::from_secs(1), simulator.recv_from(&mut buffer)).await.expect("read ping").expect("read datagram");
+        let (size, _) = simulator.recv_from(&mut buffer).await.expect("read datagram");
         let mut expected = parse_hex_fixture(vectors::START_PING_CHECK).expect("valid ping fixture");
         expected[1..5].copy_from_slice(&3u32.to_be_bytes());
         expected[7] = 0;

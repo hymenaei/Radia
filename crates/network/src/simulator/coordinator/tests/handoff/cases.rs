@@ -13,9 +13,7 @@ async fn handoff_waits_for_matching_movement() {
     let (shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
-    let mut connection = connect_test_neighbor(simulator_id, session.clone(), region_handle, NetworkStatusHandle::default())
-        .await
-        .expect("connect destination circuit");
+    let mut connection = connect_test_neighbor(simulator_id, session.clone(), region_handle).await.expect("connect destination circuit");
     connection.handoff = Some(HandoffTarget {
         agent_id: session.agent_id,
         session_id: session.session_id,
@@ -89,8 +87,9 @@ fn overload_logout_keeps_a_pending_promotion_on_the_original_primary() {
 }
 
 async fn run_overload_logout_promotion_test() {
-    use crate::event::Event::{Failed, SimulatorDisconnected, SimulatorMessage, SimulatorPromoted};
     use protocol::lludp::Message::RegionHandshake;
+
+    use crate::event::Event::{Failed, SimulatorDisconnected, SimulatorMessage, SimulatorPromoted};
 
     let mut harness = connected_neighbor().await;
     let target_region = 0x1000_0000_0000_1000;
@@ -201,12 +200,6 @@ async fn run_overload_logout_promotion_test() {
     .await
     .expect("destination disconnect should drain accepted movement events");
 
-    assert_eq!(
-        harness.status.snapshot().simulator_endpoint,
-        Some(harness.primary.local_addr().expect("primary endpoint")),
-        "a promotion received after logout starts must not replace its logout target"
-    );
-
     harness.primary.send_to(&ack(120, logout.sequence()), harness.primary_peer).await.expect("ack primary logout");
     let mut logout_reply = fixture("logout_reply.hex");
     logout_reply[0] |= 0x40;
@@ -231,8 +224,9 @@ async fn run_handoff_send_latency_test() {
 }
 
 async fn run_teleport_finish_scenario(send_count: usize) -> Vec<Duration> {
-    use crate::event::Event::{Failed, SimulatorMessage, SimulatorPromoted};
     use protocol::lludp::Message::{AgentMovementComplete, ChatFromSimulator, RegionHandshake};
+
+    use crate::event::Event::{Failed, SimulatorMessage, SimulatorPromoted};
 
     let mut harness = Box::pin(connected_neighbor()).await;
     let target_region = 0x1000_0000_0000_1000;
@@ -329,11 +323,6 @@ async fn run_teleport_finish_scenario(send_count: usize) -> Vec<Duration> {
     })
     .await
     .expect("manager should process the post-movement barrier");
-    assert_eq!(
-        harness.status.snapshot().simulator_endpoint,
-        Some(harness.primary.local_addr().expect("primary simulator address")),
-        "a mismatched movement completion must leave the primary simulator unchanged"
-    );
 
     harness.pause_sends.send_replace(true);
     let (completed, mut held_send) = oneshot::channel();
@@ -458,9 +447,6 @@ async fn run_teleport_finish_scenario(send_count: usize) -> Vec<Duration> {
     .await
     .expect("former primary's retained bytes should move into the neighbor budget");
     assert_eq!(harness.packet_memory.global_available_bytes(), global_available - retained_primary_bytes);
-    let status = harness.status.snapshot();
-    assert_eq!(status.simulator_endpoint, Some(target_endpoint));
-    assert!(status.circuit_established, "promoted circuit should remain established");
     assert!(matches!(held_send.try_recv(), Err(oneshot::error::TryRecvError::Empty)), "promotion must preserve the pending explicit send");
     harness.pause_sends.send_replace(false);
     let sent = receive_message(&harness.primary, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
@@ -566,10 +552,6 @@ async fn run_teleport_finish_scenario(send_count: usize) -> Vec<Duration> {
     assert_eq!(harness.packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
     assert_eq!(harness.packet_memory.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
 
-    let status = harness.status.snapshot();
-    assert_eq!(status.simulator_endpoint, Some(target_endpoint));
-    assert!(status.circuit_established, "former primary failure must keep the destination circuit established");
-
     harness
         .neighbor
         .send_to(&movement_complete_packet(50, session.agent_id, session.session_id, wrong_region), harness.neighbor_peer)
@@ -668,7 +650,6 @@ async fn run_repeated_promotions() {
                 _ => {}
             }
         }
-        assert_eq!(harness.status.snapshot().simulator_endpoint, Some(endpoint));
         harness
             .commands
             .send(Command::SendMessage { message: object_request(), delivery: Delivery::Unreliable })

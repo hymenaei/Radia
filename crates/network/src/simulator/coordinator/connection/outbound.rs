@@ -19,8 +19,8 @@ use tokio::{
 };
 
 use super::{
-    DEFAULT_AGENT_THROTTLE_RATES, LOGOUT_TIMEOUT, MAX_NONCONTROL_SENDS, MAX_PENDING_SEND_BYTES, MAX_PENDING_SEND_NOTIFICATIONS,
-    MAX_PENDING_SENDS, MAX_SEND_AGE, MAX_SEND_ERROR_BYTES, OUTBOUND_SEND_CHARGE_BYTES, RELIABLE_RETRY_EXPIRED, SimulatorEvent,
+    ConnectionError, DEFAULT_AGENT_THROTTLE_RATES, LOGOUT_TIMEOUT, MAX_NONCONTROL_SENDS, MAX_PENDING_SEND_BYTES,
+    MAX_PENDING_SEND_NOTIFICATIONS, MAX_PENDING_SENDS, MAX_SEND_AGE, MAX_SEND_ERROR_BYTES, OUTBOUND_SEND_CHARGE_BYTES, SimulatorEvent,
 };
 use crate::{
     AgentSession,
@@ -33,7 +33,7 @@ use crate::{
     },
 };
 
-pub(super) type PendingSendFuture = Pin<Box<dyn Future<Output = Result<(Instant, PreparedDatagram), String>> + Send>>;
+pub(super) type PendingSendFuture = Pin<Box<dyn Future<Output = Result<(Instant, PreparedDatagram), ConnectionError>> + Send>>;
 
 pub(super) struct QueuedMessage {
     pub(super) message: Message,
@@ -265,10 +265,14 @@ pub(super) fn expire_pending_send(pending: &mut Option<PendingSend>, now: Instan
     }
 }
 
-pub(super) fn expire_deferred_retries(circuit: &Circuit, deferred_retries: &mut HashMap<u32, Instant>, now: Instant) -> Result<(), String> {
+pub(super) fn expire_deferred_retries(
+    circuit: &Circuit,
+    deferred_retries: &mut HashMap<u32, Instant>,
+    now: Instant,
+) -> Result<(), ConnectionError> {
     deferred_retries.retain(|sequence, _| circuit.has_pending(*sequence));
     if deferred_retries.values().any(|started_at| now.saturating_duration_since(*started_at) >= MAX_SEND_AGE) {
-        return Err(RELIABLE_RETRY_EXPIRED.into());
+        return Err(ConnectionError::ReliableRetryExpired);
     }
     Ok(())
 }
@@ -279,7 +283,7 @@ pub(super) async fn send_prepared(
     pacer: &ConnectionPacer,
     prepared: PreparedDatagram,
     class: TrafficClass,
-) -> Result<u32, String> {
+) -> Result<u32, ConnectionError> {
     let sequence = prepared.sequence();
     let sent_at = pacer.handle().send(socket, prepared.bytes(), class).await?;
     circuit.commit_sent(prepared, sent_at)?;
@@ -306,7 +310,7 @@ pub(super) fn queue_internal(
     class: TrafficClass,
     movement: MovementSend,
     active_class: Option<TrafficClass>,
-) -> Result<(), String> {
+) -> Result<(), ConnectionError> {
     let queued = QueuedMessage {
         message,
         delivery,
@@ -317,10 +321,10 @@ pub(super) fn queue_internal(
         report_failure: false,
         movement,
     };
-    queue.push(queued, active_class).map_err(|_| "The simulator send queue is full.".to_string())
+    queue.push(queued, active_class).map_err(|_| ConnectionError::SendQueueFull)
 }
 
-pub(super) fn bound_send_error(mut error: String) -> String {
+pub(in crate::simulator::coordinator) fn bound_send_error(mut error: String) -> String {
     if error.len() > MAX_SEND_ERROR_BYTES {
         let mut end = MAX_SEND_ERROR_BYTES;
         while !error.is_char_boundary(end) {
@@ -336,13 +340,13 @@ pub(super) fn queue_send_notification(
     pending: &mut VecDeque<SimulatorEvent>,
     simulator_id: SimulatorId,
     cancel_target: Option<super::HandoffCancellation>,
-    error: Option<String>,
+    error: Option<ConnectionError>,
     report_failure: bool,
-) -> Result<(), String> {
+) -> Result<(), ConnectionError> {
     if !report_failure && cancel_target.is_none() {
         return Ok(());
     }
-    let event = SimulatorEvent::SendCompleted { simulator_id, cancel_target, error: error.map(bound_send_error), report_failure };
+    let event = SimulatorEvent::SendCompleted { simulator_id, cancel_target, error, report_failure };
     if !pending.is_empty() {
         return push_send_notification(pending, event);
     }
@@ -350,13 +354,13 @@ pub(super) fn queue_send_notification(
     match events.try_send(event) {
         Ok(()) => Ok(()),
         Err(mpsc::error::TrySendError::Full(event)) => push_send_notification(pending, event),
-        Err(mpsc::error::TrySendError::Closed(_)) => Err("The simulator manager has closed.".into()),
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(ConnectionError::SimulatorManagerClosed),
     }
 }
 
-pub(super) fn push_send_notification(pending: &mut VecDeque<SimulatorEvent>, event: SimulatorEvent) -> Result<(), String> {
+pub(super) fn push_send_notification(pending: &mut VecDeque<SimulatorEvent>, event: SimulatorEvent) -> Result<(), ConnectionError> {
     if pending.len() >= MAX_PENDING_SEND_NOTIFICATIONS {
-        return Err("The simulator send notification queue is full.".into());
+        return Err(ConnectionError::SendNotificationQueueFull);
     }
     pending.push_back(event);
     Ok(())
@@ -367,17 +371,18 @@ pub(super) fn report_queued_failure(
     pending: &mut VecDeque<SimulatorEvent>,
     simulator_id: SimulatorId,
     mut queued: QueuedMessage,
-    error: Error,
-) -> Result<(), String> {
-    let message = error.to_string();
+    error: ConnectionError,
+) -> Result<(), ConnectionError> {
     let has_completion = queued.completion.is_some();
-    if let Some(completion) = queued.completion.take() {
-        let _ = completion.send(Err(error));
+    if let Some(completion) = queued.completion.take()
+        && let Err(failure) = completion.send(Err(error.to_network_error()))
+    {
+        drop(failure);
     }
     if queued.report_failure || queued.cancel_target.is_some() {
-        queue_send_notification(events, pending, simulator_id, queued.cancel_target, Some(message), queued.report_failure)?;
+        queue_send_notification(events, pending, simulator_id, queued.cancel_target, Some(error), queued.report_failure)?;
     } else if !has_completion {
-        return Err(message);
+        return Err(error);
     }
     Ok(())
 }
@@ -387,7 +392,7 @@ pub(super) fn preempt_deferred_send(
     queue: &mut OutboundQueue,
     circuit: &Circuit,
     ack_deadline_due: bool,
-) -> Result<(), String> {
+) -> Result<(), ConnectionError> {
     let Some(current) = pending.as_ref() else { return Ok(()) };
     let obsolete_retry = current.meta.is_retransmission && !circuit.has_pending(current.meta.sequence);
     let ack_preempts = ack_deadline_due && !current.meta.is_acknowledgement && circuit.has_pending_acks();
@@ -397,7 +402,7 @@ pub(super) fn preempt_deferred_send(
         if (ack_preempts || class_preempts)
             && let Some(queued) = canceled.queued_message.take()
         {
-            queue.push_front(queued).map_err(|_| "The simulator send queue is full while prioritizing traffic.".to_string())?;
+            queue.push_front(queued).map_err(|_| ConnectionError::SendQueueFullPrioritizing)?;
         }
     }
     Ok(())
@@ -409,12 +414,17 @@ pub(super) fn fail_queued_on_close(
     simulator_id: SimulatorId,
     mut queued: QueuedMessage,
 ) {
-    let error = Error::SimulatorConnectionClosed.to_string();
-    if let Some(completion) = queued.completion.take() {
-        let _ = completion.send(Err(Error::SimulatorConnectionClosed));
+    let failure = ConnectionError::SimulatorConnectionClosed;
+    if let Some(completion) = queued.completion.take()
+        && let Err(error) = completion.send(Err(Error::SimulatorConnectionClosed))
+    {
+        drop(error);
     }
-    if queued.report_failure || queued.cancel_target.is_some() {
-        let _ = queue_send_notification(events, pending, simulator_id, queued.cancel_target, Some(error), queued.report_failure);
+    if (queued.report_failure || queued.cancel_target.is_some())
+        && let Err(error) =
+            queue_send_notification(events, pending, simulator_id, queued.cancel_target, Some(failure), queued.report_failure)
+    {
+        tracing::warn!(simulator = simulator_id.get(), %error, "could not queue a simulator send failure notification");
     }
 }
 
@@ -456,16 +466,16 @@ pub(super) fn prepare_next_send(
     deferred_retries: &mut HashMap<u32, Instant>,
     send_ack_now: bool,
     last_send_was_retry: bool,
-) -> Result<Option<PendingSend>, (Option<Box<QueuedMessage>>, String)> {
+) -> Result<Option<PendingSend>, (Option<Box<QueuedMessage>>, ConnectionError)> {
     if send_ack_now && circuit.has_pending_acks() {
-        let prepared = circuit.prepare_acknowledgements().map_err(|error| (None, error))?;
+        let prepared = circuit.prepare_acknowledgements().map_err(|error| (None, error.into()))?;
         if let Some(prepared) = prepared {
             return Ok(Some(begin_send(Arc::clone(socket), pacer.handle(), prepared, TrafficClass::Control, None)));
         }
     }
 
     let now = Instant::now();
-    let prepared = circuit.prepare_retransmission(now).map_err(|error| (None, error))?;
+    let prepared = circuit.prepare_retransmission(now).map_err(|error| (None, error.into()))?;
     if let Some(prepared) = prepared {
         let retry_started_at = match deferred_retries.entry(prepared.sequence()) {
             Entry::Occupied(entry) => *entry.get(),
@@ -477,14 +487,14 @@ pub(super) fn prepare_next_send(
         if let Some(queued) = queue.pop_priority_matching(|queued| can_prepare_queued(circuit, queued)) {
             let message = match circuit.prepare_message(queued.message.clone(), queued.delivery) {
                 Ok(prepared) => prepared,
-                Err(error) => return Err((Some(Box::new(queued)), error)),
+                Err(error) => return Err((Some(Box::new(queued)), error.into())),
             };
             return Ok(Some(begin_send(Arc::clone(socket), pacer.handle(), message, queued.class, Some(queued))));
         }
         if last_send_was_retry && let Some(queued) = queue.pop_next_matching(|queued| can_prepare_queued(circuit, queued)) {
             let message = match circuit.prepare_message(queued.message.clone(), queued.delivery) {
                 Ok(prepared) => prepared,
-                Err(error) => return Err((Some(Box::new(queued)), error)),
+                Err(error) => return Err((Some(Box::new(queued)), error.into())),
             };
             return Ok(Some(begin_send(Arc::clone(socket), pacer.handle(), message, queued.class, Some(queued))));
         }
@@ -496,7 +506,7 @@ pub(super) fn prepare_next_send(
     {
         let prepared = match circuit.prepare_message(queued.message.clone(), queued.delivery) {
             Ok(prepared) => prepared,
-            Err(error) => return Err((Some(Box::new(queued)), error)),
+            Err(error) => return Err((Some(Box::new(queued)), error.into())),
         };
         return Ok(Some(begin_send(Arc::clone(socket), pacer.handle(), prepared, queued.class, Some(queued))));
     }
@@ -504,7 +514,7 @@ pub(super) fn prepare_next_send(
     let Some(queued) = queue.pop_next_matching(|queued| can_prepare_queued(circuit, queued)) else { return Ok(None) };
     let prepared = match circuit.prepare_message(queued.message.clone(), queued.delivery) {
         Ok(prepared) => prepared,
-        Err(error) => return Err((Some(Box::new(queued)), error)),
+        Err(error) => return Err((Some(Box::new(queued)), error.into())),
     };
     let class = queued.class;
     Ok(Some(begin_send(Arc::clone(socket), pacer.handle(), prepared, class, Some(queued))))
@@ -520,9 +530,9 @@ pub(super) fn prepare_shutdown_send(
     circuit: &mut Circuit,
     queue: &mut OutboundQueue,
     send_ack_now: bool,
-) -> Result<Option<PendingSend>, (Option<Box<QueuedMessage>>, String)> {
+) -> Result<Option<PendingSend>, (Option<Box<QueuedMessage>>, ConnectionError)> {
     if send_ack_now && circuit.has_pending_acks() {
-        let prepared = circuit.prepare_acknowledgements().map_err(|error| (None, error))?;
+        let prepared = circuit.prepare_acknowledgements().map_err(|error| (None, error.into()))?;
         if let Some(prepared) = prepared {
             return Ok(Some(begin_send(Arc::clone(socket), pacer.handle(), prepared, TrafficClass::Control, None)));
         }
@@ -531,7 +541,7 @@ pub(super) fn prepare_shutdown_send(
     if let Some(queued) = queue.pop_control_matching(|queued| can_prepare_queued(circuit, queued)) {
         let prepared = match circuit.prepare_message(queued.message.clone(), queued.delivery) {
             Ok(prepared) => prepared,
-            Err(error) => return Err((Some(Box::new(queued)), error)),
+            Err(error) => return Err((Some(Box::new(queued)), error.into())),
         };
         return Ok(Some(begin_send(Arc::clone(socket), pacer.handle(), prepared, queued.class, Some(queued))));
     }

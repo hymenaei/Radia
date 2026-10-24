@@ -150,8 +150,9 @@ fn stale_cancel_keeps_new_handoff() {
 }
 
 async fn run_stale_cancel() {
-    use crate::test_support::http::{EventQueueTestServer, EventServerResponse, response};
     use llsd::{Map, xml};
+
+    use crate::test_support::http::{EventQueueTestServer, EventServerResponse, response};
 
     let (release, poll_response) = sync::mpsc::channel();
     let server = EventQueueTestServer::start(|base| {
@@ -359,6 +360,5 @@ async fn run_disconnect_logs_out_promoted_primary() {
     })
     .await
     .expect("the promoted simulator should emit its terminal lifecycle event");
-    assert_eq!(harness.status.snapshot().lifecycle, NetworkLifecycle::Disconnected);
     assert!(timeout(WAIT, harness.client).await.expect("shutdown should finish").expect("manager task").is_ok());
 }

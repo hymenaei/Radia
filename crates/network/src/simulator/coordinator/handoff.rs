@@ -17,8 +17,9 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    ConnectionRole, CoordinatorRunState, HandoffCommand, PreconnectEvents, SimulatorCapabilitySession, SimulatorConnectionState,
-    SimulatorCoordinator, SimulatorEvent, SimulatorRequest, record_event_envelope_loss, remove_simulator_capability,
+    ConnectionRole, CoordinatorError, CoordinatorRunState, HandoffCommand, PreconnectEvents, SimulatorCapabilitySession,
+    SimulatorConnectionState, SimulatorCoordinator, SimulatorEvent, SimulatorRequest, record_event_envelope_loss,
+    remove_simulator_capability,
 };
 use crate::{
     capabilities::{Client, EventQueueExit},
@@ -218,7 +219,7 @@ impl SimulatorCoordinator {
         neighbor_event_queues: &mut JoinSet<(SimulatorId, SocketAddr, EventQueueExit)>,
         neighbor_event_queue_owners: &mut HashMap<Id, (SimulatorId, SocketAddr)>,
         simulator_capabilities: &mut HashMap<SimulatorId, SimulatorCapabilitySession>,
-    ) -> Result<Client, String> {
+    ) -> Result<Client, CoordinatorError> {
         if let Some(capability) = simulator_capabilities.get(&simulator_id)
             && capability.endpoint == handoff.endpoint
             && capability.seed_capability == handoff.seed_capability
@@ -235,7 +236,7 @@ impl SimulatorCoordinator {
                 Ok(queue) => queue,
                 Err(error) => {
                     client.close_session();
-                    return Err(error);
+                    return Err(error.into());
                 }
             };
         let endpoint = handoff.endpoint;
@@ -267,7 +268,7 @@ impl SimulatorCoordinator {
         announcement: HandoffAnnouncement,
         setup: &mut PromotionSetup<'_>,
         state: &mut HandoffState,
-    ) -> Result<(), String> {
+    ) -> Result<(), CoordinatorError> {
         if source != self.primary.simulator_id || state.is_conflicted() {
             return Ok(());
         }
@@ -287,7 +288,6 @@ impl SimulatorCoordinator {
                         });
                     if same_live_target {
                         let Some(generation) = self.next_handoff_generation() else {
-                            self.status.record_error("The simulator handoff generation limit has been reached.");
                             return Ok(());
                         };
                         current.generation = generation;
@@ -335,14 +335,17 @@ impl SimulatorCoordinator {
                         &mut setup.state.simulator_capabilities,
                         &self.coverage_losses,
                     );
-                    self.status.record_error("Conflicting simulator handoff announcements; waiting for TeleportCancel.");
+                    tracing::warn!(
+                        simulator = self.primary.simulator_id.get(),
+                        region = handoff.region_handle,
+                        "conflicting simulator handoff announcements; waiting for TeleportCancel"
+                    );
                     return Ok(());
                 }
             }
         }
         evidence.record(announcement);
         let Some(generation) = self.next_handoff_generation() else {
-            self.status.record_error("The simulator handoff generation limit has been reached.");
             return Ok(());
         };
 
@@ -358,7 +361,7 @@ impl SimulatorCoordinator {
             return Ok(());
         };
         let simulator_id = connection.simulator_id;
-        if let Err(error) = self.ensure_handoff_capabilities(
+        if let Err(_error) = self.ensure_handoff_capabilities(
             simulator_id,
             &handoff,
             setup.capability_events.clone(),
@@ -367,13 +370,12 @@ impl SimulatorCoordinator {
             &mut setup.state.neighbor_event_queue_owners,
             &mut setup.state.simulator_capabilities,
         ) {
-            tracing::info!(
+            tracing::warn!(
                 simulator = simulator_id.get(),
                 region = handoff.region_handle,
                 reason = "destination capabilities failed",
                 "simulator handoff failed"
             );
-            self.status.record_error(format!("Could not start destination simulator capabilities: {error}"));
             if let Some(connection) = setup.state.neighbor_connections.get_mut(&handoff.region_handle) {
                 connection.queue_handoff_command(HandoffCommand::Cancel);
             }
@@ -392,7 +394,7 @@ impl SimulatorCoordinator {
         packet_order: PacketOrder,
         setup: &mut PromotionSetup<'_>,
         state: &mut HandoffState,
-    ) -> Result<(), String> {
+    ) -> Result<(), CoordinatorError> {
         if source != self.primary.simulator_id || state.is_conflicted() {
             return Ok(());
         }
@@ -408,10 +410,7 @@ impl SimulatorCoordinator {
                     )
                     .await
                 }
-                Err(reason) => {
-                    self.status.record_error(format!("Ignored malformed TeleportFinish message: {reason}"));
-                    Ok(())
-                }
+                Err(_reason) => Ok(()),
             },
             Message::TeleportFailed(failed) if failed.agent_id == self.session.agent_id => {
                 if teleport_failure_matches(state.pending(), HandoffOrder::Packet(packet_order))
@@ -431,10 +430,7 @@ impl SimulatorCoordinator {
                 }
                 Ok(())
             }
-            Message::TeleportFailed(_) => {
-                self.status.record_error("Ignored TeleportFailed for a different agent.");
-                Ok(())
-            }
+            Message::TeleportFailed(_) => Ok(()),
             _ => Ok(()),
         }
     }
@@ -719,12 +715,13 @@ pub(super) fn is_teleport_cancel(message: &Message, agent_id: Uuid, session_id: 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::simulator::coordinator::tests::login_session;
-    use crate::{Error, status::NetworkStatusHandle};
-    use protocol::login::ResponseData;
     use std::time::Duration;
+
+    use protocol::login::ResponseData;
     use tokio::{net::UdpSocket, time::timeout};
+
+    use super::*;
+    use crate::{Error, simulator::coordinator::tests::login_session};
 
     #[test]
     fn evidence_retains_the_newest_packet_finish() {
@@ -757,7 +754,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handoff_worker_is_tracked_after_retirement() {
+    async fn handoff_capability_requests_are_waited_for_after_retirement() {
         let root = UdpSocket::bind("127.0.0.1:0").await.expect("bind root simulator");
         let destination = UdpSocket::bind("127.0.0.1:0").await.expect("bind destination");
         let session = login_session(root.local_addr().expect("root endpoint"));
@@ -768,14 +765,11 @@ mod tests {
             endpoint: destination.local_addr().expect("destination endpoint"),
             seed_capability: session.seed_capability.clone(),
         };
-        let mut connection = SimulatorCoordinator::connect(
-            session,
-            ResponseData::default(),
-            crate::simulator::coordinator::tests::test_options(NetworkStatusHandle::default()),
-        )
-        .await
-        .expect("coordinator startup")
-        .expect("primary connection starts");
+        let mut connection =
+            SimulatorCoordinator::connect(session, ResponseData::default(), crate::simulator::coordinator::tests::test_options())
+                .await
+                .expect("coordinator startup")
+                .expect("primary connection starts");
         let id = SimulatorId::allocate().expect("destination ID");
         let (events, _receiver) = mpsc::channel(4);
         let (_shutdown, shutdown) = watch::channel(false);
@@ -785,11 +779,13 @@ mod tests {
         let client = connection
             .ensure_handoff_capabilities(id, &target, events, shutdown, &mut queues, &mut owners, &mut capabilities)
             .expect("start destination capability");
-        assert_eq!(connection.capability_workers.len(), 2);
+        assert_eq!(connection.capability_request_waiters.len(), 2);
         remove_simulator_capability(&mut capabilities, id);
         assert!(capabilities.is_empty());
-        timeout(Duration::from_secs(2), connection.finish_capability_workers()).await.expect("join root and retired destination workers");
-        assert!(connection.capability_workers.is_empty());
+        timeout(Duration::from_secs(2), connection.finish_capability_request_waiters())
+            .await
+            .expect("wait for root and retired destination capability requests");
+        assert!(connection.capability_request_waiters.is_empty());
         while timeout(Duration::from_secs(2), queues.join_next()).await.expect("join retired EventQueue").is_some() {}
         assert!(matches!(client.request_capabilities(&["TestCapability"]).await, Err(Error::CapabilitySessionClosed)));
     }

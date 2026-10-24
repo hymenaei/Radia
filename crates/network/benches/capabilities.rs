@@ -142,6 +142,8 @@ struct CapabilityRequest {
 }
 
 fn bench_capability_post(c: &mut Criterion) {
+    const RESPONSE_LIMIT_BYTES: usize = 4096;
+
     let server = LoopbackServer::start(|_| {
         "<?xml version=\"1.0\"?><llsd><map><key>accepted</key><boolean>true</boolean><key>revision</key><integer>42</integer></map></llsd>"
             .to_owned()
@@ -152,7 +154,8 @@ fn bench_capability_post(c: &mut Criterion) {
     let capability = CapabilityUrl::parse(&format!("http://{}/inventory", server.address)).expect("parse local capability URL");
     let client = runtime.block_on(async { Client::new(seed).expect("create capability client") });
     let request = CapabilityRequest { item_id: "benchmark-item" };
-    let warmup: Value = runtime.block_on(client.post(&capability, &request)).expect("warm up capability POST");
+    let warmup: Value =
+        runtime.block_on(client.post_with_response_limit(&capability, &request, RESPONSE_LIMIT_BYTES)).expect("warm up capability POST");
     let fields = warmup.as_map().expect("response LLSD map");
     assert_eq!(fields.get("accepted").and_then(Value::as_bool), Some(true));
     assert_eq!(fields.get("revision").and_then(Value::as_integer), Some(42));
@@ -160,7 +163,11 @@ fn bench_capability_post(c: &mut Criterion) {
     let mut group = c.benchmark_group("network/capability_post");
     group.throughput(Throughput::Elements(1));
     group.bench_function("xml_request_response", |b| {
-        b.iter(|| black_box(runtime.block_on(client.post(&capability, &request)).expect("post capability")));
+        b.iter(|| {
+            black_box(
+                runtime.block_on(client.post_with_response_limit(&capability, &request, RESPONSE_LIMIT_BYTES)).expect("post capability"),
+            )
+        });
     });
     group.finish();
 }

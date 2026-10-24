@@ -50,10 +50,9 @@ async fn rejected_packet_retries() {
     let simulator_address = simulator.local_addr().expect("read simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
     let coverage = CoverageLossLedger::new();
-    let connection =
-        connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, NetworkStatusHandle::default(), coverage.clone())
-            .await
-            .expect("connect neighbor simulator");
+    let connection = connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, coverage.clone())
+        .await
+        .expect("connect neighbor simulator");
     let budget = SimulatorMemoryBudget::new();
     let packet_memory = budget.for_neighbor();
     let budget_view = packet_memory.clone();
@@ -114,10 +113,9 @@ async fn typed_decode_retries() {
     let simulator_address = simulator.local_addr().expect("read simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
     let coverage = CoverageLossLedger::new();
-    let connection =
-        connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, NetworkStatusHandle::default(), coverage.clone())
-            .await
-            .expect("connect neighbor simulator");
+    let connection = connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, coverage.clone())
+        .await
+        .expect("connect neighbor simulator");
     let packet_memory = SimulatorMemoryBudget::new().for_neighbor();
     let budget_view = packet_memory.clone();
     let (events, mut received_events) = mpsc::channel(4);
@@ -185,10 +183,9 @@ async fn ack_queue_full_retries() {
     let simulator_address = simulator.local_addr().expect("read simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
     let coverage = CoverageLossLedger::new();
-    let connection =
-        connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, NetworkStatusHandle::default(), coverage.clone())
-            .await
-            .expect("connect neighbor simulator");
+    let connection = connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, coverage.clone())
+        .await
+        .expect("connect neighbor simulator");
     let shared_budget = SimulatorMemoryBudget::new();
     let packet_memory = shared_budget.for_neighbor();
     let budget_view = packet_memory.clone();
@@ -298,8 +295,7 @@ async fn ack_control_survives_memory_pressure() {
     let simulator_address = simulator.local_addr().expect("read simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
     let coverage = CoverageLossLedger::new();
-    let status = NetworkStatusHandle::default();
-    let connection = connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, status, coverage.clone())
+    let connection = connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, coverage.clone())
         .await
         .expect("connect neighbor simulator");
 
@@ -310,7 +306,7 @@ async fn ack_control_survives_memory_pressure() {
     let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
     let (_commands, commands) = mpsc::channel(1);
     let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
-    let task: JoinHandle<Result<(), String>> =
+    let task: JoinHandle<Result<(), ConnectionError>> =
         spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory.clone()));
 
     let (use_circuit_code, peer) = receive_packet(&simulator).await;

@@ -1,7 +1,8 @@
 use std::{
-    future::Future,
+    future::{Future, poll_fn},
     io::{self, ErrorKind},
     sync::Arc,
+    sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, Wake, Waker},
     thread,
     time::{Duration, Instant},
@@ -13,26 +14,22 @@ use serde::Serialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net, runtime,
-    sync::{Semaphore, oneshot},
-    task::{JoinSet, spawn, yield_now},
+    sync::Notify,
+    task::{JoinSet, spawn},
     time::timeout,
 };
 use url::Url;
 
-use super::{DecodeGate, RequestDeadline, admit_capability_decode_memory_with_response_limit, decode_admitted_response};
 use crate::capabilities::budget::{
-    LLSD_SCAN_WORKING_BYTES, MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS,
-    MAX_LLSD_XML_ELEMENTS, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
+    MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS,
+    MAX_SEED_CAPABILITY_RESPONSE_BYTES,
 };
 use crate::test_support::{
     http::{ConcurrentCapabilityTestServer, LocalServer, response},
     simulator::test_source,
 };
 use crate::{
-    Error,
     Error::{Capability, CapabilityHttp},
-    NetworkStatusHandle,
-    capabilities::request::AdmittedResponse,
     capabilities::{CapabilityBudget, CapabilityUrl, Client},
     event::{Event, SimulatorId},
     http,
@@ -40,32 +37,21 @@ use crate::{
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn admit_capability_decode_memory(body: &[u8], http: &http::Client) -> Result<http::ResponseMemoryPermit, Error> {
-    admit_capability_decode_memory_with_response_limit(body, http, MAX_CAPABILITY_RESPONSE_BYTES)
+#[derive(Clone, Default)]
+struct SerializationProbe {
+    count: Arc<AtomicUsize>,
+    serialized: Arc<Notify>,
 }
 
-#[tokio::test]
-async fn cancelled_worker_wait_can_be_resumed() {
-    use std::pin::pin;
-
-    use super::RequestWorker;
-    use tokio::sync::Mutex;
-
-    let (release, wait) = oneshot::channel::<()>();
-    let worker = RequestWorker {
-        task: Mutex::new(Some(spawn(async move {
-            let _ = wait.await;
-        }))),
-    };
+impl Serialize for SerializationProbe {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
     {
-        let mut wait = pin!(worker.wait());
-        assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.serialized.notify_one();
+        serializer.serialize_str("admitted")
     }
-    let mut wait = pin!(worker.wait());
-    assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending(), "the worker is still running");
-    release.send(()).expect("worker is waiting for release");
-    wait.await.expect("resumed join completes");
-    worker.wait().await.expect("repeated join is harmless");
 }
 
 async fn read_request_headers(stream: &mut net::TcpStream) -> io::Result<()> {
@@ -89,16 +75,31 @@ async fn write_empty_response(stream: &mut net::TcpStream) -> io::Result<()> {
 
 #[test]
 fn requests_run_outside_tokio() {
-    let server = LocalServer::start(vec![response(200, "OK", "application/octet-stream", None, "body")]);
+    let server = LocalServer::start(vec![
+        response(200, "OK", "application/octet-stream", None, "body"),
+        response(200, "OK", "application/llsd+xml", None, "<llsd><string>posted</string></llsd>"),
+        response(200, "OK", "application/octet-stream", None, "raw body"),
+    ]);
     let runtime = runtime::Builder::new_multi_thread().enable_all().build().expect("Tokio runtime");
     let client = runtime.block_on(async { Client::new(server.url("/seed")) }).expect("active Tokio runtime");
     let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
 
-    let body = block_on(client.get_bytes(&url)).expect("capability request from the external executor");
+    let body = block_on(client.get_bytes_with_response_limit(&url, MAX_CAPABILITY_RESPONSE_BYTES))
+        .expect("capability request from the external executor");
+    let posted = block_on(client.post_with_response_limit(&url, &Value::String("request".into()), MAX_CAPABILITY_RESPONSE_BYTES))
+        .expect("LLSD POST from the external executor");
+    let raw = block_on(client.post_bytes_with_response_limit(&url, &Value::String("request".into()), MAX_CAPABILITY_RESPONSE_BYTES))
+        .expect("raw body POST from the external executor");
 
     assert_eq!(body, b"body");
+    assert_eq!(posted, Value::String("posted".into()));
+    assert_eq!(raw, b"raw body");
     drop(client);
-    assert_eq!(server.finish().len(), 1);
+    let requests = server.finish();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].starts_with(b"GET /resource HTTP/1.1"));
+    assert!(requests[1].starts_with(b"POST /resource HTTP/1.1"));
+    assert!(requests[2].starts_with(b"POST /resource HTTP/1.1"));
 }
 
 #[tokio::test]
@@ -129,12 +130,15 @@ async fn capability_clients_share_the_session_http_connection_pool() {
     let seed = Url::parse(&format!("{endpoint}/seed")).expect("valid seed URL");
     let resource = CapabilityUrl::parse(&format!("{endpoint}/resource")).expect("valid capability URL");
     let budget = CapabilityBudget::new();
-    let first = Client::new_with_status_and_budget(seed.clone(), NetworkStatusHandle::default(), budget.clone())
-        .expect("create first capability client");
-    let second = Client::new_with_status_and_budget(seed, NetworkStatusHandle::default(), budget).expect("create second capability client");
+    let first = Client::new_with_budget(seed.clone(), budget.clone()).expect("create first capability client");
+    let second = Client::new_with_budget(seed, budget).expect("create second capability client");
 
-    assert!(first.get_bytes(&resource).await.expect("first capability request").is_empty());
-    assert!(second.get_bytes(&resource).await.expect("second capability request").is_empty());
+    assert!(
+        first.get_bytes_with_response_limit(&resource, MAX_CAPABILITY_RESPONSE_BYTES).await.expect("first capability request").is_empty()
+    );
+    assert!(
+        second.get_bytes_with_response_limit(&resource, MAX_CAPABILITY_RESPONSE_BYTES).await.expect("second capability request").is_empty()
+    );
     let (first_peer, second_peer) = timeout(TEST_TIMEOUT, server).await.expect("server should receive both requests").expect("server task");
 
     assert_eq!(first_peer, second_peer, "clients in one capability session should reuse an HTTP connection");
@@ -167,196 +171,6 @@ fn block_on<F: Future>(future: F) -> F::Output {
             }
         }
     }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn response_memory_stays_admitted_through_value_decode() {
-    let body = b"<llsd><integer>42</integer></llsd>".to_vec();
-    let body_len = body.len();
-    let allocation_bound =
-        xml::value_allocation_bound(&body, crate::capabilities::request::capability_llsd_limits()).expect("bound valid LLSD response");
-    let memory_limit = body_len + LLSD_SCAN_WORKING_BYTES + allocation_bound;
-    let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0);
-    let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_len).expect("reserve raw response memory");
-    let (gate, entered_rx) = DecodeGate::new();
-    let requests = Arc::new(Semaphore::new(1));
-    let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
-    let response = AdmittedResponse { body, max_response_bytes: MAX_CAPABILITY_RESPONSE_BYTES, _memory: Some(memory), _request: request };
-    let http = http::Client::new(Some(TEST_TIMEOUT), false, None)
-        .expect("build HTTP client")
-        .with_memory_budget(budget.clone(), http::ResponseMemoryClass::Ordinary);
-    let decode_gate = Arc::clone(&gate);
-    let task = spawn(decode_admitted_response(response, http, RequestDeadline::new(TEST_TIMEOUT), move || decode_gate.wait()));
-
-    let entered_decode = entered_rx.recv_timeout(TEST_TIMEOUT).is_ok();
-    let raw_memory_held = budget.try_reserve(http::ResponseMemoryClass::Ordinary, 1).is_err();
-    let request_held = requests.try_acquire().is_err();
-    gate.release();
-    let result = timeout(TEST_TIMEOUT, task).await.expect("decoder should finish").expect("decoder task");
-
-    assert!(entered_decode, "LLSD decode should reach its admitted blocking point");
-    assert!(raw_memory_held, "raw response and decode admission should remain held while decoding");
-    assert!(request_held, "request concurrency should remain admitted while decoding");
-    assert_eq!(result.expect("decode admitted response"), Value::Integer(42));
-    let permit = budget
-        .try_reserve(http::ResponseMemoryClass::Ordinary, memory_limit)
-        .expect("successful decode should release body and decoder admissions");
-    drop(permit);
-    drop(requests.try_acquire().expect("successful decode should release its request slot"));
-
-    let malformed = b"<llsd><array></map></llsd>".to_vec();
-    let malformed_len = malformed.len();
-    let bound = xml::value_allocation_bound(&malformed, crate::capabilities::request::capability_llsd_limits());
-    assert!(matches!(bound, Err(xml::BoundError::Malformed)), "malformed input must fail preflight");
-    let memory_limit = malformed_len + LLSD_SCAN_WORKING_BYTES;
-    let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0);
-    let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, malformed_len).expect("reserve malformed response memory");
-    let requests = Arc::new(Semaphore::new(1));
-    let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
-    let response =
-        AdmittedResponse { body: malformed, max_response_bytes: MAX_CAPABILITY_RESPONSE_BYTES, _memory: Some(memory), _request: request };
-    let http = http::Client::new(Some(TEST_TIMEOUT), false, None)
-        .expect("build HTTP client")
-        .with_memory_budget(budget.clone(), http::ResponseMemoryClass::Ordinary);
-    assert!(matches!(decode_admitted_response(response, http, RequestDeadline::new(TEST_TIMEOUT), || {}).await, Err(Capability(_))));
-    let permit = budget
-        .try_reserve(http::ResponseMemoryClass::Ordinary, memory_limit)
-        .expect("failed decode should release body and decoder admissions");
-    drop(permit);
-    drop(requests.try_acquire().expect("failed decode should release its request slot"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn cancellation_keeps_capability_decode_admission_until_worker_finishes() {
-    let body = b"<llsd><integer>42</integer></llsd>".to_vec();
-    let allocation_bound =
-        xml::value_allocation_bound(&body, crate::capabilities::request::capability_llsd_limits()).expect("bound valid LLSD response");
-    let memory_limit = body.capacity() + LLSD_SCAN_WORKING_BYTES + allocation_bound;
-    let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0);
-    let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body.capacity()).expect("reserve raw response memory");
-    let (gate, entered_rx) = DecodeGate::new();
-    let requests = Arc::new(Semaphore::new(1));
-    let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
-    let response = AdmittedResponse { body, max_response_bytes: MAX_CAPABILITY_RESPONSE_BYTES, _memory: Some(memory), _request: request };
-    let http = http::Client::new(Some(TEST_TIMEOUT), false, None)
-        .expect("build HTTP client")
-        .with_memory_budget(budget.clone(), http::ResponseMemoryClass::Ordinary);
-    let decode_gate = Arc::clone(&gate);
-    let task = spawn(decode_admitted_response(response, http, RequestDeadline::new(TEST_TIMEOUT), move || decode_gate.wait()));
-
-    entered_rx.recv_timeout(TEST_TIMEOUT).expect("LLSD decoder reached its admitted blocking point");
-    task.abort();
-    assert!(task.await.expect_err("async decoder waiter should be canceled").is_cancelled());
-    assert!(budget.try_reserve(http::ResponseMemoryClass::Ordinary, 1).is_err());
-    assert_eq!(requests.available_permits(), 0, "the request slot remains held by the blocking decoder");
-
-    gate.release();
-    timeout(TEST_TIMEOUT, async {
-        loop {
-            let memory_released = match budget.try_reserve(http::ResponseMemoryClass::Ordinary, memory_limit) {
-                Ok(permit) => {
-                    drop(permit);
-                    true
-                }
-                Err(_) => false,
-            };
-            let request_released = match Arc::clone(&requests).try_acquire_owned() {
-                Ok(permit) => {
-                    drop(permit);
-                    true
-                }
-                Err(_) => false,
-            };
-            if memory_released && request_released {
-                break;
-            }
-            yield_now().await;
-        }
-    })
-    .await
-    .expect("decoder completion should release body, decode memory, and request slot");
-}
-
-#[test]
-fn decode_preflight_enforces_llsd_limits() {
-    let max_depth = crate::capabilities::budget::MAX_LLSD_NESTING_DEPTH;
-    let mut nested = String::from("<llsd>");
-    for _ in 0..=max_depth {
-        nested.push_str("<array>");
-    }
-    nested.push_str("<undef/>");
-    for _ in 0..=max_depth {
-        nested.push_str("</array>");
-    }
-    nested.push_str("</llsd>");
-
-    let mut many_values = String::from("<llsd><array>");
-    for _ in 0..MAX_LLSD_XML_ELEMENTS {
-        many_values.push_str("<undef/>");
-    }
-    many_values.push_str("<undef/></array></llsd>");
-
-    for body in [nested.into_bytes(), many_values.into_bytes()] {
-        let memory_limit = body.capacity() + LLSD_SCAN_WORKING_BYTES;
-        let budget = http::ResponseMemoryBudget::new(memory_limit, 0, 0);
-        let raw = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body.capacity()).expect("admit raw response body");
-        let client = http::Client::new(Some(TEST_TIMEOUT), false, None)
-            .expect("build HTTP client")
-            .with_memory_budget(budget.clone(), http::ResponseMemoryClass::Ordinary);
-
-        let error = match admit_capability_decode_memory(&body, &client) {
-            Ok(_) => panic!("preflight must reject a configured LLSD limit"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, CapabilityHttp(http::Error::ResourceExhausted { .. })));
-        drop(raw);
-        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, memory_limit).expect("failed preflight releases workspace"));
-    }
-}
-
-#[test]
-fn decode_preflight_enforces_memory_budget() {
-    let body = format!("<llsd><string>{}</string></llsd>", "x".repeat(128 * 1024)).into_bytes();
-    let bound =
-        xml::value_allocation_bound(&body, crate::capabilities::request::capability_llsd_limits()).expect("bound valid LLSD response");
-    let body_capacity = body.capacity();
-
-    for limit in [body_capacity + LLSD_SCAN_WORKING_BYTES - 1, body_capacity + LLSD_SCAN_WORKING_BYTES + bound - 1] {
-        let budget = http::ResponseMemoryBudget::new(limit, 0, 0);
-        let raw = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_capacity).expect("admit raw response body");
-        let client = http::Client::new(Some(TEST_TIMEOUT), false, None)
-            .expect("build HTTP client")
-            .with_memory_budget(budget.clone(), http::ResponseMemoryClass::Ordinary);
-
-        let error = match admit_capability_decode_memory(&body, &client) {
-            Ok(_) => panic!("preflight must reject insufficient memory"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, CapabilityHttp(http::Error::ResourceExhausted { .. })));
-        drop(raw);
-        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("failed admission returns all memory"));
-    }
-}
-
-#[test]
-fn dropped_reply_releases_admission() {
-    let body = b"body".to_vec();
-    let body_len = body.len();
-    let budget = http::ResponseMemoryBudget::new(body_len, 0, 0);
-    let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_len).expect("reserve response memory");
-    let requests = Arc::new(Semaphore::new(1));
-    let request = Arc::clone(&requests).try_acquire_owned().expect("reserve request slot");
-    let response = AdmittedResponse { body, max_response_bytes: MAX_CAPABILITY_RESPONSE_BYTES, _memory: Some(memory), _request: request };
-    let (reply, waiting) = oneshot::channel();
-
-    assert!(reply.send(response).is_ok(), "caller should be able to retain the admitted reply");
-    assert_eq!(requests.available_permits(), 0);
-    assert!(budget.try_reserve(http::ResponseMemoryClass::Ordinary, 1).is_err());
-
-    drop(waiting);
-
-    assert_eq!(requests.available_permits(), 1);
-    drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_len).expect("dropping reply releases response memory"));
 }
 
 #[tokio::test]
@@ -413,15 +227,12 @@ async fn get_and_post_return_llsd_values_for_consumer_conversion() {
     }
 
     let body = "<?xml version=\"1.0\"?><llsd><map><key>count</key><integer>7</integer></map></llsd>";
-    let server = LocalServer::start(vec![
-        response(200, "OK", "application/llsd+xml", None, body),
-        response(200, "OK", "application/llsd+xml", None, body),
-    ]);
+    let server = LocalServer::start(vec![response(200, "OK", "application/llsd+xml", None, body)]);
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
     let url = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
 
-    let posted = client.post(&url, &Request { count: 7 }).await.expect("LLSD POST response");
-    let fetched = client.get(&url).await.expect("LLSD GET response");
+    let posted =
+        client.post_with_response_limit(&url, &Request { count: 7 }, MAX_CAPABILITY_RESPONSE_BYTES).await.expect("LLSD POST response");
     let requests = server.finish();
 
     let into_reply = |value: Value| {
@@ -429,13 +240,11 @@ async fn get_and_post_return_llsd_values_for_consumer_conversion() {
         Reply { count }
     };
     assert_eq!(into_reply(posted), Reply { count: 7 });
-    assert_eq!(into_reply(fetched), Reply { count: 7 });
     let post = str::from_utf8(&requests[0]).expect("POST is UTF-8");
     assert!(post.starts_with("POST /capability HTTP/1.1"));
     let (_, post_body) = post.split_once("\r\n\r\n").expect("POST has a body");
     let payload: Value = xml::from_str(post_body).expect("POST body is valid LLSD XML");
     assert_eq!(payload.as_map().and_then(|map| map.get("count")), Some(&Value::Integer(7)));
-    assert!(str::from_utf8(&requests[1]).expect("GET is UTF-8").starts_with("GET /capability HTTP/1.1"));
 }
 
 #[tokio::test]
@@ -449,10 +258,13 @@ async fn raw_body_limits_apply_to_declared_and_unknown_lengths() {
     let client = Client::new(server.url("/seed")).unwrap();
     let url = CapabilityUrl::parse(server.url("/raw").as_str()).unwrap();
     assert_eq!(client.get_bytes_with_response_limit(&url, 5).await.unwrap(), b"12345");
-    assert!(matches!(client.get_bytes_with_response_limit(&url, 5).await, Err(CapabilityHttp(http::Error::ResourceExhausted { .. }))));
+    std::assert_matches!(
+        client.get_bytes_with_response_limit(&url, 5).await,
+        Err(CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, .. }))
+    );
     assert!(matches!(
         client.post_bytes_with_response_limit(&url, &Value::Undefined, 5).await,
-        Err(CapabilityHttp(http::Error::ResourceExhausted { .. }))
+        Err(CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, .. }))
     ));
     assert_eq!(client.post_bytes_with_response_limit(&url, &Value::Undefined, 5).await.unwrap(), b"12345");
     for limit in [0, MAX_CAPABILITY_RESPONSE_BYTES + 1] {
@@ -501,7 +313,10 @@ async fn post_rejects_oversized_response_before_reading() {
         .await
         .expect_err("declared response over the selected limit should fail");
 
-    assert!(matches!(&error, CapabilityHttp(http::Error::ResourceExhausted { status: Some(StatusCode::OK), .. })));
+    std::assert_matches!(
+        &error,
+        CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, status: Some(StatusCode::OK), .. })
+    );
     assert_eq!(server.finish().len(), 1);
 }
 
@@ -519,7 +334,7 @@ async fn post_rejects_invalid_limits_without_sending() {
 }
 
 #[tokio::test]
-async fn large_valid_capability_value_is_decoded_with_memory_admission() {
+async fn large_valid_capability_value_is_decoded_with_llsd_limits() {
     const PAYLOAD_BYTES: usize = 1024 * 1024;
 
     let payload = "x".repeat(PAYLOAD_BYTES);
@@ -528,7 +343,8 @@ async fn large_valid_capability_value_is_decoded_with_memory_admission() {
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
     let url = CapabilityUrl::parse(server.url("/large").as_str()).expect("valid capability URL");
 
-    let value = client.get(&url).await.expect("admit and decode a 1 MiB LLSD value");
+    let value =
+        client.post_with_response_limit(&url, &Value::Undefined, MAX_CAPABILITY_RESPONSE_BYTES).await.expect("decode a 1 MiB LLSD value");
 
     assert_eq!(value, Value::String(payload));
     assert_eq!(server.finish().len(), 1);
@@ -540,12 +356,16 @@ async fn ordinary_post_is_not_replayed_after_a_server_error() {
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
     let url = CapabilityUrl::parse(server.url("/side-effect").as_str()).expect("valid capability URL");
 
-    let error = client.post(&url, &Value::String("one-shot".into())).await.expect_err("ordinary POST reports the server failure");
+    let error = client
+        .post_with_response_limit(&url, &Value::String("one-shot".into()), MAX_CAPABILITY_RESPONSE_BYTES)
+        .await
+        .expect_err("ordinary POST reports the server failure");
 
     assert!(matches!(
         &error,
-        CapabilityHttp(http::Error::HttpStatus {
-            status: StatusCode::SERVICE_UNAVAILABLE,
+        CapabilityHttp(http::Error {
+            kind: http::ErrorKind::HttpStatus,
+            status: Some(StatusCode::SERVICE_UNAVAILABLE),
             retry_after: Some(retry_after),
             elapsed,
             ..
@@ -594,7 +414,10 @@ async fn oversized_declared_seed_body_is_rejected_before_reading() {
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
 
     let error = client.request_capabilities(&["TestCapability"]).await.expect_err("oversized seed response should fail");
-    assert!(matches!(&error, CapabilityHttp(http::Error::ResourceExhausted { status: Some(StatusCode::OK), .. })));
+    std::assert_matches!(
+        &error,
+        CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, status: Some(StatusCode::OK), .. })
+    );
 
     assert_eq!(server.finish().len(), 1);
 }
@@ -605,23 +428,107 @@ async fn oversized_declared_capability_body_is_rejected_before_reading() {
     let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
 
     let url = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
-    let error = client.post(&url, &Value::Undefined).await.expect_err("oversized LLSD response should fail");
-    assert!(matches!(&error, CapabilityHttp(http::Error::ResourceExhausted { status: Some(StatusCode::OK), .. })));
+    let error = client
+        .post_with_response_limit(&url, &Value::Undefined, MAX_CAPABILITY_RESPONSE_BYTES)
+        .await
+        .expect_err("oversized LLSD response should fail");
+    std::assert_matches!(
+        &error,
+        CapabilityHttp(http::Error { kind: http::ErrorKind::ResourceExhausted, status: Some(StatusCode::OK), .. })
+    );
 
     assert_eq!(server.finish().len(), 1);
 }
 
 #[tokio::test]
 async fn request_body_is_bounded() {
-    let server = LocalServer::start(vec![]);
-    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let body = "<llsd><undef/></llsd>";
+    let server = LocalServer::start(vec![response(200, "OK", "application/llsd+xml", None, body)]);
+    let budget = CapabilityBudget::new();
+    let client = Client::new_with_budget(server.url("/seed"), budget).expect("active Tokio runtime");
     let url = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
     let payload = Value::String("N".repeat(MAX_CAPABILITY_REQUEST_BODY_BYTES + 1));
 
-    let error = client.post(&url, &payload).await.expect_err("an oversized request body should fail");
+    for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
+        let error = client
+            .post_with_response_limit(&url, &payload, MAX_CAPABILITY_RESPONSE_BYTES)
+            .await
+            .expect_err("an oversized request body should fail");
+        std::assert_matches!(error, Capability(_));
+    }
 
-    assert!(matches!(error, Capability(_)));
-    assert!(server.finish().is_empty(), "an oversized request must not be sent");
+    let value = timeout(TEST_TIMEOUT, client.post_with_response_limit(&url, &Value::Undefined, body.len()))
+        .await
+        .expect("encoding failures should release their request permits")
+        .expect("valid request after encoding failures");
+
+    assert_eq!(value, Value::Undefined);
+    assert_eq!(server.finish().len(), 1, "oversized requests must not be sent");
+}
+
+#[tokio::test]
+async fn posts_encode_after_admission() {
+    let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS + 2;
+    let mut server = ConcurrentCapabilityTestServer::start(request_count);
+    let budget = CapabilityBudget::new();
+    let client = Client::new_with_budget(server.url("/seed"), budget).expect("active Tokio runtime");
+    let held_url = CapabilityUrl::parse(server.url("/held").as_str()).expect("valid held URL");
+    let post_url = CapabilityUrl::parse(server.url("/post").as_str()).expect("valid POST URL");
+    let mut held_requests = JoinSet::new();
+
+    for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
+        let client = client.clone();
+        let url = held_url.clone();
+        held_requests.spawn(async move { client.get_bytes_with_response_limit(&url, MAX_CAPABILITY_RESPONSE_BYTES).await });
+    }
+    for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
+        server.next_request().await;
+    }
+
+    let value_probe = SerializationProbe::default();
+    let bytes_probe = SerializationProbe::default();
+    let mut value_post = Box::pin(client.post_with_response_limit(&post_url, &value_probe, MAX_CAPABILITY_RESPONSE_BYTES));
+    let mut bytes_post = Box::pin(client.post_bytes_with_response_limit(&post_url, &bytes_probe, MAX_CAPABILITY_RESPONSE_BYTES));
+
+    assert!(poll_fn(|context| Poll::Ready(value_post.as_mut().poll(context))).await.is_pending());
+    assert!(poll_fn(|context| Poll::Ready(bytes_post.as_mut().poll(context))).await.is_pending());
+    assert_eq!(value_probe.count.load(Ordering::Relaxed), 0, "LLSD value POST must wait before serializing");
+    assert_eq!(bytes_probe.count.load(Ordering::Relaxed), 0, "raw body POST must wait before serializing");
+
+    server.release_response();
+    timeout(TEST_TIMEOUT, held_requests.join_next())
+        .await
+        .expect("a held request should finish")
+        .expect("one held request task")
+        .expect("held request task should succeed")
+        .expect("held request should return a body");
+    assert!(poll_fn(|context| Poll::Ready(value_post.as_mut().poll(context))).await.is_pending());
+    timeout(TEST_TIMEOUT, value_probe.serialized.notified()).await.expect("value POST should serialize after admission");
+    assert_eq!(value_probe.count.load(Ordering::Relaxed), 1);
+    server.next_request().await;
+
+    server.release_response();
+    timeout(TEST_TIMEOUT, held_requests.join_next())
+        .await
+        .expect("another held request should finish")
+        .expect("one held request task")
+        .expect("held request task should succeed")
+        .expect("held request should return a body");
+    assert!(poll_fn(|context| Poll::Ready(bytes_post.as_mut().poll(context))).await.is_pending());
+    timeout(TEST_TIMEOUT, bytes_probe.serialized.notified()).await.expect("raw body POST should serialize after admission");
+    assert_eq!(bytes_probe.count.load(Ordering::Relaxed), 1);
+    server.next_request().await;
+
+    server.finish();
+    timeout(TEST_TIMEOUT, async {
+        while let Some(request) = held_requests.join_next().await {
+            request.expect("held request task should finish").expect("held request should succeed");
+        }
+        value_post.await.expect("LLSD POST should succeed");
+        bytes_post.await.expect("raw body POST should succeed");
+    })
+    .await
+    .expect("admitted POSTs and held requests should finish");
 }
 
 #[tokio::test]
@@ -709,12 +616,8 @@ async fn shared_budget_bounds_requests() {
     let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS * 2;
     let mut server = ConcurrentCapabilityTestServer::start(request_count);
     let budget = CapabilityBudget::new();
-    let clients = (0..2)
-        .map(|_| {
-            Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                .expect("active Tokio runtime")
-        })
-        .collect::<Vec<_>>();
+    let clients =
+        (0..2).map(|_| Client::new_with_budget(server.url("/seed"), budget.clone()).expect("active Tokio runtime")).collect::<Vec<_>>();
     let mut requests = JoinSet::new();
 
     for index in 0..request_count {

@@ -76,23 +76,55 @@ where
     timeout(TEST_TIMEOUT, &mut future).await.expect("session close cancels retry")
 }
 
+fn seed_context(events: mpsc::Sender<EventEnvelope>) -> EventQueueContext {
+    EventQueueContext {
+        simulator_id: SimulatorId::new(1),
+        source: SocketAddr::from(([127, 0, 0, 1], 0)),
+        seed: Url::parse("http://127.0.0.1:9/seed").expect("valid seed URL"),
+        http: http::Client::new(None, false, None).expect("build HTTP client"),
+        events,
+        ordinary_requests: Arc::new(Semaphore::new(1)),
+        primary_event_queues: Arc::new(Semaphore::new(1)),
+        neighbor_event_queues: Arc::new(Semaphore::new(1)),
+        queued_event_bytes: Arc::new(Semaphore::new(MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES)),
+        coverage_losses: CoverageLossLedger::new(),
+    }
+}
+
+fn pending_event_queue_loss(
+    events: &mpsc::Sender<EventEnvelope>,
+    simulator_id: SimulatorId,
+    socket: SocketAddr,
+    stop: &Stop,
+) -> PendingEventQueueLoss {
+    let ledger = CoverageLossLedger::new();
+    let coverage_source = CoverageSource::EventQueue { incarnation: 1 };
+    let notifier = EventQueueLossNotifier::new(events.clone(), simulator_id, socket, stop.clone());
+    PendingEventQueueLoss::new(ledger, simulator_id, coverage_source, notifier)
+}
+
 #[tokio::test]
 async fn poll_backoff_stops_when_session_closes() {
     let (events, _received) = mpsc::channel(1);
-    let (_shutdown, mut shutdown) = watch::channel(false);
+    let (_shutdown, shutdown) = watch::channel(false);
     let (session_closed, session_closed_receiver) = watch::channel(false);
     let mut error_count = 0;
+    let simulator_id = SimulatorId::new(1);
+    let source = SocketAddr::from(([127, 0, 0, 1], 0));
+    let stop = Stop::new(shutdown, session_closed_receiver);
+    let mut pending_loss = pending_event_queue_loss(&events, simulator_id, source, &stop);
 
     assert_eq!(
         close_while_pending(
-            retry_event_queue(
-                SimulatorId::new(1),
+            retry_event_queue_with_hint(
+                simulator_id,
                 &mut error_count,
-                SocketAddr::from(([127, 0, 0, 1], 0)),
+                source,
                 &events,
                 "poll failed".into(),
-                &mut shutdown,
-                &session_closed_receiver,
+                None,
+                &stop,
+                &mut pending_loss,
             ),
             &session_closed,
         )
@@ -104,22 +136,15 @@ async fn poll_backoff_stops_when_session_closes() {
 #[tokio::test]
 async fn seed_backoff_stops_when_session_closes() {
     let (events, _received) = mpsc::channel(1);
-    let (_shutdown, mut shutdown) = watch::channel(false);
+    let (_shutdown, shutdown_receiver) = watch::channel(false);
     let (session_closed, session_closed_receiver) = watch::channel(false);
     let mut retries = 0;
+    let context = seed_context(events);
+    let stop = Stop::new(shutdown_receiver, session_closed_receiver);
 
     assert_eq!(
         close_while_pending(
-            retry_seed_capability_lookup(
-                SimulatorId::new(1),
-                &mut retries,
-                SocketAddr::from(([127, 0, 0, 1], 0)),
-                &events,
-                "seed lookup failed".into(),
-                Some(Duration::from_secs(30)),
-                &mut shutdown,
-                &session_closed_receiver,
-            ),
+            retry_seed_capability_lookup(&context, &mut retries, "seed lookup failed".into(), Some(Duration::from_secs(30)), &stop),
             &session_closed,
         )
         .await,
@@ -131,20 +156,25 @@ async fn seed_backoff_stops_when_session_closes() {
 async fn poll_limit_notification_stops_when_session_closes() {
     let (events, mut received) = mpsc::channel(1);
     events.try_send(EventEnvelope::new(Event::Failed("occupy event channel".into()))).expect("fill event channel");
-    let (_shutdown, mut shutdown) = watch::channel(false);
+    let (_shutdown, shutdown) = watch::channel(false);
     let (session_closed, session_closed_receiver) = watch::channel(false);
     let mut error_count = MAX_EVENT_QUEUE_ERRORS;
+    let simulator_id = SimulatorId::new(1);
+    let source = SocketAddr::from(([127, 0, 0, 1], 0));
+    let stop = Stop::new(shutdown, session_closed_receiver);
+    let mut pending_loss = pending_event_queue_loss(&events, simulator_id, source, &stop);
 
     assert_eq!(
         close_while_pending(
-            retry_event_queue(
-                SimulatorId::new(1),
+            retry_event_queue_with_hint(
+                simulator_id,
                 &mut error_count,
-                SocketAddr::from(([127, 0, 0, 1], 0)),
+                source,
                 &events,
                 "poll failed".into(),
-                &mut shutdown,
-                &session_closed_receiver,
+                None,
+                &stop,
+                &mut pending_loss,
             ),
             &session_closed,
         )
@@ -158,22 +188,15 @@ async fn poll_limit_notification_stops_when_session_closes() {
 async fn seed_limit_notification_stops_when_session_closes() {
     let (events, mut received) = mpsc::channel(1);
     events.try_send(EventEnvelope::new(Event::Failed("occupy event channel".into()))).expect("fill event channel");
-    let (_shutdown, mut shutdown) = watch::channel(false);
+    let (_shutdown, shutdown_receiver) = watch::channel(false);
     let (session_closed, session_closed_receiver) = watch::channel(false);
     let mut retries = SEED_LOOKUP_RETRY_LIMIT;
+    let context = seed_context(events);
+    let stop = Stop::new(shutdown_receiver, session_closed_receiver);
 
     assert_eq!(
         close_while_pending(
-            retry_seed_capability_lookup(
-                SimulatorId::new(1),
-                &mut retries,
-                SocketAddr::from(([127, 0, 0, 1], 0)),
-                &events,
-                "seed lookup failed".into(),
-                Some(Duration::from_secs(30)),
-                &mut shutdown,
-                &session_closed_receiver,
-            ),
+            retry_seed_capability_lookup(&context, &mut retries, "seed lookup failed".into(), Some(Duration::from_secs(30)), &stop),
             &session_closed,
         )
         .await,
@@ -183,6 +206,8 @@ async fn seed_limit_notification_stops_when_session_closes() {
 }
 #[cfg(test)]
 mod retained_size_tests {
+    use llsd::{Binary, Uri};
+
     use super::*;
 
     #[test]
@@ -204,17 +229,14 @@ mod retained_size_tests {
 }
 #[cfg(test)]
 mod event_queue_batch_tests {
-    use super::*;
-    use crate::{
-        coverage::CoverageLoss,
-        http::{ResponseMemoryBudget, ResponseMemoryClass},
-    };
     use std::{
         future::Future,
         pin::pin,
         task::{Context, Waker},
     };
-    use tokio::{spawn, task::yield_now};
+
+    use super::*;
+    use crate::coverage::CoverageLoss;
 
     fn reserve_batch(budget: &Arc<Semaphore>) -> OwnedSemaphorePermit {
         budget.clone().try_acquire_many_owned(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES as u32).expect("reserve one EventQueue batch")
@@ -267,13 +289,8 @@ mod event_queue_batch_tests {
         drop(received);
         let (_shutdown, shutdown_receiver) = watch::channel(false);
         let (_session_closed, session_closed_receiver) = watch::channel(false);
-        let notifier = EventQueueLossNotifier::new(
-            events,
-            simulator_id,
-            SocketAddr::from(([127, 0, 0, 1], 0)),
-            shutdown_receiver,
-            session_closed_receiver,
-        );
+        let stop = Stop::new(shutdown_receiver, session_closed_receiver);
+        let notifier = EventQueueLossNotifier::new(events, simulator_id, SocketAddr::from(([127, 0, 0, 1], 0)), stop);
         PendingEventQueueLoss::new(ledger.clone(), simulator_id, source(), notifier)
     }
 
@@ -287,6 +304,7 @@ mod event_queue_batch_tests {
         ledger: &CoverageLossLedger,
     ) -> EventSendOutcome {
         let mut pending = pending_loss(ledger, simulator_id);
+        let stop = Stop::new(shutdown.clone(), session_closed.clone());
         send_event_queue_batch(
             events,
             simulator_id,
@@ -294,8 +312,7 @@ mod event_queue_batch_tests {
             source(),
             0,
             batch,
-            shutdown,
-            session_closed,
+            &stop,
             reserve_batch(budget),
             ledger,
             &mut pending,
@@ -315,7 +332,8 @@ mod event_queue_batch_tests {
                 shutdown.send_replace(true);
             }
 
-            assert!(acquire_event_batch_reservation(Arc::clone(&budget), &shutdown_receiver, &session_closed_receiver).is_none());
+            let stop = Stop::new(shutdown_receiver, session_closed_receiver);
+            assert!(acquire_event_batch_reservation(Arc::clone(&budget), &stop).is_none());
             assert_eq!(budget.available_permits(), MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES);
         }
     }
@@ -328,7 +346,8 @@ mod event_queue_batch_tests {
         let (_session_closed, session_closed) = watch::channel(false);
         let ledger = CoverageLossLedger::new();
         let simulator_id = SimulatorId::new(3);
-        let notifier = EventQueueLossNotifier::new(events, simulator_id, SocketAddr::from(([127, 0, 0, 1], 0)), shutdown, session_closed);
+        let stop = Stop::new(shutdown, session_closed);
+        let notifier = EventQueueLossNotifier::new(events, simulator_id, SocketAddr::from(([127, 0, 0, 1], 0)), stop);
         let mut pending = PendingEventQueueLoss::new(ledger.clone(), simulator_id, source(), notifier);
         {
             let mut notification = pin!(pending.notify("admission failed".into()));
@@ -495,10 +514,14 @@ mod event_queue_batch_tests {
 
         let (_shutdown, shutdown_receiver) = watch::channel(false);
         let (_session_closed, session_closed_receiver) = watch::channel(false);
-        assert!(acquire_event_batch_reservation(Arc::clone(&queued_event_bytes), &shutdown_receiver, &session_closed_receiver).is_none());
+        let stop = Stop::new(shutdown_receiver, session_closed_receiver);
+        assert!(acquire_event_batch_reservation(Arc::clone(&queued_event_bytes), &stop).is_none());
 
         drop(reservations.pop());
-        let permit = acquire_event_batch_reservation(Arc::clone(&queued_event_bytes), &shutdown_receiver, &session_closed_receiver)
+        let (_shutdown, shutdown_receiver) = watch::channel(false);
+        let (_session_closed, session_closed_receiver) = watch::channel(false);
+        let stop = Stop::new(shutdown_receiver, session_closed_receiver);
+        let permit = acquire_event_batch_reservation(Arc::clone(&queued_event_bytes), &stop)
             .expect("released batch capacity should admit another poll");
         assert_eq!(queued_event_bytes.available_permits(), 0);
         drop(permit);
@@ -532,80 +555,6 @@ mod event_queue_batch_tests {
         ));
         assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES);
     }
-
-    #[tokio::test]
-    async fn exhausted_budget_skips_decode() {
-        let body = b"<llsd><map><key>id</key><integer>1</integer><key>events</key><array/></map></llsd>".to_vec();
-        let available = body.len() + LLSD_SCAN_WORKING_BYTES;
-        let budget = ResponseMemoryBudget::new(0, 0, available);
-        let raw = budget.try_reserve(ResponseMemoryClass::EventQueue, body.len()).expect("reserve input");
-        let workspace = budget.try_reserve(ResponseMemoryClass::EventQueue, LLSD_SCAN_WORKING_BYTES).expect("reserve scanner");
-        let event_queues = Arc::new(Semaphore::new(1));
-        let event_queue_permit = Arc::clone(&event_queues).acquire_owned().await.expect("EventQueue slot");
-        let result = decode_admitted_event_batch_with(body, Some(raw), Some(workspace), event_queue_permit, |_| {
-            panic!("decoder must not run without memory admission")
-        })
-        .await;
-        assert!(matches!(result, Err(BatchDecodeError::Resource(_))));
-        assert_eq!(event_queues.available_permits(), 1, "decode rejection returns its EventQueue slot");
-        assert!(budget.try_reserve(ResponseMemoryClass::EventQueue, available).is_ok());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn cancellation_holds_decode_memory() {
-        let body = b"<llsd><map><key>id</key><integer>1</integer><key>events</key><array/></map></llsd>".to_vec();
-        let decoded_bytes = event_batch_allocation_bound(&body).expect("bound valid batch");
-        let reserved_bytes = body.len() + decoded_bytes;
-        let budget = ResponseMemoryBudget::new(0, 0, reserved_bytes);
-        let raw_memory = budget.try_reserve(ResponseMemoryClass::EventQueue, body.len()).expect("reserve raw response");
-        let decoded_memory = budget.try_reserve(ResponseMemoryClass::EventQueue, decoded_bytes).expect("reserve decode workspace");
-        let event_queues = Arc::new(Semaphore::new(1));
-        let event_queue_permit = Arc::clone(&event_queues).acquire_owned().await.expect("EventQueue slot");
-        let (entered, entered_rx) = oneshot::channel();
-        let (release, release_rx) = sync::mpsc::channel();
-        let task =
-            spawn(decode_admitted_event_batch_with(body, Some(raw_memory), Some(decoded_memory), event_queue_permit, move |bytes| {
-                let _ = entered.send(());
-                release_rx.recv().expect("release blocking decoder");
-                decode_event_batch(bytes)
-            }));
-
-        entered_rx.await.expect("decoder should enter before cancellation");
-        task.abort();
-        let error = match task.await {
-            Ok(_) => panic!("async decoder task should be canceled"),
-            Err(error) => error,
-        };
-        assert!(error.is_cancelled());
-        assert!(budget.try_reserve(ResponseMemoryClass::EventQueue, 1).is_err(), "both permits remain held during decoding");
-        assert_eq!(event_queues.available_permits(), 0, "cancellation cannot admit a replacement poll before decode ends");
-
-        release.send(()).expect("unblock decoder");
-        time::timeout(Duration::from_secs(1), async {
-            loop {
-                let memory_released = match budget.try_reserve(ResponseMemoryClass::EventQueue, reserved_bytes) {
-                    Ok(permit) => {
-                        drop(permit);
-                        true
-                    }
-                    Err(_) => false,
-                };
-                let event_queue_released = match Arc::clone(&event_queues).try_acquire_owned() {
-                    Ok(permit) => {
-                        drop(permit);
-                        true
-                    }
-                    Err(_) => false,
-                };
-                if memory_released && event_queue_released {
-                    break;
-                }
-                yield_now().await;
-            }
-        })
-        .await
-        .expect("decoder completion should release response memory and the EventQueue slot");
-    }
 }
 
 #[cfg(test)]
@@ -636,7 +585,6 @@ mod client_event_queue_tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::capabilities::DecodeGate;
     use crate::capabilities::budget::{
         MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS, MAX_CONCURRENT_EVENT_QUEUES, MAX_EVENT_QUEUE_RESPONSE_BYTES,
         MAX_LLSD_XML_ELEMENTS,
@@ -653,14 +601,12 @@ mod client_event_queue_tests {
         AgentSession,
         Error::CapabilitySessionClosed,
         Grid,
-        capabilities::begin_process_measurement,
         capabilities::{CapabilityBudget, CapabilityUrl, Client, EventQueueExit},
         coverage::CoverageLossLedger,
         event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, EventReceiver, PRIMARY_TERMINAL_EVENT_CAPACITY, SimulatorId},
         http,
         session::{COMMAND_CAPACITY, Command},
         simulator::run_session,
-        status::NetworkStatusHandle,
         transport::lludp::Delivery,
     };
 
@@ -788,12 +734,8 @@ mod client_event_queue_tests {
         let task_count = MAX_CONCURRENT_EVENT_QUEUES + 1;
         let server = EventQueueBudgetTestServer::start();
         let budget = CapabilityBudget::new();
-        let clients = (0..2)
-            .map(|_| {
-                Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                    .expect("active Tokio runtime")
-            })
-            .collect::<Vec<_>>();
+        let clients =
+            (0..2).map(|_| Client::new_with_budget(server.url("/seed"), budget.clone()).expect("active Tokio runtime")).collect::<Vec<_>>();
         let (events, received_events) = mpsc::channel(1);
         let mut received_events = EventReceiver::new(received_events);
         events.try_send(EventEnvelope::new(Event::SendFailed("hold event forwarding".into()))).expect("fill the application event channel");
@@ -876,7 +818,7 @@ mod client_event_queue_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn response_classes_share_budget() {
+    async fn ordinary_requests_run_during_event_queue_polls() {
         let event_server = EventQueueTestServer::start(|base| {
             let mut event_url = base.clone();
             event_url.set_path("/event-queue");
@@ -886,17 +828,13 @@ mod client_event_queue_tests {
                 hold_response(),
             ]
         });
-        let ordinary_body = "<llsd><integer>42</integer></llsd>";
+        let ordinary_body = "ordinary response";
         let ordinary_server = LocalServer::start(vec![response(200, "OK", "application/llsd+xml", None, ordinary_body)]);
-        let mut budget = CapabilityBudget::new();
-        let ordinary_memory_limit = 64 * 1024;
-        let event_queue_memory_limit = 2 * 1024 * 1024;
-        budget.response_memory = http::ResponseMemoryBudget::new(ordinary_memory_limit, event_queue_memory_limit, 0);
+        let budget = CapabilityBudget::new();
         let ordinary_request_capacity = budget.ordinary_requests.available_permits();
         let event_queue_capacity = available_event_queue_permits(&budget);
         let queued_event_capacity = budget.queued_event_bytes.available_permits();
-        let client = Client::new_with_status_and_budget(event_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-            .expect("active Tokio runtime");
+        let client = Client::new_with_budget(event_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
         let (event_sender, mut received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
         let task = client
@@ -920,36 +858,22 @@ mod client_event_queue_tests {
         assert_eq!(available_event_queue_permits(&budget), event_queue_capacity - 1, "long poll holds its concurrency slot");
 
         let ordinary_url = CapabilityUrl::parse(ordinary_server.url("/ordinary").as_str()).expect("valid ordinary capability URL");
-        let (gate, entered_receiver) = DecodeGate::new();
         let ordinary_client = client.clone();
-        let decode_gate = gate.clone();
-        let ordinary_task = spawn(async move { ordinary_client.get_with_decode_hook(&ordinary_url, move || decode_gate.wait()).await });
-
-        assert!(entered_receiver.recv_timeout(TEST_TIMEOUT).is_ok(), "ordinary response should decode while EventQueue is polling");
-        assert!(budget.response_memory.try_reserve(http::ResponseMemoryClass::Ordinary, ordinary_memory_limit).is_err());
-        assert!(available_event_queue_permits(&budget) < event_queue_capacity);
-        gate.release();
+        let ordinary_task =
+            spawn(async move { ordinary_client.get_bytes_with_response_limit(&ordinary_url, MAX_CAPABILITY_RESPONSE_BYTES).await });
         assert_eq!(
             timeout(TEST_TIMEOUT, ordinary_task)
                 .await
                 .expect("ordinary decode should finish")
                 .expect("ordinary request task")
-                .expect("ordinary response should decode"),
-            Value::Integer(42)
+                .expect("ordinary response should complete"),
+            ordinary_body.as_bytes()
         );
-        assert!(
-            budget.response_memory.try_reserve(http::ResponseMemoryClass::Ordinary, ordinary_memory_limit).is_ok(),
-            "ordinary raw-response admission returns after decode"
-        );
+        assert_eq!(available_event_queue_permits(&budget), event_queue_capacity - 1);
         assert_eq!(ordinary_server.finish().len(), 1);
 
         shutdown.send_replace(true);
         assert_eq!(timeout(TEST_TIMEOUT, task.wait()).await.expect("EventQueue should stop"), EventQueueExit::Stopped);
-        let event_queue_memory = budget
-            .response_memory
-            .try_reserve(http::ResponseMemoryClass::EventQueue, event_queue_memory_limit)
-            .expect("decode-memory admission returns when ownership transfers to the queued-event budget");
-        drop(event_queue_memory);
         assert!(
             budget.queued_event_bytes.available_permits() < queued_event_capacity,
             "the queued batch keeps its retained-event reservation until the envelope is dropped"
@@ -959,162 +883,16 @@ mod client_event_queue_tests {
         assert_eq!(budget.ordinary_requests.available_permits(), ordinary_request_capacity);
         assert_eq!(available_event_queue_permits(&budget), event_queue_capacity);
         assert_eq!(budget.queued_event_bytes.available_permits(), queued_event_capacity);
-        let event_queue_memory = budget
-            .response_memory
-            .try_reserve(http::ResponseMemoryClass::EventQueue, event_queue_memory_limit)
-            .expect("EventQueue response admission returns after batch drop and shutdown");
-        drop(event_queue_memory);
 
         drop(client);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "manual process-wide allocator sample; run with cargo test -p network --lib -- --ignored event_queue_peak_with_ordinary_live --nocapture"]
-    async fn event_queue_peak_with_ordinary_live() {
-        event_queue_peak_sample().await;
-    }
-
-    async fn event_queue_peak_sample() {
-        const EVENT_QUEUE_COUNT: usize = MAX_CONCURRENT_EVENT_QUEUES;
-        const ORDINARY_REQUEST_COUNT: usize = MAX_CONCURRENT_CAPABILITY_REQUESTS;
-        const EVENT_COUNT: usize = 4;
-        const EVENT_PAYLOAD_BYTES: usize = MAX_QUEUED_CAPABILITY_EVENT_BYTES - 16 * 1024;
-        const ORDINARY_PAYLOAD_BYTES: usize = 64 * 1024;
-
-        let event_payload = "e".repeat(EVENT_PAYLOAD_BYTES);
-        let mut event_body = String::from("<llsd><map><key>id</key><integer>6</integer><key>events</key><array>");
-        for _ in 0..EVENT_COUNT {
-            event_body.push_str("<map><key>message</key><string>ObjectUpdate</string><key>body</key><map><key>payload</key><string>");
-            event_body.push_str(&event_payload);
-            event_body.push_str("</string></map></map>");
-        }
-        event_body.push_str("</array></map></llsd>");
-        let ordinary_payload = "o".repeat(ORDINARY_PAYLOAD_BYTES);
-        let ordinary_body = format!("<llsd><string>{ordinary_payload}</string></llsd>");
-        let event_value_bound = xml::value_allocation_bound(event_body.as_bytes(), crate::capabilities::request::capability_llsd_limits())
-            .expect("bound EventQueue XML decode");
-        let event_batch_bound = event_batch_allocation_bound(event_body.as_bytes()).expect("bound EventQueue batch decode");
-        let event_response = response(200, "OK", "application/llsd+xml", None, &event_body);
-        let ordinary_response = response(200, "OK", "application/llsd+xml", None, &ordinary_body);
-        let event_server = EventQueueBudgetTestServer::start();
-        let ordinary_server = LocalServer::start(vec![ordinary_response; ORDINARY_REQUEST_COUNT]);
-        let budget = CapabilityBudget::new();
-        let queued_event_capacity = budget.queued_event_bytes.available_permits();
-        let client = Client::new_with_status_and_budget(event_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-            .expect("active Tokio runtime");
-        let (event_sender, mut received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
-        let (shutdown, shutdown_requested) = watch::channel(false);
-        let mut event_tasks = Vec::with_capacity(EVENT_QUEUE_COUNT);
-        for index in 0..EVENT_QUEUE_COUNT {
-            let task = client
-                .start_event_queue_with_role(
-                    SimulatorId::new(index as u64 + 1),
-                    test_source(),
-                    event_sender.clone(),
-                    shutdown_requested.clone(),
-                    CoverageLossLedger::new(),
-                    index == 0,
-                )
-                .expect("start EventQueue");
-            event_tasks.push(task);
-        }
-
-        let mut event_polls = Vec::with_capacity(EVENT_QUEUE_COUNT);
-        for _ in 0..EVENT_QUEUE_COUNT {
-            event_server.next_seed();
-            event_polls.push(event_server.next_poll());
-        }
-        assert_eq!(available_event_queue_permits(&budget), 0, "all configured EventQueue slots should be occupied");
-
-        let ordinary_url = CapabilityUrl::parse(ordinary_server.url("/ordinary").as_str()).expect("valid capability URL");
-        let (gate, entered_receiver) = DecodeGate::new();
-        let mut ordinary_tasks = Vec::with_capacity(ORDINARY_REQUEST_COUNT);
-        for _ in 0..ORDINARY_REQUEST_COUNT {
-            let ordinary_client = client.clone();
-            let ordinary_url = ordinary_url.clone();
-            let decode_gate = gate.clone();
-            ordinary_tasks
-                .push(spawn(async move { ordinary_client.get_with_decode_hook(&ordinary_url, move || decode_gate.wait()).await }));
-        }
-        for _ in 0..ORDINARY_REQUEST_COUNT {
-            entered_receiver.recv_timeout(TEST_TIMEOUT).expect("ordinary response should pause with its body admitted");
-        }
-        assert_eq!(budget.ordinary_requests.available_permits(), 0, "all configured ordinary request slots should be occupied");
-
-        let measurement = begin_process_measurement();
-        thread::scope(|scope| {
-            for mut poll in event_polls {
-                let event_response = &event_response;
-                scope.spawn(move || poll.write_all(event_response).expect("write EventQueue response"));
-            }
-        });
-
-        let mut batches = Vec::with_capacity(EVENT_QUEUE_COUNT);
-        for _ in 0..EVENT_QUEUE_COUNT {
-            let batch = timeout(TEST_TIMEOUT, received_events.recv())
-                .await
-                .expect("EventQueue response should decode")
-                .expect("event channel remains open");
-            assert!(matches!(&batch.event, Event::CapabilityEventBatch { events, .. } if events.len() == EVENT_COUNT));
-            batches.push(batch);
-        }
-        let queued_event_bytes_remaining = budget.queued_event_bytes.available_permits();
-        assert!(queued_event_bytes_remaining < queued_event_capacity, "decoded batches should retain their queue reservations");
-
-        shutdown.send_replace(true);
-        event_server.stop();
-        for task in event_tasks {
-            assert_eq!(timeout(TEST_TIMEOUT, task.wait()).await.expect("EventQueue should stop"), EventQueueExit::Stopped);
-        }
-        event_server.finish();
-
-        let (baseline_bytes, live_delta_bytes, peak_bytes, elapsed_ns) = measurement.finish();
-        let peak_delta_bytes = peak_bytes.saturating_sub(baseline_bytes);
-        let total_batch_bound = event_batch_bound.saturating_mul(EVENT_QUEUE_COUNT);
-        eprintln!(
-            "Configured-concurrency EventQueue process allocation sample: event_queues={EVENT_QUEUE_COUNT} ordinary_requests={ORDINARY_REQUEST_COUNT} event_response={} B ordinary_response={} B events_per_batch={} value_bound_per_queue={} B batch_bound_per_queue={} B queued_event_bytes_remaining={} ordinary_limit={} B event_queue_limit={} B process_baseline={} B process_live_delta={} B process_peak={} B process_peak_delta={} B peak_delta_to_all_batch_bounds={:.2} elapsed={} ns. Four ordinary decoders remain paused with their bodies admitted while nine EventQueue responses are sent concurrently; all decoded EventQueue batches remain retained through the sample. Process-wide allocator sample includes test harness, Reqwest/Hyper, and Tokio; excludes allocator overhead and RSS.",
-            event_body.len(),
-            ordinary_body.len(),
-            EVENT_COUNT,
-            event_value_bound,
-            event_batch_bound,
-            queued_event_bytes_remaining,
-            MAX_CAPABILITY_RESPONSE_BYTES * ORDINARY_REQUEST_COUNT,
-            (2 * MAX_EVENT_QUEUE_RESPONSE_BYTES) * EVENT_QUEUE_COUNT + MAX_QUEUED_CAPABILITY_EVENT_BYTES,
-            baseline_bytes,
-            live_delta_bytes,
-            peak_bytes,
-            peak_delta_bytes,
-            peak_delta_bytes as f64 / total_batch_bound.max(1) as f64,
-            elapsed_ns,
-        );
-
-        gate.release();
-        for task in ordinary_tasks {
-            assert_eq!(
-                timeout(TEST_TIMEOUT, task)
-                    .await
-                    .expect("ordinary decode should finish")
-                    .expect("ordinary request task")
-                    .expect("ordinary response should decode"),
-                Value::String(ordinary_payload.clone())
-            );
-        }
-        assert_eq!(ordinary_server.finish().len(), ORDINARY_REQUEST_COUNT);
-        drop(client);
-        drop(batches);
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn event_poll_wait_cancels_on_close() {
         let server = EventQueueBudgetTestServer::start();
         let budget = CapabilityBudget::new();
-        let clients = (0..2)
-            .map(|_| {
-                Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                    .expect("active Tokio runtime")
-            })
-            .collect::<Vec<_>>();
+        let clients =
+            (0..2).map(|_| Client::new_with_budget(server.url("/seed"), budget.clone()).expect("active Tokio runtime")).collect::<Vec<_>>();
         let (events, _received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
         let mut tasks = Vec::with_capacity(MAX_CONCURRENT_EVENT_QUEUES);
@@ -1174,13 +952,9 @@ mod client_event_queue_tests {
         let waiting_server = EventQueueBudgetTestServer::start();
         let primary_server = EventQueueBudgetTestServer::start();
         let budget = CapabilityBudget::new();
-        let active_client = Client::new_with_status_and_budget(active_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-            .expect("active Tokio runtime");
-        let waiting_client =
-            Client::new_with_status_and_budget(waiting_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                .expect("active Tokio runtime");
-        let primary_client = Client::new_with_status_and_budget(primary_server.url("/seed"), NetworkStatusHandle::default(), budget)
-            .expect("active Tokio runtime");
+        let active_client = Client::new_with_budget(active_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
+        let waiting_client = Client::new_with_budget(waiting_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
+        let primary_client = Client::new_with_budget(primary_server.url("/seed"), budget).expect("active Tokio runtime");
         let (events, _received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
         let mut active_tasks = Vec::with_capacity(MAX_CONCURRENT_EVENT_QUEUES - 1);
@@ -1263,15 +1037,9 @@ mod client_event_queue_tests {
         let old_primary_server = EventQueueBudgetTestServer::start();
         let new_primary_server = EventQueueBudgetTestServer::start();
         let budget = CapabilityBudget::new();
-        let neighbor_client =
-            Client::new_with_status_and_budget(neighbor_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                .expect("active Tokio runtime");
-        let old_primary_client =
-            Client::new_with_status_and_budget(old_primary_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                .expect("active Tokio runtime");
-        let new_primary_client =
-            Client::new_with_status_and_budget(new_primary_server.url("/seed"), NetworkStatusHandle::default(), budget)
-                .expect("active Tokio runtime");
+        let neighbor_client = Client::new_with_budget(neighbor_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
+        let old_primary_client = Client::new_with_budget(old_primary_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
+        let new_primary_client = Client::new_with_budget(new_primary_server.url("/seed"), budget).expect("active Tokio runtime");
         let (events, _received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
         let old_coverage_losses = CoverageLossLedger::new();
@@ -1379,13 +1147,13 @@ mod client_event_queue_tests {
         requests.push(spawn(async move { client.request_capabilities(&["TestCapability"]).await }));
         let cancelled = requests.remove(0);
         cancelled.abort();
-        let _ = cancelled.await;
+        assert!(cancelled.await.expect_err("aborted request task").is_cancelled());
 
         server.next_request().await;
 
         for request in requests {
             request.abort();
-            let _ = request.await;
+            assert!(request.await.expect_err("aborted queued request task").is_cancelled());
         }
         server.finish();
     }
@@ -1832,7 +1600,7 @@ mod client_event_queue_tests {
         let values = "<undef/>".repeat(MAX_LLSD_XML_ELEMENTS);
         let xml = format!("<llsd><array>{values}</array></llsd>");
         let Err(error) = decode_event_batch(xml.as_bytes()) else {
-            panic!("excessive LLSD values should be rejected during preflight");
+            panic!("excessive LLSD values should be rejected by decoder limits");
         };
         assert!(error.contains("element limit"));
     }
@@ -1871,20 +1639,10 @@ mod client_event_queue_tests {
         for status in [StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED, StatusCode::NOT_FOUND] {
             assert!(!retryable_event_queue_error(status), "HTTP {status} should stop this poll incarnation");
         }
-        let fast_timeout =
-            http::Error::Timeout { elapsed: Duration::from_secs(9), status: None, retry_after: None, message: String::new() };
-        let long_timeout =
-            http::Error::Timeout { elapsed: Duration::from_secs(10), status: None, retry_after: None, message: String::new() };
+        let fast_timeout = http::Error::timeout(Duration::from_secs(9), "fast timeout");
+        let long_timeout = http::Error::timeout(Duration::from_secs(10), "long timeout");
         assert!(!fast_timeout.is_timeout_after(Duration::from_secs(10)));
         assert!(long_timeout.is_timeout_after(Duration::from_secs(10)));
-
-        let partial_body_timeout = http::Error::Timeout {
-            elapsed: Duration::from_secs(10),
-            status: Some(StatusCode::OK),
-            retry_after: None,
-            message: String::new(),
-        };
-        assert!(!partial_body_timeout.is_timeout_after(Duration::from_secs(10)));
     }
 
     #[tokio::test]
@@ -1895,7 +1653,7 @@ mod client_event_queue_tests {
         let error = post_event_queue(&client, &server.url("/event-queue"), &Value::Undefined, 1024)
             .await
             .expect_err("held response should time out");
-        assert!(error.is_timeout());
+        assert_eq!(error.kind, http::ErrorKind::Timeout);
         assert_eq!(server.finish().len(), 1);
     }
 
@@ -2061,45 +1819,6 @@ mod client_event_queue_tests {
                 if current.watermark == loss.watermark && current.retired
         ));
         assert!(server.finish().is_empty(), "the observed requests were already consumed");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn decode_pressure_stops_queue() {
-        let server = EventQueueTestServer::start(|base| {
-            let mut event_url = base.clone();
-            event_url.set_path("/event-queue");
-            vec![
-                EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed_response(&event_url))),
-                EventServerResponse::Response(response(
-                    200,
-                    "OK",
-                    "application/llsd+xml",
-                    None,
-                    "<llsd><map><key>id</key><integer>5</integer><key>events</key><array><map><key>message</key><string>test</string></map></array></map></llsd>",
-                )),
-            ]
-        });
-        let mut client = Client::new(server.url("/seed")).expect("active Tokio runtime");
-        client.budget.response_memory = http::ResponseMemoryBudget::new(0, 0, 64 * 1024);
-        let (sender, receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY);
-        let mut receiver = EventReceiver::new(receiver);
-        let (_shutdown, shutdown_requested) = watch::channel(false);
-        let losses = CoverageLossLedger::new();
-        let task =
-            client.start_event_queue(SimulatorId::new(1), test_source(), sender, shutdown_requested, losses.clone()).expect("start queue");
-        server.next_request();
-        let poll = server.next_request();
-        assert_eq!(map_field(&decode_request_body(&poll), "ack"), Some(&Value::Undefined));
-        let notification = timeout(TEST_TIMEOUT, receiver.recv()).await.expect("decode rejection notification").expect("open receiver");
-        assert!(matches!(notification, Event::EventQueueCoverageLost { reason, .. } if reason.contains("decode memory")));
-        assert_eq!(
-            timeout(TEST_TIMEOUT, task.wait()).await.expect("queue stops after admission failure"),
-            EventQueueExit::StoppedWithCoverageLoss
-        );
-        assert!(matches!(losses.snapshot().losses.as_slice(), [crate::coverage::CoverageLoss::Source(loss)] if loss.retired));
-        assert!(receiver.try_recv().is_err(), "no partial batch is published");
-        assert!(client.budget.response_memory.try_reserve(http::ResponseMemoryClass::EventQueue, 64 * 1024).is_ok());
-        assert!(server.finish().is_empty(), "rejected batch cannot produce an ACK poll");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2319,17 +2038,22 @@ mod client_event_queue_tests {
         let mut error_count = MAX_EVENT_QUEUE_ERRORS;
         let (events, received_events) = mpsc::channel(1);
         let mut received_events = EventReceiver::new(received_events);
-        let (_shutdown, mut shutdown_requested) = watch::channel(false);
+        let (_shutdown, shutdown_requested) = watch::channel(false);
         let (_session_closed, session_closed) = watch::channel(false);
+        let simulator_id = SimulatorId::new(1);
+        let source = test_source();
+        let stop = Stop::new(shutdown_requested, session_closed);
+        let mut pending_loss = pending_event_queue_loss(&events, simulator_id, source, &stop);
 
-        let outcome = retry_event_queue(
-            SimulatorId::new(1),
+        let outcome = retry_event_queue_with_hint(
+            simulator_id,
             &mut error_count,
-            test_source(),
+            source,
             &events,
             "EventQueueGet returned HTTP 500.".into(),
-            &mut shutdown_requested,
-            &session_closed,
+            None,
+            &stop,
+            &mut pending_loss,
         )
         .await;
         let Some(Event::CapabilityError { capability, reason, .. }) = received_events.recv().await else {

@@ -91,15 +91,13 @@ async fn cancelled_queues_release_packet_memory() {
 }
 
 #[tokio::test]
-async fn retired_capability_worker_is_joined() {
+async fn retired_capability_requests_are_waited_for() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let endpoint = simulator.local_addr().expect("simulator endpoint");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind held capability");
     let seed = Url::parse(&format!("http://{}/held", listener.local_addr().expect("HTTP endpoint"))).expect("held URL");
-    let mut connection = connect_with_status(login_session(endpoint), ResponseData::default(), NetworkStatusHandle::default())
-        .await
-        .expect("connect coordinator");
-    let client = connection.new_capability_client(seed.clone()).expect("track capability worker");
+    let mut connection = connect_coordinator(login_session(endpoint), ResponseData::default()).await.expect("connect coordinator");
+    let client = connection.new_capability_client(seed.clone()).expect("track capability requests");
     let id = SimulatorId::allocate().expect("neighbor ID");
     let mut capabilities = HashMap::from([(
         id,
@@ -119,38 +117,34 @@ async fn retired_capability_worker_is_joined() {
     let (mut socket, _) = timeout(WAIT, listener.accept()).await.expect("request reaches server").expect("accept request");
     let mut bytes = [0; 1024];
     assert!(timeout(WAIT, socket.read(&mut bytes)).await.expect("read held request").expect("HTTP request bytes") > 0);
-    assert_eq!(connection.capability_workers.len(), 2, "root and neighbor workers stay tracked");
+    assert_eq!(connection.capability_request_waiters.len(), 2, "root and neighbor capability requests stay tracked");
     crate::simulator::coordinator::remove_simulator_capability(&mut capabilities, id);
     assert!(capabilities.is_empty());
-    timeout(WAIT, connection.finish_capability_workers()).await.expect("join retired and root workers");
-    assert!(connection.capability_workers.is_empty());
+    timeout(WAIT, connection.finish_capability_request_waiters()).await.expect("wait for retired and root capability requests");
+    assert!(connection.capability_request_waiters.is_empty());
     let result = timeout(WAIT, request).await.expect("closed request resolves").expect("request task");
     assert!(matches!(result, Err(Error::CapabilitySessionClosed)));
     assert!(matches!(client.request_capabilities(&["TestCapability"]).await, Err(Error::CapabilitySessionClosed)));
 }
 
 #[tokio::test]
-async fn capability_worker_count_is_bounded() {
+async fn capability_client_count_is_bounded() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
-    let mut connection = connect_with_status(
-        login_session(simulator.local_addr().expect("simulator endpoint")),
-        ResponseData::default(),
-        NetworkStatusHandle::default(),
-    )
-    .await
-    .expect("connect coordinator");
+    let mut connection = connect_coordinator(login_session(simulator.local_addr().expect("simulator endpoint")), ResponseData::default())
+        .await
+        .expect("connect coordinator");
     let seed = connection.session.seed_capability.clone();
     let mut clients = Vec::new();
-    for _ in 1..crate::simulator::coordinator::MAX_CAPABILITY_WORKERS {
-        clients.push(connection.new_capability_client(seed.clone()).expect("admit worker within limit"));
+    for _ in 1..crate::simulator::coordinator::MAX_TRACKED_CAPABILITY_CLIENTS {
+        clients.push(connection.new_capability_client(seed.clone()).expect("admit client within limit"));
     }
     assert!(connection.new_capability_client(seed).is_err());
-    assert_eq!(connection.capability_workers.len(), crate::simulator::coordinator::MAX_CAPABILITY_WORKERS);
+    assert_eq!(connection.capability_request_waiters.len(), crate::simulator::coordinator::MAX_TRACKED_CAPABILITY_CLIENTS);
     for client in &clients {
         client.close_session();
     }
-    timeout(WAIT, connection.finish_capability_workers()).await.expect("join bounded workers");
-    assert!(connection.capability_workers.is_empty());
+    timeout(WAIT, connection.finish_capability_request_waiters()).await.expect("wait for bounded capability requests");
+    assert!(connection.capability_request_waiters.is_empty());
 }
 
 #[tokio::test(start_paused = true)]
@@ -161,7 +155,6 @@ async fn full_decode_slots_do_not_block_primary_retry_timers() {
     let connection = connect_with_coverage(
         login_session(simulator.local_addr().expect("read simulator address")),
         ResponseData::default(),
-        NetworkStatusHandle::default(),
         coverage_losses.clone(),
     )
     .await
@@ -255,7 +248,12 @@ async fn primary_udp_activity_resets_keepalive_timeout() {
 
     advance(Duration::from_secs(2)).await;
     let result = client.await.expect("primary session task");
-    assert!(matches!(result, Err(reason) if reason == "The simulator stopped responding to LLUDP keepalive traffic."));
+    std::assert_matches!(
+        result,
+        Err(crate::simulator::coordinator::CoordinatorError::Connection(
+            crate::simulator::coordinator::connection::ConnectionError::KeepaliveTimeout
+        ))
+    );
     drop(commands);
 }
 
@@ -264,9 +262,8 @@ async fn neighbor_circuit_fails_after_udp_inactivity() {
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
     let endpoint = neighbor.local_addr().expect("read neighbor address");
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");
-    let connection = connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
-        .await
-        .expect("connect neighbor circuit");
+    let connection =
+        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
     let (events, mut event_receiver) = mpsc::channel(4);
     let (_shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(4);
@@ -283,10 +280,12 @@ async fn neighbor_circuit_fails_after_udp_inactivity() {
 
     advance(KEEPALIVE_TIMEOUT).await;
     let result = worker.await.expect("neighbor task");
-    assert!(matches!(result, Err(reason) if reason == "The simulator stopped responding to LLUDP keepalive traffic."));
+    std::assert_matches!(result, Err(crate::simulator::coordinator::connection::ConnectionError::KeepaliveTimeout));
 }
 
-async fn terminal_after_full_queue(result: Result<(), String>) -> (Event, SimulatorId, SocketAddr) {
+async fn terminal_after_full_queue(
+    result: Result<(), crate::simulator::coordinator::CoordinatorError>,
+) -> (Event, SimulatorId, SocketAddr) {
     let (events, mut received) = mpsc::channel(2);
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
     let endpoint = "127.0.0.1:9000".parse().expect("parse simulator endpoint");
@@ -316,7 +315,8 @@ async fn primary_disconnect_survives_full_queue() {
 
 #[tokio::test]
 async fn primary_failure_survives_full_queue() {
-    let (event, simulator_id, endpoint) = terminal_after_full_queue(Err("simulator failed".into())).await;
+    let (event, simulator_id, endpoint) =
+        terminal_after_full_queue(Err(crate::simulator::coordinator::CoordinatorError::ShutdownReason("simulator failed"))).await;
     assert!(matches!(
         event,
         Event::SimulatorFailed { simulator_id: actual_id, region_handle: None, endpoint: actual_endpoint, reason }
@@ -328,9 +328,7 @@ async fn primary_failure_survives_full_queue() {
 async fn full_queue_keeps_control_responsive() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
-    let connection = connect_with_status(login_session(endpoint), ResponseData::default(), NetworkStatusHandle::default())
-        .await
-        .expect("connect simulator circuit");
+    let connection = connect_coordinator(login_session(endpoint), ResponseData::default()).await.expect("connect simulator circuit");
     let (_, peer) = receive(&simulator).await;
 
     let (events, mut received) = mpsc::channel(2);
@@ -374,9 +372,7 @@ async fn full_queue_keeps_control_responsive() {
 async fn capability_events_wait_for_simulator_connection() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
-    let mut connection = connect_with_status(login_session(endpoint), ResponseData::default(), NetworkStatusHandle::default())
-        .await
-        .expect("connect simulator circuit");
+    let mut connection = connect_coordinator(login_session(endpoint), ResponseData::default()).await.expect("connect simulator circuit");
     let simulator_id = connection.simulator_id;
     let (events, mut received) = mpsc::channel(4);
     let mut run_state = CoordinatorRunState::new();
@@ -437,14 +433,8 @@ async fn disconnect_cancels_primary_startup() {
     let (send_gate, pause_sends, send_entered) = UdpTransport::new_send_gate();
     pause_sends.send_replace(true);
     let (disconnect, disconnect_requested) = watch::channel(false);
-    let status = NetworkStatusHandle::default();
-    let startup = spawn(connect_with_gate_and_disconnect(
-        login_session(endpoint),
-        ResponseData::default(),
-        status.clone(),
-        send_gate,
-        disconnect_requested,
-    ));
+    let startup =
+        spawn(connect_with_gate_and_disconnect(login_session(endpoint), ResponseData::default(), send_gate, disconnect_requested));
 
     timeout(WAIT, send_entered.notified()).await.expect("initial UseCircuitCode reaches the gated local send");
     let mut packet = [0; 1024];
@@ -459,8 +449,4 @@ async fn disconnect_cancels_primary_startup() {
             .expect("clean cancellation")
             .is_none()
     );
-    let status = status.snapshot();
-    assert_eq!(status.lifecycle, NetworkLifecycle::Disconnected);
-    assert_eq!(status.udp_packets_sent, 0);
-    assert!(status.last_error.is_none());
 }

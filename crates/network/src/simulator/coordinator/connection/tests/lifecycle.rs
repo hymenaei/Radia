@@ -15,7 +15,6 @@ async fn primary_sends_agent_throttle_after_matching_movement_complete() {
     let connection = connect_test_primary_with_state(
         simulator_id,
         agent_session.clone(),
-        NetworkStatusHandle::default(),
         CoverageLossLedger::new(),
         primary_state_receiver,
         budget.handle(),
@@ -78,7 +77,6 @@ async fn demoted_primary_times_out() {
     let connection = connect_test_primary_with_state(
         simulator_id,
         session(simulator.local_addr().expect("simulator address")),
-        NetworkStatusHandle::default(),
         CoverageLossLedger::new(),
         primary_state_receiver,
         budget.handle(),
@@ -126,7 +124,7 @@ async fn demoted_primary_times_out() {
     let started = tokio::time::Instant::now();
     let result = worker.await.expect("connection worker");
     assert!(started.elapsed() <= WAIT, "demoted connection expires");
-    assert_eq!(result, Err("The simulator stopped responding to LLUDP keepalive traffic.".into()));
+    std::assert_matches!(result, Err(ConnectionError::KeepaliveTimeout));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -144,7 +142,6 @@ async fn promoted_logout_bypasses_full_queue() {
         simulator_id,
         agent_session,
         Some(42),
-        NetworkStatusHandle::default(),
         CoverageLossLedger::new(),
         Some(primary_state_receiver),
         Some(budget.handle()),
@@ -270,15 +267,9 @@ async fn saturated_neighbor_events_preserve_ack_and_generation_completion() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let simulator_address = simulator.local_addr().expect("simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
-    let connection = connect_test_neighbor_with_coverage(
-        simulator_id,
-        session(simulator_address),
-        42,
-        NetworkStatusHandle::default(),
-        CoverageLossLedger::new(),
-    )
-    .await
-    .expect("connect neighbor simulator");
+    let connection = connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, CoverageLossLedger::new())
+        .await
+        .expect("connect neighbor simulator");
     let (events, mut received_events) = mpsc::channel(1);
     let (shutdown, shutdown_receiver) = watch::channel(false);
     let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
@@ -369,15 +360,9 @@ async fn saturated_event_channel_delivers_expired_send_failure() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let simulator_address = simulator.local_addr().expect("simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
-    let mut connection = connect_test_neighbor_with_coverage(
-        simulator_id,
-        session(simulator_address),
-        42,
-        NetworkStatusHandle::default(),
-        CoverageLossLedger::new(),
-    )
-    .await
-    .expect("connect neighbor simulator");
+    let mut connection = connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, CoverageLossLedger::new())
+        .await
+        .expect("connect neighbor simulator");
     let (send_gate, pause_sends, send_entered) = UdpTransport::new_send_gate();
     Arc::get_mut(&mut connection.socket).expect("connection owns socket").set_send_gate(send_gate);
     let (events, mut received_events) = mpsc::channel(1);
@@ -453,15 +438,9 @@ async fn connection_survives_send_failures() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let simulator_address = simulator.local_addr().expect("simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
-    let mut connection = connect_test_neighbor_with_coverage(
-        simulator_id,
-        session(simulator_address),
-        42,
-        NetworkStatusHandle::default(),
-        CoverageLossLedger::new(),
-    )
-    .await
-    .expect("connect neighbor simulator");
+    let mut connection = connect_test_neighbor_with_coverage(simulator_id, session(simulator_address), 42, CoverageLossLedger::new())
+        .await
+        .expect("connect neighbor simulator");
     let (send_gate, pause_sends, send_entered) = UdpTransport::new_send_gate();
     Arc::get_mut(&mut connection.socket).expect("connection owns socket").set_send_gate(send_gate);
     let (events, mut received_events) = mpsc::channel(1);

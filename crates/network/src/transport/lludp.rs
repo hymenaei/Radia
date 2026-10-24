@@ -1,27 +1,20 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    error::Error as StdError,
     fmt,
     time::Duration,
 };
 
 use protocol::{
-    lludp::{Message, Packet, PacketFlags},
+    lludp::{LLUdpError, Message, Packet, PacketFlags},
     messages::{PacketAck, PingId, StartPingCheck, circuit::packet_ack::Packets},
 };
 use tokio::time::Instant;
 
-#[cfg(test)]
-use crate::transport::UdpTransport;
-use crate::{
-    event::{
-        PacketOrder,
-        PacketOrder::{Ambiguous, Degraded, Ordered},
-    },
-    status::NetworkStatusHandle,
+use crate::event::{
+    PacketOrder,
+    PacketOrder::{Ambiguous, Degraded, Ordered},
 };
-
-#[cfg(test)]
-pub(crate) const DEFAULT_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const PING_INTERVAL: Duration = Duration::from_secs(5);
 pub(crate) const MAX_RETRIES: u8 = 3;
 pub(crate) const RESENT_FLAG: u8 = 0x20;
@@ -45,6 +38,44 @@ const MINIMUM_RELIABLE_TIMEOUT: Duration = Duration::from_secs(1);
 const RELIABLE_TIMEOUT_FACTOR: u32 = 5;
 const SEQUENCE_32_HALF_RANGE: u32 = 1 << 31;
 pub(crate) const MAX_ORDERED_SEQUENCE_DISTANCE: u32 = 1 << 30;
+
+#[derive(Clone, Debug)]
+pub(crate) enum CircuitError {
+    InboundOnly,
+    UnknownDirection,
+    ReliableWindowFull,
+    EncodeMessage(LLUdpError),
+    EncodeAcknowledgements(LLUdpError),
+    RetryLimit,
+    MessageStateChanged,
+    AcknowledgementStateChanged,
+}
+
+impl fmt::Display for CircuitError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InboundOnly => formatter.write_str("Cannot send a simulator-to-viewer message to the simulator."),
+            Self::UnknownDirection => formatter.write_str("Cannot send a message without a known viewer-to-simulator direction."),
+            Self::ReliableWindowFull => formatter.write_str("Too many reliable simulator packets are awaiting acknowledgements."),
+            Self::EncodeMessage(error) => write!(formatter, "Could not encode a simulator message: {error}"),
+            Self::EncodeAcknowledgements(error) => write!(formatter, "Could not encode simulator acknowledgements: {error}"),
+            Self::RetryLimit => formatter.write_str("The simulator did not acknowledge a reliable packet."),
+            Self::MessageStateChanged => formatter.write_str("LLUDP send state changed while a packet was waiting to be sent."),
+            Self::AcknowledgementStateChanged => {
+                formatter.write_str("LLUDP send state changed while acknowledgements were waiting to be sent.")
+            }
+        }
+    }
+}
+
+impl StdError for CircuitError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::EncodeMessage(error) | Self::EncodeAcknowledgements(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SequenceOrdering {
@@ -100,29 +131,10 @@ pub(crate) struct Circuit {
     next_ping_id: u8,
     pending_pings: HashMap<u8, Instant>,
     quarantined_ping_ids: HashMap<u8, Instant>,
-    status: NetworkStatusHandle,
-}
-
-impl Drop for Circuit {
-    fn drop(&mut self) {
-        self.status.set_reliable_packets_pending(0);
-    }
 }
 
 impl Circuit {
-    #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self::with_status(NetworkStatusHandle::default())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_sequence(next_sequence: u32) -> Self {
-        let mut circuit = Self::new();
-        circuit.next_sequence = next_sequence;
-        circuit
-    }
-
-    pub(crate) fn with_status(status: NetworkStatusHandle) -> Self {
         Self {
             next_sequence: 1,
             pending: HashMap::new(),
@@ -138,8 +150,14 @@ impl Circuit {
             next_ping_id: 0,
             pending_pings: HashMap::new(),
             quarantined_ping_ids: HashMap::new(),
-            status,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_sequence(next_sequence: u32) -> Self {
+        let mut circuit = Self::new();
+        circuit.next_sequence = next_sequence;
+        circuit
     }
 
     pub(crate) fn retry_timeout(&self) -> Duration {
@@ -151,7 +169,7 @@ impl Circuit {
         self.retry_timeout().saturating_mul(multiplier).min(KEEPALIVE_TIMEOUT)
     }
 
-    pub(crate) fn prepare_ping(&mut self, sent_at: Instant) -> Result<Option<PreparedDatagram>, String> {
+    pub(crate) fn prepare_ping(&mut self, sent_at: Instant) -> Result<Option<PreparedDatagram>, CircuitError> {
         self.expire_pings(sent_at);
         let Some(ping_id) = available_ping_id(self.next_ping_id, &self.pending_pings, &self.quarantined_ping_ids) else {
             return Ok(None);
@@ -210,29 +228,19 @@ impl Circuit {
         self.pending.len() < MAX_PENDING_PACKETS
     }
 
-    #[cfg(test)]
-    pub(crate) async fn send(&mut self, socket: &UdpTransport, message: Message, delivery: Delivery) -> Result<u32, String> {
-        let prepared = self.prepare_message(message, delivery).inspect_err(|error| {
-            self.status.record_error(error.as_str());
-        })?;
-        let sequence = prepared.sequence();
-        self.send_prepared(socket, prepared).await?;
-        Ok(sequence)
-    }
-
-    pub(crate) fn prepare_message(&self, message: Message, delivery: Delivery) -> Result<PreparedDatagram, String> {
+    pub(crate) fn prepare_message(&self, message: Message, delivery: Delivery) -> Result<PreparedDatagram, CircuitError> {
         self.prepare_message_with_ping(message, delivery, None)
     }
 
-    fn prepare_message_with_ping(&self, message: Message, delivery: Delivery, ping: Option<u8>) -> Result<PreparedDatagram, String> {
+    fn prepare_message_with_ping(&self, message: Message, delivery: Delivery, ping: Option<u8>) -> Result<PreparedDatagram, CircuitError> {
         if message.is_inbound_only() {
-            return Err("Cannot send a simulator-to-viewer message to the simulator.".into());
+            return Err(CircuitError::InboundOnly);
         }
         if matches!(&message, Message::Schema(_) | Message::Unknown { .. }) {
-            return Err("Cannot send a message without a known viewer-to-simulator direction.".into());
+            return Err(CircuitError::UnknownDirection);
         }
         if delivery.tracks_reliable() && !self.has_reliable_capacity() {
-            return Err("Too many reliable simulator packets are awaiting acknowledgements.".into());
+            return Err(CircuitError::ReliableWindowFull);
         }
 
         let sequence = self.next_sequence;
@@ -240,7 +248,7 @@ impl Circuit {
         if delivery.is_reliable() {
             packet = packet.with_reliable();
         }
-        let mut bytes = packet.encode().map_err(|error| format!("Could not encode a simulator message: {error}"))?;
+        let mut bytes = packet.encode().map_err(CircuitError::EncodeMessage)?;
         let available_ack_bytes = MAX_NORMAL_DATAGRAM_BYTES.saturating_sub(bytes.len().saturating_add(1));
         let ack_count = self.pending_acks.len().min(MAX_ACKS_PER_PACKET).min(available_ack_bytes / size_of::<u32>());
         let appended_acks = self.pending_acks.iter().take(ack_count).copied().collect::<Vec<_>>();
@@ -254,20 +262,19 @@ impl Circuit {
         Ok(PreparedDatagram { bytes, commit: DatagramCommit::Message { sequence, delivery, appended_acks, ping } })
     }
 
-    pub(crate) fn prepare_acknowledgements(&self) -> Result<Option<PreparedDatagram>, String> {
+    pub(crate) fn prepare_acknowledgements(&self) -> Result<Option<PreparedDatagram>, CircuitError> {
         if self.pending_acks.is_empty() {
             return Ok(None);
         }
         let acknowledgements = self.pending_acks.iter().take(MAX_ACKS_PER_PACKET).copied().collect::<Vec<_>>();
         let packets = acknowledgements.iter().map(|id| Packets { id: *id }).collect();
         let sequence = self.next_sequence;
-        let bytes = Packet::new(sequence, Message::PacketAck(PacketAck { packets }))
-            .encode()
-            .map_err(|error| format!("Could not encode simulator acknowledgements: {error}"))?;
+        let bytes =
+            Packet::new(sequence, Message::PacketAck(PacketAck { packets })).encode().map_err(CircuitError::EncodeAcknowledgements)?;
         Ok(Some(PreparedDatagram { bytes, commit: DatagramCommit::Acknowledgements { sequence, acknowledgements } }))
     }
 
-    pub(crate) fn prepare_retransmission(&self, now: Instant) -> Result<Option<PreparedDatagram>, String> {
+    pub(crate) fn prepare_retransmission(&self, now: Instant) -> Result<Option<PreparedDatagram>, CircuitError> {
         let due = self
             .pending
             .iter()
@@ -277,7 +284,7 @@ impl Circuit {
             return Ok(None);
         };
         if packet.retries >= MAX_RETRIES {
-            return Err("The simulator did not acknowledge a reliable packet.".into());
+            return Err(CircuitError::RetryLimit);
         }
         let mut bytes = packet.bytes.clone();
         bytes[0] |= RESENT_FLAG;
@@ -287,11 +294,11 @@ impl Circuit {
         }))
     }
 
-    pub(crate) fn commit_sent(&mut self, prepared: PreparedDatagram, sent_at: Instant) -> Result<(), String> {
+    pub(crate) fn commit_sent(&mut self, prepared: PreparedDatagram, sent_at: Instant) -> Result<(), CircuitError> {
         match prepared.commit {
             DatagramCommit::Message { sequence, delivery, appended_acks, ping } => {
                 if sequence != self.next_sequence {
-                    return Err("LLUDP send state changed while a packet was waiting to be sent.".into());
+                    return Err(CircuitError::MessageStateChanged);
                 }
                 self.next_sequence = advance_sequence(sequence);
                 if delivery.tracks_reliable() {
@@ -302,11 +309,10 @@ impl Circuit {
                     self.pending_pings.insert(ping_id, sent_at);
                     self.next_ping_id = ping_id.wrapping_add(1);
                 }
-                self.status.set_reliable_packets_pending(self.pending.len());
             }
             DatagramCommit::Acknowledgements { sequence, acknowledgements } => {
                 if sequence != self.next_sequence {
-                    return Err("LLUDP send state changed while acknowledgements were waiting to be sent.".into());
+                    return Err(CircuitError::AcknowledgementStateChanged);
                 }
                 self.next_sequence = advance_sequence(sequence);
                 remove_sent_acks(&mut self.pending_acks, &mut self.pending_ack_sequences, &acknowledgements);
@@ -319,46 +325,10 @@ impl Circuit {
                     packet.bytes = prepared.bytes;
                     packet.sent_at = sent_at;
                     packet.retries += 1;
-                    self.status.note_retransmit();
                 }
             }
         }
         Ok(())
-    }
-
-    #[cfg(test)]
-    async fn send_prepared(&mut self, socket: &UdpTransport, prepared: PreparedDatagram) -> Result<(), String> {
-        if let Err(error) = socket.send(prepared.bytes()).await {
-            let message = match prepared.commit {
-                DatagramCommit::Acknowledgements { .. } => format!("Could not send simulator acknowledgements: {error}"),
-                DatagramCommit::Retransmission { .. } => format!("Could not retry a simulator message: {error}"),
-                DatagramCommit::Message { .. } => format!("Could not send a simulator message: {error}"),
-            };
-            self.status.record_error(&message);
-            return Err(message);
-        }
-        self.commit_sent(prepared, Instant::now())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn flush_pending_acks(&mut self, socket: &UdpTransport) -> Result<(), String> {
-        while let Some(prepared) = self.prepare_acknowledgements()? {
-            self.send_prepared(socket, prepared).await?;
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn receive(&mut self, packet: &Packet) -> Result<ReceiveOutcome, ReceiveError> {
-        self.receive_at(packet, Instant::now())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn receive_at(&mut self, packet: &Packet, received_at: Instant) -> Result<ReceiveOutcome, ReceiveError> {
-        let admission =
-            self.prepare_receive(packet.sequence(), packet.is_reliable(), packet.appended_acks().iter().copied(), received_at)?;
-        self.acknowledge_message(packet.message());
-        Ok(self.commit_receive(admission))
     }
 
     pub(crate) fn prepare_receive(
@@ -382,7 +352,7 @@ impl Circuit {
         }
         if self.received_sequences.len() >= MAX_RECEIVED_RELIABLE_PACKETS {
             if !self.duplicate_history_full {
-                self.status.record_error("Reliable packet duplicate history is full; new reliable packets are not acknowledged.");
+                tracing::warn!("Reliable packet duplicate history is full; new reliable packets are not acknowledged");
                 self.duplicate_history_full = true;
             }
             return Err(ReceiveError::DuplicateHistoryFull);
@@ -410,6 +380,11 @@ impl Circuit {
                 ReceiveOutcome { is_new_packet: true, packet_order }
             }
         }
+    }
+
+    pub(crate) fn commit_received_packet(&mut self, admission: ReceiveAdmission, packet: &Packet) -> ReceiveOutcome {
+        self.acknowledge_message(packet.message());
+        self.commit_receive(admission)
     }
 
     pub(crate) fn acknowledge_message(&mut self, message: &Message) {
@@ -527,7 +502,6 @@ impl Circuit {
         for acknowledged in acknowledgements {
             self.pending.remove(&acknowledged);
         }
-        self.status.set_reliable_packets_pending(self.pending.len());
     }
 
     fn queue_ack(&mut self, sequence: u32) -> bool {
@@ -639,50 +613,12 @@ fn remove_sent_acks(pending_acks: &mut VecDeque<u32>, pending_ack_sequences: &mu
     }
 }
 
-#[cfg(test)]
-pub(crate) async fn retransmit_due(socket: &UdpTransport, pending: &mut HashMap<u32, PendingPacket>) -> Result<(), String> {
-    retransmit_due_tracked(socket, pending, &NetworkStatusHandle::default(), DEFAULT_RETRY_TIMEOUT).await
-}
-
-#[cfg(test)]
-async fn retransmit_due_tracked(
-    socket: &UdpTransport,
-    pending: &mut HashMap<u32, PendingPacket>,
-    status: &NetworkStatusHandle,
-    retry_timeout: Duration,
-) -> Result<(), String> {
-    let now = Instant::now();
-    for packet in pending.values_mut() {
-        if now.duration_since(packet.sent_at) < retry_timeout {
-            continue;
-        }
-        if packet.retries >= MAX_RETRIES {
-            return Err("The simulator did not acknowledge a reliable packet.".into());
-        }
-
-        let mut bytes = packet.bytes.clone();
-        bytes[0] |= RESENT_FLAG;
-        socket.send(&bytes).await.map_err(|error| format!("Could not retry a simulator message: {error}"))?;
-        tracing::debug!(retry = packet.retries + 1, datagram_bytes = bytes.len(), "Reliable packet retransmitted");
-        packet.bytes = bytes;
-        packet.sent_at = now;
-        packet.retries += 1;
-        status.note_retransmit();
-    }
-    Ok(())
-}
-
 fn oldest_unacked_sequence(next_sequence: u32, pending: &HashMap<u32, PendingPacket>) -> u32 {
     pending.keys().copied().max_by_key(|sequence| sequence_age(next_sequence, *sequence)).unwrap_or_else(|| next_sequence.wrapping_sub(1))
 }
 
 pub(crate) fn sequence_age(next_sequence: u32, sequence: u32) -> u32 {
     next_sequence.wrapping_sub(sequence)
-}
-
-#[cfg(test)]
-fn sequence_is_newer(sequence: u32, reference: u32) -> bool {
-    matches!(compare_sequence(sequence, reference), SequenceOrdering::Newer(_))
 }
 
 fn compare_sequence(sequence: u32, reference: u32) -> SequenceOrdering {
@@ -708,18 +644,6 @@ fn compare_received_sequence(sequence: u32, reference: u32, wide_sequence_seen: 
         distance if distance == SEQUENCE_24_HALF_RANGE => SequenceOrdering::Ambiguous,
         distance if distance < SEQUENCE_24_HALF_RANGE => SequenceOrdering::Newer(distance),
         _ => SequenceOrdering::Older(backward),
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn acknowledge_pending(packet: &Packet, pending: &mut HashMap<u32, PendingPacket>) {
-    for ack in packet.appended_acks() {
-        pending.remove(ack);
-    }
-    if let Message::PacketAck(message) = packet.message() {
-        for packet in &message.packets {
-            pending.remove(&packet.id);
-        }
     }
 }
 

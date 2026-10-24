@@ -86,17 +86,10 @@ proptest! {
 
     #[test]
     fn inputs_do_not_panic(input in prop::collection::vec(any::<u8>(), 0..257)) {
-        let decoders: [(&str, Decoder); 3] = [
-            ("XML", xml::from_slice::<Value>),
-            ("binary", binary::from_slice::<Value>),
-            ("notation", notation::from_slice::<Value>),
-        ];
+        let decoders: [Decoder; 3] = [xml::from_slice::<Value>, binary::from_slice::<Value>, notation::from_slice::<Value>];
 
-        for (format, decode) in decoders {
-            let decoded = decode(&input);
-            if format == "XML" && decoded.is_ok() {
-                prop_assert!(xml::value_allocation_bound(&input, Limits::default()).is_ok(), "{format} accepted input rejected by the allocation bound");
-            }
+        for decode in decoders {
+            let _result = decode(&input);
         }
     }
 
@@ -127,7 +120,6 @@ proptest! {
         let limits = Limits::default();
 
         let decoded_xml = xml::from_slice_with_limits::<Value>(&xml, limits).expect("decode generated XML within limits");
-        prop_assert!(xml::value_allocation_bound(&xml, limits).is_ok());
         let decoded_binary = binary::from_slice_with_limits::<Value>(&binary, limits).expect("decode generated binary within limits");
         let decoded_notation = notation::from_slice_with_limits::<Value>(&notation, limits).expect("decode generated notation within limits");
 
@@ -139,35 +131,4 @@ proptest! {
         prop_assert!(real_bits_match(&decoded_notation, &value), "notation real bits changed: {value:?}");
     }
 
-    #[test]
-    fn xml_allocation_accepts_decoder_limits(
-        value in values(),
-        (max_bytes, max_depth, max_values, max_container_items, max_string_bytes, max_map_key_bytes, max_binary_bytes)
-            in (0usize..2048, 0usize..5, 0usize..40, 0usize..8, 0usize..32, 0usize..16, 0usize..32)
-    ) {
-        let xml = xml::to_vec(&value).expect("generated LLSD value encodes as XML");
-        let limits = Limits {
-            max_bytes,
-            max_depth,
-            max_values,
-            max_container_items,
-            max_string_bytes,
-            max_map_key_bytes,
-            max_binary_bytes,
-        };
-
-        if xml::from_slice_with_limits::<Value>(&xml, limits).is_ok() {
-            prop_assert!(xml::value_allocation_bound(&xml, limits).is_ok(), "decoder accepted XML rejected by bound scanner: {xml:?}, {limits:?}");
-        }
-    }
-
-    #[test]
-    fn xml_mutation_bound(value in values(), offset in any::<usize>(), replacement in any::<u8>()) {
-        let mut input = xml::to_vec(&value).expect("encode mutation input");
-        let index = offset % input.len();
-        input[index] = replacement;
-        if xml::from_slice::<Value>(&input).is_ok() {
-            prop_assert!(xml::value_allocation_bound(&input, Limits::default()).is_ok());
-        }
-    }
 }

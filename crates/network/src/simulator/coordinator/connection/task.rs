@@ -11,7 +11,7 @@ use tokio::{
 };
 
 use super::{
-    ACK_INTERVAL, ConnectionRole, ConnectionTask, LOGOUT_TIMEOUT, MAX_PENDING_SEND_NOTIFICATIONS, MAX_PRECONNECT_EVENTS,
+    ACK_INTERVAL, ConnectionError, ConnectionRole, ConnectionTask, LOGOUT_TIMEOUT, MAX_PENDING_SEND_NOTIFICATIONS, MAX_PRECONNECT_EVENTS,
     MAX_QUEUED_SIMULATOR_EVENTS, MAX_SEND_AGE, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorMemoryBudget, SimulatorRequest,
     active_queue_class, expire_deferred_retries, expire_pending_send, fail_queued_on_close, finish_logout, flush_send_notifications,
     lifecycle::{LogoutAction, Phase, RunControl},
@@ -31,7 +31,7 @@ use crate::{
 };
 
 enum SelectedEvent {
-    Sent(Result<(Instant, PreparedDatagram), String>),
+    Sent(Result<(Instant, PreparedDatagram), ConnectionError>),
     Shutdown,
     EventReceiverClosed,
     Logout(Option<oneshot::Sender<Result<(), Error>>>),
@@ -47,11 +47,14 @@ enum SelectedEvent {
     Yield,
 }
 
-fn send_age_expiry_error(queued: &QueuedMessage) -> Error {
-    if matches!(&queued.message, Message::LogoutRequest(_)) {
-        Error::SimulatorLogoutSendAgeExpired
-    } else {
-        Error::SimulatorSend(super::SEND_QUEUE_EXPIRED.into())
+fn send_age_expiry_error(queued: &QueuedMessage) -> ConnectionError {
+    ConnectionError::SendAgeExpired { logout: matches!(&queued.message, Message::LogoutRequest(_)) }
+}
+
+fn finish_connection_logout(reason: Option<&'static str>) -> Result<(), ConnectionError> {
+    match finish_logout(reason) {
+        Some(reason) => Err(ConnectionError::ShutdownReason(reason)),
+        None => Ok(()),
     }
 }
 
@@ -63,7 +66,7 @@ pub(super) async fn run(
     commands: mpsc::Receiver<SimulatorCommand>,
     logout_commands: mpsc::Receiver<oneshot::Sender<Result<(), Error>>>,
     packet_memory: SimulatorMemoryBudget,
-) -> Result<(), String> {
+) -> Result<(), ConnectionError> {
     let mut ack_timer = time::interval_at(Instant::now() + ACK_INTERVAL, ACK_INTERVAL);
     ack_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let mut ping_timer = time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
@@ -97,7 +100,7 @@ pub(super) async fn run(
 }
 
 impl ConnectionTask {
-    async fn run(mut self) -> Result<(), String> {
+    async fn run(mut self) -> Result<(), ConnectionError> {
         let result = self.run_loop().await;
         self.packet_rejections.flush();
         flush_send_notifications(&self.events, &mut self.pending_notifications, &mut self.shutdown).await;
@@ -108,18 +111,18 @@ impl ConnectionTask {
         result
     }
 
-    async fn run_loop(&mut self) -> Result<(), String> {
+    async fn run_loop(&mut self) -> Result<(), ConnectionError> {
         let mut receive_buffer = [0u8; 65_535];
         let event_sender = self.events.clone();
         loop {
             if *self.shutdown.borrow() || self.events.is_closed() {
-                return finish_logout(self.phase.close_reason());
+                return finish_connection_logout(self.phase.close_reason());
             }
             self.expire_sends()?;
             self.begin_draining_when_ready();
             self.discard_application_sends_while_draining();
             if self.drain_is_complete() {
-                return finish_logout(self.phase.close_reason());
+                return finish_connection_logout(self.phase.close_reason());
             }
             if !self.prepare_send()? {
                 continue;
@@ -202,12 +205,12 @@ impl ConnectionTask {
                 }
             };
             if let RunControl::Finish(reason) = control {
-                return finish_logout(reason);
+                return finish_connection_logout(reason);
             }
         }
     }
 
-    fn expire_sends(&mut self) -> Result<(), String> {
+    fn expire_sends(&mut self) -> Result<(), ConnectionError> {
         expire_deferred_retries(&self.connection.circuit, &mut self.deferred_retries, Instant::now())?;
         if self.pending_notifications.is_empty() {
             for queued in self.outbound.expire(Instant::now()) {
@@ -220,7 +223,7 @@ impl ConnectionTask {
                 let error = send_age_expiry_error(&queued);
                 report_queued_failure(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued, error)?;
             }
-            Some(PendingSendExpiration::ReliableRetry) => return Err(super::RELIABLE_RETRY_EXPIRED.into()),
+            Some(PendingSendExpiration::ReliableRetry) => return Err(ConnectionError::ReliableRetryExpired),
             None => {}
         }
         Ok(())
@@ -259,7 +262,7 @@ impl ConnectionTask {
             && self.pending_notifications.is_empty()
     }
 
-    fn prepare_send(&mut self) -> Result<bool, String> {
+    fn prepare_send(&mut self) -> Result<bool, ConnectionError> {
         if self.pending_send.is_some() {
             return Ok(true);
         }
@@ -267,13 +270,14 @@ impl ConnectionTask {
             let prepared = match self.connection.circuit.prepare_message(queued.message.clone(), queued.delivery) {
                 Ok(prepared) => prepared,
                 Err(error) => {
+                    let error = ConnectionError::from(error);
                     self.fail_logout(error.clone());
                     report_queued_failure(
                         &self.events,
                         &mut self.pending_notifications,
                         self.connection.simulator_id,
                         queued,
-                        Error::SimulatorSend(error.clone()),
+                        error.clone(),
                     )?;
                     return Err(error);
                 }
@@ -309,13 +313,7 @@ impl ConnectionTask {
         match next {
             Ok(next) => self.pending_send = next,
             Err((Some(queued), error)) => {
-                report_queued_failure(
-                    &self.events,
-                    &mut self.pending_notifications,
-                    self.connection.simulator_id,
-                    *queued,
-                    Error::SimulatorSend(error),
-                )?;
+                report_queued_failure(&self.events, &mut self.pending_notifications, self.connection.simulator_id, *queued, error)?;
                 return Ok(false);
             }
             Err((None, error)) => return Err(error),
@@ -323,7 +321,7 @@ impl ConnectionTask {
         Ok(true)
     }
 
-    fn send_completed(&mut self, sent: Result<(Instant, PreparedDatagram), String>) -> Result<RunControl, String> {
+    fn send_completed(&mut self, sent: Result<(Instant, PreparedDatagram), ConnectionError>) -> Result<RunControl, ConnectionError> {
         let mut completed = self.pending_send.take().expect("send branch is guarded");
         match sent {
             Ok((sent_at, prepared)) => {
@@ -353,8 +351,9 @@ impl ConnectionTask {
                 }
                 if let Some(queued) = &mut completed.queued_message
                     && let Some(completion) = queued.completion.take()
+                    && let Err(error) = completion.send(Ok(()))
                 {
-                    let _ = completion.send(Ok(()));
+                    drop(error);
                 }
                 if was_logout {
                     self.phase.complete_logout(None);
@@ -376,7 +375,7 @@ impl ConnectionTask {
                         &mut self.pending_notifications,
                         self.connection.simulator_id,
                         queued,
-                        Error::SimulatorSend(error.clone()),
+                        error.clone(),
                     )?;
                 }
                 if was_logout {
@@ -388,7 +387,7 @@ impl ConnectionTask {
         Ok(RunControl::Continue)
     }
 
-    fn logout_command(&mut self, command: Option<oneshot::Sender<Result<(), Error>>>) -> Result<RunControl, String> {
+    fn logout_command(&mut self, command: Option<oneshot::Sender<Result<(), Error>>>) -> Result<RunControl, ConnectionError> {
         let Some(completed) = command else {
             self.logout_commands = None;
             return Ok(RunControl::Continue);
@@ -415,7 +414,9 @@ impl ConnectionTask {
                 });
             }
             LogoutAction::Complete(completed) => {
-                let _ = completed.send(Ok(()));
+                if let Err(error) = completed.send(Ok(())) {
+                    drop(error);
+                }
             }
             LogoutAction::Waiting => {}
         }
@@ -426,11 +427,11 @@ impl ConnectionTask {
         RunControl::Finish(self.phase.close_reason())
     }
 
-    fn keepalive_timeout(&self) -> Result<RunControl, String> {
-        Err("The simulator stopped responding to LLUDP keepalive traffic.".into())
+    fn keepalive_timeout(&self) -> Result<RunControl, ConnectionError> {
+        Err(ConnectionError::KeepaliveTimeout)
     }
 
-    async fn primary_state_changed(&mut self, changed: Result<(), watch::error::RecvError>) -> Result<RunControl, String> {
+    async fn primary_state_changed(&mut self, changed: Result<(), watch::error::RecvError>) -> Result<RunControl, ConnectionError> {
         match changed {
             Ok(()) => {
                 let receiver = self.connection.primary_state_receiver.as_mut().expect("primary-state branch is guarded");
@@ -444,7 +445,7 @@ impl ConnectionTask {
         Ok(RunControl::Continue)
     }
 
-    fn ack_tick(&mut self) -> Result<RunControl, String> {
+    fn ack_tick(&mut self) -> Result<RunControl, ConnectionError> {
         self.ack_timer_due = self.connection.circuit.has_pending_acks();
         preempt_deferred_send(
             &mut self.pending_send,
@@ -475,7 +476,7 @@ impl ConnectionTask {
         }
     }
 
-    fn ping_tick(&mut self) -> Result<RunControl, String> {
+    fn ping_tick(&mut self) -> Result<RunControl, ConnectionError> {
         if let Some(prepared) = self.connection.circuit.prepare_ping(Instant::now())? {
             self.pending_send = Some(begin_send(
                 Arc::clone(&self.connection.socket),
@@ -488,7 +489,7 @@ impl ConnectionTask {
         Ok(RunControl::Continue)
     }
 
-    fn command(&mut self, command: Option<SimulatorCommand>) -> Result<RunControl, String> {
+    fn command(&mut self, command: Option<SimulatorCommand>) -> Result<RunControl, ConnectionError> {
         match command {
             Some(SimulatorCommand::Send { message, delivery, completed, cancel_target, report_failure }) => {
                 let message_traffic_class = message_class(&message);
@@ -528,9 +529,16 @@ impl ConnectionTask {
                     }
                 };
                 if let Some(error) = error {
-                    let message = error.to_string();
-                    if let Some(completed) = failed_completion {
-                        let _ = completed.send(Err(error));
+                    let message = match &error {
+                        Error::SimulatorConnectionClosed => ConnectionError::SimulatorConnectionClosed,
+                        Error::SimulatorNotReady => ConnectionError::SimulatorNotReady,
+                        Error::SimulatorCommandQueueFull => ConnectionError::SimulatorCommandQueueFull,
+                        _ => return Err(ConnectionError::SimulatorManagerClosed),
+                    };
+                    if let Some(completed) = failed_completion
+                        && let Err(error) = completed.send(Err(error))
+                    {
+                        drop(error);
                     }
                     if failed_report || failed_cancel_target.is_some() {
                         queue_send_notification(
@@ -573,7 +581,7 @@ impl ConnectionTask {
         Ok(RunControl::Continue)
     }
 
-    fn fail_logout(&mut self, error: String) {
+    fn fail_logout(&mut self, error: ConnectionError) {
         self.phase.complete_logout(Some(error));
     }
 }

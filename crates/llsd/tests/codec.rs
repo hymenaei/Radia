@@ -249,7 +249,6 @@ fn xml_accepts_doctype() {
     let input = b"<!DOCTYPE llsd [<!ELEMENT llsd (undef)><!ELEMENT undef EMPTY>]><llsd><undef/></llsd>";
 
     assert_eq!(xml::from_slice::<Value>(input).expect("decode LLSD with its DTD"), Value::Undefined);
-    assert!(xml::value_allocation_bound(input, Limits::default()).is_ok());
     assert!(xml::from_str::<Value>("<!DOCTYPE llsd [<!ENTITY custom 'value'>]><llsd><string>&custom;</string></llsd>").is_err());
 }
 
@@ -470,7 +469,6 @@ fn xml_combines_text_and_cdata() {
 fn xml_preserves_character_reference_line_endings() {
     let input = "<llsd><array><string>crlf\r\ncr\rlf</string><string>ref&#13;char</string><string><![CDATA[crlf\r\ncr\rlf]]></string></array></llsd>";
     let value = xml::from_str::<Value>(input).expect("decode XML line endings");
-    assert!(xml::value_allocation_bound(input.as_bytes(), Limits::default()).is_ok());
 
     assert_eq!(
         value,
@@ -1061,7 +1059,6 @@ fn xml_limits_count_normalized_text() {
     ] {
         let limits = Limits { max_string_bytes: bytes, max_map_key_bytes: bytes, ..Limits::default() };
         assert_eq!(xml::from_slice_with_limits::<Value>(input, limits).expect("normalized text fits"), expected);
-        assert!(xml::value_allocation_bound(input, limits).is_ok(), "scanner rejected accepted normalized text");
         let limits = Limits { max_string_bytes: bytes - 1, max_map_key_bytes: bytes - 1, ..limits };
         assert_matches!(xml::from_slice_with_limits::<Value>(input, limits), Err(Error::LimitExceeded(name)) if name == limit_name);
     }

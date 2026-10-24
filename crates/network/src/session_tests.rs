@@ -37,6 +37,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use super::SessionError;
 use super::{
     COMMAND_CAPACITY, Channels, Command, MAX_OUTBOUND_CHAT_MESSAGE_BYTES, MAX_OUTBOUND_OBJECT_REQUESTS, MfaChallenge,
     NETWORK_THREAD_STACK_SIZE, Session, SessionHandle, SessionOptions, run_client, send_failure_event, wait_for_login,
@@ -46,7 +47,6 @@ use crate::event::{
     CLIENT_EVENT_CAPACITY, CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventSendOutcome, PRIMARY_TERMINAL_EVENT_CAPACITY,
     send_client_event,
 };
-use crate::status::{NetworkLifecycle, NetworkStatusHandle};
 use crate::test_support::http::response;
 use crate::{
     Delivery, Error, Grid, LoginCredentials, StartLocation,
@@ -178,17 +178,20 @@ fn test_credentials() -> LoginCredentials {
     }
 }
 
-fn spawn_test_session(login_url: String) -> (Session, SessionHandle, JoinHandle<Result<(), String>>) {
+fn spawn_test_session(login_url: String) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>) {
     spawn_session_client(test_credentials(), login_url)
 }
 
 fn spawn_test_session_with_event_sender(
     login_url: String,
-) -> (Session, SessionHandle, JoinHandle<Result<(), String>>, mpsc::Sender<EventEnvelope>) {
+) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>, mpsc::Sender<EventEnvelope>) {
     spawn_session_client_with_event_sender(test_credentials(), login_url)
 }
 
-fn spawn_session_client(credentials: LoginCredentials, login_url: String) -> (Session, SessionHandle, JoinHandle<Result<(), String>>) {
+fn spawn_session_client(
+    credentials: LoginCredentials,
+    login_url: String,
+) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>) {
     let (session, handle, worker, _) = spawn_session_client_with_event_sender(credentials, login_url);
     (session, handle, worker)
 }
@@ -196,7 +199,7 @@ fn spawn_session_client(credentials: LoginCredentials, login_url: String) -> (Se
 fn spawn_session_client_with_event_sender(
     credentials: LoginCredentials,
     login_url: String,
-) -> (Session, SessionHandle, JoinHandle<Result<(), String>>, mpsc::Sender<EventEnvelope>) {
+) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>, mpsc::Sender<EventEnvelope>) {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
@@ -205,13 +208,11 @@ fn spawn_session_client_with_event_sender(
     let coverage_changed = coverage_losses.subscribe();
     let (disconnect_requested, disconnect_signal) = watch::channel(false);
     let (worker_finished_sender, worker_finished) = watch::channel(false);
-    let status = NetworkStatusHandle::new();
     let handle = SessionHandle {
         commands: commands.clone(),
         disconnect_requested,
         command_admission_closed: Arc::new(Mutex::new(false)),
         worker_finished,
-        status: status.clone(),
     };
     let session = Session {
         handle: handle.clone(),
@@ -233,7 +234,6 @@ fn spawn_session_client_with_event_sender(
                 disconnect_requested: disconnect_signal,
                 coverage_losses,
             },
-            status,
             login_url,
             SessionOptions::default(),
         )
@@ -247,7 +247,7 @@ fn spawn_session_client_with_event_sender(
 fn spawn_network_thread_session(
     credentials: LoginCredentials,
     login_url: String,
-) -> (Session, SessionHandle, JoinHandle<Result<(), String>>) {
+) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>) {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
@@ -255,13 +255,11 @@ fn spawn_network_thread_session(
     let coverage_changed = coverage_losses.subscribe();
     let (disconnect_requested, disconnect_signal) = watch::channel(false);
     let (worker_finished_sender, worker_finished) = watch::channel(false);
-    let status = NetworkStatusHandle::new();
     let handle = SessionHandle {
         commands: commands.clone(),
         disconnect_requested,
         command_admission_closed: Arc::new(Mutex::new(false)),
         worker_finished,
-        status: status.clone(),
     };
     let session = Session {
         handle: handle.clone(),
@@ -285,7 +283,7 @@ fn spawn_network_thread_session(
                 disconnect_requested: disconnect_signal.clone(),
                 coverage_losses,
             };
-            let result = runtime.block_on(run_client(credentials, channels, status, login_url, SessionOptions::default()));
+            let result = runtime.block_on(run_client(credentials, channels, login_url, SessionOptions::default()));
             runtime.shutdown_background();
             worker_finished_sender.send_replace(true);
             result
@@ -402,7 +400,6 @@ async fn event_queue_coverage_loss_keeps_viewer_session_connected() {
         panic!("EventQueueGet failure sent LogoutRequest instead of preserving the viewer session");
     }
     send_result.expect("session should still accept simulator commands");
-    assert_eq!(retained_handle.network_status().lifecycle, NetworkLifecycle::Connected);
     assert!(!*retained_handle.worker_finished.borrow(), "EventQueueGet failure must not finish the network worker");
     assert!(matches!(chat_packet.message(), Message::ChatFromViewer(message) if message.chat_data.message == "still connected"));
     simulator.send_to(&server_ack(25, chat_packet.sequence()), peer).await.expect("ack post-failure chat");
@@ -794,7 +791,7 @@ async fn login_handoff() {
 struct PromotedSession {
     session: Session,
     handle: SessionHandle,
-    worker: JoinHandle<Result<(), String>>,
+    worker: JoinHandle<Result<(), SessionError>>,
     primary: UdpSocket,
     destination: UdpSocket,
     destination_peer: SocketAddr,
@@ -886,7 +883,6 @@ async fn promoted_session() -> PromotedSession {
     })
     .await
     .expect("destination movement should promote the simulator");
-    assert_eq!(session.current_simulator(), Some(destination_address));
     let (_, destination_throttle) =
         receive_client_message(&destination, destination_peer, |message| matches!(message, Message::AgentThrottle(_))).await;
     assert!(destination_throttle.is_reliable());
@@ -938,7 +934,6 @@ async fn disconnect_after_promotion() {
     timeout(CLIENT_TIMEOUT, disconnect).await.expect("disconnect should wait for teardown").expect("disconnect task");
     assert!(timeout(CLIENT_TIMEOUT, worker).await.expect("network worker should finish").expect("client task").is_ok());
     assert_destination_disconnected(&mut events, destination_id).await;
-    assert_eq!(handle.network_status().lifecycle, NetworkLifecycle::Disconnected);
 
     let requests = timeout(CLIENT_TIMEOUT, http_task).await.expect("fake HTTP server should stop").expect("HTTP task");
     assert_eq!(requests.len(), 3);
@@ -946,7 +941,7 @@ async fn disconnect_after_promotion() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn disconnect_after_promotion_with_full_reliable_window() {
-    let PromotedSession { mut session, handle, worker, primary: _primary, destination, destination_peer, destination_id, http_task } =
+    let PromotedSession { mut session, worker, primary: _primary, destination, destination_peer, destination_id, http_task, .. } =
         promoted_session().await;
 
     for local_id in 0..MAX_PENDING_PACKETS {
@@ -959,7 +954,6 @@ async fn disconnect_after_promotion_with_full_reliable_window() {
             .expect("reliable send should finish while filling the window")
             .expect("send_to should not fail before the reliable window is full");
     }
-    assert!(handle.network_status().reliable_packets_pending >= MAX_PENDING_PACKETS);
 
     for local_id in 0..MAX_PENDING_PACKETS {
         let (_, packet) =
@@ -978,7 +972,6 @@ async fn disconnect_after_promotion_with_full_reliable_window() {
     timeout(CLIENT_TIMEOUT, disconnect).await.expect("disconnect should finish with a full reliable window").expect("disconnect task");
     assert!(timeout(CLIENT_TIMEOUT, worker).await.expect("network worker should finish").expect("client task").is_ok());
     assert_destination_disconnected(&mut events, destination_id).await;
-    assert_eq!(handle.network_status().lifecycle, NetworkLifecycle::Disconnected);
 
     let requests = timeout(CLIENT_TIMEOUT, http_task).await.expect("fake HTTP server should stop").expect("HTTP task");
     assert_eq!(requests.len(), 3);
@@ -996,7 +989,6 @@ async fn drop_after_promotion() {
     handle.disconnect().await;
     assert!(timeout(CLIENT_TIMEOUT, worker).await.expect("network worker should finish").expect("client task").is_ok());
     assert_destination_disconnected(&mut events, destination_id).await;
-    assert_eq!(handle.network_status().lifecycle, NetworkLifecycle::Disconnected);
 
     let requests = timeout(CLIENT_TIMEOUT, http_task).await.expect("fake HTTP server should stop").expect("HTTP task");
     assert_eq!(requests.len(), 3);
@@ -1029,7 +1021,6 @@ async fn mfa_continuation() {
             disconnect_requested,
             coverage_losses: CoverageLossLedger::new(),
         },
-        NetworkStatusHandle::default(),
         login_url,
         SessionOptions::default(),
     ));
@@ -1543,20 +1534,12 @@ async fn disconnect_waits() {
     let (commands, _command_receiver) = mpsc::channel(1);
     let (disconnect_requested, mut disconnect_state) = watch::channel(false);
     let (worker_finished_sender, worker_finished) = watch::channel(false);
-    let status = NetworkStatusHandle::new();
-    let handle = SessionHandle {
-        commands,
-        disconnect_requested,
-        command_admission_closed: Arc::new(Mutex::new(false)),
-        worker_finished,
-        status: status.clone(),
-    };
+    let handle = SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished };
     let first_handle = handle.clone();
     let second_handle = handle.clone();
     let mut first_disconnect = spawn(async move { first_handle.disconnect().await });
 
     assert!(disconnect_state.changed().await.is_ok());
-    assert_eq!(status.snapshot().lifecycle, NetworkLifecycle::Disconnecting);
     let mut second_disconnect = spawn(async move { second_handle.disconnect().await });
     assert!(timeout(Duration::from_millis(10), &mut first_disconnect).await.is_err());
     assert!(timeout(Duration::from_millis(10), &mut second_disconnect).await.is_err());
@@ -1696,13 +1679,7 @@ async fn targeted_send_reports_finished_worker() {
     let (commands, mut command_receiver) = mpsc::channel(1);
     let (disconnect_requested, _) = watch::channel(false);
     let (worker_finished_sender, worker_finished) = watch::channel(false);
-    let handle = SessionHandle {
-        commands,
-        disconnect_requested,
-        command_admission_closed: Arc::new(Mutex::new(false)),
-        worker_finished,
-        status: NetworkStatusHandle::new(),
-    };
+    let handle = SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished };
     let request = RequestMultipleObjects {
         agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
         objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }],
@@ -1720,13 +1697,7 @@ async fn targeted_send_reports_finished_worker() {
 
 fn targeted_send_handle(commands: mpsc::Sender<Command>, disconnect_requested: watch::Sender<bool>) -> SessionHandle {
     let (_, worker_finished) = watch::channel(false);
-    SessionHandle {
-        commands,
-        disconnect_requested,
-        command_admission_closed: Arc::new(Mutex::new(false)),
-        worker_finished,
-        status: NetworkStatusHandle::new(),
-    }
+    SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished }
 }
 
 fn chat_message_with_size(size: usize) -> ChatFromViewer {
@@ -1832,45 +1803,16 @@ async fn oversized_sends_are_rejected_before_admission() {
 }
 
 #[test]
-fn disconnect_request_preserves_terminal_status() {
-    let (commands, _command_receiver) = mpsc::channel(1);
-    let (disconnect_requested, _) = watch::channel(false);
-    let (_worker_finished_sender, worker_finished) = watch::channel(false);
-    let status = NetworkStatusHandle::new();
-    let handle = SessionHandle {
-        commands,
-        disconnect_requested,
-        command_admission_closed: Arc::new(Mutex::new(false)),
-        worker_finished,
-        status: status.clone(),
-    };
-
-    for terminal in [NetworkLifecycle::Disconnected, NetworkLifecycle::Failed] {
-        status.set_lifecycle(terminal);
-        handle.request_disconnect();
-        assert_eq!(status.snapshot().lifecycle, terminal);
-    }
-}
-
-#[test]
 fn session_drop_requests_disconnect() {
     let (commands, _command_receiver) = mpsc::channel(1);
     let (disconnect_requested, disconnect_observed) = watch::channel(false);
     let (_worker_finished_sender, worker_finished) = watch::channel(false);
-    let status = NetworkStatusHandle::new();
-    let handle = SessionHandle {
-        commands,
-        disconnect_requested,
-        command_admission_closed: Arc::new(Mutex::new(false)),
-        worker_finished,
-        status: status.clone(),
-    };
+    let handle = SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished };
     let session = Session::new_for_test(handle, mpsc::channel(1).1);
 
     drop(session);
 
     assert!(*disconnect_observed.borrow());
-    assert_eq!(status.snapshot().lifecycle, NetworkLifecycle::Disconnecting);
 }
 
 #[tokio::test]

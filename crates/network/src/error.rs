@@ -90,11 +90,11 @@ mod redaction_tests {
         assert!(!format!("{error:?}").contains("capability-secret"));
         assert!(format!("{error}").contains("capability-secret"));
 
-        let error = http::Error::Message("http-response-secret".into());
+        let error = http::Error::resource_exhausted("http-response-secret");
         assert!(!format!("{error:?}").contains("http-response-secret"));
         assert!(format!("{error}").contains("http-response-secret"));
 
-        let error = Error::CapabilityHttp(http::Error::Message("http-response-secret".into()));
+        let error = Error::CapabilityHttp(http::Error::resource_exhausted("http-response-secret"));
         assert!(!format!("{error:?}").contains("http-response-secret"));
         assert!(format!("{error}").contains("http-response-secret"));
     }

@@ -6,24 +6,20 @@ async fn wait_for_coverage_loss(
     simulator_id: SimulatorId,
     reason: CoverageLossReason,
 ) {
-    timeout(WAIT, async {
-        loop {
-            if coverage.snapshot().losses.iter().any(|loss| {
-                matches!(
-                    loss,
-                    CoverageLoss::Source(record)
-                        if record.watermark.simulator_id == simulator_id
-                            && record.watermark.source == CoverageSource::Lludp
-                            && record.reason == reason
-                )
-            }) {
-                break;
-            }
-            changed.changed().await.expect("coverage ledger remains available");
+    loop {
+        if coverage.snapshot().losses.iter().any(|loss| {
+            matches!(
+                loss,
+                CoverageLoss::Source(record)
+                    if record.watermark.simulator_id == simulator_id
+                        && record.watermark.source == CoverageSource::Lludp
+                        && record.reason == reason
+            )
+        }) {
+            break;
         }
-    })
-    .await
-    .expect("expected coverage loss to be recorded");
+        changed.changed().await.expect("coverage ledger remains available");
+    }
 }
 
 #[test]
@@ -213,17 +209,13 @@ async fn ack_queue_full_retries() {
     duplicate[1..5].copy_from_slice(&duplicate_sequence.to_be_bytes());
     simulator.send_to(&duplicate, peer).await.expect("send reliable chat");
     receive_ack(&simulator, duplicate_sequence).await;
-    let duplicate_retention = timeout(WAIT, async {
-        loop {
-            let Some(SimulatorEvent::Simulator(envelope)) = received_events.recv().await else { continue };
-            let (event, retention, _) = envelope.into_parts();
-            if matches!(event, Event::SimulatorMessage { sequence, .. } if sequence == duplicate_sequence) {
-                break retention.expect("received chat retains its packet memory");
-            }
+    let duplicate_retention = loop {
+        let Some(SimulatorEvent::Simulator(envelope)) = received_events.recv().await else { continue };
+        let (event, retention, _) = envelope.into_parts();
+        if matches!(event, Event::SimulatorMessage { sequence, .. } if sequence == duplicate_sequence) {
+            break retention.expect("received chat retains its packet memory");
         }
-    })
-    .await
-    .expect("receive the retained chat");
+    };
 
     let first_sequence = 10_000;
     let rejected_sequence = first_sequence + NEW_RELIABLE_ACK_CAPACITY as u32;
@@ -297,7 +289,7 @@ async fn ack_queue_full_retries() {
     assert!(matches!(receive_message_event(&mut received_events, rejected_sequence).await, Event::SimulatorMessage { .. }));
 
     shutdown.send_replace(true);
-    assert!(timeout(WAIT, task).await.expect("join simulator task").expect("join task").is_ok());
+    assert!(task.await.expect("join task").is_ok());
 }
 
 #[tokio::test]

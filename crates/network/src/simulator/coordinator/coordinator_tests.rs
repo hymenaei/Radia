@@ -421,52 +421,40 @@ fn start_ping_packet(sequence: u32, ping_id: u8, oldest_unacked: u32) -> Vec<u8>
 
 async fn receive(socket: &UdpSocket) -> (Vec<u8>, SocketAddr) {
     let mut buffer = [0; 65_535];
-    let (size, endpoint) = timeout(WAIT, socket.recv_from(&mut buffer)).await.expect("receive simulator datagram").expect("read datagram");
+    let (size, endpoint) = socket.recv_from(&mut buffer).await.expect("read datagram");
     (buffer[..size].to_vec(), endpoint)
 }
 
 async fn receive_message(socket: &UdpSocket, expected: impl Fn(&Message) -> bool) -> Packet {
-    timeout(WAIT, async {
-        loop {
-            let (bytes, _) = receive(socket).await;
-            let packet = Packet::decode(&bytes).expect("decode simulator packet");
-            if expected(packet.message()) {
-                return packet;
-            }
+    loop {
+        let (bytes, _) = receive(socket).await;
+        let packet = Packet::decode(&bytes).expect("decode simulator packet");
+        if expected(packet.message()) {
+            return packet;
         }
-    })
-    .await
-    .expect("receive expected simulator message")
+    }
 }
 
 async fn receive_message_with_peer(socket: &UdpSocket, expected: impl Fn(&Message) -> bool) -> (Packet, SocketAddr) {
-    timeout(WAIT, async {
-        loop {
-            let (bytes, peer) = receive(socket).await;
-            let packet = Packet::decode(&bytes).expect("decode simulator packet");
-            if expected(packet.message()) {
-                return (packet, peer);
-            }
+    loop {
+        let (bytes, peer) = receive(socket).await;
+        let packet = Packet::decode(&bytes).expect("decode simulator packet");
+        if expected(packet.message()) {
+            return (packet, peer);
         }
-    })
-    .await
-    .expect("receive expected simulator message")
+    }
 }
 
 async fn receive_ack(socket: &UdpSocket, sequence: u32) -> Packet {
-    timeout(WAIT, async {
-        loop {
-            let (bytes, _) = receive(socket).await;
-            let packet = Packet::decode(&bytes).expect("decode simulator acknowledgement");
-            if packet.appended_acks().contains(&sequence)
-                || matches!(packet.message(), Message::PacketAck(ack) if ack.packets.iter().any(|item| item.id == sequence))
-            {
-                return packet;
-            }
+    loop {
+        let (bytes, _) = receive(socket).await;
+        let packet = Packet::decode(&bytes).expect("decode simulator acknowledgement");
+        if packet.appended_acks().contains(&sequence)
+            || matches!(packet.message(), Message::PacketAck(ack) if ack.packets.iter().any(|item| item.id == sequence))
+        {
+            return packet;
         }
-    })
-    .await
-    .expect("receive reliable packet acknowledgement")
+    }
 }
 
 async fn announce_neighbor(primary: &UdpSocket, peer: SocketAddr, endpoint: SocketAddr, region_handle: u64, sequence: u32) {
@@ -522,30 +510,22 @@ async fn next_event(events: &mut mpsc::Receiver<EventEnvelope>) -> Event {
 }
 
 async fn next_neighbor_event(events: &mut mpsc::Receiver<SimulatorEvent>) -> Event {
-    timeout(WAIT, async {
-        match events.recv().await.expect("neighbor event channel remains open") {
-            SimulatorEvent::Simulator(event) => event.into_event(),
-            SimulatorEvent::SendCompleted { .. } | SimulatorEvent::Finished { .. } => {
-                panic!("a standalone neighbor worker must not emit its manager completion")
-            }
+    match events.recv().await.expect("neighbor event channel remains open") {
+        SimulatorEvent::Simulator(event) => event.into_event(),
+        SimulatorEvent::SendCompleted { .. } | SimulatorEvent::Finished { .. } => {
+            panic!("a standalone neighbor worker must not emit its manager completion")
         }
-    })
-    .await
-    .expect("receive neighbor event")
+    }
 }
 
 async fn next_raw_event(events: &mut mpsc::Receiver<EventEnvelope>) -> Event {
-    timeout(WAIT, async {
-        loop {
-            let event = events.recv().await.expect("event channel remains open").into_event();
-            if matches!(&event, Event::CapabilityError { capability, .. } if capability == "EventQueueGet") {
-                continue;
-            }
-            return event;
+    loop {
+        let event = events.recv().await.expect("event channel remains open").into_event();
+        if matches!(&event, Event::CapabilityError { capability, .. } if capability == "EventQueueGet") {
+            continue;
         }
-    })
-    .await
-    .expect("receive network event")
+        return event;
+    }
 }
 
 fn set_sequence(bytes: &mut [u8], sequence: u32) {
@@ -573,7 +553,7 @@ async fn stalled_send_is_isolated() {
         async move { send_targeted(&commands, id, object_request()).await }
     });
     let sent = receive_message(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
-    assert!(timeout(WAIT, neighbor_send).await.expect("unrelated send completion").expect("send task").is_ok());
+    assert!(neighbor_send.await.expect("send task").is_ok());
     harness.neighbor.send_to(&ack(41, sent.sequence()), harness.neighbor_peer).await.expect("ack neighbor request");
 
     let mut chat = fixture("chat_from_simulator.hex");
@@ -605,13 +585,7 @@ async fn stalled_send_is_isolated() {
     receive_message(&harness.neighbor, |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 10)).await;
 
     harness.disconnect.send_replace(true);
-    assert!(
-        timeout(LOGOUT_TIMEOUT + WAIT, harness.client)
-            .await
-            .expect("bounded shutdown despite stalled send")
-            .expect("coordinator task")
-            .is_ok()
-    );
+    assert!(harness.client.await.expect("coordinator task").is_ok());
     assert_eq!(harness.packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
 }
 

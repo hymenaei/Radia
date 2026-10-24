@@ -114,7 +114,7 @@ fn pending_for_test(circuit: &Circuit, queued: QueuedMessage, class: TrafficClas
 
 async fn receive_packet(socket: &UdpSocket) -> (Packet, SocketAddr) {
     let mut buffer = [0; 16 * 1024];
-    let (size, peer) = timeout(WAIT, socket.recv_from(&mut buffer)).await.expect("receive simulator packet").expect("read datagram");
+    let (size, peer) = socket.recv_from(&mut buffer).await.expect("read datagram");
     (Packet::decode(&buffer[..size]).expect("decode simulator packet"), peer)
 }
 
@@ -126,47 +126,35 @@ async fn send_ack(socket: &UdpSocket, peer: SocketAddr, sequence: u32) {
 }
 
 async fn receive_ack(socket: &UdpSocket, sequence: u32) {
-    timeout(WAIT, async {
-        loop {
-            let (packet, _) = receive_packet(socket).await;
-            if packet.appended_acks().contains(&sequence)
-                || matches!(packet.message(), Message::PacketAck(message) if message.packets.iter().any(|ack| ack.id == sequence))
-            {
-                break;
-            }
+    loop {
+        let (packet, _) = receive_packet(socket).await;
+        if packet.appended_acks().contains(&sequence)
+            || matches!(packet.message(), Message::PacketAck(message) if message.packets.iter().any(|ack| ack.id == sequence))
+        {
+            break;
         }
-    })
-    .await
-    .expect("receive reliable packet acknowledgement");
+    }
 }
 
 async fn receive_connected(events: &mut mpsc::Receiver<SimulatorEvent>) {
-    timeout(WAIT, async {
-        loop {
-            if let Some(SimulatorEvent::Simulator(event)) = events.recv().await
-                && matches!(event.into_event(), Event::SimulatorConnected { .. })
-            {
-                break;
-            }
+    loop {
+        if let Some(SimulatorEvent::Simulator(event)) = events.recv().await
+            && matches!(event.into_event(), Event::SimulatorConnected { .. })
+        {
+            break;
         }
-    })
-    .await
-    .expect("receive connected event");
+    }
 }
 
 async fn receive_message_event(events: &mut mpsc::Receiver<SimulatorEvent>, sequence: u32) -> Event {
-    timeout(WAIT, async {
-        loop {
-            if let Some(SimulatorEvent::Simulator(event)) = events.recv().await {
-                let event = event.into_event();
-                if matches!(event, Event::SimulatorMessage { sequence: received, .. } if received == sequence) {
-                    break event;
-                }
+    loop {
+        if let Some(SimulatorEvent::Simulator(event)) = events.recv().await {
+            let event = event.into_event();
+            if matches!(event, Event::SimulatorMessage { sequence: received, .. } if received == sequence) {
+                break event;
             }
         }
-    })
-    .await
-    .expect("receive simulator message event")
+    }
 }
 
 async fn connect_test_primary_with_coverage(

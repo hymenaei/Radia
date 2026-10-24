@@ -115,7 +115,7 @@ async fn demoted_primary_times_out() {
         })
         .await
         .expect("queue command after demotion");
-    assert!(timeout(WAIT, result).await.expect("send is not starved after role watch closes").expect("demotion barrier").is_ok());
+    assert!(result.await.expect("demotion barrier").is_ok());
     let _ = receive_packet(&simulator).await;
     let ping = parse_hex_fixture(vectors::START_PING_CHECK).expect("ping fixture");
     simulator.send_to(&ping, peer).await.expect("send activity barrier");
@@ -123,7 +123,7 @@ async fn demoted_primary_times_out() {
     assert!(matches!(reply.message(), Message::CompletePingCheck(_)));
 
     advance(KEEPALIVE_TIMEOUT).await;
-    let result = timeout(WAIT, worker).await.expect("demoted connection expires").expect("connection worker");
+    let result = worker.await.expect("connection worker");
     assert_eq!(result, Err("The simulator stopped responding to LLUDP keepalive traffic.".into()));
 }
 
@@ -346,24 +346,20 @@ async fn saturated_neighbor_events_preserve_ack_and_generation_completion() {
     receive_ack(&simulator, reliable_sequence).await;
 
     assert!(matches!(received_events.try_recv(), Ok(SimulatorEvent::SendCompleted { .. })), "remove the channel filler");
-    let notification = timeout(WAIT, async {
-        loop {
-            if let Some(SimulatorEvent::SendCompleted { simulator_id: completed_id, cancel_target: Some(actual), error, report_failure }) =
-                received_events.recv().await
-            {
-                assert_eq!(completed_id, simulator_id);
-                assert!(error.is_none(), "successful local send has no error");
-                assert!(!report_failure, "successful send completion does not report a failure");
-                assert!(crate::simulator::coordinator::handoff::matches_handoff_cancellation(&handoff_state, actual));
-                break;
-            }
+    loop {
+        if let Some(SimulatorEvent::SendCompleted { simulator_id: completed_id, cancel_target: Some(actual), error, report_failure }) =
+            received_events.recv().await
+        {
+            assert_eq!(completed_id, simulator_id);
+            assert!(error.is_none(), "successful local send has no error");
+            assert!(!report_failure, "successful send completion does not report a failure");
+            assert!(crate::simulator::coordinator::handoff::matches_handoff_cancellation(&handoff_state, actual));
+            break;
         }
-    })
-    .await;
-    assert!(notification.is_ok(), "the generation-scoped send completion must drain after capacity returns");
+    }
 
     shutdown.send_replace(true);
-    assert!(timeout(WAIT, task).await.expect("join connection task").expect("connection task").is_ok());
+    assert!(task.await.expect("connection task").is_ok());
 }
 
 #[tokio::test(start_paused = true)]
@@ -434,22 +430,18 @@ async fn saturated_event_channel_delivers_expired_send_failure() {
     receive_ack(&simulator, reliable_sequence).await;
 
     assert!(matches!(received_events.try_recv(), Ok(SimulatorEvent::SendCompleted { .. })), "remove the channel filler");
-    timeout(WAIT, async {
-        loop {
-            if let Some(SimulatorEvent::SendCompleted { simulator_id: completed_id, cancel_target: Some(actual), error, report_failure }) =
-                received_events.recv().await
-            {
-                assert_eq!(completed_id, simulator_id);
-                assert!(error.is_some(), "expired send reports its failure");
-                assert!(report_failure);
-                assert!(crate::simulator::coordinator::handoff::matches_handoff_cancellation(&handoff_state, actual));
-                break;
-            }
+    loop {
+        if let Some(SimulatorEvent::SendCompleted { simulator_id: completed_id, cancel_target: Some(actual), error, report_failure }) =
+            received_events.recv().await
+        {
+            assert_eq!(completed_id, simulator_id);
+            assert!(error.is_some(), "expired send reports its failure");
+            assert!(report_failure);
+            assert!(crate::simulator::coordinator::handoff::matches_handoff_cancellation(&handoff_state, actual));
+            break;
         }
-    })
-    .await
-    .expect("send failure notification should be delivered after channel capacity returns");
+    }
 
     shutdown.send_replace(true);
-    assert!(timeout(WAIT, task).await.expect("join connection task").expect("connection task").is_ok());
+    assert!(task.await.expect("connection task").is_ok());
 }

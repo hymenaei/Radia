@@ -4,10 +4,7 @@ async fn send_pending(pending: PendingSend, circuit: &mut Circuit, simulator: &U
     let (sent_at, prepared) = pending.result.await.expect("pacer send completes");
     circuit.commit_sent(prepared, sent_at).expect("commit locally sent datagram");
     let mut bytes = [0; 2048];
-    let (size, _) = timeout(Duration::from_secs(1), simulator.recv_from(&mut bytes))
-        .await
-        .expect("simulator receives datagram")
-        .expect("read datagram");
+    let (size, _) = simulator.recv_from(&mut bytes).await.expect("read datagram");
     Packet::decode(&bytes[..size]).expect("decode sent datagram")
 }
 

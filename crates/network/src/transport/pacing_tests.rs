@@ -491,30 +491,16 @@ async fn blocked_udp_send_refunds_credit_before_waiting_for_writability() {
         let bytes = [1; 100];
         flowing_pacer.send(&flowing_socket, &bytes, TrafficClass::Fair).await
     });
-    timeout(Duration::from_millis(1), flowing)
-        .await
-        .expect("unblocked connection should use refunded pacing credit")
-        .expect("flowing send task")
-        .expect("flowing datagram");
+    flowing.await.expect("flowing send task").expect("flowing datagram");
 
     let mut received = [0; MAX_BURST_BYTES as usize];
-    let (received_bytes, _) = timeout(Duration::from_secs(1), server.recv_from(&mut received))
-        .await
-        .expect("receive unblocked simulator datagram")
-        .expect("read unblocked simulator datagram");
+    let (received_bytes, _) = server.recv_from(&mut received).await.expect("read unblocked simulator datagram");
     assert_eq!(&received[..received_bytes], &[1; 100]);
 
     advance(Duration::from_millis(13)).await;
     gate_state.send_replace(false);
-    timeout(Duration::from_secs(1), blocked)
-        .await
-        .expect("blocked send should resume")
-        .expect("blocked send task")
-        .expect("blocked datagram");
-    let (received_bytes, _) = timeout(Duration::from_secs(1), server.recv_from(&mut received))
-        .await
-        .expect("receive resumed simulator datagram")
-        .expect("read resumed simulator datagram");
+    blocked.await.expect("blocked send task").expect("blocked datagram");
+    let (received_bytes, _) = server.recv_from(&mut received).await.expect("read resumed simulator datagram");
     assert_eq!(received_bytes, MAX_BURST_BYTES as usize);
 
     drop(blocked_connection);

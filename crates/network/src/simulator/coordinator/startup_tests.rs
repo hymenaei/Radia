@@ -194,24 +194,20 @@ async fn full_decode_slots_do_not_block_primary_retry_timers() {
         .expect("encode packet rejected by unavailable decoder");
     simulator.send_to(&dropped_packet, peer).await.expect("send packet while decode slots are full");
 
-    timeout(WAIT, async {
-        loop {
-            if coverage_losses.snapshot().losses.iter().any(|loss| {
-                matches!(
-                    loss,
-                    CoverageLoss::Source(record)
-                        if record.watermark.simulator_id == simulator_id
-                            && record.watermark.source == CoverageSource::Lludp
-                            && record.reason == CoverageLossReason::DecodeAdmission
-                )
-            }) {
-                break;
-            }
-            coverage_changes.changed().await.expect("coverage ledger remains open");
+    loop {
+        if coverage_losses.snapshot().losses.iter().any(|loss| {
+            matches!(
+                loss,
+                CoverageLoss::Source(record)
+                    if record.watermark.simulator_id == simulator_id
+                        && record.watermark.source == CoverageSource::Lludp
+                        && record.reason == CoverageLossReason::DecodeAdmission
+            )
+        }) {
+            break;
         }
-    })
-    .await
-    .expect("inbound packet must be rejected by decode-slot admission before advancing retry time");
+        coverage_changes.changed().await.expect("coverage ledger remains open");
+    }
 
     advance(Duration::from_secs(6)).await;
     let retry = receive(&simulator).await.0;

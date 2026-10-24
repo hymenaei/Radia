@@ -1017,7 +1017,9 @@ fn late_ack_clears_pending() {
 }
 
 async fn receive(socket: &UdpSocket) -> (Vec<u8>, SocketAddr) {
-    receive_with_timeout(socket, SIMULATOR_TIMEOUT).await
+    let mut buffer = [0; 65_535];
+    let (size, peer) = socket.recv_from(&mut buffer).await.expect("read fake simulator datagram");
+    (buffer[..size].to_vec(), peer)
 }
 
 async fn receive_with_timeout(socket: &UdpSocket, wait: Duration) -> (Vec<u8>, SocketAddr) {

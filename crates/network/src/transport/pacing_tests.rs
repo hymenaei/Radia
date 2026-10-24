@@ -491,7 +491,9 @@ async fn blocked_udp_send_refunds_credit_before_waiting_for_writability() {
         let bytes = [1; 100];
         flowing_pacer.send(&flowing_socket, &bytes, TrafficClass::Fair).await
     });
+    let started = Instant::now();
     flowing.await.expect("flowing send task").expect("flowing datagram");
+    assert!(started.elapsed() < Duration::from_millis(1), "unblocked connection should use refunded pacing credit");
 
     let mut received = [0; MAX_BURST_BYTES as usize];
     let (received_bytes, _) = server.recv_from(&mut received).await.expect("read unblocked simulator datagram");

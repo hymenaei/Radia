@@ -123,7 +123,9 @@ async fn demoted_primary_times_out() {
     assert!(matches!(reply.message(), Message::CompletePingCheck(_)));
 
     advance(KEEPALIVE_TIMEOUT).await;
+    let started = tokio::time::Instant::now();
     let result = worker.await.expect("connection worker");
+    assert!(started.elapsed() <= WAIT, "demoted connection expires");
     assert_eq!(result, Err("The simulator stopped responding to LLUDP keepalive traffic.".into()));
 }
 

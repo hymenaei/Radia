@@ -194,6 +194,7 @@ async fn full_decode_slots_do_not_block_primary_retry_timers() {
         .expect("encode packet rejected by unavailable decoder");
     simulator.send_to(&dropped_packet, peer).await.expect("send packet while decode slots are full");
 
+    let started = tokio::time::Instant::now();
     loop {
         if coverage_losses.snapshot().losses.iter().any(|loss| {
             matches!(
@@ -208,6 +209,7 @@ async fn full_decode_slots_do_not_block_primary_retry_timers() {
         }
         coverage_changes.changed().await.expect("coverage ledger remains open");
     }
+    assert!(started.elapsed() < WAIT, "inbound packet must be rejected by decode-slot admission before advancing retry time");
 
     advance(Duration::from_secs(6)).await;
     let retry = receive(&simulator).await.0;

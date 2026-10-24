@@ -584,8 +584,10 @@ async fn stalled_send_is_isolated() {
     harness.neighbor.send_to(&start_ping_packet(44, 10, 0), harness.neighbor_peer).await.expect("ping after abandoned send");
     receive_message(&harness.neighbor, |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 10)).await;
 
+    let started = tokio::time::Instant::now();
     harness.disconnect.send_replace(true);
     assert!(harness.client.await.expect("coordinator task").is_ok());
+    assert!(started.elapsed() <= LOGOUT_TIMEOUT + WAIT, "bounded shutdown despite stalled send");
     assert_eq!(harness.packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
 }
 

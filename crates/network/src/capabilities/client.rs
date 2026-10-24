@@ -1,15 +1,3 @@
-#[cfg(test)]
-pub(crate) mod test_values {
-    use std::time::Duration;
-
-    use super::Client;
-
-    pub(crate) fn client_with_request_timeout(mut client: Client, timeout: Duration) -> Client {
-        client.request_timeout = timeout;
-        client
-    }
-}
-
 use std::{collections::HashMap, fmt, future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
 use llsd::xml;
@@ -497,6 +485,18 @@ fn validate_response_limit(max_response_bytes: usize) -> Result<(), Error> {
 fn encode_request<Request: Serialize + ?Sized>(payload: &Request) -> Result<Vec<u8>, Error> {
     xml::to_vec_with_max_bytes(payload, MAX_CAPABILITY_REQUEST_BODY_BYTES)
         .map_err(|error| Error::Capability(format!("Could not encode an LLSD request: {error}")))
+}
+
+#[cfg(test)]
+pub(crate) mod test_values {
+    use std::time::Duration;
+
+    use super::Client;
+
+    pub(crate) fn client_with_request_timeout(mut client: Client, timeout: Duration) -> Client {
+        client.request_timeout = timeout;
+        client
+    }
 }
 
 #[cfg(test)]

@@ -73,13 +73,6 @@ impl PreconnectEvents {
     }
 }
 
-#[cfg(test)]
-impl PreconnectEvents {
-    pub(super) fn len(&self) -> usize {
-        self.len
-    }
-}
-
 pub(super) enum PreconnectOutcome {
     Ready(EventEnvelope),
     Buffered,

@@ -1,12 +1,3 @@
-#[cfg(test)]
-pub(crate) mod test_values {
-    use super::PacerHandle;
-
-    pub(crate) fn pacer_rate(handle: &PacerHandle) -> u64 {
-        handle.bucket.lock().expect("session pacing bucket").rate_bytes_per_second
-    }
-}
-
 use std::{
     collections::HashMap,
     error::Error as StdError,
@@ -754,6 +745,15 @@ fn next_dispatch_delay(bucket: &Arc<Mutex<Bucket>>, pending: &HashMap<u64, Pendi
         return Duration::from_secs(24 * 60 * 60);
     };
     bucket.lock().map(|bucket| bucket.delay_until(bytes, Instant::now())).unwrap_or(Duration::from_millis(1))
+}
+
+#[cfg(test)]
+pub(crate) mod test_values {
+    use super::PacerHandle;
+
+    pub(crate) fn pacer_rate(handle: &PacerHandle) -> u64 {
+        handle.bucket.lock().expect("session pacing bucket").rate_bytes_per_second
+    }
 }
 
 #[cfg(test)]

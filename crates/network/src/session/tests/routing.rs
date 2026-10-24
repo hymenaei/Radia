@@ -180,7 +180,7 @@ fn preconnect_buffer_is_bounded() {
     }
     let overflow = queue_until_connected(&HashSet::new(), &mut pending, simulator_id, EventEnvelope::new(Event::Failed("overflow".into())));
     assert!(matches!(overflow, PreconnectOutcome::Full));
-    assert_eq!(pending.len(), MAX_PRECONNECT_EVENTS);
+    assert_eq!(pending.take(simulator_id).len(), MAX_PRECONNECT_EVENTS);
 }
 
 #[tokio::test]
@@ -203,8 +203,7 @@ async fn simulator_removal_releases_preconnect_bytes() {
     ));
     assert_eq!(budget.available_permits(), 3);
 
-    pending.remove(simulator_id);
-    assert_eq!(pending.len(), 0);
+    assert_eq!(pending.remove(simulator_id).len(), 1);
     assert_eq!(budget.available_permits(), 10);
 }
 
@@ -259,7 +258,7 @@ async fn replacing_neighbor_releases_queued_state() {
 
     assert_ne!(setup.state.neighbor_connections.get(&region_handle).expect("replacement remains tracked").simulator_id, old_id);
     assert!(setup.state.retiring_simulators.contains(&old_id));
-    assert_eq!(setup.state.preconnect_events.len(), 0, "replacement drops old pre-connect events immediately");
+    assert!(setup.state.preconnect_events.take(old_id).is_empty(), "replacement drops old pre-connect events immediately");
     assert_eq!(packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
     assert_eq!(packet_memory.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
     assert_eq!(packet_memory.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
@@ -304,7 +303,7 @@ async fn preconnect_overflow_is_neighbor_scoped() {
         .expect("neighbor overflow should not log out the primary simulator");
 
     assert!(run_state.neighbor_connections.is_empty(), "overflow must remove the affected neighbor");
-    assert_eq!(run_state.preconnect_events.len(), 0);
+    assert!(run_state.preconnect_events.take(simulator_id).is_empty());
     assert!(!run_state.connected_simulators.contains(&simulator_id));
     assert!(neighbor_task.await.expect_err("overflow should cancel the neighbor worker").is_cancelled());
     std::assert_matches!(

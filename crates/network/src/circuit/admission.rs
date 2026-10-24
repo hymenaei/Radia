@@ -1,39 +1,3 @@
-#[cfg(test)]
-pub(crate) mod test_values {
-    use super::{ConnectionRole, MemoryLimits, PacketMemoryError, PacketMemoryReservation, SimulatorMemoryBudget, lock_unpoisoned};
-
-    pub(crate) fn with_test_limits(global: usize, neighbors: usize, neighbor_connection: usize) -> SimulatorMemoryBudget {
-        SimulatorMemoryBudget::with_limits(MemoryLimits { global, neighbors, primary_connection: global, neighbor_connection })
-    }
-
-    pub(crate) fn reserve_bytes_for_test(
-        budget: &SimulatorMemoryBudget,
-        bytes: usize,
-    ) -> Result<PacketMemoryReservation, PacketMemoryError> {
-        budget.reserve_bytes(bytes, bytes)
-    }
-
-    pub(crate) fn global_available_bytes(budget: &SimulatorMemoryBudget) -> usize {
-        let shared = lock_unpoisoned(&budget.shared.usage);
-        budget.shared.limits.global.saturating_sub(shared.global)
-    }
-
-    pub(crate) fn neighbor_available_bytes(budget: &SimulatorMemoryBudget) -> usize {
-        let shared = lock_unpoisoned(&budget.shared.usage);
-        budget.shared.limits.neighbors.saturating_sub(shared.neighbors)
-    }
-
-    pub(crate) fn connection_available_bytes(budget: &SimulatorMemoryBudget) -> usize {
-        let _shared = lock_unpoisoned(&budget.shared.usage);
-        let connection = lock_unpoisoned(&budget.connection);
-        let limit = match connection.role {
-            ConnectionRole::Primary => budget.shared.limits.primary_connection,
-            ConnectionRole::Neighbor => budget.shared.limits.neighbor_connection,
-        };
-        limit.saturating_sub(connection.bytes)
-    }
-}
-
 use std::{
     mem::size_of,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -289,6 +253,42 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 fn subtract_bytes(counter: &mut usize, bytes: usize) {
     debug_assert!(*counter >= bytes, "admission byte accounting underflow");
     *counter = counter.saturating_sub(bytes);
+}
+
+#[cfg(test)]
+pub(crate) mod test_values {
+    use super::{ConnectionRole, MemoryLimits, PacketMemoryError, PacketMemoryReservation, SimulatorMemoryBudget, lock_unpoisoned};
+
+    pub(crate) fn with_test_limits(global: usize, neighbors: usize, neighbor_connection: usize) -> SimulatorMemoryBudget {
+        SimulatorMemoryBudget::with_limits(MemoryLimits { global, neighbors, primary_connection: global, neighbor_connection })
+    }
+
+    pub(crate) fn reserve_bytes_for_test(
+        budget: &SimulatorMemoryBudget,
+        bytes: usize,
+    ) -> Result<PacketMemoryReservation, PacketMemoryError> {
+        budget.reserve_bytes(bytes, bytes)
+    }
+
+    pub(crate) fn global_available_bytes(budget: &SimulatorMemoryBudget) -> usize {
+        let shared = lock_unpoisoned(&budget.shared.usage);
+        budget.shared.limits.global.saturating_sub(shared.global)
+    }
+
+    pub(crate) fn neighbor_available_bytes(budget: &SimulatorMemoryBudget) -> usize {
+        let shared = lock_unpoisoned(&budget.shared.usage);
+        budget.shared.limits.neighbors.saturating_sub(shared.neighbors)
+    }
+
+    pub(crate) fn connection_available_bytes(budget: &SimulatorMemoryBudget) -> usize {
+        let _shared = lock_unpoisoned(&budget.shared.usage);
+        let connection = lock_unpoisoned(&budget.connection);
+        let limit = match connection.role {
+            ConnectionRole::Primary => budget.shared.limits.primary_connection,
+            ConnectionRole::Neighbor => budget.shared.limits.neighbor_connection,
+        };
+        limit.saturating_sub(connection.bytes)
+    }
 }
 
 #[cfg(test)]

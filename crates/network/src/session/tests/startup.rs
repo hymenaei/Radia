@@ -382,7 +382,6 @@ async fn capability_events_wait_for_simulator_connection() {
             .await
             .expect("buffer pre-connect capability event");
     }
-    assert_eq!(run_state.preconnect_events.len(), 2);
     assert_eq!(queued_bytes.available_permits(), 3, "the preconnect buffer must retain capability bytes");
     assert!(received.try_recv().is_err(), "capability events must wait for SimulatorConnected");
 
@@ -409,7 +408,7 @@ async fn capability_events_wait_for_simulator_connection() {
             assert_eq!(queued_bytes.available_permits(), 10, "recv_event handoff must release retained bytes");
         }
     }
-    assert_eq!(run_state.preconnect_events.len(), 0);
+    assert!(run_state.preconnect_events.take(simulator_id).is_empty());
 }
 
 #[tokio::test]

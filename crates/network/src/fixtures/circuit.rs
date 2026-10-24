@@ -10,12 +10,13 @@ use tokio::{
     time::Instant,
 };
 
-pub(crate) use crate::circuit::{NEW_RELIABLE_ACK_CAPACITY, pacer_rate, set_send_gate, with_sequence};
 use crate::circuit::{
     UdpTransport,
     admission::{PacketMemoryError, PacketMemoryReservation, SimulatorMemoryBudget},
     lludp::{Circuit, CircuitError, Delivery, PreparedDatagram, ReceiveError, ReceiveOutcome},
 };
+
+pub(crate) use crate::circuit::{NEW_RELIABLE_ACK_CAPACITY, pacer_rate, set_send_gate, with_sequence};
 
 pub(crate) trait SimulatorMemoryBudgetTestExt {
     fn with_test_limits(global: usize, neighbors: usize, neighbor_connection: usize) -> Self

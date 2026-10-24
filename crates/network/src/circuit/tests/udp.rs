@@ -5,6 +5,27 @@ use tokio::net::UdpSocket;
 
 use super::{MAX_IPV4_UDP_PAYLOAD, MAX_IPV6_UDP_PAYLOAD, UdpTransport, local_bind_address};
 
+fn ipv6_is_disabled(error: &io::Error) -> bool {
+    match error.raw_os_error() {
+        #[cfg(target_os = "linux")]
+        Some(97) => true,
+        #[cfg(windows)]
+        Some(10047) => true,
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd",
+            target_os = "dragonfly",
+            target_os = "solaris",
+            target_os = "illumos"
+        ))]
+        Some(47) => true,
+        _ => false,
+    }
+}
+
 #[tokio::test]
 async fn ipv6_udp_round_trip() {
     let server = match UdpSocket::bind("[::1]:0").await {
@@ -72,25 +93,4 @@ fn bind_uses_remote_family() {
 
     assert_eq!(local_bind_address(ipv4), SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0));
     assert_eq!(local_bind_address(ipv6), SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0));
-}
-
-fn ipv6_is_disabled(error: &io::Error) -> bool {
-    match error.raw_os_error() {
-        #[cfg(target_os = "linux")]
-        Some(97) => true,
-        #[cfg(windows)]
-        Some(10047) => true,
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "ios",
-            target_os = "freebsd",
-            target_os = "openbsd",
-            target_os = "netbsd",
-            target_os = "dragonfly",
-            target_os = "solaris",
-            target_os = "illumos"
-        ))]
-        Some(47) => true,
-        _ => false,
-    }
 }

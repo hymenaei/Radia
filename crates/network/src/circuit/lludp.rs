@@ -1,16 +1,3 @@
-#[cfg(test)]
-pub(crate) mod test_values {
-    use super::{Circuit, DUPLICATE_ACK_HEADROOM, MAX_PENDING_ACKS};
-
-    pub(crate) const NEW_RELIABLE_ACK_CAPACITY: usize = MAX_PENDING_ACKS - DUPLICATE_ACK_HEADROOM;
-
-    pub(crate) fn with_sequence(next_sequence: u32) -> Circuit {
-        let mut circuit = Circuit::new();
-        circuit.next_sequence = next_sequence;
-        circuit
-    }
-}
-
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error as StdError,
@@ -648,6 +635,19 @@ fn compare_received_sequence(sequence: u32, reference: u32, wide_sequence_seen: 
         distance if distance == SEQUENCE_24_HALF_RANGE => SequenceOrdering::Ambiguous,
         distance if distance < SEQUENCE_24_HALF_RANGE => SequenceOrdering::Newer(distance),
         _ => SequenceOrdering::Older(backward),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_values {
+    use super::{Circuit, DUPLICATE_ACK_HEADROOM, MAX_PENDING_ACKS};
+
+    pub(crate) const NEW_RELIABLE_ACK_CAPACITY: usize = MAX_PENDING_ACKS - DUPLICATE_ACK_HEADROOM;
+
+    pub(crate) fn with_sequence(next_sequence: u32) -> Circuit {
+        let mut circuit = Circuit::new();
+        circuit.next_sequence = next_sequence;
+        circuit
     }
 }
 

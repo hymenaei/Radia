@@ -1,14 +1,3 @@
-#[cfg(test)]
-pub(crate) mod test_values {
-    use crate::fixtures::circuit::SendGate;
-
-    use super::UdpTransport;
-
-    pub(crate) fn set_send_gate(transport: &mut UdpTransport, send_gate: SendGate) {
-        transport.send_gate = Some(send_gate);
-    }
-}
-
 use std::{
     error::Error as StdError,
     fmt,
@@ -107,6 +96,17 @@ fn local_bind_address(remote: SocketAddr) -> SocketAddr {
     match remote {
         SocketAddr::V4(_) => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
         SocketAddr::V6(_) => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_values {
+    use crate::fixtures::circuit::SendGate;
+
+    use super::UdpTransport;
+
+    pub(crate) fn set_send_gate(transport: &mut UdpTransport, send_gate: SendGate) {
+        transport.send_gate = Some(send_gate);
     }
 }
 

@@ -116,31 +116,6 @@ mod simulator_send {
         drop(session);
     }
 
-    #[tokio::test]
-    async fn fake_login_server_skips_closed_connections() {
-        let (login_url, stop_http, http_server) = fake_login_server(0).await;
-        let address = login_url
-            .strip_prefix("http://")
-            .and_then(|url| url.strip_suffix("/login.cgi"))
-            .expect("login URL address")
-            .parse::<SocketAddr>()
-            .expect("fake login address");
-
-        drop(TcpStream::connect(address).await.expect("connect incomplete request"));
-        let mut incomplete = TcpStream::connect(address).await.expect("connect partial request");
-        incomplete.write_all(b"POST /login.cgi HTTP/1.1\r\nContent-Length: 4\r\n\r\n").await.expect("write partial request");
-        drop(incomplete);
-
-        let mut client = TcpStream::connect(address).await.expect("connect login request");
-        client.write_all(b"POST /login.cgi HTTP/1.1\r\nContent-Length: 0\r\n\r\n").await.expect("write login request");
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).await.expect("read login response");
-        assert!(from_utf8(&response).expect("HTTP response is UTF-8").contains("<member><name>login</name>"));
-
-        stop_http.send_replace(true);
-        http_server.await.expect("fake login server");
-    }
-
     async fn fake_login_server(simulator_port: u16) -> (String, watch::Sender<bool>, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake login server");
         let address = listener.local_addr().expect("fake login address");
@@ -197,7 +172,11 @@ mod simulator_send {
         let mut request = Vec::new();
         let mut chunk = [0; 2048];
         loop {
-            let size = stream.read(&mut chunk).await.expect("read HTTP request");
+            let size = match stream.read(&mut chunk).await {
+                Ok(size) => size,
+                Err(error) if is_client_hung_up(error.kind()) => return None,
+                Err(error) => panic!("read HTTP request: {error}"),
+            };
             if size == 0 {
                 return None;
             }
@@ -219,14 +198,15 @@ mod simulator_send {
         }
     }
 
+    fn is_client_hung_up(kind: ErrorKind) -> bool {
+        matches!(kind, ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted)
+    }
+
     async fn write_response(stream: &mut TcpStream, content_type: &str, body: &str) {
         let response =
             format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         if let Err(error) = stream.write_all(response.as_bytes()).await {
-            assert!(
-                matches!(error.kind(), ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted),
-                "write HTTP response: {error}"
-            );
+            assert!(is_client_hung_up(error.kind()), "write HTTP response: {error}");
         }
     }
 

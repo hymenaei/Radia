@@ -1,9 +1,6 @@
 mod components;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod scene;
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
-#[path = "scene_unsupported.rs"]
-mod scene;
 mod views;
 mod window_geometry;
 
@@ -22,6 +19,7 @@ struct AppLifecycle {
     _window_closed: Subscription,
     controller: Option<Entity<LoginScreen>>,
     login_window: Option<AnyWindowHandle>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     scene: scene::State,
     quitting: bool,
     session: Arc<Mutex<Option<network::SessionHandle>>>,
@@ -67,6 +65,7 @@ fn install_lifecycle(session: Arc<Mutex<Option<network::SessionHandle>>>, cx: &m
         if closing_main {
             lifecycle.login_window = None;
         }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         if lifecycle.scene.window_closed(closed_window_id) {
             return;
         }
@@ -78,6 +77,7 @@ fn install_lifecycle(session: Arc<Mutex<Option<network::SessionHandle>>>, cx: &m
         _window_closed: window_closed,
         controller: None,
         login_window: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         scene: scene::State::new(),
         quitting: false,
         session,
@@ -103,6 +103,7 @@ fn should_shutdown(closing_main_window: bool, open_windows: usize) -> bool {
 }
 
 fn shutdown(cx: &mut App) {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     let background_executor = cx.background_executor().clone();
     let lifecycle = cx.global_mut::<AppLifecycle>();
     if lifecycle.quitting {
@@ -110,6 +111,7 @@ fn shutdown(cx: &mut App) {
     }
     lifecycle.quitting = true;
     let session = Arc::clone(&lifecycle.session);
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     let scene_shutdown = lifecycle.scene.shutdown(background_executor);
     for window in cx.windows() {
         if window.update(cx, |_, window, _| window.remove_window()).is_err() {
@@ -118,6 +120,7 @@ fn shutdown(cx: &mut App) {
     }
     cx.spawn(async move |cx| {
         disconnect_session(session).await;
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         scene_shutdown.await;
         cx.update(|app| app.quit());
     })

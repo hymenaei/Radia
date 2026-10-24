@@ -264,10 +264,11 @@ impl Render for LoginScreen {
         let login_screen = content.child(login_body);
 
         let chat_content = div().flex_1().min_h_0().child(self.chat_screen.clone()).into_any_element();
-        crate::gui::scene::login_content(
-            self.active_session.as_ref().is_some_and(super::ActiveSession::is_ready),
-            login_screen.into_any_element(),
-            chat_content,
-        )
+        let session_ready = self.active_session.as_ref().is_some_and(super::ActiveSession::is_ready);
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let content = crate::gui::scene::login_content(session_ready, login_screen.into_any_element(), chat_content);
+        #[cfg(target_os = "macos")]
+        let content = if session_ready { chat_content } else { login_screen.into_any_element() };
+        content
     }
 }

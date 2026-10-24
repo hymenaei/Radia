@@ -2,9 +2,6 @@ mod coordinator;
 mod environment;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod experience_environment;
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
-#[path = "experience_environment_unsupported.rs"]
-mod experience_environment;
 mod inbound;
 mod object_media;
 mod outbound;
@@ -17,6 +14,7 @@ pub(crate) use coordinator::{
     AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionReadyUpdate,
     ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
 };
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) use experience_environment::EnvironmentInbox;
 pub(crate) use inbound::{ChatMessage, display_message, format_avatar_name};
 pub(crate) use network::{Session, SessionHandle};

@@ -100,7 +100,7 @@ mod backend {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod backend {
     use std::fmt::{self, Display, Formatter};
 

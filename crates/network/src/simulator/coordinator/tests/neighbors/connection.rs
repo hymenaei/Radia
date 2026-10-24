@@ -711,11 +711,11 @@ async fn crossed_region_promotes_after_matching_movement() {
         .await
         .expect("send through the promoted simulator");
     let routed = receive_message(&neighbor, |message| matches!(message, Message::CompletePingCheck(_))).await;
-    assert!(matches!(routed.message(), Message::CompletePingCheck(_)));
+    std::assert_matches!(routed.message(), Message::CompletePingCheck(_));
 
     drop(commands);
     let logout = receive_message(&neighbor, |message| matches!(message, Message::LogoutRequest(_))).await;
-    assert!(matches!(logout.message(), Message::LogoutRequest(_)));
+    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
     timeout(TEST_TIMEOUT, worker).await.expect("network worker shutdown").expect("network task").expect("clean shutdown");
     primary_seed_server.stop();
     let primary_requests = primary_seed_server.finish();

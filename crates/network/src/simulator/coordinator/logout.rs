@@ -63,13 +63,6 @@ impl StdError for LogoutAttemptError {
     }
 }
 
-fn logout_completion_error(error: Error) -> LogoutAttemptError {
-    match error {
-        Error::SimulatorLogoutSendAgeExpired => LogoutAttemptError::Unavailable(LogoutUnavailable::Deadline),
-        error => LogoutAttemptError::Unexpected(error),
-    }
-}
-
 impl CoordinatorState {
     pub(super) async fn disconnect_once(&mut self, logout_already_sent: bool) -> Result<LogoutOutcome, CoordinatorError> {
         tracing::info!(logout_already_sent, "simulator disconnect started");
@@ -188,6 +181,13 @@ impl CoordinatorRuntime<'_> {
     pub(super) async fn handle_event_receiver_closed(&mut self) -> Result<RuntimeAction, CoordinatorError> {
         self.coordinator.graceful_disconnect(false).await?;
         Ok(RuntimeAction::Exit(Ok(())))
+    }
+}
+
+fn logout_completion_error(error: Error) -> LogoutAttemptError {
+    match error {
+        Error::SimulatorLogoutSendAgeExpired => LogoutAttemptError::Unavailable(LogoutUnavailable::Deadline),
+        error => LogoutAttemptError::Unexpected(error),
     }
 }
 

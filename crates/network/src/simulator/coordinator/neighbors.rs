@@ -16,6 +16,7 @@ use super::{
     ConnectionError, ConnectionTaskResult, CoordinatorError, CoordinatorRunState, CoordinatorRuntime, CoordinatorState, HandoffCommand,
     HandoffTarget, NEIGHBOR_COMMAND_CAPACITY, PrimaryState, PromotionSetup, RuntimeAction, SimulatorCapabilitySession, SimulatorCommand,
     SimulatorConnection, SimulatorConnectionOptions, SimulatorConnectionState, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome,
+    handoff::{is_handoff_message, matches_pending_promotion},
     is_current_simulator, record_event_envelope_loss, remove_simulator_capability,
 };
 use crate::{
@@ -24,9 +25,6 @@ use crate::{
     event::{Event, EventEnvelope, SimulatorId},
     simulator::{MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS},
 };
-
-use super::handoff::{is_handoff_message, matches_pending_promotion};
-
 impl CoordinatorState {
     pub(super) async fn start_neighbor(
         &mut self,

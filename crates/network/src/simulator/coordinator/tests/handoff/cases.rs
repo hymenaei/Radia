@@ -537,11 +537,9 @@ impl TeleportFinishScenario {
         .await
         .expect("former primary's retained bytes should move into the neighbor budget");
         assert_eq!(self.harness.packet_memory.global_available_bytes(), self.global_available - self.retained_primary_bytes);
-        assert!(
-            matches!(
-                self.held_send.as_mut().expect("promotion retains the pending explicit send").try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ),
+        std::assert_matches!(
+            self.held_send.as_mut().expect("promotion retains the pending explicit send").try_recv(),
+            Err(oneshot::error::TryRecvError::Empty),
             "promotion must preserve the pending explicit send"
         );
     }
@@ -712,7 +710,7 @@ impl TeleportFinishScenario {
         self.harness.disconnect.send_replace(true);
         let logout = receive_message(&self.harness.neighbor, |message| matches!(message, Message::LogoutRequest(_))).await;
         assert!(logout.is_reliable());
-        assert!(matches!(logout.message(), Message::LogoutRequest(_)));
+        std::assert_matches!(logout.message(), Message::LogoutRequest(_));
         assert!(timeout(WAIT, self.harness.client).await.expect("logout should finish").expect("manager task").is_ok());
         self.completion_latencies
     }
@@ -866,7 +864,7 @@ async fn validate_repeated_target(
         })
         .await
         .expect("observe former-primary disconnect");
-        assert!(matches!(send_targeted(&harness.commands, ids[step], object_request()).await, Err(Error::SimulatorUnavailable)));
+        std::assert_matches!(send_targeted(&harness.commands, ids[step], object_request()).await, Err(Error::SimulatorUnavailable));
         harness
             .commands
             .send(Command::SendMessage { message: object_request(), delivery: Delivery::Unreliable })

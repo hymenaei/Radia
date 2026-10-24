@@ -453,6 +453,135 @@ impl CoordinatorState {
     }
 }
 
+impl CoordinatorRuntime<'_> {
+    pub(super) fn handle_handoff_command_retry(&mut self) -> RuntimeAction {
+        RuntimeAction::Continue
+    }
+
+    pub(super) async fn handle_send_completed(
+        &mut self,
+        simulator_id: SimulatorId,
+        cancel_target: Option<HandoffCancellation>,
+        error: Option<ConnectionError>,
+        report_failure: bool,
+    ) -> Result<RuntimeAction, CoordinatorError> {
+        if let Some(error) = error {
+            if report_failure {
+                self.coordinator
+                    .publish_event(
+                        &self.events,
+                        &mut self.run_state,
+                        Event::SendFailed(super::connection::bound_send_error(error.to_string())),
+                    )
+                    .await?;
+            }
+        } else if simulator_id == self.coordinator.primary.simulator_id
+            && let Some(cancel) = cancel_target
+        {
+            if self.handoff_state.clear_conflict(cancel) {
+                return Ok(RuntimeAction::Continue);
+            }
+            if matches_handoff_cancellation(&self.handoff_state, cancel)
+                && let Some(pending) = self.handoff_state.cancel_matching(cancel)
+            {
+                cancel_pending_handoff(
+                    pending,
+                    "teleport cancelled",
+                    self.coordinator.simulator_id,
+                    &mut self.run_state.neighbor_connections,
+                    &mut self.run_state.retiring_simulators,
+                    &mut self.run_state.preconnect_events,
+                    &mut self.run_state.connected_simulators,
+                    &mut self.run_state.simulator_capabilities,
+                    &self.coordinator.coverage_losses,
+                );
+            }
+        }
+        Ok(RuntimeAction::Continue)
+    }
+
+    pub(super) async fn promote_primary(
+        &mut self,
+        simulator_id: SimulatorId,
+        event: Event,
+        retained_bytes: Option<EventRetention>,
+        coverage_watermark: Option<crate::coverage::CoverageWatermark>,
+    ) -> Result<(), CoordinatorError> {
+        let promotion = self.handoff_state.take_pending().expect("matching promotion is pending");
+        let Some(connection) = self
+            .run_state
+            .neighbor_connections
+            .get(&promotion.handoff.region_handle)
+            .filter(|connection| connection.simulator_id == promotion.target && connection.endpoint == promotion.handoff.endpoint)
+        else {
+            tracing::info!(
+                simulator = promotion.target.get(),
+                region = promotion.handoff.region_handle,
+                reason = "destination circuit is stale",
+                "simulator handoff failed"
+            );
+            return Ok(());
+        };
+        let Some(next_primary) = PrimaryRoute::from_neighbor(promotion.handoff.region_handle, connection) else {
+            tracing::error!(
+                simulator = promotion.target.get(),
+                region = promotion.handoff.region_handle,
+                reason = "destination primary route is unavailable",
+                "simulator handoff failed"
+            );
+            return Ok(());
+        };
+        let Some((capabilities, promoted_event_queue)) = self
+            .run_state
+            .simulator_capabilities
+            .get(&promotion.target)
+            .filter(|capabilities| capabilities.endpoint == promotion.handoff.endpoint)
+            .map(|capabilities| (capabilities.client.clone(), capabilities.event_queue_role.clone()))
+        else {
+            tracing::warn!(
+                simulator = promotion.target.get(),
+                region = promotion.handoff.region_handle,
+                reason = "destination capabilities are unavailable",
+                "simulator handoff failed"
+            );
+            return Ok(());
+        };
+        let previous_simulator_id = self.coordinator.primary.simulator_id;
+        self.coordinator
+            .publish_simulator_event(
+                simulator_id,
+                EventEnvelope::from_parts(event, retained_bytes, coverage_watermark),
+                &self.events,
+                &mut self.run_state,
+            )
+            .await?;
+        if self.run_state.logout_deadline.is_some() {
+            return Ok(());
+        }
+        let mut session = self.coordinator.session.clone();
+        session.simulator_address = promotion.handoff.endpoint;
+        session.seed_capability = promotion.handoff.seed_capability;
+        let role_generation = promotion.generation.get();
+        self.coordinator.promote_primary(next_primary, role_generation);
+        tracing::info!(simulator = promotion.target.get(), region = promotion.handoff.region_handle, "simulator promoted");
+        self.active_primary_event_queue.set_primary(false);
+        promoted_event_queue.set_primary(true);
+        self.active_primary_event_queue = promoted_event_queue;
+        self.coordinator
+            .publish_event(
+                &self.events,
+                &mut self.run_state,
+                Event::SimulatorPromoted {
+                    previous_simulator_id,
+                    simulator_id: promotion.target,
+                    session: Box::new(session),
+                    capabilities,
+                },
+            )
+            .await
+    }
+}
+
 pub(super) fn connection_message_has_application_event(
     message: &Message,
     role: ConnectionRole,
@@ -728,135 +857,6 @@ pub(super) fn is_handoff_message(message: &Message) -> bool {
 
 pub(super) fn is_teleport_cancel(message: &Message, agent_id: Uuid, session_id: Uuid) -> bool {
     matches!(message, Message::TeleportCancel(cancel) if cancel.agent_id == agent_id && cancel.session_id == session_id)
-}
-
-impl CoordinatorRuntime<'_> {
-    pub(super) fn handle_handoff_command_retry(&mut self) -> RuntimeAction {
-        RuntimeAction::Continue
-    }
-
-    pub(super) async fn handle_send_completed(
-        &mut self,
-        simulator_id: SimulatorId,
-        cancel_target: Option<HandoffCancellation>,
-        error: Option<ConnectionError>,
-        report_failure: bool,
-    ) -> Result<RuntimeAction, CoordinatorError> {
-        if let Some(error) = error {
-            if report_failure {
-                self.coordinator
-                    .publish_event(
-                        &self.events,
-                        &mut self.run_state,
-                        Event::SendFailed(super::connection::bound_send_error(error.to_string())),
-                    )
-                    .await?;
-            }
-        } else if simulator_id == self.coordinator.primary.simulator_id
-            && let Some(cancel) = cancel_target
-        {
-            if self.handoff_state.clear_conflict(cancel) {
-                return Ok(RuntimeAction::Continue);
-            }
-            if matches_handoff_cancellation(&self.handoff_state, cancel)
-                && let Some(pending) = self.handoff_state.cancel_matching(cancel)
-            {
-                cancel_pending_handoff(
-                    pending,
-                    "teleport cancelled",
-                    self.coordinator.simulator_id,
-                    &mut self.run_state.neighbor_connections,
-                    &mut self.run_state.retiring_simulators,
-                    &mut self.run_state.preconnect_events,
-                    &mut self.run_state.connected_simulators,
-                    &mut self.run_state.simulator_capabilities,
-                    &self.coordinator.coverage_losses,
-                );
-            }
-        }
-        Ok(RuntimeAction::Continue)
-    }
-
-    pub(super) async fn promote_primary(
-        &mut self,
-        simulator_id: SimulatorId,
-        event: Event,
-        retained_bytes: Option<EventRetention>,
-        coverage_watermark: Option<crate::coverage::CoverageWatermark>,
-    ) -> Result<(), CoordinatorError> {
-        let promotion = self.handoff_state.take_pending().expect("matching promotion is pending");
-        let Some(connection) = self
-            .run_state
-            .neighbor_connections
-            .get(&promotion.handoff.region_handle)
-            .filter(|connection| connection.simulator_id == promotion.target && connection.endpoint == promotion.handoff.endpoint)
-        else {
-            tracing::info!(
-                simulator = promotion.target.get(),
-                region = promotion.handoff.region_handle,
-                reason = "destination circuit is stale",
-                "simulator handoff failed"
-            );
-            return Ok(());
-        };
-        let Some(next_primary) = PrimaryRoute::from_neighbor(promotion.handoff.region_handle, connection) else {
-            tracing::error!(
-                simulator = promotion.target.get(),
-                region = promotion.handoff.region_handle,
-                reason = "destination primary route is unavailable",
-                "simulator handoff failed"
-            );
-            return Ok(());
-        };
-        let Some((capabilities, promoted_event_queue)) = self
-            .run_state
-            .simulator_capabilities
-            .get(&promotion.target)
-            .filter(|capabilities| capabilities.endpoint == promotion.handoff.endpoint)
-            .map(|capabilities| (capabilities.client.clone(), capabilities.event_queue_role.clone()))
-        else {
-            tracing::warn!(
-                simulator = promotion.target.get(),
-                region = promotion.handoff.region_handle,
-                reason = "destination capabilities are unavailable",
-                "simulator handoff failed"
-            );
-            return Ok(());
-        };
-        let previous_simulator_id = self.coordinator.primary.simulator_id;
-        self.coordinator
-            .publish_simulator_event(
-                simulator_id,
-                EventEnvelope::from_parts(event, retained_bytes, coverage_watermark),
-                &self.events,
-                &mut self.run_state,
-            )
-            .await?;
-        if self.run_state.logout_deadline.is_some() {
-            return Ok(());
-        }
-        let mut session = self.coordinator.session.clone();
-        session.simulator_address = promotion.handoff.endpoint;
-        session.seed_capability = promotion.handoff.seed_capability;
-        let role_generation = promotion.generation.get();
-        self.coordinator.promote_primary(next_primary, role_generation);
-        tracing::info!(simulator = promotion.target.get(), region = promotion.handoff.region_handle, "simulator promoted");
-        self.active_primary_event_queue.set_primary(false);
-        promoted_event_queue.set_primary(true);
-        self.active_primary_event_queue = promoted_event_queue;
-        self.coordinator
-            .publish_event(
-                &self.events,
-                &mut self.run_state,
-                Event::SimulatorPromoted {
-                    previous_simulator_id,
-                    simulator_id: promotion.target,
-                    session: Box::new(session),
-                    capabilities,
-                },
-            )
-            .await
-    }
 }
 
 #[cfg(test)]

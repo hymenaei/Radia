@@ -5,87 +5,17 @@ use tokio::task::JoinError;
 use url::Url;
 use uuid::Uuid;
 
-use super::{CoordinatorError, CoordinatorRuntime, NeighborEventQueueJoin, RuntimeAction, is_current_simulator};
+use super::{
+    CoordinatorError, CoordinatorRuntime, NeighborEventQueueJoin, RuntimeAction,
+    handoff::{HandoffOrder, PromotionSetup},
+    is_current_simulator,
+    neighbors::neighbor_event_queue_failure,
+};
 use crate::{
     capabilities::EventQueueExit,
     event::{Event, EventEnvelope},
 };
-
-use super::handoff::{HandoffOrder, PromotionSetup};
-use super::neighbors::neighbor_event_queue_failure;
-
 const MAX_SIMULATORS_PER_ENABLE_EVENT: usize = 32;
-
-pub(super) fn decode_enable_simulators(body: &Value) -> Result<Vec<(u64, SocketAddr)>, &'static str> {
-    let body = super::handoff::event_fields(body)?;
-    let Some(Value::Array(simulators)) = body.get("SimulatorInfo") else {
-        return Err("SimulatorInfo is not an LLSD array");
-    };
-    if simulators.is_empty() || simulators.len() > MAX_SIMULATORS_PER_ENABLE_EVENT {
-        return Err("SimulatorInfo has an invalid number of entries");
-    }
-
-    simulators
-        .iter()
-        .map(|simulator| {
-            let Value::Map(simulator) = simulator else {
-                return Err("SimulatorInfo entry is not an LLSD map");
-            };
-            let Some(Value::Binary(handle)) = simulator.get("Handle") else {
-                return Err("Handle is not LLSD binary data");
-            };
-            let handle: [u8; 8] = handle.as_slice().try_into().map_err(|_| "Handle is not 8 bytes")?;
-            let Some(Value::Binary(ip)) = simulator.get("IP") else {
-                return Err("IP is not LLSD binary data");
-            };
-            let ip: [u8; 4] = ip.as_slice().try_into().map_err(|_| "IP is not 4 bytes")?;
-            let Some(Value::Integer(port)) = simulator.get("Port") else {
-                return Err("Port is not an LLSD integer");
-            };
-            let port = u16::try_from(*port).ok().filter(|port| *port != 0).ok_or("Port is outside the valid range")?;
-            let endpoint = SocketAddr::from((Ipv4Addr::from(ip), port));
-            Ok((u64::from_be_bytes(handle), endpoint))
-        })
-        .collect()
-}
-
-pub(super) fn decode_agent_communication(body: &Value, agent_id: Uuid) -> Result<(SocketAddr, Url), &'static str> {
-    let body = super::handoff::event_fields(body)?;
-    match body.get("agent-id") {
-        Some(Value::Uuid(value)) if *value == agent_id => {}
-        Some(Value::Uuid(_)) => return Err("agent-id does not match the logged-in agent"),
-        _ => return Err("agent-id is not an LLSD UUID"),
-    }
-    let Some(Value::String(address)) = body.get("sim-ip-and-port") else {
-        return Err("sim-ip-and-port is not an LLSD string");
-    };
-    let endpoint = address.parse().map_err(|_| "sim-ip-and-port is not a socket address")?;
-    let Some(Value::String(seed)) = body.get("seed-capability") else {
-        return Err("seed-capability is not an LLSD string");
-    };
-    let seed = Url::parse(seed).map_err(|_| "seed-capability is not a valid URL")?;
-    Ok((endpoint, seed))
-}
-
-pub(super) fn redact_seed_capability(body: &mut Value) {
-    fn redact(value: &mut Value) {
-        match value {
-            Value::Map(fields) => {
-                for (name, value) in fields {
-                    if matches!(name.as_str(), "SeedCapability" | "seed-capability") {
-                        *value = Value::String("[redacted]".to_owned());
-                    } else {
-                        redact(value);
-                    }
-                }
-            }
-            Value::Array(values) => values.iter_mut().for_each(redact),
-            _ => {}
-        }
-    }
-
-    redact(body);
-}
 
 impl CoordinatorRuntime<'_> {
     pub(super) async fn handle_capability_event(
@@ -303,6 +233,77 @@ impl CoordinatorRuntime<'_> {
         }
         RuntimeAction::Continue
     }
+}
+
+pub(super) fn decode_enable_simulators(body: &Value) -> Result<Vec<(u64, SocketAddr)>, &'static str> {
+    let body = super::handoff::event_fields(body)?;
+    let Some(Value::Array(simulators)) = body.get("SimulatorInfo") else {
+        return Err("SimulatorInfo is not an LLSD array");
+    };
+    if simulators.is_empty() || simulators.len() > MAX_SIMULATORS_PER_ENABLE_EVENT {
+        return Err("SimulatorInfo has an invalid number of entries");
+    }
+
+    simulators
+        .iter()
+        .map(|simulator| {
+            let Value::Map(simulator) = simulator else {
+                return Err("SimulatorInfo entry is not an LLSD map");
+            };
+            let Some(Value::Binary(handle)) = simulator.get("Handle") else {
+                return Err("Handle is not LLSD binary data");
+            };
+            let handle: [u8; 8] = handle.as_slice().try_into().map_err(|_| "Handle is not 8 bytes")?;
+            let Some(Value::Binary(ip)) = simulator.get("IP") else {
+                return Err("IP is not LLSD binary data");
+            };
+            let ip: [u8; 4] = ip.as_slice().try_into().map_err(|_| "IP is not 4 bytes")?;
+            let Some(Value::Integer(port)) = simulator.get("Port") else {
+                return Err("Port is not an LLSD integer");
+            };
+            let port = u16::try_from(*port).ok().filter(|port| *port != 0).ok_or("Port is outside the valid range")?;
+            let endpoint = SocketAddr::from((Ipv4Addr::from(ip), port));
+            Ok((u64::from_be_bytes(handle), endpoint))
+        })
+        .collect()
+}
+
+pub(super) fn decode_agent_communication(body: &Value, agent_id: Uuid) -> Result<(SocketAddr, Url), &'static str> {
+    let body = super::handoff::event_fields(body)?;
+    match body.get("agent-id") {
+        Some(Value::Uuid(value)) if *value == agent_id => {}
+        Some(Value::Uuid(_)) => return Err("agent-id does not match the logged-in agent"),
+        _ => return Err("agent-id is not an LLSD UUID"),
+    }
+    let Some(Value::String(address)) = body.get("sim-ip-and-port") else {
+        return Err("sim-ip-and-port is not an LLSD string");
+    };
+    let endpoint = address.parse().map_err(|_| "sim-ip-and-port is not a socket address")?;
+    let Some(Value::String(seed)) = body.get("seed-capability") else {
+        return Err("seed-capability is not an LLSD string");
+    };
+    let seed = Url::parse(seed).map_err(|_| "seed-capability is not a valid URL")?;
+    Ok((endpoint, seed))
+}
+
+pub(super) fn redact_seed_capability(body: &mut Value) {
+    fn redact(value: &mut Value) {
+        match value {
+            Value::Map(fields) => {
+                for (name, value) in fields {
+                    if matches!(name.as_str(), "SeedCapability" | "seed-capability") {
+                        *value = Value::String("[redacted]".to_owned());
+                    } else {
+                        redact(value);
+                    }
+                }
+            }
+            Value::Array(values) => values.iter_mut().for_each(redact),
+            _ => {}
+        }
+    }
+
+    redact(body);
 }
 
 #[cfg(test)]

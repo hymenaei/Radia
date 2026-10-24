@@ -193,10 +193,10 @@ async fn promoted_logout_bypasses_full_queue() {
 
     pause_sends.send_replace(false);
     let (logout_packet, _) = receive_packet(&simulator).await;
-    assert!(matches!(logout_packet.message(), Message::LogoutRequest(_)));
+    std::assert_matches!(logout_packet.message(), Message::LogoutRequest(_));
     assert!(logout_response.await.expect("logout completion").is_ok(), "logout local send completes despite a full ordinary queue");
     assert!(repeated_logout_response.await.expect("repeated logout completion").is_ok());
-    assert!(matches!(pending_response.await, Ok(Err(Error::SimulatorConnectionClosed))));
+    std::assert_matches!(pending_response.await, Ok(Err(Error::SimulatorConnectionClosed)));
 
     shutdown.send_replace(true);
     assert!(timeout(WAIT, worker).await.expect("stop connection worker").expect("join connection worker").is_ok());

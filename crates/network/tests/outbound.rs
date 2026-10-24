@@ -15,7 +15,7 @@ fn supported_messages_implement_the_send_contract() {
 
 #[cfg(feature = "testing")]
 mod simulator_send {
-    use std::{net::SocketAddr, str::from_utf8};
+    use std::{io::ErrorKind, net::SocketAddr, str::from_utf8};
 
     use network::{Delivery, Event, Grid, LoginCredentials, StartLocation};
     use protocol::{
@@ -116,6 +116,31 @@ mod simulator_send {
         drop(session);
     }
 
+    #[tokio::test]
+    async fn fake_login_server_skips_closed_connections() {
+        let (login_url, stop_http, http_server) = fake_login_server(0).await;
+        let address = login_url
+            .strip_prefix("http://")
+            .and_then(|url| url.strip_suffix("/login.cgi"))
+            .expect("login URL address")
+            .parse::<SocketAddr>()
+            .expect("fake login address");
+
+        drop(TcpStream::connect(address).await.expect("connect incomplete request"));
+        let mut incomplete = TcpStream::connect(address).await.expect("connect partial request");
+        incomplete.write_all(b"POST /login.cgi HTTP/1.1\r\nContent-Length: 4\r\n\r\n").await.expect("write partial request");
+        drop(incomplete);
+
+        let mut client = TcpStream::connect(address).await.expect("connect login request");
+        client.write_all(b"POST /login.cgi HTTP/1.1\r\nContent-Length: 0\r\n\r\n").await.expect("write login request");
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.expect("read login response");
+        assert!(from_utf8(&response).expect("HTTP response is UTF-8").contains("<member><name>login</name>"));
+
+        stop_http.send_replace(true);
+        http_server.await.expect("fake login server");
+    }
+
     async fn fake_login_server(simulator_port: u16) -> (String, watch::Sender<bool>, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake login server");
         let address = listener.local_addr().expect("fake login address");
@@ -152,7 +177,9 @@ mod simulator_send {
                     accepted = listener.accept() => accepted.expect("accept fake HTTP request"),
                 };
                 let (mut stream, _) = accepted;
-                let request = read_request(&mut stream).await;
+                let Some(request) = read_request(&mut stream).await else {
+                    continue;
+                };
                 let request_line = from_utf8(&request).expect("HTTP request is UTF-8").split("\r\n").next().expect("request line");
                 let (content_type, body) = if request_line.starts_with("POST /login.cgi ") {
                     ("text/xml", login_body.as_str())
@@ -166,12 +193,14 @@ mod simulator_send {
         (format!("http://{address}/login.cgi"), stop, server)
     }
 
-    async fn read_request(stream: &mut TcpStream) -> Vec<u8> {
+    async fn read_request(stream: &mut TcpStream) -> Option<Vec<u8>> {
         let mut request = Vec::new();
         let mut chunk = [0; 2048];
         loop {
             let size = stream.read(&mut chunk).await.expect("read HTTP request");
-            assert_ne!(size, 0, "HTTP connection closed before the request completed");
+            if size == 0 {
+                return None;
+            }
             request.extend_from_slice(&chunk[..size]);
             let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
                 continue;
@@ -185,7 +214,7 @@ mod simulator_send {
                 })
                 .unwrap_or(0);
             if request.len() >= header_end + 4 + content_length {
-                return request;
+                return Some(request);
             }
         }
     }
@@ -193,7 +222,12 @@ mod simulator_send {
     async fn write_response(stream: &mut TcpStream, content_type: &str, body: &str) {
         let response =
             format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-        stream.write_all(response.as_bytes()).await.expect("write HTTP response");
+        if let Err(error) = stream.write_all(response.as_bytes()).await {
+            assert!(
+                matches!(error.kind(), ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted),
+                "write HTTP response: {error}"
+            );
+        }
     }
 
     async fn receive_packet(socket: &UdpSocket) -> (Packet, SocketAddr) {

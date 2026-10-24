@@ -475,7 +475,15 @@ mod tests {
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n").await.expect("write headers");
             headers_sent.send(()).expect("request should await response headers");
             body_released.await.expect("allow body deadline to expire");
-            stream.write_all(b"data").await.expect("write body");
+            if let Err(error) = stream.write_all(b"data").await {
+                assert!(
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                    ),
+                    "write response body after the client deadline: {error}"
+                );
+            }
         });
         let client = Client::new(Some(Duration::from_millis(250)), false, None).expect("build HTTP client");
         let url = Url::parse(&format!("http://{address}/body")).expect("local HTTP URL");

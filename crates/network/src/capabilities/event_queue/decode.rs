@@ -3,7 +3,7 @@ use std::{fmt, mem, mem::size_of, str::from_utf8};
 use llsd::{Binary, Uri, Value};
 use tokio::{sync::OwnedSemaphorePermit, task::JoinError};
 
-use super::super::{
+use crate::capabilities::{
     budget::{MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, spawn_blocking_with_permit},
     request::decode_llsd_xml,
 };

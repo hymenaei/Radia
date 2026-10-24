@@ -5,8 +5,8 @@ use std::{
 };
 
 use llsd::{Limits, Value, xml};
-use reqwest::Url;
-use tokio::{sync::watch, time};
+use reqwest::{StatusCode, Url};
+use tokio::time;
 
 use super::budget::{
     MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_NAMES, MAX_CAPABILITY_NAMES_BYTES, MAX_CAPABILITY_REQUEST_BODY_BYTES,
@@ -14,7 +14,7 @@ use super::budget::{
 };
 use crate::{
     error::Error,
-    http::{self, Response},
+    http::{self, ErrorKind, Response},
 };
 
 #[derive(Clone, Copy)]
@@ -59,21 +59,21 @@ pub(super) fn validate_capability_names(names: &[&str]) -> Result<(), Error> {
 }
 
 pub(super) fn is_transient_seed_lookup(error: &Error) -> bool {
-    matches!(error, Error::CapabilityHttp(error) if error.is_transient_seed_lookup())
+    let Error::CapabilityHttp(error) = error else {
+        return false;
+    };
+
+    match error.kind {
+        ErrorKind::Transport | ErrorKind::Timeout => true,
+        ErrorKind::HttpStatus => error.status.is_some_and(|status| status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS),
+        ErrorKind::Cancelled | ErrorKind::ResourceExhausted | ErrorKind::InvalidUrl => false,
+    }
 }
 
 pub(super) fn seed_lookup_retry_after(error: &Error) -> Option<Duration> {
     match error {
-        Error::CapabilityHttp(error) => error.retry_after(),
+        Error::CapabilityHttp(error) => error.retry_after,
         _ => None,
-    }
-}
-
-pub(super) async fn wait_for_session_close(mut session_closed: watch::Receiver<bool>) {
-    while !*session_closed.borrow() {
-        if session_closed.changed().await.is_err() {
-            break;
-        }
     }
 }
 

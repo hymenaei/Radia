@@ -19,7 +19,7 @@ use super::{
     event_queue::{self, EventQueueContext, EventQueueTask, Stop},
     request::{
         RequestDeadline, decode_capability_value_with_response_limit, decode_seed_capabilities, get_capability_bytes, post_capability,
-        request_capabilities_response, validate_capability_names, wait_for_session_close,
+        request_capabilities_response, validate_capability_names,
     },
 };
 use crate::{
@@ -257,23 +257,23 @@ impl Client {
 
     async fn acquire_request_permit(&self, deadline: RequestDeadline) -> Result<OwnedSemaphorePermit, Error> {
         let budget = Arc::clone(&self.budget.ordinary_requests);
-        let session_closed = self.session_closed.subscribe();
+        let mut session_closed = self.session_closed.subscribe();
         if *session_closed.borrow() {
             return Err(Error::CapabilitySessionClosed);
         }
         tokio::select! {
             biased;
-            _ = wait_for_session_close(session_closed) => Err(Error::CapabilitySessionClosed),
+            _ = session_closed.wait_for(|closed| *closed) => Err(Error::CapabilitySessionClosed),
             _ = time::sleep_until(deadline.at) => Err(deadline.error()),
             permit = budget.acquire_owned() => permit.map_err(|_| Error::CapabilityRequestCanceled),
         }
     }
 
     async fn race_request<T>(&self, deadline: RequestDeadline, operation: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
-        let session_closed = self.session_closed.subscribe();
+        let mut session_closed = self.session_closed.subscribe();
         tokio::select! {
             biased;
-            _ = wait_for_session_close(session_closed) => Err(Error::CapabilitySessionClosed),
+            _ = session_closed.wait_for(|closed| *closed) => Err(Error::CapabilitySessionClosed),
             _ = time::sleep_until(deadline.at) => Err(deadline.error()),
             result = operation => result,
         }
@@ -358,7 +358,10 @@ impl Client {
     }
 
     pub(crate) async fn wait_for_requests(&self) {
-        wait_for_session_close(self.session_closed.subscribe()).await;
+        let mut session_closed = self.session_closed.subscribe();
+        if let Ok(closed) = session_closed.wait_for(|closed| *closed).await {
+            drop(closed);
+        }
         self.requests.wait_until_idle().await;
     }
 
@@ -448,13 +451,8 @@ impl RequestTracker {
 
     async fn wait_until_idle(&self) {
         let mut active = self.active.subscribe();
-        loop {
-            if *active.borrow() == 0 {
-                return;
-            }
-            if active.changed().await.is_err() {
-                return;
-            }
+        if let Ok(active) = active.wait_for(|active| *active == 0).await {
+            drop(active);
         }
     }
 }

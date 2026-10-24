@@ -31,9 +31,7 @@ use super::{
         MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
         spawn_blocking_with_permit,
     },
-    request::{
-        decode_seed_capabilities, is_transient_seed_lookup, request_capabilities_response, seed_lookup_retry_after, wait_for_session_close,
-    },
+    request::{decode_seed_capabilities, is_transient_seed_lookup, request_capabilities_response, seed_lookup_retry_after},
 };
 use crate::{
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
@@ -167,10 +165,12 @@ impl Stop {
     }
 
     async fn stopped(&self) {
+        let mut shutdown = self.shutdown.clone();
+        let mut session_closed = self.session_closed.clone();
         tokio::select! {
             biased;
-            _ = wait_for_watch_true(self.shutdown.clone()) => {}
-            _ = wait_for_session_close(self.session_closed.clone()) => {}
+            _ = shutdown.wait_for(|stopped| *stopped) => {}
+            _ = session_closed.wait_for(|closed| *closed) => {}
         }
     }
 }
@@ -287,14 +287,6 @@ impl EventQueueLossNotifier {
 
     fn was_notified(&self) -> bool {
         self.notified.load(Ordering::Acquire)
-    }
-}
-
-async fn wait_for_watch_true(mut watch: watch::Receiver<bool>) {
-    while !*watch.borrow() {
-        if watch.changed().await.is_err() {
-            break;
-        }
     }
 }
 
@@ -722,24 +714,6 @@ pub(crate) async fn post_event_queue(
         .map_err(|error| http::Error::resource_exhausted(format!("Could not encode an EventQueueGet request: {error}")))?
         .into_bytes();
     client.post("event_queue", url, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes).await
-}
-
-#[cfg(test)]
-pub(crate) async fn retry_event_queue(
-    simulator_id: SimulatorId,
-    error_count: &mut u32,
-    source: SocketAddr,
-    events: &mpsc::Sender<EventEnvelope>,
-    error: String,
-    shutdown: &mut watch::Receiver<bool>,
-    session_closed: &watch::Receiver<bool>,
-) -> RetryOutcome {
-    let coverage_losses = CoverageLossLedger::new();
-    let coverage_source = CoverageSource::EventQueue { incarnation: 1 };
-    let stop = Stop::new(shutdown.clone(), session_closed.clone());
-    let notifier = EventQueueLossNotifier::new(events.clone(), simulator_id, source, stop.clone());
-    let mut pending_loss = PendingEventQueueLoss::new(coverage_losses, simulator_id, coverage_source, notifier);
-    retry_event_queue_with_hint(simulator_id, error_count, source, events, error, None, &stop, &mut pending_loss).await
 }
 
 async fn retry_event_queue_with_hint(

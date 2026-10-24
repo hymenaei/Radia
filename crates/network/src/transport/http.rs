@@ -81,7 +81,7 @@ impl Client {
         let response = match send_with_deadline(request.send(), deadline, started).await {
             Ok(response) => response,
             Err(error) => {
-                tracing::warn!(operation, error = %error, elapsed_ms = started.elapsed().as_millis(), "HTTP request failed");
+                tracing::debug!(operation, error = %error, elapsed_ms = started.elapsed().as_millis(), "HTTP request failed");
                 return Err(error);
             }
         };
@@ -94,7 +94,7 @@ impl Client {
         let body = match read_bounded_body(response, max_response_bytes, deadline, started).await {
             Ok(body) => body,
             Err(error) => {
-                tracing::warn!(
+                tracing::debug!(
                     operation,
                     http_status = status.as_u16(),
                     elapsed_ms = started.elapsed().as_millis(),
@@ -192,18 +192,6 @@ impl Error {
 
     pub(crate) fn is_timeout_after(&self, minimum: Duration) -> bool {
         self.kind == ErrorKind::Timeout && self.status.is_none() && self.elapsed >= minimum
-    }
-
-    pub(crate) fn is_transient_seed_lookup(&self) -> bool {
-        match self.kind {
-            ErrorKind::Transport | ErrorKind::Timeout => true,
-            ErrorKind::HttpStatus => self.status.is_some_and(|status| status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS),
-            ErrorKind::Cancelled | ErrorKind::ResourceExhausted | ErrorKind::InvalidUrl => false,
-        }
-    }
-
-    pub(crate) fn retry_after(&self) -> Option<Duration> {
-        self.retry_after
     }
 
     pub(crate) fn is_resource_exhausted(&self) -> bool {

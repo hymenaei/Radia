@@ -92,23 +92,40 @@ fn seed_context(events: mpsc::Sender<EventEnvelope>) -> EventQueueContext {
     }
 }
 
+fn pending_event_queue_loss(
+    events: &mpsc::Sender<EventEnvelope>,
+    simulator_id: SimulatorId,
+    socket: SocketAddr,
+    stop: &Stop,
+) -> PendingEventQueueLoss {
+    let ledger = CoverageLossLedger::new();
+    let coverage_source = CoverageSource::EventQueue { incarnation: 1 };
+    let notifier = EventQueueLossNotifier::new(events.clone(), simulator_id, socket, stop.clone());
+    PendingEventQueueLoss::new(ledger, simulator_id, coverage_source, notifier)
+}
+
 #[tokio::test]
 async fn poll_backoff_stops_when_session_closes() {
     let (events, _received) = mpsc::channel(1);
-    let (_shutdown, mut shutdown) = watch::channel(false);
+    let (_shutdown, shutdown) = watch::channel(false);
     let (session_closed, session_closed_receiver) = watch::channel(false);
     let mut error_count = 0;
+    let simulator_id = SimulatorId::new(1);
+    let source = SocketAddr::from(([127, 0, 0, 1], 0));
+    let stop = Stop::new(shutdown, session_closed_receiver);
+    let mut pending_loss = pending_event_queue_loss(&events, simulator_id, source, &stop);
 
     assert_eq!(
         close_while_pending(
-            retry_event_queue(
-                SimulatorId::new(1),
+            retry_event_queue_with_hint(
+                simulator_id,
                 &mut error_count,
-                SocketAddr::from(([127, 0, 0, 1], 0)),
+                source,
                 &events,
                 "poll failed".into(),
-                &mut shutdown,
-                &session_closed_receiver,
+                None,
+                &stop,
+                &mut pending_loss,
             ),
             &session_closed,
         )
@@ -140,20 +157,25 @@ async fn seed_backoff_stops_when_session_closes() {
 async fn poll_limit_notification_stops_when_session_closes() {
     let (events, mut received) = mpsc::channel(1);
     events.try_send(EventEnvelope::new(Event::Failed("occupy event channel".into()))).expect("fill event channel");
-    let (_shutdown, mut shutdown) = watch::channel(false);
+    let (_shutdown, shutdown) = watch::channel(false);
     let (session_closed, session_closed_receiver) = watch::channel(false);
     let mut error_count = MAX_EVENT_QUEUE_ERRORS;
+    let simulator_id = SimulatorId::new(1);
+    let source = SocketAddr::from(([127, 0, 0, 1], 0));
+    let stop = Stop::new(shutdown, session_closed_receiver);
+    let mut pending_loss = pending_event_queue_loss(&events, simulator_id, source, &stop);
 
     assert_eq!(
         close_while_pending(
-            retry_event_queue(
-                SimulatorId::new(1),
+            retry_event_queue_with_hint(
+                simulator_id,
                 &mut error_count,
-                SocketAddr::from(([127, 0, 0, 1], 0)),
+                source,
                 &events,
                 "poll failed".into(),
-                &mut shutdown,
-                &session_closed_receiver,
+                None,
+                &stop,
+                &mut pending_loss,
             ),
             &session_closed,
         )
@@ -1597,7 +1619,7 @@ mod client_event_queue_tests {
         let values = "<undef/>".repeat(MAX_LLSD_XML_ELEMENTS);
         let xml = format!("<llsd><array>{values}</array></llsd>");
         let Err(error) = decode_event_batch(xml.as_bytes()) else {
-            panic!("excessive LLSD values should be rejected during preflight");
+            panic!("excessive LLSD values should be rejected by decoder limits");
         };
         assert!(error.contains("element limit"));
     }
@@ -2035,17 +2057,22 @@ mod client_event_queue_tests {
         let mut error_count = MAX_EVENT_QUEUE_ERRORS;
         let (events, received_events) = mpsc::channel(1);
         let mut received_events = EventReceiver::new(received_events);
-        let (_shutdown, mut shutdown_requested) = watch::channel(false);
+        let (_shutdown, shutdown_requested) = watch::channel(false);
         let (_session_closed, session_closed) = watch::channel(false);
+        let simulator_id = SimulatorId::new(1);
+        let source = test_source();
+        let stop = Stop::new(shutdown_requested, session_closed);
+        let mut pending_loss = pending_event_queue_loss(&events, simulator_id, source, &stop);
 
-        let outcome = retry_event_queue(
-            SimulatorId::new(1),
+        let outcome = retry_event_queue_with_hint(
+            simulator_id,
             &mut error_count,
-            test_source(),
+            source,
             &events,
             "EventQueueGet returned HTTP 500.".into(),
-            &mut shutdown_requested,
-            &session_closed,
+            None,
+            &stop,
+            &mut pending_loss,
         )
         .await;
         let Some(Event::CapabilityError { capability, reason, .. }) = received_events.recv().await else {

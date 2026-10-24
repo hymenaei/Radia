@@ -86,23 +86,3 @@ fn unrelated_streaming_method_is_ignored() {
 
     assert!(decode_object_message(Region::new(11), 5, OrderEvidence::Ordered(5), &message).is_none());
 }
-
-#[test]
-fn compressed_owner_metadata_does_not_populate_object_properties() {
-    let packet = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED);
-    let message = packet.message().clone();
-    let Message::ObjectUpdateCompressed(update) = &message else { panic!("expected compressed object fixture") };
-    let first_owner = update.objects[0].owner_id;
-    assert_ne!(first_owner, Uuid::from_u128(0));
-
-    let batch = decode_object_message(REGION, packet.sequence(), OrderEvidence::Ordered(100), &message)
-        .expect("compressed fixture has an object message");
-    let Some(ObjectOperation::Observe(observation)) = batch.blocks.first().and_then(Option::as_ref) else {
-        panic!("expected compressed observation")
-    };
-    let mut world = world();
-    let introduced = world.observe_object(observation.clone()).expect("decoded compressed observation applies");
-    let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
-    assert_eq!(world.object(entity).unwrap().properties().owner_id, None);
-    assert_eq!(world.object(entity).unwrap().properties().creator_id, None);
-}

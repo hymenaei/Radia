@@ -77,7 +77,7 @@ fn object_views_support_shared_reads() {
 
     let region = Region::new(6);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    std::assert_matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
     let Introduced(entity) = world.observe_object(observation(source(region, 1), 60, 1)).unwrap().outcome else {
         panic!("expected object introduction");
     };
@@ -92,8 +92,8 @@ fn object_views_support_shared_reads() {
         assert_eq!(object.id(), scanned.id());
         std::thread::scope(|scope| {
             let shared = &object;
-            let reader = scope.spawn(move || shared.properties());
-            assert_eq!(scanned.clone().properties(), reader.join().unwrap());
+            let reader = scope.spawn(move || shared.id());
+            assert_eq!(scanned.clone().id(), reader.join().unwrap());
         });
     }
     assert_eq!(
@@ -672,7 +672,7 @@ proptest::proptest! {
 
     #[test]
     fn mutation_sequences_preserve_world_indexes(
-        operations in proptest::collection::vec((0_u8..6, 0_u8..3, 0_u8..16, 0_u8..8, 1_u8..32, 0_u8..9, 0_u8..32), 1..128)
+        operations in proptest::collection::vec((0_u8..5, 0_u8..3, 0_u8..16, 0_u8..8, 1_u8..32, 0_u8..9, 0_u8..32), 1..128)
     ) {
         let regions = [Region::new(700), Region::new(701), Region::new(702)];
         let mut world_limits = limits();
@@ -748,9 +748,7 @@ proptest::proptest! {
                     };
                     let _ = world.patch_object(patch).expect("apply valid attachment update");
                 }
-                _ => {
-                    let _ = world.maintain_query_state(usize::from(value as u8) + 1).expect("maintain generated query state");
-                }
+                5.. => panic!("operation generator is bounded to 0..5"),
             }
 
             proptest::prop_assert_eq!(world.check_invariants(), Ok(()));

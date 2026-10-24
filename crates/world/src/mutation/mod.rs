@@ -7,7 +7,7 @@ mod region;
 
 use super::World;
 use crate::{
-    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, Parent, PoseState, RecentBatch, Recovery, RegionApplied,
+    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, Parent, PoseState, Recovery, RegionApplied,
     RegionOutcome, WorldChange, WorldPose, WorldRevision,
 };
 
@@ -16,7 +16,6 @@ pub(crate) struct Effects {
     pub(crate) changes: Vec<WorldChange>,
     pub(crate) recovery_targets: Vec<LocalAddress>,
     pub(crate) recovery_cancellations: Vec<LocalAddress>,
-    pub(crate) recent: RecentBatch,
 }
 
 impl Effects {
@@ -31,7 +30,6 @@ impl World {
     }
 
     pub(super) fn publish_changes(&mut self, changes: Vec<WorldChange>) -> Option<WorldRevision> {
-        self.update_spatial_state(&changes);
         self.journal.append(changes, self.limits.max_journal_entries, self.limits.max_journal_changes)
     }
 
@@ -60,7 +58,6 @@ impl World {
     }
 
     fn finish(&mut self, outcome: ApplyOutcome, effects: Effects) -> Applied {
-        self.recent.apply_batch(effects.recent);
         let recovery = self.recovery(effects.recovery_targets);
         Applied {
             revision: self.publish_changes(effects.changes),

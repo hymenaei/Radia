@@ -2,10 +2,7 @@ use math::Vec3;
 use uuid::Uuid;
 
 use crate::update::{FieldStamp, Stamp};
-use crate::{
-    AttachmentPoint, Kind, LinearMotion, LocalAddress, Parent, Properties, PropertiesProvenance, PropertyProvenance, Region, Transform,
-    UpdateAuthority, UpdateSource, WorldPose,
-};
+use crate::{AttachmentPoint, Kind, LinearMotion, LocalAddress, Parent, Region, Transform, UpdateAuthority, UpdateSource, WorldPose};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct Binding {
@@ -74,18 +71,6 @@ pub(crate) struct RegionalStamp {
     pub(crate) stamp: FieldStamp,
 }
 
-impl From<PropertyProvenance> for RegionalStamp {
-    fn from(provenance: PropertyProvenance) -> Self {
-        Self {
-            region: provenance.region,
-            stamp: FieldStamp {
-                authority: provenance.authority,
-                stamp: Stamp { order: provenance.order, block_ordinal: provenance.block_ordinal },
-            },
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ParentRejectionBarrier {
     pub(crate) region: Region,
@@ -151,18 +136,6 @@ impl ObjectState {
         self.position_frame_generation = None;
         self.rotation_frame_generation = None;
         self.provisional_pose = None;
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct ObjectProperties {
-    pub(crate) properties: Properties,
-    pub(crate) properties_provenance: PropertiesProvenance,
-}
-
-impl ObjectProperties {
-    pub(crate) fn is_empty(self) -> bool {
-        self == Self::default()
     }
 }
 

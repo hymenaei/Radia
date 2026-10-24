@@ -6,12 +6,12 @@ use math::{Quat, Vec3};
 use uuid::Uuid;
 
 use crate::mutation::facet::Facet;
-use crate::object::components::{Fenced, ObjectProperties};
+use crate::object::components::Fenced;
 use crate::object::storage::ComponentView;
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, Kind, LinearMotion, LocalAddress, LocalTransform, ObjectMedia,
-    Parent, PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Properties, PropertiesProvenance, Shape, SitTarget,
-    SurfaceAppearance, Transform, WorldTransformState,
+    Parent, PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Shape, SitTarget, SurfaceAppearance, Transform,
+    WorldTransformState,
 };
 use crate::{ObjectOrdering, ObjectRecord, World};
 
@@ -114,19 +114,6 @@ impl<'a> Object<'a> {
 
     pub fn avatar_appearance(&self) -> Option<&'a AvatarAppearance> {
         self.facet::<Arc<AvatarAppearance>>()
-    }
-
-    pub fn properties(&self) -> Properties {
-        self.properties_data().0
-    }
-
-    pub fn properties_provenance(&self) -> PropertiesProvenance {
-        self.properties_data().1
-    }
-
-    pub(crate) fn properties_data(&self) -> (Properties, PropertiesProvenance) {
-        let properties = self.world.store.component::<ObjectProperties>(self.entity.0).copied().unwrap_or_default();
-        (properties.properties, properties.properties_provenance)
     }
 
     pub fn attachment_point(&self) -> Option<AttachmentPoint> {

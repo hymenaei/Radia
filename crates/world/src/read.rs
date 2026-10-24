@@ -8,11 +8,11 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
-    Appearance, AttachmentPoint, AvatarAppearance, LinearMotion, ObjectMedia, PbrMaterialAssignments, PropertiesProvenance, SitTarget,
-    SurfaceAppearance, Transform,
+    Appearance, AttachmentPoint, AvatarAppearance, LinearMotion, ObjectMedia, PbrMaterialAssignments, SitTarget, SurfaceAppearance,
+    Transform,
 };
 use crate::{
-    Entity, Kind, LocalAddress, Parent, PbrMaterialOverrides, PoseError, PoseState, Properties, Region, RegionInfo, Shape, WorldRevision,
+    Entity, Kind, LocalAddress, Parent, PbrMaterialOverrides, PoseError, PoseState, Region, RegionInfo, Shape, WorldRevision,
     WorldTransformState,
 };
 use crate::{Object, World, WorldChange, WorldId};
@@ -103,8 +103,6 @@ pub struct ObjectDetail {
     pub avatar_appearance: Option<AvatarAppearance>,
     pub attachment_point: Option<AttachmentPoint>,
     pub sit_target: Option<SitTarget>,
-    pub properties: Properties,
-    pub properties_provenance: PropertiesProvenance,
 }
 
 impl ObjectDetail {
@@ -174,7 +172,6 @@ pub enum WorldReadError {
     StaleSession,
     StaleIdentity,
     ResyncRequired,
-    StaleRevision,
     InvalidCursor,
     InvalidLimit,
     TooLarge,
@@ -186,7 +183,6 @@ impl Display for WorldReadError {
             Self::StaleSession => f.write_str("cursor or entity belongs to another World session"),
             Self::StaleIdentity => f.write_str("object incarnation is no longer live"),
             Self::ResyncRequired => f.write_str("journal history was evicted; rebuild from a fresh read barrier"),
-            Self::StaleRevision => f.write_str("query cursor no longer matches the World revision"),
             Self::InvalidCursor => f.write_str("invalid World read cursor"),
             Self::InvalidLimit => f.write_str("read limit is zero or exceeds the operation maximum"),
             Self::TooLarge => f.write_str("read result exceeds the byte limit"),
@@ -351,8 +347,6 @@ impl World {
             avatar_appearance: object.avatar_appearance().cloned(),
             attachment_point: object.attachment_point(),
             sit_target: object.sit_target(),
-            properties: object.properties(),
-            properties_provenance: object.properties_provenance(),
         };
         Ok(detail)
     }

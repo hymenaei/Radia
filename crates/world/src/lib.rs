@@ -4,7 +4,7 @@ mod identity;
 mod invariants;
 mod mutation;
 mod object;
-mod query;
+mod read;
 mod region;
 mod update;
 
@@ -14,18 +14,15 @@ use uuid::Uuid;
 
 use crate::history::Journal;
 use crate::history::address::Tombstones;
-use crate::history::recent::{RecentBatch, RecentStore};
 use crate::identity::WorldId;
 use crate::object::components::{
     Binding, Fences, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field, newer_region_field,
 };
 use crate::object::storage::ObjectStore;
 use crate::object::view::IndexedObjects;
-use crate::query::spatial::SpatialIndex;
 use crate::region::RegionState;
 use crate::update::Stamp;
 
-pub use history::recent::{MAX_RECENT_OBJECT_BYTES, MAX_RECENT_OBJECTS, RECENT_OBJECT_TTL, RecentObject};
 pub use history::{WorldChange, WorldChangeClasses, WorldEntityRemovalReason};
 pub use identity::{Entity, LocalAddress, ObjectBindingTarget, Region, RegionHandle, RegionInfo};
 pub use object::appearance::{
@@ -47,17 +44,12 @@ pub use object::transform::{
     WorldPose, WorldTransform, WorldTransformState,
 };
 pub use object::view::{Object, Objects};
-pub use object::{Kind, Parent, ParentUpdate, Properties, PropertiesPatch, PropertiesProvenance, PropertyProvenance};
-pub use query::read::{
+pub use object::{Kind, Parent, ParentUpdate};
+pub use read::{
     MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_MEDIA_READ_BYTES,
     MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetail, ObjectDetailBatch,
     ObjectDetailResult, ObjectListItem, ObjectListPage, ObjectMediaRead, ObjectPageCursor, ObjectSummary, RegionPage, RegionPageCursor,
     RegionSummary, WorldChangeCursor, WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError,
-};
-pub use query::spatial::{MAX_QUERY_STATE_MAINTENANCE_WORK, QueryStateMaintenance};
-pub use query::{
-    MAX_WORLD_QUERY_RESULTS, MAX_WORLD_QUERY_WORK, QueryCompleteness, QueryIncompleteReason, QueryScope, QueryUnresolved, ValueFilter,
-    WorldQuery, WorldQueryBudget, WorldQueryBuildError, WorldQueryCursor, WorldQueryItem, WorldQueryPage,
 };
 pub use region::environment::{
     EnvironmentAssignment, EnvironmentRead, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_BYTES,
@@ -90,8 +82,6 @@ pub struct World {
     environment_bytes: usize,
     limits: WorldLimits,
     journal: Journal,
-    spatial: SpatialIndex,
-    recent: RecentStore,
 }
 
 impl World {
@@ -112,8 +102,6 @@ impl World {
             environment_bytes: 0,
             limits,
             journal: Journal::new(),
-            spatial: SpatialIndex::default(),
-            recent: RecentStore::default(),
         }
     }
 

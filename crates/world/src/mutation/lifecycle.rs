@@ -1,13 +1,11 @@
-use std::{num::NonZeroU32, time::Instant};
+use std::num::NonZeroU32;
 
 use super::Effects;
 use crate::UpdateAuthority::Untracked;
 use crate::history::WorldChange::EntityRemoved;
 use crate::update::{FieldStamp, Stamp};
-use crate::{
-    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, Parent, PoseState, Region, UpdateAuthority, UpdateSource,
-};
-use crate::{RecentObject, World, WorldEntityRemovalReason, newer_field};
+use crate::{Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, Parent, Region, UpdateAuthority, UpdateSource};
+use crate::{World, WorldEntityRemovalReason, newer_field};
 
 #[derive(Clone, Copy)]
 pub(super) enum RemovalCause {
@@ -87,24 +85,8 @@ impl World {
         while let Some((entity, cause, expanded)) = first.take().or_else(|| pending.pop()) {
             let invalidation = cause.stamp();
             let reason = cause.reason();
-            let (id, kind, state, properties, media_bytes) = self.store.removal_data(entity.0);
+            let (id, state, media_bytes) = self.store.removal_data(entity.0);
             let address = state.binding.address;
-            let recent = (!expanded).then(|| RecentObject {
-                id,
-                kind,
-                address,
-                attachment_point: state.attachment_point,
-                properties: properties.properties,
-                properties_provenance: properties.properties_provenance,
-                last_pose: match self.resolve_pose(entity) {
-                    Ok(PoseState::Resolved(pose)) => Some(pose),
-                    Ok(PoseState::Unresolved(_)) | Ok(PoseState::Provisional { .. }) | Err(_) => None,
-                },
-                removal_reason: reason,
-            });
-            if let Some(recent) = recent {
-                effects.recent.push(recent, Instant::now());
-            }
             let children = if expanded { None } else { self.children.remove(&entity) };
             if expanded || children.as_ref().is_none_or(|children| children.is_empty()) {
                 self.object_media_bytes = self.object_media_bytes.saturating_sub(media_bytes);

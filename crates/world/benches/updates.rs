@@ -9,7 +9,7 @@ use world::{
     ApplyOutcome::{IgnoredStale, Unchanged},
     AvatarAppearanceUpdate, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance, FieldUpdate, LinearMotion, ObjectPatch,
     ParentUpdate::Root,
-    PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, Pose, PropertiesPatch, SurfaceAppearance,
+    PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, Pose, SurfaceAppearance,
 };
 
 use super::support::{
@@ -167,9 +167,6 @@ fn bench_mixed(group: &mut BenchmarkGroup<'_, WallTime>) {
                 let rotation = if alternate { Quat::IDENTITY } else { Quat::from_rotation_y(0.25) };
                 let pose = Pose { position: Some(position), rotation: Some(rotation) };
                 let (velocity, acceleration) = if alternate { (Vec3::Y, Vec3::Z) } else { (Vec3::X, Vec3::Y) };
-                let owner = Uuid::from_u128(u128::MAX - 2 - u128::from(round));
-                let creator = Uuid::from_u128(u128::MAX - 3 - u128::from(round));
-
                 for row in &scene.rows {
                     let _ =
                         black_box(scene.world.observe_object(observation_with_pose(*row, duplicate_pose)).expect("duplicate observation"));
@@ -187,21 +184,6 @@ fn bench_mixed(group: &mut BenchmarkGroup<'_, WallTime>) {
                     let mut patch = ObjectPatch::new(source(row.region, row.order), row.local_id);
                     patch.linear_motion = LinearMotion { velocity: Some(velocity), acceleration: Some(acceleration) };
                     let _ = black_box(scene.world.patch_object(patch).expect("motion update"));
-                }
-                for row in &scene.rows {
-                    let entity = scene.world.entity(row.id).expect("object identity");
-                    let target = scene.world.object_binding_target(entity).expect("current object binding");
-                    let _ = black_box(
-                        scene
-                            .world
-                            .patch_properties(
-                                source(row.region, row.order),
-                                target,
-                                row.id,
-                                PropertiesPatch { owner_id: Some(owner), creator_id: Some(creator) },
-                            )
-                            .expect("property update"),
-                    );
                 }
                 for row in &scene.rows {
                     let mut patch = ObjectPatch::new(source(row.region, row.order - 1), row.local_id);

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::identity::WorldId;
 use crate::mutation::facet::{FacetChanges, FacetSet, FacetUpdates};
-use crate::object::components::{Fenced, ObjectProperties};
+use crate::object::components::Fenced;
 use crate::{Entity, Kind, LocalAddress, ObjectMedia, Parent, Region};
 use crate::{ObjectOrdering, ObjectRecord, ObjectState};
 
@@ -108,14 +108,7 @@ impl ObjectStore {
         self.remove_region_id(address.region(), id);
     }
 
-    pub(crate) fn commit(
-        &mut self,
-        entity: Entity,
-        state: ObjectState,
-        facets: Option<FacetChanges>,
-        properties: Option<ObjectProperties>,
-        ordering: ObjectOrdering,
-    ) {
+    pub(crate) fn commit(&mut self, entity: Entity, state: ObjectState, facets: Option<FacetChanges>, ordering: ObjectOrdering) {
         let (id, previous) = {
             let record = self.object_record(entity).expect("mutation target is live");
             (record.id, record.state.binding.address)
@@ -140,15 +133,6 @@ impl ObjectStore {
         }
         if let Some(facets) = facets {
             facets.apply(&mut self.ecs, entity.0);
-        }
-        if let Some(properties) = properties {
-            if properties.is_empty() {
-                if self.ecs.satisfies::<&ObjectProperties>(entity.0) {
-                    self.ecs.remove_one::<ObjectProperties>(entity.0).expect("properties component is present");
-                }
-            } else {
-                self.ecs.insert_one(entity.0, properties).expect("properties mutation target is live");
-            }
         }
     }
 
@@ -190,27 +174,10 @@ impl ObjectStore {
         FacetSet::read(self.ecs.entity(entity).expect("facet read target is live"), updates, reset)
     }
 
-    pub(crate) fn properties(&self, entity: hecs::Entity) -> ObjectProperties {
-        self.ecs
-            .entity(entity)
-            .expect("properties read target is live")
-            .get::<&ObjectProperties>()
-            .map(|properties| *properties)
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn removal_data(&mut self, entity: hecs::Entity) -> (Uuid, Kind, ObjectState, ObjectProperties, usize) {
-        let (record, properties, object_media) = self
-            .ecs
-            .query_one_mut::<(&ObjectRecord, Option<&ObjectProperties>, Option<&Fenced<Arc<ObjectMedia>>>)>(entity)
-            .expect("every object has a record");
-        (
-            record.id,
-            record.kind,
-            record.state,
-            properties.copied().unwrap_or_default(),
-            object_media.and_then(|component| component.value.as_deref()).map_or(0, ObjectMedia::retained_bytes),
-        )
+    pub(crate) fn removal_data(&mut self, entity: hecs::Entity) -> (Uuid, ObjectState, usize) {
+        let (record, object_media) =
+            self.ecs.query_one_mut::<(&ObjectRecord, Option<&Fenced<Arc<ObjectMedia>>>)>(entity).expect("every object has a record");
+        (record.id, record.state, object_media.and_then(|component| component.value.as_deref()).map_or(0, ObjectMedia::retained_bytes))
     }
 
     pub(crate) fn objects(&self) -> QueryBorrow<'_, (hecs::Entity, &ObjectRecord)> {

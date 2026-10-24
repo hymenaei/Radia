@@ -13,22 +13,7 @@ use std::num::NonZeroU32;
 
 use uuid::Uuid;
 
-use crate::{Entity, LocalAddress, Region, UpdateAuthority};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PropertyProvenance {
-    pub region: Region,
-    pub authority: UpdateAuthority,
-    pub order: u64,
-    pub block_ordinal: u32,
-    pub source_sequence: u32,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PropertiesProvenance {
-    pub owner: Option<PropertyProvenance>,
-    pub creator: Option<PropertyProvenance>,
-}
+use crate::{Entity, LocalAddress};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Kind {
@@ -49,16 +34,4 @@ pub enum Parent {
     Root,
     Pending { address: LocalAddress, expected_uuid: Option<Uuid> },
     Resolved(Entity),
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct Properties {
-    pub owner_id: Option<Uuid>,
-    pub creator_id: Option<Uuid>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct PropertiesPatch {
-    pub owner_id: Option<Uuid>,
-    pub creator_id: Option<Uuid>,
 }

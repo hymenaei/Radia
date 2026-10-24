@@ -1,4 +1,4 @@
-use std::{future::Future, time::Duration};
+use std::future::Future;
 
 use futures::{FutureExt, pin_mut};
 use network::Event;
@@ -8,9 +8,6 @@ use crate::{
     world_reader::{ReadRequest, WorldReadHost},
 };
 
-const QUERY_STATE_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(25);
-const QUERY_STATE_MAINTENANCE_RETRY: Duration = Duration::from_millis(1);
-
 pub(super) enum Input {
     Cancelled,
     Event(Option<Event>),
@@ -18,15 +15,7 @@ pub(super) enum Input {
     Terrain(DecodedTerrain),
     Environment(Option<Box<Completion>>),
     WorldRead(ReadRequest),
-    QueryStateMaintenance,
-}
-
-pub(super) fn next_query_state_maintenance_delay(elapsed: Duration, has_dirty_pressure: bool) -> Duration {
-    if has_dirty_pressure {
-        return QUERY_STATE_MAINTENANCE_RETRY;
-    }
-    let elapsed_in_interval = Duration::from_nanos((elapsed.as_nanos() % QUERY_STATE_MAINTENANCE_INTERVAL.as_nanos()) as u64);
-    QUERY_STATE_MAINTENANCE_INTERVAL - elapsed_in_interval
+    CameraTick,
 }
 
 pub(super) async fn select_drain_input<E, M, T, N, C, Q>(
@@ -36,7 +25,7 @@ pub(super) async fn select_drain_input<E, M, T, N, C, Q>(
     terrain: T,
     environment: N,
     cancellation: C,
-    maintenance: Q,
+    camera_tick: Q,
 ) -> Input
 where
     E: Future<Output = Option<Event>>,
@@ -44,7 +33,7 @@ where
     T: Future<Output = DecodedTerrain>,
     N: Future<Output = Option<Box<Completion>>>,
     C: Future<Output = ()> + Clone,
-    Q: Future<Output = ()>,
+    Q: Future<Output = tokio::time::Instant>,
 {
     let event = event.fuse();
     let media = media.fuse();
@@ -57,13 +46,13 @@ where
         return Input::WorldRead(request);
     }
     let cancellation = cancellation.fuse();
-    let maintenance = maintenance.fuse();
+    let camera_tick = camera_tick.fuse();
     let input = {
         let read = reads.next_request().fuse();
-        pin_mut!(event, media, terrain, environment, cancellation, maintenance, read);
+        pin_mut!(event, media, terrain, environment, cancellation, camera_tick, read);
         futures::select_biased! {
             _ = cancellation => Input::Cancelled,
-            _ = maintenance => Input::QueryStateMaintenance,
+            _ = camera_tick => Input::CameraTick,
             decoded = terrain => Input::Terrain(decoded),
             result = media => Input::Media(result),
             completion = environment => Input::Environment(completion),

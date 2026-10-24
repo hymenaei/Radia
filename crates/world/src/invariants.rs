@@ -81,14 +81,8 @@ impl World {
         if !self.tombstones.invariants_hold(&self.regions, &self.store) {
             return Err("tombstone indexes are inconsistent");
         }
-        if let Some(error) = self.spatial.invariant_error(self) {
-            return Err(error);
-        }
         if !self.journal.invariants_hold() {
             return Err("change journal accounting is inconsistent");
-        }
-        if !self.recent.invariants_hold() || self.recent.iter_after(None).any(|(id, _)| self.entity(id).is_some()) {
-            return Err("recent-object indexes overlap live entities or are inconsistent");
         }
         Ok(())
     }

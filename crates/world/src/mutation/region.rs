@@ -56,14 +56,10 @@ impl World {
             self.regions.get_mut(&region).expect("active region remains registered").name_fence = name_fence;
             return Ok(RegionApplied::unchanged());
         }
-        let origin_changed = current.info.resolved_origin() != info.resolved_origin();
         self.ensure_revision_available()?;
         let current = self.regions.get_mut(&region).expect("active region remains registered");
         current.info = info;
         current.name_fence = name_fence;
-        if origin_changed {
-            self.mark_spatial_region(region);
-        }
         Ok(self.publish_region_patch(RegionUpdated(region)))
     }
     pub fn retire_region(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
@@ -78,7 +74,6 @@ impl World {
             let entity = self.entity(id).expect("object index contains only live entities");
             self.remove_entity(entity, RemovalCause::RegionRetired, None, &mut effects);
         }
-        self.recent.apply_batch(effects.recent);
         let removed_region = self.regions.remove(&region).expect("active region remains registered");
         self.terrain_patches -= removed_region.terrain.patch_count();
         self.environment_bytes -= removed_region.environment.source_bytes();

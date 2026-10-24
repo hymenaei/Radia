@@ -18,8 +18,8 @@ const LOG_DIR: &str = "target/logs";
 const MAX_LOGS: usize = 20;
 
 pub(crate) fn init() -> Option<WorkerGuard> {
-    let (json, guard, file_error) = match create_session_log() {
-        Ok(file) => {
+    let (json, guard, file_error, maintenance_warning) = match create_session_log() {
+        Ok((file, warning)) => {
             let (writer, guard) = tracing_appender::non_blocking(file);
             let file_filter = EnvFilter::try_from_env("FILE_LOG").unwrap_or_else(|_| EnvFilter::new("trace"));
             let json = fmt::layer()
@@ -29,9 +29,9 @@ pub(crate) fn init() -> Option<WorkerGuard> {
                 .with_line_number(true)
                 .with_writer(writer)
                 .with_filter(file_filter);
-            (Some(json), Some(guard), None)
+            (Some(json), Some(guard), None, warning)
         }
-        Err(error) => (None, None, Some(error)),
+        Err(error) => (None, None, Some(error), None),
     };
 
     let console_filter = EnvFilter::try_from_env("LOG").unwrap_or_else(|_| EnvFilter::new("warn,viewer=info"));
@@ -55,6 +55,9 @@ pub(crate) fn init() -> Option<WorkerGuard> {
     if let Some(error) = file_error {
         tracing::warn!(%error, "Could not create session log; continuing with console logging");
     }
+    if let Some(warning) = maintenance_warning {
+        tracing::warn!(%warning, "Could not maintain session log links or prune old logs");
+    }
 
     let default_hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -71,7 +74,7 @@ pub(crate) fn init() -> Option<WorkerGuard> {
     guard
 }
 
-fn create_session_log() -> io::Result<std::fs::File> {
+fn create_session_log() -> io::Result<(fs::File, Option<String>)> {
     let dir = Path::new(LOG_DIR);
     fs::create_dir_all(dir)?;
 
@@ -91,16 +94,21 @@ fn create_session_log() -> io::Result<std::fs::File> {
 
     let latest = dir.join("latest.jsonl");
 
+    let mut warnings = Vec::new();
     match fs::remove_file(&latest) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+        Err(error) => warnings.push(format!("Could not remove the latest session log link: {error}")),
     }
 
-    fs::hard_link(&path, &latest)?;
-    prune_logs(dir)?;
+    if let Err(error) = fs::hard_link(&path, &latest) {
+        warnings.push(format!("Could not create the latest session log link: {error}"));
+    }
+    if let Err(error) = prune_logs(dir) {
+        warnings.push(format!("Could not prune old session logs: {error}"));
+    }
 
-    Ok(file)
+    Ok((file, (!warnings.is_empty()).then(|| warnings.join("; "))))
 }
 
 fn prune_logs(dir: &Path) -> io::Result<()> {

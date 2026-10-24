@@ -1,4 +1,9 @@
-use super::support::*;
+use super::support::{
+    AgentHandedOff, Ambiguous, AmbiguousOrder, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, HashSet, IgnoredStale, Introduced,
+    InvalidValue, KindMismatch, LinearMotion, Local, Object, ObjectPatch, Ordered, Parent, ParentCycle, Pending, Pose, PropertiesPatch,
+    Quat, Region, RegionInfo, Removed, Resolved, Root, TombstoneRecorded, Unchanged, UpdateSource, Updated, Vec3, World, WorldLimits,
+    address, limits, local_id, object, patch_properties_current, source, uuid, with_region,
+};
 
 #[test]
 fn object_count_tracks_live_objects() {

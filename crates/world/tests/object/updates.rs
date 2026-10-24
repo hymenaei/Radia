@@ -1,4 +1,9 @@
-use super::support::*;
+use super::support::{
+    Ambiguous, AmbiguousOrder, AngularVelocity, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, FieldRejectionReason, IgnoredStale,
+    Introduced, InvalidRotation, KindMismatch, LinearMotion, Object, ObjectObservation, ObjectPatch, Pose, PropertiesPatch, Quat, Region,
+    Removed, Root, Scale, Unchanged, Unknown, UnknownObject, UntrustedSource, UpdateSource, Updated, Uuid, Vec3, address, local_id, object,
+    ordered, patch_properties_current, source, untracked, uuid, with_region,
+};
 
 #[test]
 fn all_invalid_patch_is_a_noop() {

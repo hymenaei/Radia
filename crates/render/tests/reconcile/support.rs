@@ -6,7 +6,7 @@ pub(super) use std::{
 
 pub(super) use assets::{Priority, Request, mesh::Mesh};
 pub(super) use math::{DVec3, Quat, Vec3};
-pub(super) use proptest::prelude::*;
+pub(super) use proptest::prelude::{ProptestConfig, prop, prop_assert_eq, proptest};
 pub(super) use render::scene::{
     AssetChange, AssetRequest, AssetTicket, Budget, Camera, Detail, EnvironmentProperty, EnvironmentPush, MeshJob, Placement, PreparedMesh,
     ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, RecoveryReason, SceneView, Status, SurfaceKind,

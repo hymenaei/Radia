@@ -1,4 +1,4 @@
-use math::{normal_matrix, DVec3, Frustum, Mat4, Vec3};
+use math::{DVec3, Frustum, Mat4, Vec3, normal_matrix};
 
 use super::{Instance, TRANSFORM_BYTES};
 use crate::{material::FaceParams, pipeline::INSTANCE_BYTES, scene::Camera};

@@ -3,7 +3,10 @@ use render::material::{AlphaBehavior, FaceMaterial, Resolution};
 use test_support::texture::{GRAY_4096_J2C, RGBA_J2C};
 use world::{FaceAppearance, PbrAlphaMode, PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, SurfaceAppearance};
 
-use super::*;
+use super::support::{
+    AssetId, Budget, Camera, DVec3, FieldUpdate, Instant, NonZeroU32, ObjectPatch, ParentUpdate, Pose, Priority, ReconcileStep, Reconciler,
+    Request, Uuid, Vec3, add, camera, prepared_asset, settle_materials, source, world,
+};
 
 fn color_image(face: &FaceMaterial) -> &TextureHandle {
     face.base_color_texture.as_ref().expect("expected a texture binding").image().expect("expected a usable image")

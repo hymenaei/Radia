@@ -1,4 +1,11 @@
-use super::support::*;
+use super::support::{
+    Appearance, AssetId, Avatar, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance,
+    FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, IgnoredStale, Introduced, MAX_AVATAR_TEXTURE_SLOTS,
+    MAX_PBR_MATERIAL_BINDINGS, MediaEntry, Object, ObjectMediaUpdate, ObjectPatch, PbrMaterialAssignments, PbrMaterialAssignmentsError,
+    PropertiesPatch, Quat, Region, Root, Shape, SitTarget, SurfaceAppearance, SurfaceAppearanceError, Unchanged, Unknown, UntrustedSource,
+    Updated, Uuid, Vec3, address, local_id, mesh_shape, object, patch_properties_current, pbr_materials, sculpt_shape, source, surface,
+    untracked, uuid, with_region,
+};
 
 #[test]
 fn shape_and_appearance_are_independent() {

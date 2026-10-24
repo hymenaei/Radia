@@ -1,4 +1,9 @@
-use super::support::*;
+use super::support::{
+    AmbiguousOrder, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, FieldRejectionReason, HashSet, IgnoredStale, Introduced,
+    InvalidValue, Local, Object, ObjectPatch, Parent, ParentCycle, ParentDependsOnRejectedParent, Pending, Pose, PropertiesPatch, Quat,
+    Region, Removed, Resolved, Root, SitTarget, Unchanged, UnknownObject, UntrustedSource, UpdateSource, Updated, Vec3, World, address,
+    limits, local_id, object, patch_properties_current, source, untracked, uuid, with_region,
+};
 
 #[test]
 fn self_parented_introduction_is_atomic() {

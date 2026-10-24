@@ -1,4 +1,4 @@
-use proptest::prelude::*;
+use proptest::prelude::{prop, prop_assert, prop_assert_eq, proptest};
 
 use super::*;
 

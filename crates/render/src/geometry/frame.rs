@@ -4,7 +4,7 @@ use std::{
 };
 
 use assets::Priority;
-use math::{flips_winding, Frustum, Quat, Vec3};
+use math::{Frustum, Quat, Vec3, flips_winding};
 use wgpu::{CommandEncoder, Device};
 
 use super::{FramePreparation, FramePreparationKey, GeometryRenderer, Instance, MAX_INSTANCES, PickFace, PrepareTimes, ShadingMode, Stats};

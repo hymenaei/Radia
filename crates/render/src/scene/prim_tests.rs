@@ -2,7 +2,7 @@ use std::{f32::consts::PI, sync::atomic::AtomicBool};
 
 use assets::mesh::{MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh};
 use math::{Vec2, Vec3};
-use proptest::prelude::*;
+use proptest::prelude::{ProptestConfig, prop, prop_assert, prop_assert_eq, proptest};
 use world::PrimShape;
 
 use super::{Detail, MeshBuildError, tessellate};

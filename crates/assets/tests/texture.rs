@@ -5,7 +5,7 @@ use assets::{
     Budget, ColorSpace, Content, Failure, Image, Kind, LoadJob, PixelAlpha, PixelFormat, Priority, Request, Resource, Status, Store,
 };
 use test_support::texture::{
-    GRAY_4096_J2C, GRAY_ALPHA_J2C, GRAY_ALPHA_RAW, GRAY_J2C, RGB_J2C, RGB_RAW, RGBA_J2C, RGBA_JP2, RGBA_LOSSY_J2C,
+    GRAY_4096_J2C, GRAY_ALPHA_J2C, GRAY_ALPHA_RAW, GRAY_J2C, GRAY_RAW, RGB_J2C, RGB_RAW, RGBA_J2C, RGBA_JP2, RGBA_LOSSY_J2C,
     RGBA_LOSSY_RAW, RGBA_RAW,
 };
 use utils::AssetId;

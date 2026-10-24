@@ -23,14 +23,16 @@ const MAX_FAVORITE_NAME_BYTES: usize = 512;
 const MAX_REGION_NAME_BYTES: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum FavoriteStoreError {
+pub enum FavoriteStoreError {
     DataDirectoryUnavailable,
     Read { path: PathBuf, detail: String },
     FileTooLarge { path: PathBuf },
     InvalidFile { path: PathBuf, detail: String },
     InvalidStoredValues { path: PathBuf, reason: &'static str },
     InvalidValuesForSave(&'static str),
+    InvalidSessionValues(&'static str),
     InvalidRefreshedValues(&'static str),
+    SessionStoreTooLarge,
     MissingParentDirectory,
     CreateDirectory { path: PathBuf, detail: String },
     Encode(String),
@@ -51,9 +53,11 @@ impl Display for FavoriteStoreError {
                 write!(formatter, "Saved login locations at {} are invalid: {reason}.", path.display())
             }
             Self::InvalidValuesForSave(reason) => write!(formatter, "Could not save login locations: {reason}."),
+            Self::InvalidSessionValues(reason) => write!(formatter, "Could not remember this account: {reason}."),
             Self::InvalidRefreshedValues(reason) => {
                 write!(formatter, "Second Life returned favorite landmarks that cannot be stored: {reason}.")
             }
+            Self::SessionStoreTooLarge => formatter.write_str("Remembering this account exceeds the 4 MiB login-locations storage limit."),
             Self::MissingParentDirectory => formatter.write_str("Login locations need a parent directory."),
             Self::CreateDirectory { path, detail } => write!(formatter, "Could not create {}: {detail}", path.display()),
             Self::Encode(detail) => write!(formatter, "Could not encode favorite landmarks: {detail}"),
@@ -67,6 +71,7 @@ impl Display for FavoriteStoreError {
 
 impl std::error::Error for FavoriteStoreError {}
 
+#[derive(Debug)]
 enum StorageError {
     InvalidValues(&'static str),
     Encode(String),
@@ -119,7 +124,22 @@ impl FavoriteStore {
         self.agents.iter().find(|agent| agent.grid == grid && agent.username == username).map(|agent| agent.agent_id)
     }
 
-    pub fn remember_agent(&mut self, grid: Grid, agent_id: Uuid, username: &str) -> bool {
+    pub fn remember_agent(&mut self, grid: Grid, agent_id: Uuid, username: &str) -> Result<bool, FavoriteStoreError> {
+        let mut next_store = self.clone();
+        let changed = next_store.remember_agent_unchecked(grid, agent_id, username);
+        if !changed {
+            return Ok(false);
+        }
+        next_store.encode_for_storage().map_err(|error| match error {
+            StorageError::InvalidValues(reason) => FavoriteStoreError::InvalidSessionValues(reason),
+            StorageError::Encode(detail) => FavoriteStoreError::Encode(detail),
+            StorageError::TooLarge => FavoriteStoreError::SessionStoreTooLarge,
+        })?;
+        *self = next_store;
+        Ok(true)
+    }
+
+    fn remember_agent_unchecked(&mut self, grid: Grid, agent_id: Uuid, username: &str) -> bool {
         let grid_key = StoredGrid::from(grid);
         let username = normalize_username(username);
         if username.is_empty() {
@@ -147,12 +167,26 @@ impl FavoriteStore {
         changed
     }
 
-    pub fn replace_favorites(&mut self, grid: Grid, agent_id: Uuid, username: &str, favorites: Vec<FavoriteLocation>) {
+    pub fn replace_favorites(
+        &mut self,
+        grid: Grid,
+        agent_id: Uuid,
+        username: &str,
+        favorites: Vec<FavoriteLocation>,
+    ) -> Result<(), FavoriteStoreError> {
+        let mut next_store = self.clone();
         let grid_key = StoredGrid::from(grid);
-        self.remember_agent(grid, agent_id, username);
-        if let Some(agent) = self.agents.iter_mut().find(|agent| agent.grid == grid_key && agent.agent_id == agent_id) {
+        next_store.remember_agent_unchecked(grid, agent_id, username);
+        if let Some(agent) = next_store.agents.iter_mut().find(|agent| agent.grid == grid_key && agent.agent_id == agent_id) {
             agent.favorites = favorites;
         }
+        next_store.encode_for_storage().map_err(|error| match error {
+            StorageError::InvalidValues(reason) => FavoriteStoreError::InvalidRefreshedValues(reason),
+            StorageError::Encode(detail) => FavoriteStoreError::Encode(detail),
+            StorageError::TooLarge => FavoriteStoreError::RefreshedStoreTooLarge,
+        })?;
+        *self = next_store;
+        Ok(())
     }
 }
 
@@ -210,14 +244,7 @@ pub(crate) fn apply_favorites_refresh(
 ) -> Result<(), FavoriteStoreError> {
     let favorites = refresh.map_err(FavoriteStoreError::Favorites)?;
     validate_favorites(&favorites).map_err(FavoriteStoreError::InvalidRefreshedValues)?;
-    let mut next_store = store.clone();
-    next_store.replace_favorites(grid, agent_id, username, favorites.clone());
-    next_store.encode_for_storage().map_err(|error| match error {
-        StorageError::InvalidValues(reason) => FavoriteStoreError::InvalidRefreshedValues(reason),
-        StorageError::Encode(detail) => FavoriteStoreError::Encode(detail),
-        StorageError::TooLarge => FavoriteStoreError::RefreshedStoreTooLarge,
-    })?;
-    *store = next_store;
+    store.replace_favorites(grid, agent_id, username, favorites.clone())?;
     *current_favorites = favorites;
     Ok(())
 }
@@ -295,8 +322,8 @@ mod tests {
     use crate::inventory::{FavoriteLocation, favorites::FavoritesError};
 
     use super::{
-        AgentFavorites, FavoriteStore, FavoriteStoreError, MAX_FAVORITE_STORE_BYTES, MAX_FAVORITES_PER_AGENT, StoredGrid,
-        apply_favorites_refresh, load_from, login_locations_path_under, save_to,
+        AgentFavorites, FavoriteStore, FavoriteStoreError, MAX_FAVORITE_STORE_BYTES, MAX_FAVORITES_PER_AGENT, MAX_STORED_AGENTS,
+        StoredGrid, apply_favorites_refresh, load_from, login_locations_path_under, save_to,
     };
 
     #[test]
@@ -309,8 +336,10 @@ mod tests {
         let agni_favorites = vec![FavoriteLocation { name: "Sandbox".into(), region_name: "Test Region".into(), x: 128, y: 64, z: 23 }];
         let aditi_favorites = vec![FavoriteLocation { name: "Home".into(), region_name: "Beta Region".into(), x: 1, y: 2, z: 3 }];
 
-        favorites.replace_favorites(Grid::Agni, agni_agent_id, "Example", agni_favorites.clone());
-        favorites.replace_favorites(Grid::Aditi, aditi_agent_id, "Example Resident", aditi_favorites.clone());
+        favorites.replace_favorites(Grid::Agni, agni_agent_id, "Example", agni_favorites.clone()).expect("replace Agni favorites");
+        favorites
+            .replace_favorites(Grid::Aditi, aditi_agent_id, "Example Resident", aditi_favorites.clone())
+            .expect("replace Aditi favorites");
         save_to(&path, &favorites).expect("save favorites");
 
         let reloaded = load_from(&path).expect("reload login locations");
@@ -325,7 +354,7 @@ mod tests {
         let agent_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
         let saved = vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
         let mut store = FavoriteStore::default();
-        store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone());
+        store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone()).expect("replace saved favorites");
         save_to(&path, &store).expect("save known-good favorite snapshot");
         let mut current_favorites = saved.clone();
 
@@ -356,7 +385,7 @@ mod tests {
         let agent_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
         let saved = vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
         let mut store = FavoriteStore::default();
-        store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone());
+        store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone()).expect("replace saved favorites");
         let mut current_favorites = saved.clone();
         let oversized =
             vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }; MAX_FAVORITES_PER_AGENT + 1];
@@ -375,7 +404,7 @@ mod tests {
         let agent_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
         let saved = vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
         let mut store = FavoriteStore::default();
-        store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone());
+        store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone()).expect("replace saved favorites");
         save_to(&path, &store).expect("save known-good favorite snapshot");
         let mut current_favorites = saved.clone();
         let oversized = vec![FavoriteLocation { name: "x".repeat(513), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
@@ -387,6 +416,28 @@ mod tests {
         assert_eq!(store.favorites_for(Grid::Agni, agent_id), saved);
         save_to(&path, &store).expect("rejected refresh must leave a savable snapshot");
         assert_eq!(load_from(&path).expect("reload known-good snapshot").favorites_for(Grid::Agni, agent_id), saved);
+    }
+
+    #[test]
+    fn account_limit_keeps_store_savable() {
+        let test_directory = tempdir().expect("create temporary login locations directory");
+        let path = login_locations_path_under(test_directory.path());
+        let mut store = FavoriteStore::default();
+        for account in 0..MAX_STORED_AGENTS {
+            store
+                .remember_agent(Grid::Agni, Uuid::from_u128(account as u128 + 1), &format!("Account {account}"))
+                .expect("remember account within limit");
+        }
+        let before = store.encode_for_storage().expect("encode store at account limit");
+
+        let error = store
+            .remember_agent(Grid::Agni, Uuid::from_u128(MAX_STORED_AGENTS as u128 + 1), "New Account")
+            .expect_err("a new account must not exceed the store limit");
+
+        assert_eq!(error, FavoriteStoreError::InvalidSessionValues("too many saved accounts"));
+        assert_eq!(store.encode_for_storage().expect("encode unchanged store"), before);
+        save_to(&path, &store).expect("save store after rejected account");
+        assert_eq!(load_from(&path).expect("reload store after rejected account").agents.len(), MAX_STORED_AGENTS);
     }
 
     #[test]

@@ -56,19 +56,23 @@ mod tests {
         let path = test_directory.path().join("favorites.json");
 
         let mut old_store = FavoriteStore::default();
-        old_store.replace_favorites(
-            Grid::Agni,
-            AGENT_ID,
-            "Example Resident",
-            vec![FavoriteLocation { name: "Old".into(), region_name: "Old Region".into(), x: 1, y: 2, z: 3 }],
-        );
+        old_store
+            .replace_favorites(
+                Grid::Agni,
+                AGENT_ID,
+                "Example Resident",
+                vec![FavoriteLocation { name: "Old".into(), region_name: "Old Region".into(), x: 1, y: 2, z: 3 }],
+            )
+            .expect("replace old favorites");
         let mut new_store = FavoriteStore::default();
-        new_store.replace_favorites(
-            Grid::Agni,
-            AGENT_ID,
-            "Example Resident",
-            vec![FavoriteLocation { name: "Newest".into(), region_name: "New Region".into(), x: 4, y: 5, z: 6 }],
-        );
+        new_store
+            .replace_favorites(
+                Grid::Agni,
+                AGENT_ID,
+                "Example Resident",
+                vec![FavoriteLocation { name: "Newest".into(), region_name: "New Region".into(), x: 4, y: 5, z: 6 }],
+            )
+            .expect("replace new favorites");
 
         let (old_result, new_result) = futures::executor::block_on(async {
             let lock = write_lock();

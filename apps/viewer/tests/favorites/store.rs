@@ -10,8 +10,8 @@ fn store_scopes_agents_and_reassigns_usernames() {
     let aditi_favorites = vec![FavoriteLocation { name: "Home".into(), region_name: "Aditi region".into(), x: 1, y: 2, z: 3 }];
     let mut store = FavoriteStore::default();
 
-    store.replace_favorites(Grid::Agni, agni_agent, "  Example  ", agni_favorites.clone());
-    store.replace_favorites(Grid::Aditi, aditi_agent, "Example Resident", aditi_favorites.clone());
+    store.replace_favorites(Grid::Agni, agni_agent, "  Example  ", agni_favorites.clone()).expect("replace Agni favorites");
+    store.replace_favorites(Grid::Aditi, aditi_agent, "Example Resident", aditi_favorites.clone()).expect("replace Aditi favorites");
 
     assert_eq!(store.favorites_for(Grid::Agni, agni_agent), agni_favorites);
     assert_eq!(store.favorites_for(Grid::Aditi, aditi_agent), aditi_favorites);
@@ -19,12 +19,12 @@ fn store_scopes_agents_and_reassigns_usernames() {
     assert_eq!(store.agent_id_for_username(Grid::Agni, "EXAMPLE resident"), Some(agni_agent));
     assert_eq!(store.agent_id_for_username(Grid::Aditi, "example"), Some(aditi_agent));
 
-    assert!(store.remember_agent(Grid::Agni, agni_agent, "Renamed Account"));
+    assert!(store.remember_agent(Grid::Agni, agni_agent, "Renamed Account").expect("remember renamed account"));
     assert_eq!(store.favorites_for(Grid::Agni, agni_agent), agni_favorites);
     assert_eq!(store.agent_id_for_username(Grid::Agni, "Example"), None);
 
     let replacement_agent = Uuid::from_u128(3);
-    assert!(store.remember_agent(Grid::Agni, replacement_agent, "Renamed Account"));
+    assert!(store.remember_agent(Grid::Agni, replacement_agent, "Renamed Account").expect("remember replacement account"));
     assert_eq!(store.agent_id_for_username(Grid::Agni, "Renamed Account"), Some(replacement_agent));
     assert_eq!(store.favorites_for(Grid::Agni, agni_agent), agni_favorites);
     assert!(store.favorites_for(Grid::Agni, replacement_agent).is_empty());

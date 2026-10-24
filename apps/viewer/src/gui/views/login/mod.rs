@@ -501,7 +501,14 @@ impl LoginScreen {
         tracing::info!(grid = %session.grid.label(), simulator = %session.simulator_address, "connected to simulator");
 
         let mut warnings = self.credential_warning.take().map(|warning| warning.to_string()).into_iter().collect::<Vec<_>>();
-        let identity_changed = self.favorite_store.remember_agent(session.grid, session.agent_id, &self.username.read(cx).value());
+        let identity_changed = match self.favorite_store.remember_agent(session.grid, session.agent_id, &self.username.read(cx).value()) {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::warn!(%error, "could not remember favorite account");
+                self.favorite_storage_warning = Some(FavoriteWarning::Storage(error));
+                false
+            }
+        };
         self.favorite_locations = self.favorite_store.favorites_for(session.grid, session.agent_id).to_vec();
         if identity_changed && self.favorite_store_loaded {
             self.favorite_storage_warning = None;

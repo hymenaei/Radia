@@ -13,7 +13,7 @@ use tokio::{
     task::JoinSet,
     time,
 };
-use tracing::Instrument;
+use tracing::{Instrument, Span};
 
 use super::{
     budget::{
@@ -89,6 +89,7 @@ pub(super) enum Command {
         names: Vec<String>,
         reply: oneshot::Sender<Result<AdmittedCapabilities, CapabilityFailure>>,
         deadline: RequestDeadline,
+        span: Span,
         _permit: OwnedSemaphorePermit,
     },
     Post {
@@ -97,6 +98,7 @@ pub(super) enum Command {
         max_response_bytes: usize,
         reply: oneshot::Sender<Result<AdmittedResponse, CapabilityFailure>>,
         deadline: RequestDeadline,
+        span: Span,
         _permit: OwnedSemaphorePermit,
     },
     GetBytes {
@@ -104,6 +106,7 @@ pub(super) enum Command {
         max_response_bytes: usize,
         reply: oneshot::Sender<Result<AdmittedResponse, CapabilityFailure>>,
         deadline: RequestDeadline,
+        span: Span,
         _permit: OwnedSemaphorePermit,
     },
 }
@@ -250,10 +253,13 @@ pub(super) async fn run(
         let seed = seed.clone();
         let session_closed = session_closed.clone();
         let status = status.clone();
+        let span = match &command {
+            Command::RequestCapabilities { span, .. } | Command::Post { span, .. } | Command::GetBytes { span, .. } => span.clone(),
+        };
         requests.spawn(
             async move {
                 match command {
-                    Command::RequestCapabilities { names, mut reply, deadline, _permit } => {
+                    Command::RequestCapabilities { names, mut reply, deadline, _permit, .. } => {
                         let result = tokio::select! {
                             biased;
                             _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
@@ -273,7 +279,7 @@ pub(super) async fn run(
                         });
                         let _ = reply.send(result);
                     }
-                    Command::Post { url, body, max_response_bytes, mut reply, deadline, _permit } => {
+                    Command::Post { url, body, max_response_bytes, mut reply, deadline, _permit, .. } => {
                         let result = tokio::select! {
                             biased;
                             _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
@@ -290,7 +296,7 @@ pub(super) async fn run(
                         let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
                         let _ = reply.send(result);
                     }
-                    Command::GetBytes { url, max_response_bytes, mut reply, deadline, _permit } => {
+                    Command::GetBytes { url, max_response_bytes, mut reply, deadline, _permit, .. } => {
                         let result = tokio::select! {
                             biased;
                             _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
@@ -308,7 +314,7 @@ pub(super) async fn run(
                     }
                 }
             }
-            .in_current_span(),
+            .instrument(span),
         );
     }
 

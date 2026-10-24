@@ -9,7 +9,7 @@ use tokio::{
     task::{AbortHandle, JoinError, JoinHandle},
     time,
 };
-use tracing::Instrument;
+use tracing::{Instrument, Span};
 
 use super::{
     budget::{
@@ -142,10 +142,13 @@ impl Client {
         permit: OwnedSemaphorePermit,
     ) -> Result<HashMap<String, CapabilityUrl>, Error> {
         let (reply, response) = oneshot::channel();
-        time::timeout_at(deadline.at, self.commands.send(Command::RequestCapabilities { names, reply, deadline, _permit: permit }))
-            .await
-            .map_err(|_| deadline.error())?
-            .map_err(|_| Error::CapabilitySessionClosed)?;
+        time::timeout_at(
+            deadline.at,
+            self.commands.send(Command::RequestCapabilities { names, reply, deadline, span: Span::current(), _permit: permit }),
+        )
+        .await
+        .map_err(|_| deadline.error())?
+        .map_err(|_| Error::CapabilitySessionClosed)?;
         let response = time::timeout_at(deadline.at, response)
             .await
             .map_err(|_| deadline.error())?
@@ -205,7 +208,7 @@ impl Client {
         let (reply, response) = oneshot::channel();
         time::timeout_at(
             deadline.at,
-            self.commands.send(Command::Post { url, body, max_response_bytes, reply, deadline, _permit: permit }),
+            self.commands.send(Command::Post { url, body, max_response_bytes, reply, deadline, span: Span::current(), _permit: permit }),
         )
         .await
         .map_err(|_| deadline.error())?
@@ -283,10 +286,13 @@ impl Client {
         permit: OwnedSemaphorePermit,
     ) -> Result<AdmittedResponse, Error> {
         let (reply, response) = oneshot::channel();
-        time::timeout_at(deadline.at, self.commands.send(Command::GetBytes { url, max_response_bytes, reply, deadline, _permit: permit }))
-            .await
-            .map_err(|_| deadline.error())?
-            .map_err(|_| Error::CapabilitySessionClosed)?;
+        time::timeout_at(
+            deadline.at,
+            self.commands.send(Command::GetBytes { url, max_response_bytes, reply, deadline, span: Span::current(), _permit: permit }),
+        )
+        .await
+        .map_err(|_| deadline.error())?
+        .map_err(|_| Error::CapabilitySessionClosed)?;
         time::timeout_at(deadline.at, response)
             .await
             .map_err(|_| deadline.error())?

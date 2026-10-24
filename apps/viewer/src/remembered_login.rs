@@ -94,7 +94,7 @@ mod backend {
                 Ok(_) => panic!("keyring access failure must be reported"),
             };
 
-            assert!(matches!(&error, CredentialStoreError::Open(_)));
+            std::assert_matches!(&error, CredentialStoreError::Open(_));
             assert!(error.to_string().starts_with("Could not open Windows Credential Manager:"));
         }
     }

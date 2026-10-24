@@ -1,4 +1,4 @@
-#[path = "weights.rs"]
+#[path = "pacing_weights.rs"]
 mod weights;
 
 use std::{

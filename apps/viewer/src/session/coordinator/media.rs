@@ -307,7 +307,8 @@ mod tests {
             }),
         );
         let input =
-            select_drain_input(&mut reads, ready(Some(event)), media.next_result(), pending(), pending(), pending(), pending()).await;
+            select_drain_input(&mut reads, ready(Some(event)), media.next_result(), pending(), pending(), pending(), pending(), pending())
+                .await;
         let input::Input::Event(Some(event)) = input else { panic!("network intake continues after media failure") };
         let _ = apply_world_event(&mut world, &event).expect("object removal is applied");
         assert!(world.world().object(target.binding.entity()).is_none());
@@ -320,10 +321,12 @@ mod tests {
             pending(),
             pending(),
             ready(tokio::time::Instant::now()),
+            pending(),
         )
         .await;
         let input::Input::CameraTick = input else { panic!("ready camera tick was not selected") };
-        let input = select_drain_input(&mut reads, pending(), media.next_result(), pending(), pending(), ready(()), pending()).await;
+        let input =
+            select_drain_input(&mut reads, pending(), media.next_result(), pending(), pending(), ready(()), pending(), pending()).await;
         let input::Input::Cancelled = input else { panic!("cancellation was not selected") };
     }
 
@@ -394,6 +397,7 @@ mod tests {
                     &mut reads,
                     std::future::ready(Some(Event::SimulatorConnected { simulator_id, region_handle: None, endpoint })),
                     media.next(),
+                    std::future::pending(),
                     std::future::pending(),
                     std::future::pending(),
                     std::future::pending(),

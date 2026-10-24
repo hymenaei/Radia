@@ -1,14 +1,8 @@
-use std::{
-    collections::HashMap,
-    future::{Future, pending},
-    mem::size_of,
-    sync::{Arc, Mutex, PoisonError},
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, future::Future, mem::size_of, time::Duration};
 
-use futures::{FutureExt, channel::mpsc, pin_mut, stream::StreamExt};
+use futures::{FutureExt, future::BoxFuture};
 use network::{
-    AgentSession, Delivery, Error,
+    Delivery, Error,
     Error::{
         CommandQueueFull, SessionClosed, SimulatorCommandQueueFull, SimulatorConnectionClosed, SimulatorNotReady, SimulatorSend,
         SimulatorUnavailable,
@@ -17,6 +11,7 @@ use network::{
 };
 use protocol::lludp::{Message, Packet};
 use protocol::messages::{CacheMissType::Full, ObjectRequest, RequestAgentData, RequestMultipleObjects};
+use tokio::time::Instant;
 use world::LocalAddress;
 
 const RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -34,9 +29,9 @@ const MAX_RECOVERY_REQUEST_BYTES: usize = 2 * 1024;
 const RECOVERY_ENTRY_BYTES: usize = size_of::<(LocalAddress, RecoveryEntry)>() + 64;
 
 #[derive(Clone, Copy, Debug)]
-struct ScheduledRecovery {
-    key: LocalAddress,
-    simulator_id: SimulatorId,
+pub(super) struct ScheduledRecovery {
+    pub(super) key: LocalAddress,
+    pub(super) simulator_id: SimulatorId,
     token: u64,
     agent_data: RequestAgentData,
     retry: RecoveryRetryState,
@@ -45,6 +40,10 @@ struct ScheduledRecovery {
 impl ScheduledRecovery {
     fn new(simulator_id: SimulatorId, token: u64, agent_data: RequestAgentData, address: LocalAddress, now: Instant) -> Self {
         Self { key: address, simulator_id, token, agent_data, retry: RecoveryRetryState::new(now) }
+    }
+
+    pub(super) fn is_exhausted(&self) -> bool {
+        self.retry.is_exhausted()
     }
 }
 
@@ -257,143 +256,155 @@ impl RecoveryScheduler {
     }
 }
 
-pub(super) fn schedule_recovery_requests(
-    targets: Vec<(Option<SimulatorId>, LocalAddress)>,
-    updated: Vec<LocalAddress>,
-    session: Option<&AgentSession>,
-    queue: &Mutex<RecoveryScheduler>,
-    wake_sender: &mut mpsc::Sender<()>,
-) {
-    if targets.is_empty() && updated.is_empty() {
-        return;
+pub(super) enum RecoveryCompletion {
+    Deadline { aged_out: Vec<ScheduledRecovery>, due: Vec<ScheduledRecovery> },
+    Send { recoveries: Vec<ScheduledRecovery>, result: Result<(), Error>, completed_at: Instant },
+}
+
+pub(super) struct OversizedRecoveryRequest {
+    pub(super) recoveries: Vec<ScheduledRecovery>,
+}
+
+struct PendingRecoverySend {
+    recoveries: Vec<ScheduledRecovery>,
+    future: BoxFuture<'static, Result<(), Error>>,
+}
+
+pub(super) struct RecoveryIntake {
+    scheduler: RecoveryScheduler,
+    next_send_at: Option<Instant>,
+    in_flight: Option<PendingRecoverySend>,
+}
+
+impl RecoveryIntake {
+    pub(super) fn new() -> Self {
+        Self { scheduler: RecoveryScheduler::new(), next_send_at: None, in_flight: None }
     }
-    let simulator = targets.first().and_then(|(simulator, _)| simulator.map(SimulatorId::get));
-    let region = targets.first().map(|(_, address)| address.region().get());
-    let agent_data = session.map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
-    let now = Instant::now();
-    let mut dropped = 0;
-    let overflow_warning = {
-        let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
+
+    pub(super) fn schedule(
+        &mut self,
+        targets: Vec<(Option<SimulatorId>, LocalAddress)>,
+        updated: Vec<LocalAddress>,
+        agent_data: Option<RequestAgentData>,
+    ) {
+        if targets.is_empty() && updated.is_empty() {
+            return;
+        }
+        let simulator = targets.first().and_then(|(simulator, _)| simulator.map(SimulatorId::get));
+        let region = targets.first().map(|(_, address)| address.region().get());
+        let now = Instant::now();
+        let mut dropped = 0;
         for address in updated {
-            queue.cancel(address);
+            self.scheduler.cancel(address);
         }
         for (simulator_id, address) in targets {
-            if queue.is_degraded(address) {
+            if self.scheduler.is_degraded(address) {
                 continue;
             }
             let Some(simulator_id) = simulator_id else {
-                queue.mark_degraded(address, None);
+                self.scheduler.mark_degraded(address, None);
                 dropped += 1;
                 continue;
             };
             let Some(agent_data) = agent_data else {
-                queue.mark_degraded(address, Some(simulator_id));
+                self.scheduler.mark_degraded(address, Some(simulator_id));
                 dropped += 1;
                 continue;
             };
-            match queue.schedule(simulator_id, agent_data, address, now) {
+            match self.scheduler.schedule(simulator_id, agent_data, address, now) {
                 Some(_) => {}
                 None => {
-                    queue.mark_degraded(address, Some(simulator_id));
+                    self.scheduler.mark_degraded(address, Some(simulator_id));
                     dropped += 1;
                 }
             }
         }
-        (dropped > 0).then(|| queue.record_overflow(dropped, now)).flatten()
-    };
-    if let Some(dropped) = overflow_warning {
-        tracing::warn!(simulator, region, dropped, "some object recovery targets could not be queued");
+        if dropped > 0
+            && let Some(dropped) = self.scheduler.record_overflow(dropped, now)
+        {
+            tracing::warn!(simulator, region, dropped, "some object recovery targets could not be queued");
+        }
     }
-    match wake_sender.try_send(()) {
-        Ok(()) => {}
-        Err(error) if error.is_full() => {}
-        Err(error) => tracing::trace!(%error, "object recovery receiver closed"),
+
+    pub(super) fn cancel_simulator(&mut self, simulator_id: SimulatorId) {
+        self.scheduler.cancel_simulator(simulator_id);
     }
-}
 
-pub(super) async fn run_recovery_retries(
-    mut wake_receiver: mpsc::Receiver<()>,
-    queue: Arc<Mutex<RecoveryScheduler>>,
-    session_handle: SessionHandle,
-    cancellation: impl Future<Output = ()> + Clone + Send + 'static,
-) {
-    use Delivery::Reliable;
+    pub(super) fn cancel(&mut self) {
+        self.in_flight = None;
+        self.scheduler.entries.clear();
+    }
 
-    let mut next_send_at = None;
-    loop {
+    pub(super) async fn next_completion(&mut self) -> RecoveryCompletion {
+        if self.in_flight.is_some() {
+            let result = self.in_flight.as_mut().expect("in-flight recovery send").future.as_mut().await;
+            let completed_at = Instant::now();
+            let send = self.in_flight.take().expect("in-flight recovery send");
+            self.next_send_at = Some(completed_at + RECOVERY_REQUEST_INTERVAL);
+            return RecoveryCompletion::Send { recoveries: send.recoveries, result, completed_at };
+        }
+
         let now = Instant::now();
-        let queue_deadline = recovery_deadline(&queue);
-        let deadline = queue_deadline.map(|deadline| next_send_at.map_or(deadline, |send_at| deadline.max(send_at)));
-        let wait = deadline.map_or(RECOVERY_IDLE_WAIT, |deadline| deadline.saturating_duration_since(now));
-        let can_wake_early = next_send_at.is_none_or(|send_at| now >= send_at);
-        let timer = tokio::time::sleep(wait).fuse();
-        let wake = async { if can_wake_early { wake_receiver.next().await } else { pending::<Option<()>>().await } }.fuse();
-        let cancelled = cancellation.clone().fuse();
-        pin_mut!(timer, wake, cancelled);
-        futures::select! {
-            _ = cancelled => break,
-            _ = timer => {},
-            wake = wake => if wake.is_none() { break; },
-        }
+        let deadline = self
+            .scheduler
+            .next_deadline()
+            .map(|deadline| self.next_send_at.map_or(deadline, |send_at| deadline.max(send_at)))
+            .unwrap_or(now + RECOVERY_IDLE_WAIT);
+        tokio::time::sleep_until(deadline).await;
+        let now = Instant::now();
+        RecoveryCompletion::Deadline { aged_out: self.scheduler.take_expired(now), due: self.scheduler.take_due(now) }
+    }
 
-        let aged_out = take_expired_recoveries(&queue, Instant::now());
-        warn_unrecovered("age_limit", &aged_out);
-
-        let due = take_due_recoveries(&queue, Instant::now());
-        if due.is_empty() {
-            continue;
-        }
-        let (exhausted, recoveries): (Vec<_>, Vec<_>) = due.into_iter().partition(|recovery| recovery.retry.is_exhausted());
-        degrade_recoveries(&queue, &exhausted);
-        warn_unrecovered("send_limit", &exhausted);
-        let Some(first) = recoveries.first() else {
-            continue;
-        };
+    pub(super) fn start_send(
+        &mut self,
+        session_handle: &SessionHandle,
+        recoveries: Vec<ScheduledRecovery>,
+    ) -> Result<(), OversizedRecoveryRequest> {
+        let Some(first) = recoveries.first().copied() else { return Ok(()) };
+        assert!(self.in_flight.is_none(), "recovery sends are serialized");
         let simulator_id = first.simulator_id;
         let addresses = recoveries.iter().map(|recovery| recovery.key).collect::<Vec<_>>();
         let request = recovery_request(first.agent_data, &addresses);
         let packet_size = Packet::new(0, Message::RequestMultipleObjects(request.clone())).encode().map(|packet| packet.len());
         if !packet_size.is_ok_and(|size| size <= MAX_RECOVERY_REQUEST_BYTES) {
-            degrade_recoveries(&queue, &recoveries);
-            let region = first.key.region().get();
-            tracing::error!(simulator = simulator_id.get(), region, "object recovery request exceeded its byte budget");
-            continue;
+            return Err(OversizedRecoveryRequest { recoveries });
         }
+        let session_handle = session_handle.clone();
+        self.start_send_future(recoveries, async move { session_handle.send_to(simulator_id, request, Delivery::Reliable).await });
+        Ok(())
+    }
 
-        let send = session_handle.send_to(simulator_id, request, Reliable).fuse();
-        let cancelled = cancellation.clone().fuse();
-        pin_mut!(send, cancelled);
-        let result = futures::select! {
-            result = send => Some(result),
-            _ = cancelled => None,
-        };
-        let Some(result) = result else { return };
-        let now = Instant::now();
-        next_send_at = Some(now + RECOVERY_REQUEST_INTERVAL);
-
-        match result {
-            Ok(()) => {
-                mark_recoveries_sent(&queue, &recoveries, now);
-            }
-            Err(error) if retryable_send_error(&error) => {
-                defer_recoveries(&queue, &recoveries, now);
-                let region = first.key.region().get();
-                tracing::debug!(simulator = simulator_id.get(), region, %error, "object recovery send deferred");
-            }
-            Err(error) => {
-                if simulator_lost_error(&error) {
-                    queue.lock().unwrap_or_else(PoisonError::into_inner).degrade_simulator(simulator_id);
-                } else {
-                    degrade_recoveries(&queue, &recoveries);
-                }
-                let region = first.key.region().get();
-                tracing::warn!(simulator = simulator_id.get(), region, %error, "could not request object updates");
-            }
+    pub(super) fn mark_sent(&mut self, recoveries: &[ScheduledRecovery], now: Instant) {
+        for recovery in recoveries {
+            self.scheduler.mark_sent(*recovery, now);
         }
+    }
+
+    pub(super) fn defer(&mut self, recoveries: &[ScheduledRecovery], now: Instant) {
+        for recovery in recoveries {
+            self.scheduler.defer(*recovery, now);
+        }
+    }
+
+    pub(super) fn degrade_recoveries(&mut self, recoveries: &[ScheduledRecovery]) {
+        for recovery in recoveries {
+            self.scheduler.degrade(*recovery);
+        }
+    }
+
+    pub(super) fn degrade_simulator(&mut self, simulator_id: SimulatorId) {
+        self.scheduler.degrade_simulator(simulator_id);
+    }
+
+    fn start_send_future<F>(&mut self, recoveries: Vec<ScheduledRecovery>, future: F)
+    where
+        F: Future<Output = Result<(), Error>> + Send + 'static,
+    {
+        self.in_flight = Some(PendingRecoverySend { recoveries, future: future.boxed() });
     }
 }
 
-fn warn_unrecovered(reason: &'static str, recoveries: &[ScheduledRecovery]) {
+pub(super) fn warn_unrecovered(reason: &'static str, recoveries: &[ScheduledRecovery]) {
     if recoveries.is_empty() {
         return;
     }
@@ -411,44 +422,11 @@ fn warn_unrecovered(reason: &'static str, recoveries: &[ScheduledRecovery]) {
     );
 }
 
-fn recovery_deadline(queue: &Mutex<RecoveryScheduler>) -> Option<Instant> {
-    queue.lock().unwrap_or_else(PoisonError::into_inner).next_deadline()
-}
-
-fn take_expired_recoveries(queue: &Mutex<RecoveryScheduler>, now: Instant) -> Vec<ScheduledRecovery> {
-    queue.lock().unwrap_or_else(PoisonError::into_inner).take_expired(now)
-}
-
-fn take_due_recoveries(queue: &Mutex<RecoveryScheduler>, now: Instant) -> Vec<ScheduledRecovery> {
-    queue.lock().unwrap_or_else(PoisonError::into_inner).take_due(now)
-}
-
-fn degrade_recoveries(queue: &Mutex<RecoveryScheduler>, recoveries: &[ScheduledRecovery]) {
-    let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
-    for recovery in recoveries {
-        queue.degrade(*recovery);
-    }
-}
-
-fn mark_recoveries_sent(queue: &Mutex<RecoveryScheduler>, recoveries: &[ScheduledRecovery], now: Instant) {
-    let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
-    for recovery in recoveries {
-        queue.mark_sent(*recovery, now);
-    }
-}
-
-fn defer_recoveries(queue: &Mutex<RecoveryScheduler>, recoveries: &[ScheduledRecovery], now: Instant) {
-    let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
-    for recovery in recoveries {
-        queue.defer(*recovery, now);
-    }
-}
-
-fn retryable_send_error(error: &Error) -> bool {
+pub(super) fn retryable_send_error(error: &Error) -> bool {
     matches!(error, CommandQueueFull | SimulatorCommandQueueFull | SimulatorNotReady | SimulatorSend(_))
 }
 
-fn simulator_lost_error(error: &Error) -> bool {
+pub(super) fn simulator_lost_error(error: &Error) -> bool {
     matches!(error, SessionClosed | SimulatorConnectionClosed | SimulatorUnavailable)
 }
 
@@ -459,24 +437,20 @@ pub(super) fn recovery_request(agent_data: RequestAgentData, addresses: &[LocalA
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashSet,
-        num::NonZeroU32,
-        sync::{Mutex, PoisonError},
-        time::{Duration, Instant},
-    };
+    use std::{collections::HashSet, num::NonZeroU32, time::Duration};
 
-    use futures::channel::mpsc;
-    use network::testing::simulator_id;
+    use network::{Error, testing::simulator_id};
     use protocol::lludp::{Message, Packet};
     use protocol::messages::{CacheMissType::Full, RequestAgentData};
     use uuid::Uuid;
     use world::{LocalAddress, Region};
 
     use super::{
-        MAX_RECOVERY_OBJECTS_PER_REQUEST, MAX_RECOVERY_REQUEST_BYTES, RECOVERY_ENTRY_BYTES, RECOVERY_MAX_AGE, RECOVERY_MAX_SENDS,
-        RECOVERY_RETRY_INTERVAL, RecoveryScheduler, recovery_request, schedule_recovery_requests,
+        MAX_RECOVERY_OBJECTS_PER_REQUEST, MAX_RECOVERY_REQUEST_BYTES, RECOVERY_ENTRY_BYTES, RECOVERY_IDLE_WAIT, RECOVERY_MAX_AGE,
+        RECOVERY_MAX_SENDS, RECOVERY_REQUEST_INTERVAL, RECOVERY_RETRY_INTERVAL, RecoveryCompletion, RecoveryIntake, RecoveryScheduler,
+        recovery_request,
     };
+    use tokio::time::Instant;
 
     fn address(region: u64, local_id: u32) -> LocalAddress {
         LocalAddress::new(Region::new(region), NonZeroU32::new(local_id).expect("nonzero local ID"))
@@ -585,16 +559,13 @@ mod tests {
         let target = address(simulator.get(), 9);
 
         for route in [Some(simulator), None] {
-            let mut scheduler = RecoveryScheduler::with_limits(1, RECOVERY_ENTRY_BYTES);
-            assert!(scheduler.schedule(simulator, agent_data(), target, Instant::now()).is_some());
-            let scheduler = Mutex::new(scheduler);
-            let (mut wake, _) = mpsc::channel(1);
+            let mut intake = RecoveryIntake::new();
+            assert!(intake.scheduler.schedule(simulator, agent_data(), target, Instant::now()).is_some());
 
-            schedule_recovery_requests(vec![(route, target)], vec![], None, &scheduler, &mut wake);
+            intake.schedule(vec![(route, target)], vec![], None);
 
-            let scheduler = scheduler.lock().unwrap_or_else(PoisonError::into_inner);
-            assert!(scheduler.next_deadline().is_none());
-            assert!(scheduler.is_degraded(target));
+            assert!(intake.scheduler.next_deadline().is_none());
+            assert!(intake.scheduler.is_degraded(target));
         }
     }
 
@@ -717,5 +688,82 @@ mod tests {
         let request = recovery_request(agent_data, &targets);
         let encoded = Packet::new(0, Message::RequestMultipleObjects(request)).encode().expect("bounded recovery packet");
         assert!(encoded.len() <= MAX_RECOVERY_REQUEST_BYTES);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pacing_delays_next_simulator_batch() {
+        let first = simulator_id();
+        let second = simulator_id();
+        let mut intake = RecoveryIntake::new();
+        intake.schedule(vec![(Some(first), address(first.get(), 8)), (Some(second), address(second.get(), 9))], vec![], Some(agent_data()));
+
+        let RecoveryCompletion::Deadline { due, aged_out } = intake.next_completion().await else { panic!("first batch is due") };
+        assert!(aged_out.is_empty());
+        assert_eq!(due.len(), 1);
+        let (send, sent) = futures::channel::oneshot::channel();
+        intake.start_send_future(due, async move { sent.await.expect("send result") });
+        let completion = {
+            let send_completion = intake.next_completion();
+            tokio::pin!(send_completion);
+            assert!(futures::poll!(send_completion.as_mut()).is_pending());
+            send.send(Ok(())).expect("send is pending");
+            send_completion.await
+        };
+        let RecoveryCompletion::Send { recoveries, result, completed_at } = completion else { panic!("send completion is returned") };
+        std::assert_matches!(result, Ok(()));
+        let sent_simulator = recoveries[0].simulator_id;
+        intake.mark_sent(&recoveries, completed_at);
+
+        let next_batch = intake.next_completion();
+        tokio::pin!(next_batch);
+        assert!(futures::poll!(next_batch.as_mut()).is_pending());
+        tokio::time::advance(RECOVERY_REQUEST_INTERVAL - Duration::from_millis(1)).await;
+        assert!(futures::poll!(next_batch.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(1)).await;
+
+        let RecoveryCompletion::Deadline { due, aged_out } = next_batch.await else { panic!("paced batch is due") };
+        assert!(aged_out.is_empty());
+        assert_eq!(due.len(), 1);
+        assert_ne!(due[0].simulator_id, sent_simulator);
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_pending_send() {
+        struct DropSignal(Option<futures::channel::oneshot::Sender<()>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    sender.send(()).expect("drop signal receiver stays open");
+                }
+            }
+        }
+
+        let mut intake = RecoveryIntake::new();
+        let (signal, dropped) = futures::channel::oneshot::channel();
+        let signal = DropSignal(Some(signal));
+        intake.start_send_future(vec![], async move {
+            let _signal = signal;
+            futures::future::pending::<Result<(), Error>>().await
+        });
+
+        intake.cancel();
+
+        dropped.await.expect("cancellation drops the in-flight future");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_rechecks_after_idle_interval() {
+        let mut intake = RecoveryIntake::new();
+        let next = intake.next_completion();
+        tokio::pin!(next);
+        assert!(futures::poll!(next.as_mut()).is_pending());
+        tokio::time::advance(RECOVERY_IDLE_WAIT - Duration::from_millis(1)).await;
+        assert!(futures::poll!(next.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(1)).await;
+
+        let RecoveryCompletion::Deadline { aged_out, due } = next.await else { panic!("idle deadline is returned") };
+        assert!(aged_out.is_empty());
+        assert!(due.is_empty());
     }
 }

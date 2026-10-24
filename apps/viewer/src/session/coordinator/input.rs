@@ -4,7 +4,7 @@ use futures::{FutureExt, pin_mut};
 use network::Event;
 
 use crate::{
-    session::{environment::Completion, object_media::ObjectMediaResult, terrain::DecodedTerrain},
+    session::{environment::Completion, object_media::ObjectMediaResult, recovery::RecoveryCompletion, terrain::DecodedTerrain},
     world_reader::{ReadRequest, WorldReadHost},
 };
 
@@ -16,9 +16,10 @@ pub(super) enum Input {
     Environment(Option<Box<Completion>>),
     WorldRead(ReadRequest),
     CameraTick,
+    Recovery(RecoveryCompletion),
 }
 
-pub(super) async fn select_drain_input<E, M, T, N, C, Q>(
+pub(super) async fn select_drain_input<E, M, T, N, C, Q, R>(
     reads: &mut WorldReadHost,
     event: E,
     media: M,
@@ -26,6 +27,7 @@ pub(super) async fn select_drain_input<E, M, T, N, C, Q>(
     environment: N,
     cancellation: C,
     camera_tick: Q,
+    recovery: R,
 ) -> Input
 where
     E: Future<Output = Option<Event>>,
@@ -34,11 +36,13 @@ where
     N: Future<Output = Option<Box<Completion>>>,
     C: Future<Output = ()> + Clone,
     Q: Future<Output = tokio::time::Instant>,
+    R: Future<Output = RecoveryCompletion>,
 {
     let event = event.fuse();
     let media = media.fuse();
     let terrain = terrain.fuse();
     let environment = environment.fuse();
+    let recovery = recovery.fuse();
     if cancellation.clone().now_or_never().is_some() {
         return Input::Cancelled;
     }
@@ -49,13 +53,14 @@ where
     let camera_tick = camera_tick.fuse();
     let input = {
         let read = reads.next_request().fuse();
-        pin_mut!(event, media, terrain, environment, cancellation, camera_tick, read);
+        pin_mut!(event, media, terrain, environment, cancellation, camera_tick, read, recovery);
         futures::select_biased! {
             _ = cancellation => Input::Cancelled,
             _ = camera_tick => Input::CameraTick,
             decoded = terrain => Input::Terrain(decoded),
             result = media => Input::Media(result),
             completion = environment => Input::Environment(completion),
+            recovery = recovery => Input::Recovery(recovery),
             event = event => Input::Event(event),
             request = read => Input::WorldRead(request),
         }

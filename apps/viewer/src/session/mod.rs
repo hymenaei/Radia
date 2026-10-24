@@ -20,7 +20,7 @@ pub(crate) use coordinator::{
 pub(crate) use experience_environment::EnvironmentInbox;
 pub(crate) use inbound::{ChatMessage, display_message, format_avatar_name};
 pub(crate) use network::{Session, SessionHandle};
-pub(crate) use outbound::agent;
+pub(crate) use outbound::CameraUplink;
 pub(crate) use region_lookup::{RegionGridCell, RegionLookup, RegionLookupError, map_request_coordinates};
 
 #[cfg(all(test, any(target_os = "windows", target_os = "linux")))]

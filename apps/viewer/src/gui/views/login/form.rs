@@ -1,6 +1,4 @@
 use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px};
-#[cfg(target_os = "linux")]
-use gpui_component::StyledExt;
 use gpui_component::{
     Disableable, Icon, IconName, Theme,
     button::{Button, ButtonVariant, ButtonVariants as _},
@@ -10,10 +8,6 @@ use gpui_component::{
 };
 use network::Grid;
 
-#[cfg(target_os = "linux")]
-use crate::gui::components::window_chrome::linux_titlebar;
-#[cfg(target_os = "windows")]
-use crate::gui::components::window_chrome::windows_titlebar;
 use crate::remembered_login;
 
 use super::{
@@ -232,14 +226,10 @@ impl Render for LoginScreen {
         let theme = Theme::global(cx).colors;
         let content = div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground);
 
-        #[cfg(target_os = "windows")]
-        let content = content.child(windows_titlebar(window.is_maximized(), div().into_any_element(), div().into_any_element(), theme));
-
-        #[cfg(target_os = "linux")]
-        let content = {
-            let titlebar_content = div().text_sm().font_semibold().text_color(theme.foreground).child("Radia").into_any_element();
-            let titlebar_action = div().into_any_element();
-            if let Some(titlebar) = linux_titlebar(window, titlebar_content, titlebar_action) { content.child(titlebar) } else { content }
+        let content = if let Some(titlebar) = crate::gui::components::window_chrome::titlebar(window, None, theme) {
+            content.child(titlebar)
+        } else {
+            content
         };
 
         let login_body = div().id("login-scroll").flex_1().min_h_0().overflow_y_scroll().child(
@@ -271,14 +261,13 @@ impl Render for LoginScreen {
                     .child(self.render_submit_button(can_submit, cx)),
             ),
         );
+        let login_screen = content.child(login_body);
 
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        if self.active_session.as_ref().is_some_and(super::ActiveSession::is_ready) {
-            content.child(div().flex_1().min_h_0().child(self.chat_screen.clone()))
-        } else {
-            content.child(login_body)
-        }
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        content.child(login_body)
+        let chat_content = div().flex_1().min_h_0().child(self.chat_screen.clone()).into_any_element();
+        crate::gui::scene::login_content(
+            self.active_session.as_ref().is_some_and(super::ActiveSession::is_ready),
+            login_screen.into_any_element(),
+            chat_content,
+        )
     }
 }

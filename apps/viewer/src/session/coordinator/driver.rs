@@ -1,26 +1,15 @@
-use std::{
-    future::pending,
-    ops::ControlFlow,
-    sync::{Arc, Mutex, PoisonError},
-    time::{Duration, Instant},
-};
+use std::{future::pending, ops::ControlFlow};
 
 use futures::{
     FutureExt,
-    channel::{mpsc as futures_mpsc, oneshot},
+    channel::oneshot,
     executor::block_on,
     future::{BoxFuture, Shared},
     pin_mut,
 };
-use math::DVec3;
-use network::{AgentSession, CoverageLoss, CoverageSource, Delivery, Event, Grid, PacketOrder, SimulatorId, capabilities::Client};
-use protocol::{lludp::Message, login::ResponseData};
-use render::scene::{Camera, EnvironmentPush};
-use tokio::{
-    runtime::Handle,
-    sync::{mpsc, watch},
-    time::{Interval, MissedTickBehavior},
-};
+use network::{AgentSession, CoverageLoss, CoverageSource, Event, Grid, PacketOrder, SimulatorId, capabilities::Client};
+use protocol::{lludp::Message, login::ResponseData, messages::RequestAgentData};
+use tokio::runtime::Handle;
 use tracing::Instrument;
 use world::UpdateSource;
 
@@ -36,20 +25,17 @@ use crate::{
     inventory::favorites::load_favorites,
     remembered_login::{self, RememberedLogin},
     session::{
-        RegionLookup, Session, SessionHandle, agent,
+        CameraUplink, RegionLookup, Session, SessionHandle,
         environment::{Completion, EnvironmentIntake},
-        experience_environment::{self, EnvironmentCommand, EnvironmentInbox},
+        experience_environment::{EnvironmentInbox, EnvironmentSender},
         inbound::object_media_requests,
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
-        recovery::{self, RecoveryScheduler},
+        recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error, warn_unrecovered},
         terrain::{DecodedTerrain, TerrainDecodeQueue},
         world::{IngestSummary, SessionWorld, viewer_world_limits},
     },
     world_reader::{ReadRequest, WorldReadHost},
 };
-
-const CAMERA_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
-const CAMERA_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 type Cancellation = Shared<BoxFuture<'static, ()>>;
 
@@ -72,7 +58,7 @@ struct SessionDriver {
     reads: WorldReadHost,
     terrain: TerrainDecodeQueue,
     environments: EnvironmentIntake,
-    environment_pushes: mpsc::Sender<EnvironmentCommand>,
+    environment_pushes: EnvironmentSender,
     environment_inbox: EnvironmentInbox,
     assets: AssetCoordinator,
     terrain_received: bool,
@@ -80,15 +66,10 @@ struct SessionDriver {
     handoff: WorldHandoff,
     active_session: Option<AgentSession>,
     active_login_data: Option<ResponseData>,
-    camera: watch::Sender<Option<Camera>>,
-    observations: watch::Receiver<Option<Camera>>,
-    last_camera: Option<(SimulatorId, DVec3, Camera)>,
-    camera_sent: Option<Instant>,
+    camera: CameraUplink,
     region_lookup: Option<RegionLookup>,
-    camera_tick: Interval,
     media: ObjectMediaIntake,
-    recovery_queue: Arc<Mutex<RecoveryScheduler>>,
-    recovery_wake: futures_mpsc::Sender<()>,
+    recovery: RecoveryIntake,
 }
 
 impl SessionDriver {
@@ -111,24 +92,9 @@ impl SessionDriver {
         let environments = EnvironmentIntake::new(runtime.clone());
         let (environment_pushes, environment_inbox) = EnvironmentInbox::channel();
         let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone());
-        let (camera, observations) = watch::channel(None);
+        let camera = CameraUplink::new();
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
-        let recovery_queue = Arc::new(Mutex::new(RecoveryScheduler::new()));
-        let (recovery_wake, recovery_wake_receiver) = futures_mpsc::channel(1);
-        drop(
-            runtime.spawn(
-                recovery::run_recovery_retries(
-                    recovery_wake_receiver,
-                    Arc::clone(&recovery_queue),
-                    session_handle.clone(),
-                    cancellation.clone(),
-                )
-                .in_current_span(),
-            ),
-        );
-
-        let mut camera_tick = tokio::time::interval(CAMERA_UPDATE_INTERVAL);
-        camera_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let recovery = RecoveryIntake::new();
 
         Self {
             session,
@@ -150,14 +116,9 @@ impl SessionDriver {
             active_session: None,
             active_login_data: None,
             camera,
-            observations,
-            last_camera: None,
-            camera_sent: None,
             region_lookup: None,
-            camera_tick,
             media,
-            recovery_queue,
-            recovery_wake,
+            recovery,
         }
     }
 
@@ -174,7 +135,8 @@ impl SessionDriver {
                 self.terrain.next_completion(),
                 self.environments.next_completion(),
                 self.cancellation.clone(),
-                self.camera_tick.tick(),
+                self.camera.next_tick(),
+                self.recovery.next_completion(),
             )
             .await;
             let flow = match input {
@@ -198,6 +160,10 @@ impl SessionDriver {
                 }
                 Input::CameraTick => {
                     self.handle_camera_tick();
+                    ControlFlow::Continue(())
+                }
+                Input::Recovery(completion) => {
+                    self.handle_recovery_completion(completion);
                     ControlFlow::Continue(())
                 }
             };
@@ -227,37 +193,12 @@ impl SessionDriver {
     }
 
     fn handle_camera_tick(&mut self) {
-        if let (Some(simulator), Some(session), Some(view)) = (self.primary_simulator, &self.active_session, *self.observations.borrow())
-            && let Some(origin) = self
-                .session_world
-                .region_for(simulator)
-                .and_then(|region| self.session_world.world().region(region))
-                .and_then(|info| info.resolved_origin())
-        {
-            let state = (simulator, origin, view);
-            let interval = if self.last_camera == Some(state) { CAMERA_HEARTBEAT_INTERVAL } else { CAMERA_UPDATE_INTERVAL };
-            let now = tokio::time::Instant::now().into_std();
-            if self.camera_sent.is_none_or(|sent| now.saturating_duration_since(sent) >= interval)
-                && let Some(update) = agent::camera(session.agent_id, session.session_id, view, origin)
-            {
-                self.camera_sent = Some(now);
-                match self.session_handle.send(update, Delivery::Unreliable) {
-                    Ok(()) => {
-                        if self
-                            .last_camera
-                            .is_none_or(|(previous, _, camera)| previous != simulator || camera.draw_distance() != view.draw_distance())
-                        {
-                            tracing::debug!(draw_distance = view.draw_distance(), "simulator viewing distance updated");
-                        }
-                        self.last_camera = Some(state);
-                    }
-                    Err(error) => {
-                        self.last_camera = None;
-                        tracing::debug!(%error, "camera update deferred");
-                    }
-                }
-            }
-        }
+        let simulator = self.primary_simulator;
+        let origin = simulator
+            .and_then(|simulator| self.session_world.region_for(simulator))
+            .and_then(|region| self.session_world.world().region(region))
+            .and_then(|info| info.resolved_origin());
+        self.camera.tick(&self.session_handle, simulator, self.active_session.as_ref(), origin);
     }
 
     fn handle_media_result(&mut self, result: Option<ObjectMediaResult>) {
@@ -308,13 +249,12 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
-                if let Some(region) = self.session_world.region_for(simulator_id) {
-                    let push = EnvironmentPush::Clear { experience: None, transition: Duration::ZERO };
-                    if let Err(error) = self.environment_pushes.try_send(EnvironmentCommand { region, push }) {
-                        tracing::error!(simulator = simulator_id.get(), region = region.get(), %error, "experience environment crossing reset could not be admitted");
-                        self.mailbox.publish(ViewerUpdate::Failed("The environment update queue is unavailable.".into()));
-                        return ControlFlow::Break(());
-                    }
+                if let Some(region) = self.session_world.region_for(simulator_id)
+                    && let Err(error) = self.environment_pushes.clear_region(region)
+                {
+                    tracing::error!(simulator = simulator_id.get(), region = region.get(), %error, "experience environment crossing reset could not be admitted");
+                    self.mailbox.publish(ViewerUpdate::Failed("The environment update queue is unavailable.".into()));
+                    return ControlFlow::Break(());
                 }
                 self.environments.simulator_promoted(
                     &mut self.session_world,
@@ -363,7 +303,7 @@ impl SessionDriver {
                     self.assets.retire(region);
                 }
                 self.handoff.simulator_disconnected(&mut self.session_world, simulator_id);
-                self.recovery_queue.lock().unwrap_or_else(PoisonError::into_inner).cancel_simulator(simulator_id);
+                self.recovery.cancel_simulator(simulator_id);
                 self.media.forget_simulator(simulator_id);
                 if Some(simulator_id) == self.primary_simulator {
                     self.primary_simulator = None;
@@ -453,38 +393,28 @@ impl SessionDriver {
         source: std::net::SocketAddr,
         message: Message,
     ) {
+        let region = self.session_world.region_for(simulator_id);
         if matches!(packet_order, PacketOrder::Ordered(_))
             && Some(simulator_id) == self.primary_simulator
-            && let (Some(agent), Some(region)) = (self.active_session.as_ref(), self.session_world.region_for(simulator_id))
+            && let (Some(agent), Some(region)) = (self.active_session.as_ref(), region)
+            && let Err(error) = self.environment_pushes.publish(&message, agent.agent_id, region, simulator_id)
         {
-            match experience_environment::decode(&message, agent.agent_id) {
-                Ok(Some(push)) => match self.environment_pushes.try_send(EnvironmentCommand { region, push }) {
-                    Ok(()) => {}
-                    Err(error) => {
-                        tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "experience environment push could not be admitted")
-                    }
-                },
-                Ok(None) => {}
-                Err(_) => tracing::debug!(simulator = simulator_id.get(), region = region.get(), "invalid experience environment push"),
-            }
+            tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "experience environment push could not be admitted");
         }
 
-        let media_requests = self
-            .session_world
-            .region_for(simulator_id)
-            .map(|region| object_media_requests(region, sequence, order_evidence(packet_order), &message))
-            .unwrap_or_default();
-        if let Some(region) = self.session_world.region_for(simulator_id) {
+        let media_requests =
+            region.map(|region| object_media_requests(region, sequence, order_evidence(packet_order), &message)).unwrap_or_default();
+        if let Some(region) = region {
             self.terrain.enqueue(&message, UpdateSource::new(region, sequence, order_evidence(packet_order), 0), &self.runtime);
         }
 
         let agent_id = self.active_session.as_ref().map(|session| session.agent_id);
+        let agent_data =
+            self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
         let result = {
-            let active_session = self.active_session.as_ref();
-            let recovery_queue = &self.recovery_queue;
-            let recovery_wake = &mut self.recovery_wake;
+            let recovery = &mut self.recovery;
             let mut on_object_chunk = |targets, updated| {
-                recovery::schedule_recovery_requests(targets, updated, active_session, recovery_queue, recovery_wake);
+                recovery.schedule(targets, updated, agent_data);
             };
             self.handoff
                 .apply_message_cooperatively(
@@ -509,17 +439,17 @@ impl SessionDriver {
             }
         }
 
-        if Some(simulator_id) == self.primary_simulator
-            && self.observations.borrow().is_none()
-            && let Message::AgentMovementComplete(movement) = &message
-            && let Some(session) = &self.active_session
-            && let Some(update) = agent::arrival(session.agent_id, session.session_id, movement)
-            && let Err(error) = self.session_handle.send(update, Delivery::Reliable)
-        {
-            tracing::debug!(%error, "arrival camera update deferred");
+        if let Message::AgentMovementComplete(movement) = &message {
+            self.camera.on_movement_complete(
+                &self.session_handle,
+                self.primary_simulator,
+                simulator_id,
+                self.active_session.as_ref(),
+                movement,
+            );
         }
         let scope = if Some(simulator_id) == self.primary_simulator { SimulatorScope::Primary } else { SimulatorScope::Neighbor };
-        let region_name = self.session_world.region_name(simulator_id);
+        let region_name = region.and_then(|region| self.session_world.world().region(region)).and_then(|info| info.name.as_deref());
         handle_simulator_message(
             scope,
             source,
@@ -548,7 +478,7 @@ impl SessionDriver {
         self.region_lookup = Some(lookup.clone());
         self.mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
             environments: self.environment_inbox.clone(),
-            camera: self.camera.clone(),
+            camera: self.camera.sender(),
             assets: self.assets.handle(),
             session: session.clone(),
             region_name: self.session_world.region_name(simulator_id).map(str::to_owned),
@@ -588,16 +518,56 @@ impl SessionDriver {
 
     fn process_ingest_summary(&mut self, simulator_id: SimulatorId, summary: IngestSummary) {
         summary.log_incomplete_data(simulator_id, self.session_world.region_for(simulator_id));
-        recovery::schedule_recovery_requests(
-            route_recovery_targets(&self.session_world, summary.recovery_targets()),
-            summary.recovery_cancellation_addresses().collect(),
-            self.active_session.as_ref(),
-            &self.recovery_queue,
-            &mut self.recovery_wake,
-        );
+        let targets = route_recovery_targets(&self.session_world, summary.recovery_targets());
+        let updated = summary.recovery_cancellation_addresses().collect();
+        let agent_data =
+            self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
+        self.recovery.schedule(targets, updated, agent_data);
+    }
+
+    fn handle_recovery_completion(&mut self, completion: RecoveryCompletion) {
+        match completion {
+            RecoveryCompletion::Deadline { aged_out, due } => {
+                warn_unrecovered("age_limit", &aged_out);
+                let (exhausted, recoveries): (Vec<_>, Vec<_>) = due.into_iter().partition(ScheduledRecovery::is_exhausted);
+                self.recovery.degrade_recoveries(&exhausted);
+                warn_unrecovered("send_limit", &exhausted);
+                if let Err(oversized) = self.recovery.start_send(&self.session_handle, recoveries) {
+                    self.recovery.degrade_recoveries(&oversized.recoveries);
+                    if let Some(first) = oversized.recoveries.first() {
+                        tracing::error!(
+                            simulator = first.simulator_id.get(),
+                            region = first.key.region().get(),
+                            "object recovery request exceeded its byte budget"
+                        );
+                    }
+                }
+            }
+            RecoveryCompletion::Send { recoveries, result, completed_at } => {
+                let Some(first) = recoveries.first() else { return };
+                let simulator_id = first.simulator_id;
+                let region = first.key.region().get();
+                match result {
+                    Ok(()) => self.recovery.mark_sent(&recoveries, completed_at),
+                    Err(error) if retryable_send_error(&error) => {
+                        self.recovery.defer(&recoveries, completed_at);
+                        tracing::debug!(simulator = simulator_id.get(), region, %error, "object recovery send deferred");
+                    }
+                    Err(error) => {
+                        if simulator_lost_error(&error) {
+                            self.recovery.degrade_simulator(simulator_id);
+                        } else {
+                            self.recovery.degrade_recoveries(&recoveries);
+                        }
+                        tracing::warn!(simulator = simulator_id.get(), region, %error, "could not request object updates");
+                    }
+                }
+            }
+        }
     }
 
     async fn finish(mut self) {
+        self.recovery.cancel();
         self.reads.finish();
         drop(self.environments);
         drop(self.terrain);

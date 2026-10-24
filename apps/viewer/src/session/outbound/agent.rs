@@ -43,12 +43,14 @@ fn update(agent_id: Uuid, session_id: Uuid, position: Vec3, direction: Vec3, far
 #[cfg(test)]
 mod tests {
     use protocol::lludp::{Message, Packet};
-    use std::time::Instant;
 
     use super::*;
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[test]
     fn camera_distance_reaches_simulator() {
+        use std::time::Instant;
+
         let view = crate::camera::OrbitCamera::new(DVec3::ZERO).scene_camera([1280, 720], Instant::now()).unwrap();
         assert_eq!(
             camera(Uuid::nil(), Uuid::nil(), view, DVec3::ZERO).unwrap().agent_data.far,

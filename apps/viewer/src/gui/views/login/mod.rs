@@ -1,5 +1,7 @@
 mod favorites;
 mod form;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+mod scene;
 mod spawn;
 
 use std::{
@@ -22,14 +24,12 @@ use self::{
 use crate::gui::views::chat::ChatScreen;
 use crate::inventory::{FavoriteLocation, favorite_store};
 use crate::{
-    asset_coordinator::AssetHandle,
     gui::window_geometry::observe,
     remembered_login::{self, CredentialStoreError, RememberedLogin},
     session::{
         AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, Session,
         SessionReadyUpdate, WriteLock, drain_session, write_lock,
     },
-    world_reader::WorldReader,
 };
 
 enum LoginPhase {
@@ -165,8 +165,6 @@ struct ActiveSession {
 
 struct ReadySession {
     session: AgentSession,
-    _world_reader: WorldReader,
-    _assets: AssetHandle,
 }
 
 impl ActiveSession {
@@ -543,7 +541,7 @@ impl LoginScreen {
         let username = self.username.read(cx).value();
         self.favorites.prepare_session(session.grid, session.agent_id, &username, Some(mailbox), cx);
         if let Some(active) = &mut self.active_session {
-            active.ready = Some(ReadySession { session: session.clone(), _world_reader: world_reader, _assets: assets });
+            active.ready = Some(ReadySession { session: session.clone() });
         }
         self.chat_screen.update(cx, |chat, cx| {
             chat.set_session(session.clone(), cx);
@@ -552,25 +550,11 @@ impl LoginScreen {
             }
         });
 
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        if crate::gui::start_scene(self.session_generation, cx)
-            && let Some(ready) = self.active_session.as_ref().and_then(|active| active.ready.as_ref())
-        {
-            crate::gui::connect_world(
-                self.session_generation,
-                crate::scene_feed::SceneSources { reader: ready._world_reader.clone(), environments, assets: ready._assets.clone() },
-                session.agent_id,
-                camera,
-                cx,
-            );
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        let _ = (camera, environments);
+        crate::gui::scene::start_session(self.session_generation, &world_reader, environments, &assets, session.agent_id, camera, cx);
     }
 
-    fn end_session(&mut self, error: String, cx: &mut Context<Self>) {
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
-        crate::gui::end_scene(self.session_generation, cx);
+    pub(crate) fn end_session(&mut self, error: String, cx: &mut Context<Self>) {
+        crate::gui::scene::end_session(self.session_generation, cx);
         tracing::warn!(%error, "viewer session ended after a failure");
         self.login_phase = LoginPhase::Idle;
         self.status.message = None;
@@ -580,22 +564,6 @@ impl LoginScreen {
         self.session_generation = self.session_generation.wrapping_add(1);
         self.chat_screen.update(cx, |chat, cx| chat.clear_session(cx));
         cx.notify();
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    pub(crate) fn scene_failed(&mut self, error: String, cx: &mut Context<Self>) {
-        tracing::error!(%error, "scene renderer stopped");
-        self.end_session("Unable to display the world.".into(), cx);
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    pub(crate) fn attach_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self._window_geometry_subscription = observe("login", window, cx);
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    pub(crate) fn chat_view(&self) -> gpui::Entity<ChatScreen> {
-        self.chat_screen.clone()
     }
 
     fn apply_favorites(&mut self, update: FavoritesUpdate, cx: &mut Context<Self>) {
@@ -647,9 +615,21 @@ mod tests {
     use super::LoginStatus;
     use crate::remembered_login::CredentialStoreError;
 
+    fn credential_error(detail: &str) -> CredentialStoreError {
+        #[cfg(target_os = "windows")]
+        {
+            CredentialStoreError::Open(detail.to_owned())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = detail;
+            CredentialStoreError::Unsupported
+        }
+    }
+
     #[test]
     fn visible_credential_warning_survives_reveal() {
-        let warning = CredentialStoreError::Save("keyring unavailable".into());
+        let warning = credential_error("keyring unavailable");
         let mut status = LoginStatus::default();
         status.show_credential_warning(Some(warning.clone()), true);
 
@@ -666,7 +646,7 @@ mod tests {
 
         assert_eq!(status.displayed(Vec::new(), false), Some("Loading saved login…".into()));
 
-        let warning = CredentialStoreError::Read("selected grid credential read failed".into());
+        let warning = credential_error("selected grid credential read failed");
         status.finish_credential_load(Some(warning.clone()));
 
         assert_eq!(status.displayed(Vec::new(), false), Some(warning.to_string()));

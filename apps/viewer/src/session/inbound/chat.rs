@@ -30,17 +30,17 @@ pub(crate) fn format_avatar_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use base::UUID;
     use math::Vec3;
     use protocol::{Audible, ChatSourceType, ChatType, messages::chat_from_simulator::ChatData};
+    use uuid::Uuid;
 
     use super::display_message;
 
     fn chat(from_name: &str, audible: Audible, chat_type: ChatType, message: &str) -> ChatData {
         ChatData {
             from_name: from_name.into(),
-            source_id: UUID::nil(),
-            owner_id: UUID::nil(),
+            source_id: Uuid::nil(),
+            owner_id: Uuid::nil(),
             source_type: ChatSourceType::Agent,
             chat_type,
             audible,

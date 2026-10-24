@@ -1,6 +1,7 @@
-use base::{AssetId, UUID};
 use llsd::{Limits, binary};
 use serde_json::{Map, Value};
+use utils::AssetId;
+use uuid::Uuid;
 
 use crate::Failure;
 
@@ -217,7 +218,7 @@ pub(crate) fn legacy(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
         _ => Err(Failure::Malformed),
     };
     let texture = |key| match fields.get(key) {
-        Some(llsd::Value::UUID(id)) => Ok(texture_ref(*id)),
+        Some(llsd::Value::Uuid(id)) => Ok(texture_ref(*id)),
         _ => Err(Failure::Malformed),
     };
     let Some(llsd::Value::Array(color)) = fields.get("SpecColor") else { return Err(Failure::Malformed) };
@@ -257,8 +258,8 @@ pub(crate) fn legacy(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
     }))
 }
 
-fn texture_ref(id: UUID) -> TextureRef {
-    if id.is_nil() || id == UUID::max() { TextureRef::Clear } else { TextureRef::Asset(AssetId::new(id)) }
+fn texture_ref(id: Uuid) -> TextureRef {
+    if id.is_nil() || id == Uuid::max() { TextureRef::Clear } else { TextureRef::Asset(AssetId::new(id)) }
 }
 
 fn object(value: &Value) -> Result<&Map<String, Value>, Failure> {
@@ -328,7 +329,7 @@ fn texture_info(root: &Map<String, Value>, value: &Value) -> Result<MaterialText
     let texture = object(index(root, "textures", info.get("index").ok_or(Failure::Malformed)?)?)?;
     let image = object(index(root, "images", texture.get("source").ok_or(Failure::Malformed)?)?)?;
     let uri = image.get("uri").and_then(Value::as_str).ok_or(Failure::Unsupported)?;
-    let id = UUID::parse_str(uri).map_err(|_| Failure::Unsupported)?;
+    let id = Uuid::parse_str(uri).map_err(|_| Failure::Unsupported)?;
     let mut result = MaterialTexture { texture: texture_ref(id), ..MaterialTexture::default() };
     if let Some(value) = texture.get("sampler") {
         result.sampler = sampler(index(root, "samplers", value)?)?;

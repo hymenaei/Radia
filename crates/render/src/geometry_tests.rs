@@ -86,25 +86,3 @@ fn resource_admission() {
     assert_eq!(memory.bytes.load(Ordering::Acquire), 0);
     assert_eq!(memory.depth.load(Ordering::Acquire), 0);
 }
-
-#[test]
-fn normal_transform() {
-    let rotation = Quat::from_rotation_z(0.3);
-    let scale = Vec3::new(-2.0, 3.0, 4.0);
-    let normal = normal_matrix(rotation, scale) * Vec3::new(1.0, 1.0, 0.0);
-    let tangent = rotation * (scale * Vec3::new(1.0, -1.0, 0.0));
-    assert!(normal.dot(tangent).abs() < 1e-5);
-    assert!((normal_matrix(Quat::IDENTITY, Vec3::splat(1e30)) * Vec3::X).is_finite());
-    assert_eq!(normal_matrix(Quat::IDENTITY, scale) * Vec3::X, -Vec3::X);
-}
-
-#[test]
-fn reflected_winding() {
-    for mask in 0..8 {
-        let scale = Vec3::from_array([0, 1, 2].map(|axis| if mask & (1 << axis) == 0 { 2.0 } else { -2.0 }));
-        let cross = (scale * Vec3::X).cross(scale * Vec3::Y);
-        let outward = normal_matrix(Quat::IDENTITY, scale) * Vec3::Z;
-        assert_eq!(flips_winding(scale), cross.dot(outward) < 0.0, "reflection mask {mask}");
-        assert_eq!(flips_winding(scale * 1e30), flips_winding(scale), "large finite scales must preserve winding");
-    }
-}

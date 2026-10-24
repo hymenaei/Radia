@@ -73,7 +73,7 @@ fn decode_material(fields: &Map) -> Result<GltfMaterialOverride, ()> {
             return Err(());
         }
         for (index, texture) in textures.iter().enumerate() {
-            let Value::UUID(texture) = texture else { return Err(()) };
+            let Value::Uuid(texture) = texture else { return Err(()) };
             material.textures[index] = Some(*texture);
         }
     }
@@ -149,8 +149,8 @@ fn number(value: &Value) -> Result<f32, ()> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use base::UUID;
     use llsd::{Value, notation};
+    use uuid::Uuid;
     use world::{GltfAlphaMode, GltfMaterialOverride};
 
     use protocol::messages::generic_streaming_message::MAX_DATA_BYTES;
@@ -213,7 +213,7 @@ mod tests {
         let bad_vector = material([("bc", Value::Array(vec![Value::Real(1.0)]))]);
         assert!(decode_payload(&payload(7, vec![Value::Integer(4)], vec![bad_vector])).is_err());
 
-        let too_many = material([("tex", Value::Array(vec![Value::UUID(UUID::nil()); 5]))]);
+        let too_many = material([("tex", Value::Array(vec![Value::Uuid(Uuid::nil()); 5]))]);
         assert!(decode_payload(&payload(7, vec![Value::Integer(4)], vec![too_many])).is_err());
     }
 

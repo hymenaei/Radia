@@ -3,8 +3,8 @@ use std::{
     num::{NonZeroU8, NonZeroU32},
 };
 
-use base::UUID;
 use math::{DVec3, Quat, Vec3};
+use uuid::Uuid;
 use world::{
     Appearance, Applied,
     ApplyOutcome::{Introduced, Removed, Updated},
@@ -36,14 +36,14 @@ fn world_limits() -> WorldLimits {
     }
 }
 
-fn uuid(value: u128) -> UUID {
-    UUID::from_u128(value)
+fn uuid(value: u128) -> Uuid {
+    Uuid::from_u128(value)
 }
 
 fn patch_properties_current(
     world: &mut World,
     source: UpdateSource,
-    id: UUID,
+    id: Uuid,
     patch: PropertiesPatch,
 ) -> Result<world::Applied, world::ApplyError> {
     let entity = world.entity(id).expect("property patch target is live");

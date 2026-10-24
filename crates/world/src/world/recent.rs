@@ -1,12 +1,10 @@
-//! Bounded metadata snapshots for removed objects, ordered by identity and expiry.
-
 use std::{
     collections::{BTreeMap, BTreeSet, Bound::Excluded, Bound::Unbounded},
     mem::size_of,
     time::{Duration, Instant},
 };
 
-use base::UUID;
+use uuid::Uuid;
 
 use super::WorldEntityRemovalReason;
 use crate::{AttachmentPoint, Kind, LocalAddress, Properties, PropertiesProvenance, WorldPose};
@@ -15,12 +13,11 @@ pub const RECENT_OBJECT_TTL: Duration = Duration::from_secs(5 * 60);
 pub const MAX_RECENT_OBJECTS: usize = 4096;
 pub const MAX_RECENT_OBJECT_BYTES: usize = 1024 * 1024;
 
-const RECENT_OBJECT_CHARGE: usize = size_of::<UUID>() + size_of::<RecentEntry>() + size_of::<(Instant, UUID)>() + 32;
+const RECENT_OBJECT_CHARGE: usize = size_of::<Uuid>() + size_of::<RecentEntry>() + size_of::<(Instant, Uuid)>() + 32;
 
-/// Bounded metadata retained after a live object leaves the World.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RecentObject {
-    pub id: UUID,
+    pub id: Uuid,
     pub kind: Kind,
     pub address: LocalAddress,
     pub attachment_point: Option<AttachmentPoint>,
@@ -36,10 +33,9 @@ pub(super) struct RecentEntry {
     expires_at: Instant,
 }
 
-/// Selects retained snapshots from one mutation, whose removed IDs are distinct.
 #[derive(Default)]
 pub(super) struct RecentBatch {
-    entries: BTreeMap<(Instant, UUID), RecentObject>,
+    entries: BTreeMap<(Instant, Uuid), RecentObject>,
 }
 
 impl RecentBatch {
@@ -58,8 +54,8 @@ impl RecentBatch {
 
 #[derive(Default)]
 pub(super) struct RecentStore {
-    by_id: BTreeMap<UUID, RecentEntry>,
-    by_expiry: BTreeSet<(Instant, UUID)>,
+    by_id: BTreeMap<Uuid, RecentEntry>,
+    by_expiry: BTreeSet<(Instant, Uuid)>,
     charged_bytes: usize,
 }
 
@@ -93,7 +89,7 @@ impl RecentStore {
         }
     }
 
-    pub(super) fn remove(&mut self, id: UUID) -> Option<RecentEntry> {
+    pub(super) fn remove(&mut self, id: Uuid) -> Option<RecentEntry> {
         let entry = self.by_id.remove(&id)?;
         let removed = self.by_expiry.remove(&(entry.expires_at, id));
         assert!(removed, "recent record is missing from its expiry index");
@@ -114,7 +110,7 @@ impl RecentStore {
         purged
     }
 
-    pub(super) fn iter_after(&self, after: Option<UUID>) -> impl Iterator<Item = (UUID, RecentEntry)> + '_ {
+    pub(super) fn iter_after(&self, after: Option<Uuid>) -> impl Iterator<Item = (Uuid, RecentEntry)> + '_ {
         let bounds = after.map_or((Unbounded, Unbounded), |id| (Excluded(id), Unbounded));
         self.by_id.range(bounds).map(|(id, entry)| (*id, *entry))
     }
@@ -124,7 +120,7 @@ impl RecentStore {
     }
 
     pub(super) fn next_expiry_after(&self, now: Instant) -> Option<Instant> {
-        self.by_expiry.range((Excluded((now, UUID::from_u128(u128::MAX))), Unbounded)).next().map(|(expires_at, _)| *expires_at)
+        self.by_expiry.range((Excluded((now, Uuid::from_u128(u128::MAX))), Unbounded)).next().map(|(expires_at, _)| *expires_at)
     }
 
     #[cfg(feature = "invariants")]
@@ -156,7 +152,7 @@ mod tests {
 
     fn object(id: u128) -> RecentObject {
         RecentObject {
-            id: UUID::from_u128(id),
+            id: Uuid::from_u128(id),
             kind: Kind::Object,
             address: LocalAddress::new(Region::new(1), std::num::NonZeroU32::new(id as u32).unwrap()),
             attachment_point: None,
@@ -184,7 +180,7 @@ mod tests {
             for id in (1..=count).rev() {
                 let now = start + Duration::from_secs(if tied_timestamps { 3 } else { (id % 7) as u64 });
                 let mut removed = object(id as u128);
-                removed.properties.owner_id = Some(UUID::from_u128(id as u128 + 1));
+                removed.properties.owner_id = Some(Uuid::from_u128(id as u128 + 1));
                 expected.insert(removed, now);
                 batch.push(removed, now);
                 assert!(batch.entries.len() <= capacity);
@@ -220,6 +216,6 @@ mod tests {
 
         assert_eq!(store.len(), 2);
         assert_eq!(store.charged_bytes(), RECENT_OBJECT_CHARGE * 2);
-        assert_eq!(store.iter_after(None).map(|(id, _)| id).collect::<Vec<_>>(), [UUID::from_u128(2), UUID::from_u128(3)]);
+        assert_eq!(store.iter_after(None).map(|(id, _)| id).collect::<Vec<_>>(), [Uuid::from_u128(2), Uuid::from_u128(3)]);
     }
 }

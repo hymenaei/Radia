@@ -32,7 +32,7 @@ pub fn generate(template: &Template) -> String {
     output.push_str("#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
     output.push_str("pub enum FieldKind {\n");
     output.push_str(
-        "    /// Boolean encoded as one byte; any nonzero byte decodes as true.\n    Bool,\n    /// 32-bit IEEE-754 float in little-endian order.\n    F32,\n    /// 64-bit IEEE-754 float in little-endian order.\n    F64,\n    /// Four IPv4 address octets in wire order.\n    IpAddr,\n    /// Two port bytes in wire order.\n    IpPort,\n    /// Field with no payload bytes.\n    Null,\n    /// Three little-endian `f32` quaternion components.\n    Quaternion,\n    /// 16-byte UUID in the wire byte order.\n    UUID,\n",
+        "    /// Boolean encoded as one byte; any nonzero byte decodes as true.\n    Bool,\n    /// 32-bit IEEE-754 float in little-endian order.\n    F32,\n    /// 64-bit IEEE-754 float in little-endian order.\n    F64,\n    /// Four IPv4 address octets in wire order.\n    IpAddr,\n    /// Two port bytes in wire order.\n    IpPort,\n    /// Field with no payload bytes.\n    Null,\n    /// Three little-endian `f32` quaternion components.\n    Quaternion,\n    /// 16-byte UUID in the wire byte order.\n    Uuid,\n",
     );
     output.push_str(
         "    /// Three little-endian `f32` components.\n    Vector3,\n    /// Three little-endian `f64` components.\n    Vector3d,\n    /// Four little-endian `f32` components.\n    Vector4,\n    S8,\n    S16,\n    S32,\n    S64,\n    U8,\n    U16,\n    U32,\n    U64,\n",
@@ -190,7 +190,7 @@ fn field_kind(kind: FieldKind) -> String {
         FieldKind::IpPort => "FieldKind::IpPort".into(),
         FieldKind::Null => "FieldKind::Null".into(),
         FieldKind::Quaternion => "FieldKind::Quaternion".into(),
-        FieldKind::UUID => "FieldKind::UUID".into(),
+        FieldKind::Uuid => "FieldKind::Uuid".into(),
         FieldKind::Vector3 => "FieldKind::Vector3".into(),
         FieldKind::Vector3d => "FieldKind::Vector3d".into(),
         FieldKind::Vector4 => "FieldKind::Vector4".into(),

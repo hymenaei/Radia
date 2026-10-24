@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
-use base::UUID;
 use llsd::{Binary, Date, Limits, URI, Value, binary, notation, xml};
 use proptest::prelude::*;
+use uuid::Uuid;
 
 const CASES: u32 = 96;
 
@@ -69,7 +69,7 @@ fn values() -> impl Strategy<Value = Value> {
         prop::collection::vec(any::<u8>(), 0..17).prop_map(|bytes| Value::Binary(Binary::from(bytes))),
         (-2_000_000_000i64..=2_000_000_000)
             .prop_filter_map("valid whole-second date", |seconds| Date::from_unix_seconds(seconds as f64).map(Value::Date)),
-        any::<[u8; 16]>().prop_map(|bytes| Value::UUID(UUID::from_bytes(bytes))),
+        any::<[u8; 16]>().prop_map(|bytes| Value::Uuid(Uuid::from_bytes(bytes))),
     ];
 
     leaves.prop_recursive(3, 32, 4, |inner| {

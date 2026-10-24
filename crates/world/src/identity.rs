@@ -1,9 +1,9 @@
-use base::UUID;
 use math::DVec3;
 use std::{
     num::NonZeroU32,
     sync::atomic::{AtomicU64, Ordering},
 };
+use uuid::Uuid;
 
 static NEXT_WORLD_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -44,7 +44,7 @@ pub struct LocalAddress {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectBindingTarget {
     pub(super) entity: Entity,
-    pub(super) id: UUID,
+    pub(super) id: Uuid,
     pub(super) address: LocalAddress,
     pub(super) address_generation: u64,
 }
@@ -54,7 +54,7 @@ impl ObjectBindingTarget {
         self.entity
     }
 
-    pub const fn object_id(self) -> UUID {
+    pub const fn object_id(self) -> Uuid {
         self.id
     }
 
@@ -96,7 +96,7 @@ impl RegionHandle {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RegionInfo {
-    pub region_id: Option<UUID>,
+    pub region_id: Option<Uuid>,
     pub handle: Option<RegionHandle>,
     pub name: Option<String>,
     pub origin: Option<DVec3>,

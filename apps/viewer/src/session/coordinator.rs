@@ -11,7 +11,6 @@ use std::{
 };
 
 use ::world::{Applied, Entity, LocalAddress, ObjectObservation, OrderEvidence, OrderEvidence::Ordered, RegionHandle, UpdateSource};
-use base::UUID;
 use futures::{
     FutureExt,
     channel::{mpsc, oneshot},
@@ -26,6 +25,7 @@ use protocol::lludp::Message;
 use scene::Camera;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
+use uuid::Uuid;
 
 use crate::{
     asset_coordinator::{AssetCoordinator, AssetHandle},
@@ -277,8 +277,8 @@ pub(crate) struct SessionReadyUpdate {
 
 pub(crate) struct FavoritesUpdate {
     pub(crate) grid: Grid,
-    pub(crate) agent_id: UUID,
-    pub(crate) session_id: UUID,
+    pub(crate) agent_id: Uuid,
+    pub(crate) session_id: Uuid,
     pub(crate) username: String,
     pub(crate) result: Result<Vec<FavoriteLocation>, String>,
 }
@@ -966,7 +966,7 @@ fn apply_world_event_with_handoff(
     world_primary: &mut Option<SimulatorId>,
     promoted_target: &mut Option<PendingWorldHandoff>,
     handoff_observations: &mut HashMap<SimulatorId, ObjectObservation>,
-    agent_id: Option<UUID>,
+    agent_id: Option<Uuid>,
 ) -> Option<(SimulatorId, IngestSummary)> {
     use Event::{SessionReady, SimulatorConnected, SimulatorDisconnected, SimulatorFailed, SimulatorMessage};
 
@@ -1018,7 +1018,7 @@ async fn apply_world_event_cooperatively(
     world_primary: &mut Option<SimulatorId>,
     promoted_target: &mut Option<PendingWorldHandoff>,
     handoff_observations: &mut HashMap<SimulatorId, ObjectObservation>,
-    agent_id: Option<UUID>,
+    agent_id: Option<Uuid>,
     on_object_chunk: &mut impl FnMut(SimulatorId, &IngestSummary, Vec<(Option<SimulatorId>, LocalAddress)>, Vec<LocalAddress>),
 ) -> Option<(SimulatorId, IngestSummary)> {
     if let Event::SimulatorMessage { simulator_id, sequence, packet_order, message, .. } = event {
@@ -1049,7 +1049,7 @@ fn apply_decoded_world_update(
     world_primary: &mut Option<SimulatorId>,
     promoted_target: &mut Option<PendingWorldHandoff>,
     handoff_observations: &mut HashMap<SimulatorId, ObjectObservation>,
-    agent_id: Option<UUID>,
+    agent_id: Option<Uuid>,
 ) -> Option<(SimulatorId, IngestSummary)> {
     match update {
         DecodedWorldUpdate::Object(batch) => {
@@ -1114,7 +1114,7 @@ fn filter_handoff_batch(
     world: &SessionWorld,
     simulator_id: SimulatorId,
     world_primary: Option<SimulatorId>,
-    agent_id: Option<UUID>,
+    agent_id: Option<Uuid>,
     mut batch: ObjectBatch,
     handoff_observations: &mut HashMap<SimulatorId, ObjectObservation>,
 ) -> Option<ObjectBatch> {
@@ -1359,7 +1359,7 @@ async fn save_if_current<T>(
 
 #[cfg(test)]
 fn fixture_packet(fixture: &str) -> protocol::lludp::Packet {
-    let bytes = testing::parse_hex_fixture(fixture).expect("valid LLUDP fixture");
+    let bytes = test_support::parse_hex_fixture(fixture).expect("valid LLUDP fixture");
     protocol::lludp::Packet::decode(&bytes).expect("decode LLUDP fixture")
 }
 
@@ -1384,7 +1384,6 @@ mod tests {
         DeferredReason::AmbiguousOrder,
         FieldUpdate, Kind, LocalAddress, ObjectObservation, OrderEvidence, Parent, ParentUpdate, Pose, Region, RegionHandle, UpdateSource,
     };
-    use base::UUID;
     use futures::{FutureExt, StreamExt, channel::oneshot, executor::block_on, stream};
     use math::{Quat, Vec3};
     use network::{
@@ -1408,7 +1407,8 @@ mod tests {
         },
     };
     use tempfile::tempdir;
-    use testing::lludp::vectors;
+    use test_support::lludp::vectors;
+    use uuid::Uuid;
 
     use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
 
@@ -1446,7 +1446,7 @@ mod tests {
 
         const EVENTS: u32 = 512;
         let simulator = simulator_id();
-        let events = (1..=EVENTS).map(|sequence| agent_update(UUID::from_u128(u128::from(sequence)), sequence, 0)).collect::<Vec<_>>();
+        let events = (1..=EVENTS).map(|sequence| agent_update(Uuid::from_u128(u128::from(sequence)), sequence, 0)).collect::<Vec<_>>();
         let mut baseline = SessionWorld::new(viewer_world_limits());
         baseline.register_simulator(simulator, None).unwrap();
         let mut primary = Some(simulator);
@@ -1513,8 +1513,8 @@ mod tests {
                     assert!(processed - at_event <= 8 * MAX_INTAKE_TURNS, "each admitted FIFO request has bounded turn latency");
                     assert_eq!(page.hydration_revision, world.world().revision());
                     assert_eq!(page.objects.len(), processed.min(256));
-                    assert_eq!(page.objects[0].id, UUID::from_u128(1));
-                    assert_eq!(page.objects.last().unwrap().id, UUID::from_u128(processed.min(256) as u128));
+                    assert_eq!(page.objects[0].id, Uuid::from_u128(1));
+                    assert_eq!(page.objects.last().unwrap().id, Uuid::from_u128(processed.min(256) as u128));
                     assert_eq!(reader.revision().unwrap(), page.hydration_revision);
                     completed += 1;
                     let mut read = Box::pin(reader.objects(None, 256));
@@ -1545,7 +1545,7 @@ mod tests {
         let source = UpdateSource::new(region, order, OrderEvidence::Ordered(u64::from(order)), 0);
         let observation = ObjectObservation {
             appearance: FieldUpdate::Set(Appearance::Surface),
-            ..ObjectObservation::new(source, UUID::from_u128(7), local_id, Kind::Object, ParentUpdate::Root)
+            ..ObjectObservation::new(source, Uuid::from_u128(7), local_id, Kind::Object, ParentUpdate::Root)
         };
         let summary = world
             .apply_object_batch(
@@ -1731,7 +1731,7 @@ mod tests {
         assert!(matches!(result, super::DrainInput::QueryStateMaintenance));
     }
 
-    fn agent_update(agent_id: UUID, local_id: u32, region_handle: u64) -> Message {
+    fn agent_update(agent_id: Uuid, local_id: u32, region_handle: u64) -> Message {
         let mut message = fixture_packet(vectors::OBJECT_UPDATE).message().clone();
         let ObjectUpdate(update) = &mut message else { panic!("expected full object update") };
         update.region_data.region_handle = region_handle;
@@ -1743,7 +1743,7 @@ mod tests {
         message
     }
 
-    fn agent_observation(source: UpdateSource, local_id: u32, agent_id: UUID, pose: Option<Pose>) -> ObjectObservation {
+    fn agent_observation(source: UpdateSource, local_id: u32, agent_id: Uuid, pose: Option<Pose>) -> ObjectObservation {
         ObjectObservation {
             pose,
             ..ObjectObservation::new(
@@ -1768,8 +1768,8 @@ mod tests {
         Message::ChatFromSimulator(ChatFromSimulator {
             chat_data: ChatData {
                 from_name: from_name.into(),
-                source_id: UUID::nil(),
-                owner_id: UUID::nil(),
+                source_id: Uuid::nil(),
+                owner_id: Uuid::nil(),
                 source_type: ChatSourceType::Agent,
                 chat_type: ChatType::Normal,
                 audible: Audible::Fully,
@@ -1832,7 +1832,7 @@ mod tests {
 
     #[test]
     fn gaining_agent_waits_for_primary_promotion() {
-        let agent_id = UUID::from_u128(0x1234);
+        let agent_id = Uuid::from_u128(0x1234);
         let source_id = simulator_id();
         let destination_id = simulator_id();
         let source_handle = RegionHandle::new(0x1111_0000_0000_0001);
@@ -1933,7 +1933,7 @@ mod tests {
 
     #[test]
     fn promoted_handoff_preserves_field_rejections() {
-        let agent_id = UUID::from_u128(0x1234);
+        let agent_id = Uuid::from_u128(0x1234);
         let source_id = simulator_id();
         let destination_id = simulator_id();
         let mut intake = SessionWorld::new(viewer_world_limits());
@@ -1975,8 +1975,8 @@ mod tests {
 
     #[test]
     fn newer_handoff_conflicts_invalidate_observation() {
-        let agent_id = UUID::from_u128(0x1234);
-        let replacement_id = UUID::from_u128(0x5678);
+        let agent_id = Uuid::from_u128(0x1234);
+        let replacement_id = Uuid::from_u128(0x5678);
         let source_id = simulator_id();
         let destination_id = simulator_id();
         let source_handle = RegionHandle::new(0x1111_0000_0000_0001);
@@ -2070,7 +2070,7 @@ mod tests {
 
     #[test]
     fn deferred_handoff_keeps_source_primary() {
-        let agent_id = UUID::from_u128(0x1234);
+        let agent_id = Uuid::from_u128(0x1234);
         let source_id = simulator_id();
         let destination_id = simulator_id();
         let source_handle = RegionHandle::new(0x1111_0000_0000_0001);
@@ -2128,7 +2128,7 @@ mod tests {
 
     #[test]
     fn chained_promotion_retargets_handoff() {
-        let agent_id = UUID::from_u128(0x1234);
+        let agent_id = Uuid::from_u128(0x1234);
         let source_id = simulator_id();
         let middle_id = simulator_id();
         let target_id = simulator_id();
@@ -2299,7 +2299,7 @@ mod tests {
         assert!(!targets.is_empty());
         assert!(targets.iter().all(|target| target.region() == region));
         assert_eq!(intake.world().revision(), before_cached_revision);
-        let request = recovery_request(RequestAgentData { agent_id: UUID::from_u128(1), session_id: UUID::from_u128(2) }, &targets);
+        let request = recovery_request(RequestAgentData { agent_id: Uuid::from_u128(1), session_id: Uuid::from_u128(2) }, &targets);
         assert!(request.objects.iter().all(|object| object.cache_miss_type == Full));
 
         let mut unknown = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();
@@ -2323,7 +2323,7 @@ mod tests {
         let ObjectUpdate(update) = &mut invalid else { panic!("expected full update fixture") };
         update.region_data.region_handle = 0x3333_0000_0000_0003;
         update.objects.truncate(1);
-        update.objects[0].id = UUID::nil();
+        update.objects[0].id = Uuid::nil();
         let (_, summary) = apply_world_event(&mut intake, &simulator_message(simulator_id, 10, invalid)).expect("registered simulator");
 
         assert_eq!(summary.invalid_blocks, 1);
@@ -2334,7 +2334,7 @@ mod tests {
 
     #[test]
     fn stale_favorite_snapshot_is_ignored() {
-        const AGENT_ID: UUID = UUID::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+        const AGENT_ID: Uuid = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
         let test_directory = tempdir().expect("create temporary favorite directory");
         let path = test_directory.path().join("favorites.json");
 

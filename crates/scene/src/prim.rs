@@ -3,7 +3,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use math::{Quat, Vec2, Vec3};
+use math::{FloatExt, Quat, Vec2, Vec3};
 use world::PrimShape;
 
 use crate::{Detail, Mesh, MeshError, mesh::Builder};
@@ -279,7 +279,7 @@ fn path(params: &Params, detail: Detail) -> (Vec<Ring>, bool) {
                     let t = params.t[0] + (params.t[1] - params.t[0]) * i as f32 / (count - 1) as f32;
                     Ring {
                         position: (params.shear * t).extend(t - 0.5),
-                        rotation: Quat::from_rotation_z(PI * lerp(params.twist, t)),
+                        rotation: Quat::from_rotation_z(PI * params.twist[0].lerp_monotonic(params.twist[1], t)),
                         scale: begin.lerp(end, t),
                         t,
                     }
@@ -338,7 +338,7 @@ fn path(params: &Params, detail: Detail) -> (Vec<Ring>, bool) {
         .enumerate()
         .map(|(i, t)| {
             let angle = TAU * params.revolutions * t;
-            let radius = lerp(radii, t);
+            let radius = radii[0].lerp_monotonic(radii[1], t);
             let s = angle.sin() * radius;
             let c = angle.cos() * radius;
             let x = if params.path == 0x30 {
@@ -348,17 +348,14 @@ fn path(params: &Params, detail: Detail) -> (Vec<Ring>, bool) {
             };
             Ring {
                 position: Vec3::new(x, c + params.shear.y * s, s),
-                rotation: Quat::from_rotation_x(angle) * Quat::from_rotation_z(TAU * lerp(params.twist, t) - PI),
+                rotation: Quat::from_rotation_x(angle)
+                    * Quat::from_rotation_z(TAU * params.twist[0].lerp_monotonic(params.twist[1], t) - PI),
                 scale: params.scale * Vec2::new(1.0 - params.skew.abs(), 1.0) * begin.lerp(end, t),
                 t,
             }
         })
         .collect();
     (rings, closed)
-}
-
-fn lerp(values: [f32; 2], t: f32) -> f32 {
-    values[0] + (values[1] - values[0]) * t
 }
 
 fn side_grid(

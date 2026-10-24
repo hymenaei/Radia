@@ -1,4 +1,3 @@
-use base::UUID;
 use math::{Quat, Vec3};
 use protocol::{
     Audible, BlockInstance, BlockValues, ChatSourceType, ChatType, FieldValue, Frequency, LLUdpError, SchemaMessage,
@@ -18,7 +17,8 @@ use protocol::{
     schema::{MessageEncoding, MessageTrust},
 };
 use std::net::Ipv4Addr;
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
+use uuid::Uuid;
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")
@@ -70,12 +70,12 @@ fn generic_streaming_payload_limit() {
     assert_eq!(Packet::decode(&truncated_wire), Err(LLUdpError::TruncatedPacket));
 }
 
-fn session_id() -> UUID {
-    UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("valid fixture UUID")
+fn session_id() -> Uuid {
+    Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("valid fixture UUID")
 }
 
-fn agent_id() -> UUID {
-    UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("valid fixture UUID")
+fn agent_id() -> Uuid {
+    Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("valid fixture UUID")
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn logout_reply_fields() {
         &Message::LogoutReply(LogoutReply {
             agent_data: logout_reply::AgentData { agent_id: agent_id(), session_id: session_id() },
             inventory_data: vec![InventoryData {
-                item_id: UUID::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid item UUID"),
+                item_id: Uuid::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid item UUID"),
             }],
         })
     );
@@ -225,7 +225,7 @@ fn chat_from_simulator_fields() {
         &Message::ChatFromSimulator(ChatFromSimulator {
             chat_data: ChatData {
                 from_name: "Ada".into(),
-                source_id: UUID::parse_str("11223344-5566-7788-99aa-bbccddeeff00").expect("valid source UUID"),
+                source_id: Uuid::parse_str("11223344-5566-7788-99aa-bbccddeeff00").expect("valid source UUID"),
                 owner_id: agent_id(),
                 source_type: ChatSourceType::Agent,
                 chat_type: ChatType::Shout,
@@ -283,8 +283,8 @@ fn outbound_strings_reject_nul() {
         Message::ChatFromSimulator(ChatFromSimulator {
             chat_data: ChatData {
                 from_name: "A\0B".into(),
-                source_id: UUID::nil(),
-                owner_id: UUID::nil(),
+                source_id: Uuid::nil(),
+                owner_id: Uuid::nil(),
                 source_type: ChatSourceType::Agent,
                 chat_type: ChatType::Normal,
                 audible: Audible::Fully,
@@ -295,8 +295,8 @@ fn outbound_strings_reject_nul() {
         Message::ChatFromSimulator(ChatFromSimulator {
             chat_data: ChatData {
                 from_name: "name".into(),
-                source_id: UUID::nil(),
-                owner_id: UUID::nil(),
+                source_id: Uuid::nil(),
+                owner_id: Uuid::nil(),
                 source_type: ChatSourceType::Agent,
                 chat_type: ChatType::Normal,
                 audible: Audible::Fully,
@@ -305,7 +305,7 @@ fn outbound_strings_reject_nul() {
             },
         }),
         Message::ChatFromViewer(ChatFromViewer {
-            agent_data: chat_from_viewer::AgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+            agent_data: chat_from_viewer::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
             chat_data: chat_from_viewer::ChatData { message: "A\0B".into(), chat_type: ChatType::Normal, channel: 0 },
         }),
     ];
@@ -326,8 +326,8 @@ fn inaudible_empty_chat() {
         &Message::ChatFromSimulator(ChatFromSimulator {
             chat_data: ChatData {
                 from_name: "None".into(),
-                source_id: UUID::nil(),
-                owner_id: UUID::nil(),
+                source_id: Uuid::nil(),
+                owner_id: Uuid::nil(),
                 source_type: ChatSourceType::Object,
                 chat_type: ChatType::Normal,
                 audible: Audible::Barely,
@@ -375,8 +375,8 @@ fn coarse_location_fixture() {
     let expected = fixture(vectors::COARSE_LOCATION_UPDATE);
     let decoded = Packet::decode(&expected).expect("decode independently assembled schema fixture");
     let agent_ids = BlockValues::new(vec![
-        BlockInstance::new(vec![FieldValue::UUID(UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("valid fixture UUID"))]),
-        BlockInstance::new(vec![FieldValue::UUID(UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("valid fixture UUID"))]),
+        BlockInstance::new(vec![FieldValue::Uuid(Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("valid fixture UUID"))]),
+        BlockInstance::new(vec![FieldValue::Uuid(Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("valid fixture UUID"))]),
     ]);
     let schema = SchemaMessage::schema_by_name("CoarseLocationUpdate").expect("generated message schema");
     let expected_message = SchemaMessage::new(

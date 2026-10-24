@@ -15,7 +15,7 @@ use crate::{
     texture::{TextureCompletion, TextureJob, TextureKey, TextureState, Textures},
 };
 use assets::{Priority, TextureId};
-use math::{DVec3, Mat3, Mat4, Quat, Vec3, Vec4};
+use math::{DVec3, Frustum, Mat4, Quat, Vec3, flips_winding, normal_matrix};
 use scene::{Camera, FaceMaterial, MeshId, Placement, PreparedMesh, SceneView, SharedMesh, SurfaceKind, ViewVersion};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Device, Extent3d, IndexFormat, Queue, RenderPass, Texture, TextureDescriptor,
@@ -358,8 +358,9 @@ impl GeometryRenderer {
             ))
         });
         let mut candidates = Vec::new();
+        let frustum = Frustum::from_clip_matrix(projection);
         for candidate in surfaces.chain(objects) {
-            if is_visible(&candidate.1, camera, projection) {
+            if is_visible(&candidate.1, camera, &frustum) {
                 candidates.push(candidate);
             }
             if candidates.len() == MAX_INSTANCES {
@@ -718,15 +719,7 @@ fn packed_instance(base: &[u8; TRANSFORM_BYTES], params: &FaceParams, scale: Vec
     bytes
 }
 
-fn normal_matrix(rotation: Quat, scale: Vec3) -> Mat3 {
-    let inverse = scale.recip();
-    Mat3::from_quat(rotation) * Mat3::from_diagonal(inverse / inverse.abs().max_element())
-}
-
-fn flips_winding(scale: Vec3) -> bool {
-    !scale.is_negative_bitmask().count_ones().is_multiple_of(2)
-}
-fn is_visible(instance: &Instance, camera: Camera, projection: Mat4) -> bool {
+fn is_visible(instance: &Instance, camera: Camera, frustum: &Frustum) -> bool {
     let bounds = instance.mesh.mesh().bounds();
     let center = (bounds.min.as_dvec3() + bounds.max.as_dvec3()) * 0.5 * instance.scale.as_dvec3();
     let offset = instance.position - camera.position() + (instance.rotation * center.as_vec3()).as_dvec3();
@@ -742,16 +735,5 @@ fn is_visible(instance: &Instance, camera: Camera, projection: Mat4) -> bool {
     if !model.is_finite() || !instance.scale.recip().is_finite() {
         return false;
     }
-    let rows = projection.transpose();
-    let planes = [
-        rows.w_axis + rows.x_axis,
-        rows.w_axis - rows.x_axis,
-        rows.w_axis + rows.y_axis,
-        rows.w_axis - rows.y_axis,
-        rows.z_axis,
-        rows.w_axis - rows.z_axis,
-    ];
-    planes
-        .into_iter()
-        .all(|plane: Vec4| f64::from(plane.truncate().dot(offset.as_vec3()) + plane.w) >= -radius * f64::from(plane.truncate().length()))
+    frustum.intersects_sphere(offset, radius)
 }

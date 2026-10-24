@@ -1,4 +1,4 @@
-use base::AssetId;
+use utils::AssetId;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct SculptFlags {

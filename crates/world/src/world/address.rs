@@ -1,5 +1,3 @@
-//! Local-address admission, tombstones, and bounded ordering evidence.
-
 #[cfg(feature = "invariants")]
 use super::RegionState;
 use super::World;
@@ -7,13 +5,13 @@ use super::World;
 use super::storage::ObjectStore;
 use crate::update::Stamp;
 use crate::{Applied, ApplyOutcome, DeferredReason, LocalAddress, Recovery, Region, WorldLimits};
-use base::UUID;
 #[cfg(feature = "invariants")]
 use std::collections::BTreeMap;
 use std::{
     collections::{BTreeSet, HashMap},
     num::NonZeroU32,
 };
+use uuid::Uuid;
 
 #[derive(Debug, Default)]
 pub(super) struct Tombstones {
@@ -146,7 +144,7 @@ impl World {
         }
     }
 
-    pub(super) fn preflight_address(&self, address: LocalAddress, id: UUID, stamp: Stamp) -> Option<Applied> {
+    pub(super) fn preflight_address(&self, address: LocalAddress, id: Uuid, stamp: Stamp) -> Option<Applied> {
         if let Some(entity) = self.entity_at(address) {
             let record = self.store.record(entity).expect("address index contains a live entity");
             if record.id != id && stamp <= record.state.binding.fence() {

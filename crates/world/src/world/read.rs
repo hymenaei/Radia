@@ -5,7 +5,7 @@ use std::{
     mem::size_of,
 };
 
-use base::UUID;
+use uuid::Uuid;
 
 use super::{Object, World, WorldChange, WorldId};
 use crate::{
@@ -16,7 +16,7 @@ use crate::{
     Entity, GltfMaterialOverrides, Kind, LocalAddress, Parent, PoseError, PoseState, Properties, Region, RegionInfo, Shape, WorldRevision,
     WorldTransformState,
 };
-use base::AssetId;
+use utils::AssetId;
 
 pub const MAX_OBJECT_PAGE_ITEMS: usize = 256;
 pub const MAX_REGION_PAGE_ITEMS: usize = 64;
@@ -37,7 +37,7 @@ pub struct WorldReadBarrier {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ObjectSummary {
     pub entity: Entity,
-    pub id: UUID,
+    pub id: Uuid,
     pub kind: Kind,
     pub address: LocalAddress,
     pub parent: Parent,
@@ -54,7 +54,7 @@ pub struct ObjectSummaryRead {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectListItem {
     pub entity: Entity,
-    pub id: UUID,
+    pub id: Uuid,
     pub kind: Kind,
     pub address: LocalAddress,
 }
@@ -82,7 +82,7 @@ pub struct ObjectPage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectPageCursor {
     world: WorldId,
-    after: UUID,
+    after: Uuid,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,7 +115,7 @@ pub struct ObjectDetail {
     pub summary: ObjectSummary,
     pub hydration_revision: WorldRevision,
     pub world_transform: Result<WorldTransformState, PoseError>,
-    pub parent_id: Option<UUID>,
+    pub parent_id: Option<Uuid>,
     pub linear_motion: LinearMotion,
     pub angular_velocity: Option<math::Vec3>,
     pub shape: Option<Shape>,
@@ -498,12 +498,12 @@ impl World {
         })
     }
 
-    fn summary_for_id(&self, id: UUID) -> ObjectSummary {
+    fn summary_for_id(&self, id: Uuid) -> ObjectSummary {
         let entity = self.entity(id).expect("object ordering index contains only live object IDs");
         self.summary_for_entity(entity).expect("UUID index contains only live entities")
     }
 
-    fn list_item_for_id(&self, id: UUID) -> ObjectListItem {
+    fn list_item_for_id(&self, id: Uuid) -> ObjectListItem {
         let entity = self.entity(id).expect("object ordering index contains only live object IDs");
         self.list_item_for_entity(entity).expect("UUID index contains only live entities")
     }

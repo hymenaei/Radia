@@ -1,9 +1,9 @@
 use crate::{Entity, LocalAddress, Region, TerrainPatchId, WorldRevision};
-use base::UUID;
 use std::{
     collections::VecDeque,
     ops::{BitOr, BitOrAssign},
 };
+use uuid::Uuid;
 
 #[cfg(test)]
 use crate::{OrderEvidence, ParentUpdate};
@@ -54,12 +54,12 @@ impl BitOrAssign for WorldChangeClasses {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorldChange {
-    EntityAdded { id: UUID, entity: Entity, address: LocalAddress },
-    EntityUpdated { id: UUID, entity: Entity, classes: WorldChangeClasses },
-    SubtreeInvalidated { id: UUID, entity: Entity },
-    EntityRemoved { id: UUID, entity: Entity, address: LocalAddress, reason: WorldEntityRemovalReason },
-    EntityRebound { id: UUID, entity: Entity, from: LocalAddress, to: LocalAddress },
-    EntityTransferred { id: UUID, entity: Entity, from: LocalAddress, to: LocalAddress },
+    EntityAdded { id: Uuid, entity: Entity, address: LocalAddress },
+    EntityUpdated { id: Uuid, entity: Entity, classes: WorldChangeClasses },
+    SubtreeInvalidated { id: Uuid, entity: Entity },
+    EntityRemoved { id: Uuid, entity: Entity, address: LocalAddress, reason: WorldEntityRemovalReason },
+    EntityRebound { id: Uuid, entity: Entity, from: LocalAddress, to: LocalAddress },
+    EntityTransferred { id: Uuid, entity: Entity, from: LocalAddress, to: LocalAddress },
     RegionAdopted(Region),
     RegionUpdated(Region),
     EnvironmentUpdated(Region),
@@ -162,15 +162,15 @@ mod tests {
     };
     use OrderEvidence::Ordered;
     use ParentUpdate::{Local, Root};
-    use base::UUID;
     use math::Vec3;
+    use uuid::Uuid;
 
     use super::*;
     use crate::{
         Appearance, FaceAppearance, FieldUpdate, Kind, LocalAddress, ObjectObservation, ObjectPatch, Pose, PropertiesPatch, RegionInfo,
         RegionOutcome, RenderMaterials, SculptFlags, Shape, SurfaceAppearance, UpdateSource, WorldLimits,
     };
-    use base::AssetId;
+    use utils::AssetId;
 
     fn limits(max_journal_entries: usize) -> WorldLimits {
         WorldLimits {
@@ -191,7 +191,7 @@ mod tests {
     fn observation(region: Region, order: u64, id: u128, local_id: u32) -> ObjectObservation {
         ObjectObservation::new(
             UpdateSource::new(region, order as u32, Ordered(order), 0),
-            UUID::from_u128(id),
+            Uuid::from_u128(id),
             NonZeroU32::new(local_id).unwrap(),
             Kind::Object,
             Root,
@@ -225,7 +225,7 @@ mod tests {
         let result = world
             .observe_object(ObjectObservation::new(
                 UpdateSource::new(region, 1, Ordered(1), 0),
-                UUID::from_u128(21),
+                Uuid::from_u128(21),
                 NonZeroU32::new(1).unwrap(),
                 Kind::Object,
                 Root,
@@ -233,7 +233,7 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(result, ApplyError::RevisionExhausted);
-        assert_eq!(world.entity(UUID::from_u128(21)), None);
+        assert_eq!(world.entity(Uuid::from_u128(21)), None);
         assert_eq!(world.entity_at(LocalAddress::new(region, NonZeroU32::new(1).unwrap())), None);
         assert!(world.objects().iter().next().is_none());
         assert_eq!(world.revision(), WorldRevision(u64::MAX));
@@ -266,8 +266,8 @@ mod tests {
             world.patch_properties(
                 UpdateSource::new(region, 100, Ordered(100), 0),
                 target,
-                UUID::from_u128(270),
-                PropertiesPatch { owner_id: Some(UUID::from_u128(271)), creator_id: Some(UUID::from_u128(272)) },
+                Uuid::from_u128(270),
+                PropertiesPatch { owner_id: Some(Uuid::from_u128(271)), creator_id: Some(Uuid::from_u128(272)) },
             ),
             Err(ApplyError::RevisionExhausted)
         );
@@ -275,7 +275,7 @@ mod tests {
 
         world.journal.revision = revision;
         let removed = world.remove_object(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap()).unwrap();
-        assert_eq!(removed.outcome, ApplyOutcome::Removed(UUID::from_u128(270)));
+        assert_eq!(removed.outcome, ApplyOutcome::Removed(Uuid::from_u128(270)));
     }
 
     #[test]
@@ -286,14 +286,14 @@ mod tests {
         let mut initial = observation(region, 1, 270, 1);
         initial.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
         assert_revision(world.observe_object(initial).unwrap());
-        let target = world.object_binding_target(world.entity(UUID::from_u128(270)).unwrap()).unwrap();
-        let owner_id = UUID::from_u128(271);
+        let target = world.object_binding_target(world.entity(Uuid::from_u128(270)).unwrap()).unwrap();
+        let owner_id = Uuid::from_u128(271);
         assert_revision(
             world
                 .patch_properties(
                     UpdateSource::new(region, 1, Ordered(1), 0),
                     target,
-                    UUID::from_u128(270),
+                    Uuid::from_u128(270),
                     PropertiesPatch { owner_id: Some(owner_id), creator_id: None },
                 )
                 .unwrap(),
@@ -301,7 +301,7 @@ mod tests {
         assert!(matches!(
             last_changes(&world),
             [EntityUpdated { id, classes, .. }]
-                if *id == UUID::from_u128(270) && classes.contains(WorldChangeClasses::PROPERTIES)
+                if *id == Uuid::from_u128(270) && classes.contains(WorldChangeClasses::PROPERTIES)
         ));
 
         world.journal.revision = WorldRevision(u64::MAX);
@@ -321,7 +321,7 @@ mod tests {
                 .patch_properties(
                     UpdateSource::new(region, 1, Ordered(1), 0),
                     target,
-                    UUID::from_u128(270),
+                    Uuid::from_u128(270),
                     PropertiesPatch { owner_id: Some(owner_id), creator_id: None },
                 )
                 .unwrap()
@@ -340,7 +340,7 @@ mod tests {
         let added = world.observe_object(observation(region, 1, 280, 1)).unwrap();
         let ApplyOutcome::Introduced(entity) = added.outcome else { panic!("expected object introduction") };
         let appearance =
-            SurfaceAppearance::new(FaceAppearance { texture_id: UUID::from_u128(281), ..FaceAppearance::default() }, Vec::new()).unwrap();
+            SurfaceAppearance::new(FaceAppearance { texture_id: Uuid::from_u128(281), ..FaceAppearance::default() }, Vec::new()).unwrap();
 
         let applied = world
             .patch_object(ObjectPatch {
@@ -353,7 +353,7 @@ mod tests {
         assert!(matches!(
             last_changes(&world),
             [EntityUpdated { id, classes, .. }]
-                if *id == UUID::from_u128(280)
+                if *id == Uuid::from_u128(280)
                     && classes.contains(WorldChangeClasses::APPEARANCE)
                     && !classes.contains(WorldChangeClasses::SHAPE)
         ));
@@ -366,7 +366,7 @@ mod tests {
         assert_region_revision(world.adopt_region(region).unwrap().outcome);
         let added = world.observe_object(observation(region, 1, 282, 1)).unwrap();
         let ApplyOutcome::Introduced(entity) = added.outcome else { panic!("expected object introduction") };
-        let materials = RenderMaterials::new(vec![(3, AssetId::new(UUID::from_u128(283)))]).unwrap();
+        let materials = RenderMaterials::new(vec![(3, AssetId::new(Uuid::from_u128(283)))]).unwrap();
 
         let applied = world
             .patch_object(ObjectPatch {
@@ -379,7 +379,7 @@ mod tests {
         assert!(matches!(
             last_changes(&world),
             [EntityUpdated { id, classes, .. }]
-                if *id == UUID::from_u128(282)
+                if *id == Uuid::from_u128(282)
                     && classes.contains(WorldChangeClasses::APPEARANCE)
                     && !classes.contains(WorldChangeClasses::SHAPE)
         ));
@@ -496,19 +496,19 @@ mod tests {
         let first_address = LocalAddress::new(first_region, NonZeroU32::new(1).unwrap());
         assert_revision(world.observe_object(observation(first_region, 1, 230, 1)).unwrap());
         assert!(
-            matches!(last_changes(&world), [EntityAdded { id, address, .. }] if *id == UUID::from_u128(230) && *address == first_address)
+            matches!(last_changes(&world), [EntityAdded { id, address, .. }] if *id == Uuid::from_u128(230) && *address == first_address)
         );
 
         let rebound_address = LocalAddress::new(first_region, NonZeroU32::new(2).unwrap());
         assert_revision(world.observe_object(observation(first_region, 2, 230, 2)).unwrap());
         assert!(last_changes(&world).iter().any(|change| {
-            matches!(change, EntityRebound { id, from, to, .. } if *id == UUID::from_u128(230) && *from == first_address && *to == rebound_address)
+            matches!(change, EntityRebound { id, from, to, .. } if *id == Uuid::from_u128(230) && *from == first_address && *to == rebound_address)
         }));
 
         let transfer_address = LocalAddress::new(second_region, NonZeroU32::new(3).unwrap());
         assert_revision(world.observe_object(observation(second_region, 1, 230, 3)).unwrap());
         assert!(last_changes(&world).iter().any(|change| {
-            matches!(change, EntityTransferred { id, from, to, .. } if *id == UUID::from_u128(230) && *from == rebound_address && *to == transfer_address)
+            matches!(change, EntityTransferred { id, from, to, .. } if *id == Uuid::from_u128(230) && *from == rebound_address && *to == transfer_address)
         }));
     }
 
@@ -534,18 +534,18 @@ mod tests {
         let changes = last_changes(&world);
         assert!(changes.iter().any(|change| {
             matches!(change, EntityRemoved { id, address, reason: WorldEntityRemovalReason::Killed, .. }
-                if *id == UUID::from_u128(250) && address.local_id().get() == 1)
+                if *id == Uuid::from_u128(250) && address.local_id().get() == 1)
         }));
         assert!(changes.iter().any(|change| {
             matches!(change, EntityRemoved { id, address, reason: WorldEntityRemovalReason::ParentCascade, .. }
-                if *id == UUID::from_u128(251) && address.local_id().get() == 2)
+                if *id == Uuid::from_u128(251) && address.local_id().get() == 2)
         }));
         assert!(changes.iter().any(|change| {
             matches!(change, EntityUpdated { id, classes, .. }
-                if *id == UUID::from_u128(252)
+                if *id == Uuid::from_u128(252)
                     && classes.contains(WorldChangeClasses::RELATIONSHIP | WorldChangeClasses::POSE))
         }));
-        assert!(changes.iter().any(|change| matches!(change, SubtreeInvalidated { id, .. } if *id == UUID::from_u128(252))));
+        assert!(changes.iter().any(|change| matches!(change, SubtreeInvalidated { id, .. } if *id == Uuid::from_u128(252))));
     }
 
     #[test]
@@ -562,7 +562,7 @@ mod tests {
 
         assert!(last_changes(&world).iter().any(|change| {
             matches!(change, EntityUpdated { id, classes, .. }
-                if *id == UUID::from_u128(321)
+                if *id == Uuid::from_u128(321)
                     && classes.contains(WorldChangeClasses::RELATIONSHIP | WorldChangeClasses::POSE))
         }));
     }
@@ -585,12 +585,12 @@ mod tests {
         assert!(matches!(
             last_changes(&world),
             [EntityUpdated { id, classes, .. }]
-                if *id == UUID::from_u128(340) && classes.contains(WorldChangeClasses::APPEARANCE)
+                if *id == Uuid::from_u128(340) && classes.contains(WorldChangeClasses::APPEARANCE)
                     && !classes.contains(WorldChangeClasses::SHAPE)
         ));
 
         let mixed_freshness = ObjectPatch {
-            shape: FieldUpdate::Set(Shape::Mesh { asset_id: AssetId::new(UUID::from_u128(1)), flags: SculptFlags::default() }),
+            shape: FieldUpdate::Set(Shape::Mesh { asset_id: AssetId::new(Uuid::from_u128(1)), flags: SculptFlags::default() }),
             appearance: FieldUpdate::Set(Appearance::Surface),
             ..ObjectPatch::new(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap())
         };
@@ -598,19 +598,19 @@ mod tests {
         assert!(matches!(
             last_changes(&world),
             [EntityUpdated { id, classes, .. }]
-                if *id == UUID::from_u128(340) && classes.contains(WorldChangeClasses::SHAPE)
+                if *id == Uuid::from_u128(340) && classes.contains(WorldChangeClasses::SHAPE)
                     && !classes.contains(WorldChangeClasses::APPEARANCE)
         ));
 
         let asset_change = ObjectPatch {
-            shape: FieldUpdate::Set(Shape::Mesh { asset_id: AssetId::new(UUID::from_u128(2)), flags: SculptFlags::default() }),
+            shape: FieldUpdate::Set(Shape::Mesh { asset_id: AssetId::new(Uuid::from_u128(2)), flags: SculptFlags::default() }),
             ..ObjectPatch::new(UpdateSource::new(region, 4, Ordered(4), 0), NonZeroU32::new(1).unwrap())
         };
         assert_revision(world.patch_object(asset_change).unwrap());
         assert!(matches!(
             last_changes(&world),
             [EntityUpdated { id, classes, .. }]
-                if *id == UUID::from_u128(340) && classes.contains(WorldChangeClasses::SHAPE)
+                if *id == Uuid::from_u128(340) && classes.contains(WorldChangeClasses::SHAPE)
                     && !classes.contains(WorldChangeClasses::APPEARANCE)
         ));
     }
@@ -637,9 +637,9 @@ mod tests {
         assert!(matches!(
             last_changes(&world),
             [EntityUpdated { id, classes, .. }, SubtreeInvalidated { id: root, .. }]
-                if *id == UUID::from_u128(310)
+                if *id == Uuid::from_u128(310)
                     && classes.contains(WorldChangeClasses::POSE)
-                    && *root == UUID::from_u128(310)
+                    && *root == Uuid::from_u128(310)
         ));
     }
 
@@ -651,7 +651,7 @@ mod tests {
         assert_revision(world.observe_object(observation(region, 1, 260, 1)).unwrap());
         assert_revision(world.observe_object(observation(region, 2, 261, 1)).unwrap());
         assert!(last_changes(&world).iter().any(|change| {
-            matches!(change, EntityRemoved { id, reason: WorldEntityRemovalReason::AddressReplaced, .. } if *id == UUID::from_u128(260))
+            matches!(change, EntityRemoved { id, reason: WorldEntityRemovalReason::AddressReplaced, .. } if *id == Uuid::from_u128(260))
         }));
 
         let entity_address = LocalAddress::new(region, NonZeroU32::new(1).unwrap());
@@ -662,10 +662,10 @@ mod tests {
         let changes = last_changes(&world);
         assert!(changes.iter().any(|change| {
             matches!(change, EntityRemoved { id, address, reason: WorldEntityRemovalReason::RegionRetired, .. }
-                if *id == UUID::from_u128(261) && *address == entity_address)
+                if *id == Uuid::from_u128(261) && *address == entity_address)
         }));
         assert!(changes.iter().any(|change| {
-            matches!(change, EntityRemoved { id, reason: WorldEntityRemovalReason::RegionRetired, .. } if *id == UUID::from_u128(262))
+            matches!(change, EntityRemoved { id, reason: WorldEntityRemovalReason::RegionRetired, .. } if *id == Uuid::from_u128(262))
         }));
         assert!(matches!(changes.last(), Some(RegionRetired { region: retired, entities_removed: 2 }) if *retired == region));
     }

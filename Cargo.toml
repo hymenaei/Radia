@@ -2,10 +2,10 @@
 resolver = "3"
 members = [
     "apps/viewer",
-    "crates/common/base",
     "crates/common/llsd",
-    "crates/common/math",
-    "crates/common/testing",
+    "crates/math",
+    "crates/utils",
+    "crates/test-support",
     "crates/network",
     "crates/protocol",
     "crates/world",
@@ -22,10 +22,10 @@ license = "LGPL-2.1-only"
 
 [workspace.dependencies]
 assets = { path = "crates/assets" }
-base = { path = "crates/common/base" }
 llsd = { path = "crates/common/llsd" }
-math = { path = "crates/common/math" }
-testing = { path = "crates/common/testing" }
+math = { path = "crates/math" }
+utils = { path = "crates/utils" }
+test-support = { path = "crates/test-support" }
 network = { path = "crates/network" }
 protocol = { path = "crates/protocol" }
 render = { path = "crates/render" }
@@ -34,6 +34,7 @@ world = { path = "crates/world" }
 
 base64 = "=0.22.1"
 block_compression = { version = "=0.9.0", default-features = false }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 criterion = "0.8"
 dirs = "=5.0.1"
 dxr = "=0.9.0"
@@ -74,7 +75,7 @@ tokio = { version = "1", features = [
 ] }
 tracing = "0.1"
 tracing-appender = "=0.2.5"
-tracing-subscriber = { version = "0.3", features = ["json", "chrono"] }
+tracing-subscriber = { version = "0.3", features = ["json", "chrono", "env-filter"] }
 tracing-tracy = { version = "=0.12.0", default-features = false, features = [
     "enable",
     "ondemand",

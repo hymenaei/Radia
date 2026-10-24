@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, fmt, io::Cursor};
 
-use base::UUID;
 use llsd::{Binary, Date, Error, Limits, Map, URI, Value, binary, notation, xml};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Serialize, Serializer};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use uuid::Uuid;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct Profile {
@@ -19,7 +19,7 @@ struct IgnoreUnknown {}
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct UUIDField {
     #[serde(with = "llsd::uuid")]
-    id: UUID,
+    id: Uuid,
 }
 
 struct OversizedSequence(usize);
@@ -244,12 +244,12 @@ fn notation_unicode_escapes() {
 
 #[test]
 fn value_accessors_match_variants() {
-    let uuid = UUID::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid UUID");
+    let uuid = Uuid::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid UUID");
     let values = [
         Value::Boolean(true),
         Value::Integer(42),
         Value::Real(1.5),
-        Value::UUID(uuid),
+        Value::Uuid(uuid),
         Value::String("plain text".into()),
         Value::URI(URI::from("https://example.invalid/resource")),
         Value::Array(vec![Value::Undefined]),
@@ -688,13 +688,13 @@ fn map_keys_follow_format_readability() {
 
 #[test]
 fn value_roundtrips() {
-    let uuid = UUID::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid UUID");
+    let uuid = Uuid::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid UUID");
     let date = Date::from_datetime(OffsetDateTime::parse("2025-02-03T04:05:06.125Z", &Rfc3339).expect("valid date"));
     let mut map = BTreeMap::new();
     map.insert("binary".into(), Value::Binary(Binary::from(vec![0, 1, 0xff])));
     map.insert("date".into(), Value::Date(date));
     map.insert("uri".into(), Value::URI(URI::from("https://example.invalid/path")));
-    map.insert("uuid".into(), Value::UUID(uuid));
+    map.insert("uuid".into(), Value::Uuid(uuid));
     let expected = Value::Map(map);
 
     for (index, (encoded, decode)) in [
@@ -706,7 +706,7 @@ fn value_roundtrips() {
     .enumerate()
     {
         let decoded = decode(&encoded).unwrap_or_else(|error| panic!("format {index}: {error}"));
-        assert_eq!(decoded.as_map().and_then(|map| map.get("uuid")), Some(&Value::UUID(uuid)));
+        assert_eq!(decoded.as_map().and_then(|map| map.get("uuid")), Some(&Value::Uuid(uuid)));
         assert_eq!(decoded.as_map().and_then(|map| map.get("uri")), Some(&Value::URI(URI::from("https://example.invalid/path"))));
         assert_eq!(decoded.as_map().and_then(|map| map.get("binary")), Some(&Value::Binary(Binary::from(vec![0, 1, 0xff]))));
         let decoded_date = match decoded.as_map().and_then(|map| map.get("date")) {
@@ -752,7 +752,7 @@ fn text_date_codecs_preserve_nanoseconds() {
 
 #[test]
 fn typed_uuid_roundtrips() {
-    let expected = UUIDField { id: UUID::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid UUID") };
+    let expected = UUIDField { id: Uuid::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid UUID") };
     let xml = xml::to_vec(&expected).expect("encode XML");
     let notation = notation::to_vec(&expected).expect("encode notation");
     let binary = binary::to_vec(&expected).expect("encode binary");
@@ -933,7 +933,7 @@ fn xml_bounded_sizes() {
         Value::Binary(Binary::from(vec![0; 64])),
         Value::Array(vec![Value::String("first".into()), Value::String("second".into())]),
         Value::URI(URI::from("https://example.invalid/path")),
-        Value::UUID(UUID::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid UUID")),
+        Value::Uuid(Uuid::parse_str("12345678-90ab-cdef-0123-456789abcdef").expect("valid UUID")),
         Value::Date(llsd_date("2025-02-03T04:05:06.125Z")),
     ];
 

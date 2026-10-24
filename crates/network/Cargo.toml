@@ -12,7 +12,7 @@ testing = []
 
 [dependencies]
 llsd.workspace = true
-base = { workspace = true, features = ["v4"] }
+uuid = { workspace = true, features = ["v4"] }
 protocol.workspace = true
 reqwest.workspace = true
 httpdate.workspace = true
@@ -27,7 +27,7 @@ zip.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 math.workspace = true
-testing.workspace = true
+test-support.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

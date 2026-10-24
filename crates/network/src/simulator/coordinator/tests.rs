@@ -28,8 +28,7 @@ use crate::{
         pacing::{ProbeHandle, TrafficClass},
     },
 };
-use ::testing::lludp::fixture;
-use base::UUID;
+use ::test_support::lludp::fixture;
 use llsd::{Map, Value};
 use protocol::{
     BlockValues, ChatType, FieldValue, SchemaMessage,
@@ -53,6 +52,7 @@ use tokio::{
     time::{advance, timeout},
 };
 use url::Url;
+use uuid::Uuid;
 
 use super::{
     CoordinatorGate, EVENT_BACKLOG_DISCONNECT_REASON, HandoffState, HandoffTarget, LOGOUT_TIMEOUT, MAX_CONCURRENT_PACKET_DECODES,
@@ -75,8 +75,8 @@ pub(super) fn login_session(simulator_address: SocketAddr) -> AgentSession {
         grid: Grid::Agni,
         message: "Welcome".into(),
         simulator_address,
-        agent_id: UUID::parse_str(AGENT_ID).expect("agent UUID"),
-        session_id: UUID::parse_str(SESSION_ID).expect("session UUID"),
+        agent_id: Uuid::parse_str(AGENT_ID).expect("agent UUID"),
+        session_id: Uuid::parse_str(SESSION_ID).expect("session UUID"),
         circuit_code: CIRCUIT_CODE,
         seed_capability: Url::parse("http://127.0.0.1:1/seed").expect("local seed capability URL"),
     }
@@ -280,7 +280,7 @@ async fn connected_neighbor_with_options(
     }
 }
 
-fn movement_complete_packet(sequence: u32, agent_id: UUID, session_id: UUID, region_handle: u64) -> Vec<u8> {
+fn movement_complete_packet(sequence: u32, agent_id: Uuid, session_id: Uuid, region_handle: u64) -> Vec<u8> {
     Packet::new(
         sequence,
         Message::AgentMovementComplete(AgentMovementComplete {
@@ -294,14 +294,14 @@ fn movement_complete_packet(sequence: u32, agent_id: UUID, session_id: UUID, reg
     .expect("encode AgentMovementComplete")
 }
 
-fn teleport_finish_to(agent_id: UUID, endpoint: SocketAddr, region_handle: u64, seed: &str) -> Message {
+fn teleport_finish_to(agent_id: Uuid, endpoint: SocketAddr, region_handle: u64, seed: &str) -> Message {
     let SocketAddr::V4(endpoint) = endpoint else { panic!("simulator endpoint must use IPv4") };
     let schema = SchemaMessage::schema_by_name("TeleportFinish").expect("TeleportFinish schema");
     Message::Schema(
         SchemaMessage::new(
             schema,
             vec![BlockValues::single(vec![
-                FieldValue::UUID(agent_id),
+                FieldValue::Uuid(agent_id),
                 FieldValue::U32(0),
                 FieldValue::IpAddr(endpoint.ip().octets()),
                 FieldValue::IpPort(endpoint.port().to_be_bytes()),
@@ -405,8 +405,8 @@ async fn send_targeted(commands: &mpsc::Sender<Command>, simulator_id: Simulator
 fn object_request() -> Message {
     Message::RequestMultipleObjects(RequestMultipleObjects {
         agent_data: RequestAgentData {
-            agent_id: UUID::parse_str(AGENT_ID).expect("agent UUID"),
-            session_id: UUID::parse_str(SESSION_ID).expect("session UUID"),
+            agent_id: Uuid::parse_str(AGENT_ID).expect("agent UUID"),
+            session_id: Uuid::parse_str(SESSION_ID).expect("session UUID"),
         },
         objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 77 }],
     })
@@ -423,8 +423,8 @@ fn burst_object_request() -> Message {
     }
     Message::RequestMultipleObjects(RequestMultipleObjects {
         agent_data: RequestAgentData {
-            agent_id: UUID::parse_str(AGENT_ID).expect("agent UUID"),
-            session_id: UUID::parse_str(SESSION_ID).expect("session UUID"),
+            agent_id: Uuid::parse_str(AGENT_ID).expect("agent UUID"),
+            session_id: Uuid::parse_str(SESSION_ID).expect("session UUID"),
         },
         objects,
     })
@@ -433,8 +433,8 @@ fn burst_object_request() -> Message {
 fn chat_message(message: impl Into<String>) -> Message {
     Message::from(ChatFromViewer {
         agent_data: chat_from_viewer::AgentData {
-            agent_id: UUID::parse_str(AGENT_ID).expect("valid test agent ID"),
-            session_id: UUID::parse_str(SESSION_ID).expect("valid test session ID"),
+            agent_id: Uuid::parse_str(AGENT_ID).expect("valid test agent ID"),
+            session_id: Uuid::parse_str(SESSION_ID).expect("valid test session ID"),
         },
         chat_data: ChatData { message: message.into(), chat_type: ChatType::Normal, channel: 0 },
     })

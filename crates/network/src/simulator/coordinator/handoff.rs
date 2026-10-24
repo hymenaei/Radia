@@ -48,7 +48,7 @@ async fn handoff_waits_for_matching_movement() {
     ));
     assert!(matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorMessage { message: Message::RegionHandshake(_), .. }));
 
-    let wrong = movement_complete_packet(42, session.agent_id, UUID::from_u128(99), region_handle);
+    let wrong = movement_complete_packet(42, session.agent_id, Uuid::from_u128(99), region_handle);
     neighbor.send_to(&wrong, peer).await.expect("send wrong-session movement completion");
     let matching = movement_complete_packet(43, session.agent_id, session.session_id, region_handle);
     neighbor.send_to(&matching, peer).await.expect("send matching movement completion");

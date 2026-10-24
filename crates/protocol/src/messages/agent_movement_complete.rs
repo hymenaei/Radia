@@ -1,8 +1,7 @@
-use base::UUID;
+use uuid::Uuid;
 
 use math::Vec3;
 
-/// The simulator's completed movement update for this agent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentMovementComplete {
     pub agent_data: AgentData,
@@ -12,8 +11,8 @@ pub struct AgentMovementComplete {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AgentData {
-    pub agent_id: UUID,
-    pub session_id: UUID,
+    pub agent_id: Uuid,
+    pub session_id: Uuid,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

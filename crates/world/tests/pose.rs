@@ -1,7 +1,7 @@
 use std::num::{NonZeroU8, NonZeroU32};
 
-use base::UUID;
 use math::{DVec3, Quat, Vec3};
+use uuid::Uuid;
 use world::{
     Applied,
     ApplyOutcome::{Introduced, Removed, Unchanged, Updated},
@@ -31,8 +31,8 @@ fn limits(entities: usize) -> WorldLimits {
     }
 }
 
-fn uuid(value: u128) -> UUID {
-    UUID::from_u128(value)
+fn uuid(value: u128) -> Uuid {
+    Uuid::from_u128(value)
 }
 
 fn local_id(value: u32) -> NonZeroU32 {

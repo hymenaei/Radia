@@ -6,11 +6,11 @@ use std::{
     time::Duration,
 };
 
-use base::UUID;
 use protocol::login::{self, ResponseData};
 use reqwest::{StatusCode, header::CONTENT_TYPE};
 use tokio::{sync::Semaphore, time};
 use url::Url;
+use uuid::Uuid;
 
 use crate::{
     capabilities::spawn_blocking_with_permit,
@@ -21,7 +21,6 @@ use crate::{
 
 pub use protocol::login::StartLocation;
 
-/// Account and simulator data returned after a successful login.
 #[derive(Clone)]
 pub struct AgentSession {
     pub first_name: String,
@@ -29,8 +28,8 @@ pub struct AgentSession {
     pub grid: Grid,
     pub message: String,
     pub simulator_address: SocketAddr,
-    pub agent_id: UUID,
-    pub session_id: UUID,
+    pub agent_id: Uuid,
+    pub session_id: Uuid,
     pub circuit_code: u32,
     pub(crate) seed_capability: Url,
 }
@@ -59,12 +58,10 @@ const MAX_CONCURRENT_LOGIN_OPERATIONS: usize = 2;
 static LOGIN_OPERATION_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-/// Second Life grid selected for login.
 pub enum Grid {
     #[default]
-    /// Main grid.
     Agni,
-    /// Beta grid.
+
     Aditi,
 }
 
@@ -84,7 +81,6 @@ impl Grid {
     }
 }
 
-/// Credentials and login options consumed by [`crate::Session::start`].
 #[derive(Clone)]
 pub struct LoginCredentials {
     pub first_name: String,
@@ -92,7 +88,7 @@ pub struct LoginCredentials {
     pub password: String,
     pub grid: Grid,
     pub start_location: StartLocation,
-    /// MFA hash from a previous login, or an empty string if absent.
+
     pub mfa_hash: String,
 }
 

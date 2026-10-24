@@ -1,4 +1,3 @@
-use base::UUID;
 use math::{Quat, Vec3, Vec4};
 use protocol::{
     LLUdpError,
@@ -10,7 +9,8 @@ use protocol::{
     },
     types::ObjectShape,
 };
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
+use uuid::Uuid;
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")
@@ -54,8 +54,8 @@ fn write_midpoint_components(bytes: &mut [u8], offset: usize, count: usize) {
     }
 }
 
-fn uuid(value: &str) -> UUID {
-    UUID::parse_str(value).expect("valid fixture UUID")
+fn uuid(value: &str) -> Uuid {
+    Uuid::parse_str(value).expect("valid fixture UUID")
 }
 
 fn decode(hex: &str) -> (Vec<u8>, Packet) {

@@ -5,7 +5,6 @@ use std::{
     time::Duration,
 };
 
-use base::UUID;
 use futures::{FutureExt, channel::mpsc, pin_mut, sink::SinkExt, stream::StreamExt};
 use llsd::{Map, Value};
 use network::{
@@ -14,6 +13,7 @@ use network::{
 };
 use tokio::runtime::Handle;
 use tokio::sync::watch;
+use uuid::Uuid;
 use world::{
     LocalAddress, MAX_MEDIA_DIMENSION, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_MEDIA_WHITELIST_ENTRIES, MAX_SURFACE_FACES,
     MediaControls, MediaEntry, ObjectBindingTarget, ObjectMediaError, ObjectMediaUpdate, OrderEvidence, UpdateSource,
@@ -50,7 +50,7 @@ impl ObjectMediaTarget {
 struct MediaKey {
     simulator_id: SimulatorId,
     address: LocalAddress,
-    object_id: UUID,
+    object_id: Uuid,
 }
 
 struct FetchRequest {
@@ -308,7 +308,7 @@ async fn fetch(
 
     let mut payload = Map::new();
     payload.insert("verb".into(), Value::String("GET".into()));
-    payload.insert("object_id".into(), Value::UUID(request.target.binding.object_id()));
+    payload.insert("object_id".into(), Value::Uuid(request.target.binding.object_id()));
     let response =
         request.client.post_with_response_limit(&capability, &payload, RESPONSE_LIMIT_BYTES).await.map_err(|_| FetchError::Transport)?;
     parse_response(&response, request.target.binding.object_id()).map_err(FetchError::from)
@@ -334,7 +334,7 @@ impl From<ParseError> for FetchError {
     }
 }
 
-fn parse_response(response: &Value, expected_id: UUID) -> Result<ObjectMediaUpdate, ParseError> {
+fn parse_response(response: &Value, expected_id: Uuid) -> Result<ObjectMediaUpdate, ParseError> {
     let response = response.as_map().ok_or(ParseError::Malformed)?;
     if response.contains_key("error") {
         return Err(ParseError::Malformed);
@@ -442,7 +442,7 @@ fn whitelist_field(fields: &Map) -> Result<Vec<String>, ParseError> {
 pub(super) fn media_version(value: &str) -> Option<u32> {
     let value = value.strip_prefix("x-mv:")?;
     let (version, agent_id) = value.split_once('/')?;
-    UUID::parse_str(agent_id).ok()?;
+    Uuid::parse_str(agent_id).ok()?;
     version.parse().ok()
 }
 
@@ -457,9 +457,9 @@ enum ParseError {
 mod tests {
     use std::num::NonZeroU32;
 
-    use base::UUID;
     use llsd::{Map, Value};
     use network::testing::simulator_id;
+    use uuid::Uuid;
     use world::{
         Appearance, FieldUpdate, Kind, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MediaControls, ObjectMediaError, ObjectObservation,
         OrderEvidence, ParentUpdate, Shape, UpdateSource,
@@ -480,7 +480,7 @@ mod tests {
         let region = world.register_simulator(simulator_id, None).expect("register simulator");
         let local_id = NonZeroU32::new(7).expect("nonzero local ID");
         let other_local_id = NonZeroU32::new(8).expect("nonzero replacement local ID");
-        let object_id = UUID::from_u128(7);
+        let object_id = Uuid::from_u128(7);
         let observation = |order, local_id| ObjectObservation {
             shape: FieldUpdate::Set(Shape::Prim(Default::default())),
             appearance: FieldUpdate::Set(Appearance::Surface),
@@ -515,9 +515,9 @@ mod tests {
         (active, replacement)
     }
 
-    fn response(object_id: UUID) -> Value {
+    fn response(object_id: Uuid) -> Value {
         let mut fields = Map::new();
-        fields.insert("object_id".into(), Value::UUID(object_id));
+        fields.insert("object_id".into(), Value::Uuid(object_id));
         fields.insert("object_media_version".into(), Value::String("x-mv:8/00000000-0000-0000-0000-000000000001".into()));
         fields.insert("object_media_data".into(), Value::Array(vec![Value::Map(Map::new())]));
         Value::Map(fields)
@@ -583,9 +583,9 @@ mod tests {
 
     #[test]
     fn response_checks_identity_and_faces() {
-        let id = UUID::from_u128(7);
+        let id = Uuid::from_u128(7);
         assert_eq!(parse_response(&response(id), id).unwrap().version(), 8);
-        assert_eq!(FetchError::from(parse_response(&response(UUID::from_u128(9)), id).unwrap_err()), FetchError::ObjectMismatch);
+        assert_eq!(FetchError::from(parse_response(&response(Uuid::from_u128(9)), id).unwrap_err()), FetchError::ObjectMismatch);
         let mut value = response(id);
         let Value::Map(fields) = &mut value else { panic!("test response is a map") };
         fields.insert("object_media_data".into(), Value::String("bad".into()));
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn response_rejects_oversized_fields() {
-        let id = UUID::from_u128(7);
+        let id = Uuid::from_u128(7);
         let mut value = response(id);
         let Value::Map(fields) = &mut value else { panic!("test response is a map") };
         let Value::Array(faces) = fields.get_mut("object_media_data").unwrap() else { panic!("test faces are an array") };

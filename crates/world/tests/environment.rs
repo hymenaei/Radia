@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use base::{AssetId, UUID};
+use utils::AssetId;
+use uuid::Uuid;
 use world::{
     ApplyError, EnvironmentAssignment, EnvironmentScope, EnvironmentSource, MAX_ENVIRONMENT_BYTES, MAX_ENVIRONMENT_SOURCE_BYTES,
     OrderEvidence, ParcelId, Region, RegionOutcome, UpdateSource, World, WorldChange, WorldLimits,
@@ -125,7 +126,7 @@ fn versions_and_failures_are_atomic() {
     for invalid in [
         EnvironmentSource::Inline(Arc::from([])),
         EnvironmentSource::Inline(vec![0; MAX_ENVIRONMENT_SOURCE_BYTES + 1].into()),
-        EnvironmentSource::Asset(AssetId::new(UUID::nil())),
+        EnvironmentSource::Asset(AssetId::new(Uuid::nil())),
     ] {
         assert!(matches!(world.observe_environment(target, source(1, 30), assignment(invalid, 11)), Err(ApplyError::InvalidValue { .. })));
         assert_eq!(world.environment(region).unwrap().region_assignment, Some(original.clone()));

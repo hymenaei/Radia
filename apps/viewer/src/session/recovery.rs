@@ -452,11 +452,11 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use base::UUID;
     use futures::channel::mpsc;
     use network::testing::simulator_id;
     use protocol::lludp::{Message, Packet};
     use protocol::messages::{CacheMissType::Full, RequestAgentData};
+    use uuid::Uuid;
     use world::{LocalAddress, Region};
 
     use super::{
@@ -469,7 +469,7 @@ mod tests {
     }
 
     fn agent_data() -> RequestAgentData {
-        RequestAgentData { agent_id: UUID::from_u128(1), session_id: UUID::from_u128(2) }
+        RequestAgentData { agent_id: Uuid::from_u128(1), session_id: Uuid::from_u128(2) }
     }
 
     #[test]
@@ -697,7 +697,7 @@ mod tests {
 
         let targets = vec![address(7, 0xff00_ff00); MAX_RECOVERY_OBJECTS_PER_REQUEST];
         let agent_data = RequestAgentData {
-            agent_id: UUID::from_bytes([0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255]),
+            agent_id: Uuid::from_bytes([0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255]),
             ..agent_data()
         };
         let request = recovery_request(agent_data, &targets);

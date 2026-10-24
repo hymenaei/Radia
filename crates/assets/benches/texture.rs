@@ -2,6 +2,7 @@ use std::{hint::black_box, thread};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jpeg2k::{DecodeParameters, Image, ImagePixelData};
+use test_support::texture::GRAY_4096_J2C;
 
 fn decode(input: &[u8], edge: u32) -> Vec<u8> {
     let reduce = 4096u32.ilog2() - edge.ilog2();
@@ -13,7 +14,7 @@ fn decode(input: &[u8], edge: u32) -> Vec<u8> {
 }
 
 fn textures(c: &mut Criterion) {
-    let input = include_bytes!("../tests/fixtures/gray-4096.j2c");
+    let input = GRAY_4096_J2C;
     let mut group = c.benchmark_group("texture/jpeg2000");
     for edge in [512u32, 1024, 2048] {
         for workers in [1u64, 2] {

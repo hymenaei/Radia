@@ -1,13 +1,15 @@
 use super::*;
 use assets::Priority;
-use base::{AssetId, UUID};
 use llsd::{Value, binary, xml};
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     thread,
 };
+use test_support::texture::{RGBA_J2C, RGBA_RAW};
 use url::Url;
+use utils::AssetId;
+use uuid::Uuid;
 
 struct Peer {
     url: Url,
@@ -84,7 +86,7 @@ fn grants(base: &Url) -> Vec<u8> {
 }
 
 fn resource(kind: Kind) -> assets::Resource {
-    assets::Resource { id: AssetId::new(UUID::from_u128(1)), kind }
+    assets::Resource { id: AssetId::new(Uuid::from_u128(1)), kind }
 }
 
 #[tokio::test]
@@ -215,7 +217,7 @@ async fn shared_images_outlive_session() {
         }
         started.take().unwrap().send(()).unwrap();
         hold.recv_timeout(Duration::from_secs(5)).unwrap();
-        (200, include_bytes!("../../../crates/assets/tests/fixtures/rgba.j2c").to_vec())
+        (200, RGBA_J2C.to_vec())
     });
     let client = Client::new(peer.url.join("seed").unwrap()).unwrap();
     let (cancel, cancelled) = oneshot::channel();
@@ -244,15 +246,12 @@ async fn shared_images_outlive_session() {
         }
         second.changed().await;
     };
-    assert_eq!(blob.image().unwrap().pixels(), include_bytes!("../../../crates/assets/tests/fixtures/rgba.raw"));
+    assert_eq!(blob.image().unwrap().pixels(), RGBA_RAW);
     assert_eq!(budget.stats().high_water_bytes, 192 * 1024 * 1024);
     cancel.send(()).unwrap();
     service.stop().await;
     assert!(matches!(second.status(), assets::Status::StaleSession));
-    assert_eq!(
-        budget.stats().resident_bytes,
-        blob.image().unwrap().pixels().len() + include_bytes!("../../../crates/assets/tests/fixtures/rgba.j2c").len()
-    );
+    assert_eq!(budget.stats().resident_bytes, blob.image().unwrap().pixels().len() + RGBA_J2C.len());
     assert!(matches!(
         handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await,
         Err(RequestError::Closed)

@@ -2,7 +2,9 @@ use assets::{
     AlphaMode, Failure, LegacyAlphaMode, LegacyMaterial, MaterialDescription, MaterialTexture, PbrMaterial, TexGen, TextureHandle,
     TextureRef, TextureTransform,
 };
-use base::{AssetId, UUID};
+use math::srgb8_to_linear;
+use utils::AssetId;
+use uuid::Uuid;
 use world::{FaceAppearance, GltfAlphaMode, GltfMaterialOverride, GltfTextureTransform};
 
 #[cfg(test)]
@@ -46,7 +48,12 @@ pub(crate) fn resolve_legacy(source: FaceAppearance, maps: Option<LegacyMaterial
         Alpha::Opaque
     };
     let material = LegacyMaterial {
-        diffuse_color: [linear(source.color[0]), linear(source.color[1]), linear(source.color[2]), f32::from(source.color[3]) / 255.0],
+        diffuse_color: [
+            srgb8_to_linear(source.color[0]),
+            srgb8_to_linear(source.color[1]),
+            srgb8_to_linear(source.color[2]),
+            f32::from(source.color[3]) / 255.0,
+        ],
         diffuse: MaterialTexture {
             texture: texture_ref(source.texture_id),
             transform: TextureTransform {
@@ -142,7 +149,7 @@ pub(crate) fn apply_overrides(mut material: PbrMaterial, overrides: &GltfMateria
     material
 }
 
-fn apply_texture(info: &mut MaterialTexture, texture: Option<UUID>, transform: GltfTextureTransform) {
+fn apply_texture(info: &mut MaterialTexture, texture: Option<Uuid>, transform: GltfTextureTransform) {
     if let Some(id) = texture.filter(|id| !id.is_nil()) {
         info.texture = texture_ref(id);
     }
@@ -157,11 +164,6 @@ fn apply_texture(info: &mut MaterialTexture, texture: Option<UUID>, transform: G
     }
 }
 
-pub(crate) fn texture_ref(id: UUID) -> TextureRef {
-    if id.is_nil() || id == UUID::max() { TextureRef::Clear } else { TextureRef::Asset(AssetId::new(id)) }
-}
-
-fn linear(value: u8) -> f32 {
-    let value = f32::from(value) / 255.0;
-    if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+pub(crate) fn texture_ref(id: Uuid) -> TextureRef {
+    if id.is_nil() || id == Uuid::max() { TextureRef::Clear } else { TextureRef::Asset(AssetId::new(id)) }
 }

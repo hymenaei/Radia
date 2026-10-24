@@ -1,8 +1,9 @@
 use super::*;
 use assets::{MaterialTexture, PbrMaterial};
-use base::{AssetId, UUID};
 use scene::{AssetState, Resolution};
 use std::f32::consts::FRAC_PI_2;
+use utils::AssetId;
+use uuid::Uuid;
 
 fn mapped(matrix: [[f32; 4]; 2], uv: [f32; 2]) -> [f32; 2] {
     matrix.map(|row| row[0] * uv[0] + row[1] * uv[1] + row[2])
@@ -30,7 +31,7 @@ fn pbr_transform_order() {
 
 #[test]
 fn fallback_preserves_material() {
-    let id = AssetId::new(UUID::from_u128(42));
+    let id = AssetId::new(Uuid::from_u128(42));
     let mut material = PbrMaterial {
         base_color_factor: [0.2, 0.3, 0.4, 0.5],
         double_sided: true,

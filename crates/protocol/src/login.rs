@@ -1,49 +1,27 @@
-//! Second Life's `login_to_simulator` XML-RPC wire contract.
-//!
-//! Callers choose client metadata and decode limits. HTTP, grid selection, retries,
-//! credential persistence, MFA continuation, and usable-session validation belong to Network.
-//!
-//! # Examples
-//!
-//! ```
-//! use protocol::login::Response;
-//!
-//! let xml = "<methodResponse><params><param><value><struct><member><name>reason</name><value><string>mfa_challenge</string></value></member></struct></value></param></params></methodResponse>";
-//! assert!(matches!(Response::from_xml(xml, 16)?, Response::MfaChallenge));
-//! # Ok::<(), protocol::login::Error>(())
-//! ```
-
 use std::{
     collections::BTreeMap,
     error, fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
-use base::UUID;
 use dxr::{FaultResponse, MethodCall, MethodResponse};
 use md5::{Digest, Md5};
 use quick_xml::{Reader, events::Event};
+use uuid::Uuid;
 
 pub use dxr::{Fault, Value};
 
 const MAX_LOGIN_XML_ELEMENTS: usize = 262_144;
 
-/// Initial region and position requested during login.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StartLocation {
     Last,
     Home,
-    /// Start in a named region at the supplied meter coordinates.
-    Region {
-        name: String,
-        x: u32,
-        y: u32,
-        z: u32,
-    },
+
+    Region { name: String, x: u32, y: u32, z: u32 },
 }
 
 impl StartLocation {
-    /// Encodes the login protocol's start-location parameter.
     pub fn login_parameter(&self) -> String {
         match self {
             Self::Last => "last".into(),
@@ -53,11 +31,10 @@ impl StartLocation {
     }
 }
 
-/// Fields of one login attempt. Borrowed secrets are never included in `Debug`.
 pub struct Request<'a> {
     pub first_name: &'a str,
     pub last_name: &'a str,
-    /// Plaintext input; encoding applies Second Life's `$1$` MD5 wire convention.
+
     pub password: &'a str,
     pub start: &'a StartLocation,
     pub channel: &'a str,
@@ -80,10 +57,6 @@ impl fmt::Debug for Request<'_> {
 }
 
 impl Request<'_> {
-    /// Encodes one XML-RPC call, including the XML declaration.
-    ///
-    /// # Errors
-    /// Returns [`Error::Encode`] if XML-RPC serialization fails.
     pub fn to_xml(&self) -> Result<String, Error> {
         let mut fields = BTreeMap::new();
         let digest = Md5::digest(self.password.as_bytes());
@@ -111,7 +84,6 @@ impl Request<'_> {
     }
 }
 
-/// Additional fields returned by the grid, including inventory metadata.
 #[derive(Clone, Default)]
 pub struct ResponseData {
     fields: BTreeMap<String, Value>,
@@ -132,20 +104,16 @@ impl fmt::Debug for ResponseData {
     }
 }
 
-/// Authenticated wire data, before grid and transport policy establish a Network session.
 pub struct Authenticated {
-    /// Absent names allow the caller to retain the submitted account names.
     pub first_name: Option<String>,
     pub last_name: Option<String>,
     pub message: String,
-    /// Numeric address and port decoded from the response. Signed XML-RPC integers
-    /// preserve their IPv4 bit pattern; Long values must fit `i32::MIN..=u32::MAX`.
-    /// Address and port usability is caller policy.
+
     pub simulator_address: SocketAddr,
-    pub agent_id: UUID,
-    pub session_id: UUID,
+    pub agent_id: Uuid,
+    pub session_id: Uuid,
     pub circuit_code: u32,
-    /// Unvalidated wire string. Network validates the capability URL before using it.
+
     pub seed_capability: String,
     pub mfa_hash: Option<String>,
     pub data: ResponseData,
@@ -157,7 +125,6 @@ impl fmt::Debug for Authenticated {
     }
 }
 
-/// XML-RPC authentication result. An MFA challenge describes wire state, not a continuation task.
 pub enum Response {
     Authenticated(Box<Authenticated>),
     MfaChallenge,
@@ -175,17 +142,6 @@ impl fmt::Debug for Response {
 }
 
 impl Response {
-    /// Parses UTF-8 XML-RPC, limiting XML element nesting and count before `dxr` deserialization.
-    ///
-    /// `max_depth` counts all XML elements, not only maps and arrays. The codec also
-    /// limits the response to 262,144 elements. The caller must separately bound input
-    /// bytes and supplies the depth policy. HTTP status and content type are deliberately
-    /// outside this codec.
-    ///
-    /// # Errors
-    /// Returns a typed XML-RPC fault, excessive nesting, malformed XML/response, or
-    /// excessive element count, or missing/invalid authentication fields. Rejected
-    /// credentials and MFA are results.
     pub fn from_xml(input: &str, max_depth: usize) -> Result<Self, Error> {
         preflight_xml(input, max_depth, MAX_LOGIN_XML_ELEMENTS)?;
         if let Ok(response) = FaultResponse::from_xml(input) {
@@ -228,7 +184,6 @@ impl Response {
     }
 }
 
-/// Login wire encoding or decoding failed. Fault messages are redacted in `Debug`.
 #[derive(Clone, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Error {
@@ -331,9 +286,9 @@ fn integer_field(fields: &BTreeMap<String, Value>, name: &'static str) -> Result
     }
 }
 
-fn uuid_field(fields: &BTreeMap<String, Value>, name: &'static str) -> Result<UUID, Error> {
+fn uuid_field(fields: &BTreeMap<String, Value>, name: &'static str) -> Result<Uuid, Error> {
     let value = string_field(fields, name).ok_or(Error::MissingField(name))?;
-    UUID::parse_str(&value).map_err(|_| Error::InvalidField(name))
+    Uuid::parse_str(&value).map_err(|_| Error::InvalidField(name))
 }
 
 #[cfg(test)]

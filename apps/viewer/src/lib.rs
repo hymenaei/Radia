@@ -14,6 +14,8 @@ mod viewport;
 mod window_chrome;
 mod window_geometry;
 
+pub(crate) const DEFAULT_DRAW_DISTANCE: f32 = 512.0;
+
 pub mod asset_coordinator;
 pub mod inventory;
 pub mod world_reader;

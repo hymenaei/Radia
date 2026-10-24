@@ -216,6 +216,7 @@ mod tests {
     use super::*;
     use crate::{Budget, budget::TEXTURE_WORK_BYTES};
     use std::cell::Cell;
+    use test_support::texture::RGBA_J2C;
 
     #[test]
     fn detail_sizes_are_bounded() {
@@ -239,7 +240,7 @@ mod tests {
 
     #[test]
     fn cancelled_decode_retains_work() {
-        let bytes = include_bytes!("../tests/fixtures/rgba.j2c");
+        let bytes = RGBA_J2C;
         let checks = Cell::new(0);
         texture_header::preflight(bytes, &|| {
             checks.set(checks.get() + 1);

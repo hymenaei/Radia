@@ -21,7 +21,7 @@ use protocol::{
         },
     },
 };
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
 
 struct BlockFacts {
     name: &'static str,
@@ -307,7 +307,7 @@ fn canonical_wire_type(kind: template::FieldKind) -> String {
         template::FieldKind::IpPort => "IPPORT".to_owned(),
         template::FieldKind::Null => "NULL".to_owned(),
         template::FieldKind::Quaternion => "LLQuaternion".to_owned(),
-        template::FieldKind::UUID => "LLUUID".to_owned(),
+        template::FieldKind::Uuid => "LLUUID".to_owned(),
         template::FieldKind::Vector3 => "LLVector3".to_owned(),
         template::FieldKind::Vector3d => "LLVector3d".to_owned(),
         template::FieldKind::Vector4 => "LLVector4".to_owned(),

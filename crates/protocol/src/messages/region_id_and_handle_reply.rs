@@ -1,6 +1,5 @@
-use base::UUID;
+use uuid::Uuid;
 
-/// Returns a region UUID and its global handle.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RegionIdAndHandleReply {
     pub reply_block: ReplyBlock,
@@ -8,6 +7,6 @@ pub struct RegionIdAndHandleReply {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ReplyBlock {
-    pub region_id: UUID,
+    pub region_id: Uuid,
     pub region_handle: u64,
 }

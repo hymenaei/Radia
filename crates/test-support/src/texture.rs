@@ -1,0 +1,12 @@
+pub const GRAY_4096_J2C: &[u8] = include_bytes!("../fixtures/textures/gray-4096.j2c");
+pub const GRAY_ALPHA_J2C: &[u8] = include_bytes!("../fixtures/textures/gray-alpha.j2c");
+pub const GRAY_ALPHA_RAW: &[u8] = include_bytes!("../fixtures/textures/gray-alpha.raw");
+pub const GRAY_J2C: &[u8] = include_bytes!("../fixtures/textures/gray.j2c");
+pub const GRAY_RAW: &[u8] = include_bytes!("../fixtures/textures/gray.raw");
+pub const RGB_J2C: &[u8] = include_bytes!("../fixtures/textures/rgb.j2c");
+pub const RGB_RAW: &[u8] = include_bytes!("../fixtures/textures/rgb.raw");
+pub const RGBA_LOSSY_J2C: &[u8] = include_bytes!("../fixtures/textures/rgba-lossy.j2c");
+pub const RGBA_LOSSY_RAW: &[u8] = include_bytes!("../fixtures/textures/rgba-lossy.raw");
+pub const RGBA_J2C: &[u8] = include_bytes!("../fixtures/textures/rgba.j2c");
+pub const RGBA_JP2: &[u8] = include_bytes!("../fixtures/textures/rgba.jp2");
+pub const RGBA_RAW: &[u8] = include_bytes!("../fixtures/textures/rgba.raw");

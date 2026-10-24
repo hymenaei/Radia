@@ -1,6 +1,5 @@
-use base::UUID;
+use uuid::Uuid;
 
-/// Requests map data for a range of grid cells.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MapBlockRequest {
     pub agent_data: AgentData,
@@ -9,8 +8,8 @@ pub struct MapBlockRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentData {
-    pub agent_id: UUID,
-    pub session_id: UUID,
+    pub agent_id: Uuid,
+    pub session_id: Uuid,
     pub flags: u32,
     pub estate_id: u32,
     pub godlike: bool,

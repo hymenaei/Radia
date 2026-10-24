@@ -1,7 +1,7 @@
 use std::num::NonZeroU32;
 
-use base::UUID;
 use math::{Quat, Vec3};
+use uuid::Uuid;
 use world::{
     ApplyOutcome::Introduced,
     Kind,
@@ -19,7 +19,7 @@ pub(super) const INITIAL_ORDER: u64 = 100_000;
 
 #[derive(Clone, Copy)]
 pub(super) struct Row {
-    pub(super) id: UUID,
+    pub(super) id: Uuid,
     pub(super) region: Region,
     pub(super) local_id: NonZeroU32,
     pub(super) order: u64,
@@ -67,7 +67,7 @@ pub(super) fn rows(count: usize, avatar_count: usize) -> (Vec<Row>, Vec<Region>)
             let region_index = index / PER_REGION;
             let local_id = NonZeroU32::new((index % PER_REGION + 1) as u32).expect("local ID is nonzero");
             Row {
-                id: UUID::from_u128(index as u128 + 1),
+                id: Uuid::from_u128(index as u128 + 1),
                 region: regions[region_index],
                 local_id,
                 order: INITIAL_ORDER + u64::from(local_id.get()),

@@ -6,8 +6,8 @@ use std::{
     },
 };
 
-use base::AssetId;
 use tokio::sync::watch;
+use utils::AssetId;
 
 use crate::{Blob, Budget, Failure, Image, PixelFormat, TextureSize, budget::TEXTURE_WORK_BYTES, texture};
 

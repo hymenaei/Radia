@@ -1,6 +1,5 @@
-use base::UUID;
+use uuid::Uuid;
 
-/// Requests a simulator's region handle for a region ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegionHandleRequest {
     pub request_block: RequestBlock,
@@ -8,5 +7,5 @@ pub struct RegionHandleRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RequestBlock {
-    pub region_id: UUID,
+    pub region_id: Uuid,
 }

@@ -4,7 +4,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base::UUID;
 use futures::{
     FutureExt, StreamExt,
     channel::oneshot,
@@ -18,6 +17,7 @@ use scene::{
 };
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
+use uuid::Uuid;
 use world::{MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS};
 
 use crate::{
@@ -123,7 +123,7 @@ pub(crate) struct SceneFeed {
     pub(crate) runtime: Handle,
     pub(crate) view: SceneView,
     pub(crate) budget: Budget,
-    pub(crate) agent_id: UUID,
+    pub(crate) agent_id: Uuid,
     pub(crate) water_height: Option<f64>,
     camera: watch::Sender<Option<Camera>>,
     incoming: mpsc::Receiver<Batch>,
@@ -133,7 +133,7 @@ pub(crate) struct SceneFeed {
 impl SceneFeed {
     pub(crate) fn start(
         sources: SceneSources,
-        agent_id: UUID,
+        agent_id: Uuid,
         camera: watch::Sender<Option<Camera>>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
@@ -178,7 +178,7 @@ impl SceneFeed {
     }
 }
 
-fn water_height(view: &SceneView, agent: UUID) -> Option<f64> {
+fn water_height(view: &SceneView, agent: Uuid) -> Option<f64> {
     let region = view.objects().find(|object| object.detail().summary.id == agent)?.detail().summary.address.region();
     let height = view.water_height(region)?;
     let origin = view.regions().find(|source| source.summary().region == region)?.summary().info.resolved_origin()?;

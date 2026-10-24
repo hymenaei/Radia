@@ -1,14 +1,14 @@
 use super::*;
 use protocol::lludp::BlockValues;
 
-fn message(agent: UUID, invoice: UUID, body: &str) -> Message {
+fn message(agent: Uuid, invoice: Uuid, body: &str) -> Message {
     let schema = SchemaMessage::schema_by_name("GenericMessage").unwrap();
     Message::Schema(
         SchemaMessage::new(
             schema,
             vec![
-                BlockValues::single(vec![FieldValue::UUID(agent), FieldValue::UUID(UUID::nil()), FieldValue::UUID(UUID::nil())]),
-                BlockValues::single(vec![FieldValue::Bytes(b"PushExpEnvironment\0".to_vec()), FieldValue::UUID(invoice)]),
+                BlockValues::single(vec![FieldValue::Uuid(agent), FieldValue::Uuid(Uuid::nil()), FieldValue::Uuid(Uuid::nil())]),
+                BlockValues::single(vec![FieldValue::Bytes(b"PushExpEnvironment\0".to_vec()), FieldValue::Uuid(invoice)]),
                 BlockValues::single(vec![FieldValue::Bytes(body.as_bytes().to_vec())]),
             ],
         )
@@ -18,23 +18,23 @@ fn message(agent: UUID, invoice: UUID, body: &str) -> Message {
 
 #[test]
 fn invoice_controls_identity() {
-    let agent = UUID::from_u128(1);
-    let experience = UUID::from_u128(2);
+    let agent = Uuid::from_u128(1);
+    let experience = Uuid::from_u128(2);
     let body = "{'action':'PushFullEnvironment','public_id':u00000000-0000-0000-0000-000000000003,'action_data':{'asset_id':u00000000-0000-0000-0000-000000000004,'transition_time':r2.5}}";
     let push = message(agent, experience, body);
     let Some(EnvironmentPush::Full { experience: actual, asset, transition }) = decode(&push, agent).unwrap() else {
         panic!("full push missing")
     };
     assert_eq!(actual.uuid(), experience);
-    assert_eq!(asset.uuid(), UUID::from_u128(4));
+    assert_eq!(asset.uuid(), Uuid::from_u128(4));
     assert_eq!(transition, Duration::from_millis(2500));
-    assert!(decode(&push, UUID::from_u128(5)).is_err(), "wrong-agent push must not be accepted");
+    assert!(decode(&push, Uuid::from_u128(5)).is_err(), "wrong-agent push must not be accepted");
 }
 
 #[test]
 fn missing_patch_clears_experience() {
-    let agent = UUID::from_u128(1);
-    let experience = UUID::from_u128(2);
+    let agent = Uuid::from_u128(1);
+    let experience = Uuid::from_u128(2);
     for settings in ["{}", "{'sky':!,'water':!}"] {
         let body = format!("{{'action':'PushPartialEnvironment','action_data':{{'settings':{settings}}}}}");
         let Some(EnvironmentPush::Clear { experience: Some(id), .. }) = decode(&message(agent, experience, &body), agent).unwrap() else {
@@ -49,7 +49,7 @@ fn missing_patch_clears_experience() {
     assert!(sky.is_empty() && water.is_empty());
     for body in ["{'action':'ClearEnvironment'}", "{'action':'ClearEnvironment','action_data':{'transition_time':i-1}}"] {
         assert!(matches!(
-            decode(&message(agent, UUID::nil(), body), agent).unwrap(),
+            decode(&message(agent, Uuid::nil(), body), agent).unwrap(),
             Some(EnvironmentPush::Clear { experience: None, transition: Duration::ZERO })
         ));
     }
@@ -58,9 +58,9 @@ fn missing_patch_clears_experience() {
 
 #[test]
 fn partial_values_preserve_sources() {
-    let agent = UUID::from_u128(1);
+    let agent = Uuid::from_u128(1);
     let body = "{'action':'PushPartialEnvironment','action_data':{'settings':{'sky':{'gamma':r1.4},'water':{'water_fog_density':r2.0}}}}";
-    let Some(EnvironmentPush::Partial { sky, water, .. }) = decode(&message(agent, UUID::from_u128(2), body), agent).unwrap() else {
+    let Some(EnvironmentPush::Partial { sky, water, .. }) = decode(&message(agent, Uuid::from_u128(2), body), agent).unwrap() else {
         panic!("partial push missing")
     };
     assert_eq!(sky[0].name, "gamma");
@@ -71,6 +71,6 @@ fn partial_values_preserve_sources() {
         "{'action':'PushPartialEnvironment','action_data':{'settings':{'sky':i1}}}",
         "{'action':'ClearEnvironment','action_data':{'transition_time':rnan}}",
     ] {
-        assert!(decode(&message(agent, UUID::from_u128(2), body), agent).is_err(), "invalid push accepted: {body}");
+        assert!(decode(&message(agent, Uuid::from_u128(2), body), agent).is_err(), "invalid push accepted: {body}");
     }
 }

@@ -19,10 +19,10 @@ Note also which crates are **API Boundaries**. Rules at the boundary are differe
 ```text
 apps/viewer/           # package `viewer`, executable `radia`
 crates/assets/         # package `assets`
-crates/common/base/    # package `base`
 crates/common/llsd/    # package `llsd`
-crates/common/math/    # package `math`
-crates/common/testing/ # package `testing`
+crates/math/           # package `math`
+crates/utils/          # package `utils`
+crates/test-support/ # package `test-support`
 crates/network/        # package `network`
 crates/protocol/       # package `protocol`
 crates/render/         # package `render`
@@ -30,19 +30,23 @@ crates/scene/          # package `scene`
 crates/world/          # package `world`
 ```
 
-Dependencies point down this list, from the viewer to the common crates.
+The viewer coordinates the library crates. The common directory is being removed one crate at a time. Shared utilities and domain ID types live in utils, which has no subsystem dependencies. AssetId wraps uuid::Uuid so asset IDs cannot be confused with other identifiers. The base crate has been removed. Rust identifiers use Uuid while external wire names and serialization markers retain their protocol spelling.
 
 ### `apps/viewer`
 
 ### `crates/assets`
 
-### `crates/common/base`
-
 ### `crates/common/llsd`
 
-### `crates/common/math`
+### `crates/math`
 
-### `crates/common/testing`
+The math crate owns reusable geometry and numeric operations and re-exports selected glam types and scalar extension traits. Frustum extraction uses zero-to-one clip depth, including reversed depth, and tests bounding spheres against six planes. Plane coefficients and sphere calculations use double precision, and plane normal lengths are computed once per frustum. Axis-aligned Bounds, normal transforms, scale-reflection detection, and sRGB channel conversions also live here. Camera policy, mesh storage, and GPU packing stay with scene and render. Keep consumers importing from math so project-specific primitives have one home.
+
+### `crates/utils`
+
+Shared ID newtypes distinguish objects, assets, avatars, groups, regions, parcels, inventory items, and folders. Their UUID representation is private. Wire codecs convert explicitly; subsystem APIs adopt these types during their individual reviews. Numeric region handles and parcel-local identifiers remain separate.
+
+### `crates/test-support`
 
 ### `crates/network`
 

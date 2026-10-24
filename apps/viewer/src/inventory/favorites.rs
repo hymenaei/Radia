@@ -1,11 +1,8 @@
-//! Load favorite landmarks and resolve their simulator regions.
-
 use std::{
     collections::{HashMap, HashSet},
     str::from_utf8,
 };
 
-use base::UUID;
 use futures::{StreamExt, TryStreamExt, stream};
 use llsd::{Map, Value};
 use network::{
@@ -14,6 +11,7 @@ use network::{
 };
 use protocol::login::{self, ResponseData};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use world::RegionHandle;
 
 use crate::session::{RegionGridCell, RegionLookup, map_request_coordinates};
@@ -27,10 +25,6 @@ const INVENTORY_TYPE_PERSON: i32 = 24;
 const REGION_LOOKUP_CONCURRENCY: usize = 4;
 const LANDMARK_FETCH_CONCURRENCY: usize = 3;
 
-/// A favorite landmark position stored by the viewer.
-///
-/// Coordinates are integer meters within the named region. Values produced by
-/// the loader have `x` and `y` in `0..=255` and `z` in `0..=4096`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FavoriteLocation {
     pub name: String,
@@ -40,24 +34,20 @@ pub struct FavoriteLocation {
     pub z: u32,
 }
 
-/// Position and region identifiers parsed from a simulator landmark asset.
-///
-/// Landmark versions provide different position fields, so unavailable values
-/// are `None`. Position components are in meters and ordered `[x, y, z]`.
 #[derive(Clone, Debug)]
 pub struct FavoriteLandmark {
     pub name: String,
-    pub region_id: Option<UUID>,
+    pub region_id: Option<Uuid>,
     pub local_pos: Option<[f64; 3]>,
     pub global_pos: Option<[f64; 3]>,
-    /// Packed handle for the region origin.
+
     pub region_handle: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
 struct InventoryItem {
-    item_id: Option<UUID>,
-    asset_id: Option<UUID>,
+    item_id: Option<Uuid>,
+    asset_id: Option<Uuid>,
     inventory_type: Option<i32>,
     asset_type: Option<i32>,
     name: Option<String>,
@@ -84,14 +74,6 @@ impl InventoryItem {
     }
 }
 
-/// Loads the agent's Favorites landmarks and resolves region names.
-///
-/// Invalid landmarks are skipped; results are sorted by lowercase name.
-///
-/// # Errors
-///
-/// Returns an error if the Favorites folder is missing or invalid, an inventory request fails,
-/// a favorite landmark asset request fails, or no candidate landmark can be read.
 pub async fn load_favorites(
     capabilities: &Client,
     region_lookup: &RegionLookup,
@@ -147,12 +129,7 @@ pub async fn load_favorites(
     Ok(locations)
 }
 
-/// Finds the first Favorites folder in login data, ignoring case.
-///
-/// # Errors
-///
-/// Returns an error if the inventory skeleton or folder UUID is missing or invalid.
-pub fn favorite_folder_id(login_data: &ResponseData) -> Result<UUID, String> {
+pub fn favorite_folder_id(login_data: &ResponseData) -> Result<Uuid, String> {
     let Some(login::Value::Array(folders)) = login_data.get("inventory-skeleton") else {
         return Err("Second Life did not include the Favorites folder in the login response.".into());
     };
@@ -171,24 +148,16 @@ pub fn favorite_folder_id(login_data: &ResponseData) -> Result<UUID, String> {
         let Some(login::Value::String(folder_id)) = fields.get("folder_id") else {
             return Err("Second Life returned an invalid Favorites folder ID.".into());
         };
-        return UUID::parse_str(folder_id).map_err(|_| "Second Life returned an invalid Favorites folder ID.".into());
+        return Uuid::parse_str(folder_id).map_err(|_| "Second Life returned an invalid Favorites folder ID.".into());
     }
 
     Err("Second Life did not include the Favorites folder in the login response.".into())
 }
 
-/// Fetches landmark assets from the Favorites folder.
-///
-/// At most three assets are fetched at once. Malformed asset contents are skipped, and successful results retain candidate order.
-///
-/// # Errors
-///
-/// Returns an error if a required capability or inventory request fails, the response is invalid,
-/// a candidate asset request fails, or every candidate asset is unreadable.
 pub async fn fetch_favorite_landmarks(
     capabilities: &Client,
-    agent_id: UUID,
-    favorite_folder_id: UUID,
+    agent_id: Uuid,
+    favorite_folder_id: Uuid,
 ) -> Result<Vec<FavoriteLandmark>, String> {
     let capability_urls = capabilities
         .request_capabilities(&REQUESTED_CAPABILITIES)
@@ -227,12 +196,12 @@ fn capability(capabilities: &HashMap<String, CapabilityUrl>, name: &str) -> Resu
     capabilities.get(name).cloned().ok_or_else(|| format!("Second Life did not provide the {name} capability."))
 }
 
-fn folder_request(agent_id: UUID, folder_id: UUID) -> Value {
+fn folder_request(agent_id: Uuid, folder_id: Uuid) -> Value {
     Value::Map(Map::from([(
         "folders".into(),
         Value::Array(vec![Value::Map(Map::from([
-            ("folder_id".into(), Value::UUID(folder_id)),
-            ("owner_id".into(), Value::UUID(agent_id)),
+            ("folder_id".into(), Value::Uuid(folder_id)),
+            ("owner_id".into(), Value::Uuid(agent_id)),
             ("sort_order".into(), Value::Integer(0)),
             ("fetch_folders".into(), Value::Boolean(true)),
             ("fetch_items".into(), Value::Boolean(true)),
@@ -240,14 +209,14 @@ fn folder_request(agent_id: UUID, folder_id: UUID) -> Value {
     )]))
 }
 
-fn item_request(item_ids: &[UUID]) -> Value {
+fn item_request(item_ids: &[Uuid]) -> Value {
     Value::Map(Map::from([(
         "items".into(),
-        Value::Array(item_ids.iter().copied().map(|item_id| Value::Map(Map::from([("item_id".into(), Value::UUID(item_id))]))).collect()),
+        Value::Array(item_ids.iter().copied().map(|item_id| Value::Map(Map::from([("item_id".into(), Value::Uuid(item_id))]))).collect()),
     )]))
 }
 
-fn favorite_folder_items(response: &Value, requested_folder_id: UUID) -> Result<Vec<InventoryItem>, String> {
+fn favorite_folder_items(response: &Value, requested_folder_id: Uuid) -> Result<Vec<InventoryItem>, String> {
     let folders = response
         .as_map()
         .and_then(|fields| fields.get("folders"))
@@ -280,8 +249,8 @@ async fn resolve_favorite_items(
     capabilities: &Client,
     fetch_items: &CapabilityUrl,
     items: Vec<InventoryItem>,
-) -> Result<Vec<(String, UUID)>, String> {
-    let items_by_id: HashMap<UUID, InventoryItem> = items.iter().filter_map(|item| item.item_id.map(|id| (id, item.clone()))).collect();
+) -> Result<Vec<(String, Uuid)>, String> {
+    let items_by_id: HashMap<Uuid, InventoryItem> = items.iter().filter_map(|item| item.item_id.map(|id| (id, item.clone()))).collect();
     let mut links = Vec::new();
     let mut linked_item_ids = HashSet::new();
     for item in &items {
@@ -293,7 +262,7 @@ async fn resolve_favorite_items(
         }
     }
 
-    let unresolved_ids: Vec<UUID> = links
+    let unresolved_ids: Vec<Uuid> = links
         .iter()
         .map(|(_, item_id)| *item_id)
         .filter(|item_id| !items_by_id.contains_key(item_id))
@@ -393,7 +362,7 @@ fn parse_landmark_asset(name: &str, bytes: &[u8]) -> Option<FavoriteLandmark> {
         .filter(|landmark| landmark.global_pos.is_some()),
         "Landmark version 2" => Some(FavoriteLandmark {
             name: name.to_owned(),
-            region_id: fields.get("region_id").and_then(|parts| parts.first()).and_then(|value| UUID::parse_str(value).ok()),
+            region_id: fields.get("region_id").and_then(|parts| parts.first()).and_then(|value| Uuid::parse_str(value).ok()),
             local_pos: fields.get("local_pos").and_then(|parts| parse_position(parts)),
             global_pos: None,
             region_handle: fields.get("region_handle").and_then(|parts| parts.first()).and_then(|value| parse_region_handle(value)),
@@ -421,10 +390,10 @@ fn parse_region_handle(value: &str) -> Option<u64> {
     value.parse().ok().or_else(|| value.strip_prefix("0x").and_then(|hex| u64::from_str_radix(hex, 16).ok()))
 }
 
-fn uuid_field(value: &Value) -> Option<UUID> {
+fn uuid_field(value: &Value) -> Option<Uuid> {
     match value {
-        Value::UUID(uuid) => Some(*uuid),
-        Value::String(value) => UUID::parse_str(value).ok(),
+        Value::Uuid(uuid) => Some(*uuid),
+        Value::String(value) => Uuid::parse_str(value).ok(),
         _ => None,
     }
 }
@@ -469,14 +438,14 @@ fn string_field(value: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use base::UUID;
     use llsd::{Map, Value};
+    use uuid::Uuid;
 
     use super::{InventoryItem, RegionGridCell, global_position, parse_landmark_asset, parse_position};
 
     fn inventory_item(inventory_type: Value, asset_type: Value) -> InventoryItem {
         let value = Value::Map(Map::from([
-            ("item_id".into(), Value::UUID(UUID::nil())),
+            ("item_id".into(), Value::Uuid(Uuid::nil())),
             ("inv_type".into(), inventory_type),
             ("type".into(), asset_type),
         ]));

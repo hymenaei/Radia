@@ -569,8 +569,7 @@ pub(crate) mod tests {
         simulator::run_session,
         transport::lludp::Delivery,
     };
-    use ::testing::{lludp::vectors, parse_hex_fixture};
-    use base::UUID;
+    use ::test_support::{lludp::vectors, parse_hex_fixture};
     use llsd::{Map, Value, xml};
     use protocol::{
         ChatType,
@@ -593,6 +592,7 @@ pub(crate) mod tests {
         time::{sleep, timeout},
     };
     use url::Url;
+    use uuid::Uuid;
     use zip::ZipArchive;
 
     fn available_event_queue_permits(budget: &CapabilityBudget) -> usize {
@@ -2229,7 +2229,7 @@ pub(crate) mod tests {
             SocketAddr::V4(endpoint) => (endpoint.ip().octets(), endpoint.port()),
             SocketAddr::V6(_) => panic!("fake neighbor should use IPv4"),
         };
-        let agent_id = UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("agent UUID");
+        let agent_id = Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("agent UUID");
         let neighbor_seed_server = EventQueueTestServer::start(|base| {
             let mut event_url = base.clone();
             event_url.set_path("/neighbor-event-queue");
@@ -2258,7 +2258,7 @@ pub(crate) mod tests {
             message: "Welcome".into(),
             simulator_address: primary_endpoint,
             agent_id,
-            session_id: UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("session UUID"),
+            session_id: Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("session UUID"),
             circuit_code: 0x1122_3344,
             seed_capability: server.url("/seed"),
         };
@@ -2326,8 +2326,8 @@ pub(crate) mod tests {
         let primary_endpoint = primary.local_addr().expect("primary simulator address");
         let neighbor_endpoint = neighbor.local_addr().expect("destination simulator address");
         let SocketAddr::V4(neighbor_endpoint_v4) = neighbor_endpoint else { panic!("fake destination must use IPv4") };
-        let agent_id = UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("agent UUID");
-        let session_id = UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("session UUID");
+        let agent_id = Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("agent UUID");
+        let session_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("session UUID");
         let region_handle = 0x1000_0000_0000_1000;
         let neighbor_seed_server = EventQueueTestServer::start(|base| {
             let mut event_url = base.clone();
@@ -2378,16 +2378,13 @@ pub(crate) mod tests {
         assert!(matches!(movement.message(), Message::CompleteAgentMovement(_)));
         primary.send_to(&acknowledgement(41, movement.sequence()), movement_peer).await.expect("ack primary movement request");
 
-        let mut primary_handshake =
-            parse_hex_fixture(vectors::get("region_handshake.hex").expect("handshake fixture")).expect("parse handshake fixture");
+        let mut primary_handshake = parse_hex_fixture(vectors::REGION_HANDSHAKE).expect("parse handshake fixture");
         primary_handshake[0] |= 0x40;
         set_sequence(&mut primary_handshake, 22);
         primary.send_to(&primary_handshake, primary_peer).await.expect("send primary region handshake");
         let reply = receive_message(&primary, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
         primary.send_to(&acknowledgement(42, reply.sequence()), primary_peer).await.expect("ack primary handshake reply");
-        let mut primary_movement_complete =
-            parse_hex_fixture(vectors::get("agent_movement_complete.hex").expect("movement completion fixture"))
-                .expect("parse movement completion fixture");
+        let mut primary_movement_complete = parse_hex_fixture(vectors::AGENT_MOVEMENT_COMPLETE).expect("parse movement completion fixture");
         primary_movement_complete[0] |= 0x40;
         set_sequence(&mut primary_movement_complete, 23);
         primary.send_to(&primary_movement_complete, primary_peer).await.expect("complete primary movement");
@@ -2420,8 +2417,7 @@ pub(crate) mod tests {
             }
         };
 
-        let mut neighbor_handshake =
-            parse_hex_fixture(vectors::get("region_handshake.hex").expect("handshake fixture")).expect("parse handshake fixture");
+        let mut neighbor_handshake = parse_hex_fixture(vectors::REGION_HANDSHAKE).expect("parse handshake fixture");
         neighbor_handshake[0] |= 0x40;
         set_sequence(&mut neighbor_handshake, 41);
         neighbor.send_to(&neighbor_handshake, neighbor_peer).await.expect("send destination region handshake");
@@ -2442,7 +2438,7 @@ pub(crate) mod tests {
         .encode()
         .expect("encode mismatched movement completion");
         neighbor.send_to(&wrong_movement, neighbor_peer).await.expect("send mismatched movement completion");
-        let mut barrier = parse_hex_fixture(vectors::get("chat_from_simulator.hex").expect("chat fixture")).expect("parse chat fixture");
+        let mut barrier = parse_hex_fixture(vectors::CHAT_FROM_SIMULATOR).expect("parse chat fixture");
         barrier[0] |= 0x40;
         set_sequence(&mut barrier, 45);
         neighbor.send_to(&barrier, neighbor_peer).await.expect("send post-movement barrier");
@@ -3177,8 +3173,8 @@ pub(crate) mod tests {
             ]
         });
         let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
-        let agent_id = UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("agent UUID");
-        let session_id = UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("session UUID");
+        let agent_id = Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("agent UUID");
+        let session_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("session UUID");
         let session = AgentSession {
             first_name: "Test".into(),
             last_name: "Resident".into(),
@@ -3886,7 +3882,7 @@ pub(crate) mod tests {
         "127.0.0.1:13000".parse().expect("fixture simulator endpoint")
     }
 
-    fn simulator_events(ip: [u8; 4], port: u16, agent_id: UUID, seed: &Url) -> String {
+    fn simulator_events(ip: [u8; 4], port: u16, agent_id: Uuid, seed: &Url) -> String {
         let simulator = Value::Map(Map::from([
             ("Handle".to_owned(), Value::Binary(0x1000_0000_0000_1000_u64.to_be_bytes().to_vec().into())),
             ("IP".to_owned(), Value::Binary(ip.to_vec().into())),
@@ -3901,7 +3897,7 @@ pub(crate) mod tests {
             (
                 "body".to_owned(),
                 Value::Map(Map::from([
-                    ("agent-id".to_owned(), Value::UUID(agent_id)),
+                    ("agent-id".to_owned(), Value::Uuid(agent_id)),
                     (
                         "sim-ip-and-port".to_owned(),
                         Value::String(format!("{}:{}", ip.iter().map(u8::to_string).collect::<Vec<_>>().join("."), port)),
@@ -3915,7 +3911,7 @@ pub(crate) mod tests {
         xml::to_string(&batch).expect("encode local LLSD event queue response")
     }
 
-    fn crossed_region_events(agent_id: UUID, session_id: UUID, region_handle: u64, endpoint: SocketAddrV4, seed: &Url) -> String {
+    fn crossed_region_events(agent_id: Uuid, session_id: Uuid, region_handle: u64, endpoint: SocketAddrV4, seed: &Url) -> String {
         let crossed_region = Value::Map(Map::from([
             ("message".to_owned(), Value::String("CrossedRegion".to_owned())),
             (
@@ -3924,8 +3920,8 @@ pub(crate) mod tests {
                     (
                         "AgentData".to_owned(),
                         Value::Array(vec![Value::Map(Map::from([
-                            ("AgentID".to_owned(), Value::UUID(agent_id)),
-                            ("SessionID".to_owned(), Value::UUID(session_id)),
+                            ("AgentID".to_owned(), Value::Uuid(agent_id)),
+                            ("SessionID".to_owned(), Value::Uuid(session_id)),
                         ]))]),
                     ),
                     (

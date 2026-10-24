@@ -1,4 +1,4 @@
-use base::UUID;
+use uuid::Uuid;
 
 use crate::ChatType;
 
@@ -10,8 +10,8 @@ pub struct ChatFromViewer {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentData {
-    pub agent_id: UUID,
-    pub session_id: UUID,
+    pub agent_id: Uuid,
+    pub session_id: Uuid,
 }
 
 #[derive(Clone, Debug, PartialEq)]

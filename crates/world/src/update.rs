@@ -6,8 +6,8 @@ use std::{
     num::NonZeroU32,
 };
 
-use base::UUID;
 use math::Vec3;
+use uuid::Uuid;
 
 use crate::AvatarAppearanceUpdate;
 use crate::ObjectMediaUpdate;
@@ -179,7 +179,7 @@ impl Default for Rejections {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObjectObservation {
     pub source: UpdateSource,
-    pub id: UUID,
+    pub id: Uuid,
     pub local_id: NonZeroU32,
     pub kind: Kind,
     pub parent: ParentUpdate,
@@ -195,7 +195,7 @@ pub struct ObjectObservation {
 }
 
 impl ObjectObservation {
-    pub const fn new(source: UpdateSource, id: UUID, local_id: NonZeroU32, kind: Kind, parent: ParentUpdate) -> Self {
+    pub const fn new(source: UpdateSource, id: Uuid, local_id: NonZeroU32, kind: Kind, parent: ParentUpdate) -> Self {
         Self {
             source,
             id,
@@ -279,7 +279,7 @@ pub enum ApplyOutcome {
     IgnoredStale,
     Introduced(Entity),
     Updated(Entity),
-    Removed(UUID),
+    Removed(Uuid),
     TombstoneRecorded(LocalAddress),
     AgentHandedOff(Entity),
     Deferred(DeferredReason),

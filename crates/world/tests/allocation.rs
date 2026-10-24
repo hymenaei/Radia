@@ -1,8 +1,8 @@
 use std::num::NonZeroU32;
 
-use base::UUID;
 use math::{Quat, Vec3};
-use testing::allocation::{CountingAllocator, live_bytes, measure};
+use test_support::allocation::{CountingAllocator, live_bytes, measure};
+use uuid::Uuid;
 use world::{
     Appearance,
     ApplyOutcome::Introduced,
@@ -51,7 +51,7 @@ fn world_memory_baseline() {
                 let parent = if local_id.get() == 1 { Root } else { Local(NonZeroU32::new(1).expect("root local ID")) };
                 let mut observation = ObjectObservation::new(
                     UpdateSource::new(regions[region_index], 100_001 + index as u32, Ordered(100_001 + index as u64), 0),
-                    UUID::from_u128(index as u128 + 1),
+                    Uuid::from_u128(index as u128 + 1),
                     local_id,
                     Object,
                     parent,
@@ -124,7 +124,7 @@ fn media_snapshot_copy_stays_within_its_budget() {
     let source = |order| UpdateSource::new(region, order as u32, Ordered(order), 0);
     let observation = ObjectObservation {
         appearance: FieldUpdate::Set(Appearance::Surface),
-        ..ObjectObservation::new(source(1), UUID::from_u128(1), local_id, Object, Root)
+        ..ObjectObservation::new(source(1), Uuid::from_u128(1), local_id, Object, Root)
     };
     let Introduced(entity) = world.observe_object(observation).unwrap().outcome else { panic!("object introduced") };
     let (_, before) = measure(|| world.object_detail(entity).unwrap());

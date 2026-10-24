@@ -1,16 +1,14 @@
-//! Serde encoding into one output buffer shared by all LLSD formats.
-
 use crate::{
     Date, Error, Limits, Result,
     value::{DATE_NEWTYPE, URI_NEWTYPE, UUID_NEWTYPE},
 };
-use base::UUID;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::ser::{
     self, Impossible, Serialize, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple, SerializeTupleStruct,
     SerializeTupleVariant,
 };
 use std::{fmt, io::Write};
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Format {
@@ -108,7 +106,7 @@ impl Serializer {
     fn string(&mut self, text: &str, kind: TextKind) -> Result<()> {
         match kind {
             TextKind::Uuid => {
-                let uuid = UUID::parse_str(text).map_err(|e| Error::InvalidValue(e.to_string()))?;
+                let uuid = Uuid::parse_str(text).map_err(|e| Error::InvalidValue(e.to_string()))?;
                 match self.format {
                     Format::Xml => self.xml_text("uuid", &uuid.to_string()),
                     Format::Binary => {

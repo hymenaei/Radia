@@ -1,5 +1,3 @@
-//! Session API, command admission, and worker lifecycle for one logged-in viewer.
-
 #[cfg(test)]
 use std::time::Instant;
 use std::{
@@ -45,30 +43,21 @@ use crate::{
 
 pub(crate) const COMMAND_CAPACITY: usize = 256;
 pub(crate) const NETWORK_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
-/// Maximum aggregate LLUDP payload rate used by a session without explicit options.
-///
-/// The session pacer starts at this rate and reduces it after reliable-packet retry timeouts.
-/// It recovers gradually up to the configured ceiling when retries stop.
+
 pub const DEFAULT_UPSTREAM_BYTES_PER_SECOND: NonZeroU64 = NonZeroU64::new(64_000).unwrap();
 const MAX_OUTBOUND_CHAT_MESSAGE_BYTES: usize = 8 * 1024 - 6 - 4 - 40 - (1 + u8::MAX as usize * 4);
 const MAX_OUTBOUND_OBJECT_REQUESTS: usize = u8::MAX as usize;
 
-/// Runtime options shared by the network connections in one session.
-///
-/// The upstream rate is a session-wide ceiling. LLUDP retries lower the active pacing rate,
-/// which gradually recovers toward this ceiling when retransmissions stop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionOptions {
     upstream_bytes_per_second: NonZeroU64,
 }
 
 impl SessionOptions {
-    /// Creates session options with a nonzero aggregate LLUDP payload ceiling.
     pub const fn new(upstream_bytes_per_second: NonZeroU64) -> Self {
         Self { upstream_bytes_per_second }
     }
 
-    /// Returns the aggregate LLUDP payload ceiling shared by all simulator connections.
     pub const fn upstream_bytes_per_second(self) -> NonZeroU64 {
         self.upstream_bytes_per_second
     }
@@ -84,21 +73,6 @@ mod outbound_message {
     pub trait Sealed {}
 }
 
-/// A message that may be sent from the viewer to a simulator.
-///
-/// This sealed trait admits only the outbound messages supported by the network layer.
-///
-/// ```compile_fail
-/// struct Unsupported;
-///
-/// impl From<Unsupported> for protocol::lludp::Message {
-///     fn from(_: Unsupported) -> Self {
-///         unreachable!()
-///     }
-/// }
-///
-/// impl network::OutboundMessage for Unsupported {}
-/// ```
 pub trait OutboundMessage: outbound_message::Sealed + Into<Message> {}
 
 impl outbound_message::Sealed for TeleportCancel {}
@@ -114,7 +88,6 @@ impl OutboundMessage for RegionHandleRequest {}
 impl outbound_message::Sealed for RequestMultipleObjects {}
 impl OutboundMessage for RequestMultipleObjects {}
 
-/// A login continuation for an authenticator challenge.
 pub struct MfaChallenge {
     commands: Sender<Command>,
     completed: AtomicBool,
@@ -125,11 +98,6 @@ impl MfaChallenge {
         Self { commands, completed: AtomicBool::new(false) }
     }
 
-    /// Submits a nonblank code once. Disconnect can still cancel authentication.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an empty code, a completed challenge, or a closed or full command queue.
     pub fn complete(&self, code: &str) -> Result<(), Error> {
         let code = code.trim();
         if code.is_empty() {
@@ -154,9 +122,6 @@ impl fmt::Debug for MfaChallenge {
     }
 }
 
-/// Owns the network worker's bounded event stream and session controls.
-///
-/// Events arrive in stream order. Dropping the session requests shutdown; [`disconnect`](Self::disconnect) waits for it.
 pub struct Session {
     handle: SessionHandle,
     events: Receiver<EventEnvelope>,
@@ -187,36 +152,18 @@ impl Session {
         }
     }
 
-    /// Starts login on the selected grid and returns before authentication completes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the network worker thread cannot start.
     pub fn start(credentials: LoginCredentials) -> Result<Self, Error> {
         Self::start_inner(credentials, None, SessionOptions::default())
     }
 
-    /// Starts login with explicit network resource options.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the network worker thread cannot start.
     pub fn start_with_options(credentials: LoginCredentials, options: SessionOptions) -> Result<Self, Error> {
         Self::start_inner(credentials, None, options)
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the worker or initial capture recording cannot start.
     pub fn start_with_capture(credentials: LoginCredentials, config: CaptureConfig) -> Result<Self, Error> {
         Self::start_inner(credentials, Some(config), SessionOptions::default())
     }
 
-    /// Starts login with capture recording and explicit network resource options.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the worker or initial capture recording cannot start.
     pub fn start_with_capture_and_options(
         credentials: LoginCredentials,
         config: CaptureConfig,
@@ -345,10 +292,6 @@ impl Session {
         self.handle.clone()
     }
 
-    /// Receives the next event or an unsurfaced coverage loss, or `None` after all work is drained.
-    ///
-    /// A covered event is held until losses at or before its watermark have been acknowledged.
-    /// Losses are delivered once per generation; callers acknowledge them after recovery is applied.
     pub async fn recv_event(&mut self) -> Option<Event> {
         loop {
             if let Some(envelope) = self.pending_event.take() {
@@ -405,15 +348,10 @@ impl Session {
         }
     }
 
-    /// Returns the losses still awaiting acknowledgement without changing their state.
     pub fn coverage_losses(&self) -> CoverageSnapshot {
         self.coverage_losses.snapshot()
     }
 
-    /// Releases a surfaced source-local loss after the caller retains it in session state.
-    ///
-    /// Acknowledgement transfers the loss fact out of Network; it does not mean recovery succeeded.
-    /// Watermarks that have not been surfaced by [`Session::recv_event`] are ignored.
     pub fn acknowledge_coverage_loss(&mut self, watermark: CoverageWatermark) {
         let scope = (watermark.simulator_id, watermark.source);
         if self.surfaced_coverage.get(&scope).is_some_and(|generation| watermark.generation <= *generation) {
@@ -422,10 +360,6 @@ impl Session {
         }
     }
 
-    /// Releases a surfaced session-wide ledger overflow after the caller retains it in session state.
-    ///
-    /// Acknowledgement transfers the loss fact out of Network; it does not mean recovery succeeded.
-    /// Generations that have not been surfaced by [`Session::recv_event`] are ignored.
     pub fn acknowledge_coverage_overflow(&mut self, generation: u64) {
         if generation > 0 && generation <= self.surfaced_overflow_generation {
             self.coverage_losses.acknowledge_overflow(generation);
@@ -509,11 +443,6 @@ impl Session {
         }
     }
 
-    /// Starts network capture and waits for the recording file to open.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if capture is already active, startup fails, or the session stops before startup completes.
     pub async fn start_capture(&self, config: CaptureConfig) -> Result<(), Error> {
         self.handle.start_capture(config).await
     }
@@ -526,31 +455,22 @@ impl Session {
         self.handle.network_status()
     }
 
-    /// Returns the primary simulator endpoint. Neighbor endpoints arrive in lifecycle events.
     pub fn current_simulator(&self) -> Option<SocketAddr> {
         self.handle.network_status().simulator_endpoint
     }
 
-    /// Stops capture and waits for the output file to finish.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no capture is active, finalization fails, or the session stops before finalization completes.
     pub async fn stop_capture(&self) -> Result<PathBuf, Error> {
         self.handle.stop_capture().await
     }
 
-    /// Queues a message for the primary simulator. See [`SessionHandle::send`] for size limits and errors.
     pub fn send(&self, message: impl OutboundMessage, delivery: Delivery) -> Result<(), Error> {
         self.handle.send(message, delivery)
     }
 
-    /// Queues a message for one simulator. See [`SessionHandle::send_to`] for delivery and error semantics.
     pub async fn send_to(&self, simulator_id: SimulatorId, message: impl OutboundMessage, delivery: Delivery) -> Result<(), Error> {
         self.handle.send_to(simulator_id, message, delivery).await
     }
 
-    /// Requests shutdown and waits until the network worker exits.
     pub async fn disconnect(&self) {
         self.handle.disconnect().await;
     }
@@ -562,9 +482,6 @@ impl Drop for Session {
     }
 }
 
-/// Cloneable send and lifecycle controls for a session.
-///
-/// Clones share one bounded command queue, admission gate, and disconnect signal.
 #[derive(Clone)]
 pub struct SessionHandle {
     commands: Sender<Command>,
@@ -610,14 +527,6 @@ impl SessionHandle {
         response.await.map_err(|_| Error::CaptureStopCanceled)?.map_err(Error::Capture)
     }
 
-    /// Queues a message for the primary simulator. A later send failure arrives as [`Event::SendFailed`].
-    ///
-    /// Chat text is limited to 7,121 allocated bytes; `RequestMultipleObjects` is limited to 255 allocated entries.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::OutboundMessageTooLarge`] for oversized fields, [`Error::SessionClosed`] after shutdown begins,
-    /// or a queue error when admission fails.
     pub fn send(&self, message: impl OutboundMessage, delivery: Delivery) -> Result<(), Error> {
         let message = message.into();
         validate_outbound_message(&message)?;
@@ -628,17 +537,6 @@ impl SessionHandle {
         try_send_command(&self.commands, Command::SendMessage { message, delivery }, Error::SimulatorConnectionClosed)
     }
 
-    /// Sends a message to an active simulator connection.
-    ///
-    /// Success means the local UDP send succeeded, not that the remote simulator received or acknowledged it. Variable-field limits match [`Self::send`].
-    /// Dropping this future after command admission stops waiting for the result; it does not
-    /// withdraw the command. The message may still be sent and, for reliable delivery, retried.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::SimulatorUnavailable`] if the ID is inactive, [`Error::SimulatorNotReady`] during connection setup,
-    /// [`Error::SimulatorCommandQueueFull`] when a send queue is full, or [`Error::OutboundMessageTooLarge`] for oversized fields.
-    /// Shutdown returns [`Error::SessionClosed`]; a connection that closes during the send returns [`Error::SimulatorConnectionClosed`].
     pub async fn send_to(&self, simulator_id: SimulatorId, message: impl OutboundMessage, delivery: Delivery) -> Result<(), Error> {
         let message = message.into();
         validate_outbound_message(&message)?;
@@ -676,7 +574,6 @@ impl SessionHandle {
         }
     }
 
-    /// Requests shutdown and waits until the network worker exits.
     pub async fn disconnect(&self) {
         self.request_disconnect();
         let mut worker_finished = self.worker_finished.clone();
@@ -1071,7 +968,6 @@ mod tests {
         event::SimulatorId,
         transport::lludp::{MAX_PENDING_PACKETS, advance_sequence},
     };
-    use base::UUID;
     use llsd::Value;
     use protocol::lludp::{BlockValues, FieldValue, Message, Packet, SchemaMessage};
     use protocol::{
@@ -1083,7 +979,7 @@ mod tests {
         },
     };
     use tempfile::tempdir;
-    use testing::lludp;
+    use test_support::lludp;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream, UdpSocket},
@@ -1092,6 +988,7 @@ mod tests {
         sync::Semaphore,
         task::{JoinHandle, spawn_blocking, yield_now},
     };
+    use uuid::Uuid;
     use zip::ZipArchive;
 
     use super::{
@@ -1657,7 +1554,7 @@ mod tests {
         bytes
     }
 
-    fn movement_complete_packet(sequence: u32, agent_id: UUID, session_id: UUID, region_handle: u64) -> Vec<u8> {
+    fn movement_complete_packet(sequence: u32, agent_id: Uuid, session_id: Uuid, region_handle: u64) -> Vec<u8> {
         Packet::new(
             sequence,
             Message::AgentMovementComplete(AgentMovementComplete {
@@ -1671,13 +1568,13 @@ mod tests {
         .expect("encode AgentMovementComplete")
     }
 
-    fn teleport_finish_packet(agent_id: UUID, endpoint: SocketAddr, region_handle: u64, seed: &str) -> Vec<u8> {
+    fn teleport_finish_packet(agent_id: Uuid, endpoint: SocketAddr, region_handle: u64, seed: &str) -> Vec<u8> {
         let SocketAddr::V4(endpoint) = endpoint else { panic!("simulator endpoint must use IPv4") };
         let schema = SchemaMessage::schema_by_name("TeleportFinish").expect("TeleportFinish schema");
         let message = SchemaMessage::new(
             schema,
             vec![BlockValues::single(vec![
-                FieldValue::UUID(agent_id),
+                FieldValue::Uuid(agent_id),
                 FieldValue::U32(0),
                 FieldValue::IpAddr(endpoint.ip().octets()),
                 FieldValue::IpPort(endpoint.port().to_be_bytes()),
@@ -1893,8 +1790,8 @@ mod tests {
         let primary_address = primary.local_addr().expect("read primary address");
         let destination = UdpSocket::bind("127.0.0.1:0").await.expect("bind destination simulator");
         let destination_address = destination.local_addr().expect("read destination address");
-        let agent_id = UUID::parse_str(AGENT_ID).expect("agent UUID");
-        let session_id = UUID::parse_str(SESSION_ID).expect("session UUID");
+        let agent_id = Uuid::parse_str(AGENT_ID).expect("agent UUID");
+        let session_id = Uuid::parse_str(SESSION_ID).expect("session UUID");
         let (login_url, poll_started, http_task) = fake_http(primary_address.port()).await;
         let (mut session, handle, worker) = spawn_test_session(login_url);
 
@@ -2045,7 +1942,7 @@ mod tests {
 
         for local_id in 0..MAX_PENDING_PACKETS {
             let request = RequestMultipleObjects {
-                agent_data: RequestAgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+                agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
                 objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: local_id as u32 }],
             };
             timeout(CLIENT_TIMEOUT, session.send_to(destination_id, request, Delivery::Reliable))
@@ -2682,8 +2579,8 @@ mod tests {
     fn object_request() -> RequestMultipleObjects {
         RequestMultipleObjects {
             agent_data: RequestAgentData {
-                agent_id: UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("agent UUID"),
-                session_id: UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("session UUID"),
+                agent_id: Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("agent UUID"),
+                session_id: Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("session UUID"),
             },
             objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }],
         }
@@ -2739,8 +2636,8 @@ mod tests {
         let handle = targeted_send_handle(commands, disconnect_requested);
         let request = RequestMultipleObjects {
             agent_data: RequestAgentData {
-                agent_id: UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("agent UUID"),
-                session_id: UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("session UUID"),
+                agent_id: Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("agent UUID"),
+                session_id: Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("session UUID"),
             },
             objects: Vec::new(),
         };
@@ -2757,7 +2654,7 @@ mod tests {
 
         assert!(matches!(handle.send(chat_message_with_text("after disconnect".into()), Delivery::Unreliable), Err(Error::SessionClosed)));
         let request =
-            RequestMultipleObjects { agent_data: RequestAgentData { agent_id: UUID::nil(), session_id: UUID::nil() }, objects: Vec::new() };
+            RequestMultipleObjects { agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() }, objects: Vec::new() };
         assert!(matches!(handle.send_to(SimulatorId::new(42), request, Delivery::Reliable).await, Err(Error::SessionClosed)));
         assert!(matches!(command_receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }
@@ -2814,7 +2711,7 @@ mod tests {
             status: NetworkStatusHandle::new(),
         };
         let request = RequestMultipleObjects {
-            agent_data: RequestAgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+            agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
             objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }],
         };
         let send = spawn(async move { handle.send_to(SimulatorId::new(42), request, Delivery::Reliable).await });
@@ -2848,7 +2745,7 @@ mod tests {
 
     fn chat_message_with_text(message: String) -> ChatFromViewer {
         ChatFromViewer {
-            agent_data: chat_from_viewer::AgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+            agent_data: chat_from_viewer::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
             chat_data: chat_from_viewer::ChatData { message, chat_type: ChatType::Normal, channel: 0 },
         }
     }
@@ -2889,7 +2786,7 @@ mod tests {
         let (disconnect_requested, _) = watch::channel(false);
         let handle = targeted_send_handle(commands.clone(), disconnect_requested);
         let request = RequestMultipleObjects {
-            agent_data: RequestAgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+            agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
             objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }; MAX_OUTBOUND_OBJECT_REQUESTS + 1],
         };
 
@@ -2900,7 +2797,7 @@ mod tests {
         let mut oversized_capacity = Vec::with_capacity(MAX_OUTBOUND_OBJECT_REQUESTS + 1);
         oversized_capacity.push(ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 });
         let request = RequestMultipleObjects {
-            agent_data: RequestAgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+            agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
             objects: oversized_capacity,
         };
         assert!(matches!(handle.send_to(SimulatorId::new(42), request, Delivery::Reliable).await, Err(Error::OutboundMessageTooLarge)));
@@ -2915,7 +2812,7 @@ mod tests {
         let handle = targeted_send_handle(commands, disconnect_requested);
         let mut objects = Vec::with_capacity(MAX_OUTBOUND_OBJECT_REQUESTS);
         objects.resize(MAX_OUTBOUND_OBJECT_REQUESTS, ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 });
-        let request = RequestMultipleObjects { agent_data: RequestAgentData { agent_id: UUID::nil(), session_id: UUID::nil() }, objects };
+        let request = RequestMultipleObjects { agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() }, objects };
 
         let send = spawn(async move { handle.send_to(SimulatorId::new(42), request, Delivery::Reliable).await });
         let Some(Command::SendTo { message: Message::RequestMultipleObjects(message), completed, .. }) = command_receiver.recv().await
@@ -2939,7 +2836,7 @@ mod tests {
         ));
 
         let request = RequestMultipleObjects {
-            agent_data: RequestAgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+            agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
             objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }; MAX_OUTBOUND_OBJECT_REQUESTS + 1],
         };
         assert!(matches!(session.send_to(SimulatorId::new(42), request, Delivery::Reliable).await, Err(Error::OutboundMessageTooLarge)));

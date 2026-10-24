@@ -1,8 +1,9 @@
 use std::hint::black_box;
 
-use base::{AssetId, UUID};
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
 use math::{Quat, Vec3};
+use utils::AssetId;
+use uuid::Uuid;
 use world::{
     Appearance,
     ApplyOutcome::{IgnoredStale, Unchanged},
@@ -167,8 +168,8 @@ fn bench_mixed(group: &mut BenchmarkGroup<'_, WallTime>) {
                 let rotation = if alternate { Quat::IDENTITY } else { Quat::from_rotation_y(0.25) };
                 let pose = Pose { position: Some(position), rotation: Some(rotation) };
                 let (velocity, acceleration) = if alternate { (Vec3::Y, Vec3::Z) } else { (Vec3::X, Vec3::Y) };
-                let owner = UUID::from_u128(u128::MAX - 2 - u128::from(round));
-                let creator = UUID::from_u128(u128::MAX - 3 - u128::from(round));
+                let owner = Uuid::from_u128(u128::MAX - 2 - u128::from(round));
+                let creator = Uuid::from_u128(u128::MAX - 3 - u128::from(round));
 
                 for row in &scene.rows {
                     let _ =
@@ -212,7 +213,7 @@ fn bench_mixed(group: &mut BenchmarkGroup<'_, WallTime>) {
                     let row = scene.rows[index];
                     let remove_order = base_order + 300_000 + index as u64 * 2;
                     let _ = black_box(scene.world.remove_object(source(row.region, remove_order), row.local_id).expect("object removal"));
-                    let replacement = Row { id: UUID::from_u128(next_id), order: remove_order + 1, ..row };
+                    let replacement = Row { id: Uuid::from_u128(next_id), order: remove_order + 1, ..row };
                     next_id += 1;
                     let _ = black_box(scene.world.observe_object(observation_with_pose(replacement, pose)).expect("local ID reuse"));
                     scene.rows[index] = replacement;
@@ -228,11 +229,11 @@ fn bench_mixed(group: &mut BenchmarkGroup<'_, WallTime>) {
 fn content_scene() -> Scene {
     let mut scene = populated_scene(10_000, false, false);
     let surface = SurfaceAppearance::new(
-        FaceAppearance { texture_id: UUID::from_u128(99), ..FaceAppearance::default() },
+        FaceAppearance { texture_id: Uuid::from_u128(99), ..FaceAppearance::default() },
         vec![(1, FaceAppearance::default())],
     )
     .expect("surface appearance");
-    let materials = RenderMaterials::new(vec![(1, AssetId::new(UUID::from_u128(100)))]).expect("material bindings");
+    let materials = RenderMaterials::new(vec![(1, AssetId::new(Uuid::from_u128(100)))]).expect("material bindings");
     let overrides = GltfMaterialOverrides::new(vec![(1, GltfMaterialOverride { roughness: Some(0.5), ..GltfMaterialOverride::default() })])
         .expect("material overrides");
     for row in &scene.rows {

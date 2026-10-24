@@ -1,7 +1,3 @@
-//! Types and configuration for opt-in network capture archives.
-//!
-//! Archives may contain raw datagrams and capability bodies; treat them as session data.
-
 use std::{
     fmt,
     fs::{self, File, OpenOptions},
@@ -17,11 +13,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use base::UUID;
 use protocol::lludp::{Message, Packet, PacketFlags};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use tokio::sync::oneshot;
+use uuid::Uuid;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 use crate::http::ResponseMemoryPermit;
@@ -30,14 +26,13 @@ use crate::http::{ResponseMemoryBudget, ResponseMemoryClass};
 
 pub(crate) const CAPTURE_SCHEMA_VERSION: u16 = 1;
 const CAPTURE_ENTRIES: [&str; 3] = ["manifest.json", "events.jsonl", "payloads.bin"];
-/// Maximum uncompressed size of any one capture archive entry, in bytes.
+
 pub const MAX_CAPTURE_ENTRY_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-/// Maximum encoded size of one `events.jsonl` record, including its newline.
+
 pub const MAX_CAPTURE_EVENT_LINE_BYTES: usize = 1024 * 1024;
 const WRITER_QUEUE_CAPACITY: usize = 1024;
 pub(crate) const MAX_CAPTURE_QUEUED_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
-/// Configuration for storing network capture archives.
 #[derive(Clone, Debug)]
 pub struct CaptureConfig {
     root: PathBuf,
@@ -53,7 +48,6 @@ impl CaptureConfig {
     }
 }
 
-/// Manifest metadata. Timestamps use RFC 3339; `payload_bytes` counts uncompressed bytes.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CaptureManifest {
     pub schema_version: u16,
@@ -68,18 +62,15 @@ pub struct CaptureManifest {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-/// Finalization state of a capture archive.
 pub enum CaptureState {
     Recording,
     Complete,
-    /// Recording finished after data was dropped or a writer error occurred.
+
     Incomplete,
-    /// Recording stopped because the network session shut down.
+
     Interrupted,
 }
 
-/// One line from the `events.jsonl` entry of a capture archive.
-/// `index` is zero-based; `elapsed_ns` is nanoseconds since capture start.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CaptureEvent {
     pub index: u64,
@@ -156,37 +147,34 @@ pub enum CaptureEventKind {
         message: Option<String>,
     },
     HttpRequest {
-        /// Correlates this request with its response or error record.
         request_id: u64,
         method: String,
-        /// Logical operation name; capability URLs are never stored here.
+
         endpoint: String,
         headers: Vec<(String, String)>,
     },
     HttpResponse {
         request_id: u64,
         status: u16,
-        /// Nanoseconds from request start to response body completion.
+
         duration_ns: u64,
         headers: Vec<(String, String)>,
     },
     HttpError {
         request_id: u64,
         phase: HttpErrorPhase,
-        /// Nanoseconds from request start to failure.
+
         duration_ns: u64,
     },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-/// Stage where a captured HTTP operation failed.
 pub enum HttpErrorPhase {
     Request,
     Body,
 }
 
-/// A byte range in the archive's `payloads.bin` entry.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CapturePayloadRef {
     pub role: String,
@@ -314,7 +302,6 @@ impl CapturePublication {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-/// Recording counters. `active` means new events are accepted; `finalizing` means the archive is being written.
 pub struct CaptureStatus {
     pub active: bool,
     pub finalizing: bool,
@@ -1200,7 +1187,7 @@ fn create_capture_paths(root: &Path) -> Result<(PathBuf, PathBuf, PathBuf), Stri
 
 pub(crate) fn capture_identifier() -> String {
     const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-    let random = UUID::new_v4();
+    let random = Uuid::new_v4();
     let mut value = 0u64;
     for byte in &random.as_bytes()[..5] {
         value = (value << 8) | u64::from(*byte);
@@ -1576,7 +1563,7 @@ mod format_tests {
     };
     use zip::ZipArchive;
 
-    use ::testing::{lludp::vectors, parse_hex_fixture};
+    use ::test_support::{lludp::vectors, parse_hex_fixture};
     use llsd::Value;
     use protocol::lludp::{Message, Packet};
     use serde_json::{from_slice, from_str, from_value, json, to_value};

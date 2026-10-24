@@ -1,10 +1,10 @@
-use base::UUID;
 use protocol::{
     LLUdpError,
     lludp::{Message, Packet},
     messages::{ExtraParamUpdate, ObjectExtraParams, improved_terse_object_update, object_update, object_update_compressed},
 };
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
+use uuid::Uuid;
 
 fn decode(hex: &str) -> (Vec<u8>, Packet) {
     let bytes = parse_hex_fixture(hex).expect("valid protocol fixture");
@@ -29,8 +29,8 @@ fn object_extra_params_validates_param_size() {
     let Message::ObjectExtraParams(message) = packet.message() else {
         panic!("expected ObjectExtraParams");
     };
-    assert_eq!(message.agent_id, UUID::from_bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]));
-    assert_eq!(message.session_id, UUID::from_bytes([16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]));
+    assert_eq!(message.agent_id, Uuid::from_bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]));
+    assert_eq!(message.session_id, Uuid::from_bytes([16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]));
     let mut expected_data = vec![1, 0];
     expected_data.extend(0x20..=0x2f);
     assert_eq!(
@@ -49,8 +49,8 @@ fn object_extra_params_validates_param_size() {
 #[test]
 fn object_extra_params_checks_clear_size() {
     let message = ObjectExtraParams {
-        agent_id: UUID::nil(),
-        session_id: UUID::nil(),
+        agent_id: Uuid::nil(),
+        session_id: Uuid::nil(),
         object_data: vec![ExtraParamUpdate { local_id: 0x0102_0304, parameter_type: 0x0080, in_use: false, data: vec![1] }],
     };
     let bytes = Packet::new(1, Message::ObjectExtraParams(message)).with_zero_coding(false).encode().expect("encode clear message");
@@ -69,8 +69,8 @@ fn extra_params_respect_variable1_limit() {
         data
     };
     let update = |data| ObjectExtraParams {
-        agent_id: UUID::nil(),
-        session_id: UUID::nil(),
+        agent_id: Uuid::nil(),
+        session_id: Uuid::nil(),
         object_data: vec![ExtraParamUpdate { local_id: 1, parameter_type: 0x0080, in_use: true, data }],
     };
 

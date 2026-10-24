@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use base::AssetId;
+use utils::AssetId;
 
 pub const MAX_AVATAR_TEXTURE_SLOTS: usize = 45;
 pub const MAX_AVATAR_VISUAL_PARAMS: usize = u8::MAX as usize;
@@ -279,10 +279,10 @@ impl Error for AvatarAppearanceError {}
 
 #[cfg(test)]
 mod tests {
-    use base::UUID;
+    use uuid::Uuid;
 
     use super::{AvatarAppearance, AvatarAppearanceUpdate, AvatarBakeSlot, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex};
-    use base::AssetId;
+    use utils::AssetId;
 
     #[test]
     fn avatar_slot_bounds_hold() {
@@ -324,16 +324,16 @@ mod tests {
     fn texture_slots_replace_and_clear() {
         let slot = AvatarTextureSlot::HEAD_BAKED;
         let mut values = [None; super::MAX_AVATAR_TEXTURE_SLOTS];
-        values[usize::from(slot.index())] = Some(AssetId::new(UUID::from_u128(7)));
+        values[usize::from(slot.index())] = Some(AssetId::new(Uuid::from_u128(7)));
         let set = AvatarTextureSlots::new(values).expect("valid slots");
         let mut appearance = AvatarAppearance::default();
         appearance.apply(AvatarAppearanceUpdate::new(None, None, Vec::new(), Some(set)).expect("valid update"));
-        assert_eq!(appearance.texture_slots().and_then(|slots| slots.texture(slot)), Some(AssetId::new(UUID::from_u128(7))));
+        assert_eq!(appearance.texture_slots().and_then(|slots| slots.texture(slot)), Some(AssetId::new(Uuid::from_u128(7))));
 
         let retained = appearance.clone();
         appearance.apply(AvatarAppearanceUpdate::new(None, None, Vec::new(), Some(AvatarTextureSlots::default())).expect("valid clear"));
         assert_eq!(appearance.texture_slots().and_then(|slots| slots.texture(slot)), None);
-        assert_eq!(retained.texture_slots().and_then(|slots| slots.texture(slot)), Some(AssetId::new(UUID::from_u128(7))));
+        assert_eq!(retained.texture_slots().and_then(|slots| slots.texture(slot)), Some(AssetId::new(Uuid::from_u128(7))));
 
         appearance.apply(AvatarAppearanceUpdate::new(Some(1), None, Vec::new(), None).expect("partial update"));
         assert!(appearance.texture_slots().is_some());

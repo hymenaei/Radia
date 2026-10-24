@@ -1,4 +1,3 @@
-use base::UUID;
 use math::{Quat, Vec3};
 use protocol::{
     ChatType, LLUdpError,
@@ -10,7 +9,8 @@ use protocol::{
         region_handshake::{RegionInfo1, RegionInfo2, RegionInfo3, RegionInfo4},
     },
 };
-use testing::{lludp::vectors, parse_hex_fixture};
+use test_support::{lludp::vectors, parse_hex_fixture};
+use uuid::Uuid;
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid protocol fixture")
@@ -18,17 +18,17 @@ fn fixture(hex: &str) -> Vec<u8> {
 
 fn chat_message() -> Message {
     Message::ChatFromViewer(ChatFromViewer {
-        agent_data: chat_from_viewer::AgentData { agent_id: UUID::nil(), session_id: UUID::nil() },
+        agent_data: chat_from_viewer::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
         chat_data: ChatData { message: "hello".into(), chat_type: ChatType::Normal, channel: 42 },
     })
 }
 
-fn session_id() -> UUID {
-    UUID::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("valid fixture UUID")
+fn session_id() -> Uuid {
+    Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("valid fixture UUID")
 }
 
-fn agent_id() -> UUID {
-    UUID::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("valid fixture UUID")
+fn agent_id() -> Uuid {
+    Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("valid fixture UUID")
 }
 
 fn region_handshake(extended: bool) -> Message {
@@ -131,8 +131,8 @@ fn agent_update_zero_coding() {
     let expected = fixture(vectors::AGENT_UPDATE_ZEROCODED);
     let message = Message::AgentUpdate(AgentUpdate {
         agent_data: AgentData {
-            agent_id: UUID::nil(),
-            session_id: UUID::nil(),
+            agent_id: Uuid::nil(),
+            session_id: Uuid::nil(),
             body_rotation: Quat::IDENTITY,
             head_rotation: Quat::IDENTITY,
             state: 0,

@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-base.workspace = true
+uuid.workspace = true
 dxr = { workspace = true, features = ["i8"] }
 md-5.workspace = true
 quick-xml.workspace = true
@@ -21,7 +21,7 @@ sha2.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
-testing.workspace = true
+test-support.workspace = true
 
 [[bench]]
 name = "packets"

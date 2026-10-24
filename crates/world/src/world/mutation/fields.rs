@@ -1,9 +1,7 @@
-//! Validation, source acceptance, and value rules for object field groups.
-
 use std::sync::Arc;
 
-use base::UUID;
 use math::{Quat, Vec3};
+use uuid::Uuid;
 
 use super::super::journal::WorldChangeClasses;
 use super::super::{Fences, ObjectContent, ObjectOrdering, ObjectState, RegionalStamp, newer_field, newer_region_field};
@@ -85,7 +83,7 @@ fn same_arc<T: PartialEq>(before: Option<&Arc<T>>, after: Option<&Arc<T>>) -> bo
     }
 }
 
-pub(super) fn validate_uuid(id: UUID, field: &'static str) -> Result<(), ApplyError> {
+pub(super) fn validate_uuid(id: Uuid, field: &'static str) -> Result<(), ApplyError> {
     if id.is_nil() { Err(ApplyError::InvalidValue { field }) } else { Ok(()) }
 }
 

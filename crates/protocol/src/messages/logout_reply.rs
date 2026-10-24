@@ -1,6 +1,5 @@
-use base::UUID;
+use uuid::Uuid;
 
-/// The simulator's response to a viewer logout request.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LogoutReply {
     pub agent_data: AgentData,
@@ -9,11 +8,11 @@ pub struct LogoutReply {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AgentData {
-    pub agent_id: UUID,
-    pub session_id: UUID,
+    pub agent_id: Uuid,
+    pub session_id: Uuid,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InventoryData {
-    pub item_id: UUID,
+    pub item_id: Uuid,
 }

@@ -1,8 +1,5 @@
-use base::UUID;
+use uuid::Uuid;
 
-/// A simulator's initial region metadata message.
-///
-/// Legacy packets may contain only `RegionInfo1`; `RegionInfo2` and `RegionInfo3` appear together.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegionHandshake {
     pub region_info1: RegionInfo1,
@@ -16,24 +13,24 @@ pub struct RegionInfo1 {
     pub region_flags: u32,
     pub sim_access: u8,
     pub sim_name: String,
-    pub sim_owner: UUID,
+    pub sim_owner: Uuid,
     pub is_estate_manager: bool,
     pub water_height: f32,
     pub billable_factor: f32,
-    pub cache_id: UUID,
-    /// Terrain textures in `TerrainBase0` through `TerrainBase3` order.
-    pub terrain_base: [UUID; 4],
-    /// Detail textures in `TerrainDetail0` through `TerrainDetail3` order.
-    pub terrain_detail: [UUID; 4],
-    /// Terrain start heights in meters, ordered `00`, `01`, `10`, then `11`.
+    pub cache_id: Uuid,
+
+    pub terrain_base: [Uuid; 4],
+
+    pub terrain_detail: [Uuid; 4],
+
     pub terrain_start_heights: [f32; 4],
-    /// Terrain height ranges in meters, ordered `00`, `01`, `10`, then `11`.
+
     pub terrain_height_ranges: [f32; 4],
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RegionInfo2 {
-    pub region_id: UUID,
+    pub region_id: Uuid,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

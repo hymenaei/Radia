@@ -1,8 +1,8 @@
 use std::{hint::black_box, num::NonZeroU32};
 
-use base::UUID;
 use criterion::{BenchmarkId, Criterion, Throughput};
 use math::{DVec3, Quat, Vec3};
+use uuid::Uuid;
 use world::{
     ApplyOutcome::Introduced,
     Entity, FieldGroup, FieldRejection,
@@ -54,7 +54,7 @@ fn world_with_chain(edge_depth: usize) -> (World, Entity) {
         let source = UpdateSource::new(region, index + 1, Ordered(u64::from(index) + 1), 0);
         let observation = ObjectObservation {
             pose: Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) }),
-            ..ObjectObservation::new(source, UUID::from_u128(u128::from(index) + 1), local_id, Object, parent)
+            ..ObjectObservation::new(source, Uuid::from_u128(u128::from(index) + 1), local_id, Object, parent)
         };
         let applied = world.observe_object(observation).expect("object observation");
         let Introduced(entity) = applied.outcome else { panic!("expected object introduction") };

@@ -1,6 +1,6 @@
 use std::{hint::black_box, panic::catch_unwind};
 
-use testing::allocation::{CountingAllocator, live_bytes, measure};
+use test_support::allocation::{CountingAllocator, live_bytes, measure};
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -34,7 +34,7 @@ fn unwinding_resets_measurement() {
 }
 
 #[test]
-fn rejects_nested_measurements_without_poisoning_the_outer_one() {
+fn nested_panic_preserves_outer_measurement() {
     let ((bytes, panic_bytes), counts) = measure(|| {
         let before = live_bytes();
         assert!(catch_unwind(|| measure(|| ())).is_err());

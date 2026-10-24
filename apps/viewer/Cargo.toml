@@ -20,6 +20,7 @@ doc = false
 tracy = ["dep:tracing-tracy"]
 
 [dependencies]
+chrono.workspace = true
 dirs.workspace = true
 futures.workspace = true
 gpui.workspace = true
@@ -27,7 +28,8 @@ gpui-component.workspace = true
 gpui-component-assets.workspace = true
 gpui-platform.workspace = true
 llsd.workspace = true
-base.workspace = true
+uuid.workspace = true
+utils.workspace = true
 assets.workspace = true
 scene.workspace = true
 math.workspace = true
@@ -60,6 +62,6 @@ winit = { workspace = true, features = ["x11", "wayland", "wayland-dlopen"] }
 tokio = { workspace = true, features = ["test-util"] }
 gpui = { workspace = true, features = ["test-support"] }
 network = { workspace = true, features = ["testing"] }
-testing.workspace = true
+test-support.workspace = true
 tempfile.workspace = true
 zip.workspace = true

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use base::UUID;
+use uuid::Uuid;
 
 use crate::identity::WorldId;
 use crate::update::{FieldStamp, Stamp};
@@ -72,8 +72,8 @@ pub struct World {
     store: ObjectStore,
     regions: BTreeMap<Region, RegionState>,
     retired: HashSet<Region>,
-    self_agent: Option<UUID>,
-    children: HashMap<Entity, BTreeMap<UUID, Entity>>,
+    self_agent: Option<Uuid>,
+    children: HashMap<Entity, BTreeMap<Uuid, Entity>>,
     pending_children: HashMap<LocalAddress, HashSet<Entity>>,
     tombstones: Tombstones,
     floors: HashMap<Region, Stamp>,
@@ -109,7 +109,7 @@ impl World {
         }
     }
 
-    pub fn set_self_agent(&mut self, id: UUID) -> Result<(), ApplyError> {
+    pub fn set_self_agent(&mut self, id: Uuid) -> Result<(), ApplyError> {
         if id.is_nil() {
             return Err(ApplyError::InvalidValue { field: "agent_id" });
         }
@@ -124,7 +124,7 @@ impl World {
         self.journal.revision
     }
 
-    pub fn entity(&self, id: UUID) -> Option<Entity> {
+    pub fn entity(&self, id: Uuid) -> Option<Entity> {
         self.store.entity(id)
     }
 

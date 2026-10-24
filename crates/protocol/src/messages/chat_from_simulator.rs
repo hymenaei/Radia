@@ -1,4 +1,4 @@
-use base::UUID;
+use uuid::Uuid;
 
 use crate::{Audible, ChatSourceType, ChatType};
 use math::Vec3;
@@ -11,8 +11,8 @@ pub struct ChatFromSimulator {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChatData {
     pub from_name: String,
-    pub source_id: UUID,
-    pub owner_id: UUID,
+    pub source_id: Uuid,
+    pub owner_id: Uuid,
     pub source_type: ChatSourceType,
     pub chat_type: ChatType,
     pub audible: Audible,

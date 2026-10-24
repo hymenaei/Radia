@@ -9,8 +9,8 @@ license = "LGPL-2.1-only"
 cargo-fuzz = true
 
 [dependencies]
-base = { path = "../crates/common/base" }
-math = { path = "../crates/common/math" }
+uuid = "1"
+math = { path = "../crates/math" }
 libfuzzer-sys = "0.4"
 protocol = { path = "../crates/protocol" }
 llsd = { path = "../crates/common/llsd" }

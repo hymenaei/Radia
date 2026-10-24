@@ -1,14 +1,12 @@
-//! Private hecs components and the ordering evidence required to update them coherently.
-
 use crate::update::{FieldStamp, Stamp};
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, GltfMaterialOverrides, Kind, LinearMotion, LocalAddress, ObjectMedia, ObjectObservation,
     Parent, Properties, PropertiesProvenance, PropertyProvenance, Region, RenderMaterials, Shape, SitTarget, SurfaceAppearance, Transform,
     UpdateAuthority, UpdateSource, WorldPose,
 };
-use base::UUID;
 use math::Vec3;
 use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct Binding {
@@ -33,7 +31,7 @@ impl Binding {
         }
     }
 
-    pub(super) fn admits_parent_link(self, expected_uuid: Option<UUID>, declared_at: Option<FieldStamp>, parent_uuid: UUID) -> bool {
+    pub(super) fn admits_parent_link(self, expected_uuid: Option<Uuid>, declared_at: Option<FieldStamp>, parent_uuid: Uuid) -> bool {
         match (expected_uuid, self.parent_resolution_fence) {
             (Some(expected), _) if expected == parent_uuid => true,
             (_, Some(fence)) => declared_at.is_some_and(|stamp| stamp.authority == UpdateAuthority::Tracked && stamp.stamp > fence),
@@ -92,7 +90,7 @@ impl ParentRejectionBarrier {
 
 #[derive(Debug)]
 pub(super) struct ObjectRecord {
-    pub(super) id: UUID,
+    pub(super) id: Uuid,
     pub(super) kind: Kind,
     pub(super) state: ObjectState,
 }

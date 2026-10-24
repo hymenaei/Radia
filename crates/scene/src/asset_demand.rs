@@ -8,7 +8,8 @@ use std::{
 };
 
 use assets::{AlphaMode, Content, Failure, Kind, MaterialDescription, Priority, Request, Resource, Status, TextureRef, TextureSize};
-use base::{AssetId, UUID};
+use utils::AssetId;
+use uuid::Uuid;
 use world::{Entity, FaceAppearance, MAX_SURFACE_FACES, Region};
 
 use crate::{
@@ -94,8 +95,8 @@ pub(crate) struct AssetDemand {
     scan: bool,
     rescan: bool,
     deferred: bool,
-    cursor: Option<UUID>,
-    dirty: BTreeMap<UUID, Entity>,
+    cursor: Option<Uuid>,
+    dirty: BTreeMap<Uuid, Entity>,
     entries: HashMap<AssetKey, Entry>,
     tickets: HashMap<AssetTicket, AssetKey>,
     targets: HashMap<Entity, ObjectDemand>,
@@ -243,7 +244,7 @@ impl AssetDemand {
         self.cursor = None;
     }
 
-    pub(crate) fn step(&mut self, mirror: &Mirror, identities: &BTreeMap<UUID, Entity>) -> Vec<MaterialChange> {
+    pub(crate) fn step(&mut self, mirror: &Mirror, identities: &BTreeMap<Uuid, Entity>) -> Vec<MaterialChange> {
         let Some(camera) = self.camera else { return Vec::new() };
         if !self.scan && self.rescan {
             self.scan = true;

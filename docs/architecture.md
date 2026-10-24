@@ -8,7 +8,7 @@ On the highest level, Radia takes two streams of input, simulator data and user 
 
 Simulator data arrives over UDP circuits and HTTP capabilities. The `protocol` crate decodes it into typed messages. The session layer translates those messages into updates and applies them to the `World`, an in-memory model of the entities the simulator has told us about. This is the ground state. Nothing below the viewer reads files or sockets to answer a question about it.
 
-From the `World`, the `scene` crate derives a render-facing view: what is visible, where it is in global space, what should be drawn. The `render` crate draws that `Scene` using decoded data from `assets`. Scene, GPU resources and decoded assets are derived state. They can be thrown away and rebuilt from the world and the asset cache.
+From the `World`, `render::scene` derives a render-facing view: what is visible, where it is in global space, and what should be drawn. The viewer runs its reconciler task, answers bounded world reads and asset requests, and applies published batches to `SceneView`. The `render` crate draws that view using decoded data from `assets`. Scene state, GPU resources and decoded assets are derived state. They can be thrown away and rebuilt from the world and the asset cache.
 
 ## Code map
 
@@ -26,7 +26,6 @@ crates/test-support/   # package `test-support`
 crates/network/        # package `network`
 crates/protocol/       # package `protocol`
 crates/render/         # package `render`
-crates/scene/          # package `scene`
 crates/world/          # package `world`
 ```
 
@@ -72,15 +71,11 @@ The vendored template is pinned to upstream commit d5445ef1ccb26864236653bbe91d6
 
 ### `crates/render`
 
-Render consumes scene snapshots and owns the presentation surface, GPU resources, bounded uploads, and resource retirement. CPU texture preparation runs through worker jobs. Typed errors preserve underlying GPU errors through the standard error source chain.
-
-### `crates/scene`
-
-Scene groups material appearance by legacy and PBR behavior, scene objects and views under model, and reconciliation reads, scheduling, and publication under reconcile. Reconciler remains the sole owner of its mutable state; extracting methods into child modules does not add shared ownership or synchronization.
+Render owns scene derivation under `render::scene`, plus the presentation surface, GPU resources, bounded uploads, and resource retirement. CPU texture preparation runs through worker jobs. Typed errors preserve underlying GPU errors through the standard error source chain. `render::material` groups legacy and PBR GPU materials; `render::scene` groups scene objects and views under model, and reconciliation reads, scheduling, and publication under reconcile. Reconciler remains the sole owner of its mutable state; extracting methods into child modules does not add shared ownership or synchronization.
 
 Meshes assembled from buffers validate size limits, finite vertex data, triangle indices, and face ranges before publication. Render upload can rely on these private construction invariants when indexing mesh data.
 
-Reconciler owns the derived scene and advances bounded reads, asset demand, mesh preparation, and publication. SceneView applies publications and supplies immutable render data. Jobs and batches retain their lifetime and memory charges, so abandoned or stale work cannot become current after recovery or teardown. The read-completion method is complete_read, alongside complete_asset and complete_mesh; camera updates use set_camera. These replace the former SceneReconciler, complete, and camera names without compatibility aliases. Shared ExperienceId comes from utils.
+Reconciler owns the derived scene and advances bounded reads, asset demand, mesh preparation, and publication. SceneView applies publications and supplies immutable render data to Renderer. Jobs and batches retain their lifetime and memory charges, so abandoned or stale work cannot become current after recovery or teardown. The read-completion method is complete_read, alongside complete_asset and complete_mesh; camera updates use set_camera. These replace the former SceneReconciler, complete, and camera names without compatibility aliases. Shared ExperienceId comes from utils.
 
 ### `crates/world`
 

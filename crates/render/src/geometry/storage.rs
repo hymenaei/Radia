@@ -1,4 +1,5 @@
 use std::{
+    iter::once,
     ops::Range,
     sync::{
         Arc,
@@ -62,7 +63,7 @@ struct Ranges(Vec<Range<u32>>);
 
 impl Ranges {
     fn new(capacity: u32) -> Self {
-        Self(std::iter::once(0..capacity).collect())
+        Self(once(0..capacity).collect())
     }
 
     fn find(&self, count: u32) -> Option<usize> {

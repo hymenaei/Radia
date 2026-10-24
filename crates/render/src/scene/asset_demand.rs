@@ -12,9 +12,9 @@ use uuid::Uuid;
 use world::{Entity, FaceAppearance, MAX_SURFACE_FACES, Region};
 
 use crate::material::{self, AssetState, FaceMaterial, Resolution};
-use crate::scene::{Budget, Camera, Object, Placement, budget::Lease, model::Mirror};
+use crate::scene::{Budget, Camera, MAX_OBJECTS, Object, Placement, budget::Lease, model::Mirror};
 
-const MAX_TARGETS: usize = crate::scene::MAX_OBJECTS;
+const MAX_TARGETS: usize = MAX_OBJECTS;
 const MAX_FACES: usize = 32_768;
 const METADATA_BYTES: usize = 16 * 1024 * 1024;
 

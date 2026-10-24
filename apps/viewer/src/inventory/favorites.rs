@@ -17,7 +17,7 @@ use uuid::Uuid;
 use world::RegionHandle;
 
 use super::favorite_store::MAX_FAVORITES_PER_AGENT;
-use crate::session::{RegionGridCell, RegionLookup, map_request_coordinates};
+use crate::session::{RegionGridCell, RegionLookup, RegionLookupError, map_request_coordinates};
 
 const REQUESTED_CAPABILITIES: [&str; 3] = ["FetchInventoryDescendents2", "FetchInventory2", "ViewerAsset"];
 const ASSET_TYPE_LINK: i32 = 24;
@@ -78,7 +78,7 @@ pub enum FavoritesError {
     TooManyLinkedItems,
     FetchLandmarkAsset { name: String, detail: String },
     NoReadableFavoriteLandmarks,
-    RegionLookup(String),
+    RegionLookup(RegionLookupError),
 }
 
 impl Display for FavoritesError {
@@ -105,7 +105,7 @@ impl Display for FavoritesError {
                 write!(formatter, "Could not fetch favorite landmark asset {name:?}: {detail}")
             }
             Self::NoReadableFavoriteLandmarks => formatter.write_str("Second Life did not return readable data for any favorite landmark."),
-            Self::RegionLookup(detail) => write!(formatter, "Could not look up a favorite landmark region: {detail}"),
+            Self::RegionLookup(error) => write!(formatter, "Could not look up a favorite landmark region: {error}"),
         }
     }
 }

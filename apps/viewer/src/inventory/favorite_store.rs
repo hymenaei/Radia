@@ -341,7 +341,7 @@ fn save_to(path: &Path, favorites: &FavoriteStore) -> Result<(), FavoriteStoreEr
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{assert_matches, fs};
 
     use network::Grid;
     use tempfile::tempdir;
@@ -392,10 +392,10 @@ mod tests {
             Grid::Agni,
             agent_id,
             "Example Resident",
-            Err(FavoritesError::RegionLookup("region lookup failed".into())),
+            Err(FavoritesError::RegionLookup(crate::session::RegionLookupError::Canceled)),
         );
 
-        assert!(matches!(result, Err(FavoriteStoreError::Favorites(FavoritesError::RegionLookup(_)))));
+        assert_matches!(result, Err(FavoriteStoreError::Favorites(FavoritesError::RegionLookup(_))));
         assert_eq!(current_favorites, saved);
         assert_eq!(store.favorites_for(Grid::Agni, agent_id), saved);
         assert_eq!(load_from(&path).expect("reload known-good snapshot").favorites_for(Grid::Agni, agent_id), saved);
@@ -521,7 +521,7 @@ mod tests {
 
         let error = load_from(&path).expect_err("corrupted login locations must not load as an empty store");
 
-        assert!(matches!(error, FavoriteStoreError::InvalidFile { .. }));
+        assert_matches!(error, FavoriteStoreError::InvalidFile { .. });
         assert!(error.to_string().contains("Saved login locations at"));
         assert!(error.to_string().contains("are invalid:"));
     }

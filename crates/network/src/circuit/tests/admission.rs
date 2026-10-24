@@ -423,7 +423,7 @@ async fn rejected_packet_retries() {
     std::assert_matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == io::ErrorKind::WouldBlock,
         "preflight-rejected packet must not be acknowledged"
     );
-    assert_eq!(budget_view.decode_slots.available_permits(), MAX_CONCURRENT_PACKET_DECODES);
+    assert_eq!(budget_view.decode_slots_available(), MAX_CONCURRENT_PACKET_DECODES);
     assert_eq!(budget_view.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
     assert_eq!(budget_view.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
     assert_eq!(budget_view.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
@@ -438,7 +438,7 @@ async fn rejected_packet_retries() {
     shutdown.send_replace(true);
     assert!(timeout(WAIT, task).await.expect("join simulator task").expect("join task").is_ok());
     assert_eq!(budget_view.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
-    assert_eq!(budget_view.decode_slots.available_permits(), MAX_CONCURRENT_PACKET_DECODES);
+    assert_eq!(budget_view.decode_slots_available(), MAX_CONCURRENT_PACKET_DECODES);
     assert_eq!(budget_view.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
     assert_eq!(budget_view.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
 }
@@ -485,7 +485,7 @@ async fn typed_decode_retries() {
     std::assert_matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == io::ErrorKind::WouldBlock,
         "packet rejected by typed decode must not be acknowledged or answered"
     );
-    assert_eq!(budget_view.decode_slots.available_permits(), MAX_CONCURRENT_PACKET_DECODES);
+    assert_eq!(budget_view.decode_slots_available(), MAX_CONCURRENT_PACKET_DECODES);
     assert_eq!(budget_view.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
     assert_eq!(budget_view.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
     assert_eq!(budget_view.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
@@ -506,7 +506,7 @@ async fn typed_decode_retries() {
 
     shutdown.send_replace(true);
     assert!(timeout(WAIT, task).await.expect("join simulator task").expect("join task").is_ok());
-    assert_eq!(budget_view.decode_slots.available_permits(), MAX_CONCURRENT_PACKET_DECODES);
+    assert_eq!(budget_view.decode_slots_available(), MAX_CONCURRENT_PACKET_DECODES);
     assert_eq!(budget_view.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
     assert_eq!(budget_view.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
     assert_eq!(budget_view.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
@@ -644,12 +644,7 @@ async fn ack_control_survives_memory_pressure() {
         spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory.clone()));
 
     let (use_circuit_code, peer) = receive_packet(&simulator).await;
-    let _decode_slots = packet_memory
-        .decode_slots
-        .clone()
-        .acquire_many_owned(MAX_CONCURRENT_PACKET_DECODES.try_into().expect("decode slot count fits u32"))
-        .await
-        .expect("occupy every decoder slot");
+    let _decode_slots = packet_memory.hold_all_decode_slots().await;
     let _global_bytes = shared_budget.reserve_bytes_for_test(MAX_QUEUED_SIMULATOR_EVENT_BYTES).expect("occupy global packet memory");
 
     let mut malformed_ack = Packet::new(700, Message::PacketAck(PacketAck { packets: vec![Packets { id: use_circuit_code.sequence() }] }))

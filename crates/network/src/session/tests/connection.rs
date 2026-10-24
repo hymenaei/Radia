@@ -91,7 +91,7 @@ async fn neighbor_pressure_keeps_primary_live_inner() {
     harness.shutdown().await;
     assert_eq!(packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
     assert_eq!(packet_memory.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
-    assert_eq!(packet_memory.decode_slots.available_permits(), MAX_CONCURRENT_PACKET_DECODES);
+    assert_eq!(packet_memory.decode_slots_available(), 8);
 }
 
 async fn prepare_crossed_region_destination(
@@ -615,7 +615,7 @@ async fn neighbor_overload_keeps_control() {
     assert!(retained_bytes > 0, "accepted packets must remain charged while the consumer is paused");
     assert_eq!(budget.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES - retained_bytes);
     assert_eq!(budget.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES - retained_bytes);
-    assert_eq!(budget.decode_slots.available_permits(), MAX_CONCURRENT_PACKET_DECODES);
+    assert_eq!(budget.decode_slots_available(), 8);
 
     let mut duplicate_chat = test_fixture("chat_from_simulator.hex");
     duplicate_chat[0] |= 0x40;
@@ -658,7 +658,7 @@ async fn neighbor_overload_keeps_control() {
     assert_eq!(budget.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
     assert_eq!(budget.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
     assert_eq!(budget.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
-    assert_eq!(budget.decode_slots.available_permits(), MAX_CONCURRENT_PACKET_DECODES);
+    assert_eq!(budget.decode_slots_available(), 8);
     let queued = event_receiver.try_recv().expect("the held event remains queued");
     let SimulatorEvent::Simulator(queued) = queued else {
         panic!("expected queued simulator event");

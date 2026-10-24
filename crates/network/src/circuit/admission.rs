@@ -11,12 +11,12 @@ use crate::{
     event::{EventEnvelope, EventRetention},
 };
 
-pub(crate) const MAX_CONCURRENT_PACKET_DECODES: usize = 8;
+pub(super) const MAX_CONCURRENT_PACKET_DECODES: usize = 8;
 pub(crate) const MAX_QUEUED_SIMULATOR_EVENT_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_QUEUED_NEIGHBOR_EVENT_BYTES: usize = 24 * 1024 * 1024;
 pub(crate) const MAX_NEIGHBOR_CONNECTION_EVENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PACKET_RETENTION_PERMITS: usize = 3;
-pub(crate) const MAX_PACKET_ACK_DECODE_BYTES: usize = 32 * 1024;
+pub(super) const MAX_PACKET_ACK_DECODE_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConnectionRole {
@@ -59,7 +59,7 @@ struct ConnectionUsage {
 
 #[derive(Clone)]
 pub(crate) struct SimulatorMemoryBudget {
-    pub(crate) decode_slots: Arc<Semaphore>,
+    decode_slots: Arc<Semaphore>,
     ack_decode_slots: Arc<Semaphore>,
     shared: Arc<SharedMemoryBudget>,
     connection: Arc<Mutex<ConnectionUsage>>,
@@ -113,14 +113,14 @@ impl SimulatorMemoryBudget {
         Arc::clone(&self.decode_slots).try_acquire_owned().ok()
     }
 
-    pub(crate) fn try_acquire_ack_decode_slot(&self, preflight: PacketPreflight) -> Option<OwnedSemaphorePermit> {
+    pub(super) fn try_acquire_ack_decode_slot(&self, preflight: PacketPreflight) -> Option<OwnedSemaphorePermit> {
         if preflight.peak_decode_allocation_bytes() > MAX_PACKET_ACK_DECODE_BYTES {
             return None;
         }
         Arc::clone(&self.ack_decode_slots).try_acquire_owned().ok()
     }
 
-    pub(crate) fn reserve_packet(&self, preflight: PacketPreflight) -> Result<PacketMemoryReservation, PacketMemoryError> {
+    pub(super) fn reserve_packet(&self, preflight: PacketPreflight) -> Result<PacketMemoryReservation, PacketMemoryError> {
         let retained_capacity_upper_bound = preflight
             .retained_capacity_upper_bound()
             .checked_add(packet_event_overhead_bytes())
@@ -135,7 +135,7 @@ impl SimulatorMemoryBudget {
         self.reserve_bytes(bytes, retained_capacity_upper_bound)
     }
 
-    pub(crate) fn trim_packet_reservation(
+    pub(super) fn trim_packet_reservation(
         &self,
         reservation: &mut PacketMemoryReservation,
         packet: &Packet,
@@ -258,6 +258,10 @@ fn subtract_bytes(counter: &mut usize, bytes: usize) {
 #[cfg(test)]
 pub(crate) mod test_values {
     use super::{ConnectionRole, MemoryLimits, PacketMemoryError, PacketMemoryReservation, SimulatorMemoryBudget, lock_unpoisoned};
+    use std::sync::Arc;
+
+    use protocol::lludp::{Packet, PacketPreflight};
+    use tokio::sync::OwnedSemaphorePermit;
 
     pub(crate) fn with_test_limits(global: usize, neighbors: usize, neighbor_connection: usize) -> SimulatorMemoryBudget {
         SimulatorMemoryBudget::with_limits(MemoryLimits { global, neighbors, primary_connection: global, neighbor_connection })
@@ -268,6 +272,30 @@ pub(crate) mod test_values {
         bytes: usize,
     ) -> Result<PacketMemoryReservation, PacketMemoryError> {
         budget.reserve_bytes(bytes, bytes)
+    }
+
+    pub(crate) fn reserve_packet_for_test(
+        budget: &SimulatorMemoryBudget,
+        preflight: PacketPreflight,
+    ) -> Result<PacketMemoryReservation, PacketMemoryError> {
+        budget.reserve_packet(preflight)
+    }
+
+    pub(crate) fn trim_packet_reservation_for_test(
+        budget: &SimulatorMemoryBudget,
+        reservation: &mut PacketMemoryReservation,
+        packet: &Packet,
+    ) -> Result<(), PacketMemoryError> {
+        budget.trim_packet_reservation(reservation, packet)
+    }
+
+    pub(crate) fn decode_slots_available_for_test(budget: &SimulatorMemoryBudget) -> usize {
+        budget.decode_slots.available_permits()
+    }
+
+    pub(crate) async fn hold_all_decode_slots_for_test(budget: &SimulatorMemoryBudget) -> OwnedSemaphorePermit {
+        let permits = u32::try_from(super::MAX_CONCURRENT_PACKET_DECODES).expect("decode slot count fits u32");
+        Arc::clone(&budget.decode_slots).acquire_many_owned(permits).await.expect("occupy every decoder slot")
     }
 
     pub(crate) fn global_available_bytes(budget: &SimulatorMemoryBudget) -> usize {

@@ -801,7 +801,7 @@ async fn handoff_waits_for_matching_movement() {
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
     let mut connection = connect_test_neighbor(simulator_id, session.clone(), region_handle).await.expect("connect destination circuit");
-    connection.handoff = Some(HandoffTarget {
+    connection.set_handoff_for_test(HandoffTarget {
         agent_id: session.agent_id,
         session_id: session.session_id,
         region_handle,

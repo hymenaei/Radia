@@ -71,7 +71,7 @@ pub(crate) use tests::run_session as run_test_session;
 pub(crate) use tests::{connect_test_connection, connect_test_primary_with_state};
 
 pub(crate) const COMMAND_CAPACITY: usize = 256;
-pub(crate) const NETWORK_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+const NETWORK_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
 pub const DEFAULT_UPSTREAM_BYTES_PER_SECOND: NonZeroU64 = NonZeroU64::new(64_000).unwrap();
 const MAX_OUTBOUND_CHAT_MESSAGE_BYTES: usize = 8 * 1024 - 6 - 4 - 40 - (1 + u8::MAX as usize * 4);
 const MAX_OUTBOUND_OBJECT_REQUESTS: usize = u8::MAX as usize;
@@ -105,7 +105,7 @@ pub struct MfaChallenge {
 }
 
 impl MfaChallenge {
-    pub(crate) fn new(commands: Sender<Command>) -> Self {
+    fn new(commands: Sender<Command>) -> Self {
         Self { commands, completed: AtomicBool::new(false) }
     }
 
@@ -134,13 +134,13 @@ impl fmt::Debug for MfaChallenge {
 }
 
 pub struct Session {
-    pub(super) handle: SessionHandle,
-    pub(super) events: Receiver<EventEnvelope>,
-    pub(super) coverage_losses: CoverageLossLedger,
-    pub(super) coverage_changed: watch::Receiver<u64>,
-    pub(super) pending_event: Option<EventEnvelope>,
-    pub(super) surfaced_coverage: HashMap<(SimulatorId, CoverageSource), u64>,
-    pub(super) surfaced_overflow_generation: u64,
+    handle: SessionHandle,
+    events: Receiver<EventEnvelope>,
+    coverage_losses: CoverageLossLedger,
+    coverage_changed: watch::Receiver<u64>,
+    pending_event: Option<EventEnvelope>,
+    surfaced_coverage: HashMap<(SimulatorId, CoverageSource), u64>,
+    surfaced_overflow_generation: u64,
 }
 
 impl Session {
@@ -333,10 +333,10 @@ impl Drop for Session {
 
 #[derive(Clone)]
 pub struct SessionHandle {
-    pub(super) commands: Sender<Command>,
-    pub(super) disconnect_requested: watch::Sender<bool>,
-    pub(super) command_admission_closed: Arc<Mutex<bool>>,
-    pub(super) worker_finished: watch::Receiver<bool>,
+    commands: Sender<Command>,
+    disconnect_requested: watch::Sender<bool>,
+    command_admission_closed: Arc<Mutex<bool>>,
+    worker_finished: watch::Receiver<bool>,
 }
 
 impl SessionHandle {

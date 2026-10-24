@@ -101,9 +101,9 @@ async fn cancelled_queues_release_packet_memory() {
     let bound = Packet::preflight(&wire).expect("valid packet bound");
     for neighbor in &neighbors {
         assert_eq!(neighbor.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);
-        drop(neighbor.reserve_packet(bound).expect("admission recovers after cancellation"));
+        drop(neighbor.reserve_packet_for_test(bound).expect("admission recovers after cancellation"));
     }
-    drop(budget.reserve_packet(bound).expect("primary admission recovers"));
+    drop(budget.reserve_packet_for_test(bound).expect("primary admission recovers"));
 }
 
 #[tokio::test]
@@ -176,13 +176,7 @@ async fn full_decode_slots_do_not_block_primary_retry_timers() {
     .await
     .expect("connect simulator circuit");
     let simulator_id = connection.simulator_id;
-    let held_slots = connection
-        .packet_memory
-        .decode_slots
-        .clone()
-        .acquire_many_owned(MAX_CONCURRENT_PACKET_DECODES.try_into().expect("decode slot count fits u32"))
-        .await
-        .expect("occupy every decode slot");
+    let held_slots = connection.packet_memory.hold_all_decode_slots().await;
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, _received) = mpsc::channel(TEST_EVENT_CAPACITY);
     let terminal_event_permit = events.clone().reserve_owned().await.expect("reserve terminal event slot");

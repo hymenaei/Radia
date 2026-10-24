@@ -611,7 +611,7 @@ impl SessionState {
         self.start_neighbor_capabilities(target_id, endpoint, seed, setup).await
     }
 
-    pub(crate) fn note_primary_event_queue_exit(&self, exit: EventQueueExit) {
+    pub(super) fn note_primary_event_queue_exit(&self, exit: EventQueueExit) {
         let reason = match exit {
             EventQueueExit::Stopped => return,
             EventQueueExit::StoppedWithCoverageLoss => "The primary simulator EventQueueGet stopped after losing event coverage.",

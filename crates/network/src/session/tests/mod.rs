@@ -66,10 +66,7 @@ use crate::{
         EVENT_BACKLOG_DISCONNECT_REASON, HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS,
         MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, NeighborEventQueueOutcome, SimulatorEvent,
         UdpTransport,
-        admission::{
-            MAX_CONCURRENT_PACKET_DECODES, MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES,
-            MAX_QUEUED_SIMULATOR_EVENT_BYTES,
-        },
+        admission::{MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES},
         lludp::{Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, RESENT_FLAG, ReceiveError},
         pacing::{OutboundBudget, OutboundBudgetHandle},
         queue_neighbor_event,
@@ -289,9 +286,9 @@ pub(super) fn login_session(simulator_address: SocketAddr) -> AgentSession {
 
 fn retained_packet_event(budget: &SimulatorMemoryBudget, simulator_id: SimulatorId, source: SocketAddr, wire: &[u8]) -> EventEnvelope {
     let preflight = Packet::preflight(wire).expect("preflight retained simulator packet");
-    let mut reservation = budget.reserve_packet(preflight).expect("reserve retained simulator packet");
+    let mut reservation = budget.reserve_packet_for_test(preflight).expect("reserve retained simulator packet");
     let packet = Packet::decode(wire).expect("decode retained simulator packet");
-    budget.trim_packet_reservation(&mut reservation, &packet).expect("trim to retained simulator packet capacity");
+    budget.trim_packet_reservation_for_test(&mut reservation, &packet).expect("trim to retained simulator packet capacity");
     let sequence = packet.sequence();
     event_with_retention(
         Event::SimulatorMessage {

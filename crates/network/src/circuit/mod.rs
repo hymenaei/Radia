@@ -92,21 +92,21 @@ pub(super) struct SimulatorConnectionOptions {
 }
 
 pub(super) struct SimulatorConnection {
-    pub(super) simulator_id: SimulatorId,
-    pub(super) session: AgentSession,
-    pub(super) region_handle: Option<u64>,
+    simulator_id: SimulatorId,
+    session: AgentSession,
+    region_handle: Option<u64>,
     initial_role: ConnectionRole,
-    pub(super) socket: Arc<UdpTransport>,
-    pub(super) circuit: Circuit,
-    pub(super) use_circuit_sequence: u32,
-    pub(super) handoff: Option<HandoffTarget>,
+    socket: Arc<UdpTransport>,
+    circuit: Circuit,
+    use_circuit_sequence: u32,
+    handoff: Option<HandoffTarget>,
     handoff_role_generation: Option<u64>,
-    pub(super) movement_requested: bool,
-    pub(super) initial_movement_sent: bool,
+    movement_requested: bool,
+    initial_movement_sent: bool,
     primary_state: PrimaryState,
     agent_throttle_sent: bool,
-    pub(super) coverage_losses: CoverageLossLedger,
-    pub(super) pacer: ConnectionPacer,
+    coverage_losses: CoverageLossLedger,
+    pacer: ConnectionPacer,
     _owned_budget: Option<OutboundBudget>,
     primary_state_receiver: Option<watch::Receiver<PrimaryState>>,
 }
@@ -143,6 +143,16 @@ impl Drop for SimulatorConnection {
 }
 
 impl SimulatorConnection {
+    #[cfg(test)]
+    pub(crate) fn set_send_gate_for_test(&mut self, send_gate: crate::fixtures::circuit::SendGate) {
+        udp::test_values::set_send_gate(Arc::get_mut(&mut self.socket).expect("test connection owns its socket"), send_gate);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_handoff_for_test(&mut self, handoff: HandoffTarget) {
+        self.handoff = Some(handoff);
+    }
+
     fn current_primary_state(&self) -> PrimaryState {
         self.primary_state_receiver.as_ref().map_or(self.primary_state, |receiver| *receiver.borrow())
     }

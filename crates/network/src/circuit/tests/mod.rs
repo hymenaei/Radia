@@ -285,7 +285,7 @@ pub(in crate::circuit) async fn run_budget_retry(role: ConnectionRole) {
     shutdown.send_replace(true);
     assert!(timeout(WAIT, task).await.expect("join simulator task").expect("join task").is_ok());
     assert_eq!(budget_view.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
-    assert_eq!(budget_view.decode_slots.available_permits(), MAX_CONCURRENT_PACKET_DECODES);
+    assert_eq!(budget_view.decode_slots_available(), MAX_CONCURRENT_PACKET_DECODES);
     if role == ConnectionRole::Neighbor {
         assert_eq!(budget_view.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
         assert_eq!(budget_view.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);

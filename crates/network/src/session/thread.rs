@@ -25,7 +25,7 @@ use crate::{
     login::{LoginResponse, login_at_url},
 };
 
-pub(crate) struct Channels {
+pub(super) struct Channels {
     pub(super) commands: Receiver<Command>,
     pub(super) command_sender: Sender<Command>,
     pub(super) events: Sender<EventEnvelope>,
@@ -34,7 +34,7 @@ pub(crate) struct Channels {
     pub(super) coverage_losses: CoverageLossLedger,
 }
 
-pub(crate) fn start_at(credentials: LoginCredentials, options: SessionOptions, login_url: String) -> Result<Session, Error> {
+pub(super) fn start_at(credentials: LoginCredentials, options: SessionOptions, login_url: String) -> Result<Session, Error> {
     let (command_sender, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let coverage_losses = CoverageLossLedger::new();
@@ -100,7 +100,7 @@ pub(crate) fn start_at(credentials: LoginCredentials, options: SessionOptions, l
 }
 
 #[tracing::instrument(name = "network.session", level = "info", skip_all, fields(grid = ?credentials.grid))]
-pub(crate) async fn run_client(
+pub(super) async fn run_client(
     credentials: LoginCredentials,
     channels: Channels,
     login_url: String,
@@ -201,7 +201,7 @@ pub(crate) async fn run_client(
     runtime.run(commands, events, disconnect_requested, terminal_event_permit).await
 }
 
-pub(crate) async fn wait_for_login<F: Future>(login: F, disconnect_requested: &mut watch::Receiver<bool>) -> Option<F::Output> {
+pub(super) async fn wait_for_login<F: Future>(login: F, disconnect_requested: &mut watch::Receiver<bool>) -> Option<F::Output> {
     if *disconnect_requested.borrow() {
         return None;
     }

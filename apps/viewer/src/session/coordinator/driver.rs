@@ -343,7 +343,7 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             SimulatorMessage { simulator_id, sequence, packet_order, source, message } => {
-                self.handle_simulator_message(simulator_id, sequence, packet_order, source, &message).await;
+                self.handle_simulator_message(simulator_id, sequence, packet_order, source, message).await;
                 ControlFlow::Continue(())
             }
             SendFailed(error) => {
@@ -455,13 +455,13 @@ impl SessionDriver {
         sequence: u32,
         packet_order: PacketOrder,
         source: std::net::SocketAddr,
-        message: &Message,
+        message: Message,
     ) {
         if matches!(packet_order, PacketOrder::Ordered(_))
             && Some(simulator_id) == self.primary_simulator
             && let (Some(agent), Some(region)) = (self.active_session.as_ref(), self.session_world.region_for(simulator_id))
         {
-            match experience_environment::decode(message, agent.agent_id) {
+            match experience_environment::decode(&message, agent.agent_id) {
                 Ok(Some(push)) => match self.environment_pushes.try_send(EnvironmentCommand { region, push }) {
                     Ok(()) => {}
                     Err(error) => {
@@ -476,10 +476,10 @@ impl SessionDriver {
         let media_requests = self
             .session_world
             .region_for(simulator_id)
-            .map(|region| object_media_requests(region, sequence, order_evidence(packet_order), message))
+            .map(|region| object_media_requests(region, sequence, order_evidence(packet_order), &message))
             .unwrap_or_default();
         if let Some(region) = self.session_world.region_for(simulator_id) {
-            self.terrain.enqueue(message, UpdateSource::new(region, sequence, order_evidence(packet_order), 0), &self.runtime);
+            self.terrain.enqueue(&message, UpdateSource::new(region, sequence, order_evidence(packet_order), 0), &self.runtime);
         }
 
         let agent_id = self.active_session.as_ref().map(|session| session.agent_id);
@@ -496,7 +496,7 @@ impl SessionDriver {
                     simulator_id,
                     sequence,
                     packet_order,
-                    message,
+                    &message,
                     agent_id,
                     &mut on_object_chunk,
                 )
@@ -506,7 +506,7 @@ impl SessionDriver {
             self.process_ingest_summary(simulator_id, summary);
         }
 
-        self.environments.simulator_message(&mut self.session_world, simulator_id, packet_order, message, self.primary_simulator);
+        self.environments.simulator_message(&mut self.session_world, simulator_id, packet_order, &message, self.primary_simulator);
         for request in media_requests {
             if let Some(target) = self.session_world.prepare_object_media(simulator_id, request) {
                 self.media.queue(target, &self.session_world);
@@ -515,7 +515,7 @@ impl SessionDriver {
 
         if Some(simulator_id) == self.primary_simulator
             && self.observations.borrow().is_none()
-            && let Message::AgentMovementComplete(movement) = message
+            && let Message::AgentMovementComplete(movement) = &message
             && let Some(session) = &self.active_session
             && let Some(update) = agent::arrival(session.agent_id, session.session_id, movement)
             && let Err(error) = self.session_handle.send(update, Delivery::Reliable)
@@ -527,7 +527,7 @@ impl SessionDriver {
         handle_simulator_message(
             scope,
             source,
-            message.clone(),
+            message,
             self.active_session.as_ref(),
             self.region_lookup.as_ref(),
             region_name,

@@ -242,8 +242,8 @@ mod tests {
     use uuid::Uuid;
     use world::{Appearance, ApplyOutcome::Introduced, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, UpdateSource};
 
-    use super::super::input::{Input as DrainInput, select_drain_input};
     use super::*;
+    use crate::session::coordinator::input::{self, select_drain_input};
     use crate::session::coordinator::tests::apply_world_event;
     use crate::session::coordinator::tests::simulator_message;
     use crate::session::world::{SessionWorld, viewer_world_limits};
@@ -302,14 +302,14 @@ mod tests {
         );
         let input =
             select_drain_input(&mut reads, ready(Some(event)), media.next_result(), pending(), pending(), pending(), pending()).await;
-        let DrainInput::Event(Some(event)) = input else { panic!("network intake continues after media failure") };
+        let input::Input::Event(Some(event)) = input else { panic!("network intake continues after media failure") };
         let _ = apply_world_event(&mut world, &event).expect("object removal is applied");
         assert!(world.world().object(target.binding.entity()).is_none());
 
         let input = select_drain_input(&mut reads, pending(), media.next_result(), pending(), pending(), pending(), ready(())).await;
-        assert!(matches!(input, DrainInput::QueryStateMaintenance));
+        assert!(matches!(input, input::Input::QueryStateMaintenance));
         let input = select_drain_input(&mut reads, pending(), media.next_result(), pending(), pending(), ready(()), pending()).await;
-        assert!(matches!(input, DrainInput::Cancelled));
+        assert!(matches!(input, input::Input::Cancelled));
     }
 
     #[test]
@@ -386,11 +386,11 @@ mod tests {
                 )
                 .await
                 {
-                    DrainInput::Media(Some(result)) => {
+                    input::Input::Media(Some(result)) => {
                         assert_eq!(result.target.binding.entity(), expected_entity);
                         return true;
                     }
-                    DrainInput::Event(Some(_)) => {
+                    input::Input::Event(Some(_)) => {
                         event_count += 1;
                         if event_count == 1 {
                             media_ready.take().expect("media gate is released once").send(()).expect("media receiver is waiting");

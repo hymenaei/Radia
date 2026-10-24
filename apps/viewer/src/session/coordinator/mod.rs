@@ -7,7 +7,7 @@ mod presentation;
 
 pub(crate) use self::driver::{CredentialPersistence, drain_session};
 #[cfg(test)]
-use self::input::{Input as DrainInput, next_query_state_maintenance_delay, select_drain_input};
+use self::input::{next_query_state_maintenance_delay, select_drain_input};
 pub(crate) use self::persistence::{WriteLock, save_favorite_store, write_lock};
 pub(crate) use self::presentation::{
     AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionReadyUpdate, ViewerUpdate,
@@ -48,6 +48,7 @@ mod tests {
     use world::{Kind, ObjectObservation, ParentUpdate, Pose, UpdateSource};
 
     use crate::session::coordinator::events::WorldHandoff;
+    use crate::session::coordinator::input::Input;
     use crate::session::world::{IngestSummary, SessionWorld, viewer_world_limits};
     use crate::world_reader::WorldReadHost;
 
@@ -101,13 +102,13 @@ mod tests {
             let input =
                 super::select_drain_input(&mut reads, ready(Some(event)), pending(), pending(), pending(), pending(), pending()).await;
             match input {
-                super::DrainInput::Event(Some(event)) => {
+                Input::Event(Some(event)) => {
                     apply_world_cooperatively(&mut world, &mut handoff, &event).await;
                     processed += 1;
                     since_read += 1;
                     assert!(since_read <= MAX_INTAKE_TURNS, "a ready read must receive its reserved turn");
                 }
-                super::DrainInput::WorldRead(request) => {
+                Input::WorldRead(request) => {
                     assert_eq!(since_read, MAX_INTAKE_TURNS, "reader floods must not displace ready intake turns");
                     request.serve(world.world());
                     since_read = 0;
@@ -168,7 +169,7 @@ mod tests {
             &mut maintenance,
         )
         .await;
-        assert!(matches!(result, super::DrainInput::QueryStateMaintenance));
+        assert!(matches!(result, Input::QueryStateMaintenance));
 
         tokio::time::advance(Duration::from_millis(30)).await;
         let delay =
@@ -191,7 +192,7 @@ mod tests {
             &mut maintenance,
         )
         .await;
-        assert!(matches!(result, super::DrainInput::Event(Some(_))));
+        assert!(matches!(result, Input::Event(Some(_))));
 
         let result = super::select_drain_input(
             &mut reads,
@@ -203,7 +204,7 @@ mod tests {
             &mut maintenance,
         )
         .await;
-        assert!(matches!(result, super::DrainInput::QueryStateMaintenance));
+        assert!(matches!(result, Input::QueryStateMaintenance));
 
         tokio::time::advance(Duration::from_millis(45)).await;
         let delay =
@@ -221,7 +222,7 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(result, super::DrainInput::QueryStateMaintenance));
+        assert!(matches!(result, Input::QueryStateMaintenance));
     }
 
     pub(super) fn agent_update(agent_id: Uuid, local_id: u32, region_handle: u64) -> Message {

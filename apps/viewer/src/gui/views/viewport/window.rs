@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::DEFAULT_DRAW_DISTANCE;
 use egui::{Context, DragValue, Slider, ViewportId};
 use futures::executor::block_on;
 use render::scene;

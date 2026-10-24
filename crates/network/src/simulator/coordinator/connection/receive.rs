@@ -9,7 +9,10 @@ use protocol::{
     },
     schema::ids::PACKET_ACK,
 };
-use tokio::{sync::mpsc, time::Instant};
+use tokio::{
+    sync::{OwnedSemaphorePermit, mpsc},
+    time::Instant,
+};
 
 use super::{
     ConnectionError, ConnectionRole, ConnectionTask, EVENT_BACKLOG_DISCONNECT_REASON, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS,
@@ -20,6 +23,7 @@ use crate::simulator::coordinator::event_routing::NeighborEventQueueOutcome;
 use crate::{
     coverage::{CoverageLossReason, CoverageSource},
     event::{Event, EventEnvelope},
+    simulator::admission::PacketMemoryReservation,
     transport::{
         lludp::{Delivery, ReceiveAdmission},
         pacing::TrafficClass,
@@ -38,6 +42,14 @@ enum RejectionKind {
     Decode,
     AllocationEstimateMismatch,
     EventAdmission,
+}
+
+struct DecodedPacket {
+    packet: Packet,
+    admission: ReceiveAdmission,
+    decode_permit: Option<OwnedSemaphorePermit>,
+    ack_decode_permit: Option<OwnedSemaphorePermit>,
+    memory_reservation: Option<PacketMemoryReservation>,
 }
 
 #[derive(Default)]
@@ -183,7 +195,7 @@ impl ConnectionTask {
         } else {
             None
         };
-        let mut memory_reservation = if is_packet_ack {
+        let memory_reservation = if is_packet_ack {
             None
         } else {
             match self.packet_memory.reserve_packet(preflight) {
@@ -216,6 +228,17 @@ impl ConnectionTask {
                 return Ok(RunControl::Continue);
             }
         };
+        self.process_decoded_packet(DecodedPacket {
+            packet,
+            admission,
+            decode_permit,
+            ack_decode_permit: _ack_decode_permit,
+            memory_reservation,
+        })
+    }
+
+    fn process_decoded_packet(&mut self, decoded: DecodedPacket) -> Result<RunControl, ConnectionError> {
+        let DecodedPacket { packet, admission, decode_permit, ack_decode_permit: _ack_decode_permit, mut memory_reservation } = decoded;
         if let Some(reservation) = &mut memory_reservation
             && self.packet_memory.trim_packet_reservation(reservation, &packet).is_err()
         {
@@ -262,79 +285,8 @@ impl ConnectionTask {
         drop(decode_permit);
         let is_new_packet = receive_outcome.is_new_packet;
         let dispatch_allowed = !self.phase.is_closing();
-        if !self.phase.is_established() && !self.connection.circuit.has_pending(self.connection.use_circuit_sequence) {
-            self.phase.mark_established();
-            tracing::info!(role = ?self.connection.current_primary_state().connection_role(), "simulator connected");
-            match self.queue_event(Event::SimulatorConnected {
-                simulator_id: self.connection.simulator_id,
-                region_handle: self.connection.region_handle,
-                endpoint: self.connection.session.simulator_address,
-            }) {
-                NeighborEventQueueOutcome::ReceiverClosed => return Ok(RunControl::Finish(None)),
-                NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::Closing => {}
-            }
-            while let Some(event) = self.preconnect_messages.pop_front() {
-                let admission_rejected = self.events.is_closed() || self.pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS;
-                let watermark = event.coverage_watermark();
-                match self.queue_event(event) {
-                    NeighborEventQueueOutcome::ReceiverClosed => {
-                        if let Some(watermark) = watermark {
-                            super::record_coverage_loss(
-                                &self.connection.coverage_losses,
-                                watermark.simulator_id,
-                                watermark.source,
-                                CoverageLossReason::EventAdmission,
-                            );
-                        }
-                        for queued in self.pending_events.drain(..) {
-                            super::record_event_envelope_loss(&self.connection.coverage_losses, queued, CoverageLossReason::EventAdmission);
-                        }
-                        return Ok(RunControl::Finish(None));
-                    }
-                    NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::Closing => {
-                        if admission_rejected && let Some(watermark) = watermark {
-                            super::record_coverage_loss(
-                                &self.connection.coverage_losses,
-                                watermark.simulator_id,
-                                watermark.source,
-                                CoverageLossReason::EventAdmission,
-                            );
-                        }
-                    }
-                }
-                if self.phase.close_reason().is_some() {
-                    for queued in self.preconnect_messages.drain(..) {
-                        if let Some(watermark) = queued.coverage_watermark() {
-                            super::record_coverage_loss(
-                                &self.connection.coverage_losses,
-                                watermark.simulator_id,
-                                watermark.source,
-                                CoverageLossReason::EventAdmission,
-                            );
-                        }
-                    }
-                    break;
-                }
-            }
-            if self.connection.initial_role == ConnectionRole::Primary {
-                queue_internal(
-                    &mut self.outbound,
-                    Message::CompleteAgentMovement(CompleteAgentMovement {
-                        agent_data: complete_agent_movement::AgentData {
-                            agent_id: self.connection.session.agent_id,
-                            session_id: self.connection.session.session_id,
-                            circuit_code: self.connection.session.circuit_code,
-                        },
-                    }),
-                    Delivery::Reliable,
-                    TrafficClass::Deadline,
-                    MovementSend::Initial,
-                    active_queue_class(self.pending_send.as_ref()),
-                )?;
-            }
-            if self.phase.has_region_handshake() && self.connection.handoff.is_some() {
-                self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
-            }
+        if let Some(control) = self.establish_connection_if_ready()? {
+            return Ok(control);
         }
         if !is_new_packet {
             return Ok(RunControl::Continue);
@@ -346,60 +298,53 @@ impl ConnectionTask {
             &self.connection.circuit,
             self.ack_timer_due || self.phase.is_draining(),
         )?;
-        if dispatch_message && dispatch_allowed {
-            let event = EventEnvelope::with_retention_and_coverage(
-                Event::SimulatorMessage {
-                    simulator_id: self.connection.simulator_id,
-                    source: self.connection.session.simulator_address,
-                    sequence: packet.sequence(),
-                    packet_order: receive_outcome.packet_order,
-                    message: packet.into_message(),
-                },
-                memory_reservation.take().expect("application packet was admitted").into_retention(),
-                self.connection.coverage_losses.watermark(self.connection.simulator_id, CoverageSource::Lludp),
-            );
-            if self.phase.is_established() {
-                let admission_rejected = self.events.is_closed() || self.pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS;
-                let watermark = event.coverage_watermark();
-                match self.queue_event(event) {
-                    NeighborEventQueueOutcome::ReceiverClosed => {
-                        if let Some(watermark) = watermark {
-                            super::record_coverage_loss(
-                                &self.connection.coverage_losses,
-                                watermark.simulator_id,
-                                watermark.source,
-                                CoverageLossReason::EventAdmission,
-                            );
-                        }
-                        for queued in self.pending_events.drain(..) {
-                            super::record_event_envelope_loss(&self.connection.coverage_losses, queued, CoverageLossReason::EventAdmission);
-                        }
-                        return Ok(RunControl::Finish(None));
+        self.dispatch_new_packet(packet, receive_outcome.packet_order, dispatch_message, dispatch_allowed, memory_reservation)
+    }
+
+    fn establish_connection_if_ready(&mut self) -> Result<Option<RunControl>, ConnectionError> {
+        if self.phase.is_established() || self.connection.circuit.has_pending(self.connection.use_circuit_sequence) {
+            return Ok(None);
+        }
+        self.phase.mark_established();
+        tracing::info!(role = ?self.connection.current_primary_state().connection_role(), "simulator connected");
+        match self.queue_event(Event::SimulatorConnected {
+            simulator_id: self.connection.simulator_id,
+            region_handle: self.connection.region_handle,
+            endpoint: self.connection.session.simulator_address,
+        }) {
+            NeighborEventQueueOutcome::ReceiverClosed => return Ok(Some(RunControl::Finish(None))),
+            NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::Closing => {}
+        }
+        while let Some(event) = self.preconnect_messages.pop_front() {
+            let admission_rejected = self.events.is_closed() || self.pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS;
+            let watermark = event.coverage_watermark();
+            match self.queue_event(event) {
+                NeighborEventQueueOutcome::ReceiverClosed => {
+                    if let Some(watermark) = watermark {
+                        super::record_coverage_loss(
+                            &self.connection.coverage_losses,
+                            watermark.simulator_id,
+                            watermark.source,
+                            CoverageLossReason::EventAdmission,
+                        );
                     }
-                    NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::Closing => {
-                        if admission_rejected && let Some(watermark) = watermark {
-                            super::record_coverage_loss(
-                                &self.connection.coverage_losses,
-                                watermark.simulator_id,
-                                watermark.source,
-                                CoverageLossReason::EventAdmission,
-                            );
-                        }
+                    for queued in self.pending_events.drain(..) {
+                        super::record_event_envelope_loss(&self.connection.coverage_losses, queued, CoverageLossReason::EventAdmission);
+                    }
+                    return Ok(Some(RunControl::Finish(None)));
+                }
+                NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::Closing => {
+                    if admission_rejected && let Some(watermark) = watermark {
+                        super::record_coverage_loss(
+                            &self.connection.coverage_losses,
+                            watermark.simulator_id,
+                            watermark.source,
+                            CoverageLossReason::EventAdmission,
+                        );
                     }
                 }
-            } else if self.preconnect_messages.len() < MAX_PRECONNECT_EVENTS {
-                self.preconnect_messages.push_back(event);
-            } else {
-                self.phase.close(Some(NEIGHBOR_PRECONNECT_OVERFLOW_REASON), false);
-                self.packet_rejections.record(RejectionKind::EventAdmission);
-                if let Some(watermark) = event.coverage_watermark() {
-                    super::record_coverage_loss(
-                        &self.connection.coverage_losses,
-                        watermark.simulator_id,
-                        watermark.source,
-                        CoverageLossReason::EventAdmission,
-                    );
-                }
+            }
+            if self.phase.close_reason().is_some() {
                 for queued in self.preconnect_messages.drain(..) {
                     if let Some(watermark) = queued.coverage_watermark() {
                         super::record_coverage_loss(
@@ -410,11 +355,113 @@ impl ConnectionTask {
                         );
                     }
                 }
+                break;
             }
-        } else if dispatch_message && is_new_packet {
+        }
+        if self.connection.initial_role == ConnectionRole::Primary {
+            queue_internal(
+                &mut self.outbound,
+                Message::CompleteAgentMovement(CompleteAgentMovement {
+                    agent_data: complete_agent_movement::AgentData {
+                        agent_id: self.connection.session.agent_id,
+                        session_id: self.connection.session.session_id,
+                        circuit_code: self.connection.session.circuit_code,
+                    },
+                }),
+                Delivery::Reliable,
+                TrafficClass::Deadline,
+                MovementSend::Initial,
+                active_queue_class(self.pending_send.as_ref()),
+            )?;
+        }
+        if self.phase.has_region_handshake() && self.connection.handoff.is_some() {
+            self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
+        }
+        Ok(None)
+    }
+
+    fn dispatch_new_packet(
+        &mut self,
+        packet: Packet,
+        packet_order: crate::event::PacketOrder,
+        dispatch_message: bool,
+        dispatch_allowed: bool,
+        mut memory_reservation: Option<PacketMemoryReservation>,
+    ) -> Result<RunControl, ConnectionError> {
+        if dispatch_message && dispatch_allowed {
+            let event = EventEnvelope::with_retention_and_coverage(
+                Event::SimulatorMessage {
+                    simulator_id: self.connection.simulator_id,
+                    source: self.connection.session.simulator_address,
+                    sequence: packet.sequence(),
+                    packet_order,
+                    message: packet.into_message(),
+                },
+                memory_reservation.take().expect("application packet was admitted").into_retention(),
+                self.connection.coverage_losses.watermark(self.connection.simulator_id, CoverageSource::Lludp),
+            );
+            return Ok(self.queue_simulator_message_event(event));
+        } else if dispatch_message {
             self.reject(RejectionKind::EventAdmission, CoverageLossReason::EventAdmission);
         }
         Ok(RunControl::Continue)
+    }
+
+    fn queue_simulator_message_event(&mut self, event: EventEnvelope) -> RunControl {
+        if self.phase.is_established() {
+            let admission_rejected = self.events.is_closed() || self.pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS;
+            let watermark = event.coverage_watermark();
+            match self.queue_event(event) {
+                NeighborEventQueueOutcome::ReceiverClosed => {
+                    if let Some(watermark) = watermark {
+                        super::record_coverage_loss(
+                            &self.connection.coverage_losses,
+                            watermark.simulator_id,
+                            watermark.source,
+                            CoverageLossReason::EventAdmission,
+                        );
+                    }
+                    for queued in self.pending_events.drain(..) {
+                        super::record_event_envelope_loss(&self.connection.coverage_losses, queued, CoverageLossReason::EventAdmission);
+                    }
+                    return RunControl::Finish(None);
+                }
+                NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::Closing => {
+                    if admission_rejected && let Some(watermark) = watermark {
+                        super::record_coverage_loss(
+                            &self.connection.coverage_losses,
+                            watermark.simulator_id,
+                            watermark.source,
+                            CoverageLossReason::EventAdmission,
+                        );
+                    }
+                }
+            }
+        } else if self.preconnect_messages.len() < MAX_PRECONNECT_EVENTS {
+            self.preconnect_messages.push_back(event);
+        } else {
+            self.phase.close(Some(NEIGHBOR_PRECONNECT_OVERFLOW_REASON), false);
+            self.packet_rejections.record(RejectionKind::EventAdmission);
+            if let Some(watermark) = event.coverage_watermark() {
+                super::record_coverage_loss(
+                    &self.connection.coverage_losses,
+                    watermark.simulator_id,
+                    watermark.source,
+                    CoverageLossReason::EventAdmission,
+                );
+            }
+            for queued in self.preconnect_messages.drain(..) {
+                if let Some(watermark) = queued.coverage_watermark() {
+                    super::record_coverage_loss(
+                        &self.connection.coverage_losses,
+                        watermark.simulator_id,
+                        watermark.source,
+                        CoverageLossReason::EventAdmission,
+                    );
+                }
+            }
+        }
+        RunControl::Continue
     }
 
     fn handle_simulator_message(

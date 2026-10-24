@@ -1,26 +1,31 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
 };
 
-use tokio::sync::{mpsc, watch};
+use protocol::lludp::Message;
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinError,
+};
 use tracing::Instrument;
 use url::Url;
 
 use super::{
-    CoordinatorError, CoordinatorRunState, HandoffCommand, HandoffTarget, NEIGHBOR_COMMAND_CAPACITY, PrimaryState, PromotionSetup,
-    SimulatorCapabilitySession, SimulatorCommand, SimulatorConnection, SimulatorConnectionOptions, SimulatorConnectionState,
-    SimulatorCoordinator, SimulatorEvent, SimulatorTaskOutcome, is_current_simulator, record_event_envelope_loss,
-    remove_simulator_capability,
+    ConnectionError, ConnectionTaskResult, CoordinatorError, CoordinatorRunState, CoordinatorRuntime, CoordinatorState, HandoffCommand,
+    HandoffTarget, NEIGHBOR_COMMAND_CAPACITY, PrimaryState, PromotionSetup, RuntimeAction, SimulatorCapabilitySession, SimulatorCommand,
+    SimulatorConnection, SimulatorConnectionOptions, SimulatorConnectionState, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome,
+    handoff::{is_handoff_message, matches_pending_promotion},
+    is_current_simulator, record_event_envelope_loss, remove_simulator_capability,
 };
 use crate::{
     capabilities::{EVENT_QUEUE_NAME, EventQueueExit},
     coverage::CoverageLossReason,
-    event::{Event, SimulatorId},
+    event::{Event, EventEnvelope, SimulatorId},
     simulator::{MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS},
 };
-
-impl SimulatorCoordinator {
+impl CoordinatorState {
     pub(super) async fn start_neighbor(
         &mut self,
         origin: SimulatorId,
@@ -129,14 +134,8 @@ impl SimulatorCoordinator {
         setup: &mut PromotionSetup<'_>,
     ) -> Result<bool, CoordinatorError> {
         tracing::warn!(simulator = simulator_id.get(), region = region_handle, %reason, "neighbor simulator connection was rejected");
-        self.publish_event(
-            &setup.application_events,
-            &mut setup.state.pending_events,
-            Event::SimulatorConnectFailed { simulator_id, region_handle, endpoint },
-            &mut setup.state.logout_deadline,
-            &mut setup.state.disconnect_reason,
-        )
-        .await?;
+        self.publish_event(&setup.application_events, setup.state, Event::SimulatorConnectFailed { simulator_id, region_handle, endpoint })
+            .await?;
         Ok(false)
     }
 
@@ -285,6 +284,271 @@ impl SimulatorCoordinator {
             setup.state,
         )
         .await
+    }
+}
+
+impl CoordinatorRuntime<'_> {
+    pub(super) async fn handle_neighbor_event(
+        &mut self,
+        neighbor_event: Option<SimulatorEvent>,
+    ) -> Result<RuntimeAction, CoordinatorError> {
+        match neighbor_event {
+            Some(SimulatorEvent::Simulator(event)) => self.handle_simulator_envelope(event).await,
+            Some(SimulatorEvent::SendCompleted { simulator_id, cancel_target, error, report_failure }) => {
+                self.handle_send_completed(simulator_id, cancel_target, error, report_failure).await
+            }
+            Some(SimulatorEvent::Finished { simulator_id, region_handle, endpoint, outcome }) => {
+                self.handle_simulator_finished(simulator_id, region_handle, endpoint, outcome).await
+            }
+            None => {
+                self.neighbor_events_closed = true;
+                Ok(RuntimeAction::Continue)
+            }
+        }
+    }
+
+    async fn handle_simulator_envelope(&mut self, envelope: EventEnvelope) -> Result<RuntimeAction, CoordinatorError> {
+        let (event, retained_bytes, coverage_watermark) = envelope.into_parts();
+        if let Event::SimulatorMessage { simulator_id, message: Message::AgentMovementComplete(movement), .. } = &event
+            && *simulator_id == self.coordinator.simulator_id
+            && movement.agent_data.agent_id == self.coordinator.session.agent_id
+            && movement.agent_data.session_id == self.coordinator.session.session_id
+        {
+            self.coordinator.register_root_connection(movement.data.region_handle, &mut self.run_state.neighbor_connections);
+        }
+        let is_current = match &event {
+            Event::SimulatorConnected { simulator_id, .. } | Event::SimulatorMessage { simulator_id, .. } => {
+                is_current_simulator(*simulator_id, self.coordinator.simulator_id, &self.run_state.neighbor_connections)
+            }
+            _ => false,
+        };
+        if !is_current {
+            return Ok(RuntimeAction::Continue);
+        }
+        self.handle_current_simulator_event(event, retained_bytes, coverage_watermark).await
+    }
+
+    async fn handle_current_simulator_event(
+        &mut self,
+        event: Event,
+        retained_bytes: Option<crate::simulator::EventRetention>,
+        coverage_watermark: Option<crate::coverage::CoverageWatermark>,
+    ) -> Result<RuntimeAction, CoordinatorError> {
+        if let Event::SimulatorMessage { simulator_id, message, .. } = &event
+            && *simulator_id == self.coordinator.simulator_id
+            && self.startup.observe_primary_message(message, self.coordinator.session.agent_id, self.coordinator.session.session_id)
+        {
+            tracing::info!("simulator session ready");
+            tracing::info!(lifecycle = "connected", "network lifecycle changed");
+            self.coordinator.primary.state.send_replace(PrimaryState::Ready { generation: 0 });
+            if self.startup.should_publish_ready() {
+                self.coordinator.publish_session_ready(&self.events, &mut self.run_state).await?;
+                self.startup.mark_ready_published();
+            }
+        }
+        if let Event::SimulatorMessage { simulator_id, packet_order, message, .. } = &event
+            && is_handoff_message(message)
+            && self.run_state.logout_deadline.is_none()
+        {
+            let mut setup = PromotionSetup {
+                state: &mut self.run_state,
+                neighbor_requests: self.neighbor_requests.clone(),
+                application_events: self.events.clone(),
+                neighbor_events: self.neighbor_events.clone(),
+                shutdown: self.disconnect_requested.clone(),
+                capability_events: self.capability_events.clone(),
+            };
+            self.coordinator.handle_handoff_message(*simulator_id, message, *packet_order, &mut setup, &mut self.handoff_state).await?;
+        }
+        if let Event::SimulatorMessage { simulator_id, message: Message::AgentMovementComplete(movement), .. } = &event
+            && self.run_state.logout_deadline.is_none()
+            && matches_pending_promotion(self.handoff_state.pending(), self.coordinator.primary.simulator_id, *simulator_id, movement)
+        {
+            self.promote_primary(*simulator_id, event, retained_bytes, coverage_watermark).await?;
+            return Ok(RuntimeAction::Continue);
+        }
+        if let Event::SimulatorConnected { simulator_id, .. } = &event {
+            let simulator_id = *simulator_id;
+            if simulator_id == self.coordinator.simulator_id {
+                self.startup.mark_primary_announced();
+            }
+            self.coordinator
+                .publish_simulator_connected(
+                    simulator_id,
+                    EventEnvelope::from_parts(event, retained_bytes, coverage_watermark),
+                    &self.events,
+                    &mut self.run_state,
+                )
+                .await?;
+            if simulator_id == self.coordinator.simulator_id && self.startup.should_publish_ready() {
+                self.coordinator.publish_session_ready(&self.events, &mut self.run_state).await?;
+                self.startup.mark_ready_published();
+            }
+        } else if let Event::SimulatorMessage { simulator_id, .. } = &event {
+            self.coordinator
+                .publish_simulator_event(
+                    *simulator_id,
+                    EventEnvelope::from_parts(event, retained_bytes, coverage_watermark),
+                    &self.events,
+                    &mut self.run_state,
+                )
+                .await?;
+        }
+        Ok(RuntimeAction::Continue)
+    }
+
+    pub(super) fn handle_pending_neighbor_finish(
+        &mut self,
+        permit: Result<mpsc::OwnedPermit<SimulatorEvent>, mpsc::error::SendError<()>>,
+    ) -> RuntimeAction {
+        match permit {
+            Ok(permit) => {
+                if let Some(finish) = self.pending_neighbor_finishes.pop_front() {
+                    permit.send(finish);
+                }
+            }
+            Err(_) => self.pending_neighbor_finishes.clear(),
+        }
+        RuntimeAction::Continue
+    }
+
+    pub(super) async fn handle_neighbor_request(&mut self, request: Option<SimulatorRequest>) -> Result<RuntimeAction, CoordinatorError> {
+        if let Some(SimulatorRequest::Enable { simulator_id, region_handle, endpoint }) = request
+            && is_current_simulator(simulator_id, self.coordinator.simulator_id, &self.run_state.neighbor_connections)
+        {
+            let mut setup = PromotionSetup {
+                state: &mut self.run_state,
+                neighbor_requests: self.neighbor_requests.clone(),
+                application_events: self.events.clone(),
+                neighbor_events: self.neighbor_events.clone(),
+                shutdown: self.disconnect_requested.clone(),
+                capability_events: self.capability_events.clone(),
+            };
+            Box::pin(self.coordinator.start_neighbor(simulator_id, region_handle, endpoint, None, &mut setup)).await?;
+        }
+        Ok(RuntimeAction::Continue)
+    }
+
+    pub(super) fn handle_neighbor_task_join(&mut self, joined: Option<Result<ConnectionTaskResult, JoinError>>) -> RuntimeAction {
+        match joined {
+            Some(Ok((simulator_id, _region_handle, _endpoint, _outcome))) => {
+                self.run_state.neighbor_task_owners.retain(|_, owner| owner.0 != simulator_id);
+            }
+            Some(Err(error)) => {
+                if let Some((simulator_id, region_handle, endpoint)) = self.run_state.neighbor_task_owners.remove(&error.id())
+                    && (simulator_id == self.coordinator.simulator_id
+                        || simulator_id == self.coordinator.primary.simulator_id
+                        || region_handle.is_some_and(|region_handle| {
+                            is_current_neighbor(region_handle, simulator_id, &self.run_state.neighbor_connections)
+                        })
+                        || self.run_state.retiring_simulators.contains(&simulator_id))
+                {
+                    let outcome = if error.is_cancelled() && self.run_state.retiring_simulators.contains(&simulator_id) {
+                        SimulatorTaskOutcome::Finished(Ok(()))
+                    } else {
+                        SimulatorTaskOutcome::Finished(Err(ConnectionError::NeighborTaskFailed(Arc::new(error))))
+                    };
+                    let finish = SimulatorEvent::Finished { simulator_id, region_handle, endpoint, outcome };
+                    match self.neighbor_events.try_send(finish) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(finish)) => self.pending_neighbor_finishes.push_back(finish),
+                        Err(mpsc::error::TrySendError::Closed(_)) => {}
+                    }
+                }
+            }
+            None => {}
+        }
+        RuntimeAction::Continue
+    }
+
+    pub(super) async fn handle_simulator_finished(
+        &mut self,
+        simulator_id: SimulatorId,
+        region_handle: Option<u64>,
+        endpoint: SocketAddr,
+        outcome: SimulatorTaskOutcome,
+    ) -> Result<RuntimeAction, CoordinatorError> {
+        if !is_current_simulator(simulator_id, self.coordinator.simulator_id, &self.run_state.neighbor_connections)
+            && !self.run_state.retiring_simulators.contains(&simulator_id)
+        {
+            return Ok(RuntimeAction::Continue);
+        }
+        if let Some(pending) = self.handoff_state.pending().filter(|pending| pending.target == simulator_id) {
+            let reason = match &outcome {
+                SimulatorTaskOutcome::Finished(Err(_)) => "destination connection ended with an error",
+                SimulatorTaskOutcome::Finished(Ok(())) => "destination connection ended before promotion",
+                SimulatorTaskOutcome::ConnectFailed(_) => "destination connection failed",
+            };
+            tracing::info!(simulator = simulator_id.get(), region = pending.handoff.region_handle, reason, "simulator handoff failed");
+            self.handoff_state.take_pending();
+        }
+        if simulator_id != self.coordinator.primary.simulator_id
+            && let SimulatorTaskOutcome::Finished(Err(error)) | SimulatorTaskOutcome::ConnectFailed(error) = &outcome
+        {
+            tracing::warn!(simulator = simulator_id.get(), region = ?region_handle, endpoint = %endpoint, %error, "neighbor simulator connection failed");
+        }
+        let connection_region = region_handle.or_else(|| {
+            self.run_state
+                .neighbor_connections
+                .iter()
+                .find_map(|(region_handle, connection)| (connection.simulator_id == simulator_id).then_some(*region_handle))
+        });
+        if let Some(region_handle) = connection_region
+            && is_current_neighbor(region_handle, simulator_id, &self.run_state.neighbor_connections)
+        {
+            self.run_state.neighbor_connections.remove(&region_handle);
+        }
+        self.run_state.retiring_simulators.remove(&simulator_id);
+        remove_simulator_capability(&mut self.run_state.simulator_capabilities, simulator_id);
+        for event in self.run_state.preconnect_events.remove(simulator_id) {
+            record_event_envelope_loss(&self.coordinator.coverage_losses, event, CoverageLossReason::EventAdmission);
+        }
+        self.run_state.connected_simulators.remove(&simulator_id);
+        let event = neighbor_completion_event(simulator_id, region_handle, endpoint, &outcome);
+        if simulator_id == self.coordinator.primary.simulator_id {
+            if *self.disconnect_requested.borrow() {
+                self.coordinator.neighbor_cancellation.send_replace(true);
+                return Ok(RuntimeAction::Exit(super::logout::finish_coordinator_logout(self.run_state.disconnect_reason)));
+            }
+            return Ok(RuntimeAction::Exit(match outcome {
+                SimulatorTaskOutcome::Finished(Ok(())) => super::logout::finish_coordinator_logout(self.run_state.disconnect_reason),
+                SimulatorTaskOutcome::Finished(Err(reason)) | SimulatorTaskOutcome::ConnectFailed(reason) => {
+                    Err(CoordinatorError::Connection(reason))
+                }
+            }));
+        }
+        if simulator_id == self.coordinator.simulator_id {
+            self.coordinator.root_connection_failed = true;
+        }
+        self.coordinator.publish_event(&self.events, &mut self.run_state, event).await?;
+        Ok(RuntimeAction::Continue)
+    }
+
+    pub(super) async fn handle_root_connection_join(
+        &mut self,
+        joined: Option<Result<ConnectionTaskResult, JoinError>>,
+    ) -> Result<RuntimeAction, CoordinatorError> {
+        if let Some(Err(error)) = joined {
+            let reason = ConnectionError::PrimaryTaskFailed(Arc::new(error));
+            if let Some(region_handle) = self.run_state.neighbor_connections.iter().find_map(|(region_handle, connection)| {
+                (connection.simulator_id == self.coordinator.simulator_id).then_some(*region_handle)
+            }) {
+                self.run_state.neighbor_connections.remove(&region_handle);
+            }
+            remove_simulator_capability(&mut self.run_state.simulator_capabilities, self.coordinator.simulator_id);
+            if self.coordinator.primary.simulator_id == self.coordinator.simulator_id {
+                return Ok(RuntimeAction::Exit(Err(CoordinatorError::Connection(reason))));
+            }
+            self.coordinator.root_connection_failed = true;
+            let event = neighbor_completion_event(
+                self.coordinator.simulator_id,
+                None,
+                self.coordinator.session.simulator_address,
+                &SimulatorTaskOutcome::ConnectFailed(reason),
+            );
+            self.coordinator.publish_event(&self.events, &mut self.run_state, event).await?;
+        }
+        Ok(RuntimeAction::Continue)
     }
 }
 

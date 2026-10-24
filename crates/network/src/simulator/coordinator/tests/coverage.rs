@@ -56,17 +56,12 @@ async fn retry_avoids_double_logout() {
     let (_, peer) = receive(&simulator).await;
 
     let (events, _event_receiver) = mpsc::channel(1);
-    let mut pending_events = VecDeque::with_capacity(MAX_PENDING_SIMULATOR_EVENTS);
+    let mut run_state = CoordinatorRunState::new();
     for _ in 1..MAX_PENDING_SIMULATOR_EVENTS {
-        pending_events.push_back(EventEnvelope::new(Event::Failed("pending event".into())));
+        run_state.pending_events.push_back(EventEnvelope::new(Event::Failed("pending event".into())));
     }
-    let mut logout_deadline = None;
-    let mut disconnect_reason = None;
-    connection
-        .publish_event(&events, &mut pending_events, Event::Failed("backlog limit".into()), &mut logout_deadline, &mut disconnect_reason)
-        .await
-        .expect("backlog sends first logout");
-    assert!(logout_deadline.is_some());
+    connection.publish_event(&events, &mut run_state, Event::Failed("backlog limit".into())).await.expect("backlog sends first logout");
+    assert!(run_state.logout_deadline.is_some());
 
     let (bytes, logout_peer) = receive(&simulator).await;
     let logout = Packet::decode(&bytes).expect("decode backlog logout");
@@ -91,21 +86,20 @@ async fn failed_backlog_logout_is_not_reported_as_sent() {
     connection.primary.logout = logout;
 
     let (events, _event_receiver) = mpsc::channel(1);
-    let mut pending_events = VecDeque::with_capacity(MAX_PENDING_SIMULATOR_EVENTS);
+    let mut run_state = CoordinatorRunState::new();
     for _ in 1..MAX_PENDING_SIMULATOR_EVENTS {
-        pending_events.push_back(EventEnvelope::new(Event::Failed("pending event".into())));
+        run_state.pending_events.push_back(EventEnvelope::new(Event::Failed("pending event".into())));
     }
-    let mut logout_deadline = None;
-    let mut disconnect_reason = None;
     connection
-        .publish_event(&events, &mut pending_events, Event::Failed("backlog limit".into()), &mut logout_deadline, &mut disconnect_reason)
+        .publish_event(&events, &mut run_state, Event::Failed("backlog limit".into()))
         .await
         .expect("backlog handling records the unavailable logout");
 
-    assert!(logout_deadline.is_some());
+    assert!(run_state.logout_deadline.is_some());
     assert!(!connection.logout_request_sent);
+    let logout_request_sent = connection.logout_request_sent;
     assert_eq!(
-        connection.disconnect_once(connection.logout_request_sent).await.expect("disconnect reports unavailable logout"),
+        connection.disconnect_once(logout_request_sent).await.expect("disconnect reports unavailable logout"),
         LogoutOutcome::Unavailable(LogoutUnavailable::ConnectionClosed)
     );
 
@@ -126,9 +120,9 @@ async fn backlog_logout_drops_covered_application_events_but_keeps_lifecycle_eve
     receive(&simulator).await;
 
     let (events, mut received_events) = mpsc::channel(2);
-    let mut pending_events = VecDeque::new();
-    let mut logout_deadline = Some(time::Instant::now() + LOGOUT_TIMEOUT);
-    let mut disconnect_reason = Some(EVENT_BACKLOG_DISCONNECT_REASON);
+    let mut run_state = CoordinatorRunState::new();
+    run_state.logout_deadline = Some(time::Instant::now() + LOGOUT_TIMEOUT);
+    run_state.disconnect_reason = Some(EVENT_BACKLOG_DISCONNECT_REASON);
     let simulator_id = connection.primary.simulator_id;
     let source = CoverageSource::EventQueue { incarnation: 42 };
     let watermark = coverage_losses.watermark(simulator_id, source);
@@ -136,13 +130,11 @@ async fn backlog_logout_drops_covered_application_events_but_keeps_lifecycle_eve
     connection
         .publish_event(
             &events,
-            &mut pending_events,
+            &mut run_state,
             EventEnvelope::with_coverage_watermark(
                 Event::CapabilityEvent { simulator_id, source: endpoint, message: "CrossedRegion".into(), body: llsd::Value::Undefined },
                 watermark,
             ),
-            &mut logout_deadline,
-            &mut disconnect_reason,
         )
         .await
         .expect("application event suppression is a normal overload outcome");
@@ -157,13 +149,7 @@ async fn backlog_logout_drops_covered_application_events_but_keeps_lifecycle_eve
     ));
 
     connection
-        .publish_event(
-            &events,
-            &mut pending_events,
-            Event::SimulatorDisconnected { simulator_id, region_handle: None, endpoint },
-            &mut logout_deadline,
-            &mut disconnect_reason,
-        )
+        .publish_event(&events, &mut run_state, Event::SimulatorDisconnected { simulator_id, region_handle: None, endpoint })
         .await
         .expect("lifecycle events remain admissible during graceful teardown");
     assert!(matches!(received_events.try_recv().map(|event| event.event), Ok(Event::SimulatorDisconnected { .. })));
@@ -195,9 +181,10 @@ async fn terminal_logout_skips_capability_events_that_start_neighbor_work() {
         ]))]),
     )]));
     let mut handoff_state = HandoffState::default();
+    let simulator_id = connection.primary.simulator_id;
 
     connection
-        .process_capability_event(connection.primary.simulator_id, "EnableSimulator", &body, None, &mut setup, &mut handoff_state)
+        .process_capability_event(simulator_id, "EnableSimulator", &body, None, &mut setup, &mut handoff_state)
         .await
         .expect("terminal capability events are discarded without starting work");
 

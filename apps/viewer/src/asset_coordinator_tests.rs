@@ -6,6 +6,7 @@ use std::{
     net::{TcpListener, TcpStream},
     thread,
 };
+use test_support::texture::{RGBA_J2C, RGBA_RAW};
 use url::Url;
 use utils::AssetId;
 use uuid::Uuid;
@@ -216,7 +217,7 @@ async fn shared_images_outlive_session() {
         }
         started.take().unwrap().send(()).unwrap();
         hold.recv_timeout(Duration::from_secs(5)).unwrap();
-        (200, test_support::texture::RGBA_J2C.to_vec())
+        (200, RGBA_J2C.to_vec())
     });
     let client = Client::new(peer.url.join("seed").unwrap()).unwrap();
     let (cancel, cancelled) = oneshot::channel();
@@ -245,12 +246,12 @@ async fn shared_images_outlive_session() {
         }
         second.changed().await;
     };
-    assert_eq!(blob.image().unwrap().pixels(), test_support::texture::RGBA_RAW);
+    assert_eq!(blob.image().unwrap().pixels(), RGBA_RAW);
     assert_eq!(budget.stats().high_water_bytes, 192 * 1024 * 1024);
     cancel.send(()).unwrap();
     service.stop().await;
     assert!(matches!(second.status(), assets::Status::StaleSession));
-    assert_eq!(budget.stats().resident_bytes, blob.image().unwrap().pixels().len() + test_support::texture::RGBA_J2C.len());
+    assert_eq!(budget.stats().resident_bytes, blob.image().unwrap().pixels().len() + RGBA_J2C.len());
     assert!(matches!(
         handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await,
         Err(RequestError::Closed)

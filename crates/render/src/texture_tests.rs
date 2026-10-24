@@ -6,9 +6,10 @@ use utils::AssetId;
 use uuid::Uuid;
 
 use super::*;
+use test_support::texture::{GRAY_4096_J2C, GRAY_ALPHA_J2C, RGB_J2C, RGBA_J2C};
 
 fn loaded(id: u128, rgba: bool) -> TextureHandle {
-    let bytes: &[u8] = if rgba { test_support::texture::RGBA_J2C } else { test_support::texture::GRAY_ALPHA_J2C };
+    let bytes: &[u8] = if rgba { RGBA_J2C } else { GRAY_ALPHA_J2C };
     loaded_fixture(id, bytes)
 }
 
@@ -241,10 +242,10 @@ fn gpu_texture_lifetimes() {
     assert_eq!(recreated.count(), 0, "cleanup does not require another visible frame");
     assert!(device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC), "this manual check requires BC support");
     for (id, bytes, quality, format) in [
-        (110, test_support::texture::RGB_J2C, CompressionQuality::Fast, TextureFormat::Bc1RgbaUnormSrgb),
-        (111, test_support::texture::RGBA_J2C, CompressionQuality::Fast, TextureFormat::Bc3RgbaUnormSrgb),
-        (112, test_support::texture::RGB_J2C, CompressionQuality::High, TextureFormat::Bc7RgbaUnormSrgb),
-        (113, test_support::texture::RGBA_J2C, CompressionQuality::High, TextureFormat::Bc7RgbaUnormSrgb),
+        (110, RGB_J2C, CompressionQuality::Fast, TextureFormat::Bc1RgbaUnormSrgb),
+        (111, RGBA_J2C, CompressionQuality::Fast, TextureFormat::Bc3RgbaUnormSrgb),
+        (112, RGB_J2C, CompressionQuality::High, TextureFormat::Bc7RgbaUnormSrgb),
+        (113, RGBA_J2C, CompressionQuality::High, TextureFormat::Bc7RgbaUnormSrgb),
     ] {
         let texture = loaded_fixture(id, bytes);
         recreated.request(&texture, 12, Priority::Visible);
@@ -261,7 +262,7 @@ fn gpu_texture_lifetimes() {
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
         assert_eq!((recreated.count(), recreated.bytes()), (0, 0), "compressed resources release after the final owner");
     }
-    let texture = loaded_fixture(114, test_support::texture::GRAY_4096_J2C);
+    let texture = loaded_fixture(114, GRAY_4096_J2C);
     assert_eq!(texture.info().unwrap().size, [2048; 2]);
     upload(&mut recreated, &device, &queue, &texture, 13);
     let TextureUploadState::Ready(gpu) = &recreated.entries[&texture.id()].state else { panic!("automatic compression uploaded") };

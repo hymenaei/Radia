@@ -4,6 +4,7 @@ use crate::{
     Image,
     budget::{ASSET_WORK_BYTES, TEXTURE_WORK_BYTES},
 };
+use test_support::texture::{GRAY_4096_J2C, RGBA_J2C, RGBA_RAW};
 use uuid::Uuid;
 
 fn resource(id: u128) -> Resource {
@@ -15,7 +16,7 @@ fn ready(demand: &Demand) -> Image {
 }
 
 fn prepared(job: &LoadJob) -> Result<Prepared, Failure> {
-    job.prepare(test_support::texture::RGBA_J2C.to_vec())
+    job.prepare(RGBA_J2C.to_vec())
 }
 
 #[test]
@@ -52,7 +53,7 @@ fn shared_detail_refines_and_releases() {
     let mut job = store.next_job(now).unwrap();
     assert!(store.try_start_decode(&mut job));
     assert!(!job.has_source());
-    let bytes = test_support::texture::GRAY_4096_J2C;
+    let bytes = GRAY_4096_J2C;
     let result = job.prepare(bytes.to_vec());
     store.complete(job, result, now);
     let retained = ready(&low);
@@ -101,7 +102,7 @@ fn failed_refinement_keeps_image() {
     let low = store.request(route, Request::Texture { id, size: TextureSize::new(32) }, Priority::Visible, now).unwrap();
     let mut job = store.next_job(now).unwrap();
     assert!(store.try_start_decode(&mut job));
-    let result = job.prepare(test_support::texture::GRAY_4096_J2C.to_vec());
+    let result = job.prepare(GRAY_4096_J2C.to_vec());
     store.complete(job, result, now);
     let high = store.request(route, Request::Texture { id, size: TextureSize::new(256) }, Priority::Visible, now).unwrap();
     let mut job = store.next_job(now).unwrap();
@@ -129,7 +130,7 @@ fn obsolete_detail_keeps_current_image() {
     let high = store.request(route, high_request, Priority::Visible, now).unwrap();
     let mut job = store.next_job(now).unwrap();
     assert!(store.try_start_decode(&mut job));
-    let result = job.prepare(test_support::texture::GRAY_4096_J2C.to_vec());
+    let result = job.prepare(GRAY_4096_J2C.to_vec());
     store.complete(job, result, now);
     assert_eq!(ready(&low).size(), [512; 2]);
     drop(high);
@@ -184,7 +185,7 @@ fn route_failures_share_success() {
     assert_eq!(job.route(), second);
     let result = prepared(&job);
     store.complete(job, result, now + Duration::from_secs(61));
-    assert_eq!(ready(&a).pixels(), test_support::texture::RGBA_RAW);
+    assert_eq!(ready(&a).pixels(), RGBA_RAW);
     assert!(std::ptr::eq(ready(&a).pixels().as_ptr(), ready(&b).pixels().as_ptr()));
     let cached = store.request(first, Request::new(resource(1)), Priority::Visible, now + Duration::from_secs(62)).unwrap();
     assert!(std::ptr::eq(ready(&a).pixels().as_ptr(), ready(&cached).pixels().as_ptr()));
@@ -335,7 +336,7 @@ fn fetches_overlap_decodes() {
             store.request(route, Request::new(resource), Priority::Visible, now).unwrap()
         })
         .collect();
-    let bytes = test_support::texture::RGBA_J2C;
+    let bytes = RGBA_J2C;
     let mut decoding = Vec::new();
     for _ in 0..MAX_ASSET_DECODES {
         let mut job = store.next_job(now).unwrap();
@@ -382,11 +383,7 @@ fn waiting_data_cancels_cleanly() {
     assert_eq!(store.priority(&job), Priority::Background);
     assert_eq!(budget.stats().charged_bytes, 1024);
     assert!(matches!(demand.status(), Status::Fetching));
-    assert_eq!(
-        job.prepare(test_support::texture::RGBA_J2C.to_vec()).err(),
-        Some(Failure::Malformed),
-        "unadmitted decoding cannot allocate"
-    );
+    assert_eq!(job.prepare(RGBA_J2C.to_vec()).err(), Some(Failure::Malformed), "unadmitted decoding cannot allocate");
     drop(demand);
     store.maintain(now);
     assert!(job.is_cancelled());

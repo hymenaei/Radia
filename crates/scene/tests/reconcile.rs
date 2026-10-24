@@ -13,6 +13,7 @@ use scene::{
     Placement, PreparedMesh, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, RecoveryReason, Resolution, SceneReconciler,
     SceneView, Status, SurfaceKind,
 };
+use test_support::texture::{GRAY_4096_J2C, RGBA_J2C};
 use utils::AssetId;
 use uuid::Uuid;
 use world::{
@@ -240,7 +241,7 @@ fn unseen_objects_get_baselines() {
     assert_eq!(baseline.request, Request::Texture { id: AssetId::new(Uuid::from_u128(101)), size: TextureSize::new(32) });
     let object = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).unwrap();
     assert!(object.mesh().is_none(), "baseline loading does not require preparing off-camera geometry");
-    scene.complete_asset(baseline.ticket, prepared_asset(baseline.request, test_support::texture::GRAY_4096_J2C.to_vec()));
+    scene.complete_asset(baseline.ticket, prepared_asset(baseline.request, GRAY_4096_J2C.to_vec()));
     settle_materials(&mut scene, &mut view, &world, &mut now);
     scene.camera(Camera::new(DVec3::ZERO, -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
@@ -332,7 +333,7 @@ fn shared_textures_follow_camera() {
     scene.camera(camera(0.0));
     let first = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
     assert_eq!(first.request, Request::Texture { id: AssetId::new(Uuid::from_u128(100)), size: TextureSize::new(128) });
-    let ready = prepared_asset(first.request, test_support::texture::GRAY_4096_J2C.to_vec());
+    let ready = prepared_asset(first.request, GRAY_4096_J2C.to_vec());
     scene.complete_asset(first.ticket, ready.clone());
     settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(
@@ -353,7 +354,7 @@ fn shared_textures_follow_camera() {
     settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(view.objects().next().unwrap().materials().unwrap()[0].base_color.as_ref().unwrap().info().unwrap().size, [128; 2]);
     let version = view.version();
-    scene.complete_asset(low.ticket, prepared_asset(low.request, test_support::texture::GRAY_4096_J2C.to_vec()));
+    scene.complete_asset(low.ticket, prepared_asset(low.request, GRAY_4096_J2C.to_vec()));
     settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_ne!(view.version(), version, "a new discard level invalidates prepared rendering");
     assert_eq!(view.objects().next().unwrap().materials().unwrap()[0].base_color.as_ref().unwrap().info().unwrap().size, [32; 2]);
@@ -371,7 +372,7 @@ fn shared_textures_follow_camera() {
     assert!(size.edge() >= 1024, "approaching a face requests more detail");
     let version = view.version();
     let request = work.requested[0];
-    scene.complete_asset(request.ticket, prepared_asset(request.request, test_support::texture::GRAY_4096_J2C.to_vec()));
+    scene.complete_asset(request.ticket, prepared_asset(request.request, GRAY_4096_J2C.to_vec()));
     settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_ne!(view.version(), version, "ready-to-ready image replacement must publish its new detail");
     assert_eq!(view.objects().next().unwrap().materials().unwrap()[0].base_color.as_ref().unwrap().info().unwrap().size, [size.edge(); 2]);
@@ -446,7 +447,7 @@ fn material_arrival_preserves_geometry() {
     assert_eq!(base.base_color_factor, [0.2, 0.3, 0.4, 0.5]);
     let assets::MaterialDescription::Pbr(effective) = faces[1].material else { panic!("expected PBR") };
     assert_eq!(effective.normal, base.normal, "unshaded channels remain intact");
-    scene.complete_asset(image_request.ticket, prepared_asset(image_request.request, test_support::texture::RGBA_J2C.to_vec()));
+    scene.complete_asset(image_request.ticket, prepared_asset(image_request.request, RGBA_J2C.to_vec()));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!((work.reads, work.builds), (0, 0));
     let face = &view.objects().next().unwrap().materials().unwrap()[1];
@@ -589,7 +590,7 @@ fn shared_texture_outlives_scene() {
     scene.camera(camera(0.0));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(work.requested.len(), 1, "faces share one texture demand");
-    let ready = prepared_asset(Request::new(work.requested[0].request.resource()), test_support::texture::GRAY_4096_J2C.to_vec());
+    let ready = prepared_asset(Request::new(work.requested[0].request.resource()), GRAY_4096_J2C.to_vec());
     scene.complete_asset(work.requested[0].ticket, ready);
     let completed = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(completed.released.is_empty());

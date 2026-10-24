@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    fmt::{self, Display, Formatter},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use gpui::Context;
@@ -17,17 +20,17 @@ use crate::{
 
 use super::{LoginScreen, spawn::favorites_for_username};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 enum FavoriteWarning {
     Storage(FavoriteStoreError),
     Save(FavoriteStoreError),
     Refresh(FavoriteStoreError),
 }
 
-impl std::fmt::Display for FavoriteWarning {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for FavoriteWarning {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Storage(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Storage(error) => Display::fmt(error, formatter),
             Self::Save(error) => write!(formatter, "Could not save favorite landmarks: {error}"),
             Self::Refresh(error) => write!(formatter, "Could not refresh favorite landmarks: {error}"),
         }

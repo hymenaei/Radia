@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fmt::{self, Display, Formatter},
     future::Future,
     net::SocketAddr,
     pin::Pin,
@@ -41,31 +42,15 @@ pub enum RegionLookupError {
     Send(Arc<Error>),
 }
 
-impl PartialEq for RegionLookupError {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Timeout, Self::Timeout)
-            | (Self::Canceled, Self::Canceled)
-            | (Self::OutOfRange, Self::OutOfRange)
-            | (Self::InvalidHandle, Self::InvalidHandle)
-            | (Self::GenerationExhausted, Self::GenerationExhausted) => true,
-            (Self::Send(left), Self::Send(right)) => Arc::ptr_eq(left, right),
-            _ => false,
-        }
-    }
-}
-
-impl Eq for RegionLookupError {}
-
-impl std::fmt::Display for RegionLookupError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for RegionLookupError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Timeout => formatter.write_str("Timed out looking up the region name."),
             Self::Canceled => formatter.write_str("The region lookup was canceled."),
             Self::OutOfRange => formatter.write_str("The region grid cell is outside the map request range."),
             Self::InvalidHandle => formatter.write_str("Second Life returned an invalid region handle."),
             Self::GenerationExhausted => formatter.write_str("The region lookup generation space is exhausted."),
-            Self::Send(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Send(error) => Display::fmt(error, formatter),
         }
     }
 }
@@ -541,7 +526,7 @@ mod tests {
 
     fn poll_pending<F: Future>(future: Pin<&mut F>, context: &mut std::task::Context<'_>)
     where
-        F::Output: std::fmt::Debug,
+        F::Output: fmt::Debug,
     {
         assert_matches!(future.poll(context), Poll::Pending);
     }
@@ -570,8 +555,8 @@ mod tests {
         lookup.handle_message(SIMULATOR, &map_reply(AGENT_ID, 12, 34, "Known Region"));
 
         let (first, second) = tokio::join!(first, second);
-        assert_eq!(first, Ok("Known Region".into()));
-        assert_eq!(second, Ok("Known Region".into()));
+        assert_matches!(first, Ok(name) if name == "Known Region");
+        assert_matches!(second, Ok(name) if name == "Known Region");
     }
 
     #[tokio::test]
@@ -605,8 +590,8 @@ mod tests {
         );
         lookup.handle_message(SIMULATOR, &map_reply(AGENT_ID, 42, 73, "Resolved Region"));
         let (first, second) = tokio::join!(first, second);
-        assert_eq!(first, Ok("Resolved Region".into()));
-        assert_eq!(second, Ok("Resolved Region".into()));
+        assert_matches!(first, Ok(name) if name == "Resolved Region");
+        assert_matches!(second, Ok(name) if name == "Resolved Region");
     }
 
     #[tokio::test]
@@ -636,8 +621,8 @@ mod tests {
         assert_matches!(sent.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
         lookup.handle_message(SIMULATOR, &map_reply(AGENT_ID, 42, 73, "Merged Region"));
         let (cell_name, id_name) = tokio::join!(cell_lookup, id_lookup);
-        assert_eq!(cell_name, Ok("Merged Region".into()));
-        assert_eq!(id_name, Ok("Merged Region".into()));
+        assert_matches!(cell_name, Ok(name) if name == "Merged Region");
+        assert_matches!(id_name, Ok(name) if name == "Merged Region");
     }
 
     #[tokio::test(start_paused = true)]
@@ -682,7 +667,7 @@ mod tests {
         advance(INITIAL_SEND_RETRY_DELAY).await;
         assert_eq!(attempt_receiver.recv().await, Some(1));
         assert_eq!(attempt_receiver.recv().await, Some(2));
-        assert_eq!(task.await.expect("lookup task"), Ok("Queued Region".into()));
+        assert_matches!(task.await.expect("lookup task"), Ok(name) if name == "Queued Region");
         assert_eq!(send_attempts.load(Ordering::SeqCst), 3);
     }
 
@@ -805,7 +790,7 @@ mod tests {
             agents: 0,
             map_image_id: Uuid::nil(),
         }]);
-        assert_eq!(replacement_receiver.await.expect("replacement waiter"), Ok("Replacement Region".into()));
+        assert_matches!(replacement_receiver.await.expect("replacement waiter"), Ok(name) if name == "Replacement Region");
     }
 
     #[tokio::test]
@@ -827,14 +812,14 @@ mod tests {
                 reply_block: ReplyBlock { region_id: REGION_ID, region_handle: handle << 32 },
             }),
         );
-        assert_eq!(request.await, Err(RegionLookupError::InvalidHandle));
+        assert_matches!(request.await, Err(RegionLookupError::InvalidHandle));
         assert_matches!(sent.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
     }
 
     #[tokio::test]
     async fn rejects_out_of_range_cells() {
         let (lookup, mut sent) = lookup();
-        assert_eq!(lookup.lookup_region_at(RegionGridCell::new(u32::from(u16::MAX) + 1, 0)).await, Err(RegionLookupError::OutOfRange));
+        assert_matches!(lookup.lookup_region_at(RegionGridCell::new(u32::from(u16::MAX) + 1, 0)).await, Err(RegionLookupError::OutOfRange));
         assert_matches!(sent.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
     }
 
@@ -845,7 +830,7 @@ mod tests {
         let task = spawn(async move { request_lookup.lookup_region_at(RegionGridCell::new(1, 2)).await });
         assert_matches!(sent.recv().await, Some(RegionLookupRequest::MapBlock(_)));
         advance(LOOKUP_TIMEOUT).await;
-        assert_eq!(task.await.expect("lookup task"), Err(RegionLookupError::Timeout));
+        assert_matches!(task.await.expect("lookup task"), Err(RegionLookupError::Timeout));
         assert!(lookup.lock_state().by_map_cell.is_empty());
     }
 
@@ -853,7 +838,7 @@ mod tests {
     async fn generation_exhaustion_is_reported() {
         let (lookup, mut sent) = lookup();
         lookup.lock_state().next_generation = u64::MAX;
-        assert_eq!(lookup.lookup_region_by_id(REGION_ID).await, Err(RegionLookupError::GenerationExhausted));
+        assert_matches!(lookup.lookup_region_by_id(REGION_ID).await, Err(RegionLookupError::GenerationExhausted));
         assert_matches!(sent.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
     }
 }

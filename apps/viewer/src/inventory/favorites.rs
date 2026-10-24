@@ -61,7 +61,7 @@ pub enum LandmarkDestination {
     RegionHandle { handle: RegionHandle, position: [f64; 3] },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum FavoritesError {
     MissingFavoritesFolder,
     InvalidFavoritesFolderId,
@@ -496,6 +496,8 @@ fn string_field(value: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use llsd::{Map, Value};
     use utils::RegionId;
     use uuid::Uuid;
@@ -593,6 +595,6 @@ mod tests {
 
         let error = favorite_folder_items(&response, folder_id).unwrap_err();
 
-        assert_eq!(error, FavoritesError::TooManyFolderItems);
+        assert_matches!(error, FavoritesError::TooManyFolderItems);
     }
 }

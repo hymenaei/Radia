@@ -174,7 +174,7 @@ impl LoginScreen {
 
     fn render_status(&self, form_disabled: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx).colors;
-        let session_active = self.active_session.as_ref().is_some_and(|active| active.session.is_some());
+        let session_active = self.active_session.as_ref().is_some_and(super::ActiveSession::is_ready);
         div().when_some(self.status.displayed(self.favorites.status_messages(), session_active), |this, status| {
             let color = if session_active {
                 theme.success
@@ -273,7 +273,7 @@ impl Render for LoginScreen {
         );
 
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-        if self.active_session.as_ref().is_some_and(|active| active.session.is_some()) {
+        if self.active_session.as_ref().is_some_and(super::ActiveSession::is_ready) {
             content.child(div().flex_1().min_h_0().child(self.chat_screen.clone()))
         } else {
             content.child(login_body)

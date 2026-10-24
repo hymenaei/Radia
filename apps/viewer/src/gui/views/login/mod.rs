@@ -2,7 +2,10 @@ mod favorites;
 mod form;
 mod spawn;
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::{
+    fmt::{self, Display, Formatter},
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use gpui::{AppContext, Context, Window};
 use gpui_component::{
@@ -46,8 +49,8 @@ enum LoginMessage {
     Detail(String),
 }
 
-impl std::fmt::Display for LoginMessage {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for LoginMessage {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::LoadingSavedLogin => formatter.write_str("Loading saved login…"),
             Self::EnterUsername => formatter.write_str("Enter your username."),
@@ -144,12 +147,25 @@ pub struct LoginScreen {
 
 struct ActiveSession {
     _session_handle: SessionHandle,
-    session: Option<AgentSession>,
-    _world_reader: Option<WorldReader>,
-    _assets: Option<AssetHandle>,
-    session_cancel: Option<futures::channel::oneshot::Sender<()>>,
+    _cancel: futures::channel::oneshot::Sender<()>,
     presentation_mailbox: PresentationMailbox,
-    shutdown_session: Arc<Mutex<Option<SessionHandle>>>,
+    ready: Option<ReadySession>,
+}
+
+struct ReadySession {
+    session: AgentSession,
+    _world_reader: WorldReader,
+    _assets: AssetHandle,
+}
+
+impl ActiveSession {
+    fn is_ready(&self) -> bool {
+        self.ready.is_some()
+    }
+
+    fn ready(&self) -> Option<&ReadySession> {
+        self.ready.as_ref()
+    }
 }
 
 impl LoginScreen {
@@ -369,16 +385,8 @@ impl LoginScreen {
     }
 
     fn prepare_session_attempt(&mut self, cx: &mut Context<Self>) {
-        if let Some(mut active) = self.active_session.take() {
-            if let Some(cancel) = active.session_cancel.take()
-                && cancel.send(()).is_err()
-            {
-                tracing::trace!("previous login task was already stopped");
-            }
-            *active.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        } else {
-            *self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        }
+        self.active_session = None;
+        *self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.session_generation = self.session_generation.wrapping_add(1);
         self.chat_screen.update(cx, |chat, cx| chat.clear_session(cx));
         self.login_phase = LoginPhase::Connecting;
@@ -408,14 +416,11 @@ impl LoginScreen {
         let (cancel_sender, cancel_receiver) = futures::channel::oneshot::channel();
         let active = ActiveSession {
             _session_handle: session_handle.clone(),
-            session: None,
-            _world_reader: None,
-            _assets: None,
-            session_cancel: Some(cancel_sender),
+            _cancel: cancel_sender,
             presentation_mailbox: mailbox.clone(),
-            shutdown_session: Arc::clone(&self.shutdown_session),
+            ready: None,
         };
-        *active.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = Some(session_handle.clone());
+        *self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner) = Some(session_handle.clone());
         self.active_session = Some(active);
         self.chat_screen.update(cx, |chat, cx| chat.set_session_handle(session_handle.clone(), cx));
 
@@ -510,7 +515,7 @@ impl LoginScreen {
                 } else if warning.is_none() {
                     self.remembered_login = None;
                 }
-                let session_active = self.active_session.as_ref().is_some_and(|active| active.session.is_some());
+                let session_active = self.active_session.as_ref().is_some_and(ActiveSession::is_ready);
                 self.status.show_credential_warning(warning, session_active);
             }
             None => {}
@@ -519,7 +524,8 @@ impl LoginScreen {
 
     fn apply_session_ready(&mut self, ready: SessionReadyUpdate, cx: &mut Context<Self>) {
         let SessionReadyUpdate { session, region_name, world_reader, assets, camera, environments } = ready;
-        let Some(mailbox) = self.active_session.as_ref().map(|active| active.presentation_mailbox.clone()) else { return };
+        let Some(active) = self.active_session.as_ref() else { return };
+        let mailbox = active.presentation_mailbox.clone();
         self.login_phase = LoginPhase::Idle;
         self.status.message = None;
         self.status.reveal_credential_warning();
@@ -528,7 +534,7 @@ impl LoginScreen {
         let username = self.username.read(cx).value();
         self.favorites.prepare_session(session.grid, session.agent_id, &username, Some(mailbox), cx);
         if let Some(active) = &mut self.active_session {
-            active.session = Some(session.clone());
+            active.ready = Some(ReadySession { session: session.clone(), _world_reader: world_reader.clone(), _assets: assets.clone() });
         }
         self.chat_screen.update(cx, |chat, cx| {
             chat.set_session(session.clone(), cx);
@@ -541,7 +547,7 @@ impl LoginScreen {
         if crate::gui::start_scene(self.session_generation, cx) {
             crate::gui::connect_world(
                 self.session_generation,
-                crate::scene_feed::SceneSources { reader: world_reader.clone(), environments, assets: assets.clone() },
+                crate::scene_feed::SceneSources { reader: world_reader, environments, assets },
                 session.agent_id,
                 camera,
                 cx,
@@ -549,11 +555,6 @@ impl LoginScreen {
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         let _ = (camera, environments);
-
-        if let Some(active) = &mut self.active_session {
-            active._assets = Some(assets);
-            active._world_reader = Some(world_reader);
-        }
     }
 
     fn end_session(&mut self, error: String, cx: &mut Context<Self>) {
@@ -563,11 +564,8 @@ impl LoginScreen {
         self.login_phase = LoginPhase::Idle;
         self.status.message = None;
         self.status.session_failure = Some(error);
-        if let Some(active) = self.active_session.take() {
-            active.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner).take();
-        } else {
-            self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner).take();
-        }
+        self.active_session = None;
+        self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner).take();
         self.session_generation = self.session_generation.wrapping_add(1);
         self.chat_screen.update(cx, |chat, cx| chat.clear_session(cx));
         cx.notify();
@@ -591,7 +589,8 @@ impl LoginScreen {
 
     fn apply_favorites(&mut self, update: FavoritesUpdate, cx: &mut Context<Self>) {
         let Some(active) = self.active_session.as_ref() else { return };
-        if !active.session.as_ref().is_some_and(|session| {
+        if !active.ready().is_some_and(|ready| {
+            let session = &ready.session;
             session.agent_id == update.agent_id && session.session_id == update.session_id && session.grid == update.grid
         }) {
             return;

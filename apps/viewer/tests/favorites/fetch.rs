@@ -88,7 +88,7 @@ fn missing_items_rejected() {
     let error = runtime
         .block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id))
         .expect_err("missing items with a nonempty folder is malformed");
-    assert_eq!(error, FavoritesError::InvalidFavoritesItemList);
+    assert_matches!(error, FavoritesError::InvalidFavoritesItemList);
     assert_eq!(error.to_string(), "Second Life returned an invalid Favorites item list.");
     let _ = server.finish();
 }

@@ -231,21 +231,6 @@ fn nested_array_value(depth: usize) -> Value {
     (0..depth).fold(Value::Integer(1), |value, _| Value::Array(vec![value]))
 }
 
-fn bench_admission(c: &mut Criterion) {
-    let mut group = c.benchmark_group("llsd/xml_admission");
-    for (name, value) in
-        [("events", event_batch_value(&event_batch())), ("inventory", inventory_batch()), ("nested", nested_array_value(60))]
-    {
-        let input = xml::to_vec(&value).expect("encode admission fixture");
-        group.bench_function(format!("{name}/scan"), |b| {
-            b.iter(|| xml::value_allocation_bound(black_box(&input), llsd::Limits::default()).expect("scan fixture"))
-        });
-        group.bench_function(format!("{name}/decode"), |b| b.iter(|| xml::from_slice::<Value>(black_box(&input)).expect("decode fixture")));
-    }
-    group.finish();
-}
-
 pub(crate) fn bench(c: &mut Criterion) {
     bench_codec(c);
-    bench_admission(c);
 }

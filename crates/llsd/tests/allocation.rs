@@ -1,5 +1,5 @@
 use std::assert_matches;
-use std::{fmt::Write, hint::black_box, time::Instant};
+use std::{fmt::Write, hint::black_box};
 
 use llsd::{Limits, Value, xml};
 use test_support::allocation::{self, CountingAllocator, live_bytes};
@@ -7,15 +7,13 @@ use test_support::allocation::{self, CountingAllocator, live_bytes};
 #[global_allocator]
 static ALLOC: CountingAllocator = CountingAllocator;
 
-fn measure<T>(operation: impl FnOnce() -> T) -> (T, i128, i128, u128) {
-    let started = Instant::now();
+fn measure<T>(operation: impl FnOnce() -> T) -> (T, i128, i128) {
     let (value, allocations) = allocation::measure(operation);
-    let elapsed = started.elapsed().as_nanos();
-    (value, allocations.live_bytes, allocations.peak_bytes, elapsed)
+    (value, allocations.live_bytes, allocations.peak_bytes)
 }
 
 #[test]
-fn allocation_bounds() {
+fn xml_decoding_releases_allocations() {
     let pairs = 131_068;
     let mut large_map = String::from("<llsd><map><key>id</key><integer>1</integer><key>events</key><array/><key>extra</key><map>");
     for index in 0..pairs {
@@ -48,29 +46,12 @@ fn allocation_bounds() {
         ("normalized line endings", format!("<llsd><string>{}</string></llsd>", "ab\r\n".repeat(50_000))),
         ("nested map nodes", node_boundary),
     ] {
-        let (bound, scan_live, scan_peak, scan_ns) = measure(|| xml::value_allocation_bound(black_box(input.as_bytes()), limits).expect("scan valid XML"));
-        assert_eq!(scan_live, 0, "scanner allocations must return for {name}");
         let baseline = live_bytes();
-        let (value, retained, peak, decode_ns) = measure(|| xml::from_slice_with_limits::<Value>(black_box(input.as_bytes()), limits).expect("decode measured XML"));
+        let (value, retained, peak) = measure(|| xml::from_slice_with_limits::<Value>(black_box(input.as_bytes()), limits).expect("decode measured XML"));
         assert!(peak >= retained);
-        assert!(peak <= bound as i128, "allocation underestimate for {name}: peak={peak}, bound={bound}");
         drop(value);
         assert_eq!(live_bytes(), baseline, "decoded storage must return for {name}");
-        eprintln!("{name}: input={} B, retained={retained} B, decode_peak={peak} B, bound={bound} B, scan_peak={scan_peak} B, bound/peak={:.2}, scan/decode={:.2} ({scan_ns}/{decode_ns} ns)", input.len(), bound as f64 / peak.max(1) as f64, scan_ns as f64 / decode_ns.max(1) as f64);
-    }
-}
-
-#[test]
-fn malformed_names_use_bounded_memory() {
-    for prefix in ["", "\u{feff}", "<llsd>", "<llsd> ", "<llsd><!--comment-->", "<llsd><string>x</string>"] {
-        let small = format!("{prefix}<unknown>");
-        let large = format!("{prefix}<{}>", "x".repeat(1024 * 1024));
-        let (small_result, small_live, small_peak, _) = measure(|| xml::value_allocation_bound(small.as_bytes(), Limits::default()));
-        let (large_result, large_live, large_peak, _) = measure(|| xml::value_allocation_bound(large.as_bytes(), Limits::default()));
-        assert_eq!(small_result, Err(xml::BoundError::Malformed));
-        assert_eq!(large_result, Err(xml::BoundError::Malformed));
-        assert_eq!((small_live, large_live), (0, 0));
-        assert_eq!(large_peak, small_peak, "malformed tag name must not be copied for {prefix:?}");
+        eprintln!("{name}: input={} B, retained={retained} B, decode_peak={peak} B", input.len());
     }
 }
 
@@ -97,8 +78,8 @@ fn oversized_keys_stay_bounded() {
     ];
     for (name, decode, small, large) in cases {
         let limits = Limits { max_map_key_bytes: 2, ..Limits::default() };
-        let (small_result, small_live, small_peak, _) = measure(|| decode(&small, limits));
-        let (large_result, large_live, large_peak, _) = measure(|| decode(&large, limits));
+        let (small_result, small_live, small_peak) = measure(|| decode(&small, limits));
+        let (large_result, large_live, large_peak) = measure(|| decode(&large, limits));
         assert_matches!(small_result, Err(llsd::Error::LimitExceeded("map key bytes")), "small key for {name}");
         assert_matches!(large_result, Err(llsd::Error::LimitExceeded("map key bytes")), "large key for {name}");
         assert_eq!((small_live, large_live), (0, 0), "failed decode retained storage for {name}");

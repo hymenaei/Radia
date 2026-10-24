@@ -34,8 +34,6 @@ pub(super) struct Tokens<'input> {
     count: usize,
     text_run: bool,
     ended: bool,
-    check_binary_encoding: bool,
-    binary_attribute_bytes: usize,
 }
 
 impl<'input> Tokens<'input> {
@@ -43,24 +41,7 @@ impl<'input> Tokens<'input> {
         let input = str::from_utf8(input).map_err(|_| Error::InvalidUtf8)?;
         let mut reader = Reader::from_str(input);
         reader.config_mut().trim_text(false);
-        Ok(Self {
-            reader,
-            pending: None,
-            preserve_text: Vec::new(),
-            limits,
-            count: 0,
-            text_run: false,
-            ended: false,
-            check_binary_encoding: true,
-            binary_attribute_bytes: 0,
-        })
-    }
-
-    pub(super) fn for_allocation_bound(input: &'input [u8], limits: Limits) -> Result<Self> {
-        let mut tokens = Self::new(input, limits)?;
-        tokens.check_binary_encoding = false;
-        tokens.reader.config_mut().check_end_names = false;
-        Ok(tokens)
+        Ok(Self { reader, pending: None, preserve_text: Vec::new(), limits, count: 0, text_run: false, ended: false })
     }
 
     pub(super) fn peek(&mut self) -> Result<Option<&Token<'input>>> {
@@ -73,10 +54,6 @@ impl<'input> Tokens<'input> {
     pub(super) fn take(&mut self) -> Result<Option<Token<'input>>> {
         self.peek()?;
         Ok(self.pending.take())
-    }
-
-    pub(super) fn binary_attribute_bytes(&self) -> usize {
-        self.binary_attribute_bytes
     }
 
     fn check_next_name(&self) -> Result<()> {
@@ -95,16 +72,12 @@ impl<'input> Tokens<'input> {
 
     fn read(&mut self) -> Result<Option<Token<'input>>> {
         loop {
-            self.binary_attribute_bytes = 0;
             self.check_next_name()?;
             let token = match self.reader.read_event() {
                 Ok(Event::Start(element)) => {
                     let name = tag_name(element.name().as_ref())?;
                     if name == "binary" {
-                        self.binary_attribute_bytes = element.as_ref().len();
-                        if self.check_binary_encoding {
-                            validate_binary_encoding(&element)?;
-                        }
+                        validate_binary_encoding(&element)?;
                     }
                     self.preserve_text.push(!matches!(name, "llsd" | "array" | "map"));
                     Token::Start(name)
@@ -112,10 +85,7 @@ impl<'input> Tokens<'input> {
                 Ok(Event::Empty(element)) => {
                     let name = tag_name(element.name().as_ref())?;
                     if name == "binary" {
-                        self.binary_attribute_bytes = element.as_ref().len();
-                        if self.check_binary_encoding {
-                            validate_binary_encoding(&element)?;
-                        }
+                        validate_binary_encoding(&element)?;
                     }
                     Token::Empty(name)
                 }
@@ -142,7 +112,6 @@ impl<'input> Tokens<'input> {
                     return Ok(None);
                 }
                 Ok(Event::Decl(_) | Event::PI(_) | Event::Comment(_)) => continue,
-                Err(_) if !self.check_binary_encoding => return Err(Error::InvalidValue("malformed XML".into())),
                 Err(error) => return Err(Error::InvalidValue(error.to_string())),
             };
             if let Some(value) = token.text() {

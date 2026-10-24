@@ -1,9 +1,7 @@
-mod allocation;
 mod de;
 mod ser;
 mod tokens;
 
-pub use self::allocation::{BoundError, value_allocation_bound};
 pub use self::de::from_slice_with_limits;
 
 use std::io::{Read, Write};

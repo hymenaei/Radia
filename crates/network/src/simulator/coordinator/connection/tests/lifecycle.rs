@@ -124,7 +124,7 @@ async fn demoted_primary_times_out() {
     let started = tokio::time::Instant::now();
     let result = worker.await.expect("connection worker");
     assert!(started.elapsed() <= WAIT, "demoted connection expires");
-    assert_eq!(result, Err("The simulator stopped responding to LLUDP keepalive traffic.".into()));
+    std::assert_matches!(result, Err(ConnectionError::KeepaliveTimeout));
 }
 
 #[tokio::test(flavor = "multi_thread")]

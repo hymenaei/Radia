@@ -2,6 +2,7 @@ mod admission;
 mod coordinator;
 
 pub(crate) use admission::EventRetention;
+pub(crate) use coordinator::CoordinatorError;
 #[cfg(test)]
 pub(crate) use coordinator::tests::run_session;
 pub(crate) use coordinator::{SimulatorCoordinator, SimulatorCoordinatorOptions};

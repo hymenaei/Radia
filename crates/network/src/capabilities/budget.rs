@@ -8,6 +8,7 @@ use tokio::{
     task::{JoinError, spawn_blocking},
 };
 
+use super::SetupError;
 use crate::http;
 
 pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -34,7 +35,7 @@ pub(crate) struct CapabilityBudget {
     pub(super) primary_event_queues: Arc<Semaphore>,
     pub(super) neighbor_event_queues: Arc<Semaphore>,
     pub(super) queued_event_bytes: Arc<Semaphore>,
-    http_client: Arc<OnceLock<Result<http::Client, String>>>,
+    http_client: Arc<OnceLock<Result<http::Client, Arc<reqwest::Error>>>>,
 }
 
 impl CapabilityBudget {
@@ -48,13 +49,11 @@ impl CapabilityBudget {
         }
     }
 
-    pub(super) fn http_client(&self) -> Result<http::Client, String> {
+    pub(super) fn http_client(&self) -> Result<http::Client, SetupError> {
         self.http_client
-            .get_or_init(|| {
-                http::Client::new(Some(REQUEST_TIMEOUT), false, None)
-                    .map_err(|error| format!("Could not prepare the capability client: {error}"))
-            })
+            .get_or_init(|| http::Client::new(Some(REQUEST_TIMEOUT), false, None).map_err(Arc::new))
             .clone()
+            .map_err(SetupError::HttpClient)
     }
 }
 

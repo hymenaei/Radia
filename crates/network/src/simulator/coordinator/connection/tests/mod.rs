@@ -169,7 +169,7 @@ async fn connect_test_primary_with_coverage(
     simulator_id: SimulatorId,
     session: AgentSession,
     coverage_losses: CoverageLossLedger,
-) -> Result<SimulatorConnection, String> {
+) -> Result<SimulatorConnection, ConnectionError> {
     let budget = OutboundBudget::new(crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
     SimulatorConnection::connect(
         session,
@@ -191,7 +191,7 @@ async fn connect_test_neighbor_with_coverage(
     session: AgentSession,
     region_handle: u64,
     coverage_losses: CoverageLossLedger,
-) -> Result<SimulatorConnection, String> {
+) -> Result<SimulatorConnection, ConnectionError> {
     let budget = OutboundBudget::new(crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
     SimulatorConnection::connect(
         session,
@@ -234,7 +234,7 @@ async fn run_budget_retry(role: ConnectionRole) {
     let (neighbor_requests, _neighbor_requests_receiver) = mpsc::channel(1);
     let (_commands, commands) = mpsc::channel(1);
     let (_logout, logout) = mpsc::channel::<oneshot::Sender<Result<(), Error>>>(1);
-    let task: JoinHandle<Result<(), String>> =
+    let task: JoinHandle<Result<(), ConnectionError>> =
         spawn(connection.run(events, shutdown_receiver, neighbor_requests, commands, logout, packet_memory));
 
     let (use_circuit_code, peer) = receive_packet(&simulator).await;

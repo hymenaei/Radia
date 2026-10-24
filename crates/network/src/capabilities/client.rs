@@ -12,6 +12,7 @@ use tokio::{
 use tracing::Instrument;
 
 use super::{
+    SetupError,
     budget::{
         CapabilityBudget, EVENT_QUEUE_REQUEST_TIMEOUT, MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES, REQUEST_TIMEOUT,
         spawn_blocking_with_permit,
@@ -85,12 +86,12 @@ impl fmt::Debug for Client {
 
 impl Client {
     pub fn new(seed: Url) -> Result<Self, Error> {
-        Self::new_with_budget(seed, CapabilityBudget::new()).map_err(Error::Capability)
+        Self::new_with_budget(seed, CapabilityBudget::new()).map_err(|error| Error::Capability(error.to_string()))
     }
 
-    pub(crate) fn new_with_budget(seed: Url, budget: CapabilityBudget) -> Result<Self, String> {
-        validate_http_url(&seed).map_err(|error| error.to_string())?;
-        let runtime = Handle::try_current().map_err(|_| "A Tokio runtime is required for capability requests.".to_string())?;
+    pub(crate) fn new_with_budget(seed: Url, budget: CapabilityBudget) -> Result<Self, SetupError> {
+        validate_http_url(&seed).map_err(|error| SetupError::InvalidSeed(Arc::new(error)))?;
+        let runtime = Handle::try_current().map_err(|_| SetupError::RequestRuntimeUnavailable)?;
         let http = budget.http_client()?;
         let (session_closed, _) = watch::channel(false);
         Ok(Self {
@@ -375,7 +376,7 @@ impl Client {
         events: mpsc::Sender<EventEnvelope>,
         shutdown: watch::Receiver<bool>,
         coverage_losses: CoverageLossLedger,
-    ) -> Result<EventQueueTask, String> {
+    ) -> Result<EventQueueTask, SetupError> {
         self.start_event_queue_with_role(simulator_id, source, events, shutdown, coverage_losses, false)
     }
 
@@ -386,7 +387,7 @@ impl Client {
         events: mpsc::Sender<EventEnvelope>,
         shutdown: watch::Receiver<bool>,
         coverage_losses: CoverageLossLedger,
-    ) -> Result<EventQueueTask, String> {
+    ) -> Result<EventQueueTask, SetupError> {
         self.start_event_queue_with_role(simulator_id, source, events, shutdown, coverage_losses, true)
     }
 
@@ -398,8 +399,8 @@ impl Client {
         shutdown: watch::Receiver<bool>,
         coverage_losses: CoverageLossLedger,
         is_primary: bool,
-    ) -> Result<EventQueueTask, String> {
-        let runtime = Handle::try_current().map_err(|_| "The simulator event queue requires an active Tokio runtime.".to_string())?;
+    ) -> Result<EventQueueTask, SetupError> {
+        let runtime = Handle::try_current().map_err(|_| SetupError::EventQueueRuntimeUnavailable)?;
         let http = self.http.clone().with_timeout(Some(EVENT_QUEUE_REQUEST_TIMEOUT));
         let seed = self.seed.as_ref().clone();
         let ordinary_requests = Arc::clone(&self.budget.ordinary_requests);

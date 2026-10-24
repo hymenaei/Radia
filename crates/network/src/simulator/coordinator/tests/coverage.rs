@@ -22,7 +22,12 @@ async fn retry_limit_keeps_primary_connected() {
 fn former_primary_failure_completion_keeps_its_identity() {
     let simulator_id = SimulatorId::allocate().expect("allocate former primary ID");
     let endpoint = "127.0.0.1:9000".parse().expect("parse endpoint");
-    let event = neighbor_completion_event(simulator_id, None, endpoint, &SimulatorTaskOutcome::Finished(Err("retry limit reached".into())));
+    let event = neighbor_completion_event(
+        simulator_id,
+        None,
+        endpoint,
+        &SimulatorTaskOutcome::Finished(Err(ConnectionError::ShutdownReason("retry limit reached"))),
+    );
     assert!(matches!(
         event,
         Event::SimulatorFailed { simulator_id: failed_id, region_handle: None, endpoint: failed_endpoint, reason }

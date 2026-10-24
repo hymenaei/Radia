@@ -17,8 +17,9 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    ConnectionRole, CoordinatorRunState, HandoffCommand, PreconnectEvents, SimulatorCapabilitySession, SimulatorConnectionState,
-    SimulatorCoordinator, SimulatorEvent, SimulatorRequest, record_event_envelope_loss, remove_simulator_capability,
+    ConnectionRole, CoordinatorError, CoordinatorRunState, HandoffCommand, PreconnectEvents, SimulatorCapabilitySession,
+    SimulatorConnectionState, SimulatorCoordinator, SimulatorEvent, SimulatorRequest, record_event_envelope_loss,
+    remove_simulator_capability,
 };
 use crate::{
     capabilities::{Client, EventQueueExit},
@@ -218,7 +219,7 @@ impl SimulatorCoordinator {
         neighbor_event_queues: &mut JoinSet<(SimulatorId, SocketAddr, EventQueueExit)>,
         neighbor_event_queue_owners: &mut HashMap<Id, (SimulatorId, SocketAddr)>,
         simulator_capabilities: &mut HashMap<SimulatorId, SimulatorCapabilitySession>,
-    ) -> Result<Client, String> {
+    ) -> Result<Client, CoordinatorError> {
         if let Some(capability) = simulator_capabilities.get(&simulator_id)
             && capability.endpoint == handoff.endpoint
             && capability.seed_capability == handoff.seed_capability
@@ -235,7 +236,7 @@ impl SimulatorCoordinator {
                 Ok(queue) => queue,
                 Err(error) => {
                     client.close_session();
-                    return Err(error);
+                    return Err(error.into());
                 }
             };
         let endpoint = handoff.endpoint;
@@ -267,7 +268,7 @@ impl SimulatorCoordinator {
         announcement: HandoffAnnouncement,
         setup: &mut PromotionSetup<'_>,
         state: &mut HandoffState,
-    ) -> Result<(), String> {
+    ) -> Result<(), CoordinatorError> {
         if source != self.primary.simulator_id || state.is_conflicted() {
             return Ok(());
         }
@@ -334,6 +335,11 @@ impl SimulatorCoordinator {
                         &mut setup.state.simulator_capabilities,
                         &self.coverage_losses,
                     );
+                    tracing::warn!(
+                        simulator = self.primary.simulator_id.get(),
+                        region = handoff.region_handle,
+                        "conflicting simulator handoff announcements; waiting for TeleportCancel"
+                    );
                     return Ok(());
                 }
             }
@@ -388,7 +394,7 @@ impl SimulatorCoordinator {
         packet_order: PacketOrder,
         setup: &mut PromotionSetup<'_>,
         state: &mut HandoffState,
-    ) -> Result<(), String> {
+    ) -> Result<(), CoordinatorError> {
         if source != self.primary.simulator_id || state.is_conflicted() {
             return Ok(());
         }

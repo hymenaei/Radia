@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr, time::Duration};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
 use protocol::{
     LLUdpError,
@@ -12,7 +12,7 @@ use protocol::{
 use tokio::{sync::mpsc, time::Instant};
 
 use super::{
-    ConnectionRole, ConnectionTask, EVENT_BACKLOG_DISCONNECT_REASON, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS,
+    ConnectionError, ConnectionRole, ConnectionTask, EVENT_BACKLOG_DISCONNECT_REASON, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS,
     NEIGHBOR_PRECONNECT_OVERFLOW_REASON, SimulatorRequest, active_queue_class, lifecycle::RunControl, outbound::MovementSend,
     preempt_deferred_send, preflight_loss_reason, queue_internal,
 };
@@ -112,16 +112,16 @@ impl PacketRejections {
 }
 
 impl ConnectionTask {
-    pub(super) fn receive_datagram(&mut self, received: io::Result<usize>, buffer: &[u8]) -> Result<RunControl, String> {
+    pub(super) fn receive_datagram(&mut self, received: io::Result<usize>, buffer: &[u8]) -> Result<RunControl, ConnectionError> {
         self.event_delivery_turn = !self.pending_notifications.is_empty() || !self.pending_events.is_empty();
-        let size = received.map_err(|error| format!("Neighbor simulator connection failed: {error}"))?;
+        let size = received.map_err(|error| ConnectionError::Receive(Arc::new(error)))?;
         if *self.shutdown.borrow() || self.events.is_closed() {
             return Ok(RunControl::Finish(None));
         }
         self.receive_packet(&buffer[..size])
     }
 
-    fn receive_packet(&mut self, bytes: &[u8]) -> Result<RunControl, String> {
+    fn receive_packet(&mut self, bytes: &[u8]) -> Result<RunControl, ConnectionError> {
         let frame = match Packet::inspect(bytes) {
             Ok(frame) => frame,
             Err(_) => {
@@ -252,8 +252,7 @@ impl ConnectionTask {
             return Ok(RunControl::Continue);
         }
         self.last_udp_received = Instant::now();
-        self.connection.circuit.acknowledge_message(packet.message());
-        let receive_outcome = self.connection.circuit.commit_receive(admission);
+        let receive_outcome = self.connection.circuit.commit_received_packet(admission, &packet);
         preempt_deferred_send(
             &mut self.pending_send,
             &mut self.outbound,
@@ -423,7 +422,7 @@ impl ConnectionTask {
         message: &Message,
         connection_role: ConnectionRole,
         dispatch_allowed: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, ConnectionError> {
         let mut dispatch_message = true;
         match message {
             Message::EnableSimulator(enabled) => {
@@ -435,10 +434,10 @@ impl ConnectionTask {
                     endpoint,
                 }) {
                     let reason = match error {
-                        mpsc::error::TrySendError::Full(_) => "The neighbor request queue is full.",
-                        mpsc::error::TrySendError::Closed(_) => "The simulator manager has closed.",
+                        mpsc::error::TrySendError::Full(_) => ConnectionError::NeighborRequestQueueFull,
+                        mpsc::error::TrySendError::Closed(_) => ConnectionError::SimulatorManagerClosed,
                     };
-                    return Err(reason.into());
+                    return Err(reason);
                 }
             }
             Message::DisableSimulator(_) => {

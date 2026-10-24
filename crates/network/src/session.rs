@@ -4,6 +4,7 @@ mod outbound_message {
 
 use std::{
     collections::{HashMap, HashSet},
+    error::Error as StdError,
     fmt,
     future::Future,
     num::NonZeroU64,
@@ -33,7 +34,7 @@ use crate::{
         send_failure_event,
     },
     login::{LoginResponse, login_at_url},
-    simulator::{SimulatorCoordinator, SimulatorCoordinatorOptions},
+    simulator::{CoordinatorError, SimulatorCoordinator, SimulatorCoordinatorOptions},
     transport::lludp::Delivery,
 };
 
@@ -42,6 +43,36 @@ pub(crate) const NETWORK_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
 pub const DEFAULT_UPSTREAM_BYTES_PER_SECOND: NonZeroU64 = NonZeroU64::new(64_000).unwrap();
 const MAX_OUTBOUND_CHAT_MESSAGE_BYTES: usize = 8 * 1024 - 6 - 4 - 40 - (1 + u8::MAX as usize * 4);
 const MAX_OUTBOUND_OBJECT_REQUESTS: usize = u8::MAX as usize;
+
+#[derive(Debug)]
+enum SessionError {
+    Login(String),
+    Simulator(CoordinatorError),
+}
+
+impl fmt::Display for SessionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Login(error) => formatter.write_str(error),
+            Self::Simulator(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl StdError for SessionError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Login(_) => None,
+            Self::Simulator(error) => Some(error),
+        }
+    }
+}
+
+impl From<CoordinatorError> for SessionError {
+    fn from(error: CoordinatorError) -> Self {
+        Self::Simulator(error)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionOptions {
@@ -167,7 +198,7 @@ impl Session {
                     Err(error) => {
                         let error = format!("Could not start the network runtime: {error}");
                         tracing::info!(lifecycle = "failed", "network lifecycle changed");
-                        let _ = failure_sender.try_send(EventEnvelope::new(Event::Failed(error)));
+                        terminal_event_permit.send(EventEnvelope::new(Event::Failed(error)));
                         worker_finished_sender.send_replace(true);
                         return;
                     }
@@ -184,7 +215,7 @@ impl Session {
                 let result = runtime.block_on(run_client(credentials, channels, login_url, options));
                 if let Err(error) = result {
                     tracing::info!(lifecycle = "failed", "network lifecycle changed");
-                    runtime.block_on(send_failure_event(&failure_sender, error, &mut failure_shutdown));
+                    runtime.block_on(send_failure_event(&failure_sender, error.to_string(), &mut failure_shutdown));
                 } else {
                     tracing::info!(lifecycle = "disconnected", "network lifecycle changed");
                 }
@@ -223,7 +254,9 @@ impl Session {
                 }
                 if self.has_unacknowledged_coverage_loss(watermark) {
                     self.pending_event = Some(envelope);
-                    let _ = self.coverage_changed.changed().await;
+                    if self.coverage_changed.changed().await.is_err() {
+                        return self.pending_event.take().map(EventEnvelope::into_event);
+                    }
                     continue;
                 }
                 return Some(envelope.into_event());
@@ -395,10 +428,8 @@ impl SessionHandle {
     fn request_disconnect(&self) {
         let mut admission_closed = self.command_admission_closed.lock().unwrap_or_else(|error| error.into_inner());
         *admission_closed = true;
-        if !*self.worker_finished.borrow() {
-            if !*self.disconnect_requested.borrow() {
-                tracing::info!(lifecycle = "disconnecting", "network lifecycle changed");
-            }
+        if !*self.worker_finished.borrow() && !*self.disconnect_requested.borrow() {
+            tracing::info!(lifecycle = "disconnecting", "network lifecycle changed");
         }
         self.disconnect_requested.send_replace(true);
     }
@@ -444,8 +475,10 @@ impl SessionHandle {
     pub async fn disconnect(&self) {
         self.request_disconnect();
         let mut worker_finished = self.worker_finished.clone();
-        if !*worker_finished.borrow() {
-            let _ = worker_finished.wait_for(|finished| *finished).await;
+        if !*worker_finished.borrow()
+            && let Err(error) = worker_finished.wait_for(|finished| *finished).await
+        {
+            tracing::debug!(%error, "network worker finished while disconnect was waiting");
         }
     }
 }
@@ -509,7 +542,12 @@ fn try_send_command(commands: &Sender<Command>, command: Command, closed: Error)
 }
 
 #[tracing::instrument(name = "network.session", level = "info", skip_all, fields(grid = ?credentials.grid))]
-async fn run_client(credentials: LoginCredentials, channels: Channels, login_url: String, options: SessionOptions) -> Result<(), String> {
+async fn run_client(
+    credentials: LoginCredentials,
+    channels: Channels,
+    login_url: String,
+    options: SessionOptions,
+) -> Result<(), SessionError> {
     let Channels { mut commands, command_sender, events, terminal_event_permit, mut disconnect_requested, coverage_losses } = channels;
     let mut mfa_token = String::new();
     let mut mfa_hash = credentials.mfa_hash.clone();
@@ -519,7 +557,7 @@ async fn run_client(credentials: LoginCredentials, channels: Channels, login_url
             Some(Ok(response)) => response,
             Some(Err(error)) => {
                 tracing::warn!("Login failed");
-                return Err(error);
+                return Err(SessionError::Login(error));
             }
             None => return Ok(()),
         };
@@ -574,7 +612,9 @@ async fn run_client(credentials: LoginCredentials, channels: Channels, login_url
                             }
                         }
                         Some(Command::SendTo { completed, .. }) => {
-                            let _ = completed.send(Err(Error::SimulatorNotReady));
+                            if let Err(error) = completed.send(Err(Error::SimulatorNotReady)) {
+                                drop(error);
+                            }
                         }
                         None => return Ok(()),
                     }
@@ -600,7 +640,7 @@ async fn run_client(credentials: LoginCredentials, channels: Channels, login_url
     else {
         return Ok(());
     };
-    simulator.run(commands, events, disconnect_requested, terminal_event_permit).await
+    simulator.run(commands, events, disconnect_requested, terminal_event_permit).await.map_err(SessionError::from)
 }
 
 async fn wait_for_login<F: Future>(login: F, disconnect_requested: &mut watch::Receiver<bool>) -> Option<F::Output> {

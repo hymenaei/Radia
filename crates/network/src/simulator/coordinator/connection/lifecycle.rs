@@ -4,7 +4,7 @@ use tokio::{sync::oneshot, time::Instant};
 
 use crate::error::Error;
 
-use super::LOGOUT_TIMEOUT;
+use super::{ConnectionError, LOGOUT_TIMEOUT};
 
 pub(super) enum Phase {
     Connecting { region_handshake_seen: bool },
@@ -172,12 +172,14 @@ impl Phase {
         }
     }
 
-    pub(super) fn complete_logout(&mut self, error: Option<String>) {
+    pub(super) fn complete_logout(&mut self, error: Option<ConnectionError>) {
         let Some(logout) = self.logout_state_mut() else { return };
         let LogoutState::AwaitingLocalSend(waiters) = mem::replace(logout, LogoutState::Complete) else { return };
         for waiter in waiters {
-            let result = error.as_ref().map_or(Ok(()), |error| Err(Error::SimulatorSend(error.clone())));
-            let _ = waiter.send(result);
+            let result = error.as_ref().map_or(Ok(()), |error| Err(error.to_network_error()));
+            if let Err(error) = waiter.send(result) {
+                drop(error);
+            }
         }
     }
 

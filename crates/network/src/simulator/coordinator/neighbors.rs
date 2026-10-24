@@ -8,7 +8,7 @@ use tracing::Instrument;
 use url::Url;
 
 use super::{
-    CoordinatorRunState, HandoffCommand, HandoffTarget, NEIGHBOR_COMMAND_CAPACITY, PrimaryState, PromotionSetup,
+    CoordinatorError, CoordinatorRunState, HandoffCommand, HandoffTarget, NEIGHBOR_COMMAND_CAPACITY, PrimaryState, PromotionSetup,
     SimulatorCapabilitySession, SimulatorCommand, SimulatorConnection, SimulatorConnectionOptions, SimulatorConnectionState,
     SimulatorCoordinator, SimulatorEvent, SimulatorTaskOutcome, is_current_simulator, record_event_envelope_loss,
     remove_simulator_capability,
@@ -28,7 +28,7 @@ impl SimulatorCoordinator {
         endpoint: SocketAddr,
         handoff: Option<HandoffTarget>,
         setup: &mut PromotionSetup<'_>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, CoordinatorError> {
         let connections = &setup.state.neighbor_connections;
         if origin != self.primary.simulator_id || !is_current_simulator(origin, self.simulator_id, connections) {
             return Ok(false);
@@ -36,7 +36,7 @@ impl SimulatorCoordinator {
         if handoff.as_ref().is_some_and(|target| target.region_handle != region_handle || target.endpoint != endpoint) {
             return Ok(false);
         }
-        let simulator_id = SimulatorId::allocate().ok_or_else(|| "Simulator connection ID space is exhausted.".to_string())?;
+        let simulator_id = SimulatorId::allocate().ok_or(CoordinatorError::SimulatorIdSpaceExhausted)?;
         if endpoint.port() == 0
             || endpoint.ip().is_unspecified()
             || endpoint.ip().is_multicast()
@@ -127,7 +127,7 @@ impl SimulatorCoordinator {
         endpoint: SocketAddr,
         reason: &'static str,
         setup: &mut PromotionSetup<'_>,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, CoordinatorError> {
         tracing::warn!(simulator = simulator_id.get(), region = region_handle, %reason, "neighbor simulator connection was rejected");
         self.publish_event(
             &setup.application_events,
@@ -205,9 +205,13 @@ impl SimulatorCoordinator {
                     ),
                     Err(error) => SimulatorTaskOutcome::ConnectFailed(error),
                 };
-                let _ = finish_events
+                if finish_events
                     .send(SimulatorEvent::Finished { simulator_id, region_handle: Some(region_handle), endpoint, outcome: outcome.clone() })
-                    .await;
+                    .await
+                    .is_err()
+                {
+                    tracing::debug!(simulator = simulator_id.get(), region = region_handle, "neighbor result receiver closed");
+                }
                 (simulator_id, Some(region_handle), endpoint, outcome)
             }
             .in_current_span(),
@@ -234,7 +238,7 @@ impl SimulatorCoordinator {
         endpoint: SocketAddr,
         seed: Url,
         setup: &mut PromotionSetup<'_>,
-    ) -> Result<(), String> {
+    ) -> Result<(), CoordinatorError> {
         let client = match self.new_capability_client(seed.clone()) {
             Ok(client) => client,
             Err(_error) => {
@@ -293,11 +297,11 @@ pub(super) fn neighbor_completion_event(
     match outcome {
         SimulatorTaskOutcome::Finished(Ok(())) => Event::SimulatorDisconnected { simulator_id, region_handle, endpoint },
         SimulatorTaskOutcome::Finished(Err(reason)) => {
-            Event::SimulatorFailed { simulator_id, region_handle, endpoint, reason: reason.clone() }
+            Event::SimulatorFailed { simulator_id, region_handle, endpoint, reason: reason.to_string() }
         }
         SimulatorTaskOutcome::ConnectFailed(reason) => match region_handle {
             Some(region_handle) => Event::SimulatorConnectFailed { simulator_id, region_handle, endpoint },
-            None => Event::SimulatorFailed { simulator_id, region_handle: None, endpoint, reason: reason.clone() },
+            None => Event::SimulatorFailed { simulator_id, region_handle: None, endpoint, reason: reason.to_string() },
         },
     }
 }
@@ -324,10 +328,9 @@ pub(super) fn neighbor_event_queue_failure(
         EventQueueExit::RetryLimitReached => "The neighbor simulator EventQueueGet stopped after repeated errors.",
         EventQueueExit::TaskFailed => "The neighbor simulator EventQueueGet task ended unexpectedly.",
     };
-    is_current_simulator(simulator_id, primary_id, connections).then(|| Event::CapabilityError {
-        simulator_id,
-        source,
-        capability: EVENT_QUEUE_NAME.to_owned(),
-        reason: reason.into(),
-    })
+    if !is_current_simulator(simulator_id, primary_id, connections) {
+        return None;
+    }
+    tracing::warn!(simulator = simulator_id.get(), source = %source, ?exit, reason, "neighbor simulator event queue stopped");
+    Some(Event::CapabilityError { simulator_id, source, capability: EVENT_QUEUE_NAME.to_owned(), reason: reason.into() })
 }

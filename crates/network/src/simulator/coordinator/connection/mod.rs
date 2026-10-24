@@ -1,3 +1,4 @@
+mod error;
 mod lifecycle;
 mod outbound;
 mod receive;
@@ -38,6 +39,8 @@ use crate::{
         pacing::{ConnectionPacer, OutboundBudget, OutboundBudgetHandle, TrafficClass},
     },
 };
+pub(super) use error::ConnectionError;
+pub(super) use outbound::bound_send_error;
 use outbound::{
     MovementSend, OutboundQueue, PendingSend, QueuedMessage, active_queue_class, agent_throttle_message, expire_deferred_retries,
     expire_pending_send, fail_queued_on_close, flush_send_notifications, logout_message, message_class, preempt_deferred_send,
@@ -52,8 +55,6 @@ const MAX_SEND_ERROR_BYTES: usize = 256;
 const OUTBOUND_SEND_CHARGE_BYTES: usize = 8 * 1024;
 const MAX_PENDING_SEND_BYTES: usize = MAX_PENDING_SENDS * OUTBOUND_SEND_CHARGE_BYTES;
 const MAX_SEND_AGE: Duration = Duration::from_secs(5);
-const SEND_QUEUE_EXPIRED: &str = "A simulator datagram exceeded its queue age limit.";
-const RELIABLE_RETRY_EXPIRED: &str = "A reliable simulator retransmission exceeded its send age limit.";
 const DEFAULT_AGENT_THROTTLE_RATES: ThrottleRates = ThrottleRates {
     resend_bits_per_second: 460_800.0,
     land_bits_per_second: 317_440.0,
@@ -149,7 +150,7 @@ impl SimulatorConnection {
         }
     }
 
-    pub(super) async fn connect(session: AgentSession, options: SimulatorConnectionOptions) -> Result<Self, String> {
+    pub(super) async fn connect(session: AgentSession, options: SimulatorConnectionOptions) -> Result<Self, ConnectionError> {
         let SimulatorConnectionOptions { simulator_id, region_handle, coverage_losses, primary_state, budget, owned_budget, transport } =
             options;
         let is_primary = region_handle.is_none();
@@ -201,10 +202,10 @@ impl SimulatorConnection {
         commands: mpsc::Receiver<SimulatorCommand>,
         logout_commands: mpsc::Receiver<oneshot::Sender<Result<(), Error>>>,
         packet_memory: SimulatorMemoryBudget,
-    ) -> Result<(), String> {
+    ) -> Result<(), ConnectionError> {
         task::run(self, events, shutdown, neighbor_requests, commands, logout_commands, packet_memory).await
     }
-    fn queue_handoff_movement(&mut self, outbound: &mut OutboundQueue, pending_send: Option<&PendingSend>) -> Result<(), String> {
+    fn queue_handoff_movement(&mut self, outbound: &mut OutboundQueue, pending_send: Option<&PendingSend>) -> Result<(), ConnectionError> {
         if self.movement_requested
             || self.handoff.is_none()
             || outbound.has_handoff_movement()

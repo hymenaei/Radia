@@ -37,6 +37,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use super::SessionError;
 use super::{
     COMMAND_CAPACITY, Channels, Command, MAX_OUTBOUND_CHAT_MESSAGE_BYTES, MAX_OUTBOUND_OBJECT_REQUESTS, MfaChallenge,
     NETWORK_THREAD_STACK_SIZE, Session, SessionHandle, SessionOptions, run_client, send_failure_event, wait_for_login,
@@ -177,17 +178,20 @@ fn test_credentials() -> LoginCredentials {
     }
 }
 
-fn spawn_test_session(login_url: String) -> (Session, SessionHandle, JoinHandle<Result<(), String>>) {
+fn spawn_test_session(login_url: String) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>) {
     spawn_session_client(test_credentials(), login_url)
 }
 
 fn spawn_test_session_with_event_sender(
     login_url: String,
-) -> (Session, SessionHandle, JoinHandle<Result<(), String>>, mpsc::Sender<EventEnvelope>) {
+) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>, mpsc::Sender<EventEnvelope>) {
     spawn_session_client_with_event_sender(test_credentials(), login_url)
 }
 
-fn spawn_session_client(credentials: LoginCredentials, login_url: String) -> (Session, SessionHandle, JoinHandle<Result<(), String>>) {
+fn spawn_session_client(
+    credentials: LoginCredentials,
+    login_url: String,
+) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>) {
     let (session, handle, worker, _) = spawn_session_client_with_event_sender(credentials, login_url);
     (session, handle, worker)
 }
@@ -195,7 +199,7 @@ fn spawn_session_client(credentials: LoginCredentials, login_url: String) -> (Se
 fn spawn_session_client_with_event_sender(
     credentials: LoginCredentials,
     login_url: String,
-) -> (Session, SessionHandle, JoinHandle<Result<(), String>>, mpsc::Sender<EventEnvelope>) {
+) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>, mpsc::Sender<EventEnvelope>) {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
@@ -243,7 +247,7 @@ fn spawn_session_client_with_event_sender(
 fn spawn_network_thread_session(
     credentials: LoginCredentials,
     login_url: String,
-) -> (Session, SessionHandle, JoinHandle<Result<(), String>>) {
+) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>) {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
@@ -787,7 +791,7 @@ async fn login_handoff() {
 struct PromotedSession {
     session: Session,
     handle: SessionHandle,
-    worker: JoinHandle<Result<(), String>>,
+    worker: JoinHandle<Result<(), SessionError>>,
     primary: UdpSocket,
     destination: UdpSocket,
     destination_peer: SocketAddr,

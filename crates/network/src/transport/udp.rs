@@ -1,10 +1,10 @@
 use std::{
+    error::Error as StdError,
+    fmt,
     io::{self, ErrorKind},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Arc,
 };
-
-#[cfg(test)]
-use std::sync::Arc;
 
 use tokio::net::UdpSocket;
 #[cfg(test)]
@@ -12,6 +12,29 @@ use tokio::sync::{Notify, watch};
 
 const MAX_IPV4_UDP_PAYLOAD: usize = u16::MAX as usize - 20 - 8;
 const MAX_IPV6_UDP_PAYLOAD: usize = u16::MAX as usize - 8;
+
+#[derive(Clone, Debug)]
+pub(crate) enum UdpError {
+    Bind(Arc<io::Error>),
+    Connect(Arc<io::Error>),
+}
+
+impl fmt::Display for UdpError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bind(error) => write!(formatter, "Could not open the simulator connection: {error}"),
+            Self::Connect(error) => write!(formatter, "Could not reach the simulator: {error}"),
+        }
+    }
+}
+
+impl StdError for UdpError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Bind(error) | Self::Connect(error) => Some(error.as_ref()),
+        }
+    }
+}
 
 #[cfg(test)]
 pub(crate) struct SendGate {
@@ -27,11 +50,9 @@ pub(crate) struct UdpTransport {
 }
 
 impl UdpTransport {
-    pub(crate) async fn connect(address: SocketAddr) -> Result<Self, String> {
-        let socket = UdpSocket::bind(local_bind_address(address))
-            .await
-            .map_err(|error| format!("Could not open the simulator connection: {error}"))?;
-        socket.connect(address).await.map_err(|error| format!("Could not reach the simulator: {error}"))?;
+    pub(crate) async fn connect(address: SocketAddr) -> Result<Self, UdpError> {
+        let socket = UdpSocket::bind(local_bind_address(address)).await.map_err(|error| UdpError::Bind(Arc::new(error)))?;
+        socket.connect(address).await.map_err(|error| UdpError::Connect(Arc::new(error)))?;
         let max_payload_size = if address.is_ipv4() { MAX_IPV4_UDP_PAYLOAD } else { MAX_IPV6_UDP_PAYLOAD };
         Ok(Self {
             socket,
@@ -51,26 +72,6 @@ impl UdpTransport {
     #[cfg(test)]
     pub(crate) fn set_send_gate(&mut self, send_gate: SendGate) {
         self.send_gate = Some(send_gate);
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn send(&self, bytes: &[u8]) -> Result<(), io::Error> {
-        if bytes.len() > self.max_payload_size {
-            return Err(io::Error::new(ErrorKind::InvalidInput, "UDP datagram exceeds the address family's maximum payload size."));
-        }
-        #[cfg(test)]
-        if let Some(send_gate) = &self.send_gate {
-            let mut paused = send_gate.paused.clone();
-            while *paused.borrow() {
-                send_gate.entered.notify_one();
-                paused.changed().await.map_err(|_| io::Error::new(ErrorKind::BrokenPipe, "UDP test send gate closed"))?;
-            }
-        }
-        let sent = self.socket.send(bytes).await?;
-        if sent != bytes.len() {
-            return Err(io::Error::new(ErrorKind::WriteZero, "UDP socket sent an incomplete datagram."));
-        }
-        Ok(())
     }
 
     pub(crate) async fn writable(&self) -> Result<(), io::Error> {
@@ -122,7 +123,6 @@ mod tests {
     use std::io;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use tokio::net::UdpSocket;
-    use tokio::time::{Duration, timeout};
 
     #[tokio::test]
     async fn ipv6_udp_round_trip() {
@@ -142,21 +142,16 @@ mod tests {
         assert!(local_bind_address(address).ip().is_unspecified());
         assert!(local_bind_address(address).is_ipv6());
 
-        transport.send(b"ipv6 request").await.expect("send IPv6 datagram");
+        transport.writable().await.expect("wait for IPv6 socket writability");
+        transport.try_send(b"ipv6 request").expect("send IPv6 datagram");
 
         let mut buffer = [0; 32];
-        let (received, peer) = timeout(Duration::from_secs(5), server.recv_from(&mut buffer))
-            .await
-            .expect("timed out receiving IPv6 request")
-            .expect("receive IPv6 request");
+        let (received, peer) = server.recv_from(&mut buffer).await.expect("receive IPv6 request");
         assert_eq!(&buffer[..received], b"ipv6 request");
         assert!(peer.is_ipv6());
 
         server.send_to(b"ipv6 response", peer).await.expect("send IPv6 response");
-        let received = timeout(Duration::from_secs(5), transport.recv(&mut buffer))
-            .await
-            .expect("timed out receiving IPv6 response")
-            .expect("receive IPv6 response");
+        let received = transport.recv(&mut buffer).await.expect("receive IPv6 response");
         assert_eq!(&buffer[..received], b"ipv6 response");
     }
 
@@ -166,7 +161,7 @@ mod tests {
         let transport = UdpTransport::connect(server.local_addr().expect("server address")).await.expect("connect IPv4 transport");
 
         let oversized = vec![0; MAX_IPV4_UDP_PAYLOAD + 1];
-        let error = transport.send(&oversized).await.expect_err("oversized IPv4 datagram should fail before reaching the socket");
+        let error = transport.try_send(&oversized).expect_err("oversized IPv4 datagram should fail before reaching the socket");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
@@ -184,7 +179,7 @@ mod tests {
         let transport = UdpTransport::connect(server.local_addr().expect("server address")).await.expect("connect IPv6 transport");
 
         let oversized = vec![0; MAX_IPV6_UDP_PAYLOAD + 1];
-        let error = transport.send(&oversized).await.expect_err("oversized IPv6 datagram should fail before reaching the socket");
+        let error = transport.try_send(&oversized).expect_err("oversized IPv6 datagram should fail before reaching the socket");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }

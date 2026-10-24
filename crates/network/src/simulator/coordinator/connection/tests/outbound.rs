@@ -150,9 +150,9 @@ async fn control_traffic_cannot_restart_retry_deadline() {
     }
 
     let deferred_since = deferred_retries[&sequence];
-    assert_eq!(
+    std::assert_matches!(
         expire_deferred_retries(&circuit, &mut deferred_retries, deferred_since + MAX_SEND_AGE),
-        Err(RELIABLE_RETRY_EXPIRED.into()),
+        Err(ConnectionError::ReliableRetryExpired),
         "repeated priority sends cannot extend a due retry's deadline"
     );
 
@@ -364,7 +364,7 @@ async fn primary_priority_sends_during_neighbor_retry_storm() {
                 circuit.commit_sent(prepared, sent_at)?;
                 sent_by_worker.fetch_add(1, Ordering::Relaxed);
             }
-            Ok::<(), String>(())
+            Ok::<(), ConnectionError>(())
         }));
         retry_counts.push(sent);
     }

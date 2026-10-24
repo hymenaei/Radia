@@ -1,6 +1,8 @@
 use std::{
     collections::HashMap,
-    io::ErrorKind,
+    error::Error as StdError,
+    fmt,
+    io::{self, ErrorKind},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -23,6 +25,34 @@ const RATE_RECOVERY_STEP_DENOMINATOR: u64 = 20;
 const MIN_RATE_DIVISOR: u64 = 16;
 const SERVICE_ORDER: [TrafficClass; 5] =
     [TrafficClass::Control, TrafficClass::Control, TrafficClass::Deadline, TrafficClass::Fair, TrafficClass::Fair];
+
+#[derive(Clone, Debug)]
+pub(crate) enum PacerError {
+    Stopped,
+    GrantCanceled,
+    Writable(Arc<io::Error>),
+    Send(Arc<io::Error>),
+}
+
+impl fmt::Display for PacerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stopped => formatter.write_str("The LLUDP byte pacer has stopped."),
+            Self::GrantCanceled => formatter.write_str("The LLUDP byte pacer stopped before granting a send."),
+            Self::Writable(error) => write!(formatter, "Could not wait for a simulator datagram send slot: {error}"),
+            Self::Send(error) => write!(formatter, "Could not send a simulator datagram: {error}"),
+        }
+    }
+}
+
+impl StdError for PacerError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        match self {
+            Self::Writable(error) | Self::Send(error) => Some(error.as_ref()),
+            Self::Stopped | Self::GrantCanceled => None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum TrafficClass {
@@ -248,7 +278,7 @@ impl OutboundBudget {
     }
 
     #[cfg(test)]
-    pub(crate) async fn register(&self, id: u64, primary: bool) -> Result<ConnectionPacer, String> {
+    pub(crate) async fn register(&self, id: u64, primary: bool) -> Result<ConnectionPacer, PacerError> {
         self.handle().register(id, primary).await
     }
 
@@ -258,9 +288,18 @@ impl OutboundBudget {
 
     pub(crate) async fn shutdown(mut self) {
         let (completed, response) = oneshot::channel();
-        let _ = self.commands.send(Command::Shutdown(completed)).await;
-        let _ = response.await;
-        let _ = (&mut self.worker).await;
+        if self.commands.send(Command::Shutdown(completed)).await.is_err() {
+            self.worker.abort();
+            return;
+        }
+        if response.await.is_err() {
+            self.worker.abort();
+        }
+        if let Err(error) = (&mut self.worker).await
+            && !error.is_cancelled()
+        {
+            tracing::error!(%error, "LLUDP byte pacer task failed during shutdown");
+        }
     }
 }
 
@@ -277,13 +316,10 @@ pub(crate) struct OutboundBudgetHandle {
 }
 
 impl OutboundBudgetHandle {
-    pub(crate) async fn register(&self, id: u64, primary: bool) -> Result<ConnectionPacer, String> {
+    pub(crate) async fn register(&self, id: u64, primary: bool) -> Result<ConnectionPacer, PacerError> {
         let role = if primary { ConnectionRole::Primary } else { ConnectionRole::Neighbor };
         let active = Arc::new(AtomicBool::new(true));
-        self.commands
-            .send(Command::Register { id, role, active: Arc::clone(&active) })
-            .await
-            .map_err(|_| "The LLUDP byte pacer has stopped.".to_string())?;
+        self.commands.send(Command::Register { id, role, active: Arc::clone(&active) }).await.map_err(|_| PacerError::Stopped)?;
         Ok(ConnectionPacer { id, role, commands: self.commands.clone(), bucket: Arc::clone(&self.bucket), active })
     }
 }
@@ -301,13 +337,10 @@ impl ConnectionPacer {
         PacerHandle { id: self.id, commands: self.commands.clone(), bucket: Arc::clone(&self.bucket) }
     }
 
-    pub(crate) async fn set_primary(&mut self, primary: bool) -> Result<(), String> {
+    pub(crate) async fn set_primary(&mut self, primary: bool) -> Result<(), PacerError> {
         let role = if primary { ConnectionRole::Primary } else { ConnectionRole::Neighbor };
         if self.role != role {
-            self.commands
-                .send(Command::SetRole { id: self.id, role })
-                .await
-                .map_err(|_| "The LLUDP byte pacer has stopped.".to_string())?;
+            self.commands.send(Command::SetRole { id: self.id, role }).await.map_err(|_| PacerError::Stopped)?;
             self.role = role;
         }
         Ok(())
@@ -317,7 +350,9 @@ impl ConnectionPacer {
 impl Drop for ConnectionPacer {
     fn drop(&mut self) {
         self.active.store(false, Ordering::Release);
-        let _ = self.commands.try_send(Command::Unregister { id: self.id });
+        match self.commands.try_send(Command::Unregister { id: self.id }) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) | Err(mpsc::error::TrySendError::Full(_)) => {}
+        }
     }
 }
 
@@ -340,21 +375,21 @@ impl PacerHandle {
         self.bucket.lock().expect("session pacing bucket").rate_bytes_per_second
     }
 
-    pub(crate) async fn send(&self, socket: &UdpTransport, bytes: &[u8], class: TrafficClass) -> Result<Instant, String> {
+    pub(crate) async fn send(&self, socket: &UdpTransport, bytes: &[u8], class: TrafficClass) -> Result<Instant, PacerError> {
         loop {
             let (completed, response) = oneshot::channel();
             self.commands
                 .send(Command::Request { id: self.id, bytes: bytes.len(), class, completed })
                 .await
-                .map_err(|_| "The LLUDP byte pacer has stopped.".to_string())?;
-            let lease = response.await.map_err(|_| "The LLUDP byte pacer stopped before granting a send.".to_string())?;
+                .map_err(|_| PacerError::Stopped)?;
+            let lease = response.await.map_err(|_| PacerError::GrantCanceled)?;
             match socket.try_send(bytes) {
                 Ok(()) => return Ok(lease.consume()),
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     drop(lease);
-                    socket.writable().await.map_err(|error| format!("Could not wait for a simulator datagram send slot: {error}"))?;
+                    socket.writable().await.map_err(|error| PacerError::Writable(Arc::new(error)))?;
                 }
-                Err(error) => return Err(format!("Could not send a simulator datagram: {error}")),
+                Err(error) => return Err(PacerError::Send(Arc::new(error))),
             }
         }
     }
@@ -440,7 +475,9 @@ fn handle_command(
             queue_request(id, bytes, class, completed, connections, pending, virtual_time);
         }
         Command::Shutdown(completed) => {
-            let _ = completed.send(());
+            if completed.send(()).is_err() {
+                return false;
+            }
             return false;
         }
     }
@@ -676,7 +713,10 @@ fn grant_request(
     virtual_time[class_index] = virtual_time[class_index].max(request.finish);
     let index = (connection_cursor[class_index] + offset) % order.len();
     connection_cursor[class_index] = (index + 1) % order.len();
-    let _ = request.completed.send(BudgetLease::new(Arc::clone(bucket), request.bytes));
+    match request.completed.send(BudgetLease::new(Arc::clone(bucket), request.bytes)) {
+        Ok(()) => {}
+        Err(error) => drop(error),
+    }
     true
 }
 

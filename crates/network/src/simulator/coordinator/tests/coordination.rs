@@ -450,7 +450,9 @@ fn neighbor_overload_reports_failure() {
             simulator_id,
             Some(region_handle),
             endpoint,
-            &SimulatorTaskOutcome::Finished(Err(EVENT_BACKLOG_DISCONNECT_REASON.into())),
+            &SimulatorTaskOutcome::Finished(Err(crate::simulator::coordinator::connection::ConnectionError::ShutdownReason(
+                EVENT_BACKLOG_DISCONNECT_REASON,
+            ))),
         ),
         Event::SimulatorFailed {
             simulator_id: failed_id,

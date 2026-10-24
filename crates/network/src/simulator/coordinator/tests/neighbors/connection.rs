@@ -505,14 +505,12 @@ async fn neighbor_overload_keeps_control() {
     receive_ack(&neighbor, last_sequence + 2).await;
 
     assert!(!task.is_finished(), "the neighbor should remain alive while queued events cannot drain");
-    assert!(
-        timeout(LOGOUT_TIMEOUT + Duration::from_secs(1), &mut task)
-            .await
-            .expect("overload teardown should finish within its deadline")
-            .expect("neighbor task should not panic")
-            .expect_err("backpressure must end with an explicit overload failure")
-            .contains(EVENT_BACKLOG_DISCONNECT_REASON)
-    );
+    let error = timeout(LOGOUT_TIMEOUT + Duration::from_secs(1), &mut task)
+        .await
+        .expect("overload teardown should finish within its deadline")
+        .expect("neighbor task should not panic")
+        .expect_err("backpressure must end with an explicit overload failure");
+    std::assert_matches!(error, ConnectionError::ShutdownReason(reason) if reason.contains(EVENT_BACKLOG_DISCONNECT_REASON));
     assert_eq!(budget.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
     assert_eq!(budget.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
     assert_eq!(budget.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);

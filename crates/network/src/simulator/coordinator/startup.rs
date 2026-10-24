@@ -9,9 +9,9 @@ use tracing::Instrument;
 use uuid::Uuid;
 
 use super::{
-    ConnectionTaskResult, NEIGHBOR_COMMAND_CAPACITY, PrimaryEventBacklog, PrimaryRoute, PrimaryState, SimulatorConnection,
-    SimulatorConnectionOptions, SimulatorConnectionState, SimulatorCoordinator, SimulatorCoordinatorOptions, SimulatorEvent,
-    SimulatorMemoryBudget, SimulatorTaskOutcome, track_capability_requests,
+    ConnectionError, ConnectionTaskResult, CoordinatorError, NEIGHBOR_COMMAND_CAPACITY, PrimaryEventBacklog, PrimaryRoute, PrimaryState,
+    SimulatorConnection, SimulatorConnectionOptions, SimulatorConnectionState, SimulatorCoordinator, SimulatorCoordinatorOptions,
+    SimulatorEvent, SimulatorMemoryBudget, SimulatorTaskOutcome, track_capability_requests,
 };
 use crate::{
     AgentSession,
@@ -76,13 +76,13 @@ impl SimulatorCoordinator {
         session: AgentSession,
         login_data: ResponseData,
         options: SimulatorCoordinatorOptions,
-    ) -> Result<Option<Self>, String> {
+    ) -> Result<Option<Self>, CoordinatorError> {
         let SimulatorCoordinatorOptions { coverage_losses, session: options, mut startup_disconnect, root_transport } = options;
         async {
             if startup_disconnect.as_ref().is_some_and(|disconnect| *disconnect.borrow()) {
                 return Ok(None);
             }
-            let simulator_id = SimulatorId::allocate().ok_or_else(|| "Simulator connection ID space is exhausted.".to_string())?;
+            let simulator_id = SimulatorId::allocate().ok_or(CoordinatorError::SimulatorIdSpaceExhausted)?;
             let capability_budget = CapabilityBudget::new();
             let capabilities = Client::new_with_budget(session.seed_capability.clone(), capability_budget.clone())?;
             let outbound_budget = OutboundBudget::new(options.upstream_bytes_per_second().get());
@@ -95,7 +95,7 @@ impl SimulatorCoordinator {
             let (primary_state_sender, primary_state_receiver) = watch::channel(PrimaryState::Connecting);
             let (neighbor_cancellation, _) = watch::channel(false);
             let packet_memory = SimulatorMemoryBudget::new();
-            let (ready_sender, ready_receiver) = oneshot::channel::<Result<(), String>>();
+            let (ready_sender, ready_receiver) = oneshot::channel::<Result<(), ConnectionError>>();
             let mut root_connection_workers = JoinSet::<ConnectionTaskResult>::new();
             let root_id = simulator_id;
             let root_endpoint = session.simulator_address;
@@ -123,7 +123,12 @@ impl SimulatorCoordinator {
                     .await
                     {
                         Ok(connection) => {
-                            let _ = ready_sender.send(Ok(()));
+                            if ready_sender.send(Ok(())).is_err() {
+                                tracing::debug!(
+                                    simulator = root_id.get(),
+                                    "startup waiter closed after the primary connection became ready"
+                                );
+                            }
                             SimulatorTaskOutcome::Finished(
                                 connection
                                     .run(
@@ -138,18 +143,24 @@ impl SimulatorCoordinator {
                             )
                         }
                         Err(error) => {
-                            let _ = ready_sender.send(Err(error.clone()));
+                            if ready_sender.send(Err(error.clone())).is_err() {
+                                tracing::debug!(simulator = root_id.get(), "startup waiter closed after the primary connection failed");
+                            }
                             SimulatorTaskOutcome::ConnectFailed(error)
                         }
                     };
-                    let _ = root_events
+                    if root_events
                         .send(SimulatorEvent::Finished {
                             simulator_id: root_id,
                             region_handle: None,
                             endpoint: root_endpoint,
                             outcome: outcome.clone(),
                         })
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        tracing::debug!(simulator = root_id.get(), "simulator connection result receiver closed");
+                    }
                     (root_id, None, root_endpoint, outcome)
                 }
                 .in_current_span(),
@@ -209,7 +220,7 @@ impl SimulatorCoordinator {
                 packet_memory,
                 coverage_losses,
                 outbound_budget: Some(outbound_budget),
-                handoff_generation: 0,
+                handoff_generation: Some(0),
             }))
         }
         .await
@@ -217,8 +228,8 @@ impl SimulatorCoordinator {
 
     async fn wait_for_primary_startup(
         startup_disconnect: &mut Option<watch::Receiver<bool>>,
-        mut ready_receiver: oneshot::Receiver<Result<(), String>>,
-    ) -> Result<bool, String> {
+        mut ready_receiver: oneshot::Receiver<Result<(), ConnectionError>>,
+    ) -> Result<bool, CoordinatorError> {
         let ready = match startup_disconnect {
             Some(disconnect) => tokio::select! {
                 biased;
@@ -228,8 +239,9 @@ impl SimulatorCoordinator {
             None => Some(ready_receiver.await),
         };
         match ready {
-            Some(Ok(result)) => result.map(|()| true),
-            Some(Err(_)) => Err("The primary simulator connection task stopped during startup.".to_string()),
+            Some(Ok(Ok(()))) => Ok(true),
+            Some(Ok(Err(error))) => Err(CoordinatorError::Connection(error)),
+            Some(Err(_)) => Err(CoordinatorError::PrimaryConnectionStoppedDuringStartup),
             None => Ok(false),
         }
     }

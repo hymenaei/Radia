@@ -248,7 +248,12 @@ async fn primary_udp_activity_resets_keepalive_timeout() {
 
     advance(Duration::from_secs(2)).await;
     let result = client.await.expect("primary session task");
-    assert!(matches!(result, Err(reason) if reason == "The simulator stopped responding to LLUDP keepalive traffic."));
+    std::assert_matches!(
+        result,
+        Err(crate::simulator::coordinator::CoordinatorError::Connection(
+            crate::simulator::coordinator::connection::ConnectionError::KeepaliveTimeout
+        ))
+    );
     drop(commands);
 }
 
@@ -275,10 +280,12 @@ async fn neighbor_circuit_fails_after_udp_inactivity() {
 
     advance(KEEPALIVE_TIMEOUT).await;
     let result = worker.await.expect("neighbor task");
-    assert!(matches!(result, Err(reason) if reason == "The simulator stopped responding to LLUDP keepalive traffic."));
+    std::assert_matches!(result, Err(crate::simulator::coordinator::connection::ConnectionError::KeepaliveTimeout));
 }
 
-async fn terminal_after_full_queue(result: Result<(), String>) -> (Event, SimulatorId, SocketAddr) {
+async fn terminal_after_full_queue(
+    result: Result<(), crate::simulator::coordinator::CoordinatorError>,
+) -> (Event, SimulatorId, SocketAddr) {
     let (events, mut received) = mpsc::channel(2);
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
     let endpoint = "127.0.0.1:9000".parse().expect("parse simulator endpoint");
@@ -308,7 +315,8 @@ async fn primary_disconnect_survives_full_queue() {
 
 #[tokio::test]
 async fn primary_failure_survives_full_queue() {
-    let (event, simulator_id, endpoint) = terminal_after_full_queue(Err("simulator failed".into())).await;
+    let (event, simulator_id, endpoint) =
+        terminal_after_full_queue(Err(crate::simulator::coordinator::CoordinatorError::ShutdownReason("simulator failed"))).await;
     assert!(matches!(
         event,
         Event::SimulatorFailed { simulator_id: actual_id, region_handle: None, endpoint: actual_endpoint, reason }

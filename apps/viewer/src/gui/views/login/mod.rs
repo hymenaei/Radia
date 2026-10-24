@@ -108,15 +108,26 @@ impl LoginStatus {
         self.load_warning = None;
     }
 
+    fn begin_grid_change(&mut self) {
+        self.message = Some(LoginMessage::LoadingSavedLogin);
+        self.session_failure = None;
+    }
+
+    fn finish_credential_load(&mut self, warning: Option<CredentialStoreError>) {
+        self.message = None;
+        self.load_warning = warning;
+    }
+
     fn show_credential_warning(&mut self, warning: Option<CredentialStoreError>, session_active: bool) {
         self.credential_warning =
             warning.map(|warning| if session_active { CredentialWarning::Visible(warning) } else { CredentialWarning::Deferred(warning) });
     }
 
     fn reveal_credential_warning(&mut self) {
-        if let Some(CredentialWarning::Deferred(warning)) = self.credential_warning.take() {
-            self.credential_warning = Some(CredentialWarning::Visible(warning));
-        }
+        self.credential_warning = self.credential_warning.take().map(|warning| match warning {
+            CredentialWarning::Deferred(warning) => CredentialWarning::Visible(warning),
+            warning => warning,
+        });
     }
 }
 
@@ -231,8 +242,7 @@ impl LoginScreen {
                     let favorites = screen.favorites.for_username(grid, username);
                     screen.set_remembered_login(login, favorites, window, cx);
                     screen.storage_loading = false;
-                    screen.status.message = None;
-                    screen.status.load_warning = login_warning;
+                    screen.status.finish_credential_load(login_warning);
                     cx.notify();
                 })
                 .is_err()
@@ -254,7 +264,7 @@ impl LoginScreen {
         self.credential_load_generation = self.credential_load_generation.wrapping_add(1);
         let generation = self.credential_load_generation;
         self.storage_loading = true;
-        self.status.message = Some(LoginMessage::LoadingSavedLogin);
+        self.status.begin_grid_change();
         cx.notify();
 
         let background = cx.background_executor().clone();
@@ -274,8 +284,7 @@ impl LoginScreen {
                     let favorites = screen.favorites.for_username(grid, username);
                     screen.set_remembered_login(login, favorites, window, cx);
                     screen.storage_loading = false;
-                    screen.status.message = None;
-                    screen.status.load_warning = login_warning;
+                    screen.status.finish_credential_load(login_warning);
                     cx.notify();
                 })
                 .is_err()
@@ -631,4 +640,35 @@ fn split_username(username: &str) -> Option<(String, String)> {
     let last_name = if last_name.is_empty() { "Resident".to_owned() } else { last_name };
 
     Some((first_name, last_name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LoginStatus;
+    use crate::remembered_login::CredentialStoreError;
+
+    #[test]
+    fn visible_credential_warning_survives_reveal() {
+        let warning = CredentialStoreError::Save("keyring unavailable".into());
+        let mut status = LoginStatus::default();
+        status.show_credential_warning(Some(warning.clone()), true);
+
+        status.reveal_credential_warning();
+
+        assert_eq!(status.displayed(Vec::new(), true), Some(warning.to_string()));
+    }
+
+    #[test]
+    fn grid_change_replaces_session_failure() {
+        let mut status = LoginStatus { session_failure: Some("previous login failed".into()), ..LoginStatus::default() };
+
+        status.begin_grid_change();
+
+        assert_eq!(status.displayed(Vec::new(), false), Some("Loading saved login…".into()));
+
+        let warning = CredentialStoreError::Read("selected grid credential read failed".into());
+        status.finish_credential_load(Some(warning.clone()));
+
+        assert_eq!(status.displayed(Vec::new(), false), Some(warning.to_string()));
+    }
 }

@@ -27,7 +27,6 @@ use crate::{
     error::Error,
     event::{EventEnvelope, SimulatorId},
     http::{self, validate_http_url},
-    status::NetworkStatusHandle,
 };
 
 #[derive(Clone)]
@@ -75,7 +74,6 @@ pub struct Client {
     session_closed: watch::Sender<bool>,
     requests: RequestTracker,
     pub(super) budget: CapabilityBudget,
-    status: NetworkStatusHandle,
     request_timeout: Duration,
 }
 
@@ -87,17 +85,13 @@ impl fmt::Debug for Client {
 
 impl Client {
     pub fn new(seed: Url) -> Result<Self, Error> {
-        Self::new_with_status(seed, NetworkStatusHandle::default()).map_err(Error::Capability)
+        Self::new_with_budget(seed, CapabilityBudget::new()).map_err(Error::Capability)
     }
 
-    pub(crate) fn new_with_status(seed: Url, status: NetworkStatusHandle) -> Result<Self, String> {
-        Self::new_with_status_and_budget(seed, status, CapabilityBudget::new())
-    }
-
-    pub(crate) fn new_with_status_and_budget(seed: Url, status: NetworkStatusHandle, budget: CapabilityBudget) -> Result<Self, String> {
+    pub(crate) fn new_with_budget(seed: Url, budget: CapabilityBudget) -> Result<Self, String> {
         validate_http_url(&seed).map_err(|error| error.to_string())?;
         let runtime = Handle::try_current().map_err(|_| "A Tokio runtime is required for capability requests.".to_string())?;
-        let http = budget.http_client()?.with_status(status.clone());
+        let http = budget.http_client()?;
         let (session_closed, _) = watch::channel(false);
         Ok(Self {
             seed: Arc::new(seed),
@@ -106,7 +100,6 @@ impl Client {
             session_closed,
             requests: RequestTracker::new(),
             budget,
-            status,
             request_timeout: REQUEST_TIMEOUT,
         })
     }
@@ -156,7 +149,6 @@ impl Client {
                 .await?;
             drop(permit);
             let capabilities = result?;
-            client.status.note_capabilities(capabilities.keys().map(String::as_str));
             Ok(capabilities.into_iter().map(|(name, url)| (name, CapabilityUrl::from_discovery(url))).collect())
         })
         .await
@@ -330,7 +322,6 @@ impl Client {
     {
         let requests = self.requests.clone();
         let runtime = self.runtime.clone();
-        let status = self.status.clone();
         let session_closed = self.session_closed.subscribe();
         async move {
             let request = requests.track();
@@ -349,17 +340,9 @@ impl Client {
             let result = task.await;
             drop(abort);
             match result {
-                Ok(result) => {
-                    if let Err(error) = &result
-                        && !matches!(error, Error::CapabilitySessionClosed | Error::CapabilityRequestCanceled)
-                    {
-                        status.record_error(error.to_string());
-                    }
-                    result
-                }
+                Ok(result) => result,
                 Err(error) => {
                     if error.is_panic() {
-                        status.record_error("The capability request task failed.");
                         return Err(Error::Capability("The capability request task failed.".into()));
                     }
                     if *session_closed.borrow() { Err(Error::CapabilitySessionClosed) } else { Err(Error::CapabilityRequestCanceled) }
@@ -419,7 +402,6 @@ impl Client {
         let runtime = Handle::try_current().map_err(|_| "The simulator event queue requires an active Tokio runtime.".to_string())?;
         let http = self.http.clone().with_timeout(Some(EVENT_QUEUE_REQUEST_TIMEOUT));
         let seed = self.seed.as_ref().clone();
-        let status = self.status.clone();
         let ordinary_requests = Arc::clone(&self.budget.ordinary_requests);
         let primary_event_queues = Arc::clone(&self.budget.primary_event_queues);
         let neighbor_event_queues = Arc::clone(&self.budget.neighbor_event_queues);
@@ -433,7 +415,6 @@ impl Client {
             seed,
             http,
             events,
-            status,
             ordinary_requests,
             primary_event_queues,
             neighbor_event_queues,

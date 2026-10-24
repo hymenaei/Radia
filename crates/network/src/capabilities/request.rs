@@ -305,7 +305,6 @@ mod tests {
         Error,
         capabilities::{CapabilityBudget, CapabilityUrl, Client},
         http::{self, ErrorKind},
-        status::NetworkStatusHandle,
     };
 
     use crate::capabilities::budget::{MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS};
@@ -315,12 +314,8 @@ mod tests {
         let budget = CapabilityBudget::new();
         let clients = (0..4)
             .map(|_| {
-                Client::new_with_status_and_budget(
-                    Url::parse("http://127.0.0.1:9/seed").expect("seed URL"),
-                    NetworkStatusHandle::default(),
-                    budget.clone(),
-                )
-                .expect("active Tokio runtime")
+                Client::new_with_budget(Url::parse("http://127.0.0.1:9/seed").expect("seed URL"), budget.clone())
+                    .expect("active Tokio runtime")
             })
             .collect::<Vec<_>>();
         let url = CapabilityUrl::parse("http://127.0.0.1:9/post").expect("capability URL");
@@ -344,13 +339,9 @@ mod tests {
     #[tokio::test]
     async fn deadline_covers_admission_wait() {
         let budget = CapabilityBudget::new();
-        let client = Client::new_with_status_and_budget(
-            Url::parse("http://127.0.0.1:9/seed").expect("seed URL"),
-            NetworkStatusHandle::default(),
-            budget.clone(),
-        )
-        .expect("active Tokio runtime")
-        .with_request_timeout(Duration::from_millis(30));
+        let client = Client::new_with_budget(Url::parse("http://127.0.0.1:9/seed").expect("seed URL"), budget.clone())
+            .expect("active Tokio runtime")
+            .with_request_timeout(Duration::from_millis(30));
         let url = CapabilityUrl::parse("http://127.0.0.1:9/capability").expect("capability URL");
         let held = Arc::clone(&budget.ordinary_requests)
             .acquire_many_owned(MAX_CONCURRENT_CAPABILITY_REQUESTS as u32)

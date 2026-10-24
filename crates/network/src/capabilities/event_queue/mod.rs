@@ -38,7 +38,6 @@ use crate::{
     event::{CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventSendOutcome, SimulatorId},
     http::{self, Response},
     simulator::EventRetention,
-    status::NetworkStatusHandle,
 };
 
 const EVENT_QUEUE_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -141,7 +140,6 @@ pub(super) struct EventQueueContext {
     pub(super) seed: Url,
     pub(super) http: http::Client,
     pub(super) events: mpsc::Sender<EventEnvelope>,
-    pub(super) status: NetworkStatusHandle,
     pub(super) ordinary_requests: Arc<Semaphore>,
     pub(super) primary_event_queues: Arc<Semaphore>,
     pub(super) neighbor_event_queues: Arc<Semaphore>,
@@ -438,11 +436,9 @@ async fn discover_capability(context: &EventQueueContext, stop: &Stop) -> Result
         };
         match requested {
             Ok(mut granted) => {
-                context.status.note_capabilities(granted.keys().map(String::as_str));
                 if let Some(capability) = granted.remove(EVENT_QUEUE_NAME) {
                     return Ok(capability);
                 }
-                context.status.record_error("Second Life did not provide the EventQueueGet capability.");
                 let outcome = send_event_queue_error(
                     &context.events,
                     Event::CapabilityError {
@@ -458,7 +454,6 @@ async fn discover_capability(context: &EventQueueContext, stop: &Stop) -> Result
             }
             Err(error) if !is_transient_seed_lookup(&error) => {
                 let message = error.to_string();
-                context.status.record_error(&message);
                 let outcome = send_event_queue_error(
                     &context.events,
                     Event::CapabilityError {
@@ -475,7 +470,6 @@ async fn discover_capability(context: &EventQueueContext, stop: &Stop) -> Result
             Err(error) => {
                 let message = error.to_string();
                 let retry_after = seed_lookup_retry_after(&error);
-                context.status.record_error(&message);
                 match retry_seed_capability_lookup(context, &mut retries, message, retry_after, stop).await {
                     RetryOutcome::Retry => {}
                     RetryOutcome::Stopped => return Err(EventQueueExit::Stopped),
@@ -506,7 +500,6 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
     }
 
     let Some(incarnation) = allocate_event_queue_incarnation() else {
-        context.status.record_error("EventQueueGet poll incarnation space is exhausted.");
         return EventQueueExit::TaskFailed;
     };
     let coverage_source = CoverageSource::EventQueue { incarnation };
@@ -521,7 +514,6 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
         source,
         http,
         events,
-        status,
         primary_event_queues,
         neighbor_event_queues,
         queued_event_bytes,
@@ -575,7 +567,6 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                 let status_code = response.status;
                 drop(poll);
                 let reason = format!("EventQueueGet returned HTTP {status_code}; polling stopped.");
-                status.record_error(&reason);
                 if !matches!(pending_loss.notify(reason.clone()).await, EventSendOutcome::Sent) {
                     return EventQueueExit::Stopped;
                 }
@@ -593,7 +584,6 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
             }
             Ok(response) if response.status.is_success() => {
                 let Some(event_queue_permit) = poll.event_queue.take() else {
-                    status.record_error("EventQueueGet lost its poll permit before decoding.");
                     return EventQueueExit::TaskFailed;
                 };
                 let decoded = decode_admitted_event_batch(response.body, event_queue_permit).await;
@@ -608,12 +598,10 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                         }
                         let Some(next_batch_order) = batch_order.checked_add(1) else {
                             pending_loss.record();
-                            status.record_error("EventQueue batch-order counter exhausted; polling stopped.");
                             drop(batch);
                             return EventQueueExit::Unavailable;
                         };
                         let Some(batch_reservation) = poll.batch.take() else {
-                            status.record_error("EventQueueGet lost its batch reservation before delivery.");
                             return EventQueueExit::TaskFailed;
                         };
                         let outcome = send_event_queue_batch(
@@ -638,7 +626,6 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                             EventSendOutcome::ReceiverClosed => {
                                 let reason =
                                     String::from("EventQueueGet batch could not be delivered in full; some events may be missing.");
-                                status.record_error(&reason);
                                 return notify_loss_then(&mut pending_loss, reason, EventQueueExit::StoppedWithCoverageLoss).await;
                             }
                         }
@@ -646,7 +633,6 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                     Err(error) => {
                         let error = error.to_string();
                         pending_loss.record();
-                        status.record_error(&error);
                         drop(poll);
                         return notify_loss_then(&mut pending_loss, error, EventQueueExit::StoppedWithCoverageLoss).await;
                     }
@@ -657,7 +643,6 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                 let retry_after = response.retry_after();
                 drop(poll);
                 let error = format!("EventQueueGet returned HTTP {status_code}.");
-                status.record_error(&error);
                 if !retryable_event_queue_error(status_code) {
                     pending_loss.record();
                     return notify_loss_then(&mut pending_loss, error, EventQueueExit::StoppedWithCoverageLoss).await;
@@ -689,14 +674,12 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                 pending_loss.record();
                 drop(poll);
                 let reason = format!("EventQueueGet response could not be admitted: {error}");
-                status.record_error(&reason);
                 return notify_loss_then(&mut pending_loss, reason, EventQueueExit::StoppedWithCoverageLoss).await;
             }
             Err(error) => {
                 pending_loss.record();
                 drop(poll);
                 let error = format!("EventQueueGet request failed: {error}");
-                status.record_error(&error);
                 return notify_loss_then(&mut pending_loss, error, EventQueueExit::StoppedWithCoverageLoss).await;
             }
         }

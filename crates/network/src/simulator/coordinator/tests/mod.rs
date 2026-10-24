@@ -60,7 +60,6 @@ use crate::{
             MAX_QUEUED_SIMULATOR_EVENT_BYTES,
         },
     },
-    status::{NetworkLifecycle, NetworkStatusHandle},
     transport::{
         SendGate, UdpTransport,
         lludp::{Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS},
@@ -95,12 +94,24 @@ pub(crate) async fn run_session(
     events: mpsc::Sender<EventEnvelope>,
     disconnect_requested: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    run_session_with_status(session, commands, events, disconnect_requested, NetworkStatusHandle::default(), None).await
+    let failure_events = events.clone();
+    let mut failure_shutdown = disconnect_requested.clone();
+    let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
+    let result = async {
+        let connection = SimulatorCoordinator::connect(session, ResponseData::default(), test_options())
+            .await?
+            .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())?;
+        connection.run(commands, events, disconnect_requested, terminal_event_permit).await
+    }
+    .await;
+    if let Err(error) = &result {
+        send_failure_event(&failure_events, error.clone(), &mut failure_shutdown).await;
+    }
+    result
 }
 
-pub(super) fn test_options(status: NetworkStatusHandle) -> SimulatorCoordinatorOptions {
+pub(super) fn test_options() -> SimulatorCoordinatorOptions {
     SimulatorCoordinatorOptions {
-        status,
         coverage_losses: CoverageLossLedger::new(),
         session: SessionOptions::default(),
         startup_disconnect: None,
@@ -128,74 +139,41 @@ fn remove_failed_neighbor(
     Some((region_handle, connection.simulator_id, connection.endpoint))
 }
 
-fn coordinator_options(status: NetworkStatusHandle) -> SimulatorCoordinatorOptions {
-    test_options(status)
+fn coordinator_options() -> SimulatorCoordinatorOptions {
+    test_options()
 }
 
-async fn gated_transport(session: &AgentSession, status: &NetworkStatusHandle, send_gate: SendGate) -> Result<UdpTransport, String> {
-    let mut transport = UdpTransport::connect_with_status(session.simulator_address, status.clone()).await?;
+async fn gated_transport(session: &AgentSession, send_gate: SendGate) -> Result<UdpTransport, String> {
+    let mut transport = UdpTransport::connect(session.simulator_address).await?;
     transport.set_send_gate(send_gate);
     Ok(transport)
 }
 
-async fn connect_with_status(
-    session: AgentSession,
-    login_data: ResponseData,
-    status: NetworkStatusHandle,
-) -> Result<SimulatorCoordinator, String> {
-    SimulatorCoordinator::connect(session, login_data, coordinator_options(status))
+async fn connect_coordinator(session: AgentSession, login_data: ResponseData) -> Result<SimulatorCoordinator, String> {
+    SimulatorCoordinator::connect(session, login_data, coordinator_options())
         .await?
         .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())
-}
-
-pub(super) async fn run_session_with_status(
-    session: AgentSession,
-    commands: mpsc::Receiver<Command>,
-    events: mpsc::Sender<EventEnvelope>,
-    disconnect_requested: watch::Receiver<bool>,
-    status: NetworkStatusHandle,
-    packet_memory_sender: Option<oneshot::Sender<SimulatorMemoryBudget>>,
-) -> Result<(), String> {
-    let failure_events = events.clone();
-    let mut failure_shutdown = disconnect_requested.clone();
-    let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
-    let result = async {
-        let connection = SimulatorCoordinator::connect(session, ResponseData::default(), coordinator_options(status))
-            .await?
-            .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())?;
-        if let Some(sender) = packet_memory_sender {
-            let _ = sender.send(connection.packet_memory.clone());
-        }
-        connection.run(commands, events, disconnect_requested, terminal_event_permit).await
-    }
-    .await;
-    if let Err(error) = &result {
-        send_failure_event(&failure_events, error.clone(), &mut failure_shutdown).await;
-    }
-    result
 }
 
 async fn connect_with_coverage(
     session: AgentSession,
     login_data: ResponseData,
-    status: NetworkStatusHandle,
     coverage_losses: CoverageLossLedger,
 ) -> Result<SimulatorCoordinator, String> {
-    let mut options = coordinator_options(status);
+    let mut options = coordinator_options();
     options.coverage_losses = coverage_losses;
     SimulatorCoordinator::connect(session, login_data, options)
         .await?
         .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())
 }
 
-async fn connect_with_status_and_send_gate(
+async fn connect_with_send_gate(
     session: AgentSession,
     login_data: ResponseData,
-    status: NetworkStatusHandle,
     send_gate: SendGate,
 ) -> Result<SimulatorCoordinator, String> {
-    let mut options = coordinator_options(status);
-    options.root_transport = Some(gated_transport(&session, &options.status, send_gate).await?);
+    let mut options = coordinator_options();
+    options.root_transport = Some(gated_transport(&session, send_gate).await?);
     SimulatorCoordinator::connect(session, login_data, options)
         .await?
         .ok_or_else(|| "The primary simulator startup was canceled unexpectedly.".to_string())
@@ -204,12 +182,11 @@ async fn connect_with_status_and_send_gate(
 async fn connect_with_gate_and_disconnect(
     session: AgentSession,
     login_data: ResponseData,
-    status: NetworkStatusHandle,
     send_gate: SendGate,
     disconnect_requested: watch::Receiver<bool>,
 ) -> Result<Option<SimulatorCoordinator>, String> {
-    let mut options = coordinator_options(status);
-    options.root_transport = Some(gated_transport(&session, &options.status, send_gate).await?);
+    let mut options = coordinator_options();
+    options.root_transport = Some(gated_transport(&session, send_gate).await?);
     options.startup_disconnect = Some(disconnect_requested);
     SimulatorCoordinator::connect(session, login_data, options).await
 }
@@ -218,7 +195,6 @@ pub(super) async fn connect_test_connection(
     simulator_id: SimulatorId,
     session: AgentSession,
     region_handle: Option<u64>,
-    status: NetworkStatusHandle,
     coverage_losses: CoverageLossLedger,
     primary_state: Option<watch::Receiver<PrimaryState>>,
     budget: Option<OutboundBudgetHandle>,
@@ -226,7 +202,7 @@ pub(super) async fn connect_test_connection(
     send_gate: Option<SendGate>,
 ) -> Result<SimulatorConnection, String> {
     let transport = match send_gate {
-        Some(send_gate) => Some(gated_transport(&session, &status, send_gate).await?),
+        Some(send_gate) => Some(gated_transport(&session, send_gate).await?),
         None => None,
     };
     let (budget, owned_budget) = match (budget, owned_budget) {
@@ -239,7 +215,7 @@ pub(super) async fn connect_test_connection(
     };
     SimulatorConnection::connect(
         session,
-        SimulatorConnectionOptions { simulator_id, region_handle, status, coverage_losses, primary_state, budget, owned_budget, transport },
+        SimulatorConnectionOptions { simulator_id, region_handle, coverage_losses, primary_state, budget, owned_budget, transport },
     )
     .await
 }
@@ -248,21 +224,19 @@ async fn connect_test_neighbor(
     simulator_id: SimulatorId,
     session: AgentSession,
     region_handle: u64,
-    status: NetworkStatusHandle,
 ) -> Result<SimulatorConnection, String> {
-    connect_test_connection(simulator_id, session, Some(region_handle), status, CoverageLossLedger::new(), None, None, None, None).await
+    connect_test_connection(simulator_id, session, Some(region_handle), CoverageLossLedger::new(), None, None, None, None).await
 }
 
 pub(super) async fn connect_test_primary_with_state(
     simulator_id: SimulatorId,
     session: AgentSession,
-    status: NetworkStatusHandle,
     coverage_losses: CoverageLossLedger,
     primary_state: watch::Receiver<PrimaryState>,
     budget: OutboundBudgetHandle,
     send_gate: Option<SendGate>,
 ) -> Result<SimulatorConnection, String> {
-    connect_test_connection(simulator_id, session, None, status, coverage_losses, Some(primary_state), Some(budget), None, send_gate).await
+    connect_test_connection(simulator_id, session, None, coverage_losses, Some(primary_state), Some(budget), None, send_gate).await
 }
 
 struct NeighborHarness {
@@ -276,7 +250,6 @@ struct NeighborHarness {
     commands: mpsc::Sender<Command>,
     events: mpsc::Receiver<EventEnvelope>,
     disconnect: watch::Sender<bool>,
-    status: NetworkStatusHandle,
     packet_memory: SimulatorMemoryBudget,
     client: JoinHandle<Result<(), String>>,
     pause_sends: watch::Sender<bool>,
@@ -390,12 +363,10 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(TEST_EVENT_CAPACITY);
     let (disconnect, disconnect_requested) = watch::channel(false);
-    let status = NetworkStatusHandle::default();
     let (send_gate, pause_sends, send_entered) = UdpTransport::new_send_gate();
-    let connection = connect_with_status_and_send_gate(
+    let connection = connect_with_send_gate(
         AgentSession { seed_capability: seed, ..login_session(primary_endpoint) },
         ResponseData::default(),
-        status.clone(),
         send_gate,
     )
     .await
@@ -466,7 +437,6 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
         commands,
         events,
         disconnect,
-        status,
         packet_memory,
         client,
         pause_sends,
@@ -700,16 +670,11 @@ fn stalled_logout_is_unavailable() {
 
 async fn run_stalled_logout_is_unavailable() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let status = NetworkStatusHandle::default();
     let (send_gate, pause_sends, send_entered) = UdpTransport::new_send_gate();
-    let mut coordinator = connect_with_status_and_send_gate(
-        login_session(simulator.local_addr().expect("simulator address")),
-        ResponseData::default(),
-        status.clone(),
-        send_gate,
-    )
-    .await
-    .expect("connect root simulator circuit");
+    let mut coordinator =
+        connect_with_send_gate(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default(), send_gate)
+            .await
+            .expect("connect root simulator circuit");
     receive(&simulator).await;
     pause_sends.send_replace(true);
     let (first_logout, first_response) = oneshot::channel();
@@ -727,10 +692,6 @@ async fn run_stalled_logout_is_unavailable() {
     let result = coordinator.run(command_receiver, events, disconnect_requested, terminal_event).await;
 
     assert!(result.is_ok());
-    assert_eq!(
-        status.snapshot().last_error.as_deref(),
-        Some("Simulator logout request was not sent before disconnect completed: the bounded logout send deadline expired")
-    );
 }
 
 #[tokio::test]

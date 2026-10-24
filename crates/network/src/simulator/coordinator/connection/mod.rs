@@ -32,7 +32,6 @@ use crate::{
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
     error::Error,
     event::{EventEnvelope, SimulatorId},
-    status::NetworkStatusHandle,
     transport::{
         UdpTransport,
         lludp::{Circuit, Delivery},
@@ -68,7 +67,6 @@ const DEFAULT_AGENT_THROTTLE_RATES: ThrottleRates = ThrottleRates {
 pub(super) struct SimulatorConnectionOptions {
     pub(super) simulator_id: SimulatorId,
     pub(super) region_handle: Option<u64>,
-    pub(super) status: NetworkStatusHandle,
     pub(super) coverage_losses: CoverageLossLedger,
     pub(super) primary_state: Option<watch::Receiver<PrimaryState>>,
     pub(super) budget: OutboundBudgetHandle,
@@ -152,16 +150,8 @@ impl SimulatorConnection {
     }
 
     pub(super) async fn connect(session: AgentSession, options: SimulatorConnectionOptions) -> Result<Self, String> {
-        let SimulatorConnectionOptions {
-            simulator_id,
-            region_handle,
-            status,
-            coverage_losses,
-            primary_state,
-            budget,
-            owned_budget,
-            transport,
-        } = options;
+        let SimulatorConnectionOptions { simulator_id, region_handle, coverage_losses, primary_state, budget, owned_budget, transport } =
+            options;
         let is_primary = region_handle.is_none();
         let pacer = budget.register(simulator_id.get(), is_primary).await?;
         let primary_state_receiver = primary_state.unwrap_or_else(|| {
@@ -170,11 +160,10 @@ impl SimulatorConnection {
         });
         let socket = match transport {
             Some(transport) => transport,
-            None => UdpTransport::connect_with_status(session.simulator_address, status.clone()).await?,
+            None => UdpTransport::connect(session.simulator_address).await?,
         };
         let socket = Arc::new(socket);
-        let circuit_status = if is_primary { status.clone() } else { status.for_circuit() };
-        let mut circuit = Circuit::with_status(circuit_status);
+        let mut circuit = Circuit::new();
         let prepared = circuit.prepare_message(
             Message::UseCircuitCode(UseCircuitCode {
                 circuit_code: CircuitCode { code: session.circuit_code, session_id: session.session_id, agent_id: session.agent_id },

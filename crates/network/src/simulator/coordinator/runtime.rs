@@ -26,7 +26,6 @@ use crate::{
     error::Error,
     event::{Event, EventEnvelope},
     session::Command,
-    status::NetworkLifecycle,
 };
 
 pub(super) struct CoordinatorRuntime<'a> {
@@ -331,8 +330,7 @@ impl<'a> CoordinatorRuntime<'a> {
                                     && startup.observe_primary_message(message, coordinator.session.agent_id, coordinator.session.session_id)
                                 {
                                         tracing::info!("simulator session ready");
-                                        coordinator.status.set_circuit_established(true);
-                                        coordinator.status.set_lifecycle(NetworkLifecycle::Connected);
+                                        tracing::info!(lifecycle = "connected", "network lifecycle changed");
                                         coordinator.primary.state.send_replace(PrimaryState::Ready { generation: 0 });
                                         if startup.should_publish_ready() {
                                             coordinator.publish_session_ready(
@@ -393,7 +391,6 @@ impl<'a> CoordinatorRuntime<'a> {
                                             reason = "destination circuit is stale",
                                             "simulator handoff failed"
                                         );
-                                        coordinator.status.record_error("Ignored movement completion from a stale destination circuit.");
                                         continue;
                                     };
                                     let Some(next_primary) = PrimaryRoute::from_neighbor(promotion.handoff.region_handle, connection) else {
@@ -403,7 +400,6 @@ impl<'a> CoordinatorRuntime<'a> {
                                             reason = "destination primary route is unavailable",
                                             "simulator handoff failed"
                                         );
-                                        coordinator.status.record_error("Could not activate the destination simulator without a primary-state route.");
                                         continue;
                                     };
                                     let Some((capabilities, promoted_event_queue)) = run_state.simulator_capabilities
@@ -419,7 +415,6 @@ impl<'a> CoordinatorRuntime<'a> {
                                             reason = "destination capabilities are unavailable",
                                             "simulator handoff failed"
                                         );
-                                        coordinator.status.record_error("Ignored movement completion without destination capabilities.");
                                         continue;
                                     };
                                     let previous_simulator_id = coordinator.primary.simulator_id;
@@ -445,9 +440,6 @@ impl<'a> CoordinatorRuntime<'a> {
                                     active_primary_event_queue.set_primary(false);
                                     promoted_event_queue.set_primary(true);
                                     active_primary_event_queue = promoted_event_queue;
-                                    coordinator.status.set_simulator_endpoint(session.simulator_address);
-                                    coordinator.status.set_circuit_established(true);
-                                    coordinator.status.set_lifecycle(NetworkLifecycle::Connected);
                                     coordinator.publish_event(
                                         &events,
                                         &mut run_state.pending_events,
@@ -467,7 +459,6 @@ impl<'a> CoordinatorRuntime<'a> {
                                     let simulator_id = *simulator_id;
                                     if simulator_id == coordinator.simulator_id {
                                         startup.mark_primary_announced();
-                                        coordinator.status.set_circuit_established(true);
                                     }
                                     coordinator.publish_simulator_connected(
                                         simulator_id,
@@ -566,9 +557,6 @@ impl<'a> CoordinatorRuntime<'a> {
                                 }
                                 run_state.connected_simulators.remove(&simulator_id);
                                 let event = neighbor_completion_event(simulator_id, region_handle, endpoint, &outcome);
-                                if let SimulatorTaskOutcome::Finished(Err(reason)) | SimulatorTaskOutcome::ConnectFailed(reason) = &outcome {
-                                    coordinator.status.record_error(reason);
-                                }
                             if simulator_id == coordinator.primary.simulator_id {
                                     if *disconnect_requested.borrow() {
                                         coordinator.neighbor_cancellation.send_replace(true);
@@ -708,7 +696,7 @@ impl<'a> CoordinatorRuntime<'a> {
                     } else if initial_queue_current
                         && matches!(exit, EventQueueExit::TaskFailed | EventQueueExit::RetryLimitReached | EventQueueExit::Unavailable)
                     {
-                        coordinator.status.record_error("The former primary simulator EventQueueGet ended after promotion.");
+                        tracing::warn!(simulator = coordinator.simulator_id.get(), "former primary simulator EventQueueGet ended after promotion");
                     }
                 }
                 permit = events.reserve(), if !run_state.pending_events.is_empty() && !events.is_closed() => {
@@ -748,14 +736,13 @@ impl<'a> CoordinatorRuntime<'a> {
                     }
                 }
                 joined = coordinator.capability_request_waiters.join_next(), if !coordinator.capability_request_waiters.is_empty() => {
-                    if let Some(Err(error)) = joined {
-                        tracing::error!(%error, "Capability request waiter failed");
+                    if matches!(joined, Some(Err(_))) {
+                        tracing::error!("Capability request waiter task failed");
                     }
                 }
                 joined = root_connection_workers.join_next(), if !root_connection_workers.is_empty() => {
                     if let Some(Err(error)) = joined {
                         let reason = format!("The primary simulator connection task failed: {error}");
-                        coordinator.status.record_error(&reason);
                         if let Some(region_handle) = run_state.neighbor_connections
                             .iter()
                             .find_map(|(region_handle, connection)| (connection.simulator_id == coordinator.simulator_id).then_some(*region_handle))
@@ -789,7 +776,6 @@ impl<'a> CoordinatorRuntime<'a> {
                             run_state.neighbor_task_owners.retain(|_, owner| owner.0 != simulator_id);
                         }
                         Some(Err(error)) => {
-                            coordinator.status.record_error(format!("A simulator connection task failed: {error}"));
                             if let Some((simulator_id, region_handle, endpoint)) = run_state.neighbor_task_owners.remove(&error.id())
                                 && (simulator_id == coordinator.simulator_id
                                     || simulator_id == coordinator.primary.simulator_id

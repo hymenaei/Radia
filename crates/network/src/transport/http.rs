@@ -12,13 +12,10 @@ use reqwest::{
 };
 use tokio::time;
 
-use crate::status::NetworkStatusHandle;
-
 #[derive(Clone)]
 pub(crate) struct Client {
     client: reqwest::Client,
     timeout: Option<Duration>,
-    status: Option<NetworkStatusHandle>,
 }
 
 impl Client {
@@ -30,16 +27,11 @@ impl Client {
         if let Some(user_agent) = user_agent {
             builder = builder.user_agent(user_agent);
         }
-        builder.build().map(|client| Self { client, timeout, status: None })
+        builder.build().map(|client| Self { client, timeout })
     }
 
     pub(crate) fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
-        self
-    }
-
-    pub(crate) fn with_status(mut self, status: NetworkStatusHandle) -> Self {
-        self.status = Some(status);
         self
     }
 
@@ -75,9 +67,6 @@ impl Client {
         if let Some(deadline) = deadline {
             request = request.timeout(deadline.saturating_duration_since(time::Instant::now()));
         }
-        if let Some(status) = &self.status {
-            status.note_http_request();
-        }
         let response = match send_with_deadline(request.send(), deadline, started).await {
             Ok(response) => response,
             Err(error) => {
@@ -85,9 +74,6 @@ impl Client {
                 return Err(error);
             }
         };
-        if let Some(status) = &self.status {
-            status.note_http_response();
-        }
         let status = response.status();
         let headers = response.headers().clone();
         let retry_after = response_retry_after(&headers);

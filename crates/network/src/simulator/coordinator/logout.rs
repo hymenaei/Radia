@@ -6,7 +6,7 @@ use tokio::{
 };
 
 use super::{LOGOUT_TIMEOUT, SimulatorCoordinator};
-use crate::{error::Error, status::NetworkLifecycle};
+use crate::error::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LogoutOutcome {
@@ -21,17 +21,6 @@ pub(super) enum LogoutUnavailable {
     ConnectionEnded,
     Deadline,
     QueueFull,
-}
-
-impl LogoutUnavailable {
-    fn description(self) -> &'static str {
-        match self {
-            Self::ConnectionClosed => "the active simulator connection is closed",
-            Self::ConnectionEnded => "the active simulator connection ended before sending logout",
-            Self::Deadline => "the bounded logout send deadline expired",
-            Self::QueueFull => "the active simulator logout queue was full",
-        }
-    }
 }
 
 pub(super) struct PendingLogout {
@@ -66,7 +55,6 @@ fn logout_completion_error(error: Error) -> LogoutAttemptError {
 impl SimulatorCoordinator {
     pub(super) async fn disconnect_once(&mut self, logout_already_sent: bool) -> Result<LogoutOutcome, String> {
         tracing::info!(logout_already_sent, "simulator disconnect started");
-        self.status.set_lifecycle(NetworkLifecycle::Disconnecting);
         self.finish_pending_logout().await?;
         let outcome = if logout_already_sent || self.logout_request_sent {
             LogoutOutcome::AlreadySent
@@ -145,9 +133,7 @@ impl SimulatorCoordinator {
             return;
         }
         self.logout_unavailable = Some(reason);
-        let message = format!("Simulator logout request was not sent before disconnect completed: {}", reason.description());
-        tracing::warn!(?reason, "simulator disconnect completed without sending logout");
-        self.status.record_error(message);
+        tracing::warn!(simulator = self.primary.simulator_id.get(), ?reason, "simulator disconnect completed without sending logout");
     }
 
     pub(super) async fn graceful_disconnect(&mut self, logout_already_sent: bool) -> Result<(), String> {

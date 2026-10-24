@@ -34,7 +34,6 @@ impl SimulatorCoordinator {
             return Ok(false);
         }
         if handoff.as_ref().is_some_and(|target| target.region_handle != region_handle || target.endpoint != endpoint) {
-            self.status.record_error("Ignored a handoff target that did not match its simulator announcement.");
             return Ok(false);
         }
         let simulator_id = SimulatorId::allocate().ok_or_else(|| "Simulator connection ID space is exhausted.".to_string())?;
@@ -129,7 +128,7 @@ impl SimulatorCoordinator {
         reason: &'static str,
         setup: &mut PromotionSetup<'_>,
     ) -> Result<bool, String> {
-        self.status.record_error(reason);
+        tracing::warn!(simulator = simulator_id.get(), region = region_handle, %reason, "neighbor simulator connection was rejected");
         self.publish_event(
             &setup.application_events,
             &mut setup.state.pending_events,
@@ -172,7 +171,6 @@ impl SimulatorCoordinator {
         if let Some(handoff) = &handoff {
             session.seed_capability = handoff.seed_capability.clone();
         }
-        let status = self.status.clone();
         let coverage_losses = self.coverage_losses.clone();
         let packet_memory = self.packet_memory.for_neighbor();
         let connection_packet_memory = packet_memory.clone();
@@ -191,7 +189,6 @@ impl SimulatorCoordinator {
                     SimulatorConnectionOptions {
                         simulator_id,
                         region_handle: Some(region_handle),
-                        status,
                         coverage_losses,
                         primary_state: Some(primary_state_receiver),
                         budget: outbound_budget,
@@ -240,8 +237,8 @@ impl SimulatorCoordinator {
     ) -> Result<(), String> {
         let client = match self.new_capability_client(seed.clone()) {
             Ok(client) => client,
-            Err(error) => {
-                self.status.record_error(error);
+            Err(_error) => {
+                tracing::warn!(simulator = simulator_id.get(), "could not start neighbor capability requests");
                 return Ok(());
             }
         };
@@ -253,9 +250,9 @@ impl SimulatorCoordinator {
             self.coverage_losses.clone(),
         ) {
             Ok(event_queue) => event_queue,
-            Err(error) => {
+            Err(_error) => {
                 client.close_session();
-                self.status.record_error(error);
+                tracing::warn!(simulator = simulator_id.get(), "could not start neighbor event queue");
                 return Ok(());
             }
         };

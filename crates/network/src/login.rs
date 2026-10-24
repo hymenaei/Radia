@@ -17,7 +17,6 @@ use uuid::Uuid;
 use crate::{
     capabilities::spawn_blocking_with_permit,
     http::{Client, validate_http_url},
-    status::{NetworkLifecycle, NetworkStatusHandle},
 };
 
 const LOGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -124,34 +123,24 @@ impl fmt::Debug for LoginResponse {
 }
 
 #[tracing::instrument(name = "network.login", level = "info", skip_all, fields(grid = ?credentials.grid))]
-pub(crate) async fn login_with_status_at(
+pub(crate) async fn login_at_url(
     credentials: &LoginCredentials,
     mfa_token: &str,
     mfa_hash: &str,
     login_url: &str,
-    status: NetworkStatusHandle,
 ) -> Result<LoginResponse, String> {
-    status.set_lifecycle(NetworkLifecycle::LoggingIn);
     let login_url = match Url::parse(login_url) {
         Ok(url) => url,
         Err(error) => {
             let error = error.to_string();
-            status.record_error(&error);
-            status.set_lifecycle(NetworkLifecycle::Failed);
             return Err(error);
         }
     };
-    let result = login_request(credentials, mfa_token, mfa_hash, &login_url, status.clone()).await;
+    let result = login_request(credentials, mfa_token, mfa_hash, &login_url).await;
     match &result {
-        Ok(LoginResponse::Authenticated { .. }) => {
-            status.set_lifecycle(NetworkLifecycle::Connecting);
-        }
+        Ok(LoginResponse::Authenticated { .. }) => {}
         Ok(LoginResponse::MfaChallenge) => tracing::info!("Login response requires MFA"),
-        Err(error) => {
-            tracing::warn!("Login response rejected");
-            status.record_error(error);
-            status.set_lifecycle(NetworkLifecycle::Failed);
-        }
+        Err(_) => tracing::warn!("Login response rejected"),
     }
     result
 }
@@ -163,17 +152,11 @@ pub(crate) async fn login_at(
     mfa_hash: &str,
     login_url: &Url,
 ) -> Result<LoginResponse, String> {
-    login_request(credentials, mfa_token, mfa_hash, login_url, NetworkStatusHandle::default()).await
+    login_request(credentials, mfa_token, mfa_hash, login_url).await
 }
 
 #[tracing::instrument(name = "network.login.request", level = "debug", skip_all, fields(grid = ?credentials.grid))]
-async fn login_request(
-    credentials: &LoginCredentials,
-    mfa_token: &str,
-    mfa_hash: &str,
-    login_url: &Url,
-    status: NetworkStatusHandle,
-) -> Result<LoginResponse, String> {
+async fn login_request(credentials: &LoginCredentials, mfa_token: &str, mfa_hash: &str, login_url: &Url) -> Result<LoginResponse, String> {
     validate_http_url(login_url).map_err(|_| "The login server URL is invalid.".to_string())?;
     let body = login::Request {
         first_name: &credentials.first_name,
@@ -203,8 +186,7 @@ async fn login_request(
     .map_err(|_| "Could not contact Second Life: the login operation exceeded its deadline while waiting for admission.".to_string())?
     .map_err(|_| "Could not prepare the login request: login operation admission is unavailable.".to_string())?;
     let client = Client::new(Some(LOGIN_REQUEST_TIMEOUT), true, Some(concat!("Radia/", env!("CARGO_PKG_VERSION"))))
-        .map_err(|error| format!("Could not prepare the login request: {error}"))?
-        .with_status(status);
+        .map_err(|error| format!("Could not prepare the login request: {error}"))?;
     tracing::debug!("Login request started");
     let response =
         time::timeout_at(deadline, client.post("login", login_url, "text/xml", None, body.into_bytes(), MAX_LOGIN_RESPONSE_BYTES))

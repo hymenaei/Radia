@@ -83,7 +83,6 @@ fn seed_context(events: mpsc::Sender<EventEnvelope>) -> EventQueueContext {
         seed: Url::parse("http://127.0.0.1:9/seed").expect("valid seed URL"),
         http: http::Client::new(None, false, None).expect("build HTTP client"),
         events,
-        status: NetworkStatusHandle::default(),
         ordinary_requests: Arc::new(Semaphore::new(1)),
         primary_event_queues: Arc::new(Semaphore::new(1)),
         neighbor_event_queues: Arc::new(Semaphore::new(1)),
@@ -606,7 +605,6 @@ mod client_event_queue_tests {
         http,
         session::{COMMAND_CAPACITY, Command},
         simulator::run_session,
-        status::NetworkStatusHandle,
         transport::lludp::Delivery,
     };
 
@@ -734,12 +732,8 @@ mod client_event_queue_tests {
         let task_count = MAX_CONCURRENT_EVENT_QUEUES + 1;
         let server = EventQueueBudgetTestServer::start();
         let budget = CapabilityBudget::new();
-        let clients = (0..2)
-            .map(|_| {
-                Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                    .expect("active Tokio runtime")
-            })
-            .collect::<Vec<_>>();
+        let clients =
+            (0..2).map(|_| Client::new_with_budget(server.url("/seed"), budget.clone()).expect("active Tokio runtime")).collect::<Vec<_>>();
         let (events, received_events) = mpsc::channel(1);
         let mut received_events = EventReceiver::new(received_events);
         events.try_send(EventEnvelope::new(Event::SendFailed("hold event forwarding".into()))).expect("fill the application event channel");
@@ -838,8 +832,7 @@ mod client_event_queue_tests {
         let ordinary_request_capacity = budget.ordinary_requests.available_permits();
         let event_queue_capacity = available_event_queue_permits(&budget);
         let queued_event_capacity = budget.queued_event_bytes.available_permits();
-        let client = Client::new_with_status_and_budget(event_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-            .expect("active Tokio runtime");
+        let client = Client::new_with_budget(event_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
         let (event_sender, mut received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
         let task = client
@@ -896,12 +889,8 @@ mod client_event_queue_tests {
     async fn event_poll_wait_cancels_on_close() {
         let server = EventQueueBudgetTestServer::start();
         let budget = CapabilityBudget::new();
-        let clients = (0..2)
-            .map(|_| {
-                Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                    .expect("active Tokio runtime")
-            })
-            .collect::<Vec<_>>();
+        let clients =
+            (0..2).map(|_| Client::new_with_budget(server.url("/seed"), budget.clone()).expect("active Tokio runtime")).collect::<Vec<_>>();
         let (events, _received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
         let mut tasks = Vec::with_capacity(MAX_CONCURRENT_EVENT_QUEUES);
@@ -961,13 +950,9 @@ mod client_event_queue_tests {
         let waiting_server = EventQueueBudgetTestServer::start();
         let primary_server = EventQueueBudgetTestServer::start();
         let budget = CapabilityBudget::new();
-        let active_client = Client::new_with_status_and_budget(active_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-            .expect("active Tokio runtime");
-        let waiting_client =
-            Client::new_with_status_and_budget(waiting_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                .expect("active Tokio runtime");
-        let primary_client = Client::new_with_status_and_budget(primary_server.url("/seed"), NetworkStatusHandle::default(), budget)
-            .expect("active Tokio runtime");
+        let active_client = Client::new_with_budget(active_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
+        let waiting_client = Client::new_with_budget(waiting_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
+        let primary_client = Client::new_with_budget(primary_server.url("/seed"), budget).expect("active Tokio runtime");
         let (events, _received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
         let mut active_tasks = Vec::with_capacity(MAX_CONCURRENT_EVENT_QUEUES - 1);
@@ -1050,15 +1035,9 @@ mod client_event_queue_tests {
         let old_primary_server = EventQueueBudgetTestServer::start();
         let new_primary_server = EventQueueBudgetTestServer::start();
         let budget = CapabilityBudget::new();
-        let neighbor_client =
-            Client::new_with_status_and_budget(neighbor_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                .expect("active Tokio runtime");
-        let old_primary_client =
-            Client::new_with_status_and_budget(old_primary_server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                .expect("active Tokio runtime");
-        let new_primary_client =
-            Client::new_with_status_and_budget(new_primary_server.url("/seed"), NetworkStatusHandle::default(), budget)
-                .expect("active Tokio runtime");
+        let neighbor_client = Client::new_with_budget(neighbor_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
+        let old_primary_client = Client::new_with_budget(old_primary_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
+        let new_primary_client = Client::new_with_budget(new_primary_server.url("/seed"), budget).expect("active Tokio runtime");
         let (events, _received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
         let (shutdown, shutdown_requested) = watch::channel(false);
         let old_coverage_losses = CoverageLossLedger::new();

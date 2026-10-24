@@ -36,7 +36,6 @@ async fn skips_ping_when_ids_full() {
 mod protocol_tests {
     use crate::{
         event::PacketOrder::{Ambiguous, Degraded, Ordered},
-        status::NetworkStatusHandle,
         transport::UdpTransport,
         transport::lludp::{
             Circuit, DUPLICATE_ACK_HEADROOM, Delivery, KEEPALIVE_TIMEOUT, MAX_NORMAL_DATAGRAM_BYTES, MAX_ORDERED_SEQUENCE_DISTANCE,
@@ -303,8 +302,7 @@ mod protocol_tests {
     async fn logout_bypasses_window() {
         let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
         let transport = UdpTransport::connect(server.local_addr().expect("simulator address")).await.expect("connect fake simulator");
-        let status = NetworkStatusHandle::new();
-        let mut circuit = Circuit::with_status(status.clone());
+        let mut circuit = Circuit::new();
         let mut buffer = [0; 1024];
 
         for sequence in 1..=MAX_PENDING_PACKETS {
@@ -335,7 +333,6 @@ mod protocol_tests {
         assert!(logout.is_reliable());
         assert!(matches!(logout.message(), Message::LogoutRequest(_)));
         assert!(!circuit.has_pending(logout_sequence));
-        assert_eq!(status.snapshot().reliable_packets_pending, MAX_PENDING_PACKETS);
     }
 
     #[test]
@@ -495,8 +492,7 @@ mod protocol_tests {
     async fn bounds_duplicate_history() {
         let server = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
         let transport = UdpTransport::connect(server.local_addr().expect("simulator address")).await.expect("connect fake simulator");
-        let status = NetworkStatusHandle::new();
-        let mut circuit = Circuit::with_status(status.clone());
+        let mut circuit = Circuit::new();
         let received_at = Instant::now();
         let mut buffer = [0; 2048];
 
@@ -530,7 +526,6 @@ mod protocol_tests {
             circuit.receive_at(&reliable_packet(MAX_RECEIVED_RELIABLE_PACKETS as u32 + 1), received_at),
             Err(ReceiveError::DuplicateHistoryFull)
         );
-        assert!(status.snapshot().last_error.as_deref().is_some_and(|error| error.contains("duplicate history is full")));
         circuit.flush_pending_acks(&transport).await.expect("flush no ack for untracked packet");
         assert!(timeout(Duration::from_millis(20), server.recv_from(&mut buffer)).await.is_err());
 
@@ -610,13 +605,11 @@ mod protocol_tests {
 
     #[test]
     fn accepts_wide_sequence() {
-        let status = NetworkStatusHandle::new();
-        let mut circuit = Circuit::with_status(status.clone());
+        let mut circuit = Circuit::new();
         let now = Instant::now();
 
         assert!(circuit.receive_at(&reliable_packet(0x0100_0000), now).expect("valid 32-bit sequence").is_new_packet);
         circuit.clear_duplicate_list(0x0100_0001, now + Duration::from_secs(1));
-        assert!(status.snapshot().last_error.is_none());
     }
 
     #[test]

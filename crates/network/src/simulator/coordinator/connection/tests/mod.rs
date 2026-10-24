@@ -39,7 +39,6 @@ use crate::{
     coverage::{CoverageLoss, CoverageLossLedger, CoverageLossReason, CoverageSource},
     error::Error,
     event::{Event, SimulatorId},
-    status::NetworkStatusHandle,
     transport::{
         UdpTransport,
         lludp::{KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, NEW_RELIABLE_ACK_CAPACITY, ReceiveAdmission},
@@ -169,7 +168,6 @@ async fn receive_message_event(events: &mut mpsc::Receiver<SimulatorEvent>, sequ
 async fn connect_test_primary_with_coverage(
     simulator_id: SimulatorId,
     session: AgentSession,
-    status: NetworkStatusHandle,
     coverage_losses: CoverageLossLedger,
 ) -> Result<SimulatorConnection, String> {
     let budget = OutboundBudget::new(crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
@@ -178,7 +176,6 @@ async fn connect_test_primary_with_coverage(
         SimulatorConnectionOptions {
             simulator_id,
             region_handle: None,
-            status,
             coverage_losses,
             primary_state: None,
             budget: budget.handle(),
@@ -193,7 +190,6 @@ async fn connect_test_neighbor_with_coverage(
     simulator_id: SimulatorId,
     session: AgentSession,
     region_handle: u64,
-    status: NetworkStatusHandle,
     coverage_losses: CoverageLossLedger,
 ) -> Result<SimulatorConnection, String> {
     let budget = OutboundBudget::new(crate::session::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
@@ -202,7 +198,6 @@ async fn connect_test_neighbor_with_coverage(
         SimulatorConnectionOptions {
             simulator_id,
             region_handle: Some(region_handle),
-            status,
             coverage_losses,
             primary_state: None,
             budget: budget.handle(),
@@ -219,14 +214,13 @@ async fn run_budget_retry(role: ConnectionRole) {
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
     let session = session(simulator_address);
     let coverage = CoverageLossLedger::new();
-    let status = NetworkStatusHandle::default();
     let connection = match role {
-        ConnectionRole::Primary => connect_test_primary_with_coverage(simulator_id, session, status.clone(), coverage.clone())
-            .await
-            .expect("connect primary simulator"),
-        ConnectionRole::Neighbor => connect_test_neighbor_with_coverage(simulator_id, session, 42, status.clone(), coverage.clone())
-            .await
-            .expect("connect neighbor simulator"),
+        ConnectionRole::Primary => {
+            connect_test_primary_with_coverage(simulator_id, session, coverage.clone()).await.expect("connect primary simulator")
+        }
+        ConnectionRole::Neighbor => {
+            connect_test_neighbor_with_coverage(simulator_id, session, 42, coverage.clone()).await.expect("connect neighbor simulator")
+        }
     };
 
     let budget = SimulatorMemoryBudget::new();

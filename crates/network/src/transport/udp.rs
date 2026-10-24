@@ -10,8 +10,6 @@ use tokio::net::UdpSocket;
 #[cfg(test)]
 use tokio::sync::{Notify, watch};
 
-use crate::status::NetworkStatusHandle;
-
 const MAX_IPV4_UDP_PAYLOAD: usize = u16::MAX as usize - 20 - 8;
 const MAX_IPV6_UDP_PAYLOAD: usize = u16::MAX as usize - 8;
 
@@ -24,18 +22,12 @@ pub(crate) struct SendGate {
 pub(crate) struct UdpTransport {
     socket: UdpSocket,
     max_payload_size: usize,
-    status: NetworkStatusHandle,
     #[cfg(test)]
     send_gate: Option<SendGate>,
 }
 
 impl UdpTransport {
-    #[cfg(test)]
     pub(crate) async fn connect(address: SocketAddr) -> Result<Self, String> {
-        Self::connect_with_status(address, NetworkStatusHandle::default()).await
-    }
-
-    pub(crate) async fn connect_with_status(address: SocketAddr, status: NetworkStatusHandle) -> Result<Self, String> {
         let socket = UdpSocket::bind(local_bind_address(address))
             .await
             .map_err(|error| format!("Could not open the simulator connection: {error}"))?;
@@ -44,7 +36,6 @@ impl UdpTransport {
         Ok(Self {
             socket,
             max_payload_size,
-            status,
             #[cfg(test)]
             send_gate: None,
         })
@@ -79,7 +70,6 @@ impl UdpTransport {
         if sent != bytes.len() {
             return Err(io::Error::new(ErrorKind::WriteZero, "UDP socket sent an incomplete datagram."));
         }
-        self.status.note_udp_sent();
         Ok(())
     }
 
@@ -110,13 +100,11 @@ impl UdpTransport {
         if sent != bytes.len() {
             return Err(io::Error::new(ErrorKind::WriteZero, "UDP socket sent an incomplete datagram."));
         }
-        self.status.note_udp_sent();
         Ok(())
     }
 
     pub(crate) async fn recv(&self, buffer: &mut [u8]) -> Result<usize, io::Error> {
         let received = self.socket.recv(buffer).await?;
-        self.status.note_udp_received();
         Ok(received)
     }
 }

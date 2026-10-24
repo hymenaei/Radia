@@ -80,9 +80,7 @@ async fn neighbor_shutdown_preempts_start() {
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
     let neighbor_connection =
-        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
-            .await
-            .expect("connect neighbor circuit");
+        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
 
     let result = timeout(
         Duration::from_millis(100),
@@ -98,9 +96,7 @@ async fn neighbor_logout_bypasses_full_queues() {
     let endpoint = neighbor.local_addr().expect("read neighbor address");
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");
     let mut connection =
-        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
-            .await
-            .expect("connect neighbor circuit");
+        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
     let (send_gate, pause_sends, send_entered) = UdpTransport::new_send_gate();
     Arc::get_mut(&mut connection.socket).expect("test connection owns its socket").set_send_gate(send_gate);
     let (event_sender, mut event_receiver) = mpsc::channel(4);
@@ -193,9 +189,7 @@ async fn neighbor_receiver_close_preempts() {
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
     let neighbor_connection =
-        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
-            .await
-            .expect("connect neighbor circuit");
+        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
     let task = spawn(neighbor_connection.run(
         event_sender,
         shutdown,
@@ -230,9 +224,7 @@ async fn neighbor_ping_is_delayed() {
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
     let neighbor_connection =
-        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
-            .await
-            .expect("connect neighbor circuit");
+        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
     let task = spawn(neighbor_connection.run(
         event_sender,
         shutdown,

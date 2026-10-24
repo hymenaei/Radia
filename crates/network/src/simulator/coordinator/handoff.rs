@@ -287,7 +287,6 @@ impl SimulatorCoordinator {
                         });
                     if same_live_target {
                         let Some(generation) = self.next_handoff_generation() else {
-                            self.status.record_error("The simulator handoff generation limit has been reached.");
                             return Ok(());
                         };
                         current.generation = generation;
@@ -335,14 +334,12 @@ impl SimulatorCoordinator {
                         &mut setup.state.simulator_capabilities,
                         &self.coverage_losses,
                     );
-                    self.status.record_error("Conflicting simulator handoff announcements; waiting for TeleportCancel.");
                     return Ok(());
                 }
             }
         }
         evidence.record(announcement);
         let Some(generation) = self.next_handoff_generation() else {
-            self.status.record_error("The simulator handoff generation limit has been reached.");
             return Ok(());
         };
 
@@ -358,7 +355,7 @@ impl SimulatorCoordinator {
             return Ok(());
         };
         let simulator_id = connection.simulator_id;
-        if let Err(error) = self.ensure_handoff_capabilities(
+        if let Err(_error) = self.ensure_handoff_capabilities(
             simulator_id,
             &handoff,
             setup.capability_events.clone(),
@@ -367,13 +364,12 @@ impl SimulatorCoordinator {
             &mut setup.state.neighbor_event_queue_owners,
             &mut setup.state.simulator_capabilities,
         ) {
-            tracing::info!(
+            tracing::warn!(
                 simulator = simulator_id.get(),
                 region = handoff.region_handle,
                 reason = "destination capabilities failed",
                 "simulator handoff failed"
             );
-            self.status.record_error(format!("Could not start destination simulator capabilities: {error}"));
             if let Some(connection) = setup.state.neighbor_connections.get_mut(&handoff.region_handle) {
                 connection.queue_handoff_command(HandoffCommand::Cancel);
             }
@@ -408,10 +404,7 @@ impl SimulatorCoordinator {
                     )
                     .await
                 }
-                Err(reason) => {
-                    self.status.record_error(format!("Ignored malformed TeleportFinish message: {reason}"));
-                    Ok(())
-                }
+                Err(_reason) => Ok(()),
             },
             Message::TeleportFailed(failed) if failed.agent_id == self.session.agent_id => {
                 if teleport_failure_matches(state.pending(), HandoffOrder::Packet(packet_order))
@@ -431,10 +424,7 @@ impl SimulatorCoordinator {
                 }
                 Ok(())
             }
-            Message::TeleportFailed(_) => {
-                self.status.record_error("Ignored TeleportFailed for a different agent.");
-                Ok(())
-            }
+            Message::TeleportFailed(_) => Ok(()),
             _ => Ok(()),
         }
     }
@@ -720,8 +710,8 @@ pub(super) fn is_teleport_cancel(message: &Message, agent_id: Uuid, session_id: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Error;
     use crate::simulator::coordinator::tests::login_session;
-    use crate::{Error, status::NetworkStatusHandle};
     use protocol::login::ResponseData;
     use std::time::Duration;
     use tokio::{net::UdpSocket, time::timeout};
@@ -768,14 +758,11 @@ mod tests {
             endpoint: destination.local_addr().expect("destination endpoint"),
             seed_capability: session.seed_capability.clone(),
         };
-        let mut connection = SimulatorCoordinator::connect(
-            session,
-            ResponseData::default(),
-            crate::simulator::coordinator::tests::test_options(NetworkStatusHandle::default()),
-        )
-        .await
-        .expect("coordinator startup")
-        .expect("primary connection starts");
+        let mut connection =
+            SimulatorCoordinator::connect(session, ResponseData::default(), crate::simulator::coordinator::tests::test_options())
+                .await
+                .expect("coordinator startup")
+                .expect("primary connection starts");
         let id = SimulatorId::allocate().expect("destination ID");
         let (events, _receiver) = mpsc::channel(4);
         let (_shutdown, shutdown) = watch::channel(false);

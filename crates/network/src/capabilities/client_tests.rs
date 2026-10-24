@@ -30,7 +30,6 @@ use crate::test_support::{
 };
 use crate::{
     Error::{Capability, CapabilityHttp},
-    NetworkStatusHandle,
     capabilities::{CapabilityBudget, CapabilityUrl, Client},
     event::{Event, SimulatorId},
     http,
@@ -131,9 +130,8 @@ async fn capability_clients_share_the_session_http_connection_pool() {
     let seed = Url::parse(&format!("{endpoint}/seed")).expect("valid seed URL");
     let resource = CapabilityUrl::parse(&format!("{endpoint}/resource")).expect("valid capability URL");
     let budget = CapabilityBudget::new();
-    let first = Client::new_with_status_and_budget(seed.clone(), NetworkStatusHandle::default(), budget.clone())
-        .expect("create first capability client");
-    let second = Client::new_with_status_and_budget(seed, NetworkStatusHandle::default(), budget).expect("create second capability client");
+    let first = Client::new_with_budget(seed.clone(), budget.clone()).expect("create first capability client");
+    let second = Client::new_with_budget(seed, budget).expect("create second capability client");
 
     assert!(
         first.get_bytes_with_response_limit(&resource, MAX_CAPABILITY_RESPONSE_BYTES).await.expect("first capability request").is_empty()
@@ -447,8 +445,7 @@ async fn request_body_is_bounded() {
     let body = "<llsd><undef/></llsd>";
     let server = LocalServer::start(vec![response(200, "OK", "application/llsd+xml", None, body)]);
     let budget = CapabilityBudget::new();
-    let client =
-        Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget).expect("active Tokio runtime");
+    let client = Client::new_with_budget(server.url("/seed"), budget).expect("active Tokio runtime");
     let url = CapabilityUrl::parse(server.url("/capability").as_str()).expect("valid capability URL");
     let payload = Value::String("N".repeat(MAX_CAPABILITY_REQUEST_BODY_BYTES + 1));
 
@@ -474,8 +471,7 @@ async fn posts_encode_after_admission() {
     let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS + 2;
     let mut server = ConcurrentCapabilityTestServer::start(request_count);
     let budget = CapabilityBudget::new();
-    let client =
-        Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget).expect("active Tokio runtime");
+    let client = Client::new_with_budget(server.url("/seed"), budget).expect("active Tokio runtime");
     let held_url = CapabilityUrl::parse(server.url("/held").as_str()).expect("valid held URL");
     let post_url = CapabilityUrl::parse(server.url("/post").as_str()).expect("valid POST URL");
     let mut held_requests = JoinSet::new();
@@ -620,12 +616,8 @@ async fn shared_budget_bounds_requests() {
     let request_count = MAX_CONCURRENT_CAPABILITY_REQUESTS * 2;
     let mut server = ConcurrentCapabilityTestServer::start(request_count);
     let budget = CapabilityBudget::new();
-    let clients = (0..2)
-        .map(|_| {
-            Client::new_with_status_and_budget(server.url("/seed"), NetworkStatusHandle::default(), budget.clone())
-                .expect("active Tokio runtime")
-        })
-        .collect::<Vec<_>>();
+    let clients =
+        (0..2).map(|_| Client::new_with_budget(server.url("/seed"), budget.clone()).expect("active Tokio runtime")).collect::<Vec<_>>();
     let mut requests = JoinSet::new();
 
     for index in 0..request_count {

@@ -5,7 +5,6 @@ mod event;
 mod login;
 mod session;
 mod simulator;
-mod status;
 #[cfg(test)]
 mod test_support;
 mod transport;
@@ -32,5 +31,4 @@ pub use error::Error;
 pub use event::{CapabilityEvent, Event, EventQueueBatchOrder, PacketOrder, SimulatorId};
 pub use login::{AgentSession, Grid, LoginCredentials, StartLocation};
 pub use session::{DEFAULT_UPSTREAM_BYTES_PER_SECOND, MfaChallenge, OutboundMessage, Session, SessionHandle, SessionOptions};
-pub use status::{NetworkLifecycle, NetworkStatusHandle, NetworkStatusSnapshot};
 pub use transport::lludp::Delivery;

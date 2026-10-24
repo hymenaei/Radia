@@ -4,9 +4,7 @@ use super::*;
 async fn retry_limit_keeps_primary_connected() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
-    let connection = connect_with_status(login_session(endpoint), ResponseData::default(), NetworkStatusHandle::default())
-        .await
-        .expect("connect simulator circuit");
+    let connection = connect_coordinator(login_session(endpoint), ResponseData::default()).await.expect("connect simulator circuit");
     let _ = receive(&simulator).await;
 
     connection.note_primary_event_queue_exit(EventQueueExit::Stopped);
@@ -35,13 +33,9 @@ fn former_primary_failure_completion_keeps_its_identity() {
 #[tokio::test]
 async fn primary_event_queue_coverage_loss_keeps_session_active() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
-    let connection = connect_with_status(
-        login_session(simulator.local_addr().expect("read simulator address")),
-        ResponseData::default(),
-        NetworkStatusHandle::default(),
-    )
-    .await
-    .expect("connect simulator circuit");
+    let connection = connect_coordinator(login_session(simulator.local_addr().expect("read simulator address")), ResponseData::default())
+        .await
+        .expect("connect simulator circuit");
     let _ = receive(&simulator).await;
 
     connection.note_primary_event_queue_exit(EventQueueExit::StoppedWithCoverageLoss);
@@ -53,9 +47,7 @@ async fn primary_event_queue_coverage_loss_keeps_session_active() {
 async fn retry_avoids_double_logout() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
-    let mut connection = connect_with_status(login_session(endpoint), ResponseData::default(), NetworkStatusHandle::default())
-        .await
-        .expect("connect simulator circuit");
+    let mut connection = connect_coordinator(login_session(endpoint), ResponseData::default()).await.expect("connect simulator circuit");
     let (_, peer) = receive(&simulator).await;
 
     let (events, _event_receiver) = mpsc::channel(1);
@@ -86,9 +78,7 @@ async fn retry_avoids_double_logout() {
 async fn failed_backlog_logout_is_not_reported_as_sent() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
-    let status = NetworkStatusHandle::default();
-    let mut connection =
-        connect_with_status(login_session(endpoint), ResponseData::default(), status.clone()).await.expect("connect simulator circuit");
+    let mut connection = connect_coordinator(login_session(endpoint), ResponseData::default()).await.expect("connect simulator circuit");
     receive(&simulator).await;
 
     let (logout, logout_receiver) = mpsc::channel(1);
@@ -113,7 +103,6 @@ async fn failed_backlog_logout_is_not_reported_as_sent() {
         connection.disconnect_once(connection.logout_request_sent).await.expect("disconnect reports unavailable logout"),
         LogoutOutcome::Unavailable(LogoutUnavailable::ConnectionClosed)
     );
-    assert!(status.snapshot().last_error.as_deref().is_some_and(|error| error.contains("was not sent")));
 
     let mut buffer = [0; 65_535];
     assert!(timeout(Duration::from_millis(50), simulator.recv_from(&mut buffer)).await.is_err());
@@ -126,10 +115,9 @@ async fn backlog_logout_drops_covered_application_events_but_keeps_lifecycle_eve
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
     let coverage_losses = CoverageLossLedger::new();
-    let mut connection =
-        connect_with_coverage(login_session(endpoint), ResponseData::default(), NetworkStatusHandle::default(), coverage_losses.clone())
-            .await
-            .expect("connect simulator circuit");
+    let mut connection = connect_with_coverage(login_session(endpoint), ResponseData::default(), coverage_losses.clone())
+        .await
+        .expect("connect simulator circuit");
     receive(&simulator).await;
 
     let (events, mut received_events) = mpsc::channel(2);
@@ -180,9 +168,7 @@ async fn backlog_logout_drops_covered_application_events_but_keeps_lifecycle_eve
 async fn terminal_logout_skips_capability_events_that_start_neighbor_work() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let endpoint = simulator.local_addr().expect("read simulator address");
-    let mut connection = connect_with_status(login_session(endpoint), ResponseData::default(), NetworkStatusHandle::default())
-        .await
-        .expect("connect primary simulator");
+    let mut connection = connect_coordinator(login_session(endpoint), ResponseData::default()).await.expect("connect primary simulator");
     receive(&simulator).await;
 
     let mut run_state = CoordinatorRunState::new();

@@ -23,7 +23,7 @@ use super::{
     CoordinatorRunState, EVENT_BACKLOG_DISCONNECT_REASON, FinishOrder, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffAnnouncement,
     HandoffDecision, HandoffEvidence, HandoffGeneration, HandoffOrder, HandoffState, HandoffTarget, NEIGHBOR_COMMAND_CAPACITY,
     PendingPromotion, PromotionSetup, SimulatorCommand, SimulatorConnectionState, SimulatorMemoryBudget, SimulatorTaskOutcome,
-    arbitrate_handoff, connect_with_status, decode_crossed_region, decode_event_teleport_finish, decode_teleport_finish,
+    arbitrate_handoff, connect_coordinator, decode_crossed_region, decode_event_teleport_finish, decode_teleport_finish,
     handoff_cancellation, is_teleport_cancel, neighbor_completion_event, neighbor_event_queue_failure, neighbor_event_queue_task_failure,
     remove_failed_neighbor, retry_pending_handoff_commands, same_handoff_destination, teleport_failure_matches,
 };
@@ -190,7 +190,7 @@ fn cancel_matches_handoff_generation() {
 #[tokio::test(start_paused = true)]
 async fn full_handoff_queue_recovers() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let mut connection = connect_with_status(
+    let mut connection = connect_coordinator(
         AgentSession {
             first_name: "Test".into(),
             last_name: "Resident".into(),
@@ -203,7 +203,6 @@ async fn full_handoff_queue_recovers() {
             seed_capability: Url::parse("http://127.0.0.1:1/seed").expect("seed URL"),
         },
         ResponseData::default(),
-        crate::status::NetworkStatusHandle::default(),
     )
     .await
     .expect("connect primary circuit");

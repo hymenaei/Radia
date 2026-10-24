@@ -15,7 +15,7 @@ use tokio::{
 use uuid::Uuid;
 
 use super::{
-    AGENT_ID, LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, PendingLogout, SESSION_ID, chat_message, connect_with_status,
+    AGENT_ID, LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, PendingLogout, SESSION_ID, chat_message, connect_coordinator,
     login_session, send_logout_with_deadline, set_sequence,
 };
 use crate::{
@@ -24,7 +24,6 @@ use crate::{
     session::{COMMAND_CAPACITY, Command},
     simulator::coordinator::{LogoutUnavailable, MAX_PENDING_SIMULATOR_EVENTS},
     simulator::run_session,
-    status::{NetworkLifecycle, NetworkStatusHandle},
     transport::UdpTransport,
     transport::lludp::{
         Circuit, DEFAULT_RETRY_TIMEOUT, Delivery, MAX_PENDING_PACKETS, MAX_RETRIES, PendingPacket, RESENT_FLAG, ReceiveError,
@@ -70,13 +69,9 @@ fn logout_message() -> Message {
 #[tokio::test]
 async fn root_disconnect_skips_remote_logout_wait() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let mut connection = connect_with_status(
-        login_session(simulator.local_addr().expect("simulator address")),
-        ResponseData::default(),
-        NetworkStatusHandle::default(),
-    )
-    .await
-    .expect("connect root simulator circuit");
+    let mut connection = connect_coordinator(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
+        .await
+        .expect("connect root simulator circuit");
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
@@ -127,11 +122,9 @@ async fn logout_transport_failure_is_unexpected() {
 #[tokio::test]
 async fn disconnect_reports_closed_primary() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let status = NetworkStatusHandle::default();
-    let mut connection =
-        connect_with_status(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default(), status.clone())
-            .await
-            .expect("connect root simulator circuit");
+    let mut connection = connect_coordinator(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
+        .await
+        .expect("connect root simulator circuit");
     receive(&simulator).await;
     let (logout, receiver) = mpsc::channel(1);
     drop(receiver);
@@ -141,12 +134,6 @@ async fn disconnect_reports_closed_primary() {
         connection.disconnect_once(false).await.expect("closed route is an unavailable logout"),
         LogoutOutcome::Unavailable(LogoutUnavailable::ConnectionClosed)
     );
-    let snapshot = status.snapshot();
-    assert_eq!(snapshot.lifecycle, NetworkLifecycle::Disconnecting);
-    assert_eq!(
-        snapshot.last_error.as_deref(),
-        Some("Simulator logout request was not sent before disconnect completed: the active simulator connection is closed")
-    );
     let mut buffer = [0; 65_535];
     assert!(timeout(Duration::from_millis(30), simulator.recv_from(&mut buffer)).await.is_err());
 }
@@ -154,11 +141,9 @@ async fn disconnect_reports_closed_primary() {
 #[tokio::test(start_paused = true)]
 async fn disconnect_logout_respects_deadline() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let status = NetworkStatusHandle::default();
-    let mut connection =
-        connect_with_status(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default(), status.clone())
-            .await
-            .expect("connect root simulator circuit");
+    let mut connection = connect_coordinator(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
+        .await
+        .expect("connect root simulator circuit");
     receive(&simulator).await;
     let (logout, _logout_receiver) = mpsc::channel(1);
     let (queued_logout, _queued_response) = oneshot::channel();
@@ -173,24 +158,14 @@ async fn disconnect_logout_respects_deadline() {
         disconnect.await.expect("disconnect task should not panic").expect("deadline is an unavailable logout"),
         LogoutOutcome::Unavailable(LogoutUnavailable::Deadline)
     );
-    let snapshot = status.snapshot();
-    assert_eq!(snapshot.lifecycle, NetworkLifecycle::Disconnecting);
-    assert_eq!(
-        snapshot.last_error.as_deref(),
-        Some("Simulator logout request was not sent before disconnect completed: the bounded logout send deadline expired")
-    );
 }
 
 #[tokio::test]
 async fn failed_root_disconnect_reports_no_send() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
-    let mut connection = connect_with_status(
-        login_session(simulator.local_addr().expect("simulator address")),
-        ResponseData::default(),
-        NetworkStatusHandle::default(),
-    )
-    .await
-    .expect("connect root simulator circuit");
+    let mut connection = connect_coordinator(login_session(simulator.local_addr().expect("simulator address")), ResponseData::default())
+        .await
+        .expect("connect root simulator circuit");
     receive(&simulator).await;
     connection.root_connection_failed = true;
 

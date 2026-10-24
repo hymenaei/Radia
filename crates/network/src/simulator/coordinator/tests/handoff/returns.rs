@@ -359,6 +359,5 @@ async fn run_disconnect_logs_out_promoted_primary() {
     })
     .await
     .expect("the promoted simulator should emit its terminal lifecycle event");
-    assert_eq!(harness.status.snapshot().lifecycle, NetworkLifecycle::Disconnected);
     assert!(timeout(WAIT, harness.client).await.expect("shutdown should finish").expect("manager task").is_ok());
 }

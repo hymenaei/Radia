@@ -25,9 +25,8 @@ async fn neighbor_intro_precedes_early_udp_data() {
     let (shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
     let (_command_sender, commands) = mpsc::channel(1);
-    let connection = connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
-        .await
-        .expect("connect neighbor circuit");
+    let connection =
+        connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
     let task = spawn(connection.run(event_sender, shutdown, neighbor_requests, commands, mpsc::channel(1).1, SimulatorMemoryBudget::new()));
 
     let (use_circuit, peer) = receive(&neighbor).await;
@@ -62,13 +61,10 @@ async fn neighbor_task_limit_preserves_current() {
     let (application_events, mut received_events) = mpsc::channel(MAX_NEIGHBOR_CONNECTION_TASKS + 1);
     let (neighbor_events, _neighbor_event_receiver) = mpsc::channel::<SimulatorEvent>(MAX_NEIGHBOR_CONNECTION_TASKS + 1);
     let (_shutdown_signal, shutdown) = watch::channel(false);
-    let mut connection = connect_with_status(
-        login_session(primary.local_addr().expect("primary simulator address")),
-        ResponseData::default(),
-        NetworkStatusHandle::default(),
-    )
-    .await
-    .expect("connect primary circuit");
+    let mut connection =
+        connect_coordinator(login_session(primary.local_addr().expect("primary simulator address")), ResponseData::default())
+            .await
+            .expect("connect primary circuit");
     let _ = receive(&primary).await;
 
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(32);
@@ -173,13 +169,10 @@ async fn neighbor_simulator_limit_is_bounded() {
     let (application_events, mut received_events) = mpsc::channel(MAX_NEIGHBOR_SIMULATORS + 1);
     let (neighbor_events, _neighbor_event_receiver) = mpsc::channel::<SimulatorEvent>(1);
     let (_shutdown_signal, shutdown) = watch::channel(false);
-    let mut connection = connect_with_status(
-        login_session(primary.local_addr().expect("primary simulator address")),
-        ResponseData::default(),
-        NetworkStatusHandle::default(),
-    )
-    .await
-    .expect("connect primary circuit");
+    let mut connection =
+        connect_coordinator(login_session(primary.local_addr().expect("primary simulator address")), ResponseData::default())
+            .await
+            .expect("connect primary circuit");
     let _ = receive(&primary).await;
 
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(32);
@@ -381,7 +374,6 @@ async fn neighbor_pressure_keeps_primary_live_inner() {
         "second neighbor payload rejected by memory admission must stay unacknowledged"
     );
     assert_eq!(harness.packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES - MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
-    assert_eq!(harness.status.snapshot().simulator_endpoint, Some(harness.primary.local_addr().expect("primary endpoint")));
 
     drop(neighbor_budget);
     harness.neighbor.send_to(&chat, harness.neighbor_peer).await.expect("retry neighbor payload after budget recovery");
@@ -427,10 +419,9 @@ async fn neighbor_overload_keeps_control() {
     let (_shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(32);
     let (_commands, command_receiver) = mpsc::channel(NEIGHBOR_COMMAND_CAPACITY);
-    let neighbor_connection =
-        connect_test_neighbor(simulator_id, login_session(neighbor_endpoint), 0x1000_0000_0000_1000, NetworkStatusHandle::default())
-            .await
-            .expect("connect neighbor circuit");
+    let neighbor_connection = connect_test_neighbor(simulator_id, login_session(neighbor_endpoint), 0x1000_0000_0000_1000)
+        .await
+        .expect("connect neighbor circuit");
     let packet_memory = SimulatorMemoryBudget::new().for_neighbor();
     let budget = packet_memory.clone();
     let mut task =

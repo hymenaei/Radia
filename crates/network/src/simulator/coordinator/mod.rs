@@ -32,7 +32,6 @@ use crate::{
     error::Error,
     event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, SimulatorId},
     session::{Command, SessionOptions},
-    status::{NetworkLifecycle, NetworkStatusHandle},
     transport::{UdpTransport, lludp::Delivery, pacing::OutboundBudget},
 };
 use capability_events::{decode_agent_communication, decode_enable_simulators};
@@ -205,7 +204,6 @@ enum HandoffCommand {
 }
 
 pub(crate) struct SimulatorCoordinatorOptions {
-    pub(crate) status: NetworkStatusHandle,
     pub(crate) coverage_losses: CoverageLossLedger,
     pub(crate) session: SessionOptions,
     pub(crate) startup_disconnect: Option<watch::Receiver<bool>>,
@@ -232,7 +230,6 @@ pub(crate) struct SimulatorCoordinator {
     capability_budget: CapabilityBudget,
     capability_request_waiters: JoinSet<()>,
     login_data: ResponseData,
-    status: NetworkStatusHandle,
     event_backlog: PrimaryEventBacklog,
     packet_memory: SimulatorMemoryBudget,
     coverage_losses: CoverageLossLedger,
@@ -267,20 +264,7 @@ impl SimulatorCoordinator {
         login_data: ResponseData,
         options: SimulatorCoordinatorOptions,
     ) -> Result<Option<Self>, String> {
-        let status_handle = options.status.clone();
-        status_handle.set_simulator_endpoint(session.simulator_address);
-        status_handle.set_lifecycle(NetworkLifecycle::Connecting);
-        let result = Self::connect_inner(session, login_data, options).await;
-        if let Err(error) = &result {
-            status_handle.clear_simulator();
-            status_handle.record_error(error);
-            status_handle.set_lifecycle(NetworkLifecycle::Failed);
-        }
-        if matches!(&result, Ok(None)) {
-            status_handle.clear_simulator();
-            status_handle.set_lifecycle(NetworkLifecycle::Disconnected);
-        }
-        result
+        Self::connect_inner(session, login_data, options).await
     }
 
     pub(crate) async fn run(
@@ -290,21 +274,12 @@ impl SimulatorCoordinator {
         disconnect_requested: watch::Receiver<bool>,
         terminal_event_permit: mpsc::OwnedPermit<EventEnvelope>,
     ) -> Result<(), String> {
-        let status = self.status.clone();
         let simulator_id = self.simulator_id;
         let result = self.run_inner(commands, events, disconnect_requested).await;
         if let Some(outbound_budget) = self.outbound_budget.take() {
             outbound_budget.shutdown().await;
         }
         self.finish_capability_request_waiters().await;
-        status.clear_simulator();
-        match &result {
-            Ok(()) => status.set_lifecycle(NetworkLifecycle::Disconnected),
-            Err(error) => {
-                status.record_error(error);
-                status.set_lifecycle(NetworkLifecycle::Failed);
-            }
-        }
         if !self.root_connection_failed || self.primary.simulator_id != simulator_id {
             Self::publish_primary_terminal_event(
                 terminal_event_permit,
@@ -321,7 +296,7 @@ impl SimulatorCoordinator {
         if self.capability_request_waiters.len() >= MAX_TRACKED_CAPABILITY_CLIENTS {
             return Err("The capability client limit has been reached.".into());
         }
-        let client = Client::new_with_status_and_budget(seed, self.status.clone(), self.capability_budget.clone())?;
+        let client = Client::new_with_budget(seed, self.capability_budget.clone())?;
         track_capability_requests(&mut self.capability_request_waiters, &client);
         Ok(client)
     }
@@ -329,8 +304,8 @@ impl SimulatorCoordinator {
     async fn finish_capability_request_waiters(&mut self) {
         self.capabilities.close_session();
         while let Some(result) = self.capability_request_waiters.join_next().await {
-            if let Err(error) = result {
-                tracing::error!(%error, "Capability request waiter failed");
+            if result.is_err() {
+                tracing::error!("Capability request waiter task failed");
             }
         }
     }
@@ -453,7 +428,6 @@ impl SimulatorCoordinator {
         }
         state.connected_simulators.remove(&simulator_id);
         let error = format!("A simulator connection exceeded the {MAX_PRECONNECT_EVENTS}-event pre-connect buffer.");
-        self.status.record_error(&error);
         if simulator_id == self.simulator_id {
             return Err(error);
         }
@@ -577,7 +551,7 @@ impl SimulatorCoordinator {
                     self.start_neighbor(simulator_id, region_handle, endpoint, None, setup).await?;
                 }
             }
-            Err(reason) => self.status.record_error(format!("Ignored malformed EnableSimulator event: {reason}")),
+            Err(_reason) => {}
         }
         Ok(())
     }
@@ -591,10 +565,7 @@ impl SimulatorCoordinator {
     ) -> Result<(), String> {
         match decode_crossed_region(body, self.session.agent_id, self.session.session_id) {
             Ok(handoff) => self.request_handoff(simulator_id, handoff, HandoffAnnouncement::CrossedRegion, setup, handoff_state).await,
-            Err(reason) => {
-                self.status.record_error(format!("Ignored malformed CrossedRegion event: {reason}"));
-                Ok(())
-            }
+            Err(_reason) => Ok(()),
         }
     }
 
@@ -617,10 +588,7 @@ impl SimulatorCoordinator {
                 )
                 .await
             }
-            Err(reason) => {
-                self.status.record_error(format!("Ignored malformed TeleportFinish event: {reason}"));
-                Ok(())
-            }
+            Err(_reason) => Ok(()),
         }
     }
 
@@ -648,7 +616,7 @@ impl SimulatorCoordinator {
                 }
             }
             Ok(()) => {}
-            Err(reason) => self.status.record_error(format!("Ignored malformed TeleportFailed event: {reason}")),
+            Err(_reason) => {}
         }
         Ok(())
     }
@@ -656,19 +624,16 @@ impl SimulatorCoordinator {
     async fn process_agent_communication(&mut self, body: &Value, setup: &mut PromotionSetup<'_>) -> Result<(), String> {
         let (endpoint, seed) = match decode_agent_communication(body, self.session.agent_id) {
             Ok(event) => event,
-            Err(reason) => {
-                self.status.record_error(format!("Ignored malformed agent communication event: {reason}"));
+            Err(_reason) => {
                 return Ok(());
             }
         };
         if endpoint == self.primary.endpoint {
-            self.status.record_error("Ignored an agent communication event for the primary simulator.");
             return Ok(());
         }
         let Some(target_id) =
             setup.state.neighbor_connections.values().find(|active| active.endpoint == endpoint).map(|active| active.simulator_id)
         else {
-            self.status.record_error("Ignored a seed capability for an untracked simulator.");
             return Ok(());
         };
         if setup.state.simulator_capabilities.contains_key(&target_id) {
@@ -686,7 +651,6 @@ impl SimulatorCoordinator {
             EventQueueExit::TaskFailed => "The primary simulator EventQueueGet task ended unexpectedly.",
         };
 
-        self.status.record_error(reason);
         tracing::warn!(
             simulator = self.primary.simulator_id.get(),
             ?exit,

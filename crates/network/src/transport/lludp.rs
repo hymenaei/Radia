@@ -10,15 +10,12 @@ use protocol::{
 };
 use tokio::time::Instant;
 
+use crate::event::{
+    PacketOrder,
+    PacketOrder::{Ambiguous, Degraded, Ordered},
+};
 #[cfg(test)]
 use crate::transport::UdpTransport;
-use crate::{
-    event::{
-        PacketOrder,
-        PacketOrder::{Ambiguous, Degraded, Ordered},
-    },
-    status::NetworkStatusHandle,
-};
 
 #[cfg(test)]
 pub(crate) const DEFAULT_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -100,19 +97,11 @@ pub(crate) struct Circuit {
     next_ping_id: u8,
     pending_pings: HashMap<u8, Instant>,
     quarantined_ping_ids: HashMap<u8, Instant>,
-    status: NetworkStatusHandle,
-}
-
-impl Drop for Circuit {
-    fn drop(&mut self) {
-        self.status.set_reliable_packets_pending(0);
-    }
 }
 
 impl Circuit {
-    #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self::with_status(NetworkStatusHandle::default())
+        Self::new_inner()
     }
 
     #[cfg(test)]
@@ -122,7 +111,7 @@ impl Circuit {
         circuit
     }
 
-    pub(crate) fn with_status(status: NetworkStatusHandle) -> Self {
+    fn new_inner() -> Self {
         Self {
             next_sequence: 1,
             pending: HashMap::new(),
@@ -138,7 +127,6 @@ impl Circuit {
             next_ping_id: 0,
             pending_pings: HashMap::new(),
             quarantined_ping_ids: HashMap::new(),
-            status,
         }
     }
 
@@ -212,9 +200,7 @@ impl Circuit {
 
     #[cfg(test)]
     pub(crate) async fn send(&mut self, socket: &UdpTransport, message: Message, delivery: Delivery) -> Result<u32, String> {
-        let prepared = self.prepare_message(message, delivery).inspect_err(|error| {
-            self.status.record_error(error.as_str());
-        })?;
+        let prepared = self.prepare_message(message, delivery)?;
         let sequence = prepared.sequence();
         self.send_prepared(socket, prepared).await?;
         Ok(sequence)
@@ -302,7 +288,6 @@ impl Circuit {
                     self.pending_pings.insert(ping_id, sent_at);
                     self.next_ping_id = ping_id.wrapping_add(1);
                 }
-                self.status.set_reliable_packets_pending(self.pending.len());
             }
             DatagramCommit::Acknowledgements { sequence, acknowledgements } => {
                 if sequence != self.next_sequence {
@@ -319,7 +304,6 @@ impl Circuit {
                     packet.bytes = prepared.bytes;
                     packet.sent_at = sent_at;
                     packet.retries += 1;
-                    self.status.note_retransmit();
                 }
             }
         }
@@ -334,7 +318,6 @@ impl Circuit {
                 DatagramCommit::Retransmission { .. } => format!("Could not retry a simulator message: {error}"),
                 DatagramCommit::Message { .. } => format!("Could not send a simulator message: {error}"),
             };
-            self.status.record_error(&message);
             return Err(message);
         }
         self.commit_sent(prepared, Instant::now())
@@ -382,7 +365,7 @@ impl Circuit {
         }
         if self.received_sequences.len() >= MAX_RECEIVED_RELIABLE_PACKETS {
             if !self.duplicate_history_full {
-                self.status.record_error("Reliable packet duplicate history is full; new reliable packets are not acknowledged.");
+                tracing::warn!("Reliable packet duplicate history is full; new reliable packets are not acknowledged");
                 self.duplicate_history_full = true;
             }
             return Err(ReceiveError::DuplicateHistoryFull);
@@ -527,7 +510,6 @@ impl Circuit {
         for acknowledged in acknowledgements {
             self.pending.remove(&acknowledged);
         }
-        self.status.set_reliable_packets_pending(self.pending.len());
     }
 
     fn queue_ack(&mut self, sequence: u32) -> bool {
@@ -641,14 +623,13 @@ fn remove_sent_acks(pending_acks: &mut VecDeque<u32>, pending_ack_sequences: &mu
 
 #[cfg(test)]
 pub(crate) async fn retransmit_due(socket: &UdpTransport, pending: &mut HashMap<u32, PendingPacket>) -> Result<(), String> {
-    retransmit_due_tracked(socket, pending, &NetworkStatusHandle::default(), DEFAULT_RETRY_TIMEOUT).await
+    retransmit_due_tracked(socket, pending, DEFAULT_RETRY_TIMEOUT).await
 }
 
 #[cfg(test)]
 async fn retransmit_due_tracked(
     socket: &UdpTransport,
     pending: &mut HashMap<u32, PendingPacket>,
-    status: &NetworkStatusHandle,
     retry_timeout: Duration,
 ) -> Result<(), String> {
     let now = Instant::now();
@@ -667,7 +648,6 @@ async fn retransmit_due_tracked(
         packet.bytes = bytes;
         packet.sent_at = now;
         packet.retries += 1;
-        status.note_retransmit();
     }
     Ok(())
 }

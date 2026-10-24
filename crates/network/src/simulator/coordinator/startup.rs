@@ -77,15 +77,14 @@ impl SimulatorCoordinator {
         login_data: ResponseData,
         options: SimulatorCoordinatorOptions,
     ) -> Result<Option<Self>, String> {
-        let SimulatorCoordinatorOptions { status, coverage_losses, session: options, mut startup_disconnect, root_transport } = options;
+        let SimulatorCoordinatorOptions { coverage_losses, session: options, mut startup_disconnect, root_transport } = options;
         async {
             if startup_disconnect.as_ref().is_some_and(|disconnect| *disconnect.borrow()) {
                 return Ok(None);
             }
             let simulator_id = SimulatorId::allocate().ok_or_else(|| "Simulator connection ID space is exhausted.".to_string())?;
             let capability_budget = CapabilityBudget::new();
-            let capabilities =
-                Client::new_with_status_and_budget(session.seed_capability.clone(), status.clone(), capability_budget.clone())?;
+            let capabilities = Client::new_with_budget(session.seed_capability.clone(), capability_budget.clone())?;
             let outbound_budget = OutboundBudget::new(options.upstream_bytes_per_second().get());
             let mut capability_request_waiters = JoinSet::new();
             track_capability_requests(&mut capability_request_waiters, &capabilities);
@@ -105,7 +104,6 @@ impl SimulatorCoordinator {
             let root_shutdown = neighbor_cancellation.subscribe();
             let root_memory = packet_memory.clone();
             let root_session = session.clone();
-            let root_status = status.clone();
             let root_coverage_losses = coverage_losses.clone();
             let root_budget: OutboundBudgetHandle = outbound_budget.handle();
             let root_connection_abort = root_connection_workers.spawn(
@@ -115,7 +113,6 @@ impl SimulatorCoordinator {
                         SimulatorConnectionOptions {
                             simulator_id: root_id,
                             region_handle: None,
-                            status: root_status,
                             coverage_losses: root_coverage_losses,
                             primary_state: Some(primary_state_receiver),
                             budget: root_budget,
@@ -208,7 +205,6 @@ impl SimulatorCoordinator {
                 capability_budget,
                 capability_request_waiters,
                 login_data,
-                status,
                 event_backlog: PrimaryEventBacklog::default(),
                 packet_memory,
                 coverage_losses,

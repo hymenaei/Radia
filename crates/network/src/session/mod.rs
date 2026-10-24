@@ -152,10 +152,6 @@ impl Session {
         let login_url = credentials.grid.login_url().to_owned();
         thread::start_at(credentials, options, login_url)
     }
-    #[cfg(feature = "testing")]
-    pub(crate) fn start_with_login_url_for_test(credentials: LoginCredentials, login_url: String) -> Result<Self, Error> {
-        thread::start_at(credentials, SessionOptions::default(), login_url)
-    }
 }
 
 impl Session {

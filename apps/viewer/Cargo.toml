@@ -60,6 +60,5 @@ time.workspace = true
 url.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 gpui = { workspace = true, features = ["test-support"] }
-network = { workspace = true, features = ["testing"] }
 test-support.workspace = true
 tempfile.workspace = true

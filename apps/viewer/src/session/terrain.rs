@@ -108,8 +108,8 @@ fn decode_terrain_patches(source: UpdateSource, data: &[u8], cancelled: &AtomicB
 
 #[cfg(test)]
 mod tests {
+    use crate::test_helpers::simulator_id;
     use futures::channel::oneshot;
-    use network::testing::simulator_id;
     use protocol::messages::LayerData;
     use world::{OrderEvidence, Region};
 

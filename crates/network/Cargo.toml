@@ -11,9 +11,6 @@ bench = false
 [lints]
 workspace = true
 
-[features]
-testing = []
-
 [dependencies]
 llsd.workspace = true
 uuid.workspace = true

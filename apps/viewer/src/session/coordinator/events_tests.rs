@@ -4,7 +4,6 @@ use math::{Quat, Vec3};
 use network::{
     Event::{SimulatorConnected, SimulatorDisconnected},
     PacketOrder::{Ambiguous, Ordered},
-    testing::simulator_id,
 };
 use protocol::{
     lludp::Message,
@@ -30,6 +29,7 @@ use crate::session::{
     recovery::recovery_request,
     world::{IngestStatus, SessionWorld, viewer_world_limits},
 };
+use crate::test_helpers::simulator_id;
 
 fn apply_world_event_with_handoff(
     world: &mut SessionWorld,

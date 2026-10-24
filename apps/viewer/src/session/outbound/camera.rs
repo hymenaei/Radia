@@ -107,8 +107,9 @@ impl CameraUplink {
 #[cfg(test)]
 mod tests {
     use math::Vec3;
-    use network::testing::simulator_id;
     use tokio::time::advance;
+
+    use crate::test_helpers::simulator_id;
 
     use super::*;
 

@@ -6,6 +6,7 @@ mod handoff;
 mod handshake;
 mod intake;
 mod login;
+mod outbound;
 mod promotion;
 mod reliability;
 mod returns;

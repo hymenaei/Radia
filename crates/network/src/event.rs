@@ -23,14 +23,14 @@ static NEXT_SIMULATOR_ID: AtomicU64 = AtomicU64::new(1);
 pub struct SimulatorId(u64);
 
 impl SimulatorId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+
     pub const fn get(self) -> u64 {
         self.0
     }
 
-    #[cfg(test)]
-    pub(crate) const fn new(generation: u64) -> Self {
-        Self(generation)
-    }
     pub(crate) fn allocate() -> Option<Self> {
         NEXT_SIMULATOR_ID.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1)).ok().map(Self)
     }

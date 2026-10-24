@@ -77,7 +77,7 @@ fn object_views_support_shared_reads() {
 
     let region = Region::new(6);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    std::assert_matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
     let Introduced(entity) = world.observe_object(observation(source(region, 1), 60, 1)).unwrap().outcome else {
         panic!("expected object introduction");
     };
@@ -92,8 +92,8 @@ fn object_views_support_shared_reads() {
         assert_eq!(object.id(), scanned.id());
         std::thread::scope(|scope| {
             let shared = &object;
-            let reader = scope.spawn(move || shared.properties());
-            assert_eq!(scanned.clone().properties(), reader.join().unwrap());
+            let reader = scope.spawn(move || shared.id());
+            assert_eq!(scanned.clone().id(), reader.join().unwrap());
         });
     }
     assert_eq!(

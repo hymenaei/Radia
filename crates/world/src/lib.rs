@@ -44,7 +44,7 @@ pub use object::transform::{
     WorldPose, WorldTransform, WorldTransformState,
 };
 pub use object::view::{Object, Objects};
-pub use object::{Kind, Parent, ParentUpdate, Properties, PropertiesPatch, PropertiesProvenance, PropertyProvenance};
+pub use object::{Kind, Parent, ParentUpdate};
 pub use read::{
     MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_DETAIL_BYTES, MAX_OBJECT_MEDIA_READ_BYTES,
     MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetail, ObjectDetailBatch,

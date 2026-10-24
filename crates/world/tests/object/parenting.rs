@@ -1,8 +1,8 @@
 use super::support::{
     AmbiguousOrder, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, FieldRejectionReason, HashSet, IgnoredStale, Introduced,
-    InvalidValue, Local, Object, ObjectPatch, Parent, ParentCycle, ParentDependsOnRejectedParent, Pending, Pose, PropertiesPatch, Quat,
-    Region, Removed, Resolved, Root, SitTarget, Unchanged, UnknownObject, UntrustedSource, UpdateSource, Updated, Vec3, World, address,
-    limits, local_id, object, patch_properties_current, source, untracked, uuid, with_region,
+    InvalidValue, Local, Object, ObjectPatch, Parent, ParentCycle, ParentDependsOnRejectedParent, Pending, Pose, Quat, Region, Removed,
+    Resolved, Root, SitTarget, Unchanged, UnknownObject, UntrustedSource, UpdateSource, Updated, Vec3, World, address, limits, local_id,
+    object, source, untracked, uuid, with_region,
 };
 
 #[test]
@@ -322,20 +322,15 @@ fn fresh_declaration_rebinds_pending_parent() {
     let mut world = with_region(region);
     let parent_address = address(region, 1);
     let parent_id = uuid(140);
-    let child_id = uuid(141);
     let parent = world.observe_object(object(source(region, 10), 140, 1, Object, Root)).unwrap();
     let Introduced(parent_entity) = parent.outcome else { panic!("expected parent introduction") };
     let child = world.observe_object(object(source(region, 11), 141, 2, Object, Local(local_id(1)))).unwrap();
     let Introduced(child_entity) = child.outcome else { panic!("expected child introduction") };
 
-    let properties = patch_properties_current(
-        &mut world,
-        source(region, 200),
-        child_id,
-        PropertiesPatch { owner_id: Some(uuid(142)), creator_id: None },
-    )
-    .unwrap();
-    assert_eq!(properties.outcome, Updated(child_entity));
+    assert_eq!(
+        world.patch_object(ObjectPatch { scale: Some(Vec3::ONE), ..ObjectPatch::new(source(region, 200), local_id(2)) }).unwrap().outcome,
+        Updated(child_entity)
+    );
     assert_eq!(world.remove_object(source(region, 12), local_id(1)).unwrap().outcome, Removed(parent_id));
     assert_eq!(world.object(child_entity).unwrap().parent(), Pending { address: parent_address, expected_uuid: Some(parent_id) });
 
@@ -354,7 +349,7 @@ fn fresh_declaration_rebinds_pending_parent() {
     assert_eq!(world.object(child_entity).unwrap().parent(), Resolved(unrelated_entity));
 
     let replacement = world.observe_object(object(source(region, 30), 140, 1, Object, Root)).unwrap();
-    assert!(matches!(replacement.outcome, Introduced(_)));
+    std::assert_matches!(replacement.outcome, Introduced(_));
     assert_eq!(world.entity(uuid(143)), None);
     assert_eq!(world.object(child_entity).unwrap().parent(), Pending { address: parent_address, expected_uuid: Some(uuid(143)) });
 }
@@ -365,21 +360,13 @@ fn delayed_declaration_keeps_pending_parent() {
     let mut world = with_region(region);
     let parent_address = address(region, 1);
     let parent_id = uuid(170);
-    let child_id = uuid(171);
 
     let parent = world.observe_object(object(source(region, 10), 170, 1, Object, Root)).unwrap();
-    assert!(matches!(parent.outcome, Introduced(_)));
+    std::assert_matches!(parent.outcome, Introduced(_));
     let child = world.observe_object(object(source(region, 11), 171, 2, Object, Local(local_id(1)))).unwrap();
     let Introduced(child_entity) = child.outcome else { panic!("expected child introduction") };
     assert_eq!(
-        patch_properties_current(
-            &mut world,
-            source(region, 200),
-            child_id,
-            PropertiesPatch { owner_id: Some(uuid(172)), creator_id: None }
-        )
-        .unwrap()
-        .outcome,
+        world.patch_object(ObjectPatch { scale: Some(Vec3::ONE), ..ObjectPatch::new(source(region, 200), local_id(2)) }).unwrap().outcome,
         Updated(child_entity)
     );
     assert_eq!(world.remove_object(source(region, 12), local_id(1)).unwrap().outcome, Removed(parent_id));

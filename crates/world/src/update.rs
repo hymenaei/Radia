@@ -103,7 +103,6 @@ pub enum FieldGroup {
     PbrMaterials,
     ObjectMedia,
     SitTarget,
-    Properties,
     AvatarAppearance,
     PbrMaterialOverrides,
 }

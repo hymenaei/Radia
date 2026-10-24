@@ -223,7 +223,7 @@ impl World {
             }
             self.tombstones.remove(&address);
         }
-        self.store.commit(entity, state, facets, None, ordering);
+        self.store.commit(entity, state, facets, ordering);
         if binding_changed {
             self.insert_tombstone(old_binding.address, if transfer { old_binding.fence() } else { origin.stamp });
         }

@@ -20,9 +20,9 @@ pub(super) use world::{Appearance, Shape};
 pub(super) use world::{
     AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance, FieldRejection,
     FieldRejectionReason, FieldUpdate, Kind, LinearMotion, LocalAddress, MAX_AVATAR_TEXTURE_SLOTS, MAX_PBR_MATERIAL_BINDINGS, MediaEntry,
-    ObjectMediaUpdate, ObjectObservation, ObjectPatch, ParentUpdate, PbrMaterialAssignments, PbrMaterialAssignmentsError, Pose,
-    PropertiesPatch, Region, RegionInfo, SculptFlags, SculptType, SitTarget, SurfaceAppearance, SurfaceAppearanceError, UpdateAuthority,
-    UpdateSource, World, WorldLimits,
+    ObjectMediaUpdate, ObjectObservation, ObjectPatch, ParentUpdate, PbrMaterialAssignments, PbrMaterialAssignmentsError, Pose, Region,
+    RegionInfo, SculptFlags, SculptType, SitTarget, SurfaceAppearance, SurfaceAppearanceError, UpdateAuthority, UpdateSource, World,
+    WorldLimits,
 };
 
 pub(super) fn limits() -> WorldLimits {
@@ -43,17 +43,6 @@ pub(super) fn limits() -> WorldLimits {
 
 pub(super) fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
-}
-
-pub(super) fn patch_properties_current(
-    world: &mut World,
-    source: UpdateSource,
-    id: Uuid,
-    patch: PropertiesPatch,
-) -> Result<world::Applied, world::ApplyError> {
-    let entity = world.entity(id).expect("property patch target is live");
-    let target = world.object_binding_target(entity).expect("live property target has a current binding");
-    world.patch_properties(source, target, id, patch)
 }
 
 pub(super) fn surface(default_texture: u128, face_texture: u128) -> SurfaceAppearance {
@@ -103,6 +92,6 @@ pub(super) fn object(source: UpdateSource, id: u128, local_id_value: u32, kind: 
 
 pub(super) fn with_region(region: Region) -> World {
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    std::assert_matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
     world
 }

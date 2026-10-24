@@ -7,7 +7,7 @@ use math::{DVec3, Quat, Vec3};
 use uuid::Uuid;
 use world::{
     Appearance, Applied,
-    ApplyOutcome::{Introduced, Removed, Updated},
+    ApplyOutcome::{Introduced, Removed},
     AttachmentPoint, CoordinateFrame, Entity, FieldUpdate, Kind,
     Kind::{Avatar, Object},
     LinearMotion, LocalAddress, MAX_MEDIA_URL_BYTES, MAX_MEDIA_WHITELIST_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_REGION_PAGE_BYTES,
@@ -15,8 +15,8 @@ use world::{
     OrderEvidence::Ordered,
     Parent, ParentUpdate,
     ParentUpdate::{Local, Root},
-    Pose, PoseState, PropertiesPatch, Region, RegionHandle, RegionInfo, UnresolvedReason, UpdateSource, World, WorldChange,
-    WorldChangeClasses, WorldLimits, WorldPose, WorldReadError, WorldTransform, WorldTransformState,
+    Pose, PoseState, Region, RegionHandle, RegionInfo, UnresolvedReason, UpdateSource, World, WorldChange, WorldChangeClasses, WorldLimits,
+    WorldPose, WorldReadError, WorldTransform, WorldTransformState,
 };
 
 fn world_limits() -> WorldLimits {
@@ -37,17 +37,6 @@ fn world_limits() -> WorldLimits {
 
 fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
-}
-
-fn patch_properties_current(
-    world: &mut World,
-    source: UpdateSource,
-    id: Uuid,
-    patch: PropertiesPatch,
-) -> Result<world::Applied, world::ApplyError> {
-    let entity = world.entity(id).expect("property patch target is live");
-    let target = world.object_binding_target(entity).expect("live property target has a current binding");
-    world.patch_properties(source, target, id, patch)
 }
 
 fn source(region: Region, order: u64) -> UpdateSource {
@@ -76,15 +65,15 @@ fn borrowed_reads_expose_current_state() {
     let first = Region::new(1);
     let second = Region::new(2);
     let mut world = World::new(world_limits());
-    assert!(matches!(world.adopt_region(first).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    std::assert_matches!(world.adopt_region(first).unwrap().outcome, world::RegionOutcome::Adopted { .. });
+    std::assert_matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. });
     let first_info = RegionInfo {
         region_id: Some(uuid(10)),
         handle: Some(RegionHandle::new((256_u64 << 32) | 512)),
         name: Some("First".to_owned()),
         origin: None,
     };
-    assert!(matches!(world.patch_region(first, first_info.clone()).unwrap().outcome, world::RegionOutcome::Patched { .. }));
+    std::assert_matches!(world.patch_region(first, first_info.clone()).unwrap().outcome, world::RegionOutcome::Patched { .. });
     assert_eq!(world.region(first), Some(&first_info));
     assert_eq!(first_info.handle.unwrap().origin(), DVec3::new(256.0, 512.0, 0.0));
     assert_eq!(world.region(Region::new(99)), None);
@@ -126,7 +115,6 @@ fn borrowed_reads_expose_current_state() {
     assert_eq!(view.appearance(), None);
     assert_eq!(view.attachment_point(), NonZeroU8::new(7).map(AttachmentPoint::new));
     assert_eq!(view.sit_target(), None);
-    assert_eq!(view.properties().owner_id, None);
     assert_eq!(view.coordinate_frame().unwrap(), CoordinateFrame::RegionRelative { region: first });
     assert_eq!(
         view.world_transform().unwrap(),
@@ -137,20 +125,6 @@ fn borrowed_reads_expose_current_state() {
     );
     assert_eq!(world.object(child).unwrap().coordinate_frame().unwrap(), CoordinateFrame::LinksetRoot { root });
     assert_eq!(world.object(child).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingLocalPose));
-    assert_eq!(
-        patch_properties_current(
-            &mut world,
-            source(first, 3),
-            uuid(20),
-            PropertiesPatch { owner_id: Some(uuid(30)), creator_id: Some(uuid(31)) }
-        )
-        .unwrap()
-        .outcome,
-        Updated(root)
-    );
-    let properties = world.object(root).unwrap().properties();
-    assert_eq!(properties.owner_id, Some(uuid(30)));
-    assert_eq!(properties.creator_id, Some(uuid(31)));
 }
 
 #[test]

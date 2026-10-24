@@ -1,10 +1,9 @@
 use super::support::{
     Appearance, AssetId, Avatar, AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance,
-    FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, IgnoredStale, Introduced, MAX_AVATAR_TEXTURE_SLOTS,
-    MAX_PBR_MATERIAL_BINDINGS, MediaEntry, Object, ObjectMediaUpdate, ObjectPatch, PbrMaterialAssignments, PbrMaterialAssignmentsError,
-    PropertiesPatch, Quat, Region, Root, Shape, SitTarget, SurfaceAppearance, SurfaceAppearanceError, Unchanged, Unknown, UntrustedSource,
-    Updated, Uuid, Vec3, address, local_id, mesh_shape, object, patch_properties_current, pbr_materials, sculpt_shape, source, surface,
-    untracked, uuid, with_region,
+    FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, Introduced, MAX_AVATAR_TEXTURE_SLOTS, MAX_PBR_MATERIAL_BINDINGS,
+    MediaEntry, Object, ObjectMediaUpdate, ObjectPatch, PbrMaterialAssignments, PbrMaterialAssignmentsError, Quat, Region, Root, Shape,
+    SitTarget, SurfaceAppearance, SurfaceAppearanceError, Unchanged, Unknown, UntrustedSource, Updated, Uuid, Vec3, address, local_id,
+    mesh_shape, object, pbr_materials, sculpt_shape, source, surface, untracked, uuid, with_region,
 };
 
 #[test]
@@ -455,10 +454,8 @@ fn transfer_scopes_regional_fields() {
     let first = Region::new(38);
     let second = Region::new(39);
     let mut world = with_region(first);
-    assert!(matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    std::assert_matches!(world.adopt_region(second).unwrap().outcome, world::RegionOutcome::Adopted { .. });
     let object_id = uuid(380);
-    let owner = uuid(381);
-    let creator = uuid(382);
     let first_object = world.observe_object(object(source(first, 1), 380, 1, Object, Root)).unwrap();
     let Introduced(entity) = first_object.outcome else { panic!("expected object introduction") };
     let saved_shape = mesh_shape(0x380);
@@ -470,49 +467,17 @@ fn transfer_scopes_regional_fields() {
         Updated(entity)
     );
 
-    assert_eq!(
-        patch_properties_current(&mut world, source(first, 200), object_id, PropertiesPatch { owner_id: Some(owner), creator_id: None })
-            .unwrap()
-            .outcome,
-        Updated(entity)
-    );
-    let stale_creator =
-        patch_properties_current(&mut world, source(first, 199), object_id, PropertiesPatch { owner_id: None, creator_id: Some(creator) })
-            .unwrap();
-    assert_eq!(stale_creator.outcome, Updated(entity));
-    assert_eq!(world.object(entity).unwrap().properties().creator_id, Some(creator));
-
     let target = SitTarget { position: Vec3::X, rotation: Quat::IDENTITY };
     assert_eq!(world.patch_sit_target(source(first, 201), object_id, Some(target)).unwrap().outcome, Updated(entity));
     let transfer = world.observe_object(object(source(second, 1), 380, 1, Object, Root)).unwrap();
     assert_eq!(transfer.outcome, Updated(entity));
     assert_eq!(world.object(entity).unwrap().sit_target(), None);
-    assert_eq!(world.object(entity).unwrap().properties().owner_id, Some(owner));
 
-    assert_eq!(
-        patch_properties_current(&mut world, source(second, 2), object_id, PropertiesPatch { owner_id: None, creator_id: Some(creator) })
-            .unwrap()
-            .outcome,
-        Updated(entity)
-    );
     let destination_target = SitTarget { position: Vec3::Y, rotation: Quat::IDENTITY };
     assert_eq!(world.patch_sit_target(source(second, 2), object_id, Some(destination_target)).unwrap().outcome, Updated(entity));
 
-    assert_eq!(
-        patch_properties_current(
-            &mut world,
-            source(first, 300),
-            object_id,
-            PropertiesPatch { owner_id: None, creator_id: Some(uuid(383)) }
-        )
-        .unwrap()
-        .outcome,
-        IgnoredStale
-    );
     assert_eq!(world.patch_sit_target(source(first, 301), object_id, Some(target)).unwrap().outcome, Unchanged);
     let view = world.object(entity).unwrap();
-    assert_eq!(view.properties().owner_id, Some(owner));
-    assert_eq!(view.properties().creator_id, Some(creator));
     assert_eq!(view.sit_target(), Some(destination_target));
     let returned = world.observe_object(object(source(first, 2), 380, 2, Object, Root)).unwrap();
     assert_eq!(returned.outcome, Updated(entity));
@@ -523,23 +488,6 @@ fn transfer_scopes_regional_fields() {
             .outcome,
         Unchanged
     );
-    let next_creator = uuid(383);
-    assert_eq!(
-        patch_properties_current(
-            &mut world,
-            source(first, 3),
-            object_id,
-            PropertiesPatch { owner_id: Some(uuid(384)), creator_id: Some(next_creator) },
-        )
-        .unwrap()
-        .outcome,
-        Updated(entity)
-    );
     let view = world.object(entity).unwrap();
     assert_eq!(view.shape(), Some(saved_shape));
-    assert_eq!(view.properties().owner_id, Some(owner));
-    assert_eq!(view.properties().creator_id, Some(next_creator));
-    assert_eq!(view.properties_provenance().owner.unwrap().order, 200);
-    assert_eq!(view.properties_provenance().creator.unwrap().region, first);
-    assert_eq!(view.properties_provenance().creator.unwrap().order, 3);
 }

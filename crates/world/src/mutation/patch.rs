@@ -11,8 +11,8 @@ use crate::object::components::Fenced;
 use crate::object::relationships::ParentResolution;
 use crate::update::FieldStamp;
 use crate::{
-    Applied, ApplyError, ApplyOutcome, AvatarAppearance, DeferredReason, FieldGroup, FieldRejectionReason, LocalAddress,
-    ObjectBindingTarget, ObjectPatch, PropertiesPatch, PropertyProvenance, Recovery, Rejections, SitTarget, UpdateSource,
+    Applied, ApplyError, ApplyOutcome, AvatarAppearance, DeferredReason, FieldGroup, FieldRejectionReason, LocalAddress, ObjectPatch,
+    Recovery, Rejections, SitTarget, UpdateSource,
 };
 use crate::{RegionalStamp, World, newer_field, newer_region_field};
 
@@ -85,7 +85,7 @@ impl World {
         let (state, facets, ordering) = draft.into_parts();
         drop(read);
 
-        self.store.commit(entity, state, facets, None, ordering);
+        self.store.commit(entity, state, facets, ordering);
         if let Some((old, new)) = media_bytes {
             self.object_media_bytes = self.object_media_bytes.saturating_sub(old).saturating_add(new);
         }
@@ -101,75 +101,6 @@ impl World {
         }
         let outcome = if change_classes.is_empty() { ApplyOutcome::Unchanged } else { ApplyOutcome::Updated(entity) };
         Ok(self.finish(outcome, effects).with_rejections(rejections).with_recovery_satisfied(parent.is_some()))
-    }
-
-    pub fn patch_properties(
-        &mut self,
-        source: UpdateSource,
-        target: ObjectBindingTarget,
-        response_id: Uuid,
-        patch: PropertiesPatch,
-    ) -> Result<Applied, ApplyError> {
-        self.require_active_region(source.region)?;
-        validate_uuid(response_id, "object_id")?;
-        if response_id != target.id || target.address.region != source.region || !self.object_binding_target_is_current(target) {
-            return Ok(Applied::new(ApplyOutcome::IgnoredStale));
-        }
-        let Some(stamp) = source.stamp() else {
-            return Ok(self.defer(DeferredReason::AmbiguousOrder, target.address));
-        };
-        let entity = target.entity;
-        let (mut state, mut properties, ordering) = {
-            let object = self.object(entity).expect("current properties target names a live entity");
-            (object.record().state, self.store.properties(entity.0), *object.ordering())
-        };
-        let provenance = properties.properties_provenance;
-        let field_stamp = FieldStamp { authority: source.authority(), stamp };
-        let mut rejections = Rejections::default();
-        let untrusted = |value: Option<Uuid>, fence: Option<PropertyProvenance>| {
-            value.is_some() && source.authority() == Untracked && fence.is_some_and(|fence| fence.authority == Tracked)
-        };
-        let owner_untrusted = untrusted(patch.owner_id, provenance.owner);
-        let creator_untrusted = untrusted(patch.creator_id, provenance.creator);
-        if owner_untrusted || creator_untrusted {
-            rejections.reject(FieldGroup::Properties, UntrustedSource);
-        }
-        let newer = |value: Option<Uuid>, untrusted: bool, fence: Option<PropertyProvenance>| {
-            value.is_some() && !untrusted && newer_region_field(source.region, field_stamp, fence.map(RegionalStamp::from))
-        };
-        let owner_is_newer = newer(patch.owner_id, owner_untrusted, provenance.owner);
-        let creator_is_newer = newer(patch.creator_id, creator_untrusted, provenance.creator);
-        let next_provenance = PropertyProvenance {
-            region: source.region,
-            authority: source.authority(),
-            order: stamp.order,
-            block_ordinal: stamp.block_ordinal,
-            source_sequence: source.sequence(),
-        };
-        let observable_change = (owner_is_newer
-            && (properties.properties.owner_id != patch.owner_id || provenance.owner != Some(next_provenance)))
-            || (creator_is_newer && (properties.properties.creator_id != patch.creator_id || provenance.creator != Some(next_provenance)));
-        if observable_change {
-            self.ensure_revision_available()?;
-        }
-        if owner_is_newer {
-            properties.properties.owner_id = patch.owner_id;
-            properties.properties_provenance.owner = Some(next_provenance);
-        }
-        if creator_is_newer {
-            properties.properties.creator_id = patch.creator_id;
-            properties.properties_provenance.creator = Some(next_provenance);
-        }
-        if patch.owner_id.is_some() || patch.creator_id.is_some() {
-            state.binding.advance_fence(source, stamp);
-        }
-        self.store.commit(entity, state, None, Some(properties), ordering);
-        let (outcome, changes) = if observable_change {
-            (ApplyOutcome::Updated(entity), vec![EntityUpdated { id: response_id, entity, classes: WorldChangeClasses::PROPERTIES }])
-        } else {
-            (ApplyOutcome::Unchanged, Vec::new())
-        };
-        Ok(self.finish(outcome, Effects::from_changes(changes)).with_rejections(rejections))
     }
 
     pub fn patch_sit_target(&mut self, source: UpdateSource, id: Uuid, target: Option<SitTarget>) -> Result<Applied, ApplyError> {
@@ -227,7 +158,7 @@ impl World {
         facets.sit_target.fence = Some(RegionalStamp { region: source.region, stamp: field_stamp });
         state.binding.advance_fence(source, stamp);
         let changes = FacetChanges::new(before, facets);
-        self.store.commit(entity, state, Some(changes), None, ordering);
+        self.store.commit(entity, state, Some(changes), ordering);
         let (outcome, changes) = if observable_change {
             (ApplyOutcome::Updated(entity), vec![EntityUpdated { id, entity, classes: WorldChangeClasses::RELATIONSHIP }])
         } else {

@@ -29,8 +29,7 @@ impl WorldChangeClasses {
     pub const RELATIONSHIP: Self = Self(1 << 3);
     pub const SHAPE: Self = Self(1 << 4);
     pub const APPEARANCE: Self = Self(1 << 5);
-    pub const PROPERTIES: Self = Self(1 << 6);
-    pub const MEDIA: Self = Self(1 << 7);
+    pub const MEDIA: Self = Self(1 << 6);
 
     pub const fn is_empty(self) -> bool {
         self.0 == 0
@@ -171,7 +170,7 @@ mod tests {
     use super::*;
     use crate::{
         Appearance, FaceAppearance, FieldUpdate, Kind, LocalAddress, ObjectObservation, ObjectPatch, PbrMaterialAssignments, Pose,
-        PropertiesPatch, RegionInfo, RegionOutcome, SculptFlags, Shape, SurfaceAppearance, UpdateSource, WorldLimits,
+        RegionInfo, RegionOutcome, SculptFlags, Shape, SurfaceAppearance, UpdateSource, WorldLimits,
     };
     use utils::AssetId;
 
@@ -264,18 +263,6 @@ mod tests {
         assert_eq!(world.patch_object(patch), Err(ApplyError::RevisionExhausted));
         assert_eq!(world.object_detail(entity).unwrap(), before);
 
-        let target = world.object_binding_target(entity).unwrap();
-        assert_eq!(
-            world.patch_properties(
-                UpdateSource::new(region, 100, Ordered(100), 0),
-                target,
-                Uuid::from_u128(270),
-                PropertiesPatch { owner_id: Some(Uuid::from_u128(271)), creator_id: Some(Uuid::from_u128(272)) },
-            ),
-            Err(ApplyError::RevisionExhausted)
-        );
-        assert_eq!(world.object_detail(entity).unwrap(), before);
-
         world.journal.revision = revision;
         let removed = world.remove_object(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap()).unwrap();
         assert_eq!(removed.outcome, ApplyOutcome::Removed(Uuid::from_u128(270)));
@@ -289,24 +276,6 @@ mod tests {
         let mut initial = observation(region, 1, 270, 1);
         initial.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
         assert_revision(world.observe_object(initial).unwrap());
-        let target = world.object_binding_target(world.entity(Uuid::from_u128(270)).unwrap()).unwrap();
-        let owner_id = Uuid::from_u128(271);
-        assert_revision(
-            world
-                .patch_properties(
-                    UpdateSource::new(region, 1, Ordered(1), 0),
-                    target,
-                    Uuid::from_u128(270),
-                    PropertiesPatch { owner_id: Some(owner_id), creator_id: None },
-                )
-                .unwrap(),
-        );
-        assert!(matches!(
-            last_changes(&world),
-            [EntityUpdated { id, classes, .. }]
-                if *id == Uuid::from_u128(270) && classes.contains(WorldChangeClasses::PROPERTIES)
-        ));
-
         world.journal.revision = WorldRevision(u64::MAX);
         let stale = ObjectPatch {
             pose: Some(Pose { position: Some(Vec3::Y), rotation: None }),
@@ -319,18 +288,6 @@ mod tests {
             ..ObjectPatch::new(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap())
         };
         assert_eq!(world.patch_object(same_pose).unwrap().outcome, ApplyOutcome::Unchanged);
-        assert_eq!(
-            world
-                .patch_properties(
-                    UpdateSource::new(region, 1, Ordered(1), 0),
-                    target,
-                    Uuid::from_u128(270),
-                    PropertiesPatch { owner_id: Some(owner_id), creator_id: None },
-                )
-                .unwrap()
-                .outcome,
-            ApplyOutcome::Unchanged
-        );
         assert_eq!(world.observe_object(observation(region, 3, 270, 1)).unwrap().outcome, ApplyOutcome::Unchanged);
         assert_eq!(world.revision(), WorldRevision(u64::MAX));
     }

@@ -1,8 +1,8 @@
 use super::support::{
     AgentHandedOff, Ambiguous, AmbiguousOrder, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, HashSet, IgnoredStale, Introduced,
-    InvalidValue, KindMismatch, LinearMotion, Local, Object, ObjectPatch, Ordered, Parent, ParentCycle, Pending, Pose, PropertiesPatch,
-    Quat, Region, RegionInfo, Removed, Resolved, Root, TombstoneRecorded, Unchanged, UpdateSource, Updated, Vec3, World, WorldLimits,
-    address, limits, local_id, object, patch_properties_current, source, uuid, with_region,
+    InvalidValue, KindMismatch, LinearMotion, Local, Object, ObjectPatch, Ordered, Parent, ParentCycle, Pending, Pose, Quat, Region,
+    RegionInfo, Removed, Resolved, Root, TombstoneRecorded, Unchanged, UpdateSource, Updated, Vec3, World, WorldLimits, address, limits,
+    local_id, object, source, uuid, with_region,
 };
 
 #[test]
@@ -323,8 +323,8 @@ fn agent_region_change_requires_handoff() {
     let source_region = Region::new(4);
     let destination_region = Region::new(5);
     let mut world = World::new(limits());
-    assert!(matches!(world.adopt_region(source_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
-    assert!(matches!(world.adopt_region(destination_region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    std::assert_matches!(world.adopt_region(source_region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
+    std::assert_matches!(world.adopt_region(destination_region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
     let agent_id = uuid(40);
     world.set_self_agent(agent_id).unwrap();
 
@@ -335,17 +335,6 @@ fn agent_region_change_requires_handoff() {
     initial.angular_velocity = Some(Vec3::Z);
     let created = world.observe_object(initial).unwrap();
     let Introduced(agent) = created.outcome else { panic!("expected agent introduction") };
-    assert!(matches!(
-        patch_properties_current(
-            &mut world,
-            source(source_region, 101),
-            agent_id,
-            PropertiesPatch { owner_id: Some(uuid(41)), creator_id: None }
-        )
-        .unwrap()
-        .outcome,
-        Updated(_)
-    ));
     assert_eq!(world.remove_object(source(source_region, 102), local_id(8)).unwrap().outcome, Unchanged);
     assert_eq!(world.entity(agent_id), Some(agent));
     let ambiguous_kill = UpdateSource::new(source_region, 103, Ambiguous, 0);
@@ -372,14 +361,10 @@ fn agent_region_change_requires_handoff() {
     assert_eq!(current.transform().scale(), Some(Vec3::splat(1.5)));
     assert_eq!(current.linear_motion(), LinearMotion::default());
     assert_eq!(current.angular_velocity(), None);
-    assert_eq!(current.properties().owner_id, Some(uuid(41)));
     let return_handoff = object(source(source_region, 104), 40, 10, Avatar, Root);
     assert_eq!(world.handoff_agent(destination_region, return_handoff).unwrap().outcome, AgentHandedOff(agent));
-    let stale_property = PropertiesPatch { owner_id: Some(uuid(42)), creator_id: None };
-    assert_eq!(patch_properties_current(&mut world, source(source_region, 101), agent_id, stale_property).unwrap().outcome, Unchanged);
-    assert_eq!(world.object(agent).unwrap().properties().owner_id, Some(uuid(41)));
 
-    assert!(matches!(world.retire_region(source_region).unwrap().outcome, world::RegionOutcome::Retired { entities_removed: 1, .. }));
+    std::assert_matches!(world.retire_region(source_region).unwrap().outcome, world::RegionOutcome::Retired { entities_removed: 1, .. });
     assert_eq!(world.entity(agent_id), None);
     assert!(world.region(source_region).is_none());
 }

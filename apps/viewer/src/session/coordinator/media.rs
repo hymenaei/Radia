@@ -287,12 +287,18 @@ mod tests {
         let target = object_media_target(&mut world, simulator, 1, 1);
         let mut media = ObjectMediaIntake::new(ObjectMediaFetcher::new(Handle::current(), ready(())));
         media.queue(target, &world);
-        assert!(matches!(&media, ObjectMediaIntake::Enabled { waiting, .. } if waiting.len() == 1));
+        match &media {
+            ObjectMediaIntake::Enabled { waiting, .. } if waiting.len() == 1 => {}
+            _ => panic!("expected one waiting media target"),
+        }
         assert!(media.next_result().await.is_none());
 
         media.disable();
         media.queue(target, &world);
-        assert!(matches!(media, ObjectMediaIntake::Disabled), "disabled fetching releases queued work and rejects new work");
+        match &media {
+            ObjectMediaIntake::Disabled => {}
+            _ => panic!("disabled fetching releases queued work and rejects new work"),
+        }
         let event = simulator_message(
             simulator,
             2,
@@ -306,10 +312,19 @@ mod tests {
         let _ = apply_world_event(&mut world, &event).expect("object removal is applied");
         assert!(world.world().object(target.binding.entity()).is_none());
 
-        let input = select_drain_input(&mut reads, pending(), media.next_result(), pending(), pending(), pending(), ready(())).await;
-        assert!(matches!(input, input::Input::CameraTick));
+        let input = select_drain_input(
+            &mut reads,
+            pending(),
+            media.next_result(),
+            pending(),
+            pending(),
+            pending(),
+            ready(tokio::time::Instant::now()),
+        )
+        .await;
+        let input::Input::CameraTick = input else { panic!("ready camera tick was not selected") };
         let input = select_drain_input(&mut reads, pending(), media.next_result(), pending(), pending(), ready(()), pending()).await;
-        assert!(matches!(input, input::Input::Cancelled));
+        let input::Input::Cancelled = input else { panic!("cancellation was not selected") };
     }
 
     #[test]

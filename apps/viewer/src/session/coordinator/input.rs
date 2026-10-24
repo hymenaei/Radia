@@ -1,4 +1,4 @@
-use std::{future::Future, time::Duration};
+use std::future::Future;
 
 use futures::{FutureExt, pin_mut};
 use network::Event;
@@ -8,8 +8,6 @@ use crate::{
     world_reader::{ReadRequest, WorldReadHost},
 };
 
-const CAMERA_TICK_INTERVAL: Duration = Duration::from_millis(25);
-
 pub(super) enum Input {
     Cancelled,
     Event(Option<Event>),
@@ -18,11 +16,6 @@ pub(super) enum Input {
     Environment(Option<Box<Completion>>),
     WorldRead(ReadRequest),
     CameraTick,
-}
-
-pub(super) fn next_camera_tick_delay(elapsed: Duration) -> Duration {
-    let elapsed_in_interval = Duration::from_nanos((elapsed.as_nanos() % CAMERA_TICK_INTERVAL.as_nanos()) as u64);
-    CAMERA_TICK_INTERVAL - elapsed_in_interval
 }
 
 pub(super) async fn select_drain_input<E, M, T, N, C, Q>(
@@ -40,7 +33,7 @@ where
     T: Future<Output = DecodedTerrain>,
     N: Future<Output = Option<Box<Completion>>>,
     C: Future<Output = ()> + Clone,
-    Q: Future<Output = ()>,
+    Q: Future<Output = tokio::time::Instant>,
 {
     let event = event.fuse();
     let media = media.fuse();

@@ -7,7 +7,7 @@ mod presentation;
 
 pub(crate) use self::driver::{CredentialPersistence, drain_session};
 #[cfg(test)]
-use self::input::{next_camera_tick_delay, select_drain_input};
+use self::input::select_drain_input;
 pub(crate) use self::persistence::{WriteLock, save_favorite_store, write_lock};
 pub(crate) use self::presentation::{
     AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionReadyUpdate, ViewerUpdate,
@@ -21,17 +21,8 @@ mod tests {
         time::Duration,
     };
 
-    use crate::session::object_media::ObjectMediaResult;
-    use futures::{FutureExt, StreamExt, stream};
     use math::Vec3;
-    use network::{
-        Event,
-        Event::{SimulatorConnected, SimulatorMessage},
-        PacketOrder,
-        PacketOrder::Ordered,
-        SimulatorId,
-        testing::simulator_id,
-    };
+    use network::{Event, Event::SimulatorMessage, PacketOrder, PacketOrder::Ordered, SimulatorId, testing::simulator_id};
     use protocol::{
         Audible, ChatSourceType, ChatType,
         lludp::Message,
@@ -144,76 +135,16 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn camera_tick_keeps_phase() {
-        let camera_tick_started = tokio::time::Instant::now().into_std();
-        let mut camera_tick = ready(()).boxed().fuse();
+    #[tokio::test]
+    async fn camera_tick_is_selected_when_ready() {
+        let mut camera_tick = tokio::time::interval(Duration::from_millis(100));
+        camera_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let world = SessionWorld::new(viewer_world_limits());
         let mut reads = WorldReadHost::new(world.world(), Handle::current());
-        assert_eq!(super::next_camera_tick_delay(Duration::ZERO), Duration::from_millis(25));
 
-        let result = super::select_drain_input(
-            &mut reads,
-            std::future::pending(),
-            std::future::pending(),
-            std::future::pending(),
-            std::future::pending(),
-            std::future::pending(),
-            &mut camera_tick,
-        )
-        .await;
-        assert!(matches!(result, Input::CameraTick));
+        let result = super::select_drain_input(&mut reads, pending(), pending(), pending(), pending(), pending(), camera_tick.tick()).await;
 
-        tokio::time::advance(Duration::from_millis(30)).await;
-        let delay = super::next_camera_tick_delay(tokio::time::Instant::now().into_std().duration_since(camera_tick_started));
-        assert_eq!(delay, Duration::from_millis(20));
-        camera_tick = tokio::time::sleep(delay).boxed().fuse();
-        let simulator_id = simulator_id();
-        let mut events = stream::iter([SimulatorConnected {
-            simulator_id,
-            region_handle: None,
-            endpoint: "127.0.0.1:13000".parse().expect("endpoint"),
-        }]);
-        let result = super::select_drain_input(
-            &mut reads,
-            events.next(),
-            stream::pending::<ObjectMediaResult>().next(),
-            std::future::pending(),
-            std::future::pending(),
-            std::future::pending(),
-            &mut camera_tick,
-        )
-        .await;
-        assert!(matches!(result, Input::Event(Some(_))));
-
-        let result = super::select_drain_input(
-            &mut reads,
-            std::future::pending(),
-            std::future::pending(),
-            std::future::pending(),
-            std::future::pending(),
-            std::future::pending(),
-            &mut camera_tick,
-        )
-        .await;
-        assert!(matches!(result, Input::CameraTick));
-
-        tokio::time::advance(Duration::from_millis(45)).await;
-        let delay = super::next_camera_tick_delay(tokio::time::Instant::now().into_std().duration_since(camera_tick_started));
-        assert_eq!(delay, Duration::from_millis(5));
-        camera_tick = tokio::time::sleep(delay).boxed().fuse();
-        let result = super::select_drain_input(
-            &mut reads,
-            std::future::pending(),
-            std::future::pending(),
-            std::future::pending(),
-            std::future::pending(),
-            std::future::pending(),
-            &mut camera_tick,
-        )
-        .await;
-
-        assert!(matches!(result, Input::CameraTick));
+        let Input::CameraTick = result else { panic!("ready camera tick was not selected") };
     }
 
     pub(super) fn agent_update(agent_id: Uuid, local_id: u32, region_handle: u64) -> Message {

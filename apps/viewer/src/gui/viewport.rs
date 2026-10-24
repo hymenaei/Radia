@@ -32,11 +32,7 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-use crate::{
-    DEFAULT_DRAW_DISTANCE,
-    gui::camera::OrbitCamera,
-    scene_feed::SceneFeed,
-};
+use crate::{DEFAULT_DRAW_DISTANCE, gui::camera::OrbitCamera, scene_feed::SceneFeed};
 
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const RECOVERY_DELAY: Duration = Duration::from_millis(500);

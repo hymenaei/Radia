@@ -703,13 +703,12 @@ mod tests {
 
     #[test]
     fn flexible_shape_and_uv_seams() {
+        let line = generate(PrimShape { profile_curve: 0, ..PrimShape::default() });
         let flexible = generate(PrimShape { path_curve: 0x80, profile_curve: 0, ..PrimShape::default() });
-        assert_eq!(flexible.faces().len(), 3);
-        close(flexible.bounds().min, Vec3::splat(-0.5));
-        close(flexible.bounds().max, Vec3::splat(0.5));
-        assert!((volume(&flexible) - PI * 0.25).abs() < 0.02);
-        let a = flexible.vertices().iter().find(|v| v.uv == Vec2::ZERO).unwrap();
-        let b = flexible.vertices().iter().find(|v| v.uv == Vec2::X).unwrap();
+        assert_eq!(line.vertices(), flexible.vertices());
+        assert_eq!(line.indices(), flexible.indices());
+        let a = line.vertices().iter().find(|v| v.uv == Vec2::ZERO).unwrap();
+        let b = line.vertices().iter().find(|v| v.uv == Vec2::X).unwrap();
         close(a.position, b.position);
         close(a.normal, b.normal);
         assert_ne!(a.uv, b.uv);
@@ -737,7 +736,8 @@ mod tests {
         assert!(centers.iter().any(|p| p.distance(Vec3::new(-5.0 / 14.0, 0.25, 0.0)) < 2e-5));
         assert!(centers.iter().any(|p| p.distance(Vec3::new(5.0 / 14.0, -0.25, 0.0)) < 2e-5));
         let clamped = generate(PrimShape { path_radius_offset: 0, ..shape });
-        assert!((volume(&mesh) - volume(&clamped)).abs() < 1e-5, "radius offset is clamped by the circular path bounds");
+        assert_eq!(mesh.vertices(), clamped.vertices());
+        assert_eq!(mesh.indices(), clamped.indices());
 
         let tapered = generate(PrimShape {
             path_curve: 0x20,

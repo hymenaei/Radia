@@ -2,8 +2,8 @@ use std::assert_matches;
 
 use super::support::{
     BTreeMap, BTreeSet, Budget, DVec3, Detail, FieldUpdate, Instant, Kind, NonZeroU32, ObjectObservation, ObjectPatch, ParentUpdate,
-    Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, Region, RegionInfo, Shape, Status, Uuid, Vec3,
-    add, camera, ids, move_root, positions, reply, settle, source, world,
+    Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, RecoveryReason, Region, RegionInfo, Shape,
+    Status, Uuid, Vec3, add, camera, ids, move_root, positions, reply, settle, source, world,
 };
 
 #[test]

@@ -40,6 +40,7 @@ const READ_QUANTUM: usize = 4;
 const POLL_DELAY: Duration = Duration::from_millis(16);
 const PATCH_BYTES: usize = size_of::<TerrainPatch>() + 256 * size_of::<f32>() + 32;
 
+#[derive(Debug)]
 pub enum ReadQuery {
     Barrier,
     Objects(Option<ObjectPageCursor>),

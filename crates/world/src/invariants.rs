@@ -34,8 +34,7 @@ impl World {
             if !self.regions.contains_key(&address.region()) {
                 return Err("live object belongs to an inactive region");
             }
-            object_media_bytes =
-                object_media_bytes.saturating_add(object.content().object_media.as_deref().map_or(0, ObjectMedia::retained_bytes));
+            object_media_bytes = object_media_bytes.saturating_add(object.object_media().map_or(0, ObjectMedia::retained_bytes));
             match object.parent() {
                 Parent::Resolved(parent) => {
                     let parent_object = self.object(parent).ok_or("resolved parent is not live")?;

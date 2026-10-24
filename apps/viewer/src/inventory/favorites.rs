@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    fmt::{self, Display, Formatter},
     str::from_utf8,
 };
 
@@ -15,6 +16,7 @@ use utils::RegionId;
 use uuid::Uuid;
 use world::RegionHandle;
 
+use super::favorite_store::MAX_FAVORITES_PER_AGENT;
 use crate::session::{RegionGridCell, RegionLookup, map_request_coordinates};
 
 const REQUESTED_CAPABILITIES: [&str; 3] = ["FetchInventoryDescendents2", "FetchInventory2", "ViewerAsset"];
@@ -25,6 +27,7 @@ const INVENTORY_TYPE_LANDMARK: i32 = 3;
 const INVENTORY_TYPE_PERSON: i32 = 24;
 const REGION_LOOKUP_CONCURRENCY: usize = 4;
 const LANDMARK_FETCH_CONCURRENCY: usize = 3;
+const MAX_LANDMARK_ASSET_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FavoriteLocation {
@@ -58,6 +61,57 @@ pub enum LandmarkDestination {
     RegionHandle { handle: RegionHandle, position: [f64; 3] },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FavoritesError {
+    MissingFavoritesFolder,
+    InvalidFavoritesFolderId,
+    RequestCapabilities(String),
+    CapabilityUnavailable(String),
+    FetchFavoritesFolder(String),
+    InvalidFolderResponse,
+    FavoritesFolderNotReturned,
+    InvalidFavoritesFolder,
+    InvalidFavoritesItemList,
+    TooManyFolderItems,
+    ResolveFavoriteItems(String),
+    InvalidLinkedItemsResponse,
+    TooManyLinkedItems,
+    FetchLandmarkAsset { name: String, detail: String },
+    NoReadableFavoriteLandmarks,
+    RegionLookup(String),
+}
+
+impl Display for FavoritesError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingFavoritesFolder => formatter.write_str("Second Life did not include the Favorites folder in the login response."),
+            Self::InvalidFavoritesFolderId => formatter.write_str("Second Life returned an invalid Favorites folder ID."),
+            Self::RequestCapabilities(detail) => write!(formatter, "Could not request inventory capabilities: {detail}"),
+            Self::CapabilityUnavailable(name) => write!(formatter, "Second Life did not provide the {name} capability."),
+            Self::FetchFavoritesFolder(detail) => write!(formatter, "Could not fetch the Favorites folder: {detail}"),
+            Self::InvalidFolderResponse => formatter.write_str("Second Life returned an invalid Favorites folder response."),
+            Self::FavoritesFolderNotReturned => formatter.write_str("Second Life did not return the Favorites folder."),
+            Self::InvalidFavoritesFolder => formatter.write_str("Second Life returned an invalid Favorites folder."),
+            Self::InvalidFavoritesItemList => formatter.write_str("Second Life returned an invalid Favorites item list."),
+            Self::TooManyFolderItems => {
+                write!(formatter, "Second Life returned more than {MAX_FAVORITES_PER_AGENT} items in the Favorites folder.")
+            }
+            Self::ResolveFavoriteItems(detail) => write!(formatter, "Could not resolve favorite landmarks: {detail}"),
+            Self::InvalidLinkedItemsResponse => formatter.write_str("Second Life returned an invalid linked-item response."),
+            Self::TooManyLinkedItems => {
+                write!(formatter, "Second Life returned more than {MAX_FAVORITES_PER_AGENT} linked favorite items.")
+            }
+            Self::FetchLandmarkAsset { name, detail } => {
+                write!(formatter, "Could not fetch favorite landmark asset {name:?}: {detail}")
+            }
+            Self::NoReadableFavoriteLandmarks => formatter.write_str("Second Life did not return readable data for any favorite landmark."),
+            Self::RegionLookup(detail) => write!(formatter, "Could not look up a favorite landmark region: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for FavoritesError {}
+
 #[derive(Clone, Debug)]
 struct InventoryItem {
     item_id: Option<Uuid>,
@@ -88,12 +142,12 @@ impl InventoryItem {
     }
 }
 
-pub async fn load_favorites(
+pub(crate) async fn load_favorites(
     capabilities: &Client,
     region_lookup: &RegionLookup,
     session: &AgentSession,
     login_data: &ResponseData,
-) -> Result<Vec<FavoriteLocation>, String> {
+) -> Result<Vec<FavoriteLocation>, FavoritesError> {
     let folder_id = favorite_folder_id(login_data)?;
     let landmarks = fetch_favorite_landmarks(capabilities, session.agent_id, folder_id).await?;
     let resolved = stream::iter(landmarks.into_iter().map(|landmark| async move {
@@ -116,20 +170,20 @@ pub async fn load_favorites(
             }
             LandmarkDestination::Region { id, position } => (region_lookup.lookup_region_by_id(id.uuid()).await, position),
         };
-        let region_name = region_name.map_err(|error| format!("Could not look up a favorite landmark region: {error}"))?;
+        let region_name = region_name.map_err(FavoritesError::RegionLookup)?;
         Ok(favorite_location(landmark.name, region_name, position))
     }))
     .buffer_unordered(REGION_LOOKUP_CONCURRENCY)
-    .collect::<Vec<Result<Option<FavoriteLocation>, String>>>()
+    .collect::<Vec<Result<Option<FavoriteLocation>, FavoritesError>>>()
     .await;
     let mut locations = resolved.into_iter().collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect::<Vec<_>>();
     locations.sort_by_key(|location| location.name.to_lowercase());
     Ok(locations)
 }
 
-pub fn favorite_folder_id(login_data: &ResponseData) -> Result<Uuid, String> {
+pub fn favorite_folder_id(login_data: &ResponseData) -> Result<Uuid, FavoritesError> {
     let Some(login::Value::Array(folders)) = login_data.get("inventory-skeleton") else {
-        return Err("Second Life did not include the Favorites folder in the login response.".into());
+        return Err(FavoritesError::MissingFavoritesFolder);
     };
 
     for folder in folders {
@@ -144,23 +198,23 @@ pub fn favorite_folder_id(login_data: &ResponseData) -> Result<Uuid, String> {
         }
 
         let Some(login::Value::String(folder_id)) = fields.get("folder_id") else {
-            return Err("Second Life returned an invalid Favorites folder ID.".into());
+            return Err(FavoritesError::InvalidFavoritesFolderId);
         };
-        return Uuid::parse_str(folder_id).map_err(|_| "Second Life returned an invalid Favorites folder ID.".into());
+        return Uuid::parse_str(folder_id).map_err(|_| FavoritesError::InvalidFavoritesFolderId);
     }
 
-    Err("Second Life did not include the Favorites folder in the login response.".into())
+    Err(FavoritesError::MissingFavoritesFolder)
 }
 
 pub async fn fetch_favorite_landmarks(
     capabilities: &Client,
     agent_id: Uuid,
     favorite_folder_id: Uuid,
-) -> Result<Vec<FavoriteLandmark>, String> {
+) -> Result<Vec<FavoriteLandmark>, FavoritesError> {
     let capability_urls = capabilities
         .request_capabilities(&REQUESTED_CAPABILITIES)
         .await
-        .map_err(|error| format!("Could not request inventory capabilities: {error}"))?;
+        .map_err(|error| FavoritesError::RequestCapabilities(error.to_string()))?;
     let descendents = capability(&capability_urls, "FetchInventoryDescendents2")?;
     let fetch_items = capability(&capability_urls, "FetchInventory2")?;
     let viewer_asset = capability(&capability_urls, "ViewerAsset")?;
@@ -168,7 +222,7 @@ pub async fn fetch_favorite_landmarks(
     let folder_response = capabilities
         .post(&descendents, &folder_request(agent_id, favorite_folder_id))
         .await
-        .map_err(|error| format!("Could not fetch the Favorites folder: {error}"))?;
+        .map_err(|error| FavoritesError::FetchFavoritesFolder(error.to_string()))?;
     let items = favorite_folder_items(&folder_response, favorite_folder_id)?;
     let candidates = resolve_favorite_items(capabilities, &fetch_items, items).await?;
     let candidate_count = candidates.len();
@@ -185,13 +239,13 @@ pub async fn fetch_favorite_landmarks(
     .flatten()
     .collect::<Vec<_>>();
     if candidate_count > 0 && landmarks.is_empty() {
-        return Err("Second Life did not return readable data for any favorite landmark.".into());
+        return Err(FavoritesError::NoReadableFavoriteLandmarks);
     }
     Ok(landmarks)
 }
 
-fn capability(capabilities: &HashMap<String, CapabilityUrl>, name: &str) -> Result<CapabilityUrl, String> {
-    capabilities.get(name).cloned().ok_or_else(|| format!("Second Life did not provide the {name} capability."))
+fn capability(capabilities: &HashMap<String, CapabilityUrl>, name: &str) -> Result<CapabilityUrl, FavoritesError> {
+    capabilities.get(name).cloned().ok_or_else(|| FavoritesError::CapabilityUnavailable(name.to_owned()))
 }
 
 fn folder_request(agent_id: Uuid, folder_id: Uuid) -> Value {
@@ -214,17 +268,17 @@ fn item_request(item_ids: &[Uuid]) -> Value {
     )]))
 }
 
-fn favorite_folder_items(response: &Value, requested_folder_id: Uuid) -> Result<Vec<InventoryItem>, String> {
+fn favorite_folder_items(response: &Value, requested_folder_id: Uuid) -> Result<Vec<InventoryItem>, FavoritesError> {
     let folders = response
         .as_map()
         .and_then(|fields| fields.get("folders"))
         .and_then(Value::as_array)
-        .ok_or_else(|| "Second Life returned an invalid Favorites folder response.".to_string())?;
+        .ok_or(FavoritesError::InvalidFolderResponse)?;
     let folder = folders
         .iter()
         .find(|folder| folder.as_map().and_then(|fields| fields.get("folder_id")).and_then(uuid_field) == Some(requested_folder_id))
-        .ok_or_else(|| "Second Life did not return the Favorites folder.".to_string())?;
-    let folder_fields = folder.as_map().ok_or_else(|| "Second Life returned an invalid Favorites folder.".to_string())?;
+        .ok_or(FavoritesError::FavoritesFolderNotReturned)?;
+    let folder_fields = folder.as_map().ok_or(FavoritesError::InvalidFavoritesFolder)?;
     let entries = match folder_fields.get("items").and_then(Value::as_array) {
         Some(entries) => entries,
         None if folder_fields.get("descendents").and_then(integer_field) == Some(0)
@@ -236,9 +290,12 @@ fn favorite_folder_items(response: &Value, requested_folder_id: Uuid) -> Result<
             return Ok(Vec::new());
         }
         None => {
-            return Err("Second Life returned an invalid Favorites item list.".into());
+            return Err(FavoritesError::InvalidFavoritesItemList);
         }
     };
+    if entries.len() > MAX_FAVORITES_PER_AGENT {
+        return Err(FavoritesError::TooManyFolderItems);
+    }
 
     Ok(entries.iter().filter_map(InventoryItem::from_llsd).collect())
 }
@@ -247,7 +304,7 @@ async fn resolve_favorite_items(
     capabilities: &Client,
     fetch_items: &CapabilityUrl,
     items: Vec<InventoryItem>,
-) -> Result<Vec<(String, Uuid)>, String> {
+) -> Result<Vec<(String, Uuid)>, FavoritesError> {
     let items_by_id: HashMap<Uuid, InventoryItem> = items.iter().filter_map(|item| item.item_id.map(|id| (id, item.clone()))).collect();
     let mut links = Vec::new();
     let mut linked_item_ids = HashSet::new();
@@ -273,12 +330,15 @@ async fn resolve_favorite_items(
         let response = capabilities
             .post(fetch_items, &item_request(&unresolved_ids))
             .await
-            .map_err(|error| format!("Could not resolve favorite landmarks: {error}"))?;
+            .map_err(|error| FavoritesError::ResolveFavoriteItems(error.to_string()))?;
         let entries = response
             .as_map()
             .and_then(|fields| fields.get("items"))
             .and_then(Value::as_array)
-            .ok_or_else(|| "Second Life returned an invalid linked-item response.".to_string())?;
+            .ok_or(FavoritesError::InvalidLinkedItemsResponse)?;
+        if entries.len() > MAX_FAVORITES_PER_AGENT {
+            return Err(FavoritesError::TooManyLinkedItems);
+        }
         entries.iter().filter_map(InventoryItem::from_llsd).collect()
     };
     let mut all_items = items_by_id;
@@ -309,21 +369,23 @@ async fn resolve_favorite_items(
     Ok(candidates)
 }
 
-async fn fetch_landmark(capabilities: &Client, asset_url: CapabilityUrl, name: String) -> Result<Option<FavoriteLandmark>, String> {
-    let bytes =
-        capabilities.get_bytes(&asset_url).await.map_err(|error| format!("Could not fetch favorite landmark asset {name:?}: {error}"))?;
+async fn fetch_landmark(capabilities: &Client, asset_url: CapabilityUrl, name: String) -> Result<Option<FavoriteLandmark>, FavoritesError> {
+    let bytes = capabilities
+        .get_bytes_with_response_limit(&asset_url, MAX_LANDMARK_ASSET_BYTES)
+        .await
+        .map_err(|error| FavoritesError::FetchLandmarkAsset { name: name.clone(), detail: error.to_string() })?;
     Ok(parse_landmark_asset(&name, &bytes))
 }
 
-fn global_position(position: [f64; 3]) -> Option<(RegionGridCell, [f64; 3])> {
-    if !position.iter().all(|value| value.is_finite()) {
+fn global_position([global_x, global_y, z]: [f64; 3]) -> Option<(RegionGridCell, [f64; 3])> {
+    if ![global_x, global_y, z].iter().all(|value| value.is_finite()) {
         return None;
     }
-    let cell = RegionGridCell::containing(position[0], position[1])?;
+    let cell = RegionGridCell::containing(global_x, global_y)?;
     map_request_coordinates(cell)?;
-    let local_x = position[0] - f64::from(cell.x() * RegionGridCell::METERS_PER_CELL);
-    let local_y = position[1] - f64::from(cell.y() * RegionGridCell::METERS_PER_CELL);
-    Some((cell, [local_x, local_y, position[2]]))
+    let local_x = global_x - f64::from(cell.x()) * f64::from(RegionGridCell::METERS_PER_CELL);
+    let local_y = global_y - f64::from(cell.y()) * f64::from(RegionGridCell::METERS_PER_CELL);
+    Some((cell, [local_x, local_y, z]))
 }
 
 fn favorite_location(name: String, region_name: String, [x, y, z]: [f64; 3]) -> Option<FavoriteLocation> {
@@ -439,7 +501,12 @@ mod tests {
     use uuid::Uuid;
     use world::RegionHandle;
 
-    use super::{InventoryItem, LandmarkDestination, RegionGridCell, global_position, parse_landmark_asset, parse_position};
+    use crate::inventory::favorite_store::MAX_FAVORITES_PER_AGENT;
+
+    use super::{
+        FavoritesError, InventoryItem, LandmarkDestination, RegionGridCell, favorite_folder_items, global_position, parse_landmark_asset,
+        parse_position,
+    };
 
     fn inventory_item(inventory_type: Value, asset_type: Value) -> InventoryItem {
         let value = Value::Map(Map::from([
@@ -473,7 +540,7 @@ mod tests {
         let landmark = parse_landmark_asset("Home", asset.as_bytes()).expect("region handle identifies the region");
 
         assert_eq!(
-            landmark.destination(),
+            landmark.destination,
             LandmarkDestination::RegionHandle { handle: RegionHandle::new(handle), position: [128.0, 64.0, 30.0] }
         );
         assert!(parse_landmark_asset("Unlocated", b"Landmark version 2\nlocal_pos <128, 64, 30>\n").is_none());
@@ -491,7 +558,7 @@ mod tests {
         ] {
             let asset = format!("Landmark version 2\nregion_id {id}\n{handle}\nlocal_pos <128, 64, 30>\n");
             let landmark = parse_landmark_asset("Home", asset.as_bytes()).expect("at least one valid region reference");
-            assert_eq!(landmark.destination(), expected, "{handle:?}");
+            assert_eq!(landmark.destination, expected, "{handle:?}");
         }
     }
 
@@ -510,5 +577,22 @@ mod tests {
         assert!(global_position([-1.0, 0.0, 0.0]).is_none());
         assert!(global_position([f64::INFINITY, 0.0, 0.0]).is_none());
         assert!(global_position([f64::from(u32::from(u16::MAX) + 1) * f64::from(RegionGridCell::METERS_PER_CELL), 0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn oversized_favorites_folder_is_rejected_before_item_parsing() {
+        let folder_id = Uuid::from_u128(42);
+        let entries = vec![Value::Integer(0); MAX_FAVORITES_PER_AGENT + 1];
+        let response = Value::Map(Map::from([(
+            "folders".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("folder_id".into(), Value::Uuid(folder_id)),
+                ("items".into(), Value::Array(entries)),
+            ]))]),
+        )]));
+
+        let error = favorite_folder_items(&response, folder_id).unwrap_err();
+
+        assert_eq!(error, FavoritesError::TooManyFolderItems);
     }
 }

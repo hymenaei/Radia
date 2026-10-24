@@ -2,17 +2,17 @@
 use std::num::NonZeroU8;
 use std::{collections::HashSet, num::NonZeroU32};
 
-use OrderEvidence::{Degraded, Ordered};
-use ParentUpdate::{Local, Root};
 use math::{DVec3, Quat, Vec3};
 use uuid::Uuid;
 use world::ApplyError::{EntityBudgetExhausted, InvalidValue, RegionRetired, RegistrationBudgetExhausted, StaleRegion};
 use world::ApplyOutcome::{Deferred, IgnoredStale, Introduced, TombstoneRecorded, Updated};
 use world::DeferredReason::AmbiguousOrder;
 use world::Kind::Object;
+use world::OrderEvidence::{Degraded, Ordered};
+use world::ParentUpdate::{Local, Root};
 use world::{
-    FieldGroup, FieldRejection, FieldRejectionReason, LocalAddress, LocalTransform, ObjectObservation, ObjectPatch, OrderEvidence,
-    ParentUpdate, Pose, Region, RegionHandle, RegionInfo, UpdateSource, World, WorldLimits,
+    FieldGroup, FieldRejection, FieldRejectionReason, LocalAddress, LocalTransform, ObjectObservation, ObjectPatch, OrderEvidence, Pose,
+    Region, RegionHandle, RegionInfo, UpdateSource, World, WorldLimits,
 };
 #[cfg(feature = "invariants")]
 use world::{FieldUpdate, Kind::Avatar};
@@ -86,18 +86,16 @@ fn object_views_support_shared_reads() {
     assert_eq!(object.id(), uuid(60));
     assert_eq!(second.entity(), object.entity());
     assert_eq!(second.id(), object.id());
-    let mut scan = world.objects();
-    let scanned = scan.iter().next().unwrap();
-    assert_eq!(object.id(), scanned.id());
-    std::thread::scope(|scope| {
-        let shared = &object;
-        let reader = scope.spawn(move || shared.properties());
-        assert_eq!(scanned.clone().properties(), reader.join().unwrap());
-    });
-    drop(scanned);
-    drop(scan);
-    drop(object);
-    drop(second);
+    {
+        let mut scan = world.objects();
+        let scanned = scan.iter().next().unwrap();
+        assert_eq!(object.id(), scanned.id());
+        std::thread::scope(|scope| {
+            let shared = &object;
+            let reader = scope.spawn(move || shared.properties());
+            assert_eq!(scanned.clone().properties(), reader.join().unwrap());
+        });
+    }
     assert_eq!(
         world.remove_object(source(region, 2), address(region, 1).local_id()).unwrap().outcome,
         world::ApplyOutcome::Removed(uuid(60))

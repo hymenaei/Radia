@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use super::support::{
     BTreeMap, BTreeSet, Budget, Duration, Instant, NonZeroU32, ParentUpdate, Placement, ProptestConfig, ReadFailure, ReadQuery, ReadReply,
     ReconcileStep, Reconciler, RecoveryReason, Region, Status, Uuid, WorldReadError, add, ids, move_root, positions, prop, prop_assert_eq,
@@ -106,7 +108,7 @@ fn publication_backpressure_and_close() {
     };
     let held = budget.charged_bytes();
     for _ in 0..1000 {
-        assert!(matches!(scene.poll(now), ReconcileStep::Wait(_)));
+        assert!(matches!(scene.poll(now), ReconcileStep::Wait(_)), "held publication keeps reconciliation backpressured");
     }
     assert_eq!(budget.charged_bytes(), held);
     view.apply(batch).unwrap();
@@ -118,7 +120,7 @@ fn publication_backpressure_and_close() {
     let result = reply(&world, &job);
     scene.close();
     scene.complete_read(job, result, now);
-    assert!(matches!(scene.poll(now), ReconcileStep::Closed));
+    assert!(matches!(scene.poll(now), ReconcileStep::Closed), "closed reconciler remains closed");
     assert_eq!(view.objects().count(), 0);
     assert_eq!(view.status(), Status::Closed);
     assert!(view.object(retained.detail().summary.entity).is_none(), "retained data cannot bypass the session lifetime");
@@ -194,7 +196,7 @@ fn abandoned_publication_recovery() {
         };
         view.apply(status).unwrap();
         assert_eq!(positions(&view), BTreeMap::from([(1, 1.0)]));
-        assert!(matches!(view.status(), Status::Recovering { reason: RecoveryReason::InvalidReply, .. }));
+        assert_matches!(view.status(), Status::Recovering { reason: RecoveryReason::InvalidReply, .. });
         settle(&mut scene, &mut view, &world, &mut now);
         assert_eq!(positions(&view), BTreeMap::from([(1, 2.0)]));
     }
@@ -229,7 +231,7 @@ fn bounded_reconciliation() {
     let after = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(2048)).unwrap();
     assert!(std::ptr::eq(unchanged.detail(), after.detail()));
     let child = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(3)).unwrap();
-    assert!(matches!(child.placement(), Placement::Ready(transform) if transform.pose.position.x == 12.0));
+    assert_matches!(child.placement(), Placement::Ready(transform) if transform.pose.position.x == 12.0);
     eprintln!(
         "2048 objects: bootstrap {:?}, {} reads; three-object movement {:?}, {} reads; admission peak {} bytes",
         bootstrap_time,
@@ -272,7 +274,7 @@ fn recovery_memory_admission() {
         panic!("expected capacity status");
     };
     view.apply(status).unwrap();
-    assert!(matches!(view.status(), Status::Recovering { reason: RecoveryReason::Capacity, .. }));
+    assert_matches!(view.status(), Status::Recovering { reason: RecoveryReason::Capacity, .. });
     assert_eq!(ids(&view), BTreeSet::from([1]));
     let ReconcileStep::Wait(until) = scene.poll(now) else {
         panic!("expected backoff");

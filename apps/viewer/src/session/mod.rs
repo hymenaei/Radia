@@ -10,8 +10,8 @@ mod terrain;
 mod world;
 
 pub(crate) use coordinator::{
-    AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionReadyUpdate, ViewerUpdate, WriteLock,
-    drain_session, save_favorite_store, write_lock,
+    AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionReadyUpdate,
+    ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
 };
 pub(crate) use experience_environment::EnvironmentInbox;
 pub(crate) use inbound::{ChatMessage, display_message, format_avatar_name};

@@ -99,6 +99,18 @@ impl Camera {
         self.vertical_fov
     }
 
+    pub fn ray(self, cursor: [f64; 2], viewport: [u32; 2]) -> DVec3 {
+        let forward = self.direction().as_dvec3();
+        let right = forward.cross(DVec3::Z).normalize_or(DVec3::X);
+        let up = right.cross(forward);
+        let height = f64::from(viewport[1]);
+        let tangent = (self.vertical_fov * 0.5).tan();
+        (forward
+            + right * ((2.0 * cursor[0] - f64::from(viewport[0])) / height * tangent)
+            + up * ((height - 2.0 * cursor[1]) / height * tangent))
+            .normalize()
+    }
+
     pub(in crate::scene) fn importance(self, center: DVec3, radius: f64) -> Option<u32> {
         self.detail(center, radius, None)?;
         let offset = center - self.position;
@@ -243,5 +255,15 @@ mod tests {
         let vertical = Camera::new(DVec3::ZERO, Vec3::Z, PI / 2.0, [1000, 1000]).unwrap();
         assert!(vertical.importance(DVec3::Z * 10.0, 1.0).is_some());
         assert_eq!(vertical.importance(DVec3::new(12.0, 0.0, 10.0), 1.0), None);
+    }
+
+    #[test]
+    fn ray_tracks_cursor_position() {
+        let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 2.0, [200, 100]).unwrap();
+        assert!(camera.ray([100.0, 50.0], [200, 100]).distance(DVec3::X) < 1e-12);
+        let expected = (DVec3::X + DVec3::Y * 2.0).normalize();
+        assert!(camera.ray([0.0, 50.0], [200, 100]).distance(expected) < 1e-12);
+        let expected = (DVec3::X + DVec3::Z).normalize();
+        assert!(camera.ray([100.0, 0.0], [200, 100]).distance(expected) < 1e-12);
     }
 }

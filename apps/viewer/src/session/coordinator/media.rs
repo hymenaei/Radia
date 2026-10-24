@@ -7,7 +7,7 @@ use network::{SimulatorId, capabilities::Client};
 use world::Entity;
 
 use crate::session::{
-    object_media::{ObjectMediaFetcher, ObjectMediaResult, ObjectMediaTarget},
+    object_media::{ObjectMediaFetcher, ObjectMediaResult, ObjectMediaTarget, response_is_stale},
     world::{MAX_WORLD_ENTITIES, SessionWorld},
 };
 
@@ -126,7 +126,85 @@ impl ObjectMediaIntake {
             return;
         }
         if !waiting.insert(target) {
-            tracing::error!("ObjectMedia queue reached the live object limit");
+            tracing::debug!(
+                simulator = target.simulator_id.get(),
+                region = target.binding.address().region().get(),
+                object = %target.binding.object_id(),
+                local_id = target.binding.address().local_id().get(),
+                "object media queue reached the live object limit"
+            );
+        }
+    }
+
+    pub(super) fn apply_result(&mut self, result: ObjectMediaResult, world: &mut SessionWorld) {
+        let retry = self.finish(&result);
+        let requested_version = retry.map_or(result.target.version, |target| target.version);
+        let response_version = result.update.as_ref().as_ref().ok().map(|update| update.version());
+        if response_version.is_some_and(|version| response_is_stale(version, requested_version)) {
+            tracing::debug!(
+                simulator = result.target.simulator_id.get(),
+                region = result.target.binding.address().region().get(),
+                object = %result.target.binding.object_id(),
+                local_id = result.target.binding.address().local_id().get(),
+                response_version,
+                requested_version,
+                "discarded superseded object media response"
+            );
+        } else {
+            match result.update {
+                Ok(update) => {
+                    let address = result.target.binding.address();
+                    if let Some(applied) = world.apply_object_media(result.target, update) {
+                        match applied {
+                            Ok(applied) => {
+                                if !applied.rejections.is_empty() {
+                                    tracing::debug!(
+                                        simulator = result.target.simulator_id.get(),
+                                        region = address.region().get(),
+                                        object = %result.target.binding.object_id(),
+                                        local_id = address.local_id().get(),
+                                        rejections = ?applied.rejections,
+                                        "object media update contained rejected fields"
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    simulator = result.target.simulator_id.get(),
+                                    region = address.region().get(),
+                                    object = %result.target.binding.object_id(),
+                                    local_id = address.local_id().get(),
+                                    %error,
+                                    "object media update was rejected by world"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(error) if world.object_media_target_is_current(result.target) => {
+                    tracing::debug!(
+                        simulator = result.target.simulator_id.get(),
+                        region = result.target.binding.address().region().get(),
+                        object = %result.target.binding.object_id(),
+                        local_id = result.target.binding.address().local_id().get(),
+                        ?error,
+                        "object media could not be loaded"
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        simulator = result.target.simulator_id.get(),
+                        region = result.target.binding.address().region().get(),
+                        object = %result.target.binding.object_id(),
+                        local_id = result.target.binding.address().local_id().get(),
+                        ?error,
+                        "discarded object media failure for a stale object target"
+                    );
+                }
+            }
+        }
+        if let Some(target) = retry {
+            self.queue(target, world);
         }
     }
 
@@ -157,7 +235,7 @@ mod tests {
         num::NonZeroU32,
     };
 
-    use futures::{StreamExt, channel::oneshot, executor::block_on, stream};
+    use futures::{StreamExt, channel::oneshot, stream};
     use network::{Event, SimulatorId, testing::simulator_id};
     use protocol::{lludp::Message::KillObject, messages::object::kill_object};
     use tokio::runtime::Handle;
@@ -165,14 +243,15 @@ mod tests {
     use world::{Appearance, ApplyOutcome::Introduced, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, UpdateSource};
 
     use super::*;
+    use crate::session::coordinator::input::{self, select_drain_input};
     use crate::session::coordinator::tests::apply_world_event;
     use crate::session::coordinator::tests::simulator_message;
-    use crate::session::coordinator::{DrainInput, select_drain_input};
     use crate::session::world::{SessionWorld, viewer_world_limits};
     use crate::session::{
         inbound::{ObjectBatch, ObjectOperation},
         object_media::{FetchError, ObjectMediaFetcher, ObjectMediaTarget},
     };
+    use crate::world_reader::WorldReadHost;
 
     fn object_media_target(world: &mut SessionWorld, simulator_id: SimulatorId, order: u32, version: u32) -> ObjectMediaTarget {
         let region = world.register_simulator(simulator_id, None).expect("register simulator");
@@ -204,6 +283,7 @@ mod tests {
     async fn media_exit_preserves_intake() {
         let simulator = simulator_id();
         let mut world = SessionWorld::new(viewer_world_limits());
+        let mut reads = WorldReadHost::new(world.world(), Handle::current());
         let target = object_media_target(&mut world, simulator, 1, 1);
         let mut media = ObjectMediaIntake::new(ObjectMediaFetcher::new(Handle::current(), ready(())));
         media.queue(target, &world);
@@ -220,15 +300,16 @@ mod tests {
                 object_data: vec![kill_object::ObjectData { local_id: target.binding.address().local_id().get() }],
             }),
         );
-        let input = select_drain_input(ready(Some(event)), media.next_result(), pending(), pending()).await;
-        let DrainInput::Event(Some(event)) = input else { panic!("network intake continues after media failure") };
+        let input =
+            select_drain_input(&mut reads, ready(Some(event)), media.next_result(), pending(), pending(), pending(), pending()).await;
+        let input::Input::Event(Some(event)) = input else { panic!("network intake continues after media failure") };
         let _ = apply_world_event(&mut world, &event).expect("object removal is applied");
         assert!(world.world().object(target.binding.entity()).is_none());
 
-        let input = select_drain_input(pending(), media.next_result(), pending(), ready(())).await;
-        assert!(matches!(input, DrainInput::QueryStateMaintenance));
-        let input = select_drain_input(pending(), media.next_result(), ready(()), pending()).await;
-        assert!(matches!(input, DrainInput::Cancelled));
+        let input = select_drain_input(&mut reads, pending(), media.next_result(), pending(), pending(), pending(), ready(())).await;
+        assert!(matches!(input, input::Input::QueryStateMaintenance));
+        let input = select_drain_input(&mut reads, pending(), media.next_result(), pending(), pending(), ready(()), pending()).await;
+        assert!(matches!(input, input::Input::Cancelled));
     }
 
     #[test]
@@ -274,10 +355,11 @@ mod tests {
         assert!(!world.object_media_target_is_current(target));
     }
 
-    #[test]
-    fn media_progresses_during_continuous_events() {
+    #[tokio::test]
+    async fn media_progresses_during_continuous_events() {
         let simulator_id = simulator_id();
         let mut world = SessionWorld::new(viewer_world_limits());
+        let mut reads = WorldReadHost::new(world.world(), Handle::current());
         let target = object_media_target(&mut world, simulator_id, 1, 1);
         let expected_entity = target.binding.entity();
         let (media_ready, media_gate) = oneshot::channel();
@@ -291,21 +373,24 @@ mod tests {
         let mut media_ready = Some(media_ready);
         let mut event_count = 0;
 
-        let media_serviced = block_on(async {
+        let media_serviced = async {
             while event_count < 128 {
                 match select_drain_input(
+                    &mut reads,
                     std::future::ready(Some(Event::SimulatorConnected { simulator_id, region_handle: None, endpoint })),
                     media.next(),
+                    std::future::pending(),
+                    std::future::pending(),
                     std::future::pending(),
                     std::future::pending(),
                 )
                 .await
                 {
-                    DrainInput::Media(Some(result)) => {
+                    input::Input::Media(Some(result)) => {
                         assert_eq!(result.target.binding.entity(), expected_entity);
                         return true;
                     }
-                    DrainInput::Event(Some(_)) => {
+                    input::Input::Event(Some(_)) => {
                         event_count += 1;
                         if event_count == 1 {
                             media_ready.take().expect("media gate is released once").send(()).expect("media receiver is waiting");
@@ -315,7 +400,8 @@ mod tests {
                 }
             }
             false
-        });
+        }
+        .await;
 
         assert!(media_serviced, "a queued media response should progress while simulator events remain ready");
         assert!(event_count < 128, "the event stream must remain ready until media is serviced");

@@ -1,27 +1,31 @@
-use protocol::login;
-use protocol::login::ResponseData;
 use std::{
     collections::BTreeMap,
-    io::{ErrorKind, Read, Write},
+    io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     str::from_utf8,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use llsd::{Value, xml};
 use network::capabilities::Client;
-use tokio::runtime::Runtime;
+use protocol::login;
+use protocol::login::ResponseData;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener as AsyncTcpListener,
+    runtime::Runtime,
+    sync::oneshot,
+    time::timeout,
+};
 use url::Url;
 use uuid::Uuid;
-use viewer::inventory::favorites::{LandmarkDestination, favorite_folder_id, fetch_favorite_landmarks};
+use viewer::inventory::favorites::{FavoritesError, LandmarkDestination, favorite_folder_id, fetch_favorite_landmarks};
 
 const AGENT_ID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const FAVORITES_FOLDER_ID: &str = "11111111-2222-3333-4444-555555555555";
+const MAX_CONCURRENT_FETCHES: usize = 3;
+const SERVER_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
 fn folder_uses_login_data() {
@@ -45,7 +49,7 @@ fn folder_uses_login_data() {
 #[test]
 fn empty_folder_requests_items() {
     let runtime = Runtime::new().expect("create local Tokio runtime");
-    let server = LocalServer::start(include_str!("fixtures/favorites_empty_folder.xml"), None);
+    let server = LocalServer::start(include_str!("../fixtures/favorites_empty_folder.xml"), None);
     let seed = server.seed_url();
     let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
     let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
@@ -74,7 +78,7 @@ fn empty_folder_requests_items() {
 #[test]
 fn missing_items_rejected() {
     let runtime = Runtime::new().expect("create local Tokio runtime");
-    let server = LocalServer::start(include_str!("fixtures/favorites_incomplete_folder.xml"), None);
+    let server = LocalServer::start(include_str!("../fixtures/favorites_incomplete_folder.xml"), None);
     let seed = server.seed_url();
     let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
     let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
@@ -83,7 +87,8 @@ fn missing_items_rejected() {
     let error = runtime
         .block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id))
         .expect_err("missing items with a nonempty folder is malformed");
-    assert!(error.contains("invalid Favorites item list"));
+    assert_eq!(error, FavoritesError::InvalidFavoritesItemList);
+    assert_eq!(error.to_string(), "Second Life returned an invalid Favorites item list.");
     let _ = server.finish();
 }
 
@@ -91,7 +96,7 @@ fn missing_items_rejected() {
 fn landmark_asset_parsed() {
     let runtime = Runtime::new().expect("create local Tokio runtime");
     let server = LocalServer::start(
-        include_str!("fixtures/favorites_landmark_folder.xml"),
+        include_str!("../fixtures/favorites_landmark_folder.xml"),
         Some("Landmark version 1\nglobal_pos 256000 512000 30\n"),
     );
     let seed = server.seed_url();
@@ -112,24 +117,29 @@ fn landmark_asset_parsed() {
 #[test]
 fn landmark_asset_request_failure_rejects_partial_results() {
     const ASSET_COUNT: usize = 16;
-    const MAX_IN_FLIGHT_ASSET_REQUESTS: usize = 3;
 
     let runtime = Runtime::new().expect("create local Tokio runtime");
-    let server = ConcurrentAssetServer::start_with_failure(landmark_folder_response(ASSET_COUNT), ASSET_COUNT, Some(0));
-    let seed = server.seed_url();
-    let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
     let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
     let folder_id = Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
 
-    let error = runtime
-        .block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id))
-        .expect_err("an asset request failure must reject the incomplete snapshot");
-    assert!(error.contains("Could not fetch favorite landmark asset"), "unexpected error: {error}");
+    let (result, requests, peak_fetches) = runtime.block_on(async {
+        let mut server = ConcurrentAssetServer::start_with_failure(landmark_folder_response(ASSET_COUNT), ASSET_COUNT, Some(0)).await;
+        let capabilities = Client::new(server.seed_url()).expect("active Tokio runtime");
+        let fetch_capabilities = capabilities.clone();
+        let fetch = tokio::spawn(async move { fetch_favorite_landmarks(&fetch_capabilities, agent_id, folder_id).await });
+        server.first_batch_size().await;
+        let result = fetch.await.expect("landmark fetch task");
+        let (requests, peak_fetches) = server.finish().await;
+        (result, requests, peak_fetches)
+    });
 
-    let (requests, _) = server.finish();
+    let error = result.expect_err("an asset request failure must reject the incomplete snapshot");
+    assert!(matches!(&error, FavoritesError::FetchLandmarkAsset { .. }), "unexpected error: {error}");
+    assert!(error.to_string().contains("Could not fetch favorite landmark asset"), "unexpected error: {error}");
+
     let asset_request_count = requests.len().saturating_sub(2);
     assert!(asset_request_count > 0);
-    assert!(asset_request_count <= MAX_IN_FLIGHT_ASSET_REQUESTS, "handled {asset_request_count} asset requests");
+    assert_eq!(peak_fetches, MAX_CONCURRENT_FETCHES, "the first batch should reach the configured concurrency");
     assert!(asset_request_count < ASSET_COUNT, "the refresh continued through all candidates after an asset request failed");
 }
 
@@ -152,32 +162,40 @@ fn malformed_landmark_is_skipped_with_valid_peer() {
 
     let requests = server.finish();
     assert_eq!(requests.len(), 4);
+    let valid_asset_index = requested_asset_index(&requests[2]);
+    assert_eq!(landmarks[0].name(), format!("Landmark {valid_asset_index:02}"));
+    assert_eq!(landmarks[0].destination(), LandmarkDestination::Global([256000.0, 512000.0, 30.0]));
 }
 
 #[test]
-fn landmark_fetches_are_bounded_and_keep_folder_order() {
+fn landmark_fetches_overlap_and_keep_folder_order() {
     const ASSET_COUNT: usize = 16;
-    const MAX_CONCURRENT_FETCHES: usize = 3;
 
     let runtime = Runtime::new().expect("create local Tokio runtime");
     let folder_response = landmark_folder_response(ASSET_COUNT);
-    let server = ConcurrentAssetServer::start(folder_response, ASSET_COUNT);
-    let seed = server.seed_url();
-    let capabilities = runtime.block_on(async { Client::new(seed).expect("active Tokio runtime") });
     let agent_id = Uuid::parse_str(AGENT_ID).expect("valid fixture UUID");
     let folder_id = Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid fixture UUID");
 
-    let landmarks = runtime.block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id));
-    let (requests, peak_fetches) = server.finish();
+    let (landmarks, requests, peak_fetches) = runtime.block_on(async {
+        let mut server = ConcurrentAssetServer::start(folder_response, ASSET_COUNT).await;
+        let capabilities = Client::new(server.seed_url()).expect("active Tokio runtime");
+        let fetch_capabilities = capabilities.clone();
+        let fetch = tokio::spawn(async move { fetch_favorite_landmarks(&fetch_capabilities, agent_id, folder_id).await });
+        server.first_batch_size().await;
+        let landmarks = fetch.await.expect("landmark fetch task");
+        let (requests, peak_fetches) = server.finish().await;
+        (landmarks, requests, peak_fetches)
+    });
+
     let landmarks = landmarks.expect("landmark fixtures are valid");
     assert_eq!(landmarks.len(), ASSET_COUNT);
     for (index, landmark) in landmarks.iter().enumerate() {
         assert_eq!(landmark.name(), format!("Landmark {index:02}"));
+        assert_eq!(landmark.destination(), LandmarkDestination::Global([256000.0 + index as f64, 512000.0, 30.0]));
     }
 
     assert_eq!(requests.len(), ASSET_COUNT + 2);
-    assert!(peak_fetches > 1, "asset requests should overlap");
-    assert!(peak_fetches <= MAX_CONCURRENT_FETCHES, "peak concurrency was {peak_fetches}");
+    assert_eq!(peak_fetches, MAX_CONCURRENT_FETCHES, "asset requests should fill the initial concurrent batch");
 }
 
 fn parse_request_body(request: &[u8]) -> Value {
@@ -208,19 +226,20 @@ fn landmark_folder_response(asset_count: usize) -> String {
 
 struct ConcurrentAssetServer {
     address: SocketAddr,
-    worker: thread::JoinHandle<(Vec<Vec<u8>>, usize)>,
+    first_batch: oneshot::Receiver<usize>,
+    worker: tokio::task::JoinHandle<(Vec<Vec<u8>>, usize)>,
 }
 
 impl ConcurrentAssetServer {
-    fn start(folder_response: String, asset_count: usize) -> Self {
-        Self::start_with_failure(folder_response, asset_count, None)
+    async fn start(folder_response: String, asset_count: usize) -> Self {
+        Self::start_with_failure(folder_response, asset_count, None).await
     }
 
-    fn start_with_failure(folder_response: String, asset_count: usize, failed_asset_index: Option<usize>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
+    async fn start_with_failure(folder_response: String, asset_count: usize, failed_asset_index: Option<usize>) -> Self {
+        let listener = AsyncTcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP server");
         let address = listener.local_addr().expect("read local server address");
-        listener.set_nonblocking(true).expect("nonblocking local listener");
-        let worker = thread::spawn(move || {
+        let (first_batch_sender, first_batch) = oneshot::channel();
+        let worker = tokio::spawn(async move {
             let capability_response = format!(
                 "<?xml version=\"1.0\"?><llsd><map>\
                  <key>FetchInventoryDescendents2</key><string>http://{address}/descendents</string>\
@@ -230,52 +249,82 @@ impl ConcurrentAssetServer {
             );
             let mut requests = Vec::with_capacity(asset_count + 2);
             for body in [&capability_response, &folder_response] {
-                let Some(mut stream) = accept_request(&listener, Instant::now() + Duration::from_secs(2)) else {
-                    return (requests, 0);
-                };
-                requests.push(read_request(&mut stream));
-                write_response(&mut stream, body, "application/llsd+xml");
+                let (mut stream, _) = listener.accept().await.expect("accept local capability request");
+                requests.push(read_async_request(&mut stream).await);
+                write_async_response(&mut stream, body, "application/llsd+xml").await.expect("write local capability response");
             }
 
-            let active = Arc::new(AtomicUsize::new(0));
-            let peak = Arc::new(AtomicUsize::new(0));
-            let mut asset_workers = Vec::with_capacity(asset_count);
-            let asset_timeout = if failed_asset_index.is_some() { 2 } else { 10 };
-            let asset_deadline = Instant::now() + Duration::from_secs(asset_timeout);
-            for _ in 0..asset_count {
-                let Some(mut stream) = accept_request(&listener, asset_deadline) else {
-                    break;
-                };
-                let active = Arc::clone(&active);
-                let peak = Arc::clone(&peak);
-                asset_workers.push(thread::spawn(move || {
-                    let request = read_request(&mut stream);
-                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(current, Ordering::SeqCst);
+            let mut batch = Vec::with_capacity(MAX_CONCURRENT_FETCHES);
+            let mut peak = 0;
+            if asset_count > 0 {
+                while batch.len() < asset_count.min(MAX_CONCURRENT_FETCHES) {
+                    let (mut stream, _) = listener.accept().await.expect("accept landmark asset request");
+                    let request = read_async_request(&mut stream).await;
                     let index = requested_asset_index(&request);
-                    thread::sleep(Duration::from_millis(100 + ((asset_count - index) * 5) as u64));
+                    batch.push((stream, request, index));
+                }
+
+                peak = batch.len();
+                let _ = first_batch_sender.send(peak);
+                let batch_size = batch.len();
+
+                if let Some(failed_index) = failed_asset_index.filter(|failed| batch.iter().any(|(_, _, index)| index == failed)) {
+                    let (stream, _, _) = batch.iter_mut().find(|(_, _, index)| *index == failed_index).expect("failed request in batch");
+                    write_async_status_response(stream, "503 Service Unavailable", "temporary asset failure", "text/plain")
+                        .await
+                        .expect("write failed asset response");
+                    requests.extend(batch.into_iter().map(|(_, request, _)| request));
+                    return (requests, peak);
+                }
+
+                for (mut stream, request, index) in batch {
+                    requests.push(request);
+                    let body = format!("Landmark version 1\nglobal_pos {} 512000 30\n", 256000 + index);
+                    write_async_response(&mut stream, &body, "application/octet-stream").await.expect("write local asset response");
+                }
+
+                for _ in batch_size..asset_count {
+                    let (mut stream, _) = listener.accept().await.expect("accept local asset request");
+                    let request = read_async_request(&mut stream).await;
+                    let index = requested_asset_index(&request);
+                    requests.push(request);
                     if failed_asset_index == Some(index) {
-                        write_status_response(&mut stream, "503 Service Unavailable", "temporary asset failure", "text/plain")
+                        write_async_status_response(&mut stream, "503 Service Unavailable", "temporary asset failure", "text/plain")
+                            .await
                             .expect("write failed asset response");
-                    } else {
-                        write_response(&mut stream, "Landmark version 1\nglobal_pos 256000 512000 30\n", "application/octet-stream");
+                        return (requests, peak);
                     }
-                    active.fetch_sub(1, Ordering::SeqCst);
-                    request
-                }));
+                    let body = format!("Landmark version 1\nglobal_pos {} 512000 30\n", 256000 + index);
+                    write_async_response(&mut stream, &body, "application/octet-stream").await.expect("write local asset response");
+                }
             }
-            requests.extend(asset_workers.into_iter().map(|worker| worker.join().expect("asset worker")));
-            (requests, peak.load(Ordering::SeqCst))
+            (requests, peak)
         });
-        Self { address, worker }
+        Self { address, first_batch, worker }
     }
 
     fn seed_url(&self) -> Url {
         Url::parse(&format!("http://{}/seed", self.address)).expect("valid local URL")
     }
 
-    fn finish(self) -> (Vec<Vec<u8>>, usize) {
-        self.worker.join().expect("local HTTP worker should finish")
+    async fn first_batch_size(&mut self) -> usize {
+        timeout(SERVER_TIMEOUT, &mut self.first_batch)
+            .await
+            .expect("initial asset requests should reach the server before the failure deadline")
+            .expect("server should report its first asset batch")
+    }
+
+    async fn finish(self) -> (Vec<Vec<u8>>, usize) {
+        let mut worker = self.worker;
+        match timeout(SERVER_TIMEOUT, &mut worker).await {
+            Ok(result) => result.expect("local HTTP worker should finish"),
+            Err(_) => {
+                worker.abort();
+                let error = worker.await.expect_err("timed-out local HTTP worker should be cancelled");
+                assert!(error.is_cancelled(), "local HTTP worker stopped unexpectedly: {error}");
+                panic!("local HTTP worker did not finish before the failure deadline");
+            }
+        }
     }
 }
 
@@ -290,22 +339,6 @@ fn requested_asset_index(request: &[u8]) -> usize {
     usize::from_str_radix(asset_id.rsplit('-').next().expect("asset UUID suffix"), 16).expect("asset index")
 }
 
-fn accept_request(listener: &TcpListener, deadline: Instant) -> Option<TcpStream> {
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                stream.set_nonblocking(false).expect("blocking accepted connection");
-                return Some(stream);
-            }
-            Err(error) if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => return None,
-            Err(error) => panic!("accept local request: {error}"),
-        }
-    }
-}
-
 fn write_response(stream: &mut TcpStream, body: &str, content_type: &str) {
     write_status_response(stream, "200 OK", body, content_type).expect("write local response");
 }
@@ -314,6 +347,21 @@ fn write_status_response(stream: &mut TcpStream, status: &str, body: &str, conte
     let response =
         format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
     stream.write_all(response.as_bytes())
+}
+
+async fn write_async_response(stream: &mut tokio::net::TcpStream, body: &str, content_type: &str) -> std::io::Result<()> {
+    write_async_status_response(stream, "200 OK", body, content_type).await
+}
+
+async fn write_async_status_response(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    body: &str,
+    content_type: &str,
+) -> std::io::Result<()> {
+    let response =
+        format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+    stream.write_all(response.as_bytes()).await
 }
 
 struct LocalServer {
@@ -373,18 +421,38 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
             return request;
         }
         request.extend_from_slice(&chunk[..size]);
-        if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-            let headers = from_utf8(&request[..header_end]).expect("HTTP headers UTF-8");
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok()).flatten()
-                })
-                .unwrap_or(0);
-            if request.len() >= header_end + 4 + content_length {
-                return request;
-            }
+        if request_is_complete(&request) {
+            return request;
         }
     }
+}
+
+async fn read_async_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        let size = stream.read(&mut chunk).await.expect("read local request");
+        if size == 0 {
+            return request;
+        }
+        request.extend_from_slice(&chunk[..size]);
+        if request_is_complete(&request) {
+            return request;
+        }
+    }
+}
+
+fn request_is_complete(request: &[u8]) -> bool {
+    let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = from_utf8(&request[..header_end]).expect("HTTP headers UTF-8");
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().ok()).flatten()
+        })
+        .unwrap_or(0);
+    request.len() >= header_end + 4 + content_length
 }

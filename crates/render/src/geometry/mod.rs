@@ -2,6 +2,7 @@ mod batching;
 mod frame;
 mod instance;
 mod mesh;
+mod pick;
 mod storage;
 
 use std::{
@@ -29,6 +30,8 @@ use crate::{
     pipeline::{INSTANCE_BYTES, SurfacePipelines, Water},
     texture::{TextureCompletion, TextureJob, TextureState, Textures},
 };
+
+pub use pick::PickError;
 
 const MESH_BYTES: usize = 64 * 1024 * 1024;
 const DEPTH_BYTES: usize = 128 * 1024 * 1024;
@@ -120,19 +123,19 @@ impl Drop for FrameLease {
     }
 }
 
-pub struct Instance {
-    pub mesh: SharedMesh,
-    pub position: DVec3,
-    pub rotation: Quat,
-    pub scale: Vec3,
-    pub pickable: bool,
-    pub faces: Vec<PickFace>,
+pub(crate) struct Instance {
+    mesh: SharedMesh,
+    position: DVec3,
+    rotation: Quat,
+    scale: Vec3,
+    pickable: bool,
+    faces: Vec<PickFace>,
     shading: ShadingMode,
 }
 
-pub struct PickFace {
-    pub indices: Range<u32>,
-    pub double_sided: bool,
+pub(crate) struct PickFace {
+    indices: Range<u32>,
+    double_sided: bool,
 }
 
 enum ShadingMode {
@@ -333,10 +336,6 @@ impl GeometryRenderer {
             drop(retired);
             drop(frame);
         });
-    }
-
-    pub(crate) fn instances(&self) -> &[Instance] {
-        &self.visible
     }
 }
 

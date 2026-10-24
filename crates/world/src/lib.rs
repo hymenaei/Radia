@@ -8,6 +8,23 @@ mod query;
 mod region;
 mod update;
 
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use uuid::Uuid;
+
+use crate::history::Journal;
+use crate::history::address::Tombstones;
+use crate::history::recent::{RecentBatch, RecentStore};
+use crate::identity::WorldId;
+use crate::object::components::{
+    Binding, Fences, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field, newer_region_field,
+};
+use crate::object::storage::ObjectStore;
+use crate::object::view::IndexedObjects;
+use crate::query::spatial::SpatialIndex;
+use crate::region::RegionState;
+use crate::update::Stamp;
+
 pub use history::recent::{MAX_RECENT_OBJECT_BYTES, MAX_RECENT_OBJECTS, RECENT_OBJECT_TTL, RecentObject};
 pub use history::{WorldChange, WorldChangeClasses, WorldEntityRemovalReason};
 pub use identity::{Entity, LocalAddress, ObjectBindingTarget, Region, RegionHandle, RegionInfo};
@@ -55,23 +72,6 @@ pub use update::{
     ObjectPatch, OrderEvidence, Recovery, RegionApplied, RegionOutcome, Rejections, UpdateAuthority, UpdateSource, WorldLimits,
     WorldRevision,
 };
-
-use std::collections::{BTreeMap, HashMap, HashSet};
-
-use uuid::Uuid;
-
-use crate::identity::WorldId;
-use crate::update::Stamp;
-use history::Journal;
-use history::address::Tombstones;
-use history::recent::{RecentBatch, RecentStore};
-use object::components::{
-    Binding, Fences, ObjectContent, ObjectOrdering, ObjectRecord, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field,
-    newer_region_field,
-};
-use object::storage::{ObjectRecordRef, ObjectStore};
-use query::spatial::SpatialIndex;
-use region::RegionState;
 
 const MAX_OBJECT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
 
@@ -141,7 +141,7 @@ impl World {
     }
 
     pub fn object_binding_target(&self, entity: Entity) -> Option<ObjectBindingTarget> {
-        let object = self.store.record(entity)?;
+        let object = self.store.object_record(entity)?;
         Some(ObjectBindingTarget {
             entity,
             id: object.id,
@@ -154,15 +154,15 @@ impl World {
         if target.entity.1 != self.id || self.entity(target.id) != Some(target.entity) {
             return false;
         }
-        let Some(object) = self.store.record(target.entity) else { return false };
+        let Some(object) = self.store.object_record(target.entity) else { return false };
         object.state.binding.address == target.address
             && object.state.binding.address_generation == target.address_generation
             && self.entity_at(target.address) == Some(target.entity)
     }
 
     pub fn object(&self, entity: Entity) -> Option<Object<'_>> {
-        let record = self.store.object(entity)?;
-        Some(Object { entity, record, world: self })
+        let record = self.store.object_record(entity)?;
+        Some(Object::new(entity, record, self))
     }
 
     pub fn objects(&self) -> Objects<'_> {
@@ -174,10 +174,7 @@ impl World {
     }
 
     pub fn objects_in_region(&self, region: Region) -> impl Iterator<Item = Object<'_>> {
-        self.store.region_ids(region).into_iter().flat_map(|ids| ids.iter()).map(|id| {
-            let entity = self.entity(*id).expect("region index contains only live objects");
-            self.object(entity).expect("region index contains only complete objects")
-        })
+        self.store.region_ids(region).into_iter().flat_map(|ids| IndexedObjects::new(ids.iter(), self))
     }
 
     pub fn children(&self, entity: Entity) -> impl Iterator<Item = Object<'_>> {
@@ -185,10 +182,7 @@ impl World {
     }
 
     pub fn avatars(&self) -> impl Iterator<Item = Object<'_>> {
-        self.store.avatar_ids().iter().map(|id| {
-            let entity = self.entity(*id).expect("avatar index contains only live entities");
-            self.object(entity).expect("avatar index contains only complete objects")
-        })
+        IndexedObjects::new(self.store.avatar_ids().iter(), self)
     }
 
     pub fn regions(&self) -> impl Iterator<Item = (Region, &RegionInfo)> {

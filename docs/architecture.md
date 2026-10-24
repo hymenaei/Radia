@@ -1,84 +1,72 @@
-This document describes the high-level architecture of Radia. If you want to get familiar with the code base, start here.
+Radia separates simulator observations, accepted world state, derived scene data, and GPU resources. This document describes the current ownership and data flow. Product direction lives in [vision.md](vision.md); working rules live in [AGENTS.md](../AGENTS.md).
 
-See also `AGENTS.md` for working rules, including which changes need approval before implementation.
+## Data flow
 
-## Bird's eye view
+Simulator traffic enters through LLUDP circuits and HTTP capabilities. `network` manages delivery and connection lifecycles; `protocol` supplies wire representations and codecs. The viewer's session intake translates messages into domain observations, preserving source identity, ordering evidence, partial updates, and coverage loss. `world` validates and applies those observations. Local requests become authoritative simulator state only when confirmed by observations.
 
-On the highest level, Radia takes two streams of input, simulator data and user input, and produces frames.
+Render's scene reconciliation reads bounded World pages and change journals through the viewer's `WorldReader` bridge. It combines accepted object, terrain, and environment state with available assets, then publishes batches for the viewport's `SceneView`. GPU drawing borrows that view; it does not read network messages or mutate World.
 
-Simulator data arrives over UDP circuits and HTTP capabilities. The `protocol` crate decodes it into typed messages. The session layer translates those messages into updates and applies them to the `World`, an in-memory model of the entities the simulator has told us about. This is the ground state. Nothing below the viewer reads files or sockets to answer a question about it.
+Transport coverage loss and scene recovery are separate concerns. Session intake tracks where simulator observations may be incomplete and requests recovery where supported. Scene reconciliation can rebuild its derived state after history loss, rejected reads, or capacity pressure, but cannot recover observations that World never received. Neither successful rendering nor a populated scene proves complete simulator state.
 
-From the `World`, `render::scene` derives a render-facing view: what is visible, where it is in global space, and what should be drawn. The viewer runs its reconciler task, answers bounded world reads and asset requests, and applies published batches to `SceneView`. The `render` crate draws that view using decoded data from `assets`. Scene state, GPU resources and decoded assets are derived state. They can be thrown away and rebuilt from the world and the asset cache.
+## State and execution
+
+The session intake task is the single owner of mutable World state. It services admitted read requests alongside incoming events; consumers receive bounded replies and revision notifications rather than locking World. Session and region identities, ordering clocks, and tombstones protect updates across deletion, local-ID reuse, and handoff.
+
+`main` creates the Tokio service runtime and starts GPUI. Networking owns a separate runtime and network thread. The scene viewport owns its window/event-loop thread, `SceneView`, and renderer. Asset fetching and scene reconciliation run on service tasks; decoding, mesh generation, and texture preparation use blocking workers. Bounded queues, admission limits, cancellation, and generation checks keep slow or stale work from crossing lifecycle boundaries.
 
 ## Code map
 
-This section talks briefly about the important crates and data structures. Pay attention to the **Architecture Invariant** paragraphs. They often describe things that are deliberately absent from the source.
-
-Note also which crates are **API Boundaries**. Rules at the boundary are different. Substantial changes to a boundary's public API need approval first, and everything behind it can change freely.
-
-```text
-apps/viewer/           # package `viewer`, executable `viewer`
-crates/assets/         # package `assets`
-crates/llsd/           # package `llsd`
-crates/math/           # package `math`
-crates/utils/          # package `utils`
-crates/test-support/   # package `test-support`
-crates/network/        # package `network`
-crates/protocol/       # package `protocol`
-crates/render/         # package `render`
-crates/world/          # package `world`
-```
-
-The viewer coordinates the library crates. The common directory is being removed one crate at a time. Shared utilities and domain ID types live in utils, which has no subsystem dependencies. AssetId wraps uuid::Uuid so asset IDs cannot be confused with other identifiers. The base crate has been removed. Rust identifiers use Uuid while external wire names and serialization markers retain their protocol spelling.
+Each entry identifies a crate's responsibility, its important boundaries, and constraints that callers must preserve. Module listings, numeric limits, and command references belong in source or [tooling.md](tooling.md).
 
 ### `apps/viewer`
 
+Composes startup, GUI screens and primitives, persistence, and subsystem coordinators. Session intake is the sole owner of World and translates protocol messages into domain observations while preserving source order and coverage-loss information. The asset coordinator supplies network routes and executes bounded asset jobs; the scene feed schedules reconciliation and delivers sequenced batches to the viewport.
+
 ### `crates/assets`
 
-Assets owns request admission, bounded decoding, and retained content. Scratch reservations and resident charges are distinct private types. Retaining content consumes its scratch reservation; the resulting charge has no resize or split operations. Resident handles keep data charged until the final owner releases it, independently of scratch-work admission. Closing a job cancellation channel ends the cancellation wait.
-
-Material decoding is grouped by legacy and PBR formats, with shared texture and sampler values in their parent module. Texture decoding, headers, and handle lifetimes share a texture module. Legacy envelope inflation grows with actual content while retaining its fixed decompression limit.
+Decodes textures, materials, and environments and owns their values plus the bounded CPU mesh representation. Its per-session Store coordinates demand, route eligibility, priority, retries, refinement, and work reservations. `next_job` yields fetch work or cached decode input. Fetched bytes become a `DecodeInput`; the Store admits that input as a `DecodeJob`, and decoding produces a charged `LoadCompletion`. The viewer owns network fetching and decode scheduling, so asset policy stays independent of transport.
 
 ### `crates/llsd`
 
+Owns LLSD values, Serde integration, and XML, binary, and notation codecs. Decode limits bound document size, nesting, value counts, and scalar or container sizes; callers can tighten them for their own admission budgets. Simulator messages and domain semantics belong to higher layers.
+
 ### `crates/math`
 
-The math crate owns reusable geometry and numeric operations and re-exports selected glam types and scalar extension traits. Frustum extraction uses zero-to-one clip depth, including reversed depth, and tests bounding spheres against six planes. Plane coefficients and sphere calculations use double precision, and plane normal lengths are computed once per frustum. Axis-aligned Bounds, normal transforms, scale-reflection detection, and sRGB channel conversions also live here. Camera policy, mesh storage, and GPU packing stay with scene and render. Keep consumers importing from math so project-specific primitives have one home.
-
-### `crates/utils`
-
-Shared ID newtypes distinguish objects, assets, avatars, groups, regions, parcels, inventory items, folders, and experiences. ExperienceId rejects nil UUIDs; an absent experience is represented by Option. Their UUID representation is private. Wire codecs convert explicitly; subsystem APIs adopt these types during their individual reviews. Numeric region handles and parcel-local identifiers remain separate.
-
-### `crates/test-support`
+Provides shared geometry and numeric primitives, with selected `glam` types re-exported through this crate. UV transforms are shared by World appearances and decoded materials. Frustum operations use zero-to-one clip depth; ray intersections preserve the parameter in `origin + direction * t`, including for unnormalized directions.
 
 ### `crates/network`
 
-Session owns the network worker and event stream; SessionHandle provides bounded send and lifecycle controls. The simulator coordinator owns connection routing, root and neighbor roles, handoff, and teardown. Its connection, capability-event, event-routing, handoff, and runtime modules are children of that owner. Coverage loss remains observable when bounded queues cannot preserve application events.
-
-Capabilities separate discovery and request admission, HTTP transport, and event-queue lifecycle. The budget module owns concurrency and response-memory limits. Checked reservations validate dedicated and shared capacity before changing accounting; permits retain admission until blocking work completes, even after its waiter is cancelled.
-
-HTTP uses Reqwest 0.13 with default features disabled and the rustls feature enabled. The default crypto provider is aws-lc; platform certificate verification uses the operating system's trust policy. The viewer does not install a global crypto provider or disable certificate checks. Redirects remain disabled, compressed responses remain raw, and request deadlines cover response-body reads. The aws-lc native dependency adds build-tool requirements described in tooling.md.
+Owns login and session lifecycle, LLUDP delivery, capability requests, simulator routing, handoff, and teardown. Session events carry source-specific ordering evidence, while bounded command and event admission preserve protocol order and report coverage loss separately from ordinary failure. World and rendering state belong elsewhere.
 
 ### `crates/protocol`
 
-Protocol owns wire framing, field codecs, typed messages, and generated metadata from the pinned Second Life message template. Messages are grouped by agent, chat, circuit, region, map, and object responsibilities. Shared object payloads and reconstruction rules belong to the object group; raw field reading and writing belong to the LLUDP codec. Each leaf module retains its protocol message name in snake_case. Root message re-exports keep common type imports concise. Wire names and field layouts remain exact.
-
-Packet framing borrows the datagram and validates allocation bounds before decoded fields are allocated. A preflighted frame binds those bounds to the same input. Packet ownership, encoding, and retained-capacity accounting remain separate from the borrowed frame. Full, compressed, cached, and terse object layouts retain their individual compatibility rules and admission bounds, including permissive object values that the world layer validates independently.
-
-LayerData keeps one shared module for its input limit, bit reader, and error type. Its terrain module owns Decoder, Patch, terrain limits, and coefficient reconstruction. Consumers use layer_data::terrain::{Decoder, Patch} and layer_data::Error. Terrain remains the only supported layer variant. Invalid terrain values preserve later independently framed patches; truncation and framing failures end iteration.
-
-The vendored template is pinned to upstream commit d5445ef1ccb26864236653bbe91d6878bb2277fc. The build checks its normalized SHA-256 digest; the local copy removes trailing whitespace and one final blank line. Login uses the protocol-mandated MD5 representation. Both hash checks use the shared lowercase hexadecimal encoder in utils. Required login fields distinguish absence from invalid types, and UUID parsing borrows their text.
+Owns Second Life wire types, LLUDP framing and field codecs, and typed messages grouped by protocol area. Each typed message owns its codec and allocation preflight; a declarative list generates message variants and ID dispatch. Build-generated schema metadata comes from a vendored, SHA-256-verified template and remains the fallback for untyped messages. External message spellings and layouts stay exact. Framing and allocation validation belong here, while domain acceptance belongs to World.
 
 ### `crates/render`
 
-Render owns scene derivation under `render::scene`, plus the presentation surface, GPU resources, bounded uploads, and resource retirement. CPU texture preparation runs through worker jobs. Typed errors preserve underlying GPU errors through the standard error source chain. `render::material` groups legacy and PBR GPU materials; `render::scene` groups scene objects and views under model, and reconciliation reads, scheduling, and publication under reconcile. Reconciler remains the sole owner of its mutable state; extracting methods into child modules does not add shared ownership or synchronization.
+Derives bounded scene state from World and Assets, then renders it through GPU-owned resources. Reconciliation reads bounded World pages and change journals; it owns visibility and mesh demand, selects prim detail, tessellates prims, builds terrain and water geometry, and resolves materials. Experience environments bypass World and are published through Render.
 
-Meshes assembled from buffers validate size limits, finite vertex data, triangle indices, and face ranges before publication. Render upload can rely on these private construction invariants when indexing mesh data.
+`scene::prim` and `scene::surface` build the reusable CPU `assets::mesh::Mesh`; `scene::mesh` retains meshes and their identities. The model layer holds scene objects, regions, patches, and recovery status. `SceneView` applies sequence-checked batches and acknowledges delivery; abandoned deliveries trigger recovery, and stale work cannot publish after recovery or teardown. GPU modules own surfaces, buffers, textures, draw preparation, and resource retirement.
 
-Reconciler owns the derived scene and advances bounded reads, asset demand, mesh preparation, and publication. SceneView applies publications and supplies immutable render data to Renderer. Jobs and batches retain their lifetime and memory charges, so abandoned or stale work cannot become current after recovery or teardown. The read-completion method is complete_read, alongside complete_asset and complete_mesh; camera updates use set_camera. These replace the former SceneReconciler, complete, and camera names without compatibility aliases. Shared ExperienceId comes from utils.
+### `crates/test-support`
+
+Provides shared LLUDP vectors and a hex parser, texture samples with independent pixel expectations, and synchronous allocation measurements. Production crates use it only as a dev-dependency. Network keeps its process-wide probes local because they measure a different scope.
+
+### `crates/utils`
+
+Provides shared domain ID newtypes and small general-purpose helpers such as atomic file replacement. ID wrappers keep UUID representation private, and domain-specific validity rules stay with each owning type. It has no subsystem dependencies.
 
 ### `crates/world`
 
+Owns accepted simulator state for regions, objects, relationships, poses, appearances, terrain, media, and environment. Mutations validate and plan before committing state and indexes. Full observations and partial patches share one field pipeline for validation, authority, and freshness; separate update clocks preserve untouched fields. PBR assignments remain distinct from face overrides. Agent handoff is an observation from the destination region that may move the self agent.
+
+Bounded reads and change history expose completeness and unresolved relationships. Ordered queries resume by cursor. Spatial queries report `ResultLimit` without a cursor, and expired history requires resynchronization.
+
 ## Keeping this file sharp
 
-Don't edit yet.
+- Describe the current architecture. Put product direction in [vision.md](vision.md), tool instructions in [tooling.md](tooling.md), and legacy research guidance in [reference.md](reference.md).
+- Start with ownership: identify authoritative state, producers and consumers, and cross-crate boundaries. Explain flows that affect ordering, backpressure, consistency, or recovery. A crate list alone is not enough.
+- Keep the invariants a change author must preserve. Include type or module names when they clarify a boundary; leave local algorithms, exhaustive inventories, and numeric limits to code.
+- Give each fact one home. Link to its owning document instead of copying its guidance.
+- Update this file when ownership, dependencies, boundaries, or recovery semantics change. Check claims against implementation, especially guarantees about limits and completeness.
+- Remove obsolete statements and repetition before adding detail. Keep enough context to explain why the boundaries matter.

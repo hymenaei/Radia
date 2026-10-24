@@ -1,44 +1,18 @@
-use std::sync::Arc;
-
 use math::{Quat, Vec3};
 use uuid::Uuid;
 
+use super::facet::{FacetChanges, FacetSet, FacetUpdates};
+use crate::FieldRejectionReason::{InvalidRotation, InvalidValue, ParentCycle, ParentDependsOnRejectedParent, StaleFrame, UntrustedSource};
+use crate::UpdateAuthority::{Tracked, Untracked};
 use crate::history::WorldChangeClasses;
-use crate::update::{FieldStamp, Stamp};
+use crate::update::FieldStamp;
 use crate::{
-    Appearance, ApplyError, AttachmentPoint, AvatarAppearanceUpdate, FieldGroup, FieldRejectionReason, FieldUpdate, Kind, LinearMotion,
-    ObjectMedia, ObjectMediaUpdate, ObjectObservation, ObjectPatch, Parent, ParentUpdate, PbrMaterialAssignments, PbrMaterialOverrides,
-    Pose, Rejections, Shape, SurfaceAppearance, UpdateAuthority, UpdateSource, WorldPose,
+    Appearance, ApplyError, AttachmentPoint, FieldGroup, FieldRejectionReason, FieldUpdate, Kind, LinearMotion, ObjectObservation,
+    ObjectPatch, Parent, ParentUpdate, Pose, Rejections, UpdateAuthority, WorldPose,
 };
-use crate::{Fences, ObjectContent, ObjectOrdering, ObjectState, ParentRejectionBarrier, RegionalStamp, newer_field, newer_region_field};
-use FieldRejectionReason::{
-    InvalidRotation, InvalidValue, ParentCycle, ParentDependsOnRejectedParent, ResourceLimit, StaleFrame, UntrustedSource,
-};
-use UpdateAuthority::{Tracked, Untracked};
+use crate::{Fences, ObjectOrdering, ObjectState, ParentRejectionBarrier};
 
-#[derive(Clone, Copy)]
-pub(super) struct Origin {
-    pub(super) source: UpdateSource,
-    pub(super) stamp: Stamp,
-}
-
-impl Origin {
-    pub(super) fn field(self) -> FieldStamp {
-        FieldStamp { authority: self.source.authority(), stamp: self.stamp }
-    }
-
-    fn regional(self) -> RegionalStamp {
-        RegionalStamp { region: self.source.region, stamp: self.field() }
-    }
-
-    fn newer(self, fence: Option<FieldStamp>) -> bool {
-        newer_field(self.field(), fence)
-    }
-
-    fn newer_regional(self, fence: Option<RegionalStamp>) -> bool {
-        newer_region_field(self.source.region, self.field(), fence)
-    }
-}
+pub(super) use super::facet::Origin;
 
 pub(super) struct Fields {
     pub(super) pose: Option<Pose>,
@@ -46,13 +20,11 @@ pub(super) struct Fields {
     angular_velocity: Option<Vec3>,
     scale: Option<Vec3>,
     pub(super) attachment_point: FieldUpdate<AttachmentPoint>,
-    shape: FieldUpdate<Shape>,
-    pub(super) appearance: FieldUpdate<Appearance>,
-    surface_appearance: Option<SurfaceAppearance>,
-    pbr_materials: Option<PbrMaterialAssignments>,
-    pbr_material_overrides: Option<PbrMaterialOverrides>,
-    pub(super) avatar_appearance: Option<AvatarAppearanceUpdate>,
-    object_media: Option<ObjectMediaUpdate>,
+    pub(super) facets: FacetUpdates,
+}
+
+fn present_update<T>(update: FieldUpdate<T>) -> Option<FieldUpdate<T>> {
+    update.is_present().then_some(update)
 }
 
 impl Fields {
@@ -63,13 +35,13 @@ impl Fields {
             angular_velocity: observation.angular_velocity,
             scale: observation.scale,
             attachment_point: observation.attachment_point,
-            shape: observation.shape,
-            appearance: observation.appearance,
-            surface_appearance: observation.surface_appearance,
-            pbr_materials: observation.pbr_materials,
-            pbr_material_overrides: None,
-            avatar_appearance: None,
-            object_media: None,
+            facets: FacetUpdates {
+                shape: present_update(observation.shape),
+                appearance: present_update(observation.appearance),
+                surface_appearance: observation.surface_appearance,
+                pbr_materials: observation.pbr_materials,
+                ..FacetUpdates::default()
+            },
         }
     }
 
@@ -80,13 +52,16 @@ impl Fields {
             angular_velocity: patch.angular_velocity,
             scale: patch.scale,
             attachment_point: patch.attachment_point,
-            shape: patch.shape,
-            appearance: patch.appearance,
-            surface_appearance: patch.surface_appearance,
-            pbr_materials: patch.pbr_materials,
-            pbr_material_overrides: patch.pbr_material_overrides,
-            avatar_appearance: patch.avatar_appearance,
-            object_media: patch.object_media,
+            facets: FacetUpdates {
+                shape: present_update(patch.shape),
+                appearance: present_update(patch.appearance),
+                surface_appearance: patch.surface_appearance,
+                pbr_materials: patch.pbr_materials,
+                pbr_material_overrides: patch.pbr_material_overrides,
+                avatar_appearance: patch.avatar_appearance,
+                object_media: patch.object_media,
+                ..FacetUpdates::default()
+            },
         };
         (patch.parent, fields)
     }
@@ -101,15 +76,14 @@ impl Fields {
             || self.angular_velocity.is_some()
             || self.scale.is_some()
             || self.attachment_point.is_present()
-            || self.shape.is_present()
-            || self.appearance.is_present()
-            || self.surface_appearance.is_some()
-            || self.pbr_materials.is_some()
-            || self.pbr_material_overrides.is_some()
-            || self.avatar_appearance.is_some()
+            || self.facets.orders_binding()
     }
 
-    pub(super) fn is_newer_than(&self, state: &ObjectState, fences: &Fences, kind: Kind, origin: Origin) -> bool {
+    pub(super) fn has_facet_updates(&self) -> bool {
+        !self.facets.is_empty()
+    }
+
+    pub(super) fn is_newer_than(&self, state: &ObjectState, fences: &Fences, facets: &FacetSet, kind: Kind, origin: Origin) -> bool {
         state.binding.address.region != origin.source.region
             || origin.stamp > state.binding.fence()
             || (self.has_pose() && origin.newer(fences.pose))
@@ -117,19 +91,12 @@ impl Fields {
             || (self.angular_velocity.is_some() && origin.newer(fences.angular_velocity))
             || (self.scale.is_some() && origin.newer(fences.scale))
             || (self.attachment_point.is_present() && origin.newer(fences.attachment_point))
-            || (self.shape.is_present() && origin.newer_regional(fences.shape))
-            || (self.appearance.is_present() && origin.newer_regional(fences.appearance))
-            || (kind != Kind::Avatar && self.surface_appearance.is_some() && origin.newer_regional(fences.texture_entry))
-            || (kind != Kind::Avatar && self.pbr_materials.is_some() && origin.newer_regional(fences.pbr_materials))
+            || self.facets.has_newer(facets, kind, origin)
             || origin.newer(fences.parent)
     }
 
-    pub(super) fn next_appearance(&self, current: Option<Appearance>, fences: &Fences, origin: Origin) -> Option<Appearance> {
-        if self.appearance.is_present() && origin.newer_regional(fences.appearance) {
-            apply_field_update(current, self.appearance)
-        } else {
-            current
-        }
+    pub(super) fn next_appearance(&self, facets: &FacetSet, origin: Origin) -> Option<Appearance> {
+        self.facets.next_appearance(facets, origin)
     }
 
     pub(super) fn next_attachment_point(
@@ -179,27 +146,15 @@ impl Fields {
             rejections.reject(FieldGroup::Scale, reason);
             self.scale = None;
         }
-        if self.object_media.as_ref().is_some_and(|update| update.validate().is_err()) {
+        if self.facets.object_media.as_ref().is_some_and(|update| update.validate().is_err()) {
             rejections.reject(FieldGroup::ObjectMedia, InvalidValue { field: "object_media" });
-            self.object_media = None;
+            self.facets.object_media = None;
         }
         rejections
     }
 
     pub(super) fn reject_unsupported(&mut self, kind: Kind, appearance: Option<Appearance>, rejections: &mut Rejections) {
-        let accepts_surface = kind == Kind::Object && appearance == Some(Appearance::Surface);
-        if self.object_media.is_some() && !accepts_surface {
-            rejections.reject(FieldGroup::ObjectMedia, InvalidValue { field: "object_media" });
-            self.object_media = None;
-        }
-        if self.avatar_appearance.is_some() && kind != Kind::Avatar {
-            rejections.reject(FieldGroup::AvatarAppearance, InvalidValue { field: "avatar_appearance" });
-            self.avatar_appearance = None;
-        }
-        if self.pbr_material_overrides.as_ref().is_some_and(|overrides| !overrides.is_empty()) && !accepts_surface {
-            rejections.reject(FieldGroup::PbrMaterialOverrides, InvalidValue { field: "pbr_material_overrides" });
-            self.pbr_material_overrides = None;
-        }
+        self.facets.reject_unsupported(kind, appearance, rejections);
     }
 
     pub(super) fn reject_parent(&mut self, cycle: bool, untrusted: bool, rejections: &mut Rejections) {
@@ -214,28 +169,21 @@ impl Fields {
         }
     }
 
-    pub(super) fn reject_untrusted(&self, fences: &Fences, rejections: &mut Rejections) {
+    pub(super) fn reject_untrusted(&mut self, fences: &Fences, facets: &FacetSet, rejections: &mut Rejections) {
         let tracked = |fence: Option<FieldStamp>| fence.is_some_and(|fence| fence.authority == Tracked);
-        let regional = |fence: Option<RegionalStamp>| tracked(fence.map(|fence| fence.stamp));
         let groups = [
             (FieldGroup::Pose, self.has_pose(), tracked(fences.pose)),
             (FieldGroup::LinearMotion, !self.linear_motion.is_empty(), tracked(fences.linear_motion)),
             (FieldGroup::AngularVelocity, self.angular_velocity.is_some(), tracked(fences.angular_velocity)),
             (FieldGroup::Scale, self.scale.is_some(), tracked(fences.scale)),
             (FieldGroup::AttachmentPoint, self.attachment_point.is_present(), tracked(fences.attachment_point)),
-            (FieldGroup::Shape, self.shape.is_present(), regional(fences.shape)),
-            (FieldGroup::Appearance, self.appearance.is_present(), regional(fences.appearance)),
-            (FieldGroup::TextureEntry, self.surface_appearance.is_some(), regional(fences.texture_entry)),
-            (FieldGroup::PbrMaterials, self.pbr_materials.is_some(), regional(fences.pbr_materials)),
-            (FieldGroup::PbrMaterialOverrides, self.pbr_material_overrides.is_some(), regional(fences.pbr_material_overrides)),
-            (FieldGroup::AvatarAppearance, self.avatar_appearance.is_some(), regional(fences.avatar_appearance)),
-            (FieldGroup::ObjectMedia, self.object_media.is_some(), true),
         ];
         for (group, present, protected) in groups {
             if present && protected {
                 rejections.reject(group, UntrustedSource);
             }
         }
+        self.facets.reject_untrusted(facets, UpdateAuthority::Untracked, rejections);
     }
 }
 
@@ -256,24 +204,22 @@ pub(super) struct Settlement {
     pub(super) advance_binding: bool,
 }
 
-pub(super) struct Draft<'a> {
+pub(super) struct Draft {
     pub(super) state: ObjectState,
     pub(super) ordering: ObjectOrdering,
-    base: &'a ObjectContent,
-    content: Option<ObjectContent>,
+    base: FacetSet,
+    facets: FacetSet,
+    facet_changes: bool,
 }
 
-impl<'a> Draft<'a> {
-    pub(super) const fn new(state: ObjectState, ordering: ObjectOrdering, base: &'a ObjectContent) -> Self {
-        Self { state, ordering, base, content: None }
+impl Draft {
+    pub(super) fn new(state: ObjectState, ordering: ObjectOrdering, base: FacetSet) -> Self {
+        Self { state, ordering, facets: base.clone(), base, facet_changes: false }
     }
 
-    pub(super) fn content(&self) -> &ObjectContent {
-        self.content.as_ref().unwrap_or(self.base)
-    }
-
-    pub(super) fn content_mut(&mut self) -> &mut ObjectContent {
-        self.content.get_or_insert_with(|| self.base.clone())
+    pub(super) fn reset_region_relative(&mut self) {
+        self.facets.reset_region_relative();
+        self.facet_changes = true;
     }
 
     pub(super) fn plan_frame(&self, changed: bool, origin: Origin) -> Result<Frame, ApplyError> {
@@ -316,6 +262,7 @@ impl<'a> Draft<'a> {
         rejections: &mut Rejections,
     ) {
         let Settlement { frame, pose_accepted, detach_snapshot, parent_applied, parent_cycle, advance_binding } = settlement;
+        self.facet_changes |= fields.has_facet_updates();
         if frame.changed {
             self.state.frame_generation = frame.generation;
             self.state.provisional_pose = None;
@@ -349,7 +296,6 @@ impl<'a> Draft<'a> {
 
     fn apply(&mut self, fields: Fields, kind: Kind, origin: Origin, pose_accepted: bool, media_bytes: usize, rejections: &mut Rejections) {
         let field = origin.field();
-        let regional = origin.regional();
         if let Some(pose) = fields.pose.filter(|_| pose_accepted) {
             if let Some(position) = pose.position {
                 self.state.transform.position = Some(position);
@@ -381,65 +327,8 @@ impl<'a> Draft<'a> {
             self.state.attachment_point = apply_field_update(self.state.attachment_point, fields.attachment_point);
             self.ordering.fences.attachment_point = Some(field);
         }
-        if fields.shape.is_present() && origin.newer_regional(self.ordering.fences.shape) {
-            let shape = apply_field_update(self.content().shape, fields.shape);
-            self.content_mut().shape = shape;
-            self.ordering.fences.shape = Some(regional);
-        }
-        if fields.appearance.is_present() && origin.newer_regional(self.ordering.fences.appearance) {
-            let appearance = apply_field_update(self.content().appearance, fields.appearance);
-            self.content_mut().appearance = appearance;
-            self.ordering.fences.appearance = Some(regional);
-        }
-        if let Some(value) = fields.surface_appearance
-            && kind != Kind::Avatar
-            && origin.newer_regional(self.ordering.fences.texture_entry)
-        {
-            if self.content().surface_appearance.as_deref() != Some(&value) {
-                self.content_mut().surface_appearance = Some(Arc::new(value));
-            }
-            self.ordering.fences.texture_entry = Some(regional);
-        }
-        if let Some(value) = fields.pbr_materials
-            && kind != Kind::Avatar
-            && origin.newer_regional(self.ordering.fences.pbr_materials)
-        {
-            let value = (!value.is_empty()).then_some(value);
-            if self.content().pbr_materials.as_deref() != value.as_ref() {
-                self.content_mut().pbr_materials = value.map(Arc::new);
-            }
-            self.ordering.fences.pbr_materials = Some(regional);
-        }
-        if let Some(value) = fields.pbr_material_overrides
-            && origin.newer_regional(self.ordering.fences.pbr_material_overrides)
-        {
-            let value = (!value.is_empty()).then_some(value);
-            if self.content().pbr_material_overrides.as_deref() != value.as_ref() {
-                self.content_mut().pbr_material_overrides = value.map(Arc::new);
-            }
-            self.ordering.fences.pbr_material_overrides = Some(regional);
-        }
-        if let Some(update) = fields.avatar_appearance
-            && origin.newer_regional(self.ordering.fences.avatar_appearance)
-        {
-            let mut appearance = self.content().avatar_appearance.as_deref().cloned().unwrap_or_default();
-            appearance.apply(update);
-            self.content_mut().avatar_appearance = Some(Arc::new(appearance));
-            self.ordering.fences.avatar_appearance = Some(regional);
-        }
-        if let Some(update) = fields.object_media
-            && origin.source.authority() == Tracked
-            && self.content().object_media.as_deref().is_none_or(|current| update.version() > current.version())
-        {
-            let current = self.content().object_media.as_deref();
-            let current_bytes = current.map_or(0, ObjectMedia::retained_bytes);
-            let mut media = current.cloned().unwrap_or_default();
-            media.apply(&update);
-            if media_bytes.saturating_sub(current_bytes).saturating_add(media.retained_bytes()) > crate::MAX_OBJECT_MEDIA_BYTES {
-                rejections.reject(FieldGroup::ObjectMedia, ResourceLimit { field: "object_media" });
-            } else {
-                self.content_mut().object_media = Some(Arc::new(media));
-            }
+        if self.facet_changes {
+            fields.facets.apply(&mut self.facets, origin, kind, media_bytes, rejections);
         }
     }
 
@@ -465,57 +354,23 @@ impl<'a> Draft<'a> {
         if before.parent != after_parent || before.attachment_point != after.attachment_point {
             classes |= WorldChangeClasses::RELATIONSHIP;
         }
-        if let Some(content) = &self.content {
-            classes |= content_change_classes(self.base, content);
+        if self.facet_changes {
+            classes |= self.facets.changed_classes(&self.base);
         }
         classes
     }
 
     pub(super) fn is_unchanged(&self, state: &ObjectState, ordering: &ObjectOrdering) -> bool {
-        self.content.is_none() && self.state == *state && self.ordering == *ordering
+        (!self.facet_changes || self.facets == self.base) && self.state == *state && self.ordering == *ordering
     }
 
     pub(super) fn media_bytes(&self) -> Option<(usize, usize)> {
-        let content = self.content.as_ref()?;
-        let bytes = |content: &ObjectContent| content.object_media.as_deref().map_or(0, ObjectMedia::retained_bytes);
-        Some((bytes(self.base), bytes(content)))
+        self.facet_changes.then(|| FacetChanges::new(self.base.clone(), self.facets.clone())).and_then(|changes| changes.media_bytes())
     }
 
-    pub(super) fn into_parts(self) -> (ObjectState, Option<ObjectContent>, ObjectOrdering) {
-        (self.state, self.content, self.ordering)
-    }
-}
-
-fn content_change_classes(before: &ObjectContent, after: &ObjectContent) -> WorldChangeClasses {
-    let mut classes = WorldChangeClasses::default();
-    if before.sit_target != after.sit_target {
-        classes |= WorldChangeClasses::RELATIONSHIP;
-    }
-    if before.shape != after.shape {
-        classes |= WorldChangeClasses::SHAPE;
-    }
-    if before.appearance != after.appearance
-        || !same_arc(before.surface_appearance.as_ref(), after.surface_appearance.as_ref())
-        || !same_arc(before.pbr_materials.as_ref(), after.pbr_materials.as_ref())
-        || !same_arc(before.pbr_material_overrides.as_ref(), after.pbr_material_overrides.as_ref())
-        || !same_arc(before.avatar_appearance.as_ref(), after.avatar_appearance.as_ref())
-    {
-        classes |= WorldChangeClasses::APPEARANCE;
-    }
-    if !same_arc(before.object_media.as_ref(), after.object_media.as_ref()) {
-        classes |= WorldChangeClasses::MEDIA;
-    }
-    if before.properties != after.properties || before.properties_provenance != after.properties_provenance {
-        classes |= WorldChangeClasses::PROPERTIES;
-    }
-    classes
-}
-
-fn same_arc<T: PartialEq>(before: Option<&Arc<T>>, after: Option<&Arc<T>>) -> bool {
-    match (before, after) {
-        (None, None) => true,
-        (Some(before), Some(after)) => Arc::ptr_eq(before, after) || **before == **after,
-        _ => false,
+    pub(super) fn into_parts(self) -> (ObjectState, Option<FacetChanges>, ObjectOrdering) {
+        let changes = self.facet_changes.then(|| FacetChanges::new(self.base, self.facets));
+        (self.state, changes, self.ordering)
     }
 }
 

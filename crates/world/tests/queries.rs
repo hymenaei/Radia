@@ -138,8 +138,6 @@ fn borrowed_queries_expose_current_state() {
     );
     assert_eq!(world.object(child).unwrap().coordinate_frame().unwrap(), CoordinateFrame::LinksetRoot { root });
     assert_eq!(world.object(child).unwrap().world_pose().unwrap(), PoseState::Unresolved(UnresolvedReason::MissingLocalPose));
-    drop(view);
-
     assert_eq!(
         patch_properties_current(
             &mut world,

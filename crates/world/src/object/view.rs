@@ -1,24 +1,39 @@
+use std::collections::btree_set;
+use std::sync::Arc;
+
 use hecs::{QueryBorrow, Ref};
 use math::{Quat, Vec3};
 use uuid::Uuid;
 
+use crate::mutation::facet::Facet;
+use crate::object::components::{Fenced, ObjectProperties};
+use crate::object::storage::ComponentView;
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, Kind, LinearMotion, LocalAddress, LocalTransform, ObjectMedia,
     Parent, PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Properties, PropertiesProvenance, Shape, SitTarget,
     SurfaceAppearance, Transform, WorldTransformState,
 };
-use crate::{ObjectContent, ObjectOrdering, ObjectRecord, ObjectRecordRef, World};
+use crate::{ObjectOrdering, ObjectRecord, World};
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct Object<'a> {
     pub(crate) entity: Entity,
-    pub(crate) record: ObjectRecordRef<'a>,
+    record: &'a ObjectRecord,
     pub(crate) world: &'a World,
 }
 
 impl<'a> Object<'a> {
-    pub(crate) fn content(&self) -> &ObjectContent {
-        self.record.content()
+    pub(crate) fn new(entity: Entity, record: &'a ObjectRecord, world: &'a World) -> Self {
+        Self { entity, record, world }
+    }
+
+    pub(crate) fn record(&self) -> &'a ObjectRecord {
+        self.record
+    }
+
+    fn facet<T: Facet>(&self) -> Option<&'a T::View> {
+        let store = &self.world.store;
+        store.component::<Fenced<T>>(self.entity.0)?.value.as_ref().map(T::view)
     }
 
     pub(crate) fn ordering(&self) -> Ref<'a, ObjectOrdering> {
@@ -74,39 +89,44 @@ impl<'a> Object<'a> {
     }
 
     pub fn shape(&self) -> Option<Shape> {
-        self.content().shape
+        self.facet::<Shape>().copied()
     }
 
     pub fn appearance(&self) -> Option<Appearance> {
-        self.content().appearance
+        self.facet::<Appearance>().copied()
     }
 
-    pub fn surface_appearance(&self) -> Option<&SurfaceAppearance> {
-        self.content().surface_appearance.as_deref()
+    pub fn surface_appearance(&self) -> Option<&'a SurfaceAppearance> {
+        self.facet::<Arc<SurfaceAppearance>>()
     }
 
-    pub fn pbr_materials(&self) -> Option<&PbrMaterialAssignments> {
-        self.content().pbr_materials.as_deref()
+    pub fn pbr_materials(&self) -> Option<&'a PbrMaterialAssignments> {
+        self.facet::<Arc<PbrMaterialAssignments>>()
     }
 
-    pub fn pbr_material_overrides(&self) -> Option<&PbrMaterialOverrides> {
-        self.content().pbr_material_overrides.as_deref()
+    pub fn pbr_material_overrides(&self) -> Option<&'a PbrMaterialOverrides> {
+        self.facet::<Arc<PbrMaterialOverrides>>()
     }
 
-    pub fn object_media(&self) -> Option<&ObjectMedia> {
-        self.content().object_media.as_deref()
+    pub fn object_media(&self) -> Option<&'a ObjectMedia> {
+        self.facet::<Arc<ObjectMedia>>()
     }
 
-    pub fn avatar_appearance(&self) -> Option<&AvatarAppearance> {
-        self.content().avatar_appearance.as_deref()
+    pub fn avatar_appearance(&self) -> Option<&'a AvatarAppearance> {
+        self.facet::<Arc<AvatarAppearance>>()
     }
 
     pub fn properties(&self) -> Properties {
-        self.content().properties
+        self.properties_data().0
     }
 
     pub fn properties_provenance(&self) -> PropertiesProvenance {
-        self.content().properties_provenance
+        self.properties_data().1
+    }
+
+    pub(crate) fn properties_data(&self) -> (Properties, PropertiesProvenance) {
+        let properties = self.world.store.component::<ObjectProperties>(self.entity.0).copied().unwrap_or_default();
+        (properties.properties, properties.properties_provenance)
     }
 
     pub fn attachment_point(&self) -> Option<AttachmentPoint> {
@@ -114,7 +134,7 @@ impl<'a> Object<'a> {
     }
 
     pub fn sit_target(&self) -> Option<SitTarget> {
-        self.content().sit_target
+        self.facet::<SitTarget>().copied()
     }
 
     pub fn coordinate_frame(&self) -> Result<CoordinateFrame, PoseError> {
@@ -131,17 +151,36 @@ impl<'a> Object<'a> {
 }
 
 pub struct Objects<'a> {
-    pub(crate) records: QueryBorrow<'a, (hecs::Entity, &'a ObjectRecord, Option<&'a ObjectContent>)>,
+    pub(crate) records: QueryBorrow<'a, (hecs::Entity, &'a ObjectRecord)>,
     pub(crate) world: &'a World,
 }
 
-impl Objects<'_> {
-    pub fn iter(&mut self) -> impl Iterator<Item = Object<'_>> {
+impl<'a> Objects<'a> {
+    pub fn iter<'b>(&'b mut self) -> impl Iterator<Item = Object<'b>> + 'b {
         let world = self.world;
-        self.records.iter().map(move |(entity, record, content)| Object {
-            entity: Entity(entity, world.id),
-            record: ObjectRecordRef::Borrowed { record, content },
-            world,
-        })
+        self.records.iter().map(move |(entity, record)| Object::new(Entity(entity, world.id), record, world))
+    }
+}
+
+pub(crate) struct IndexedObjects<'a> {
+    ids: btree_set::Iter<'a, Uuid>,
+    records: ComponentView<'a, ObjectRecord>,
+    world: &'a World,
+}
+
+impl<'a> IndexedObjects<'a> {
+    pub(crate) fn new(ids: btree_set::Iter<'a, Uuid>, world: &'a World) -> Self {
+        Self { ids, records: world.store.component_view::<ObjectRecord>(), world }
+    }
+}
+
+impl<'a> Iterator for IndexedObjects<'a> {
+    type Item = Object<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let id = *self.ids.next()?;
+        let entity = self.world.entity(id).expect("object index contains only live entities");
+        let record = self.records.get(entity.0).expect("object index contains only complete objects");
+        Some(Object::new(entity, record, self.world))
     }
 }

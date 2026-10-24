@@ -14,7 +14,7 @@ impl World {
         let mut edges = 0;
 
         loop {
-            let Some(object) = self.store.record(current) else { return Ok(CoordinateFrame::Unknown) };
+            let Some(object) = self.store.object_record(current) else { return Ok(CoordinateFrame::Unknown) };
             match object.state.parent {
                 Parent::Unknown => return Ok(CoordinateFrame::Unknown),
                 Parent::Pending { address, expected_uuid } => return Ok(CoordinateFrame::PendingParent { address, expected_uuid }),
@@ -30,7 +30,7 @@ impl World {
                         return Err(PoseError::TraversalLimitExceeded { max_edges: MAX_PARENT_EDGES });
                     }
                     edges += 1;
-                    if self.store.record(parent).is_some_and(|parent| parent.kind == Kind::Avatar) {
+                    if self.store.object_record(parent).is_some_and(|parent| parent.kind == Kind::Avatar) {
                         return if current == entity {
                             Ok(CoordinateFrame::AttachmentPoint { avatar: parent, point: object.state.attachment_point })
                         } else {
@@ -46,7 +46,7 @@ impl World {
     pub(crate) fn resolve_pose(&self, entity: Entity) -> Result<PoseState, PoseError> {
         let state = self.resolve_pose_without_provisional(entity)?;
         if let PoseState::Unresolved(reason) = state
-            && let Some(object) = self.store.record(entity)
+            && let Some(object) = self.store.object_record(entity)
             && object.state.parent == Parent::Root
             && let Some(pose) = object.state.provisional_pose
         {
@@ -63,7 +63,7 @@ impl World {
         let mut unresolved = None;
 
         loop {
-            let Some(object) = self.store.record(current) else {
+            let Some(object) = self.store.object_record(current) else {
                 record_unresolved(&mut unresolved, UnresolvedReason::PoseNotValidForCurrentFrame);
                 break;
             };
@@ -118,7 +118,7 @@ impl World {
                     break;
                 }
                 Parent::Resolved(parent) => {
-                    let Some(parent_object) = self.store.record(parent) else {
+                    let Some(parent_object) = self.store.object_record(parent) else {
                         record_unresolved(&mut unresolved, UnresolvedReason::PoseNotValidForCurrentFrame);
                         break;
                     };
@@ -150,7 +150,7 @@ impl World {
             PoseState::Provisional { pose, reason } => return Ok(WorldTransformState::Provisional { pose, reason }),
             PoseState::Unresolved(reason) => return Ok(WorldTransformState::Unresolved(reason)),
         };
-        let Some(object) = self.store.record(entity) else {
+        let Some(object) = self.store.object_record(entity) else {
             return Ok(WorldTransformState::Unresolved(UnresolvedReason::PoseNotValidForCurrentFrame));
         };
         match object.state.transform.scale() {

@@ -2,15 +2,15 @@ Radia is not a port of the official viewer. Existing viewers are references for 
 
 Radia fixes how the viewer works before it changes how the world looks. The first goal is a viewer that is simpler, safer, faster, and easier to maintain, and that shows Second Life as it exists today. Content, materials, environments, lighting, water, avatars, and interactions should look and behave the way their creators intended. Once that base holds, Radia goes beyond what Second Life can express.
 
-## Classic and Modern
+## Current milestone
 
-Radia is one viewer with two editions. Both run on the same world model, asset handling, networking core, and gui framework. An edition decides which renderer features, environment system, and default interface are active. It is a configuration, not a fork.
+The current milestone is the Classic compatibility baseline. It should preserve the workflows and content residents rely on, with rendering that matches closely without copying the official viewer's interface pixel for pixel. Radia does not identify or offer selectable editions while this work is in progress.
 
-Classic is the compatibility edition. Its contract is that someone coming from the official viewer keeps their workflow and their content. Rendering should match closely, but pixel-perfect output and a copy of the official gui are not required. Classic is the default edition and the first milestone.
+## Later direction
 
-Modern is the edition that moves past that contract. The protocol and content formats are still Second Life's, so modern's job is to render and operate that same content to a roughly 2018 standard. That means a renderer redesigned around current lighting and material techniques, better water, atmosphere, and volumetric clouds, and an interface rebuilt for current expectations. Nothing is re-uploaded or re-authored. Existing content gets the new pipeline applied to it.
+After the Classic baseline is complete, the project can decide whether to offer additional editions and how to name and select them. One possible direction is to apply newer material, lighting, water, atmosphere, and cloud techniques to existing Second Life content without requiring re-upload or re-authoring. Its scope and acceptance criteria remain open until the current milestone is complete.
 
-Modern is a superset of classic, so anything classic can show, modern can. Edition-specific code stays isolated, so work on Modern cannot change how classic behaves.
+Any later edition should preserve the content the Classic baseline can show. If editions are introduced, keep their distinct rendering and interface behavior isolated so changes in one do not alter another.
 
 ## Principles
 
@@ -20,7 +20,7 @@ Modern is a superset of classic, so anything classic can show, modern can. Editi
 - **Performance.** Overhead is low, interaction is responsive, and frame times are stable. We get there through sound architecture and measured optimization.
 - **Independence.** Existing designs get re-examined, Radia's own included. No decision is permanent because it is old.
 - **Compatibility.** Preserve external behavior and content semantics without inheriting the legacy implementation.
-- **Restraint.** Build for current requirements. Add an extension point when a second edition or feature needs one, and skip speculative frameworks.
+- **Restraint.** Build for current requirements. Add an extension point when a concrete feature needs one, and skip speculative frameworks.
 
 ## Compatibility at the boundaries
 

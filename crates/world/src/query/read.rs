@@ -222,7 +222,7 @@ impl World {
             .take(limit)
             .map(|id| {
                 let entity = self.entity(*id).expect("object ordering index contains only live object IDs");
-                let record = self.store.record(entity).expect("UUID index contains only live entities");
+                let record = self.store.object_record(entity).expect("UUID index contains only live entities");
                 ObjectListItem { entity, id: record.id, kind: record.kind, address: record.state.binding.address }
             })
             .collect::<Vec<_>>();

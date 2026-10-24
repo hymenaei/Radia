@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::{num::NonZeroU32, time::Instant};
 
 use math::{DVec3, Quat, Vec3};
@@ -24,7 +25,7 @@ pub(super) fn scene(alpha: u8) -> (Reconciler, SceneView, Camera) {
         max_recovery_targets: 4,
     });
     let region = Region::new(1);
-    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    assert_matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
     let _ = world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).unwrap();
     for (id, y, mut color, shape) in [
         (1, -2.0, [255, 0, 0, 255], PrimShape::default()),
@@ -44,7 +45,7 @@ pub(super) fn scene(alpha: u8) -> (Reconciler, SceneView, Camera) {
         object.shape = FieldUpdate::Set(Shape::Prim(shape));
         object.appearance = FieldUpdate::Set(Appearance::Surface);
         object.surface_appearance = Some(SurfaceAppearance::new(FaceAppearance { color, ..Default::default() }, Vec::new()).unwrap());
-        assert!(matches!(world.observe_object(object).unwrap().outcome, world::ApplyOutcome::Introduced(_)));
+        assert_matches!(world.observe_object(object).unwrap().outcome, world::ApplyOutcome::Introduced(_));
     }
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();

@@ -72,8 +72,6 @@ fn shape_appearance_fences_are_independent() {
     let current = world.object(entity).unwrap();
     assert_eq!(current.shape(), Some(mesh_shape(0x209)));
     assert_eq!(current.appearance(), Some(Appearance::Avatar));
-    drop(current);
-
     let clear =
         ObjectPatch { shape: FieldUpdate::Clear, appearance: FieldUpdate::Clear, ..ObjectPatch::new(source(region, 30), local_id(1)) };
     assert_eq!(world.patch_object(clear).unwrap().outcome, Updated(entity));
@@ -463,6 +461,14 @@ fn transfer_scopes_regional_fields() {
     let creator = uuid(382);
     let first_object = world.observe_object(object(source(first, 1), 380, 1, Object, Root)).unwrap();
     let Introduced(entity) = first_object.outcome else { panic!("expected object introduction") };
+    let saved_shape = mesh_shape(0x380);
+    assert_eq!(
+        world
+            .patch_object(ObjectPatch { shape: FieldUpdate::Set(saved_shape), ..ObjectPatch::new(source(first, 200), local_id(1)) })
+            .unwrap()
+            .outcome,
+        Updated(entity)
+    );
 
     assert_eq!(
         patch_properties_current(&mut world, source(first, 200), object_id, PropertiesPatch { owner_id: Some(owner), creator_id: None })
@@ -508,10 +514,15 @@ fn transfer_scopes_regional_fields() {
     assert_eq!(view.properties().owner_id, Some(owner));
     assert_eq!(view.properties().creator_id, Some(creator));
     assert_eq!(view.sit_target(), Some(destination_target));
-    drop(view);
-
     let returned = world.observe_object(object(source(first, 2), 380, 2, Object, Root)).unwrap();
     assert_eq!(returned.outcome, Updated(entity));
+    assert_eq!(
+        world
+            .patch_object(ObjectPatch { shape: FieldUpdate::Set(mesh_shape(0x383)), ..ObjectPatch::new(source(first, 3), local_id(2)) })
+            .unwrap()
+            .outcome,
+        Unchanged
+    );
     let next_creator = uuid(383);
     assert_eq!(
         patch_properties_current(
@@ -525,6 +536,7 @@ fn transfer_scopes_regional_fields() {
         Updated(entity)
     );
     let view = world.object(entity).unwrap();
+    assert_eq!(view.shape(), Some(saved_shape));
     assert_eq!(view.properties().owner_id, Some(owner));
     assert_eq!(view.properties().creator_id, Some(next_creator));
     assert_eq!(view.properties_provenance().owner.unwrap().order, 200);

@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use super::support::{
     BTreeMap, BTreeSet, Budget, DVec3, Instant, Mesh, ParentUpdate, PreparedMesh, ReadFailure, ReadQuery, ReadReply, ReconcileStep,
     Reconciler, RecoveryReason, Region, RegionInfo, SceneView, Status, SurfaceKind, TerrainPatch, TerrainPatchId, Vec3, add, move_root,
@@ -293,7 +295,7 @@ fn startup_failure_retains_terrain() {
         match scene.poll(now) {
             ReconcileStep::Read(job) => {
                 if matches!(job.query(), ReadQuery::Objects(_)) && !checked {
-                    assert!(matches!(view.status(), Status::Recovering { .. }));
+                    assert_matches!(view.status(), Status::Recovering { .. });
                     let surface = view
                         .surfaces()
                         .find(|surface| matches!(surface.kind, SurfaceKind::Terrain(_)))
@@ -440,7 +442,7 @@ fn terrain_extent_validation() {
                 _ => panic!("expected terrain hydration"),
             }
         }
-        assert!(matches!(scene.status(), Status::Recovering { reason: RecoveryReason::InvalidReply, .. }));
+        assert_matches!(scene.status(), Status::Recovering { reason: RecoveryReason::InvalidReply, .. });
         assert_eq!(view.surfaces().count(), 0);
     }
 }

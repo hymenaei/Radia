@@ -5,8 +5,7 @@ use crate::UpdateAuthority::Untracked;
 use crate::history::WorldChange::EntityRemoved;
 use crate::update::{FieldStamp, Stamp};
 use crate::{
-    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, ObjectMedia, Parent, PoseState, Region, UpdateAuthority,
-    UpdateSource,
+    Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, Parent, PoseState, Region, UpdateAuthority, UpdateSource,
 };
 use crate::{RecentObject, World, WorldEntityRemovalReason, newer_field};
 
@@ -51,7 +50,7 @@ impl World {
         }
         let address = LocalAddress::new(source.region, local_id);
         let live = self.entity_at(address).map(|entity| {
-            let record = self.store.record(entity).expect("address index contains a live entity");
+            let record = self.store.object_record(entity).expect("address index contains a live entity");
             (entity, record.id, record.state.binding.fence())
         });
         if live.is_some_and(|(_, id, _)| self.self_agent == Some(id)) {
@@ -88,30 +87,21 @@ impl World {
         while let Some((entity, cause, expanded)) = first.take().or_else(|| pending.pop()) {
             let invalidation = cause.stamp();
             let reason = cause.reason();
-            let (id, address, media_bytes, recent) = self
-                .object(entity)
-                .map(|object| {
-                    let recent = (!expanded).then(|| RecentObject {
-                        id: object.record.id,
-                        kind: object.kind(),
-                        address: object.address(),
-                        attachment_point: object.attachment_point(),
-                        properties: object.properties(),
-                        properties_provenance: object.properties_provenance(),
-                        last_pose: match object.world_pose() {
-                            Ok(PoseState::Resolved(pose)) => Some(pose),
-                            Ok(PoseState::Unresolved(_)) | Ok(PoseState::Provisional { .. }) | Err(_) => None,
-                        },
-                        removal_reason: reason,
-                    });
-                    (
-                        object.record.id,
-                        object.address(),
-                        object.content().object_media.as_deref().map_or(0, ObjectMedia::retained_bytes),
-                        recent,
-                    )
-                })
-                .expect("removal traversal contains only live entities");
+            let (id, kind, state, properties, media_bytes) = self.store.removal_data(entity.0);
+            let address = state.binding.address;
+            let recent = (!expanded).then(|| RecentObject {
+                id,
+                kind,
+                address,
+                attachment_point: state.attachment_point,
+                properties: properties.properties,
+                properties_provenance: properties.properties_provenance,
+                last_pose: match self.resolve_pose(entity) {
+                    Ok(PoseState::Resolved(pose)) => Some(pose),
+                    Ok(PoseState::Unresolved(_)) | Ok(PoseState::Provisional { .. }) | Err(_) => None,
+                },
+                removal_reason: reason,
+            });
             if let Some(recent) = recent {
                 effects.recent.push(recent, Instant::now());
             }
@@ -136,7 +126,7 @@ impl World {
                 }
                 let Some((child_kind, child_id, child_address, child_fence)) = self
                     .store
-                    .record(child)
+                    .object_record(child)
                     .map(|record| (record.kind, record.id, record.state.binding.address, record.state.binding.fence()))
                 else {
                     continue;
@@ -159,7 +149,7 @@ impl World {
 
     fn advance_parent_fence(&mut self, child: Entity, invalidation: Option<Stamp>, invalidation_region: Region) {
         let Some(stamp) = invalidation
-            .filter(|_| self.store.record(child).is_some_and(|record| record.state.binding.address.region == invalidation_region))
+            .filter(|_| self.store.object_record(child).is_some_and(|record| record.state.binding.address.region == invalidation_region))
         else {
             return;
         };

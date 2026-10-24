@@ -1,7 +1,7 @@
 use std::hint::black_box;
 
 use block_compression::{BC7Settings, CompressionVariant, encode::compress_rgba8};
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput};
 use intel_tex_2::{RgbaSurface, bc1, bc3, bc7};
 
 #[path = "../src/texture/compression.rs"]
@@ -10,7 +10,7 @@ mod texture_compression;
 
 use texture_compression::{CompressionFormat, CompressionQuality};
 
-fn textures(c: &mut Criterion) {
+pub(crate) fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("texture/compression");
     for edge in [512u32, 1024, 2048] {
         let mut pixels = Vec::with_capacity(edge as usize * edge as usize * 4);
@@ -103,6 +103,3 @@ fn textures(c: &mut Criterion) {
     }
     group.finish();
 }
-
-criterion_group!(benches, textures);
-criterion_main!(benches);

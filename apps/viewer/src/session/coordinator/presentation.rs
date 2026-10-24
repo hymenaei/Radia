@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::{
     asset_coordinator::AssetHandle,
-    inventory::FavoriteLocation,
-    remembered_login::RememberedLogin,
+    inventory::{FavoriteLocation, favorite_store::FavoriteStoreError, favorites::FavoritesError},
+    remembered_login::{CredentialStoreError, RememberedLogin},
     session::{ChatMessage, RegionLookup, experience_environment::EnvironmentInbox},
     world_reader::WorldReader,
 };
@@ -73,7 +73,7 @@ impl PresentationMailbox {
         match wake_sender.try_send(()) {
             Ok(()) => {}
             Err(error) if error.is_full() => {}
-            Err(error) => tracing::trace!(%error, "Presentation receiver closed"),
+            Err(error) => tracing::trace!(%error, "presentation receiver closed"),
         }
     }
 }
@@ -107,7 +107,7 @@ pub(crate) struct PresentationSnapshot {
     pub(crate) chat_messages: VecDeque<ChatMessage>,
     pub(crate) failure: Option<String>,
     pub(crate) favorites: Option<FavoritesUpdate>,
-    pub(crate) favorite_store_saved: Option<(u64, Result<(), String>)>,
+    pub(crate) favorite_store_saved: Option<(u64, Result<(), FavoriteStoreError>)>,
 }
 
 impl PresentationSnapshot {
@@ -131,7 +131,7 @@ impl PresentationSnapshot {
 
 pub(crate) enum AuthenticationUpdate {
     MfaRequired(MfaChallenge),
-    CredentialsUpdated { remembered_login: Option<RememberedLogin>, warning: Option<String> },
+    CredentialsUpdated { remembered_login: Option<RememberedLogin>, warning: Option<CredentialStoreError> },
 }
 
 pub(crate) struct SessionReadyUpdate {
@@ -149,7 +149,7 @@ pub(crate) struct FavoritesUpdate {
     pub(crate) agent_id: Uuid,
     pub(crate) session_id: Uuid,
     pub(crate) username: String,
-    pub(crate) result: Result<Vec<FavoriteLocation>, String>,
+    pub(crate) result: Result<Vec<FavoriteLocation>, FavoritesError>,
 }
 
 #[derive(Default)]
@@ -161,7 +161,7 @@ struct PendingPresentation {
     chat_bytes: usize,
     failure: Option<String>,
     favorites: Option<FavoritesUpdate>,
-    favorite_store_saved: Option<(u64, Result<(), String>)>,
+    favorite_store_saved: Option<(u64, Result<(), FavoriteStoreError>)>,
 }
 
 impl PendingPresentation {
@@ -192,20 +192,21 @@ pub(crate) enum ViewerUpdate {
     ChatMessage(ChatMessage),
     Failed(String),
     Favorites(FavoritesUpdate),
-    FavoriteStoreSaved { generation: u64, result: Result<(), String> },
+    FavoriteStoreSaved { generation: u64, result: Result<(), FavoriteStoreError> },
 }
 
 #[cfg(test)]
 mod tests {
     use network::{PacketOrder::Ordered, testing::simulator_id};
 
-    use super::*;
     use crate::session::coordinator::events::{SimulatorScope, decode_simulator_world_update, handle_simulator_message};
     use crate::session::coordinator::tests::{chat_message, region_handshake};
     use crate::session::{
         ChatMessage,
         world::{SessionWorld, viewer_world_limits},
     };
+
+    use super::*;
 
     #[test]
     fn updates_coalesce_and_bound_chat() {

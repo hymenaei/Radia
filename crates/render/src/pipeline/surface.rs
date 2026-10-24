@@ -15,7 +15,7 @@ pub(crate) const VERTEX_BYTES: usize = 32;
 const CAMERA_BYTES: usize = 144;
 const KEY_LIGHT: Vec3 = Vec3::new(-0.3, 0.5, 1.0);
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Pipeline {
     Surface,
     FlippedWinding,

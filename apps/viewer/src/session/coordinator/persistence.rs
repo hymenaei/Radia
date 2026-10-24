@@ -16,17 +16,17 @@ pub(crate) async fn save_favorite_store(
     lock: WriteLock,
     generation: Arc<AtomicU64>,
     expected_generation: u64,
-) -> Option<Result<(), String>> {
+) -> Option<Result<(), favorite_store::FavoriteStoreError>> {
     save_if_current(store, lock, generation, expected_generation, |store| favorite_store::save(&store)).await
 }
 
-async fn save_if_current<T>(
+async fn save_if_current<T, E>(
     value: T,
     lock: WriteLock,
     generation: Arc<AtomicU64>,
     expected_generation: u64,
-    save: impl FnOnce(T) -> Result<(), String>,
-) -> Option<Result<(), String>> {
+    save: impl FnOnce(T) -> Result<(), E>,
+) -> Option<Result<(), E>> {
     let _guard = lock.lock().await;
     (generation.load(Ordering::Acquire) == expected_generation).then(|| save(value))
 }
@@ -45,8 +45,9 @@ mod tests {
     use tempfile::tempdir;
     use uuid::Uuid;
 
-    use super::*;
     use crate::inventory::{FavoriteLocation, favorite_store::FavoriteStore};
+
+    use super::*;
 
     #[test]
     fn stale_favorite_snapshot_is_ignored() {
@@ -55,19 +56,23 @@ mod tests {
         let path = test_directory.path().join("favorites.json");
 
         let mut old_store = FavoriteStore::default();
-        old_store.replace_favorites(
-            Grid::Agni,
-            AGENT_ID,
-            "Example Resident",
-            vec![FavoriteLocation { name: "Old".into(), region_name: "Old Region".into(), x: 1, y: 2, z: 3 }],
-        );
+        old_store
+            .replace_favorites(
+                Grid::Agni,
+                AGENT_ID,
+                "Example Resident",
+                vec![FavoriteLocation { name: "Old".into(), region_name: "Old Region".into(), x: 1, y: 2, z: 3 }],
+            )
+            .expect("replace old favorites");
         let mut new_store = FavoriteStore::default();
-        new_store.replace_favorites(
-            Grid::Agni,
-            AGENT_ID,
-            "Example Resident",
-            vec![FavoriteLocation { name: "Newest".into(), region_name: "New Region".into(), x: 4, y: 5, z: 6 }],
-        );
+        new_store
+            .replace_favorites(
+                Grid::Agni,
+                AGENT_ID,
+                "Example Resident",
+                vec![FavoriteLocation { name: "Newest".into(), region_name: "New Region".into(), x: 4, y: 5, z: 6 }],
+            )
+            .expect("replace new favorites");
 
         let (old_result, new_result) = futures::executor::block_on(async {
             let lock = write_lock();

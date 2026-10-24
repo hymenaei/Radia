@@ -1,4 +1,5 @@
 pub mod asset_coordinator;
+pub(crate) mod camera;
 pub mod gui;
 pub mod inventory;
 mod remembered_login;

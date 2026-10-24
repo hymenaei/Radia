@@ -3,6 +3,10 @@ name = "assets"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autobenches = false
+
+[lib]
+bench = false
 
 [lints]
 workspace = true
@@ -24,5 +28,5 @@ test-support.workspace = true
 proptest.workspace = true
 
 [[bench]]
-name = "texture"
+name = "main"
 harness = false

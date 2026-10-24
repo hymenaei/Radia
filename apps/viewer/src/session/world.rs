@@ -121,7 +121,7 @@ impl IngestSummary {
             .flat_map(|(result, address)| result.recovery_cancellations.iter().copied().chain(address))
     }
 
-    pub(super) fn log_incomplete_data(&self, simulator_id: SimulatorId) {
+    pub(super) fn log_incomplete_data(&self, simulator_id: SimulatorId, region: Option<Region>) {
         use ApplyError::{
             AddressGenerationExhausted, EntityBudgetExhausted, EnvironmentBudgetExhausted, FrameGenerationExhausted, InvalidValue,
             KindMismatch, RegionRetired, RegistrationBudgetExhausted, RevisionExhausted, StaleRegion, TerrainBudgetExhausted,
@@ -131,8 +131,10 @@ impl IngestSummary {
             StaleVersion, UntrustedSource,
         };
 
+        let simulator = simulator_id.get();
+        let region = region.map(|region| region.get());
         if let IngestStatus::RegionMetadataRejected(error) = self.status {
-            tracing::warn!(?simulator_id, ?error, "could not apply object batch region metadata");
+            tracing::warn!(simulator, region, %error, "could not apply object batch region metadata");
             return;
         }
         let region_mismatch = matches!(self.status, IngestStatus::RegionHandleMismatch | IngestStatus::RegionContextMismatch);
@@ -188,15 +190,27 @@ impl IngestSummary {
             }
         }
         if region_mismatch || malformed > 0 || resource_limits > 0 {
-            let rejected_addresses = rejected_addresses[..rejected_address_count].iter().flatten().collect::<Vec<_>>();
-            tracing::warn!(
-                ?simulator_id,
-                region_mismatch,
-                malformed,
-                resource_limits,
-                rejected_addresses = ?rejected_addresses,
-                "World update was partially rejected; world data may be incomplete"
-            );
+            let local_ids =
+                rejected_addresses[..rejected_address_count].iter().flatten().map(|address| address.local_id().get()).collect::<Vec<_>>();
+            if region_mismatch || resource_limits > 0 {
+                tracing::warn!(
+                    simulator,
+                    region,
+                    region_mismatch,
+                    malformed,
+                    resource_limits,
+                    local_ids = ?local_ids,
+                    "world update was partially rejected; world data may be incomplete"
+                );
+            } else {
+                tracing::debug!(
+                    simulator,
+                    region,
+                    malformed,
+                    local_ids = ?local_ids,
+                    "world update contained rejected values"
+                );
+            }
         }
     }
 }
@@ -237,15 +251,16 @@ impl SessionWorld {
         match self.world.maintain_query_state(QUERY_STATE_MAINTENANCE_WORK_PER_QUANTUM) {
             Ok(progress) => progress.dirty_scopes > 0,
             Err(error) => {
-                tracing::warn!(?error, "could not maintain World query state");
+                tracing::warn!(?error, "could not maintain world query state");
                 false
             }
         }
     }
 
-    pub(super) fn set_self_agent(&mut self, agent_id: Uuid) {
+    pub(super) fn set_self_agent(&mut self, simulator_id: SimulatorId, agent_id: Uuid) {
+        let region = self.region_for(simulator_id).map(|region| region.get());
         if let Err(error) = self.world.set_self_agent(agent_id) {
-            tracing::warn!(?error, "could not set authenticated world agent");
+            tracing::warn!(simulator = simulator_id.get(), region, %error, "could not set authenticated world agent");
         }
     }
 
@@ -296,9 +311,8 @@ impl SessionWorld {
     }
 
     pub(super) fn apply_terrain(&mut self, decoded: DecodedTerrain) -> usize {
-        if self.simulator_for_region(decoded.source.region()).is_none() {
-            return 0;
-        }
+        let region = decoded.source.region().get();
+        let Some(simulator) = self.simulator_for_region(decoded.source.region()).map(|simulator| simulator.get()) else { return 0 };
         let mut rejected = decoded.rejected;
         let mut applied = 0;
         for (ordinal, patch) in decoded.patches {
@@ -311,7 +325,7 @@ impl SessionWorld {
             }
         }
         if rejected > 0 {
-            tracing::debug!(rejected, "terrain packet was partially rejected");
+            tracing::debug!(simulator, region, rejected, "terrain packet was partially rejected");
         }
         applied
     }
@@ -494,8 +508,6 @@ impl SessionWorld {
             return None;
         }
         let local_id = object.address().local_id();
-        drop(object);
-
         let mut patch = ObjectPatch::new(source, local_id);
         patch.avatar_appearance = Some(update.update);
         let result = self.world.patch_object(patch);
@@ -537,7 +549,7 @@ impl SessionWorld {
         let applied = match self.world.handoff_agent(from, observation) {
             Ok(applied) => applied,
             Err(error) => {
-                tracing::debug!(?error, "agent region handoff is waiting for valid source state");
+                tracing::debug!(simulator = to_simulator.get(), region = to.get(), %error, "agent region handoff is waiting for valid source state");
                 return (false, None);
             }
         };

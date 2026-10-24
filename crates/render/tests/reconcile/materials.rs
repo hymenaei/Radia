@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use assets::{TextureHandle, TextureSize};
 use render::material::{AlphaBehavior, FaceMaterial, Resolution};
 use test_support::texture::{GRAY_4096_J2C, RGBA_J2C};
@@ -219,7 +221,7 @@ fn shared_refinement_preserves_binding() {
     let assets::LoadJob::Decode(input) = store.next_job(now).unwrap() else { panic!("cached refinement unexpectedly refetched the asset") };
     let completion = store.start_decode(input).expect("decode admission").run();
     store.complete(completion, now);
-    assert!(matches!(refined.status(), assets::Status::Ready(_)));
+    assert_matches!(refined.status(), assets::Status::Ready(_));
     scene.complete_asset(request.ticket, baseline.status());
     settle_materials(&mut scene, &mut view, &world, &mut now);
 
@@ -315,7 +317,7 @@ fn material_arrival_preserves_geometry() {
     let object = view.objects().next().unwrap();
     assert_eq!(object.mesh().unwrap().1.id(), mesh, "removing PBR bindings must preserve geometry");
     let face = &object.materials().unwrap()[0];
-    assert!(matches!(face.material, assets::MaterialDescription::Legacy(_)));
+    assert_matches!(face.material, assets::MaterialDescription::Legacy(_));
     assert_eq!(face.pbr_state, None, "removed bindings cannot retain PBR resolution state");
     assert_eq!(face.base_color_factor(), [1.0, 0.0, 0.0, 128.0 / 255.0], "removing PBR restores authored diffuse properties");
     assert_eq!(face.alpha, AlphaBehavior::Blend);
@@ -335,7 +337,7 @@ fn binding_edits_reject_old_completion() {
     let first = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
     scene.complete_asset(first.ticket, material_asset(old));
     let image = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
-    assert!(matches!(view.objects().next().unwrap().materials().unwrap()[0].material, assets::MaterialDescription::Pbr(_)));
+    assert_matches!(view.objects().next().unwrap().materials().unwrap()[0].material, assets::MaterialDescription::Pbr(_));
     let current = AssetId::new(Uuid::from_u128(10));
     let mut patch = ObjectPatch::new(source(1, 3), NonZeroU32::new(1).unwrap());
     patch.pbr_materials = Some(PbrMaterialAssignments::new(vec![(0, current)]).unwrap());
@@ -351,17 +353,17 @@ fn binding_edits_reject_old_completion() {
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!((work.reads, work.builds, work.requested.len()), (0, 0, 0));
     let face = &view.objects().next().unwrap().materials().unwrap()[0];
-    assert!(matches!(face.material, assets::MaterialDescription::Legacy(_)));
+    assert_matches!(face.material, assets::MaterialDescription::Legacy(_));
     assert_eq!(face.pbr_state.unwrap().asset, current);
     assert_eq!(face.pbr_state.unwrap().resolution, Resolution::Pending);
     scene.complete_asset(next.ticket, assets::Status::Failed { failure: assets::Failure::NotFound, retry_at: None });
     settle_materials(&mut scene, &mut view, &world, &mut now);
     let face = &view.objects().next().unwrap().materials().unwrap()[0];
     assert_eq!(face.pbr_state.unwrap().resolution, Resolution::Failed(assets::Failure::NotFound));
-    assert!(matches!(face.material, assets::MaterialDescription::Legacy(_)));
+    assert_matches!(face.material, assets::MaterialDescription::Legacy(_));
     scene.close();
     scene.complete_asset(next.ticket, material_asset(current));
-    assert!(matches!(scene.poll(now), ReconcileStep::Closed));
+    assert!(matches!(scene.poll(now), ReconcileStep::Closed), "closed reconciler ignores late asset completion");
 }
 
 #[test]

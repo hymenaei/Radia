@@ -208,9 +208,12 @@ fn downsample_even(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use block_compression::decode::{decode_block_bc1, decode_block_bc3, decode_block_bc7};
+    use std::assert_matches;
     use std::cell::Cell;
+
+    use block_compression::decode::{decode_block_bc1, decode_block_bc3, decode_block_bc7};
+
+    use super::*;
 
     #[test]
     fn color_and_alpha_survive() {
@@ -276,16 +279,17 @@ mod tests {
     #[test]
     fn malformed_and_cancelled_fail() {
         for size in [[0, 4], [4, 0], [MAX_TEXTURE_EDGE + 1, 4], [4, 4]] {
-            assert!(matches!(encode(&[], size, CompressionQuality::Fast, || false), Err(Failure::Malformed)));
+            assert_matches!(encode(&[], size, CompressionQuality::Fast, || false).map(|_| ()), Err(Failure::Malformed));
         }
         let source = vec![255; 128 * 128 * 4];
-        assert!(matches!(encode(&source, [128, 128], CompressionQuality::Fast, || true), Err(Failure::Cancelled)));
+        assert_matches!(encode(&source, [128, 128], CompressionQuality::Fast, || true).map(|_| ()), Err(Failure::Cancelled));
         let calls = Cell::new(0);
         let result = encode(&source, [128, 128], CompressionQuality::Fast, || {
             calls.set(calls.get() + 1);
             calls.get() == 3
-        });
-        assert!(matches!(result, Err(Failure::Cancelled)), "encoding checks cancellation between native stripes");
+        })
+        .map(|_| ());
+        assert_matches!(result, Err(Failure::Cancelled), "encoding checks cancellation between native stripes");
         assert!(supported([128, 4]));
         assert!(supported([132, 20]));
         for size in [[0, 128], [127, 128], [32, 32], [MAX_TEXTURE_EDGE + 4, 128]] {

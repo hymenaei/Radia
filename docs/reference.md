@@ -46,8 +46,8 @@ Deferral is not removal from Classic's contract. A feature that residents rely o
 
 ## How to use a reference
 
-Start with the protocol, format, observed behavior, or failing compatibility case. Use specifications, and focused tests before tracing large sections of legacy code. Read the smallest relevant source area when the contract remains unclear.
+Start with the protocol, format, observed behavior, or failing compatibility case. Use specifications and focused tests before tracing large sections of legacy code. Read the smallest relevant source area when the contract remains unclear.
 
-Record the behavior Radia must preserve, implement it behind Radia's own boundaries, and verify it with tests. Do not translate source files or reproduce abstractions merely to make the implementations look alike. The ignore categories are priorities, not bans on inspection: any file may be consulted when it resolves a real compatibility question.
+For each compatibility decision, record the behavior Radia must preserve, the source URL and revision, the specification or template version, and the provenance of any fixture. Redact session data before adding captured fixtures. Implement the behavior behind Radia's own boundaries and verify it with tests. Do not translate source files or mirror abstractions. The ignore categories are priorities, not bans on inspection; consult any file that resolves a real compatibility question.
 
 **Preserve what Second Life requires. Redesign how Radia achieves it.**

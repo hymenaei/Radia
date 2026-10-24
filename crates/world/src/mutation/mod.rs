@@ -1,11 +1,11 @@
-use super::World;
-use crate::{Applied, ApplyError, ApplyOutcome, Recovery, Rejections, WorldChange, WorldRevision};
-
 mod fields;
 mod lifecycle;
 mod observe;
 mod patch;
 mod region;
+
+use super::World;
+use crate::{Applied, ApplyError, ApplyOutcome, Recovery, Rejections, WorldChange, WorldRevision};
 
 impl World {
     pub(super) fn ensure_revision_available(&self) -> Result<(), ApplyError> {
@@ -34,7 +34,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::super::World;
+    use crate::World;
     use crate::update::Stamp;
     use crate::{
         ApplyOutcome,

@@ -8,11 +8,10 @@ use uuid::Uuid;
 
 use crate::identity::WorldId;
 use crate::{Entity, Kind, LocalAddress, Parent, Region};
-
-use super::{ObjectContent, ObjectOrdering, ObjectRecord, ObjectState};
+use crate::{ObjectContent, ObjectOrdering, ObjectRecord, ObjectState};
 
 #[derive(Clone)]
-pub(super) enum ObjectRecordRef<'a> {
+pub(crate) enum ObjectRecordRef<'a> {
     Owned { record: Ref<'a, ObjectRecord>, content: Option<Ref<'a, ObjectContent>> },
     Borrowed { record: &'a ObjectRecord, content: Option<&'a ObjectContent> },
 }
@@ -29,7 +28,7 @@ impl Deref for ObjectRecordRef<'_> {
 }
 
 impl ObjectRecordRef<'_> {
-    pub(super) fn content(&self) -> &ObjectContent {
+    pub(crate) fn content(&self) -> &ObjectContent {
         match self {
             Self::Owned { content, .. } => content.as_deref().unwrap_or(&ObjectContent::EMPTY),
             Self::Borrowed { content, .. } => content.unwrap_or(&ObjectContent::EMPTY),
@@ -37,7 +36,7 @@ impl ObjectRecordRef<'_> {
     }
 }
 
-pub(super) struct ObjectStore {
+pub(crate) struct ObjectStore {
     world: WorldId,
     ecs: hecs::World,
     entities: HashMap<Uuid, Entity>,
@@ -48,7 +47,7 @@ pub(super) struct ObjectStore {
 }
 
 impl ObjectStore {
-    pub(super) fn new(world: WorldId) -> Self {
+    pub(crate) fn new(world: WorldId) -> Self {
         Self {
             world,
             ecs: hecs::World::new(),
@@ -60,36 +59,36 @@ impl ObjectStore {
         }
     }
 
-    pub(super) fn entity(&self, id: Uuid) -> Option<Entity> {
+    pub(crate) fn entity(&self, id: Uuid) -> Option<Entity> {
         self.entities.get(&id).copied()
     }
 
-    pub(super) fn entity_at(&self, address: LocalAddress) -> Option<Entity> {
+    pub(crate) fn entity_at(&self, address: LocalAddress) -> Option<Entity> {
         self.addresses.get(&address).copied()
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entities.len()
     }
 
-    pub(super) fn ids(&self) -> &BTreeSet<Uuid> {
+    pub(crate) fn ids(&self) -> &BTreeSet<Uuid> {
         &self.ids
     }
 
-    pub(super) fn avatar_ids(&self) -> &BTreeSet<Uuid> {
+    pub(crate) fn avatar_ids(&self) -> &BTreeSet<Uuid> {
         &self.avatars
     }
 
-    pub(super) fn region_ids(&self, region: Region) -> Option<&BTreeSet<Uuid>> {
+    pub(crate) fn region_ids(&self, region: Region) -> Option<&BTreeSet<Uuid>> {
         self.regions.get(&region)
     }
 
     #[cfg(feature = "invariants")]
-    pub(super) fn entities(&self) -> impl Iterator<Item = (Uuid, Entity)> + '_ {
+    pub(crate) fn entities(&self) -> impl Iterator<Item = (Uuid, Entity)> + '_ {
         self.entities.iter().map(|(id, entity)| (*id, *entity))
     }
 
-    pub(super) fn insert(&mut self, record: ObjectRecord, content: ObjectContent, ordering: ObjectOrdering) -> Entity {
+    pub(crate) fn insert(&mut self, record: ObjectRecord, content: ObjectContent, ordering: ObjectOrdering) -> Entity {
         let id = record.id;
         let address = record.state.binding.address;
         let kind = record.kind;
@@ -107,7 +106,7 @@ impl ObjectStore {
         entity
     }
 
-    pub(super) fn remove(&mut self, entity: Entity) {
+    pub(crate) fn remove(&mut self, entity: Entity) {
         let (id, address) = {
             let record = self.record(entity).expect("removal target is live");
             (record.id, record.state.binding.address)
@@ -120,7 +119,7 @@ impl ObjectStore {
         self.remove_region_id(address.region(), id);
     }
 
-    pub(super) fn commit(&mut self, entity: Entity, state: ObjectState, content: Option<ObjectContent>, ordering: ObjectOrdering) {
+    pub(crate) fn commit(&mut self, entity: Entity, state: ObjectState, content: Option<ObjectContent>, ordering: ObjectOrdering) {
         let (id, previous) = {
             let record = self.record(entity).expect("mutation target is live");
             (record.id, record.state.binding.address)
@@ -162,14 +161,14 @@ impl ObjectStore {
         }
     }
 
-    pub(super) fn record(&self, entity: Entity) -> Option<Ref<'_, ObjectRecord>> {
+    pub(crate) fn record(&self, entity: Entity) -> Option<Ref<'_, ObjectRecord>> {
         if entity.1 != self.world {
             return None;
         }
         self.ecs.get::<&ObjectRecord>(entity.0).ok()
     }
 
-    pub(super) fn object(&self, entity: Entity) -> Option<ObjectRecordRef<'_>> {
+    pub(crate) fn object(&self, entity: Entity) -> Option<ObjectRecordRef<'_>> {
         if entity.1 != self.world {
             return None;
         }
@@ -179,50 +178,50 @@ impl ObjectStore {
         Some(ObjectRecordRef::Owned { record, content })
     }
 
-    pub(super) fn objects(&self) -> QueryBorrow<'_, (hecs::Entity, &ObjectRecord, Option<&ObjectContent>)> {
+    pub(crate) fn objects(&self) -> QueryBorrow<'_, (hecs::Entity, &ObjectRecord, Option<&ObjectContent>)> {
         self.ecs.query::<(hecs::Entity, &ObjectRecord, Option<&ObjectContent>)>()
     }
 
-    pub(super) fn object_view(&self) -> ViewBorrow<'_, (&ObjectRecord, Option<&ObjectContent>)> {
+    pub(crate) fn object_view(&self) -> ViewBorrow<'_, (&ObjectRecord, Option<&ObjectContent>)> {
         self.ecs.view::<(&ObjectRecord, Option<&ObjectContent>)>()
     }
 
-    pub(super) fn records(&self) -> ViewBorrow<'_, &ObjectRecord> {
+    pub(crate) fn records(&self) -> ViewBorrow<'_, &ObjectRecord> {
         self.ecs.view::<&ObjectRecord>()
     }
 
-    pub(super) fn ordered_records(&self) -> ViewBorrow<'_, (&ObjectRecord, &ObjectOrdering)> {
+    pub(crate) fn ordered_records(&self) -> ViewBorrow<'_, (&ObjectRecord, &ObjectOrdering)> {
         self.ecs.view::<(&ObjectRecord, &ObjectOrdering)>()
     }
 
-    pub(super) fn read(&self, entity: hecs::Entity) -> QueryOne<'_, (&ObjectRecord, Option<&ObjectContent>, &ObjectOrdering)> {
+    pub(crate) fn read(&self, entity: hecs::Entity) -> QueryOne<'_, (&ObjectRecord, Option<&ObjectContent>, &ObjectOrdering)> {
         self.ecs.query_one::<(&ObjectRecord, Option<&ObjectContent>, &ObjectOrdering)>(entity)
     }
 
-    pub(super) fn read_ordered(&self, entity: hecs::Entity) -> QueryOne<'_, (&ObjectRecord, &ObjectOrdering)> {
+    pub(crate) fn read_ordered(&self, entity: hecs::Entity) -> QueryOne<'_, (&ObjectRecord, &ObjectOrdering)> {
         self.ecs.query_one::<(&ObjectRecord, &ObjectOrdering)>(entity)
     }
 
-    pub(super) fn ordering(&self, entity: hecs::Entity) -> Ref<'_, ObjectOrdering> {
+    pub(crate) fn ordering(&self, entity: hecs::Entity) -> Ref<'_, ObjectOrdering> {
         self.ecs.get::<&ObjectOrdering>(entity).expect("every object has ordering")
     }
 
-    pub(super) fn set_parent(&mut self, entity: Entity, parent: Parent) {
+    pub(crate) fn set_parent(&mut self, entity: Entity, parent: Parent) {
         assert_eq!(entity.1, self.world, "parent mutation belongs to another World");
         self.ecs.query_one_mut::<&mut ObjectRecord>(entity.0).expect("parent mutation target is live").state.parent = parent;
     }
 
     #[cfg(test)]
-    pub(super) fn record_mut(&mut self, entity: hecs::Entity) -> &mut ObjectRecord {
+    pub(crate) fn record_mut(&mut self, entity: hecs::Entity) -> &mut ObjectRecord {
         self.ecs.query_one_mut::<&mut ObjectRecord>(entity).expect("test mutation target is live")
     }
 
-    pub(super) fn ordering_mut(&mut self, entity: hecs::Entity) -> &mut ObjectOrdering {
+    pub(crate) fn ordering_mut(&mut self, entity: hecs::Entity) -> &mut ObjectOrdering {
         self.ecs.query_one_mut::<&mut ObjectOrdering>(entity).expect("mutation target has ordering")
     }
 
     #[cfg(feature = "invariants")]
-    pub(super) fn check_invariants(&self) -> Result<(), &'static str> {
+    pub(crate) fn check_invariants(&self) -> Result<(), &'static str> {
         let count = self.entities.len();
         if self.ecs.len() as usize != count
             || self.ecs.query::<(&ObjectRecord, &ObjectOrdering)>().iter().count() != count

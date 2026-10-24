@@ -4,7 +4,7 @@ use utils::AssetId;
 use uuid::Uuid;
 use world::{
     ApplyError, EnvironmentAssignment, EnvironmentScope, EnvironmentSource, MAX_ENVIRONMENT_BYTES, MAX_ENVIRONMENT_SOURCE_BYTES,
-    OrderEvidence, ParcelId, Region, RegionOutcome, UpdateSource, World, WorldChange, WorldLimits,
+    OrderEvidence, ParcelLocalId, Region, RegionOutcome, UpdateSource, World, WorldChange, WorldLimits,
 };
 
 fn new_world() -> World {
@@ -66,10 +66,10 @@ fn assignments_share_source_and_journal() {
 fn parcel_changes_reject_stale_results() {
     let mut world = new_world();
     let region = Region::new(1);
-    let a = ParcelId::new(10).unwrap();
-    let b = ParcelId::new(20).unwrap();
+    let a = ParcelLocalId::new(10).unwrap();
+    let b = ParcelLocalId::new(20).unwrap();
     let scope = EnvironmentScope::Parcel(a);
-    assert_eq!(ParcelId::new(-1), None);
+    assert_eq!(ParcelLocalId::new(-1), None);
     assert_eq!(world.environment_target(region, scope), None);
     let _ = world.observe_agent_parcel(source(1, 1), Some(a)).unwrap();
     let old = world.environment_target(region, scope).unwrap();

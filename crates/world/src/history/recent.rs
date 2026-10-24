@@ -6,13 +6,12 @@ use std::{
 
 use uuid::Uuid;
 
-use super::WorldEntityRemovalReason;
+use crate::WorldEntityRemovalReason;
 use crate::{AttachmentPoint, Kind, LocalAddress, Properties, PropertiesProvenance, WorldPose};
 
 pub const RECENT_OBJECT_TTL: Duration = Duration::from_secs(5 * 60);
 pub const MAX_RECENT_OBJECTS: usize = 4096;
 pub const MAX_RECENT_OBJECT_BYTES: usize = 1024 * 1024;
-
 const RECENT_OBJECT_CHARGE: usize = size_of::<Uuid>() + size_of::<RecentEntry>() + size_of::<(Instant, Uuid)>() + 32;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -28,18 +27,18 @@ pub struct RecentObject {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct RecentEntry {
-    pub(super) object: RecentObject,
+pub(crate) struct RecentEntry {
+    pub(crate) object: RecentObject,
     expires_at: Instant,
 }
 
 #[derive(Default)]
-pub(super) struct RecentBatch {
+pub(crate) struct RecentBatch {
     entries: BTreeMap<(Instant, Uuid), RecentObject>,
 }
 
 impl RecentBatch {
-    pub(super) fn push(&mut self, object: RecentObject, now: Instant) {
+    pub(crate) fn push(&mut self, object: RecentObject, now: Instant) {
         let limit = MAX_RECENT_OBJECTS.min(MAX_RECENT_OBJECT_BYTES / RECENT_OBJECT_CHARGE);
         if limit == 0 {
             return;
@@ -53,7 +52,7 @@ impl RecentBatch {
 }
 
 #[derive(Default)]
-pub(super) struct RecentStore {
+pub(crate) struct RecentStore {
     by_id: BTreeMap<Uuid, RecentEntry>,
     by_expiry: BTreeSet<(Instant, Uuid)>,
     charged_bytes: usize,
@@ -61,11 +60,11 @@ pub(super) struct RecentStore {
 
 impl RecentStore {
     #[cfg(test)]
-    pub(super) fn insert(&mut self, object: RecentObject, now: Instant) {
+    pub(crate) fn insert(&mut self, object: RecentObject, now: Instant) {
         self.insert_with_limits(object, now, RECENT_OBJECT_TTL, MAX_RECENT_OBJECTS, MAX_RECENT_OBJECT_BYTES);
     }
 
-    pub(super) fn apply_batch(&mut self, batch: RecentBatch) {
+    pub(crate) fn apply_batch(&mut self, batch: RecentBatch) {
         for ((expires_at, _), object) in batch.entries {
             self.insert_entry(RecentEntry { object, expires_at }, MAX_RECENT_OBJECTS, MAX_RECENT_OBJECT_BYTES);
         }
@@ -89,7 +88,7 @@ impl RecentStore {
         }
     }
 
-    pub(super) fn remove(&mut self, id: Uuid) -> Option<RecentEntry> {
+    pub(crate) fn remove(&mut self, id: Uuid) -> Option<RecentEntry> {
         let entry = self.by_id.remove(&id)?;
         let removed = self.by_expiry.remove(&(entry.expires_at, id));
         assert!(removed, "recent record is missing from its expiry index");
@@ -97,7 +96,7 @@ impl RecentStore {
         Some(entry)
     }
 
-    pub(super) fn purge_expired(&mut self, now: Instant, budget: usize) -> usize {
+    pub(crate) fn purge_expired(&mut self, now: Instant, budget: usize) -> usize {
         let mut purged = 0;
         while purged < budget {
             let Some((expires_at, id)) = self.by_expiry.first().copied() else { break };
@@ -110,21 +109,21 @@ impl RecentStore {
         purged
     }
 
-    pub(super) fn iter_after(&self, after: Option<Uuid>) -> impl Iterator<Item = (Uuid, RecentEntry)> + '_ {
+    pub(crate) fn iter_after(&self, after: Option<Uuid>) -> impl Iterator<Item = (Uuid, RecentEntry)> + '_ {
         let bounds = after.map_or((Unbounded, Unbounded), |id| (Excluded(id), Unbounded));
         self.by_id.range(bounds).map(|(id, entry)| (*id, *entry))
     }
 
-    pub(super) fn is_expired(&self, entry: RecentEntry, now: Instant) -> bool {
+    pub(crate) fn is_expired(&self, entry: RecentEntry, now: Instant) -> bool {
         entry.expires_at <= now
     }
 
-    pub(super) fn next_expiry_after(&self, now: Instant) -> Option<Instant> {
+    pub(crate) fn next_expiry_after(&self, now: Instant) -> Option<Instant> {
         self.by_expiry.range((Excluded((now, Uuid::from_u128(u128::MAX))), Unbounded)).next().map(|(expires_at, _)| *expires_at)
     }
 
     #[cfg(feature = "invariants")]
-    pub(super) fn invariants_hold(&self) -> bool {
+    pub(crate) fn invariants_hold(&self) -> bool {
         if self.by_id.len() != self.by_expiry.len() || self.charged_bytes != self.by_id.len().saturating_mul(RECENT_OBJECT_CHARGE) {
             return false;
         }
@@ -133,12 +132,12 @@ impl RecentStore {
     }
 
     #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.by_id.len()
     }
 
     #[cfg(test)]
-    pub(super) fn charged_bytes(&self) -> usize {
+    pub(crate) fn charged_bytes(&self) -> usize {
         self.charged_bytes
     }
 }

@@ -1,6 +1,19 @@
-use crate::{Entity, LocalAddress, Region, UpdateAuthority};
+pub(crate) mod appearance;
+pub(crate) mod avatar;
+pub(crate) mod components;
+pub(crate) mod media;
+pub(crate) mod pose;
+pub(crate) mod relationships;
+pub(crate) mod shape;
+pub(crate) mod storage;
+pub(crate) mod transform;
+pub(crate) mod view;
+
 use std::num::NonZeroU32;
+
 use uuid::Uuid;
+
+use crate::{Entity, LocalAddress, Region, UpdateAuthority};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PropertyProvenance {

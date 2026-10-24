@@ -1,21 +1,17 @@
-//! Ordered object removal, hierarchy cascades, and recent-object retention.
-
 use std::{num::NonZeroU32, time::Instant};
 
 use crate::UpdateAuthority::Untracked;
-
-use super::super::journal::{
+use crate::history::{
     WorldChange::{EntityRemoved, EntityUpdated},
     WorldChangeClasses,
 };
-use super::super::{RecentBatch, RecentObject, World, WorldChange, WorldEntityRemovalReason, newer_field};
 use crate::update::{FieldStamp, Stamp};
 use crate::{
     Applied, ApplyError, ApplyOutcome, DeferredReason, Entity, Kind, LocalAddress, ObjectMedia, Parent, PoseState, Recovery, Region,
     UpdateAuthority, UpdateSource,
 };
+use crate::{RecentBatch, RecentObject, World, WorldChange, WorldEntityRemovalReason, newer_field};
 
-/// The lifetime operation determines both ordering evidence and tombstone policy.
 #[derive(Clone, Copy)]
 pub(super) enum RemovalCause {
     Killed(Stamp),
@@ -31,7 +27,6 @@ impl RemovalCause {
             Self::RegionRetired => None,
         }
     }
-
     fn reason(self) -> WorldEntityRemovalReason {
         match self {
             Self::Killed(_) => WorldEntityRemovalReason::Killed,
@@ -40,7 +35,6 @@ impl RemovalCause {
             Self::RegionRetired => WorldEntityRemovalReason::RegionRetired,
         }
     }
-
     fn tombstone_stamp(self) -> Option<Stamp> {
         match self {
             Self::Killed(stamp) | Self::ParentCascade(stamp) => Some(stamp),
@@ -50,15 +44,6 @@ impl RemovalCause {
 }
 
 impl World {
-    /// Applies an ordered simulator removal to an address and its eligible descendants.
-    ///
-    /// Removal preserves newer children and avatars as pending relationships. Unknown addresses
-    /// retain bounded tombstone evidence so stale observations cannot resurrect them. Untracked
-    /// removals and removal of the authenticated agent are ignored.
-    ///
-    /// # Errors
-    /// Returns an [`ApplyError`] for an inactive source region or exhausted revision capacity.
-    /// The World remains unchanged on error.
     pub fn remove_object(&mut self, source: UpdateSource, local_id: NonZeroU32) -> Result<Applied, ApplyError> {
         self.require_active_region(source.region)?;
         if source.authority() == Untracked {
@@ -124,7 +109,6 @@ impl World {
         }
         Ok(Applied::unchanged())
     }
-
     pub(super) fn remove_entity(
         &mut self,
         entity: Entity,
@@ -164,11 +148,9 @@ impl World {
                     )
                 })
                 .expect("removal traversal contains only live entities");
-
             if let Some(recent) = recent {
                 recent_batch.push(recent, Instant::now());
             }
-
             let children = if expanded { None } else { self.children.remove(&entity) };
             if expanded || children.as_ref().is_none_or(|children| children.is_empty()) {
                 self.object_media_bytes = self.object_media_bytes.saturating_sub(media_bytes);
@@ -181,7 +163,6 @@ impl World {
                 recovery_cancellations.push(address);
                 continue;
             }
-
             let children = children.expect("an unexpanded parent has children");
             pending.push((entity, cause, true));
             for child in children.into_values() {
@@ -198,7 +179,6 @@ impl World {
                 };
                 let cascade_stamp = invalidation
                     .filter(|stamp| address.region == child_address.region && *stamp > child_fence && child_kind != Kind::Avatar);
-
                 if reason == WorldEntityRemovalReason::RegionRetired && child_address.region == address.region {
                     pending.push((child, RemovalCause::RegionRetired, false));
                 } else if let Some(stamp) = cascade_stamp {
@@ -217,7 +197,6 @@ impl World {
             }
         }
     }
-
     fn advance_parent_fence(&mut self, child: Entity, invalidation: Option<Stamp>, invalidation_region: Region) {
         let Some(stamp) = invalidation
             .filter(|_| self.store.record(child).is_some_and(|record| record.state.binding.address.region == invalidation_region))

@@ -2,23 +2,22 @@ use std::num::NonZeroU32;
 
 use uuid::Uuid;
 
-use super::journal::{
+use crate::history::{
     WorldChange::{EntityUpdated, SubtreeInvalidated},
     WorldChangeClasses,
 };
-use super::{Binding, World, WorldChange};
 use crate::update::{FieldStamp, Stamp};
 use crate::{AttachmentPoint, Entity, Kind, LocalAddress, Parent, ParentUpdate, Region};
+use crate::{Binding, World, WorldChange};
+use ParentResolution::{Accepted, Cycle};
 
-pub(super) enum ParentResolution {
+pub(crate) enum ParentResolution {
     Accepted(Parent),
     Cycle,
 }
 
-use ParentResolution::{Accepted, Cycle};
-
 impl World {
-    pub(super) fn waiting_children_will_change(
+    pub(crate) fn waiting_children_will_change(
         &self,
         address: LocalAddress,
         entity: Entity,
@@ -39,7 +38,7 @@ impl World {
         })
     }
 
-    pub(super) fn parent_will_be_cascaded(&self, root: Entity, target: Entity, stamp: Stamp) -> bool {
+    pub(crate) fn parent_will_be_cascaded(&self, root: Entity, target: Entity, stamp: Stamp) -> bool {
         let Some(root_region) = self.store.record(root).map(|record| record.state.binding.address.region()) else { return false };
         let mut current = target;
         let records = self.store.records();
@@ -64,14 +63,14 @@ impl World {
         false
     }
 
-    pub(super) fn invalidate_subtree(&self, root: Entity, changes: &mut Vec<WorldChange>) {
+    pub(crate) fn invalidate_subtree(&self, root: Entity, changes: &mut Vec<WorldChange>) {
         if self.children.get(&root).is_some_and(|children| !children.is_empty()) {
             let id = self.store.record(root).expect("a subtree root is live").id;
             changes.push(SubtreeInvalidated { id, entity: root });
         }
     }
 
-    pub(super) fn resolve_parent(
+    pub(crate) fn resolve_parent(
         &self,
         region: Region,
         local_id: NonZeroU32,
@@ -106,7 +105,7 @@ impl World {
         }
     }
 
-    pub(super) fn relationship_frame_changed(
+    pub(crate) fn relationship_frame_changed(
         &self,
         current: Parent,
         next: Parent,
@@ -135,14 +134,14 @@ impl World {
         }
     }
 
-    pub(super) fn apply_parent(&mut self, child: Entity, parent: Parent, recovery_targets: &mut Vec<LocalAddress>) {
+    pub(crate) fn apply_parent(&mut self, child: Entity, parent: Parent, recovery_targets: &mut Vec<LocalAddress>) {
         self.set_parent(child, parent);
         if let Parent::Pending { address, .. } = parent {
             recovery_targets.push(address);
         }
     }
 
-    pub(super) fn set_parent(&mut self, child: Entity, parent: Parent) {
+    pub(crate) fn set_parent(&mut self, child: Entity, parent: Parent) {
         let child_uuid = {
             let record = self.store.record(child).expect("a parented child is live");
             if record.state.parent == parent {
@@ -163,7 +162,7 @@ impl World {
         }
     }
 
-    pub(super) fn detach_parent(&mut self, child: Entity) {
+    pub(crate) fn detach_parent(&mut self, child: Entity) {
         let Some((parent, child_uuid)) = self.store.record(child).map(|object| (object.state.parent, object.id)) else {
             return;
         };
@@ -188,7 +187,7 @@ impl World {
         }
     }
 
-    pub(super) fn pend_source_children(
+    pub(crate) fn pend_source_children(
         &mut self,
         parent: Entity,
         old_address: LocalAddress,
@@ -218,7 +217,7 @@ impl World {
         }
     }
 
-    pub(super) fn resolve_waiting_children(
+    pub(crate) fn resolve_waiting_children(
         &mut self,
         address: LocalAddress,
         parent: Entity,
@@ -260,7 +259,7 @@ impl World {
         }
     }
 
-    pub(super) fn would_cycle(&self, child: Entity, mut parent: Entity) -> bool {
+    pub(crate) fn would_cycle(&self, child: Entity, mut parent: Entity) -> bool {
         if self.store.record(child).is_some_and(|object| object.state.parent == Parent::Resolved(parent)) {
             return false;
         }

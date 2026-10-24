@@ -5,7 +5,7 @@ use uuid::Uuid;
 use world::{Kind, ObjectDetailResult, ObjectObservation, OrderEvidence, ParentUpdate, Region, UpdateSource};
 
 use super::*;
-use world::{EnvironmentAssignment, EnvironmentScope, EnvironmentSource, MAX_ENVIRONMENT_SOURCE_BYTES, ParcelId, WorldLimits};
+use world::{EnvironmentAssignment, EnvironmentScope, EnvironmentSource, MAX_ENVIRONMENT_SOURCE_BYTES, ParcelLocalId, WorldLimits};
 
 fn world() -> World {
     World::new(WorldLimits {
@@ -49,7 +49,7 @@ async fn environment_reads_fit_admission() {
     let region = Region::new(1);
     let _ = world.adopt_region(region).unwrap();
     let source = UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0);
-    let parcel = ParcelId::new(42).unwrap();
+    let parcel = ParcelLocalId::new(42).unwrap();
     let _ = world.observe_agent_parcel(source, Some(parcel)).unwrap();
     for scope in [EnvironmentScope::Region, EnvironmentScope::Parcel(parcel)] {
         let target = world.environment_target(region, scope).unwrap();

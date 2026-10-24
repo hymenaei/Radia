@@ -1,38 +1,40 @@
 #[cfg(feature = "invariants")]
-use super::RegionState;
-use super::World;
-#[cfg(feature = "invariants")]
-use super::storage::ObjectStore;
-use crate::update::Stamp;
-use crate::{Applied, ApplyOutcome, DeferredReason, LocalAddress, Recovery, Region, WorldLimits};
-#[cfg(feature = "invariants")]
 use std::collections::BTreeMap;
 use std::{
     collections::{BTreeSet, HashMap},
     num::NonZeroU32,
 };
+
 use uuid::Uuid;
 
+#[cfg(feature = "invariants")]
+use crate::RegionState;
+use crate::World;
+#[cfg(feature = "invariants")]
+use crate::object::storage::ObjectStore;
+use crate::update::Stamp;
+use crate::{Applied, ApplyOutcome, DeferredReason, LocalAddress, Recovery, Region, WorldLimits};
+
 #[derive(Debug, Default)]
-pub(super) struct Tombstones {
+pub(crate) struct Tombstones {
     by_address: HashMap<LocalAddress, Stamp>,
     oldest_by_region: HashMap<Region, BTreeSet<(Stamp, NonZeroU32)>>,
 }
 
 impl Tombstones {
-    pub(super) fn get(&self, address: &LocalAddress) -> Option<&Stamp> {
+    pub(crate) fn get(&self, address: &LocalAddress) -> Option<&Stamp> {
         self.by_address.get(address)
     }
 
-    pub(super) fn contains_key(&self, address: &LocalAddress) -> bool {
+    pub(crate) fn contains_key(&self, address: &LocalAddress) -> bool {
         self.by_address.contains_key(address)
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.by_address.len()
     }
 
-    pub(super) fn insert(&mut self, address: LocalAddress, stamp: Stamp) -> Option<Stamp> {
+    pub(crate) fn insert(&mut self, address: LocalAddress, stamp: Stamp) -> Option<Stamp> {
         let previous = self.remove(&address);
         self.by_address.insert(address, stamp);
         let inserted = self.oldest_by_region.entry(address.region()).or_default().insert((stamp, address.local_id()));
@@ -40,7 +42,7 @@ impl Tombstones {
         previous
     }
 
-    pub(super) fn remove(&mut self, address: &LocalAddress) -> Option<Stamp> {
+    pub(crate) fn remove(&mut self, address: &LocalAddress) -> Option<Stamp> {
         let stamp = self.by_address.remove(address)?;
         let region = address.region();
         let entries = self.oldest_by_region.get_mut(&region).expect("every tombstone has a region index");
@@ -51,7 +53,7 @@ impl Tombstones {
         Some(stamp)
     }
 
-    pub(super) fn remove_region(&mut self, region: Region) {
+    pub(crate) fn remove_region(&mut self, region: Region) {
         if let Some(entries) = self.oldest_by_region.remove(&region) {
             for (_, local_id) in entries {
                 self.by_address.remove(&LocalAddress::new(region, local_id));
@@ -68,7 +70,7 @@ impl Tombstones {
     }
 
     #[cfg(feature = "invariants")]
-    pub(super) fn invariants_hold(&self, active_regions: &BTreeMap<Region, RegionState>, store: &ObjectStore) -> bool {
+    pub(crate) fn invariants_hold(&self, active_regions: &BTreeMap<Region, RegionState>, store: &ObjectStore) -> bool {
         self.by_address.len() == self.oldest_by_region.values().map(BTreeSet::len).sum::<usize>()
             && self.by_address.iter().all(|(address, stamp)| {
                 active_regions.contains_key(&address.region())
@@ -83,7 +85,7 @@ impl Tombstones {
 }
 
 impl World {
-    pub(super) fn tombstone_would_change(&self, address: LocalAddress, stamp: Stamp) -> bool {
+    pub(crate) fn tombstone_would_change(&self, address: LocalAddress, stamp: Stamp) -> bool {
         if self.entity_at(address).is_some() || self.tombstones.get(&address).is_some_and(|existing| *existing >= stamp) {
             return false;
         }
@@ -93,7 +95,7 @@ impl World {
         true
     }
 
-    pub(super) fn insert_tombstone(&mut self, address: LocalAddress, stamp: Stamp) -> bool {
+    pub(crate) fn insert_tombstone(&mut self, address: LocalAddress, stamp: Stamp) -> bool {
         if self.entity_at(address).is_some() || self.tombstones.get(&address).is_some_and(|existing| *existing >= stamp) {
             return false;
         }
@@ -144,7 +146,7 @@ impl World {
         }
     }
 
-    pub(super) fn preflight_address(&self, address: LocalAddress, id: Uuid, stamp: Stamp) -> Option<Applied> {
+    pub(crate) fn preflight_address(&self, address: LocalAddress, id: Uuid, stamp: Stamp) -> Option<Applied> {
         if let Some(entity) = self.entity_at(address) {
             let record = self.store.record(entity).expect("address index contains a live entity");
             if record.id != id && stamp <= record.state.binding.fence() {
@@ -171,7 +173,7 @@ impl World {
         None
     }
 
-    pub(super) fn unknown_address(&self, address: LocalAddress, stamp: Stamp) -> Applied {
+    pub(crate) fn unknown_address(&self, address: LocalAddress, stamp: Stamp) -> Applied {
         if let Some(tombstone) = self.tombstones.get(&address) {
             if stamp <= *tombstone {
                 return Applied::unchanged();

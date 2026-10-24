@@ -6,7 +6,7 @@ use world::{
     AgentHandoff, Appearance, Applied, ApplyError,
     ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded},
     EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, MAX_QUERY_STATE_MAINTENANCE_WORK,
-    ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, ParcelId, Region, RegionApplied, RegionHandle, RegionInfo,
+    ObjectMediaUpdate, ObjectObservation, ObjectPatch, OrderEvidence, ParcelLocalId, Region, RegionApplied, RegionHandle, RegionInfo,
     RegionOutcome, UpdateSource, World, WorldLimits,
 };
 
@@ -219,7 +219,11 @@ impl SessionWorld {
         &self.world
     }
 
-    pub(super) fn observe_agent_parcel(&mut self, source: UpdateSource, parcel: Option<ParcelId>) -> Result<RegionApplied, ApplyError> {
+    pub(super) fn observe_agent_parcel(
+        &mut self,
+        source: UpdateSource,
+        parcel: Option<ParcelLocalId>,
+    ) -> Result<RegionApplied, ApplyError> {
         self.world.observe_agent_parcel(source, parcel)
     }
 

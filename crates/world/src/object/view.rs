@@ -1,42 +1,27 @@
-use super::{ObjectContent, ObjectOrdering, ObjectRecord, ObjectRecordRef, World};
+use hecs::{QueryBorrow, Ref};
+use math::{Quat, Vec3};
+use uuid::Uuid;
+
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, GltfMaterialOverrides, Kind, LinearMotion, LocalAddress,
     LocalTransform, ObjectMedia, Parent, PoseError, PoseState, Properties, PropertiesProvenance, RenderMaterials, Shape, SitTarget,
     SurfaceAppearance, Transform, WorldTransformState,
 };
-use hecs::{QueryBorrow, Ref};
-use math::{Quat, Vec3};
-use uuid::Uuid;
+use crate::{ObjectContent, ObjectOrdering, ObjectRecord, ObjectRecordRef, World};
 
 #[derive(Clone)]
 pub struct Object<'a> {
-    pub(super) entity: Entity,
-    pub(super) record: ObjectRecordRef<'a>,
-    pub(super) world: &'a World,
-}
-
-pub struct Objects<'a> {
-    pub(super) records: QueryBorrow<'a, (hecs::Entity, &'a ObjectRecord, Option<&'a ObjectContent>)>,
-    pub(super) world: &'a World,
-}
-
-impl Objects<'_> {
-    pub fn iter(&mut self) -> impl Iterator<Item = Object<'_>> {
-        let world = self.world;
-        self.records.iter().map(move |(entity, record, content)| Object {
-            entity: Entity(entity, world.id),
-            record: ObjectRecordRef::Borrowed { record, content },
-            world,
-        })
-    }
+    pub(crate) entity: Entity,
+    pub(crate) record: ObjectRecordRef<'a>,
+    pub(crate) world: &'a World,
 }
 
 impl<'a> Object<'a> {
-    pub(super) fn content(&self) -> &ObjectContent {
+    pub(crate) fn content(&self) -> &ObjectContent {
         self.record.content()
     }
 
-    pub(super) fn ordering(&self) -> Ref<'a, ObjectOrdering> {
+    pub(crate) fn ordering(&self) -> Ref<'a, ObjectOrdering> {
         self.world.store.ordering(self.entity.0)
     }
 
@@ -142,5 +127,21 @@ impl<'a> Object<'a> {
 
     pub fn world_transform(&self) -> Result<WorldTransformState, PoseError> {
         self.world.resolve_transform(self.entity)
+    }
+}
+
+pub struct Objects<'a> {
+    pub(crate) records: QueryBorrow<'a, (hecs::Entity, &'a ObjectRecord, Option<&'a ObjectContent>)>,
+    pub(crate) world: &'a World,
+}
+
+impl Objects<'_> {
+    pub fn iter(&mut self) -> impl Iterator<Item = Object<'_>> {
+        let world = self.world;
+        self.records.iter().map(move |(entity, record, content)| Object {
+            entity: Entity(entity, world.id),
+            record: ObjectRecordRef::Borrowed { record, content },
+            world,
+        })
     }
 }

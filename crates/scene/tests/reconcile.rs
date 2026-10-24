@@ -18,7 +18,7 @@ use utils::AssetId;
 use uuid::Uuid;
 use world::{
     Appearance, EnvironmentAssignment, EnvironmentScope, EnvironmentSource, FaceAppearance, FieldUpdate, GltfAlphaMode,
-    GltfMaterialOverride, GltfMaterialOverrides, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParcelId, ParentUpdate,
+    GltfMaterialOverride, GltfMaterialOverrides, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParcelLocalId, ParentUpdate,
     Pose, Region, RegionInfo, RenderMaterials, Shape, SurfaceAppearance, TerrainPatch, TerrainPatchId, World, WorldLimits, WorldReadError,
 };
 
@@ -177,7 +177,7 @@ fn environment_changes_follow_world() {
     assert_eq!(builds, 0, "assignment updates do not rebuild geometry");
     assert_eq!(view.environment(region).unwrap().region_assignment, Some(assignment));
     assert_eq!(view.revision(), Some(world.revision()));
-    let parcel = ParcelId::new(7).unwrap();
+    let parcel = ParcelLocalId::new(7).unwrap();
     let _ = world.observe_agent_parcel(source(1, 2), Some(parcel)).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);

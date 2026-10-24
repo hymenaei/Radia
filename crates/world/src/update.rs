@@ -15,7 +15,6 @@ use crate::{
     Appearance, AttachmentPoint, Entity, GltfMaterialOverrides, Kind, LinearMotion, LocalAddress, MotionPatch, ParentUpdate, Pose, Region,
     RenderMaterials, Shape, SurfaceAppearance,
 };
-
 use OrderEvidence::{Ambiguous, Degraded, Ordered};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

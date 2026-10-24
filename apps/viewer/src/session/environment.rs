@@ -17,8 +17,8 @@ use protocol::lludp::{FieldValue, Message, SchemaMessage};
 use tokio::{runtime::Handle, sync::Semaphore};
 use uuid::Uuid;
 use world::{
-    EnvironmentAssignment, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_SOURCE_BYTES, OrderEvidence, ParcelId,
-    Region, RegionOutcome, UpdateSource,
+    EnvironmentAssignment, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_SOURCE_BYTES, OrderEvidence,
+    ParcelLocalId, Region, RegionOutcome, UpdateSource,
 };
 
 use super::world::SessionWorld;
@@ -42,7 +42,7 @@ enum FetchError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ParcelNotice {
-    parcel: ParcelId,
+    parcel: ParcelLocalId,
     sequence: i32,
     version: i32,
     overrides: bool,
@@ -414,8 +414,11 @@ fn decode(bytes: &[u8], requested: EnvironmentScope) -> Result<Response, FetchEr
     let Value::Map(root) = value else { return Err(FetchError::Malformed) };
     let Some(Value::Map(fields)) = root.get("environment") else { return Err(FetchError::Malformed) };
     let parcel = integer(fields.get("parcel_id"))?.unwrap_or(-1);
-    let scope =
-        if parcel == -1 { EnvironmentScope::Region } else { EnvironmentScope::Parcel(ParcelId::new(parcel).ok_or(FetchError::Malformed)?) };
+    let scope = if parcel == -1 {
+        EnvironmentScope::Region
+    } else {
+        EnvironmentScope::Parcel(ParcelLocalId::new(parcel).ok_or(FetchError::Malformed)?)
+    };
     if scope != requested && scope != EnvironmentScope::Region {
         return Err(FetchError::Superseded);
     }
@@ -482,7 +485,7 @@ fn parcel_value(value: &Value) -> Result<Option<ParcelNotice>, FetchError> {
         return Err(FetchError::Malformed);
     }
     let sequence = integer(parcel.get("SequenceID"))?.ok_or(FetchError::Malformed)?;
-    let parcel = integer(parcel.get("LocalID"))?.and_then(ParcelId::new).ok_or(FetchError::Malformed)?;
+    let parcel = integer(parcel.get("LocalID"))?.and_then(ParcelLocalId::new).ok_or(FetchError::Malformed)?;
     let (version, overrides) = match body.get("ParcelEnvironmentBlock") {
         None => (-2, true),
         Some(Value::Array(values)) if values.is_empty() => (-2, true),

@@ -1,3 +1,6 @@
+pub(crate) mod read;
+pub(crate) mod spatial;
+
 use std::{
     collections::{BTreeSet, Bound::Excluded, HashSet},
     error::Error,
@@ -9,11 +12,11 @@ use hecs::ViewBorrow;
 use math::DVec3;
 use uuid::Uuid;
 
-use super::{
-    Object, ObjectContent, ObjectListItem, ObjectRecord, ObjectRecordRef, RecentObject, World, WorldId, WorldReadError,
-    spatial::{Cell, CellRange, SubtreeScan},
-};
 use crate::{AttachmentPoint, Entity, Kind, PoseState, Properties, PropertiesProvenance, Region, WorldPose, WorldRevision};
+use crate::{
+    Object, ObjectContent, ObjectListItem, ObjectRecord, ObjectRecordRef, RecentObject, World, WorldId, WorldReadError,
+    query::spatial::{Cell, CellRange, SubtreeScan},
+};
 
 pub const MAX_WORLD_QUERY_WORK: usize = 65_536;
 pub const MAX_WORLD_QUERY_RESULTS: usize = 256;
@@ -59,25 +62,6 @@ pub struct WorldQuery {
     creator: Option<ValueFilter<Uuid>>,
     sphere: Option<Sphere>,
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorldQueryBuildError {
-    InvalidCenter,
-    InvalidRadius,
-    OutOfRange,
-}
-
-impl Display for WorldQueryBuildError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidCenter => f.write_str("spatial query center must be finite"),
-            Self::InvalidRadius => f.write_str("spatial query radius must be finite and nonnegative"),
-            Self::OutOfRange => f.write_str("spatial query exceeds the supported coordinate range"),
-        }
-    }
-}
-
-impl Error for WorldQueryBuildError {}
 
 impl WorldQuery {
     pub const fn live() -> Self {
@@ -141,6 +125,25 @@ impl WorldQuery {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorldQueryBuildError {
+    InvalidCenter,
+    InvalidRadius,
+    OutOfRange,
+}
+
+impl Display for WorldQueryBuildError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidCenter => f.write_str("spatial query center must be finite"),
+            Self::InvalidRadius => f.write_str("spatial query radius must be finite and nonnegative"),
+            Self::OutOfRange => f.write_str("spatial query exceeds the supported coordinate range"),
+        }
+    }
+}
+
+impl Error for WorldQueryBuildError {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorldQueryBudget {
     pub work: usize,
     pub results: usize,
@@ -167,7 +170,6 @@ pub enum QueryIncompleteReason {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct QueryUnresolved {
     pub objects: usize,
-
     pub complete: bool,
 }
 
@@ -1054,7 +1056,7 @@ mod tests {
                 RecentObject {
                     id: Uuid::from_u128(u128::from(id)),
                     kind: Kind::Object,
-                    address: super::super::LocalAddress::new(region, NonZeroU32::new(id).unwrap()),
+                    address: crate::LocalAddress::new(region, NonZeroU32::new(id).unwrap()),
                     attachment_point: None,
                     properties: Properties::default(),
                     properties_provenance: PropertiesProvenance::default(),
@@ -1180,7 +1182,7 @@ mod tests {
             RecentObject {
                 id: Uuid::from_u128(61),
                 kind: Kind::Object,
-                address: super::super::LocalAddress::new(region, NonZeroU32::new(1).unwrap()),
+                address: crate::LocalAddress::new(region, NonZeroU32::new(1).unwrap()),
                 attachment_point: None,
                 properties: Properties::default(),
                 properties_provenance: PropertiesProvenance::default(),

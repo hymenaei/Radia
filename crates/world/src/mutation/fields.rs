@@ -3,14 +3,13 @@ use std::sync::Arc;
 use math::{Quat, Vec3};
 use uuid::Uuid;
 
-use super::super::journal::WorldChangeClasses;
-use super::super::{Fences, ObjectContent, ObjectOrdering, ObjectState, RegionalStamp, newer_field, newer_region_field};
+use crate::history::WorldChangeClasses;
 use crate::update::{FieldStamp, Stamp};
 use crate::{
     ApplyError, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, Kind, LinearMotion, MotionPatch, ObjectObservation,
     ObjectPatch, Parent, Pose, Rejections, RenderMaterials, SurfaceAppearance, UpdateAuthority, UpdateSource,
 };
-
+use crate::{Fences, ObjectContent, ObjectOrdering, ObjectState, RegionalStamp, newer_field, newer_region_field};
 use FieldRejectionReason::{InvalidRotation, UntrustedSource};
 use UpdateAuthority::{Tracked, Untracked};
 

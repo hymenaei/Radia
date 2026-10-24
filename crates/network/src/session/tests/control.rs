@@ -98,7 +98,7 @@ async fn neighbor_logout_bypasses_full_queues() {
     let mut connection =
         connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
     let (send_gate, pause_sends, send_entered) = new_send_gate();
-    connection.set_send_gate_for_test(send_gate);
+    crate::circuit::test_values::set_send_gate(&mut connection, send_gate);
     let (event_sender, mut event_receiver) = mpsc::channel(4);
     let (shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(4);

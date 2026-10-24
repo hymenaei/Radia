@@ -143,16 +143,6 @@ impl Drop for SimulatorConnection {
 }
 
 impl SimulatorConnection {
-    #[cfg(test)]
-    pub(crate) fn set_send_gate_for_test(&mut self, send_gate: crate::fixtures::circuit::SendGate) {
-        udp::test_values::set_send_gate(Arc::get_mut(&mut self.socket).expect("test connection owns its socket"), send_gate);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_handoff_for_test(&mut self, handoff: HandoffTarget) {
-        self.handoff = Some(handoff);
-    }
-
     fn current_primary_state(&self) -> PrimaryState {
         self.primary_state_receiver.as_ref().map_or(self.primary_state, |receiver| *receiver.borrow())
     }
@@ -264,6 +254,22 @@ fn preflight_loss_reason(error: LLUdpError, message_id: MessageId) -> CoverageLo
             CoverageLossReason::AllocationEstimateMismatch
         }
         _ => CoverageLossReason::PreflightRejected,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_values {
+    use std::sync::Arc;
+
+    use super::{HandoffTarget, SimulatorConnection, udp};
+    use crate::fixtures::circuit::SendGate;
+
+    pub(crate) fn set_send_gate(connection: &mut SimulatorConnection, send_gate: SendGate) {
+        udp::test_values::set_send_gate(Arc::get_mut(&mut connection.socket).expect("test connection owns its socket"), send_gate);
+    }
+
+    pub(crate) fn set_handoff(connection: &mut SimulatorConnection, handoff: HandoffTarget) {
+        connection.handoff = Some(handoff);
     }
 }
 

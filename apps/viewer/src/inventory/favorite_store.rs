@@ -1,13 +1,13 @@
 use std::{
     fmt::{self, Display, Formatter},
     fs::{self, File},
-    io::{ErrorKind, Read},
+    io::{self, ErrorKind, Read, Write},
     path::{Path, PathBuf},
 };
 
 use network::Grid;
 use serde::{Deserialize, Serialize};
-use serde_json::{from_str, to_vec_pretty};
+use serde_json::{from_str, to_vec_pretty, to_writer_pretty};
 use utils::write_atomic;
 use uuid::Uuid;
 
@@ -78,6 +78,27 @@ enum StorageError {
     TooLarge,
 }
 
+#[derive(Default)]
+struct SizeCounter {
+    bytes: usize,
+    exceeded: bool,
+}
+
+impl Write for SizeCounter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(bytes.len());
+        if self.bytes > MAX_FAVORITE_STORE_BYTES {
+            self.exceeded = true;
+            return Err(io::Error::new(ErrorKind::WriteZero, "favorite store exceeds its storage size limit"));
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct FavoriteStore {
     #[serde(default)]
@@ -106,6 +127,13 @@ impl FavoriteStore {
         Ok(contents)
     }
 
+    fn validate_serialized_size(&self) -> Result<(), StorageError> {
+        self.validate().map_err(StorageError::InvalidValues)?;
+        let mut counter = SizeCounter::default();
+        to_writer_pretty(&mut counter, self)
+            .map_err(|error| if counter.exceeded { StorageError::TooLarge } else { StorageError::Encode(error.to_string()) })
+    }
+
     pub fn favorites_for(&self, grid: Grid, agent_id: Uuid) -> &[FavoriteLocation] {
         let grid = StoredGrid::from(grid);
         self.agents
@@ -130,7 +158,7 @@ impl FavoriteStore {
         if !changed {
             return Ok(false);
         }
-        next_store.encode_for_storage().map_err(|error| match error {
+        next_store.validate_serialized_size().map_err(|error| match error {
             StorageError::InvalidValues(reason) => FavoriteStoreError::InvalidSessionValues(reason),
             StorageError::Encode(detail) => FavoriteStoreError::Encode(detail),
             StorageError::TooLarge => FavoriteStoreError::SessionStoreTooLarge,
@@ -180,7 +208,7 @@ impl FavoriteStore {
         if let Some(agent) = next_store.agents.iter_mut().find(|agent| agent.grid == grid_key && agent.agent_id == agent_id) {
             agent.favorites = favorites;
         }
-        next_store.encode_for_storage().map_err(|error| match error {
+        next_store.validate_serialized_size().map_err(|error| match error {
             StorageError::InvalidValues(reason) => FavoriteStoreError::InvalidRefreshedValues(reason),
             StorageError::Encode(detail) => FavoriteStoreError::Encode(detail),
             StorageError::TooLarge => FavoriteStoreError::RefreshedStoreTooLarge,
@@ -395,6 +423,39 @@ mod tests {
         assert_eq!(result, Err(FavoriteStoreError::InvalidRefreshedValues("an account has too many saved favorites")));
         assert_eq!(current_favorites, saved);
         assert_eq!(store.favorites_for(Grid::Agni, agent_id), saved);
+    }
+
+    #[test]
+    fn oversized_store_refresh_keeps_previous_snapshot() {
+        let test_directory = tempdir().expect("create temporary login locations directory");
+        let path = login_locations_path_under(test_directory.path());
+        let agent_id = Uuid::from_u128(0);
+        let saved = vec![FavoriteLocation { name: "Home".into(), region_name: "Ahern".into(), x: 1, y: 2, z: 3 }];
+        let mut store = FavoriteStore::default();
+        store.replace_favorites(Grid::Agni, agent_id, "Example Resident", saved.clone()).expect("replace saved favorites");
+        let large_favorite = FavoriteLocation { name: "n".repeat(512), region_name: "r".repeat(512), x: 1, y: 2, z: 3 };
+        let large_favorites = vec![large_favorite; MAX_FAVORITES_PER_AGENT];
+        for account in 1..8 {
+            store
+                .replace_favorites(Grid::Agni, Uuid::from_u128(account), &format!("Account {account}"), large_favorites.clone())
+                .expect("add account below the storage limit");
+        }
+        save_to(&path, &store).expect("save store before oversized refresh");
+        let mut current_favorites = saved.clone();
+
+        let result =
+            apply_favorites_refresh(&mut current_favorites, &mut store, Grid::Agni, agent_id, "Example Resident", Ok(large_favorites));
+
+        assert_eq!(result, Err(FavoriteStoreError::RefreshedStoreTooLarge));
+        assert_eq!(current_favorites, saved);
+        let store_favorites = store.favorites_for(Grid::Agni, agent_id);
+        assert_eq!(store_favorites.len(), saved.len());
+        assert_eq!(store_favorites.first(), saved.first());
+        save_to(&path, &store).expect("rejected refresh must leave a savable snapshot");
+        let reloaded = load_from(&path).expect("reload known-good snapshot");
+        let reloaded_favorites = reloaded.favorites_for(Grid::Agni, agent_id);
+        assert_eq!(reloaded_favorites.len(), saved.len());
+        assert_eq!(reloaded_favorites.first(), saved.first());
     }
 
     #[test]

@@ -2,6 +2,7 @@ use std::sync::OnceLock;
 
 use assets::{Failure, MAX_TEXTURE_EDGE};
 use intel_tex_2::{RgbaSurface, bc1, bc3, bc7};
+use math::{linear_to_srgb8, srgb8_to_linear};
 use wgpu::TextureFormat;
 
 #[cfg(test)]
@@ -135,8 +136,8 @@ struct ColorTables {
 fn downsample(source: &[u8], size: [u32; 2], cancelled: impl Fn() -> bool) -> Result<Vec<u8>, Failure> {
     static COLORS: OnceLock<ColorTables> = OnceLock::new();
     let colors = COLORS.get_or_init(|| ColorTables {
-        linear: std::array::from_fn(|index| math::srgb8_to_linear(index as u8)),
-        srgb: std::array::from_fn(|index| math::linear_to_srgb8(index as f32 / 4095.0)),
+        linear: std::array::from_fn(|index| srgb8_to_linear(index as u8)),
+        srgb: std::array::from_fn(|index| linear_to_srgb8(index as f32 / 4095.0)),
     });
     let next = size.map(|edge| (edge / 2).max(1));
     if size.into_iter().all(|edge| edge == 1 || edge.is_multiple_of(2)) {

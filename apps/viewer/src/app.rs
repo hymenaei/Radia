@@ -20,7 +20,7 @@ use scene::Camera;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use tokio::sync::watch;
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
 #[path = "app_tests.rs"]
 mod tests;
 

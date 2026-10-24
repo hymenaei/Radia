@@ -20,6 +20,7 @@ jpeg2k = { workspace = true, features = ["openjpeg-sys", "strict-mode"] }
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
+test-support.workspace = true
 
 [[bench]]
 name = "texture"

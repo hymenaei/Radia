@@ -15,7 +15,7 @@ use crate::{
     texture::{TextureCompletion, TextureJob, TextureKey, TextureState, Textures},
 };
 use assets::{Priority, TextureId};
-use math::{DVec3, Frustum, Mat4, Quat, Vec3};
+use math::{DVec3, Frustum, Mat4, Quat, Vec3, flips_winding, normal_matrix};
 use scene::{Camera, FaceMaterial, MeshId, Placement, PreparedMesh, SceneView, SharedMesh, SurfaceKind, ViewVersion};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, CommandEncoder, Device, Extent3d, IndexFormat, Queue, RenderPass, Texture, TextureDescriptor,
@@ -450,7 +450,7 @@ impl GeometryRenderer {
                 let pipeline = if matches!(instance.shading, ShadingMode::Water) {
                     Pipeline::Water
                 } else {
-                    match (params.blend, params.double_sided, math::flips_winding(instance.scale)) {
+                    match (params.blend, params.double_sided, flips_winding(instance.scale)) {
                         (true, true, _) => Pipeline::BlendDoubleSided,
                         (true, false, true) => Pipeline::BlendFlipped,
                         (true, false, false) => Pipeline::Blend,
@@ -698,7 +698,7 @@ fn model(instance: &Instance, origin: DVec3) -> Mat4 {
 
 fn instance_base(instance: &Instance, origin: DVec3) -> [u8; TRANSFORM_BYTES] {
     let mut bytes = [0; TRANSFORM_BYTES];
-    let normal = math::normal_matrix(instance.rotation, instance.scale);
+    let normal = normal_matrix(instance.rotation, instance.scale);
     let values = model(instance, origin)
         .to_cols_array()
         .into_iter()

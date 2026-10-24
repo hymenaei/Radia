@@ -19,7 +19,7 @@ pub use asset_demand::{AssetChange, AssetRequest, AssetTicket};
 pub use budget::{Budget, MEMORY_BYTES};
 pub use camera::{Camera, CameraError, Detail};
 pub use environment::{
-    EnvironmentProperty, EnvironmentPush, EnvironmentPushError, ExperienceId, ExperienceProperty, ExperienceSetting, ViewerEnvironment,
+    EnvironmentProperty, EnvironmentPush, EnvironmentPushError, ExperienceProperty, ExperienceSetting, ViewerEnvironment,
 };
 pub use mesh::{Face, MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh, MeshError, MeshId, SharedMesh, Vertex};
 pub use mesh_cache::{MeshKey, PreparedMesh};
@@ -33,3 +33,4 @@ pub use reconcile::{
     SceneReconciler,
 };
 pub use surfaces::{Surface, SurfaceKind};
+pub use utils::ExperienceId;

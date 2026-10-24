@@ -10,6 +10,7 @@ use std::{
 };
 
 use crate::{
+    DEFAULT_DRAW_DISTANCE,
     camera::{self, OrbitCamera},
     scene_feed::SceneFeed,
 };
@@ -630,7 +631,7 @@ impl SceneWindow {
                     ui.add(Slider::new(&mut camera.lod_factor, 0.25..=4.0).text("LOD factor"))
                         .on_hover_text("Higher values keep more detailed prim geometry at a distance.");
                     if ui.button("Reset settings").clicked() {
-                        camera.draw_distance = camera::DEFAULT_DRAW_DISTANCE;
+                        camera.draw_distance = DEFAULT_DRAW_DISTANCE;
                         camera.lod_factor = 1.0;
                     }
                 }

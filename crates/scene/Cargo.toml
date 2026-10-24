@@ -16,3 +16,4 @@ math.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+test-support.workspace = true

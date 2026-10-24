@@ -3,7 +3,7 @@ use protocol::messages::{AgentMovementComplete, AgentUpdate, agent_update::Agent
 use scene::Camera;
 use uuid::Uuid;
 
-use crate::camera::DEFAULT_DRAW_DISTANCE;
+use crate::DEFAULT_DRAW_DISTANCE;
 
 pub(crate) fn camera(agent_id: Uuid, session_id: Uuid, camera: Camera, origin: DVec3) -> Option<AgentUpdate> {
     update(agent_id, session_id, (camera.position() - origin).as_vec3(), camera.direction(), camera.draw_distance() as f32)
@@ -43,13 +43,13 @@ fn update(agent_id: Uuid, session_id: Uuid, position: Vec3, direction: Vec3, far
 #[cfg(test)]
 mod tests {
     use protocol::lludp::{Message, Packet};
-    use std::time::Instant;
+    use std::f64::consts::FRAC_PI_3;
 
     use super::*;
 
     #[test]
     fn camera_distance_reaches_simulator() {
-        let view = crate::camera::OrbitCamera::new(DVec3::ZERO).scene_camera([1280, 720], Instant::now()).unwrap();
+        let view = Camera::new(DVec3::new(-4.0, 0.0, 2.0), Vec3::new(4.0, 0.0, -2.0), FRAC_PI_3, [1280, 720]).unwrap();
         assert_eq!(
             camera(Uuid::nil(), Uuid::nil(), view, DVec3::ZERO).unwrap().agent_data.far,
             view.draw_distance() as f32,

@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn cancelled_decode_retains_work() {
-        let bytes = include_bytes!("../tests/fixtures/rgba.j2c");
+        let bytes = test_support::texture::RGBA_J2C;
         let checks = Cell::new(0);
         texture_header::preflight(bytes, &|| {
             checks.set(checks.get() + 1);

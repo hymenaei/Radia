@@ -5,12 +5,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::DEFAULT_DRAW_DISTANCE;
+
 #[cfg(test)]
 #[path = "camera_tests.rs"]
 mod tests;
 
 const FOCUS_TIME: Duration = Duration::from_millis(400);
-pub(crate) const DEFAULT_DRAW_DISTANCE: f32 = 512.0;
 
 pub(crate) struct OrbitCamera {
     focus: DVec3,

@@ -25,11 +25,11 @@ fn decode(bytes: &[u8]) -> Result<Image, Failure> {
 #[test]
 fn lossless_channels_match_openjpeg() {
     let cases: &[(&[u8], &[u8], usize, bool)] = &[
-        (include_bytes!("fixtures/gray.j2c"), include_bytes!("fixtures/gray.raw"), 1, false),
-        (include_bytes!("fixtures/gray-alpha.j2c"), include_bytes!("fixtures/gray-alpha.raw"), 2, true),
-        (include_bytes!("fixtures/rgb.j2c"), include_bytes!("fixtures/rgb.raw"), 3, false),
-        (include_bytes!("fixtures/rgba.j2c"), include_bytes!("fixtures/rgba.raw"), 4, true),
-        (include_bytes!("fixtures/rgba.jp2"), include_bytes!("fixtures/rgba.raw"), 4, true),
+        (test_support::texture::GRAY_J2C, test_support::texture::GRAY_RAW, 1, false),
+        (test_support::texture::GRAY_ALPHA_J2C, test_support::texture::GRAY_ALPHA_RAW, 2, true),
+        (test_support::texture::RGB_J2C, test_support::texture::RGB_RAW, 3, false),
+        (test_support::texture::RGBA_J2C, test_support::texture::RGBA_RAW, 4, true),
+        (test_support::texture::RGBA_JP2, test_support::texture::RGBA_RAW, 4, true),
     ];
     for (encoded, expected, channels, alpha) in cases {
         let image = decode(encoded).unwrap();
@@ -43,9 +43,9 @@ fn lossless_channels_match_openjpeg() {
 
 #[test]
 fn lossy_error_stays_bounded() {
-    let image = decode(include_bytes!("fixtures/rgba-lossy.j2c")).unwrap();
+    let image = decode(test_support::texture::RGBA_LOSSY_J2C).unwrap();
     let output = image.pixels();
-    let source = include_bytes!("fixtures/rgba-lossy.raw");
+    let source = test_support::texture::RGBA_LOSSY_RAW;
     assert_eq!(output.len(), source.len());
     for (actual, expected) in output.iter().zip(source) {
         assert!(actual.abs_diff(*expected) <= 2, "actual {actual}, source {expected}");
@@ -54,7 +54,7 @@ fn lossy_error_stays_bounded() {
 
 #[test]
 fn reduced_gray_matches_openjpeg() {
-    let image = decode(include_bytes!("fixtures/gray-4096.j2c")).unwrap();
+    let image = decode(test_support::texture::GRAY_4096_J2C).unwrap();
     assert_eq!(image.size(), [2048, 2048]);
     assert_eq!(image.format(), PixelFormat::Gray8);
     assert!(image.pixels().iter().all(|sample| *sample == 73));
@@ -62,7 +62,7 @@ fn reduced_gray_matches_openjpeg() {
 
 #[test]
 fn invalid_headers_fail_early() {
-    let valid = include_bytes!("fixtures/rgba.j2c");
+    let valid = test_support::texture::RGBA_J2C;
     for length in 0..valid.len() {
         assert!(decode(&valid[..length]).is_err(), "accepted truncation at {length}");
     }
@@ -96,13 +96,13 @@ fn reduced_rgb_matches_openjpeg() {
 
 #[test]
 fn jp2_metadata_must_match() {
-    let mut bytes = include_bytes!("fixtures/rgba.jp2").to_vec();
-    assert_eq!(decode(&bytes).unwrap().pixels(), include_bytes!("fixtures/rgba.raw"));
+    let mut bytes = test_support::texture::RGBA_JP2.to_vec();
+    assert_eq!(decode(&bytes).unwrap().pixels(), test_support::texture::RGBA_RAW);
     let definitions = bytes.windows(4).position(|tag| tag == b"cdef").unwrap();
     let alpha_type = definitions + 4 + 2 + 3 * 6 + 2;
     bytes[alpha_type..alpha_type + 2].copy_from_slice(&2u16.to_be_bytes());
     assert!(matches!(decode(&bytes), Err(Failure::Unsupported)), "premultiplied alpha requires an explicit conversion policy");
-    let mut wrong_dimensions = include_bytes!("fixtures/rgba.jp2").to_vec();
+    let mut wrong_dimensions = test_support::texture::RGBA_JP2.to_vec();
     let ihdr = wrong_dimensions.windows(4).position(|tag| tag == b"ihdr").unwrap();
     wrong_dimensions[ihdr + 4..ihdr + 8].copy_from_slice(&999u32.to_be_bytes());
     assert!(matches!(decode(&wrong_dimensions), Err(Failure::Malformed)));
@@ -111,7 +111,7 @@ fn jp2_metadata_must_match() {
 proptest::proptest! {
     #[test]
     fn mutations_never_publish_an_invalid_image(offset in 0usize..470, byte in proptest::prelude::any::<u8>()) {
-        let mut encoded = include_bytes!("fixtures/rgba.j2c").to_vec();
+        let mut encoded = test_support::texture::RGBA_J2C.to_vec();
         encoded[offset] = byte;
         if let Ok(image) = decode(&encoded) {
             let [width, height] = image.size();

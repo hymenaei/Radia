@@ -8,11 +8,7 @@ use uuid::Uuid;
 use super::*;
 
 fn loaded(id: u128, rgba: bool) -> TextureHandle {
-    let bytes: &[u8] = if rgba {
-        include_bytes!("../../assets/tests/fixtures/rgba.j2c")
-    } else {
-        include_bytes!("../../assets/tests/fixtures/gray-alpha.j2c")
-    };
+    let bytes: &[u8] = if rgba { test_support::texture::RGBA_J2C } else { test_support::texture::GRAY_ALPHA_J2C };
     loaded_fixture(id, bytes)
 }
 
@@ -245,10 +241,10 @@ fn gpu_texture_lifetimes() {
     assert_eq!(recreated.count(), 0, "cleanup does not require another visible frame");
     assert!(device.features().contains(wgpu::Features::TEXTURE_COMPRESSION_BC), "this manual check requires BC support");
     for (id, bytes, quality, format) in [
-        (110, include_bytes!("../../assets/tests/fixtures/rgb.j2c").as_slice(), CompressionQuality::Fast, TextureFormat::Bc1RgbaUnormSrgb),
-        (111, include_bytes!("../../assets/tests/fixtures/rgba.j2c").as_slice(), CompressionQuality::Fast, TextureFormat::Bc3RgbaUnormSrgb),
-        (112, include_bytes!("../../assets/tests/fixtures/rgb.j2c").as_slice(), CompressionQuality::High, TextureFormat::Bc7RgbaUnormSrgb),
-        (113, include_bytes!("../../assets/tests/fixtures/rgba.j2c").as_slice(), CompressionQuality::High, TextureFormat::Bc7RgbaUnormSrgb),
+        (110, test_support::texture::RGB_J2C, CompressionQuality::Fast, TextureFormat::Bc1RgbaUnormSrgb),
+        (111, test_support::texture::RGBA_J2C, CompressionQuality::Fast, TextureFormat::Bc3RgbaUnormSrgb),
+        (112, test_support::texture::RGB_J2C, CompressionQuality::High, TextureFormat::Bc7RgbaUnormSrgb),
+        (113, test_support::texture::RGBA_J2C, CompressionQuality::High, TextureFormat::Bc7RgbaUnormSrgb),
     ] {
         let texture = loaded_fixture(id, bytes);
         recreated.request(&texture, 12, Priority::Visible);
@@ -265,7 +261,7 @@ fn gpu_texture_lifetimes() {
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
         assert_eq!((recreated.count(), recreated.bytes()), (0, 0), "compressed resources release after the final owner");
     }
-    let texture = loaded_fixture(114, include_bytes!("../../assets/tests/fixtures/gray-4096.j2c"));
+    let texture = loaded_fixture(114, test_support::texture::GRAY_4096_J2C);
     assert_eq!(texture.info().unwrap().size, [2048; 2]);
     upload(&mut recreated, &device, &queue, &texture, 13);
     let TextureUploadState::Ready(gpu) = &recreated.entries[&texture.id()].state else { panic!("automatic compression uploaded") };

@@ -22,7 +22,7 @@ crates/assets/         # package `assets`
 crates/common/llsd/    # package `llsd`
 crates/math/           # package `math`
 crates/utils/          # package `utils`
-crates/test-support/ # package `testing`
+crates/test-support/ # package `test-support`
 crates/network/        # package `network`
 crates/protocol/       # package `protocol`
 crates/render/         # package `render`

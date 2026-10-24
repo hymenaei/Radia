@@ -14,7 +14,7 @@ fn loaded() -> (TextureHandle, Budget) {
     let demand = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
     let mut job = store.next_job(now).unwrap();
     assert!(store.try_start_decode(&mut job));
-    let result = job.prepare(include_bytes!("../tests/fixtures/rgba.j2c").to_vec());
+    let result = job.prepare(test_support::texture::RGBA_J2C.to_vec());
     store.complete(job, result, now);
     let Status::Ready(Content::Texture(texture)) = demand.status() else { panic!("fixture must load") };
     (texture, budget)
@@ -51,7 +51,7 @@ fn usage_controls_pixel_retention() {
         assert_eq!(texture.image().is_some(), usage == TextureUsage::MainAndRender);
         assert_eq!(texture.info(), Some(info), "upload leaves source and image metadata valid");
         let decoded = texture.decode_job().unwrap().run().unwrap();
-        assert_eq!(decoded.pixels(), include_bytes!("../tests/fixtures/rgba.raw"));
+        assert_eq!(decoded.pixels(), test_support::texture::RGBA_RAW);
         assert_ne!(decoded.pixels().as_ptr(), original, "re-decoding reads the encoded source rather than reusing a pixel copy");
         if usage == TextureUsage::MainAndRender {
             assert_eq!(texture.image().unwrap().pixels().as_ptr(), decoded.pixels().as_ptr());

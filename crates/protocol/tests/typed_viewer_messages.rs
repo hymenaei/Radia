@@ -3,10 +3,7 @@ use std::assert_matches;
 use protocol::{
     BlockInstance, BlockValues, FieldValue, SchemaMessage,
     lludp::{LLUdpError, Message, Packet},
-    messages::{
-        RegionInfo, TeleportFinish,
-        region::region_info::{AgentData as RegionAgentData, CombatSettings, RegionInfo2Block, RegionInfoBlock},
-    },
+    messages::{RegionInfo, TeleportFinish, region::region_info},
 };
 use uuid::Uuid;
 
@@ -52,8 +49,8 @@ fn generic_preflight_rejects_truncation() {
 #[test]
 fn region_info_optional_tail_defaults() {
     let message = RegionInfo {
-        agent_data: RegionAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
-        region_info: RegionInfoBlock {
+        agent_data: region_info::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
+        region_info: region_info::RegionInfoBlock {
             sim_name: Vec::new(),
             estate_id: Some(0),
             parent_estate_id: Some(0),
@@ -71,7 +68,7 @@ fn region_info_optional_tail_defaults() {
             use_estate_sun: Some(false),
             sun_hour: Some(0.0),
         },
-        region_info2: RegionInfo2Block {
+        region_info2: region_info::RegionInfo2Block {
             product_sku: Vec::new(),
             product_name: Vec::new(),
             max_agents32: Some(0),
@@ -80,7 +77,7 @@ fn region_info_optional_tail_defaults() {
         },
         region_info3: Vec::new(),
         region_info5: Vec::new(),
-        combat_settings: vec![CombatSettings {
+        combat_settings: vec![region_info::CombatSettings {
             combat_flags: Some(0),
             on_death: Some(0),
             damage_throttle: Some(0.0),

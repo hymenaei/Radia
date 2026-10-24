@@ -27,7 +27,7 @@ pub(crate) struct ComponentView<'a, T: Component> {
 
 impl<'a, T: Component> ComponentView<'a, T> {
     pub(crate) fn get(&self, entity: hecs::Entity) -> Option<&'a T> {
-        self.store.component_ref(entity, Some(&self.view))
+        self.store.shared_component_ref(entity, Some(&self.view))
     }
 }
 
@@ -164,19 +164,18 @@ impl ObjectStore {
         if entity.1 != self.world {
             return None;
         }
-        self.component_ref(entity.0, None)
+        self.shared_component_ref(entity.0, None)
     }
 
     pub(crate) fn component<T: Component>(&self, entity: hecs::Entity) -> Option<&T> {
-        self.component_ref(entity, None)
+        self.shared_component_ref(entity, None)
     }
 
     pub(crate) fn component_view<T: Component>(&self) -> ComponentView<'_, T> {
         ComponentView { store: self, view: self.ecs.view::<&T>() }
     }
 
-    fn component_ref<'a, T: Component>(&'a self, entity: hecs::Entity, view: Option<&ViewBorrow<'a, &'a T>>) -> Option<&'a T> {
-        // SAFETY: `&self.ecs` only takes shared dynamic borrows; mutation needs `&mut ObjectStore`, so these reads cannot alias a writer.
+    fn shared_component_ref<'a, T: Component>(&'a self, entity: hecs::Entity, view: Option<&ViewBorrow<'a, &'a T>>) -> Option<&'a T> {
         unsafe {
             if let Some(view) = view {
                 let component = view.get_unchecked(entity)?;

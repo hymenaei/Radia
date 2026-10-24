@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use hecs::{EntityBuilder, EntityRef};
+use hecs::{EntityBuilder, EntityRef, World};
 
 use super::impls::{apply_facet, check_support, reject_untrusted};
 use crate::history::WorldChangeClasses;
-use crate::object::components::{Fenced, RegionalStamp, newer_region_field};
+use crate::object::components::{Fenced, RegionalStamp, newer_field, newer_region_field};
 use crate::update::{FieldStamp, Stamp};
 use crate::{
     Appearance, AvatarAppearance, FieldGroup, FieldRejectionReason, Kind, ObjectMedia, PbrMaterialAssignments, PbrMaterialOverrides,
@@ -27,7 +27,7 @@ impl Origin {
     }
 
     pub(in crate::mutation) fn newer(self, fence: Option<FieldStamp>) -> bool {
-        crate::object::components::newer_field(self.field(), fence)
+        newer_field(self.field(), fence)
     }
 
     pub(in crate::mutation) fn newer_regional(self, fence: Option<RegionalStamp>) -> bool {
@@ -121,13 +121,13 @@ macro_rules! define_facets {
                 added
             }
 
-            pub(crate) fn update_existing(&self, previous: &Self, ecs: &mut hecs::World, entity: hecs::Entity) {
+            pub(crate) fn update_existing(&self, previous: &Self, ecs: &mut World, entity: hecs::Entity) {
                 $(if self.$field != previous.$field && previous.$field.is_stored() && self.$field.is_stored() {
                     *ecs.query_one_mut::<&mut Fenced<$ty>>(entity).expect("changed facet component is present") = self.$field.clone();
                 })+
             }
 
-            pub(crate) fn remove_cleared(&self, previous: &Self, ecs: &mut hecs::World, entity: hecs::Entity) {
+            pub(crate) fn remove_cleared(&self, previous: &Self, ecs: &mut World, entity: hecs::Entity) {
                 $(if self.$field != previous.$field && previous.$field.is_stored() && !self.$field.is_stored() {
                     ecs.remove_one::<Fenced<$ty>>(entity).expect("changed facet component is present");
                 })+
@@ -143,8 +143,6 @@ macro_rules! define_facets {
                 $(
                     if <$ty as Facet>::RESET_ON_TRANSFER {
                         self.$field = Fenced::default();
-                    } else if <$ty as Facet>::REGIONAL_FENCE {
-                        self.$field.fence = None;
                     }
                 )+
             }
@@ -245,7 +243,7 @@ impl FacetChanges {
         Self { before, after }
     }
 
-    pub(crate) fn apply(self, ecs: &mut hecs::World, entity: hecs::Entity) {
+    pub(crate) fn apply(self, ecs: &mut World, entity: hecs::Entity) {
         if self.before == self.after {
             return;
         }

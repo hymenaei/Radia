@@ -1,10 +1,10 @@
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, BinaryHeap},
     fmt,
     sync::{
         Arc, Weak,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -24,6 +24,7 @@ pub const MAX_ASSET_FETCHES: usize = 8;
 const DEMAND_DEADLINE: Duration = Duration::from_secs(60);
 const NEGATIVE_TTL: Duration = Duration::from_secs(30);
 const MAX_ATTEMPTS: u8 = 3;
+type ScheduleKey = (Reverse<Priority>, bool, Instant, Resource, Route);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Kind {
@@ -194,6 +195,7 @@ struct Counter {
 
 struct Lease {
     counter: Arc<Counter>,
+    maintenance: Arc<AtomicBool>,
     size: Option<TextureSize>,
     priority: Priority,
     _texture: Option<TextureHandle>,
@@ -203,6 +205,7 @@ impl Drop for Lease {
     fn drop(&mut self) {
         self.counter.count.fetch_sub(1, Ordering::AcqRel);
         self.counter.wake.send_replace(());
+        self.maintenance.store(true, Ordering::Release);
     }
 }
 
@@ -265,12 +268,23 @@ impl RouteState {
     }
 }
 
+struct WorkLife {
+    maintenance: Arc<AtomicBool>,
+}
+
+impl Drop for WorkLife {
+    fn drop(&mut self) {
+        self.maintenance.store(true, Ordering::Release);
+    }
+}
+
 enum LoadPhase {
     Idle,
     Queued,
-    Running { generation: u64, route: Route, life: Weak<()>, cancelled: watch::Sender<bool>, stage: Stage },
+    Running { generation: u64, route: Route, life: Weak<WorkLife>, cancelled: watch::Sender<bool>, stage: Stage },
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum Stage {
     Fetching,
     Decoding,
@@ -321,8 +335,8 @@ struct Job {
     resource: Resource,
     route: Route,
     generation: u64,
+    _life: Arc<WorkLife>,
     reservation: Reservation,
-    _life: Arc<()>,
     cancelled: watch::Receiver<bool>,
     size: TextureSize,
 }
@@ -465,6 +479,10 @@ impl DecodeInput {
 pub struct DecodeJob(DecodeInput);
 
 impl DecodeJob {
+    pub fn fail(self, failure: Failure) -> LoadCompletion {
+        self.0.fail(failure)
+    }
+
     pub fn run(self) -> LoadCompletion {
         let DecodeInput { job, source } = self.0;
         let result = match source {
@@ -509,8 +527,15 @@ pub struct Store {
     sequence: u64,
     routes: BTreeSet<Route>,
     entries: BTreeMap<Resource, AssetEntry>,
+    candidates: Vec<ScheduleKey>,
+    candidate_heap: BinaryHeap<ScheduleKey>,
+    candidates_dirty: bool,
     budget: Budget,
     closed: bool,
+    maintenance_dirty: Arc<AtomicBool>,
+    maintained_at: Option<Instant>,
+    running_fetches: usize,
+    running_decodes: usize,
     textures: TextureEvents,
 }
 
@@ -533,8 +558,15 @@ impl Store {
             sequence: 0,
             routes: BTreeSet::new(),
             entries: BTreeMap::new(),
+            candidates: Vec::with_capacity(MAX_ASSET_FETCHES),
+            candidate_heap: BinaryHeap::with_capacity(MAX_ASSET_FETCHES),
+            candidates_dirty: true,
             budget,
             closed: false,
+            maintenance_dirty: Arc::new(AtomicBool::new(true)),
+            maintained_at: None,
+            running_fetches: 0,
+            running_decodes: 0,
             textures: TextureEvents::default(),
         }
     }
@@ -561,6 +593,7 @@ impl Store {
     }
 
     pub fn retire_route(&mut self, route: Route) {
+        self.maintenance_dirty.store(true, Ordering::Release);
         self.routes.remove(&route);
         for entry in self.entries.values_mut() {
             if let Some(view) = entry.views.remove(&route) {
@@ -635,13 +668,24 @@ impl Store {
         };
         view.publish_status(status.retaining(ready.as_ref()));
         view.counter.count.fetch_add(1, Ordering::AcqRel);
-        let lease = Arc::new(Lease { counter: Arc::clone(&view.counter), size: request.size(), priority, _texture: texture });
+        let lease = Arc::new(Lease {
+            counter: Arc::clone(&view.counter),
+            maintenance: Arc::clone(&self.maintenance_dirty),
+            size: request.size(),
+            priority,
+            _texture: texture,
+        });
         view.leases.retain(|lease| lease.strong_count() > 0);
         view.leases.push(Arc::downgrade(&lease));
+        self.maintenance_dirty.store(true, Ordering::Release);
         Ok(Demand { _lease: lease, status: view.status.subscribe() })
     }
 
     pub fn maintain(&mut self, now: Instant) {
+        let dirty = self.maintenance_dirty.swap(false, Ordering::AcqRel);
+        if self.maintained_at == Some(now) && !dirty {
+            return;
+        }
         for entry in self.entries.values_mut() {
             let ready = entry.ready();
             let mut desired = None;
@@ -680,7 +724,7 @@ impl Store {
                 entry.phase = LoadPhase::Idle;
                 entry.broadcast_status(Status::Ready((*content).clone()));
             }
-            if let LoadPhase::Running { life, cancelled, route, .. } = &entry.phase {
+            if let LoadPhase::Running { life, cancelled, route, stage, .. } = &entry.phase {
                 if !entry.has_active_demand() || entry.views.get(route).is_none_or(|view| now >= view.deadline) {
                     cancelled.send_replace(true);
                 }
@@ -688,7 +732,12 @@ impl Store {
                     if let Some(view) = entry.views.get_mut(route) {
                         view.fail(Failure::Cancelled, None, now, ready.as_ref());
                     }
+                    let stage = *stage;
                     entry.phase = LoadPhase::Queued;
+                    match stage {
+                        Stage::Fetching => self.running_fetches -= 1,
+                        Stage::Decoding => self.running_decodes -= 1,
+                    }
                 }
             }
             if !matches!(entry.phase, LoadPhase::Idle)
@@ -703,44 +752,32 @@ impl Store {
         }
         self.entries
             .retain(|_, entry| entry.has_active_demand() || entry.texture().is_some() || matches!(entry.phase, LoadPhase::Running { .. }));
+        self.candidates.clear();
+        self.candidate_heap.clear();
+        self.candidates_dirty = true;
+        self.maintained_at = Some(now);
     }
 
     pub fn next_job(&mut self, now: Instant) -> Option<LoadJob> {
-        self.maintain(now);
-        if self.closed
-            || self.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Fetching, .. })).count()
-                >= MAX_ASSET_FETCHES
-        {
+        if self.closed {
             return None;
         }
-        let (resource, route) = self
-            .entries
-            .iter()
-            .filter(|(_, entry)| matches!(entry.phase, LoadPhase::Queued))
-            .filter_map(|(resource, entry)| {
-                entry
-                    .views
-                    .iter()
-                    .find(|(_, view)| {
-                        view.count() > 0
-                            && view.attempts < MAX_ATTEMPTS
-                            && (entry.priority == Priority::Background || now < view.deadline)
-                            && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some_and(|retry| retry <= now))
-                    })
-                    .map(|(route, _)| (*resource, *route, (Reverse(entry.priority), entry.ready().is_some(), entry.used)))
-            })
-            .min_by_key(|(_, _, used)| *used)
-            .map(|(resource, route, _)| (resource, route))?;
+        if self.running_fetches >= MAX_ASSET_FETCHES && self.maintained_at == Some(now) && !self.maintenance_dirty.load(Ordering::Acquire) {
+            return None;
+        }
+        self.maintain(now);
+        if self.running_fetches >= MAX_ASSET_FETCHES {
+            return None;
+        }
+        self.build_candidates(now);
+        let (_, _, _, resource, route) = self.candidates.last().copied()?;
         let bytes = resource.kind.max_response_bytes();
-        let headroom = if self.entries.values().any(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })) {
-            0
-        } else {
-            TEXTURE_WORK_BYTES.saturating_sub(bytes)
-        };
+        let headroom = if self.running_decodes > 0 { 0 } else { TEXTURE_WORK_BYTES.saturating_sub(bytes) };
         let reservation = self.budget.reserve_with_headroom(bytes, headroom)?;
         self.sequence = self.sequence.checked_add(1)?;
+        self.candidates.pop();
         let generation = self.sequence;
-        let life = Arc::new(());
+        let life = Arc::new(WorkLife { maintenance: Arc::clone(&self.maintenance_dirty) });
         let (cancelled, receiver) = watch::channel(false);
         let entry = self.entries.get_mut(&resource).expect("selected demanded entry");
         if entry.priority == Priority::Background {
@@ -748,6 +785,7 @@ impl Store {
         }
         entry.views.get_mut(&route).expect("selected route").attempts += 1;
         entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&life), cancelled, stage: Stage::Fetching };
+        self.running_fetches += 1;
         entry.broadcast_status(Status::Fetching);
         let source = entry.texture().and_then(|texture| texture.source());
         let job =
@@ -762,9 +800,7 @@ impl Store {
         if self.closed || input.is_cancelled() || input.job.route.store != self.id {
             return Err(input);
         }
-        if self.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })).count()
-            >= MAX_ASSET_DECODES
-        {
+        if self.running_decodes >= MAX_ASSET_DECODES {
             return Err(input);
         }
         if !self.entries.get(&input.job.resource).is_some_and(
@@ -778,6 +814,9 @@ impl Store {
         let entry = self.entries.get_mut(&input.job.resource).expect("validated running job");
         let LoadPhase::Running { stage, .. } = &mut entry.phase else { unreachable!("validated running phase") };
         *stage = Stage::Decoding;
+        self.running_fetches -= 1;
+        self.running_decodes += 1;
+        self.maintenance_dirty.store(true, Ordering::Release);
         entry.broadcast_status(Status::Decoding);
         Ok(DecodeJob(input))
     }
@@ -788,10 +827,16 @@ impl Store {
             return;
         }
         let Some(entry) = self.entries.get_mut(&job.resource) else { return };
-        if !matches!(entry.phase, LoadPhase::Running { generation, .. } if generation == job.generation) {
-            return;
+        let stage = match &entry.phase {
+            LoadPhase::Running { generation, stage, .. } if *generation == job.generation => *stage,
+            _ => return,
+        };
+        match stage {
+            Stage::Fetching => self.running_fetches -= 1,
+            Stage::Decoding => self.running_decodes -= 1,
         }
         entry.phase = LoadPhase::Queued;
+        self.maintenance_dirty.store(true, Ordering::Release);
         if !self.routes.contains(&job.route)
             || job.is_cancelled()
             || !entry.has_active_demand()
@@ -876,6 +921,9 @@ impl Store {
             return;
         }
         self.closed = true;
+        self.running_fetches = 0;
+        self.running_decodes = 0;
+        self.maintenance_dirty.store(true, Ordering::Release);
         for entry in self.entries.values() {
             if let LoadPhase::Running { cancelled, .. } = &entry.phase {
                 cancelled.send_replace(true);
@@ -883,7 +931,40 @@ impl Store {
             entry.broadcast_status(Status::StaleSession);
         }
         self.entries.clear();
+        self.candidates.clear();
+        self.candidate_heap.clear();
+        self.candidates_dirty = true;
         self.routes.clear();
+    }
+
+    fn build_candidates(&mut self, now: Instant) {
+        if !self.candidates_dirty {
+            return;
+        }
+        self.candidates.clear();
+        self.candidate_heap.clear();
+        let candidate_limit = MAX_ASSET_FETCHES.saturating_sub(self.running_fetches);
+        let candidates = &mut self.candidate_heap;
+        for (resource, entry) in &self.entries {
+            if matches!(entry.phase, LoadPhase::Queued)
+                && let Some((route, _)) = entry.views.iter().find(|(_, view)| {
+                    view.count() > 0
+                        && view.attempts < MAX_ATTEMPTS
+                        && (entry.priority == Priority::Background || now < view.deadline)
+                        && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some_and(|retry| retry <= now))
+                })
+            {
+                retain_candidate(
+                    candidates,
+                    candidate_limit,
+                    (Reverse(entry.priority), entry.ready().is_some(), entry.used, *resource, *route),
+                );
+            }
+        }
+        while let Some(candidate) = self.candidate_heap.pop() {
+            self.candidates.push(candidate);
+        }
+        self.candidates_dirty = false;
     }
 }
 
@@ -893,6 +974,20 @@ fn content_satisfies(content: &Content, desired: Option<TextureSize>) -> bool {
             desired.is_none_or(|size| image.info().is_some_and(|info| info.discard == size.discard_level(info.source_size)))
         }
         Content::Material(_) | Content::Environment(_) => true,
+    }
+}
+
+fn retain_candidate(candidates: &mut BinaryHeap<ScheduleKey>, limit: usize, candidate: ScheduleKey) {
+    if limit == 0 {
+        return;
+    }
+    if candidates.len() < limit {
+        candidates.push(candidate);
+        return;
+    }
+    if candidates.peek().is_some_and(|largest| candidate < *largest) {
+        candidates.pop();
+        candidates.push(candidate);
     }
 }
 

@@ -551,12 +551,14 @@ fn dropped_jobs_wake_sessions() {
     let demand = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     let input = fetch(&mut store, now, RGBA_J2C.to_vec());
     let job = store.start_decode(input).expect("decode admission");
+    assert_eq!(store.running_decodes, 1);
     first_wake.borrow_and_update();
     second_wake.borrow_and_update();
     drop(job);
     assert!(first_wake.has_changed().unwrap());
     assert!(second_wake.has_changed().unwrap(), "reconnect and retiring owners must not steal each other's wakeups");
     store.maintain(now);
+    assert_eq!(store.running_decodes, 0);
     assert_matches!(demand.status(), Status::Failed { failure: Failure::Cancelled, retry_at: None });
     assert!(store.next_job(now).is_none());
     assert_eq!(budget.stats().charged_bytes, 0);
@@ -568,14 +570,17 @@ fn reacquisition_waits_for_cancelled_job() {
     let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
     let first = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     let job = next_fetch(&mut store, now);
+    assert_eq!(store.running_fetches, 1);
     drop(first);
     store.maintain(now);
+    assert_eq!(store.running_fetches, 1);
     assert!(job.is_cancelled());
     let replacement = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     assert!(store.next_job(now).is_none(), "reacquisition must not duplicate a resource's in-flight work");
     let completion = job.complete(Err(Failure::NotFound)).expect_err("cancellation wins over a late fetch failure");
     assert_eq!(completion.failure(), Failure::Cancelled);
     store.complete(completion.into(), now);
+    assert_eq!(store.running_fetches, 0);
     let job = store.next_job(now).expect("the replacement starts after cancelled work completes");
     let job = match job {
         LoadJob::Fetch(job) => job.complete(Ok(RGBA_J2C.to_vec())).expect("response attachment"),
@@ -592,7 +597,7 @@ fn reacquisition_waits_for_cancelled_job() {
 proptest::proptest! {
     #[test]
     fn demand_churn_preserves_lifetimes(
-        operations in proptest::collection::vec((0u8..4, 0usize..16), 0..120)
+        operations in proptest::collection::vec((0u8..5, 0usize..16), 0..120)
     ) {
         let budget = Budget::default();
         let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
@@ -631,9 +636,14 @@ proptest::proptest! {
                         }
                     }
                 }
+                4 => { drop(jobs.pop()); }
                 _ => {}
             }
             store.maintain(now);
+            let fetching = store.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Fetching, .. })).count();
+            let decoding = store.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })).count();
+            proptest::prop_assert_eq!(store.running_fetches, fetching);
+            proptest::prop_assert_eq!(store.running_decodes, decoding);
             for job in &jobs {
                 if !leases.iter().flatten().any(|(resource, _)| *resource == job.resource()) {
                     proptest::prop_assert!(job.is_cancelled());
@@ -645,6 +655,8 @@ proptest::proptest! {
         }
         drop(leases);
         store.close();
+        proptest::prop_assert_eq!(store.running_fetches, 0);
+        proptest::prop_assert_eq!(store.running_decodes, 0);
         drop(jobs);
         proptest::prop_assert_eq!(budget.stats().charged_bytes, 0);
     }
@@ -681,9 +693,11 @@ fn retired_material_cannot_publish() {
     let old = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
     let input = fetch(&mut store, now, legacy_envelope(resource.id));
     let job = store.start_decode(input).expect("decode admission");
+    assert_eq!(store.running_decodes, 1);
     let prepared = job.run();
     store.retire_route(route);
     store.complete(prepared, now);
+    assert_eq!(store.running_decodes, 0);
     assert_matches!(old.status(), Status::Failed { failure: Failure::RouteClosed, .. });
     assert_eq!(budget.stats().charged_bytes, 0);
     let route = store.register_route().unwrap();

@@ -1,3 +1,5 @@
+use std::mem;
+
 use tokio::{sync::oneshot, time::Instant};
 
 use crate::error::Error;
@@ -123,7 +125,7 @@ impl Phase {
     pub(super) fn begin_draining(&mut self) {
         let transition = match self {
             Self::Closing { stage, logout, deadline, reason } => {
-                Some((*stage, std::mem::replace(logout, LogoutState::NotRequested), *deadline, *reason))
+                Some((*stage, mem::replace(logout, LogoutState::NotRequested), *deadline, *reason))
             }
             Self::Connecting { .. } | Self::Established { .. } | Self::Draining { .. } => None,
         };
@@ -172,7 +174,7 @@ impl Phase {
 
     pub(super) fn complete_logout(&mut self, error: Option<String>) {
         let Some(logout) = self.logout_state_mut() else { return };
-        let LogoutState::AwaitingLocalSend(waiters) = std::mem::replace(logout, LogoutState::Complete) else { return };
+        let LogoutState::AwaitingLocalSend(waiters) = mem::replace(logout, LogoutState::Complete) else { return };
         for waiter in waiters {
             let result = error.as_ref().map_or(Ok(()), |error| Err(Error::SimulatorSend(error.clone())));
             let _ = waiter.send(result);

@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::{io, net::SocketAddr, time::Duration};
 
 use protocol::{
     LLUdpError,
@@ -428,7 +428,7 @@ impl ConnectionTask {
         match message {
             Message::EnableSimulator(enabled) => {
                 let info = &enabled.simulator_info;
-                let endpoint = std::net::SocketAddr::from((info.ip, info.port));
+                let endpoint = SocketAddr::from((info.ip, info.port));
                 if let Err(error) = self.neighbor_requests.try_send(SimulatorRequest::Enable {
                     simulator_id: self.connection.simulator_id,
                     region_handle: info.handle,

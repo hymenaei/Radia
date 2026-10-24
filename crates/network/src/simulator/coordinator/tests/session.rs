@@ -14,6 +14,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use ::test_support::lludp::fixture;
+
 use super::{
     AGENT_ID, LOGOUT_TIMEOUT, LogoutAttemptError, LogoutOutcome, PendingLogout, SESSION_ID, chat_message, connect_coordinator,
     login_session, send_logout_with_deadline, set_sequence,
@@ -27,7 +29,6 @@ use crate::{
     transport::UdpTransport,
     transport::lludp::{Circuit, CircuitError, Delivery, MAX_PENDING_PACKETS, MAX_RETRIES, RESENT_FLAG, ReceiveError},
 };
-use ::test_support::lludp::fixture;
 
 const CIRCUIT_CODE: u32 = 0x1122_3344;
 const SIMULATOR_TIMEOUT: Duration = Duration::from_secs(2);

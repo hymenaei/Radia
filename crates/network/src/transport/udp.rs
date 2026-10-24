@@ -119,10 +119,12 @@ fn local_bind_address(remote: SocketAddr) -> SocketAddr {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_IPV4_UDP_PAYLOAD, MAX_IPV6_UDP_PAYLOAD, UdpTransport, local_bind_address};
     use std::io;
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
     use tokio::net::UdpSocket;
+
+    use super::{MAX_IPV4_UDP_PAYLOAD, MAX_IPV6_UDP_PAYLOAD, UdpTransport, local_bind_address};
 
     #[tokio::test]
     async fn ipv6_udp_round_trip() {

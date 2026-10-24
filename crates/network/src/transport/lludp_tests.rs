@@ -35,15 +35,8 @@ async fn skips_ping_when_ids_full() {
 }
 #[cfg(test)]
 mod protocol_tests {
-    use crate::{
-        event::PacketOrder::{Ambiguous, Degraded, Ordered},
-        transport::UdpTransport,
-        transport::lludp::{
-            Circuit, CircuitError, DUPLICATE_ACK_HEADROOM, Delivery, KEEPALIVE_TIMEOUT, MAX_NORMAL_DATAGRAM_BYTES,
-            MAX_ORDERED_SEQUENCE_DISTANCE, MAX_PENDING_ACKS, MAX_PENDING_PACKETS, MAX_RECEIVED_RELIABLE_PACKETS, PendingPacket,
-            ReceiveAdmission, ReceiveError, ReceiveOutcome, advance_sequence, remove_sent_acks, sequence_age,
-        },
-    };
+    use std::{net::SocketAddr, time::Duration};
+
     use ::test_support::{lludp::vectors, parse_hex_fixture};
     use math::Vec3;
     use protocol::{
@@ -58,9 +51,18 @@ mod protocol_tests {
             object::request_multiple_objects::{CacheMissType, ObjectRequest, RequestAgentData},
         },
     };
-    use std::{net::SocketAddr, time::Duration};
     use tokio::{net::UdpSocket, time::Instant};
     use uuid::Uuid;
+
+    use crate::{
+        event::PacketOrder::{Ambiguous, Degraded, Ordered},
+        transport::UdpTransport,
+        transport::lludp::{
+            Circuit, CircuitError, DUPLICATE_ACK_HEADROOM, Delivery, KEEPALIVE_TIMEOUT, MAX_NORMAL_DATAGRAM_BYTES,
+            MAX_ORDERED_SEQUENCE_DISTANCE, MAX_PENDING_ACKS, MAX_PENDING_PACKETS, MAX_RECEIVED_RELIABLE_PACKETS, PendingPacket,
+            ReceiveAdmission, ReceiveError, ReceiveOutcome, advance_sequence, remove_sent_acks, sequence_age,
+        },
+    };
 
     fn complete_ping(ping_id: u8) -> Message {
         Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id } })

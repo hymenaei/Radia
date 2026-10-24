@@ -403,18 +403,20 @@ async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assets::Priority;
-    use llsd::{Value, binary, xml};
     use std::{
         io::{Read, Write},
         net::{TcpListener, TcpStream},
         thread,
     };
+
+    use assets::Priority;
+    use llsd::{Value, binary, xml};
     use test_support::texture::{RGBA_J2C, RGBA_RAW};
     use url::Url;
     use utils::AssetId;
     use uuid::Uuid;
+
+    use super::*;
 
     struct Peer {
         url: Url,

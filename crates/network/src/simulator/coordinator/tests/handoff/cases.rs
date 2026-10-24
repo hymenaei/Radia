@@ -87,8 +87,9 @@ fn overload_logout_keeps_a_pending_promotion_on_the_original_primary() {
 }
 
 async fn run_overload_logout_promotion_test() {
-    use crate::event::Event::{Failed, SimulatorDisconnected, SimulatorMessage, SimulatorPromoted};
     use protocol::lludp::Message::RegionHandshake;
+
+    use crate::event::Event::{Failed, SimulatorDisconnected, SimulatorMessage, SimulatorPromoted};
 
     let mut harness = connected_neighbor().await;
     let target_region = 0x1000_0000_0000_1000;
@@ -223,8 +224,9 @@ async fn run_handoff_send_latency_test() {
 }
 
 async fn run_teleport_finish_scenario(send_count: usize) -> Vec<Duration> {
-    use crate::event::Event::{Failed, SimulatorMessage, SimulatorPromoted};
     use protocol::lludp::Message::{AgentMovementComplete, ChatFromSimulator, RegionHandshake};
+
+    use crate::event::Event::{Failed, SimulatorMessage, SimulatorPromoted};
 
     let mut harness = Box::pin(connected_neighbor()).await;
     let target_region = 0x1000_0000_0000_1000;

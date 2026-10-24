@@ -715,12 +715,13 @@ pub(super) fn is_teleport_cancel(message: &Message, agent_id: Uuid, session_id: 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::Error;
-    use crate::simulator::coordinator::tests::login_session;
-    use protocol::login::ResponseData;
     use std::time::Duration;
+
+    use protocol::login::ResponseData;
     use tokio::{net::UdpSocket, time::timeout};
+
+    use super::*;
+    use crate::{Error, simulator::coordinator::tests::login_session};
 
     #[test]
     fn evidence_retains_the_newest_packet_finish() {

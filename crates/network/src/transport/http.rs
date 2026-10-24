@@ -476,11 +476,9 @@ mod tests {
             headers_sent.send(()).expect("request should await response headers");
             body_released.await.expect("allow body deadline to expire");
             if let Err(error) = stream.write_all(b"data").await {
-                assert!(
-                    matches!(
-                        error.kind(),
-                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
-                    ),
+                std::assert_matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted,
                     "write response body after the client deadline: {error}"
                 );
             }

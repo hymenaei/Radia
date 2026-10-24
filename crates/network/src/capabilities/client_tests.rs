@@ -454,7 +454,7 @@ async fn request_body_is_bounded() {
             .post_with_response_limit(&url, &payload, MAX_CAPABILITY_RESPONSE_BYTES)
             .await
             .expect_err("an oversized request body should fail");
-        assert!(matches!(error, Capability(_)));
+        std::assert_matches!(error, Capability(_));
     }
 
     let value = timeout(TEST_TIMEOUT, client.post_with_response_limit(&url, &Value::Undefined, body.len()))

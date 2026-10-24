@@ -407,10 +407,8 @@ fn authenticated_response(value: login::Authenticated, credentials: &LoginCreden
 
 #[cfg(test)]
 mod tests {
-    use crate::{AgentSession, Event, Grid, LoginCredentials, PacketOrder::Ordered, StartLocation, event::SimulatorId};
+    use std::net::SocketAddr;
 
-    use crate::login::{LoginResponse, login_at};
-    use crate::test_support::http::{LocalServer, response};
     use math::Vec3;
     use protocol::{
         Audible, ChatSourceType, ChatType,
@@ -418,8 +416,11 @@ mod tests {
         login,
         messages::{ChatFromSimulator, chat::chat_from_simulator::ChatData},
     };
-    use std::net::SocketAddr;
     use url::Url;
+
+    use crate::login::{LoginResponse, login_at};
+    use crate::test_support::http::{LocalServer, response};
+    use crate::{AgentSession, Event, Grid, LoginCredentials, PacketOrder::Ordered, StartLocation, event::SimulatorId};
 
     const AGENT_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
     const SESSION_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";

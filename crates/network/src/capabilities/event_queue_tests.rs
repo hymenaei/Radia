@@ -229,13 +229,15 @@ mod retained_size_tests {
 }
 #[cfg(test)]
 mod event_queue_batch_tests {
-    use super::*;
-    use crate::coverage::CoverageLoss;
     use std::{
         future::Future,
         pin::pin,
         task::{Context, Waker},
     };
+
+    use super::*;
+    use crate::coverage::CoverageLoss;
+
     fn reserve_batch(budget: &Arc<Semaphore>) -> OwnedSemaphorePermit {
         budget.clone().try_acquire_many_owned(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES as u32).expect("reserve one EventQueue batch")
     }

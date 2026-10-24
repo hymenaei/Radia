@@ -37,7 +37,6 @@ use crate::{
 };
 use capability_events::{decode_agent_communication, decode_enable_simulators};
 use connection::{ConnectionError, SimulatorConnection, SimulatorConnectionOptions};
-pub(crate) use error::CoordinatorError;
 use event_routing::{
     EventQueueOutcome, PreconnectEvents, PreconnectOutcome, PrimaryEventBacklog, primary_event_queue_size, queue_neighbor_event,
     queue_simulator_event, queue_until_connected,
@@ -51,6 +50,8 @@ use logout::{LogoutUnavailable, PendingLogout, finish_logout};
 use neighbors::{is_current_neighbor, neighbor_completion_event, neighbor_event_queue_failure};
 use runtime::CoordinatorRuntime;
 use startup::SessionStartup;
+
+pub(crate) use error::CoordinatorError;
 
 const ACK_INTERVAL: Duration = Duration::from_millis(100);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(40);

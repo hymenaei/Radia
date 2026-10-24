@@ -39,13 +39,14 @@ use crate::{
         pacing::{ConnectionPacer, OutboundBudget, OutboundBudgetHandle, TrafficClass},
     },
 };
-pub(super) use error::ConnectionError;
-pub(super) use outbound::bound_send_error;
 use outbound::{
     MovementSend, OutboundQueue, PendingSend, QueuedMessage, active_queue_class, agent_throttle_message, expire_deferred_retries,
     expire_pending_send, fail_queued_on_close, flush_send_notifications, logout_message, message_class, preempt_deferred_send,
     prepare_next_send, prepare_shutdown_send, queue_internal, queue_send_notification, report_queued_failure, send_prepared,
 };
+
+pub(super) use error::ConnectionError;
+pub(super) use outbound::bound_send_error;
 
 const MAX_PENDING_SENDS: usize = 8;
 const CONTROL_SEND_RESERVE: usize = 2;

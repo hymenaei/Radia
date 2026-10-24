@@ -150,8 +150,9 @@ fn stale_cancel_keeps_new_handoff() {
 }
 
 async fn run_stale_cancel() {
-    use crate::test_support::http::{EventQueueTestServer, EventServerResponse, response};
     use llsd::{Map, xml};
+
+    use crate::test_support::http::{EventQueueTestServer, EventServerResponse, response};
 
     let (release, poll_response) = sync::mpsc::channel();
     let server = EventQueueTestServer::start(|base| {

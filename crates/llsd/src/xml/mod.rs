@@ -8,6 +8,7 @@ pub use self::de::from_slice_with_limits;
 
 use std::io::{Read, Write};
 
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::{Error, Limits, Result, encoding::read_limited};
@@ -29,19 +30,19 @@ pub fn from_reader_with_limits<T: DeserializeOwned, R: Read>(mut reader: R, limi
     from_slice_with_limits(&bytes, limits)
 }
 
-pub fn to_vec<T: serde::Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
+pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
     crate::serialization::to_vec::<ser::Encoder, _>(value, None)
 }
 
-pub fn to_vec_with_max_bytes<T: serde::Serialize + ?Sized>(value: &T, max_bytes: usize) -> Result<Vec<u8>> {
+pub fn to_vec_with_max_bytes<T: Serialize + ?Sized>(value: &T, max_bytes: usize) -> Result<Vec<u8>> {
     crate::serialization::to_vec::<ser::Encoder, _>(value, Some(max_bytes))
 }
 
-pub fn to_string<T: serde::Serialize + ?Sized>(value: &T) -> Result<String> {
+pub fn to_string<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     String::from_utf8(to_vec(value)?).map_err(|_| Error::InvalidUtf8)
 }
 
-pub fn to_writer<T: serde::Serialize + ?Sized, W: Write>(writer: W, value: &T) -> Result<()> {
+pub fn to_writer<T: Serialize + ?Sized, W: Write>(writer: W, value: &T) -> Result<()> {
     crate::serialization::to_writer::<ser::Encoder, _, _>(writer, value)
 }
 

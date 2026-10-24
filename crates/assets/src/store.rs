@@ -244,6 +244,22 @@ impl RouteState {
     fn count(&self) -> usize {
         self.counter.count.load(Ordering::Acquire)
     }
+
+    fn restart(&mut self, now: Instant) {
+        self.failed = None;
+        self.attempts = 0;
+        self.deadline = now + DEMAND_DEADLINE;
+    }
+
+    fn queued_status(&self) -> Status {
+        self.failed.as_ref().map_or(Status::Queued, |failed| Status::Failed { failure: failed.failure, retry_at: failed.retry_at })
+    }
+
+    fn fail(&mut self, failure: Failure, retry_at: Option<Instant>, now: Instant, ready: Option<&Content>) {
+        self.failed = Some(FailureRecord { failure, retry_at, expires: now + NEGATIVE_TTL });
+        self.publish_status(Status::Failed { failure, retry_at }.retaining(ready));
+    }
+
     fn publish_status(&self, status: Status) {
         self.status.send_replace(status.map(|content| content.downgrade()));
     }
@@ -609,17 +625,13 @@ impl Store {
             }
         });
         if view.count() == 0 && view.failed.as_ref().is_none_or(|failed| failed.expires <= now) {
-            view.failed = None;
-            view.attempts = 0;
-            view.deadline = now + DEMAND_DEADLINE;
+            view.restart(now);
         }
         let status = match &entry.phase {
             LoadPhase::Idle => ready.as_ref().map_or(Status::Queued, |content| Status::Ready(content.clone())),
             LoadPhase::Running { stage: Stage::Decoding, .. } => Status::Decoding,
             LoadPhase::Running { stage: Stage::Fetching, .. } => Status::Fetching,
-            LoadPhase::Queued => {
-                view.failed.as_ref().map_or(Status::Queued, |failed| Status::Failed { failure: failed.failure, retry_at: failed.retry_at })
-            }
+            LoadPhase::Queued => view.queued_status(),
         };
         view.publish_status(status.retaining(ready.as_ref()));
         view.counter.count.fetch_add(1, Ordering::AcqRel);
@@ -645,9 +657,7 @@ impl Store {
             if priority != entry.priority {
                 for view in entry.views.values_mut() {
                     if now >= view.deadline && view.failed.as_ref().is_none_or(|failed| failed.failure == Failure::Deadline) {
-                        view.deadline = now + DEMAND_DEADLINE;
-                        view.failed = None;
-                        view.attempts = 0;
+                        view.restart(now);
                     }
                 }
             }
@@ -656,9 +666,7 @@ impl Store {
                 entry.target = desired;
                 if ready.is_some() {
                     for view in entry.views.values_mut() {
-                        view.failed = None;
-                        view.attempts = 0;
-                        view.deadline = now + DEMAND_DEADLINE;
+                        view.restart(now);
                     }
                 }
                 if !matches!(entry.phase, LoadPhase::Running { .. }) {
@@ -678,8 +686,7 @@ impl Store {
                 }
                 if life.upgrade().is_none() {
                     if let Some(view) = entry.views.get_mut(route) {
-                        view.failed = Some(FailureRecord { failure: Failure::Cancelled, retry_at: None, expires: now + NEGATIVE_TTL });
-                        view.publish_status(Status::Failed { failure: Failure::Cancelled, retry_at: None }.retaining(ready.as_ref()));
+                        view.fail(Failure::Cancelled, None, now, ready.as_ref());
                     }
                     entry.phase = LoadPhase::Queued;
                 }
@@ -690,8 +697,7 @@ impl Store {
                 for view in entry.views.values_mut().filter(|view| {
                     view.count() > 0 && now >= view.deadline && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some())
                 }) {
-                    view.failed = Some(FailureRecord { failure: Failure::Deadline, retry_at: None, expires: now + NEGATIVE_TTL });
-                    view.publish_status(Status::Failed { failure: Failure::Deadline, retry_at: None }.retaining(ready.as_ref()));
+                    view.fail(Failure::Deadline, None, now, ready.as_ref());
                 }
             }
         }
@@ -836,15 +842,10 @@ impl Store {
                     }
                     _ => None,
                 };
-                view.failed = Some(FailureRecord { failure, retry_at, expires: now + NEGATIVE_TTL });
-                view.publish_status(Status::Failed { failure, retry_at }.retaining(ready.as_ref()));
+                view.fail(failure, retry_at, now, ready.as_ref());
                 for (route, view) in &entry.views {
                     if *route != job.route && view.count() > 0 {
-                        let status = view
-                            .failed
-                            .as_ref()
-                            .map_or(Status::Queued, |failed| Status::Failed { failure: failed.failure, retry_at: failed.retry_at });
-                        view.publish_status(status.retaining(ready.as_ref()));
+                        view.publish_status(view.queued_status().retaining(ready.as_ref()));
                     }
                 }
             }

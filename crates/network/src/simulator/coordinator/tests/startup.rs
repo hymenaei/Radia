@@ -1,5 +1,25 @@
 use super::*;
 
+async fn terminal_after_full_queue(
+    result: Result<(), crate::simulator::coordinator::CoordinatorError>,
+) -> (Event, SimulatorId, SocketAddr) {
+    let (events, mut received) = mpsc::channel(2);
+    let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
+    let endpoint = "127.0.0.1:9000".parse().expect("parse simulator endpoint");
+    let terminal_slot = events.clone().try_reserve_owned().expect("reserve terminal event slot");
+    events.try_send(EventEnvelope::new(Event::Failed("queued before disconnect".into()))).expect("fill the nonterminal slot");
+    assert_eq!(events.capacity(), 0, "the ordinary event capacity is full");
+
+    SimulatorCoordinator::publish_primary_terminal_event(terminal_slot, simulator_id, None, endpoint, &result);
+
+    assert!(matches!(
+        timeout(WAIT, received.recv()).await.expect("queued event should remain observable").map(EventEnvelope::into_event),
+        Some(Event::Failed(message)) if message == "queued before disconnect"
+    ));
+    let terminal_event = timeout(WAIT, received.recv()).await.expect("terminal event should remain observable");
+    (terminal_event.expect("terminal event remains observable").into_event(), simulator_id, endpoint)
+}
+
 #[test]
 fn startup_accepts_movement_before_handshake() {
     let agent_id = Uuid::from_u128(1);
@@ -281,26 +301,6 @@ async fn neighbor_circuit_fails_after_udp_inactivity() {
     advance(KEEPALIVE_TIMEOUT).await;
     let result = worker.await.expect("neighbor task");
     std::assert_matches!(result, Err(crate::simulator::coordinator::connection::ConnectionError::KeepaliveTimeout));
-}
-
-async fn terminal_after_full_queue(
-    result: Result<(), crate::simulator::coordinator::CoordinatorError>,
-) -> (Event, SimulatorId, SocketAddr) {
-    let (events, mut received) = mpsc::channel(2);
-    let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
-    let endpoint = "127.0.0.1:9000".parse().expect("parse simulator endpoint");
-    let terminal_slot = events.clone().try_reserve_owned().expect("reserve terminal event slot");
-    events.try_send(EventEnvelope::new(Event::Failed("queued before disconnect".into()))).expect("fill the nonterminal slot");
-    assert_eq!(events.capacity(), 0, "the ordinary event capacity is full");
-
-    SimulatorCoordinator::publish_primary_terminal_event(terminal_slot, simulator_id, None, endpoint, &result);
-
-    assert!(matches!(
-        timeout(WAIT, received.recv()).await.expect("queued event should remain observable").map(EventEnvelope::into_event),
-        Some(Event::Failed(message)) if message == "queued before disconnect"
-    ));
-    let terminal_event = timeout(WAIT, received.recv()).await.expect("terminal event should remain observable");
-    (terminal_event.expect("terminal event remains observable").into_event(), simulator_id, endpoint)
 }
 
 #[tokio::test]

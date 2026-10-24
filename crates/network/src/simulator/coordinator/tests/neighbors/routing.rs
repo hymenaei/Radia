@@ -1,5 +1,110 @@
 use super::*;
 
+async fn run_queued_target_does_not_follow_neighbor_replacement() {
+    let mut harness = Box::pin(connected_neighbor()).await;
+    let neighbor_id = harness.neighbor_id;
+    let replacement = UdpSocket::bind("127.0.0.1:0").await.expect("bind replacement simulator");
+    let endpoint = replacement.local_addr().expect("replacement endpoint");
+    let region_handle = 0x1000_0000_0000_1000;
+
+    announce_neighbor(&harness.primary, harness.primary_peer, endpoint, region_handle, 50).await;
+    let (bytes, replacement_peer) = receive(&replacement).await;
+    let circuit = Packet::decode(&bytes).expect("decode replacement circuit packet");
+    assert!(matches!(circuit.message(), Message::UseCircuitCode(_)));
+    replacement.send_to(&ack(60, circuit.sequence()), replacement_peer).await.expect("ack replacement circuit");
+
+    let replacement_id = timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorConnected { simulator_id, region_handle: Some(handle), endpoint: connected_endpoint } =
+                next_event(&mut harness.events).await
+                && handle == region_handle
+                && connected_endpoint == endpoint
+            {
+                break simulator_id;
+            }
+        }
+    })
+    .await
+    .expect("replacement connection should be announced");
+    assert_ne!(replacement_id, neighbor_id);
+
+    let (completed, result) = oneshot::channel();
+    harness
+        .commands
+        .send(Command::SendTo { simulator_id: neighbor_id, message: object_request(), delivery: Delivery::Reliable, completed })
+        .await
+        .expect("queue an exact send while the replacement route is installed");
+    assert!(matches!(
+        timeout(WAIT, result).await.expect("stale target send should complete").expect("send reply"),
+        Err(Error::SimulatorUnavailable)
+    ));
+
+    let mut buffer = [0; 65_535];
+    let deadline = Instant::now() + Duration::from_millis(50);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match timeout(remaining, replacement.recv_from(&mut buffer)).await {
+            Ok(Ok((size, _))) => {
+                let packet = Packet::decode(&buffer[..size]).expect("decode replacement traffic");
+                assert!(
+                    !matches!(packet.message(), Message::RequestMultipleObjects(_)),
+                    "a queued send for the retired simulator ID must not reach its replacement"
+                );
+            }
+            Err(_) | Ok(Err(_)) => break,
+        }
+    }
+
+    harness.shutdown().await;
+}
+
+async fn run_neighbor_targets_and_replacements() {
+    let mut harness = Box::pin(connected_neighbor()).await;
+    receive_ack(&harness.primary, 23).await;
+    send_targeted(&harness.commands, harness.neighbor_id, object_request())
+        .await
+        .expect("route an object request to the selected simulator");
+    let (_, sent_peer) =
+        receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
+    assert_eq!(sent_peer, harness.neighbor_peer);
+    let mut buffer = [0; 65_535];
+    assert!(timeout(Duration::from_millis(50), harness.primary.recv_from(&mut buffer)).await.is_err());
+
+    let mut disable = fixture("disable_simulator.hex");
+    set_sequence(&mut disable, 42);
+    harness.neighbor.send_to(&disable, harness.neighbor_peer).await.expect("disable neighbor circuit");
+    loop {
+        if matches!(next_event(&mut harness.events).await, Event::SimulatorDisconnected { simulator_id, .. } if simulator_id == harness.neighbor_id)
+        {
+            break;
+        }
+    }
+    assert!(matches!(send_targeted(&harness.commands, harness.neighbor_id, object_request()).await, Err(Error::SimulatorUnavailable)));
+
+    let neighbor_endpoint = harness.neighbor.local_addr().expect("neighbor address");
+    announce_neighbor(&harness.primary, harness.primary_peer, neighbor_endpoint, 0x1000_0000_0000_1000, 50).await;
+    let (bytes, replacement_peer) = receive(&harness.neighbor).await;
+    assert!(matches!(Packet::decode(&bytes).expect("decode replacement circuit packet").message(), Message::UseCircuitCode(_)));
+    harness.neighbor.send_to(&ack(60, 1), replacement_peer).await.expect("ack replacement circuit");
+    let replacement_id = loop {
+        match next_event(&mut harness.events).await {
+            Event::SimulatorConnected { simulator_id, region_handle: Some(0x1000_0000_0000_1000), endpoint }
+                if endpoint == neighbor_endpoint =>
+            {
+                break simulator_id;
+            }
+            _ => {}
+        }
+    };
+    assert_ne!(replacement_id, harness.neighbor_id);
+    assert!(matches!(send_targeted(&harness.commands, harness.neighbor_id, object_request()).await, Err(Error::SimulatorUnavailable)));
+    send_targeted(&harness.commands, replacement_id, object_request()).await.expect("send to replacement");
+    let (_, sent_peer) =
+        receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
+    assert_eq!(sent_peer, replacement_peer);
+    harness.shutdown().await;
+}
+
 #[test]
 fn neighbor_disconnect_removes_preconnect_packet_memory() {
     let simulator_id = SimulatorId::new(54);
@@ -321,111 +426,6 @@ fn neighbor_targets_and_replacements() {
 #[test]
 fn queued_target_does_not_follow_neighbor_replacement() {
     run_large_stack_test(run_queued_target_does_not_follow_neighbor_replacement);
-}
-
-async fn run_queued_target_does_not_follow_neighbor_replacement() {
-    let mut harness = Box::pin(connected_neighbor()).await;
-    let neighbor_id = harness.neighbor_id;
-    let replacement = UdpSocket::bind("127.0.0.1:0").await.expect("bind replacement simulator");
-    let endpoint = replacement.local_addr().expect("replacement endpoint");
-    let region_handle = 0x1000_0000_0000_1000;
-
-    announce_neighbor(&harness.primary, harness.primary_peer, endpoint, region_handle, 50).await;
-    let (bytes, replacement_peer) = receive(&replacement).await;
-    let circuit = Packet::decode(&bytes).expect("decode replacement circuit packet");
-    assert!(matches!(circuit.message(), Message::UseCircuitCode(_)));
-    replacement.send_to(&ack(60, circuit.sequence()), replacement_peer).await.expect("ack replacement circuit");
-
-    let replacement_id = timeout(WAIT, async {
-        loop {
-            if let Event::SimulatorConnected { simulator_id, region_handle: Some(handle), endpoint: connected_endpoint } =
-                next_event(&mut harness.events).await
-                && handle == region_handle
-                && connected_endpoint == endpoint
-            {
-                break simulator_id;
-            }
-        }
-    })
-    .await
-    .expect("replacement connection should be announced");
-    assert_ne!(replacement_id, neighbor_id);
-
-    let (completed, result) = oneshot::channel();
-    harness
-        .commands
-        .send(Command::SendTo { simulator_id: neighbor_id, message: object_request(), delivery: Delivery::Reliable, completed })
-        .await
-        .expect("queue an exact send while the replacement route is installed");
-    assert!(matches!(
-        timeout(WAIT, result).await.expect("stale target send should complete").expect("send reply"),
-        Err(Error::SimulatorUnavailable)
-    ));
-
-    let mut buffer = [0; 65_535];
-    let deadline = Instant::now() + Duration::from_millis(50);
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match timeout(remaining, replacement.recv_from(&mut buffer)).await {
-            Ok(Ok((size, _))) => {
-                let packet = Packet::decode(&buffer[..size]).expect("decode replacement traffic");
-                assert!(
-                    !matches!(packet.message(), Message::RequestMultipleObjects(_)),
-                    "a queued send for the retired simulator ID must not reach its replacement"
-                );
-            }
-            Err(_) | Ok(Err(_)) => break,
-        }
-    }
-
-    harness.shutdown().await;
-}
-
-async fn run_neighbor_targets_and_replacements() {
-    let mut harness = Box::pin(connected_neighbor()).await;
-    receive_ack(&harness.primary, 23).await;
-    send_targeted(&harness.commands, harness.neighbor_id, object_request())
-        .await
-        .expect("route an object request to the selected simulator");
-    let (_, sent_peer) =
-        receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
-    assert_eq!(sent_peer, harness.neighbor_peer);
-    let mut buffer = [0; 65_535];
-    assert!(timeout(Duration::from_millis(50), harness.primary.recv_from(&mut buffer)).await.is_err());
-
-    let mut disable = fixture("disable_simulator.hex");
-    set_sequence(&mut disable, 42);
-    harness.neighbor.send_to(&disable, harness.neighbor_peer).await.expect("disable neighbor circuit");
-    loop {
-        if matches!(next_event(&mut harness.events).await, Event::SimulatorDisconnected { simulator_id, .. } if simulator_id == harness.neighbor_id)
-        {
-            break;
-        }
-    }
-    assert!(matches!(send_targeted(&harness.commands, harness.neighbor_id, object_request()).await, Err(Error::SimulatorUnavailable)));
-
-    let neighbor_endpoint = harness.neighbor.local_addr().expect("neighbor address");
-    announce_neighbor(&harness.primary, harness.primary_peer, neighbor_endpoint, 0x1000_0000_0000_1000, 50).await;
-    let (bytes, replacement_peer) = receive(&harness.neighbor).await;
-    assert!(matches!(Packet::decode(&bytes).expect("decode replacement circuit packet").message(), Message::UseCircuitCode(_)));
-    harness.neighbor.send_to(&ack(60, 1), replacement_peer).await.expect("ack replacement circuit");
-    let replacement_id = loop {
-        match next_event(&mut harness.events).await {
-            Event::SimulatorConnected { simulator_id, region_handle: Some(0x1000_0000_0000_1000), endpoint }
-                if endpoint == neighbor_endpoint =>
-            {
-                break simulator_id;
-            }
-            _ => {}
-        }
-    };
-    assert_ne!(replacement_id, harness.neighbor_id);
-    assert!(matches!(send_targeted(&harness.commands, harness.neighbor_id, object_request()).await, Err(Error::SimulatorUnavailable)));
-    send_targeted(&harness.commands, replacement_id, object_request()).await.expect("send to replacement");
-    let (_, sent_peer) =
-        receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
-    assert_eq!(sent_peer, replacement_peer);
-    harness.shutdown().await;
 }
 
 #[tokio::test]

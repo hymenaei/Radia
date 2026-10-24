@@ -480,7 +480,7 @@ impl LoginScreen {
                     self.session_generation,
                     crate::scene_feed::SceneSources { reader: world_reader.clone(), environments, assets: assets.clone() },
                     session.agent_id,
-                    _camera,
+                    camera,
                     cx,
                 );
             }

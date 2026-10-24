@@ -76,17 +76,31 @@ async fn write_empty_response(stream: &mut net::TcpStream) -> io::Result<()> {
 
 #[test]
 fn requests_run_outside_tokio() {
-    let server = LocalServer::start(vec![response(200, "OK", "application/octet-stream", None, "body")]);
+    let server = LocalServer::start(vec![
+        response(200, "OK", "application/octet-stream", None, "body"),
+        response(200, "OK", "application/llsd+xml", None, "<llsd><string>posted</string></llsd>"),
+        response(200, "OK", "application/octet-stream", None, "raw body"),
+    ]);
     let runtime = runtime::Builder::new_multi_thread().enable_all().build().expect("Tokio runtime");
     let client = runtime.block_on(async { Client::new(server.url("/seed")) }).expect("active Tokio runtime");
     let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
 
     let body = block_on(client.get_bytes_with_response_limit(&url, MAX_CAPABILITY_RESPONSE_BYTES))
         .expect("capability request from the external executor");
+    let posted = block_on(client.post_with_response_limit(&url, &Value::String("request".into()), MAX_CAPABILITY_RESPONSE_BYTES))
+        .expect("LLSD POST from the external executor");
+    let raw = block_on(client.post_bytes_with_response_limit(&url, &Value::String("request".into()), MAX_CAPABILITY_RESPONSE_BYTES))
+        .expect("raw body POST from the external executor");
 
     assert_eq!(body, b"body");
+    assert_eq!(posted, Value::String("posted".into()));
+    assert_eq!(raw, b"raw body");
     drop(client);
-    assert_eq!(server.finish().len(), 1);
+    let requests = server.finish();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].starts_with(b"GET /resource HTTP/1.1"));
+    assert!(requests[1].starts_with(b"POST /resource HTTP/1.1"));
+    assert!(requests[2].starts_with(b"POST /resource HTTP/1.1"));
 }
 
 #[tokio::test]

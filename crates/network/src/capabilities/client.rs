@@ -173,7 +173,7 @@ impl Client {
     {
         validate_response_limit(max_response_bytes)?;
         let deadline = RequestDeadline::new(self.request_timeout);
-        let permit = self.acquire_request_permit(deadline).await?;
+        let permit = self.acquire_request_permit_on_runtime(deadline).await?;
         let body = encode_request(payload)?;
         if deadline.expired() {
             return Err(deadline.error());
@@ -210,7 +210,7 @@ impl Client {
     {
         validate_response_limit(max_response_bytes)?;
         let deadline = RequestDeadline::new(self.request_timeout);
-        let permit = self.acquire_request_permit(deadline).await?;
+        let permit = self.acquire_request_permit_on_runtime(deadline).await?;
         let body = encode_request(payload)?;
         if deadline.expired() {
             return Err(deadline.error());
@@ -282,6 +282,11 @@ impl Client {
             _ = time::sleep_until(deadline.at) => Err(deadline.error()),
             permit = budget.acquire_owned() => permit.map_err(|_| Error::CapabilityRequestCanceled),
         }
+    }
+
+    async fn acquire_request_permit_on_runtime(&self, deadline: RequestDeadline) -> Result<OwnedSemaphorePermit, Error> {
+        let client = self.clone();
+        self.on_runtime(async move { client.acquire_request_permit(deadline).await }).await
     }
 
     async fn race_request<T>(&self, deadline: RequestDeadline, operation: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {

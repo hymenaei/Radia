@@ -5,9 +5,7 @@ use reqwest::Url;
 use tokio::sync::{OwnedSemaphorePermit, mpsc, watch};
 
 use crate::{
-    capabilities::{
-        CapabilityBudget, Client, EVENT_QUEUE_NAME, EventQueueTask, available_event_queue_permits as count_available_event_queue_permits,
-    },
+    capabilities::{CapabilityBudget, Client, EVENT_QUEUE_NAME, EventQueueTask},
     coverage::{CoverageLossLedger, CoverageWatermark},
     event::{Event, EventEnvelope, EventRetention, SimulatorId},
     fixtures::http::{EventQueueTestServer, EventServerResponse, request_line, seed_grant},
@@ -158,10 +156,6 @@ pub(crate) fn event_with_retention(event: Event, retention: EventRetention) -> E
 
 pub(crate) fn event_with_coverage_watermark(event: Event, coverage_watermark: CoverageWatermark) -> EventEnvelope {
     EventEnvelope::from_parts(event, None, Some(coverage_watermark))
-}
-
-pub(crate) fn available_event_queue_permits(budget: &CapabilityBudget) -> usize {
-    count_available_event_queue_permits(budget)
 }
 
 pub(crate) fn request_body(request: &[u8]) -> &str {

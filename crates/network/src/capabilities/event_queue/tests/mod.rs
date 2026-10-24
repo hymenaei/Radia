@@ -34,10 +34,7 @@ use crate::capabilities::budget::{
 };
 use crate::capabilities::event_queue::{MAX_EVENT_QUEUE_ERRORS, MAX_QUEUED_CAPABILITY_EVENT_BYTES};
 use crate::fixtures::{
-    event_queue::{
-        EventReceiver, available_event_queue_permits, decode_request_body, map_field, receive_poll_error, request_body, set_sequence,
-        test_fixture,
-    },
+    event_queue::{EventReceiver, decode_request_body, map_field, receive_poll_error, request_body, set_sequence, test_fixture},
     http::{
         ConcurrentCapabilityTestServer, EventQueueBudgetTestServer, EventQueueTestServer, EventServerResponse, LocalServer,
         event_batch_response, hold_response, request_line, response, seed_grant, seed_response, write_response,
@@ -63,6 +60,10 @@ const TWO_EVENT_BATCH: &str = "<llsd><map><key>id</key><integer>5</integer><key>
 const MALFORMED_BATCH: &str = "<llsd><map>";
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn available_event_queue_permits(budget: &CapabilityBudget) -> usize {
+    budget.primary_event_queues.available_permits() + budget.neighbor_event_queues.available_permits()
+}
 
 async fn close_while_pending<F>(future: F, session_closed: &watch::Sender<bool>) -> RetryOutcome
 where

@@ -1,6 +1,5 @@
 use std::num::{NonZeroU8, NonZeroU32};
 
-use protocol::messages::object as object_messages;
 use protocol::{
     lludp::{
         Message,
@@ -10,8 +9,8 @@ use protocol::{
         },
     },
     messages::{
-        CachedObjectReference, ExtraParamUpdate, ExtraParameter, ObjectData, object::improved_terse_object_update,
-        object::object_update_compressed,
+        CachedObjectReference, ExtraParamUpdate, ExtraParameter, ObjectData, object::decode_texture_entry,
+        object::improved_terse_object_update, object::object_update_compressed,
     },
     types::{ObjectShape, TextureEntry, TextureFace, decode_render_material_bindings},
 };
@@ -262,7 +261,7 @@ fn full_observation(block: &ObjectData, source: UpdateSource, invalid_fields: &m
     let local_id = local_id(block.local_id)?;
     let classification = object_classification(block.pcode, Some(block.shape), &block.extra_parameters, invalid_fields);
     let surface_appearance = if block.pcode == VOLUME_PCODE {
-        let (value, invalid) = decoded_surface_appearance(object_messages::decode_texture_entry(&block.texture_entry));
+        let (value, invalid) = decoded_surface_appearance(decode_texture_entry(&block.texture_entry));
         *invalid_fields += usize::from(invalid);
         value
     } else {
@@ -297,7 +296,7 @@ fn compressed_observation(
     let parent = parent(block.parent_local_id)?;
     let classification = object_classification(block.pcode, block.shape, &block.extra_parameters, invalid_fields);
     let surface_appearance = if block.pcode == VOLUME_PCODE {
-        let decoded = block.texture_entry.as_deref().map(object_messages::decode_texture_entry).unwrap_or(Ok(None));
+        let decoded = block.texture_entry.as_deref().map(decode_texture_entry).unwrap_or(Ok(None));
         let (value, invalid) = decoded_surface_appearance(decoded);
         *invalid_fields += usize::from(invalid);
         value

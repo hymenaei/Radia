@@ -1,6 +1,8 @@
 use llsd::{Limits, Value, binary};
 
-use super::{MaterialDescription, MaterialTexture, TextureRef, TextureTransform};
+use math::UvTransform;
+
+use super::{MaterialDescription, MaterialTexture, TextureRef};
 use crate::Failure;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,7 +17,7 @@ pub enum LegacyAlphaMode {
 pub struct LegacyMaterial {
     pub diffuse_color: [f32; 4],
     pub diffuse: MaterialTexture,
-    pub texgen: TexGen,
+    pub mapping: TextureMapping,
     pub fullbright: bool,
     pub bump: u8,
     pub shiny: u8,
@@ -34,7 +36,7 @@ impl Default for LegacyMaterial {
         Self {
             diffuse_color: [1.0; 4],
             diffuse: MaterialTexture::default(),
-            texgen: TexGen::Default,
+            mapping: TextureMapping::Default,
             fullbright: false,
             bump: 0,
             shiny: 0,
@@ -51,7 +53,7 @@ impl Default for LegacyMaterial {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TexGen {
+pub enum TextureMapping {
     #[default]
     Default,
     Planar,
@@ -101,8 +103,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
     }
     Ok(MaterialDescription::Legacy(LegacyMaterial {
         normal: MaterialTexture {
-            texture: texture("NormMap")?,
-            transform: TextureTransform {
+            source: texture("NormMap")?,
+            transform: UvTransform {
                 offset: [fixed("NormOffsetX")?, fixed("NormOffsetY")?],
                 scale: [fixed("NormRepeatX")?, fixed("NormRepeatY")?],
                 rotation: fixed("NormRotation")?,
@@ -110,8 +112,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
             ..MaterialTexture::default()
         },
         specular: MaterialTexture {
-            texture: texture("SpecMap")?,
-            transform: TextureTransform {
+            source: texture("SpecMap")?,
+            transform: UvTransform {
                 offset: [fixed("SpecOffsetX")?, fixed("SpecOffsetY")?],
                 scale: [fixed("SpecRepeatX")?, fixed("SpecRepeatY")?],
                 rotation: fixed("SpecRotation")?,
@@ -129,10 +131,10 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<MaterialDescription, Failure> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::material::TextureRef;
     use utils::AssetId;
     use uuid::Uuid;
+
+    use super::*;
 
     fn legacy_fields(mode: i32, cutoff: i32) -> llsd::Map {
         let mut fields: llsd::Map = [
@@ -169,13 +171,13 @@ mod tests {
     fn legacy_expected(alpha_mode: LegacyAlphaMode) -> LegacyMaterial {
         LegacyMaterial {
             normal: MaterialTexture {
-                texture: TextureRef::Asset(AssetId::new(Uuid::from_u128(7))),
-                transform: TextureTransform { offset: [0.25, -0.5], scale: [2.0, 3.0], rotation: 1.5 },
+                source: TextureRef::Asset(AssetId::new(Uuid::from_u128(7))),
+                transform: UvTransform { offset: [0.25, -0.5], scale: [2.0, 3.0], rotation: 1.5 },
                 ..MaterialTexture::default()
             },
             specular: MaterialTexture {
-                texture: TextureRef::Clear,
-                transform: TextureTransform { offset: [-0.125, 0.75], scale: [-1.0, 0.0], rotation: -2.0 },
+                source: TextureRef::Clear,
+                transform: UvTransform { offset: [-0.125, 0.75], scale: [-1.0, 0.0], rotation: -2.0 },
                 ..MaterialTexture::default()
             },
             specular_color: [51, 102, 153, 204],

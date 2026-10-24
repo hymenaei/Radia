@@ -1,5 +1,3 @@
-//! Generic UDP and HTTP transport adapters.
-
 pub(crate) mod http;
 pub(crate) mod lludp;
 pub(crate) mod pacing;

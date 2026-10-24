@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use math::{Quat, Vec3};
 use protocol::{
     Audible, BlockInstance, BlockValues, ChatSourceType, ChatType, FieldValue, Frequency, LLUdpError, SchemaMessage,
@@ -35,7 +37,7 @@ fn teleport_cancel_wire() {
     assert_eq!(packet.message().name(), "TeleportCancel");
     assert!(!packet.message().is_inbound_only());
     for length in 0..expected.len() {
-        assert!(Packet::decode(&expected[..length]).is_err(), "truncated cancellation at {length}");
+        assert_matches!(Packet::decode(&expected[..length]), Err(LLUdpError::TruncatedPacket), "truncated cancellation at {length}");
     }
 }
 
@@ -162,7 +164,7 @@ fn logout_reply_fields() {
 
     let mut truncated = expected;
     truncated.pop();
-    assert!(matches!(Packet::decode(&truncated), Err(LLUdpError::TruncatedPacket)));
+    assert_matches!(Packet::decode(&truncated), Err(LLUdpError::TruncatedPacket));
 }
 
 #[test]
@@ -205,13 +207,7 @@ fn confirm_enable_simulator_fields() {
         })
     );
     assert_eq!(decoded.encode().expect("re-encode ConfirmEnableSimulator fixture"), expected);
-}
-
-#[test]
-fn confirm_enable_simulator_is_inbound_only() {
-    let message = Message::ConfirmEnableSimulator(ConfirmEnableSimulator { agent_data: confirm_enable_simulator::AgentData::default() });
-
-    assert!(message.is_inbound_only());
+    assert!(decoded.message().is_inbound_only());
 }
 
 #[test]
@@ -240,15 +236,12 @@ fn chat_from_simulator_fields() {
 }
 
 #[test]
-fn invalid_utf8_message() {
-    let expected = fixture(vectors::CHAT_FROM_SIMULATOR_INVALID_UTF8_MESSAGE);
-    assert_eq!(Packet::decode(&expected), Err(LLUdpError::InvalidUtf8));
-}
-
-#[test]
-fn invalid_utf8_name() {
-    let expected = fixture(vectors::CHAT_FROM_SIMULATOR_INVALID_UTF8_NAME);
-    assert_eq!(Packet::decode(&expected), Err(LLUdpError::InvalidUtf8));
+fn invalid_utf8_is_rejected() {
+    for (field, wire) in
+        [("message", vectors::CHAT_FROM_SIMULATOR_INVALID_UTF8_MESSAGE), ("name", vectors::CHAT_FROM_SIMULATOR_INVALID_UTF8_NAME)]
+    {
+        assert_eq!(Packet::decode(&fixture(wire)), Err(LLUdpError::InvalidUtf8), "invalid chat {field}");
+    }
 }
 
 #[test]
@@ -281,38 +274,47 @@ fn chat_nul_terminates_strings() {
 #[test]
 fn outbound_strings_reject_nul() {
     let messages = [
-        Message::ChatFromSimulator(ChatFromSimulator {
-            chat_data: ChatData {
-                from_name: "A\0B".into(),
-                source_id: Uuid::nil(),
-                owner_id: Uuid::nil(),
-                source_type: ChatSourceType::Agent,
-                chat_type: ChatType::Normal,
-                audible: Audible::Fully,
-                position: Vec3::ZERO,
-                message: "text".into(),
-            },
-        }),
-        Message::ChatFromSimulator(ChatFromSimulator {
-            chat_data: ChatData {
-                from_name: "name".into(),
-                source_id: Uuid::nil(),
-                owner_id: Uuid::nil(),
-                source_type: ChatSourceType::Agent,
-                chat_type: ChatType::Normal,
-                audible: Audible::Fully,
-                position: Vec3::ZERO,
-                message: "A\0B".into(),
-            },
-        }),
-        Message::ChatFromViewer(ChatFromViewer {
-            agent_data: chat_from_viewer::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
-            chat_data: chat_from_viewer::ChatData { message: "A\0B".into(), chat_type: ChatType::Normal, channel: 0 },
-        }),
+        (
+            "chat name",
+            Message::ChatFromSimulator(ChatFromSimulator {
+                chat_data: ChatData {
+                    from_name: "A\0B".into(),
+                    source_id: Uuid::nil(),
+                    owner_id: Uuid::nil(),
+                    source_type: ChatSourceType::Agent,
+                    chat_type: ChatType::Normal,
+                    audible: Audible::Fully,
+                    position: Vec3::ZERO,
+                    message: "text".into(),
+                },
+            }),
+        ),
+        (
+            "simulator chat message",
+            Message::ChatFromSimulator(ChatFromSimulator {
+                chat_data: ChatData {
+                    from_name: "name".into(),
+                    source_id: Uuid::nil(),
+                    owner_id: Uuid::nil(),
+                    source_type: ChatSourceType::Agent,
+                    chat_type: ChatType::Normal,
+                    audible: Audible::Fully,
+                    position: Vec3::ZERO,
+                    message: "A\0B".into(),
+                },
+            }),
+        ),
+        (
+            "viewer chat message",
+            Message::ChatFromViewer(ChatFromViewer {
+                agent_data: chat_from_viewer::AgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
+                chat_data: chat_from_viewer::ChatData { message: "A\0B".into(), chat_type: ChatType::Normal, channel: 0 },
+            }),
+        ),
     ];
 
-    for message in messages {
-        assert_eq!(Packet::new(1, message).encode(), Err(LLUdpError::InvalidMessage));
+    for (field, message) in messages {
+        assert_eq!(Packet::new(1, message).encode(), Err(LLUdpError::InvalidMessage), "reject NUL in {field}");
     }
 }
 

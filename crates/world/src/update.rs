@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::AvatarAppearanceUpdate;
 use crate::ObjectMediaUpdate;
 use crate::{
-    Appearance, AttachmentPoint, Entity, GltfMaterialOverrides, Kind, LinearMotion, LocalAddress, MotionPatch, ParentUpdate, Pose, Region,
-    RenderMaterials, Shape, SurfaceAppearance,
+    Appearance, AttachmentPoint, Entity, Kind, LinearMotion, LocalAddress, ParentUpdate, PbrMaterialAssignments, PbrMaterialOverrides,
+    Pose, Region, Shape, SurfaceAppearance,
 };
 use OrderEvidence::{Ambiguous, Degraded, Ordered};
 
@@ -100,12 +100,12 @@ pub enum FieldGroup {
     Shape,
     Appearance,
     TextureEntry,
-    RenderMaterials,
+    PbrMaterials,
     ObjectMedia,
     SitTarget,
     Properties,
     AvatarAppearance,
-    GltfMaterialOverrides,
+    PbrMaterialOverrides,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -162,9 +162,9 @@ impl Rejections {
         self.entries.iter()
     }
 
-    pub(crate) fn push(&mut self, rejection: FieldRejection) {
-        if let Err(index) = self.entries.binary_search_by_key(&rejection.group, |entry| entry.group) {
-            self.entries.insert(index, rejection);
+    pub(crate) fn reject(&mut self, group: FieldGroup, reason: FieldRejectionReason) {
+        if let Err(index) = self.entries.binary_search_by_key(&group, |entry| entry.group) {
+            self.entries.insert(index, FieldRejection { group, reason });
         }
     }
 }
@@ -190,7 +190,7 @@ pub struct ObjectObservation {
     pub shape: FieldUpdate<Shape>,
     pub appearance: FieldUpdate<Appearance>,
     pub surface_appearance: Option<SurfaceAppearance>,
-    pub render_materials: Option<RenderMaterials>,
+    pub pbr_materials: Option<PbrMaterialAssignments>,
 }
 
 impl ObjectObservation {
@@ -209,7 +209,7 @@ impl ObjectObservation {
             shape: FieldUpdate::Keep,
             appearance: FieldUpdate::Keep,
             surface_appearance: None,
-            render_materials: None,
+            pbr_materials: None,
         }
     }
 }
@@ -219,7 +219,7 @@ pub struct ObjectPatch {
     pub source: UpdateSource,
     pub local_id: NonZeroU32,
     pub pose: Option<Pose>,
-    pub linear_motion: MotionPatch,
+    pub linear_motion: LinearMotion,
     pub angular_velocity: Option<Vec3>,
     pub scale: Option<Vec3>,
     pub parent: Option<ParentUpdate>,
@@ -227,8 +227,8 @@ pub struct ObjectPatch {
     pub shape: FieldUpdate<Shape>,
     pub appearance: FieldUpdate<Appearance>,
     pub surface_appearance: Option<SurfaceAppearance>,
-    pub render_materials: Option<RenderMaterials>,
-    pub gltf_material_overrides: Option<GltfMaterialOverrides>,
+    pub pbr_materials: Option<PbrMaterialAssignments>,
+    pub pbr_material_overrides: Option<PbrMaterialOverrides>,
     pub object_media: Option<ObjectMediaUpdate>,
     pub avatar_appearance: Option<AvatarAppearanceUpdate>,
 }
@@ -239,7 +239,7 @@ impl ObjectPatch {
             source,
             local_id,
             pose: None,
-            linear_motion: MotionPatch { velocity: None, acceleration: None },
+            linear_motion: LinearMotion { velocity: None, acceleration: None },
             angular_velocity: None,
             scale: None,
             parent: None,
@@ -247,23 +247,12 @@ impl ObjectPatch {
             shape: FieldUpdate::Keep,
             appearance: FieldUpdate::Keep,
             surface_appearance: None,
-            render_materials: None,
-            gltf_material_overrides: None,
+            pbr_materials: None,
+            pbr_material_overrides: None,
             object_media: None,
             avatar_appearance: None,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct AgentHandoff {
-    pub source: UpdateSource,
-    pub local_id: NonZeroU32,
-    pub parent: ParentUpdate,
-    pub pose: Option<Pose>,
-    pub linear_motion: Option<LinearMotion>,
-    pub angular_velocity: Option<Vec3>,
-    pub scale: Option<Vec3>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -338,9 +327,9 @@ pub struct Applied {
 }
 
 impl Applied {
-    pub(crate) fn unchanged() -> Self {
+    pub(crate) fn new(outcome: ApplyOutcome) -> Self {
         Self {
-            outcome: ApplyOutcome::Unchanged,
+            outcome,
             revision: None,
             recovery: Recovery::default(),
             recovery_cancellations: Vec::new(),
@@ -348,23 +337,16 @@ impl Applied {
         }
     }
 
+    pub(crate) fn unchanged() -> Self {
+        Self::new(ApplyOutcome::Unchanged)
+    }
+
     pub(crate) fn deferred(reason: DeferredReason, recovery: Recovery) -> Self {
-        Self {
-            outcome: ApplyOutcome::Deferred(reason),
-            revision: None,
-            recovery,
-            recovery_cancellations: Vec::new(),
-            rejections: Rejections::default(),
-        }
+        Self { recovery, ..Self::new(ApplyOutcome::Deferred(reason)) }
     }
 
     pub(crate) fn with_rejections(mut self, rejections: Rejections) -> Self {
         self.rejections = rejections;
-        self
-    }
-
-    pub(crate) fn with_recovery_cancellations(mut self, addresses: Vec<LocalAddress>) -> Self {
-        self.recovery_cancellations = addresses;
         self
     }
 
@@ -379,6 +361,16 @@ impl Applied {
 pub struct RegionApplied {
     pub outcome: RegionOutcome,
     pub recovery_cancellations: Vec<LocalAddress>,
+}
+
+impl RegionApplied {
+    pub(crate) const fn new(outcome: RegionOutcome) -> Self {
+        Self { outcome, recovery_cancellations: Vec::new() }
+    }
+
+    pub(crate) const fn unchanged() -> Self {
+        Self::new(RegionOutcome::Unchanged)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -449,9 +441,9 @@ mod tests {
         let first = FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::InvalidRotation };
         let later = FieldRejection { group: FieldGroup::Shape, reason: FieldRejectionReason::UntrustedSource };
         let mut rejections = Rejections::new();
-        rejections.push(later);
-        rejections.push(first);
-        rejections.push(FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::StaleFrame });
+        rejections.reject(later.group, later.reason);
+        rejections.reject(first.group, first.reason);
+        rejections.reject(FieldGroup::Pose, FieldRejectionReason::StaleFrame);
 
         assert_eq!(rejections.len(), 2);
         assert_eq!(rejections.iter().copied().collect::<Vec<_>>(), [first, later]);

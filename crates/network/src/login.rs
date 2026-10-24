@@ -1,3 +1,5 @@
+pub use protocol::login::StartLocation;
+
 use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -14,12 +16,16 @@ use uuid::Uuid;
 
 use crate::{
     capabilities::spawn_blocking_with_permit,
-    capture::CaptureRecorder,
     http::{Client, validate_http_url},
     status::{NetworkLifecycle, NetworkStatusHandle},
 };
 
-pub use protocol::login::StartLocation;
+const LOGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_LOGIN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_LOGIN_XML_DEPTH: usize = 64;
+const MAX_CONCURRENT_LOGIN_OPERATIONS: usize = 2;
+
+static LOGIN_OPERATION_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct AgentSession {
@@ -51,17 +57,10 @@ impl fmt::Debug for AgentSession {
     }
 }
 
-const LOGIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_LOGIN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_LOGIN_XML_DEPTH: usize = 64;
-const MAX_CONCURRENT_LOGIN_OPERATIONS: usize = 2;
-static LOGIN_OPERATION_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Grid {
     #[default]
     Agni,
-
     Aditi,
 }
 
@@ -88,7 +87,6 @@ pub struct LoginCredentials {
     pub password: String,
     pub grid: Grid,
     pub start_location: StartLocation,
-
     pub mfa_hash: String,
 }
 
@@ -131,7 +129,6 @@ pub(crate) async fn login_with_status_at(
     mfa_token: &str,
     mfa_hash: &str,
     login_url: &str,
-    capture: Option<CaptureRecorder>,
     status: NetworkStatusHandle,
 ) -> Result<LoginResponse, String> {
     status.set_lifecycle(NetworkLifecycle::LoggingIn);
@@ -144,7 +141,7 @@ pub(crate) async fn login_with_status_at(
             return Err(error);
         }
     };
-    let result = login_at_with_capture(credentials, mfa_token, mfa_hash, &login_url, capture, status.clone()).await;
+    let result = login_request(credentials, mfa_token, mfa_hash, &login_url, status.clone()).await;
     match &result {
         Ok(LoginResponse::Authenticated { .. }) => {
             status.set_lifecycle(NetworkLifecycle::Connecting);
@@ -166,16 +163,15 @@ pub(crate) async fn login_at(
     mfa_hash: &str,
     login_url: &Url,
 ) -> Result<LoginResponse, String> {
-    login_at_with_capture(credentials, mfa_token, mfa_hash, login_url, None, NetworkStatusHandle::default()).await
+    login_request(credentials, mfa_token, mfa_hash, login_url, NetworkStatusHandle::default()).await
 }
 
 #[tracing::instrument(name = "network.login.request", level = "debug", skip_all, fields(grid = ?credentials.grid))]
-async fn login_at_with_capture(
+async fn login_request(
     credentials: &LoginCredentials,
     mfa_token: &str,
     mfa_hash: &str,
     login_url: &Url,
-    capture: Option<CaptureRecorder>,
     status: NetworkStatusHandle,
 ) -> Result<LoginResponse, String> {
     validate_http_url(login_url).map_err(|_| "The login server URL is invalid.".to_string())?;
@@ -208,12 +204,11 @@ async fn login_at_with_capture(
     .map_err(|_| "Could not prepare the login request: login operation admission is unavailable.".to_string())?;
     let client = Client::new(Some(LOGIN_REQUEST_TIMEOUT), true, Some(concat!("Radia/", env!("CARGO_PKG_VERSION"))))
         .map_err(|error| format!("Could not prepare the login request: {error}"))?
-        .with_capture(capture.clone())
         .with_status(status);
     tracing::debug!("Login request started");
     let response = time::timeout_at(
         deadline,
-        client.post_operation_bounded("login", None, login_url, "text/xml", None, body.into_bytes(), MAX_LOGIN_RESPONSE_BYTES),
+        client.post_operation_bounded("login", login_url, "text/xml", None, body.into_bytes(), MAX_LOGIN_RESPONSE_BYTES),
     )
     .await
     .map_err(|_| "Could not contact Second Life: the login operation exceeded its deadline.".to_string())?
@@ -323,8 +318,8 @@ fn authenticated_response(value: login::Authenticated, credentials: &LoginCreden
 mod tests {
     use crate::{AgentSession, Event, Grid, LoginCredentials, PacketOrder::Ordered, StartLocation, event::SimulatorId};
 
-    use crate::http::testing::{LocalServer, response};
     use crate::login::{LoginResponse, login_at};
+    use crate::test_support::http::{LocalServer, response};
     use math::Vec3;
     use protocol::{
         Audible, ChatSourceType, ChatType,

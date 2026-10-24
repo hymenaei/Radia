@@ -1,15 +1,20 @@
+use math::{Quat, Vec3};
 use uuid::Uuid;
 
 use crate::{
     LLUdpError,
-    lludp::codec::{Reader, Writer},
+    lludp::{
+        codec::{Reader, Writer},
+        message::{AllocationStrategy, TypedMessage},
+        types::MessageId,
+    },
     messages::object::{
         ExtraParameter, ObjectSound, ObjectText, RegionData, add_preflight_capacity, decode_extra_parameters, encode_extra_parameters,
         preflight_capacity, rotation_from_vector3, skip_extra_parameters,
     },
+    schema::ids::OBJECT_UPDATE_COMPRESSED,
     types::ObjectShape,
 };
-use math::{Quat, Vec3};
 
 const SPECIAL_HAS_SCRATCH_PAD: u32 = 0x001;
 const SPECIAL_HAS_TREE_DATA: u32 = 0x002;
@@ -66,6 +71,39 @@ pub struct ObjectData {
 pub enum ObjectSpecificData {
     Tree { species: u8 },
     ScratchPad(Vec<u8>),
+}
+
+impl TypedMessage for ObjectUpdateCompressed {
+    const ID: MessageId = OBJECT_UPDATE_COMPRESSED;
+    const ALLOCATION: AllocationStrategy = AllocationStrategy::Specialized;
+    const INBOUND_ONLY: bool = true;
+
+    fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
+        self::decode(reader)
+    }
+
+    fn encode(&self, writer: &mut Writer<'_>) -> Result<(), LLUdpError> {
+        self.region_data.encode(writer);
+        let count = u8::try_from(self.objects.len()).map_err(|_| LLUdpError::VariableFieldTooLong)?;
+        writer.u8(count);
+        for object in &self.objects {
+            writer.u32(object.update_flags);
+            encode_fields(object, writer)?;
+        }
+        Ok(())
+    }
+
+    fn preflight_allocation_bound(payload: &[u8]) -> Result<usize, LLUdpError> {
+        crate::lludp::message::allocation::with_payload(payload, preflight_allocation_bytes(payload)?)
+    }
+
+    fn retained_capacity_bytes(&self) -> usize {
+        let mut bytes = crate::lludp::message::allocation::capacity_bytes(self.objects.capacity(), std::mem::size_of::<ObjectData>());
+        for object in &self.objects {
+            crate::lludp::message::allocation::add_object_update_compressed_capacity(&mut bytes, object);
+        }
+        bytes
+    }
 }
 
 pub(crate) fn decode(reader: &mut Reader<'_>) -> Result<ObjectUpdateCompressed, LLUdpError> {

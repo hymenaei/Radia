@@ -131,14 +131,29 @@ pub struct Pose {
     pub rotation: Option<Quat>,
 }
 
+impl Pose {
+    pub(crate) const fn is_empty(self) -> bool {
+        self.position.is_none() && self.rotation.is_none()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LinearMotion {
     pub velocity: Option<Vec3>,
     pub acceleration: Option<Vec3>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct MotionPatch {
-    pub velocity: Option<Vec3>,
-    pub acceleration: Option<Vec3>,
+impl LinearMotion {
+    pub(crate) const fn is_empty(self) -> bool {
+        self.velocity.is_none() && self.acceleration.is_none()
+    }
+
+    pub(crate) fn merge(&mut self, update: Self) {
+        if let Some(value) = update.velocity {
+            self.velocity = Some(value);
+        }
+        if let Some(value) = update.acceleration {
+            self.acceleration = Some(value);
+        }
+    }
 }

@@ -6,25 +6,18 @@ use std::{
 use protocol::lludp::{MAX_PACKET_RETAINED_CAPACITY_BYTES, Packet, PacketPreflight};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::event::EventEnvelope;
-
 use super::{ConnectionRole, MAX_SIMULATOR_CONNECTIONS};
+use crate::event::EventEnvelope;
 
 pub(super) const MAX_CONCURRENT_PACKET_DECODES: usize = 8;
 pub(super) const MAX_QUEUED_SIMULATOR_EVENT_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const MAX_QUEUED_NEIGHBOR_EVENT_BYTES: usize = 24 * 1024 * 1024;
 pub(super) const MAX_NEIGHBOR_CONNECTION_EVENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PACKET_RETENTION_PERMITS: usize = 3;
-
 pub(super) const MAX_PACKET_ACK_DECODE_BYTES: usize = 32 * 1024;
 
 pub(crate) struct EventRetention {
     _charge: EventRetentionCharge,
-}
-
-enum EventRetentionCharge {
-    Permits { _permits: Vec<OwnedSemaphorePermit> },
-    Packet { _reservation: PacketMemoryReservation },
 }
 
 impl EventRetention {
@@ -35,6 +28,11 @@ impl EventRetention {
     fn from_packet_reservation(reservation: PacketMemoryReservation) -> Self {
         Self { _charge: EventRetentionCharge::Packet { _reservation: reservation } }
     }
+}
+
+enum EventRetentionCharge {
+    Permits { _permits: Vec<OwnedSemaphorePermit> },
+    Packet { _reservation: PacketMemoryReservation },
 }
 
 #[derive(Clone, Copy)]
@@ -90,11 +88,6 @@ impl SimulatorMemoryBudget {
             shared: Arc::new(SharedMemoryBudget { limits, usage: Mutex::new(SharedUsage::default()) }),
             connection: Arc::new(Mutex::new(ConnectionUsage { role: ConnectionRole::Primary, bytes: 0 })),
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn with_test_limits(global: usize, neighbors: usize, neighbor_connection: usize) -> Self {
-        Self::with_limits(MemoryLimits { global, neighbors, primary_connection: global, neighbor_connection })
     }
 
     pub(super) fn for_neighbor(&self) -> Self {
@@ -211,25 +204,28 @@ impl SimulatorMemoryBudget {
             retained_capacity_upper_bound,
         })
     }
+}
 
-    #[cfg(test)]
+#[cfg(test)]
+impl SimulatorMemoryBudget {
+    pub(super) fn with_test_limits(global: usize, neighbors: usize, neighbor_connection: usize) -> Self {
+        Self::with_limits(MemoryLimits { global, neighbors, primary_connection: global, neighbor_connection })
+    }
+
     pub(super) fn reserve_bytes_for_test(&self, bytes: usize) -> Result<PacketMemoryReservation, PacketMemoryError> {
         self.reserve_bytes(bytes, bytes)
     }
 
-    #[cfg(test)]
     pub(super) fn global_available_bytes(&self) -> usize {
         let shared = lock_unpoisoned(&self.shared.usage);
         self.shared.limits.global.saturating_sub(shared.global)
     }
 
-    #[cfg(test)]
     pub(super) fn neighbor_available_bytes(&self) -> usize {
         let shared = lock_unpoisoned(&self.shared.usage);
         self.shared.limits.neighbors.saturating_sub(shared.neighbors)
     }
 
-    #[cfg(test)]
     pub(super) fn connection_available_bytes(&self) -> usize {
         let _shared = lock_unpoisoned(&self.shared.usage);
         let connection = lock_unpoisoned(&self.connection);
@@ -239,10 +235,6 @@ impl SimulatorMemoryBudget {
         };
         limit.saturating_sub(connection.bytes)
     }
-}
-
-pub(super) fn packet_event_overhead_bytes() -> usize {
-    size_of::<EventEnvelope>() + MAX_PACKET_RETENTION_PERMITS * size_of::<OwnedSemaphorePermit>()
 }
 
 pub(super) struct PacketMemoryReservation {
@@ -282,15 +274,6 @@ impl Drop for PacketMemoryReservation {
     }
 }
 
-fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn subtract_bytes(counter: &mut usize, bytes: usize) {
-    debug_assert!(*counter >= bytes, "admission byte accounting underflow");
-    *counter = counter.saturating_sub(bytes);
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PacketMemoryError {
     PacketTooLarge,
@@ -299,6 +282,19 @@ pub(super) enum PacketMemoryError {
     ConnectionBudget,
     CounterOverflow,
     BoundExceeded,
+}
+
+pub(super) fn packet_event_overhead_bytes() -> usize {
+    size_of::<EventEnvelope>() + MAX_PACKET_RETENTION_PERMITS * size_of::<OwnedSemaphorePermit>()
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn subtract_bytes(counter: &mut usize, bytes: usize) {
+    debug_assert!(*counter >= bytes, "admission byte accounting underflow");
+    *counter = counter.saturating_sub(bytes);
 }
 
 #[cfg(test)]
@@ -339,7 +335,7 @@ mod tests {
         let preflight = Packet::preflight(&ack).expect("preflight maximum-sized ACK control packet");
         assert!(preflight.peak_decode_allocation_bytes() <= MAX_PACKET_ACK_DECODE_BYTES);
 
-        let mut permits = (0..super::super::MAX_SIMULATOR_CONNECTIONS)
+        let mut permits = (0..crate::simulator::MAX_SIMULATOR_CONNECTIONS)
             .map(|_| budget.try_acquire_ack_decode_slot(preflight).expect("each active simulator has one control decode slot"))
             .collect::<Vec<_>>();
         assert!(budget.try_acquire_ack_decode_slot(preflight).is_none(), "the control decode budget has no extra slot");

@@ -115,7 +115,7 @@ fn bench_spatial_queries(c: &mut Criterion) {
         patch.pose = Some(Pose { position: Some(position), rotation: Some(Quat::IDENTITY) });
         let _ = scene.world.patch_object(patch).expect("grid position");
     }
-    while scene.world.maintain_query_state(MAX_QUERY_STATE_MAINTENANCE_WORK).expect("repair grid").has_dirty_pressure {}
+    while scene.world.maintain_query_state(MAX_QUERY_STATE_MAINTENANCE_WORK).expect("repair grid").dirty_scopes > 0 {}
     let query = WorldQuery::live().within(DVec3::new(101.0, 101.0, 1.0), 0.25).expect("spatial query");
     let budget = WorldQueryBudget { work: 4096, results: 64 };
     let page = scene.world.query(query, None, budget).expect("clean spatial query");
@@ -133,7 +133,7 @@ fn bench_spatial_queries(c: &mut Criterion) {
         patch.pose = Some(Pose { position: Some(Vec3::X * (offset + 1) as f32), rotation: Some(Quat::IDENTITY) });
         let _ = scene.world.patch_object(patch).expect("linkset child");
     }
-    while scene.world.maintain_query_state(MAX_QUERY_STATE_MAINTENANCE_WORK).expect("repair linkset").has_dirty_pressure {}
+    while scene.world.maintain_query_state(MAX_QUERY_STATE_MAINTENANCE_WORK).expect("repair linkset").dirty_scopes > 0 {}
     let mut patch = ObjectPatch::new(source(region, order), root.local_id);
     patch.pose = Some(Pose { position: Some(Vec3::new(400.0, 400.0, 1.0)), rotation: None });
     let _ = scene.world.patch_object(patch).expect("move root");

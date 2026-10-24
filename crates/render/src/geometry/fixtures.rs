@@ -1,0 +1,81 @@
+use std::{num::NonZeroU32, time::Instant};
+
+use math::{DVec3, Quat, Vec3};
+use uuid::Uuid;
+use world::{
+    Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, PrimShape, Region, Shape,
+    SurfaceAppearance, UpdateSource, World, WorldLimits,
+};
+
+use crate::scene::{Budget, Camera, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView};
+
+pub(super) fn scene(alpha: u8) -> (Reconciler, SceneView, Camera) {
+    let mut world = World::new(WorldLimits {
+        max_region_registrations: 1,
+        max_entities: 2,
+        max_entities_per_region: 2,
+        max_tombstones_per_region: 1,
+        max_tombstones: 1,
+        max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(1),
+        max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(1),
+        max_journal_entries: 16,
+        max_journal_changes: 64,
+        max_region_name_bytes: 64,
+        max_recovery_targets: 4,
+    });
+    let region = Region::new(1);
+    assert!(matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. }));
+    let _ = world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).unwrap();
+    for (id, y, mut color, shape) in [
+        (1, -2.0, [255, 0, 0, 255], PrimShape::default()),
+        (2, 2.0, [0, 255, 0, 255], PrimShape { path_scale_x: 150, ..PrimShape::default() }),
+    ] {
+        color[3] = alpha;
+        let mut object = ObjectObservation::new(
+            UpdateSource::new(region, id, OrderEvidence::Ordered(u64::from(id)), 0),
+            Uuid::from_u128(u128::from(id)),
+            NonZeroU32::new(id).unwrap(),
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        let position = if alpha == 255 { Vec3::new(10.0, y, 0.0) } else { Vec3::new(if id == 1 { 10.0 } else { 14.0 }, y * 0.35, 0.0) };
+        object.pose = Some(Pose { position: Some(position), rotation: Some(Quat::IDENTITY) });
+        object.scale = Some(Vec3::splat(2.0));
+        object.shape = FieldUpdate::Set(Shape::Prim(shape));
+        object.appearance = FieldUpdate::Set(Appearance::Surface);
+        object.surface_appearance = Some(SurfaceAppearance::new(FaceAppearance { color, ..Default::default() }, Vec::new()).unwrap());
+        assert!(matches!(world.observe_object(object).unwrap().outcome, world::ApplyOutcome::Introduced(_)));
+    }
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
+    scene.set_camera(camera);
+    let mut now = Instant::now();
+    loop {
+        match scene.poll(now) {
+            ReconcileStep::Read(job) => {
+                let result = match job.query() {
+                    ReadQuery::Barrier => Ok(ReadReply::Barrier(world.read_barrier())),
+                    ReadQuery::Objects(cursor) => world.object_list_page(*cursor, 256).map(ReadReply::Objects),
+                    ReadQuery::Regions(cursor) => world.region_page(*cursor, 64).map(ReadReply::Regions),
+                    ReadQuery::Details(entities) => world.object_detail_batch(entities).map(ReadReply::Details),
+                    ReadQuery::Changes(cursor) => world.change_page(*cursor, 256).map(ReadReply::Changes),
+                    ReadQuery::Terrain(region, cursor) => world.terrain_page(*region, *cursor, 8).map(ReadReply::Terrain),
+                    ReadQuery::Environment(region) => Ok(ReadReply::Environment(world.environment(*region))),
+                };
+                scene.complete_read(job, result.map_err(crate::scene::ReadFailure::World), now);
+            }
+            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+            ReconcileStep::Publish(batch) => {
+                view.apply(batch).unwrap();
+            }
+            ReconcileStep::Continue => {}
+            ReconcileStep::Wait(until) => now = until,
+            ReconcileStep::Idle => {
+                assert_eq!(view.object_count(), 2);
+                assert!(view.objects().all(|object| object.mesh().is_some() && object.materials().is_some()));
+                return (scene, view, camera);
+            }
+            _ => panic!("fixture stopped before publishing geometry"),
+        }
+    }
+}

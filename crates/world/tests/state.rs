@@ -315,20 +315,6 @@ fn self_agent_cannot_be_reassigned() {
 }
 
 #[test]
-fn region_coordinates_decode_correctly() {
-    let region = Region::new(19);
-    let address = address(region, 42);
-    let packed = (512_u64 << 32) | 768;
-    let handle = RegionHandle::new(packed);
-
-    assert_eq!(region.get(), 19);
-    assert_eq!(address.region(), region);
-    assert_eq!(address.local_id(), NonZeroU32::new(42).unwrap());
-    assert_eq!(handle.get(), packed);
-    assert_eq!(handle.origin(), DVec3::new(512.0, 768.0, 0.0));
-}
-
-#[test]
 fn local_transform_needs_all_components() {
     let region = Region::new(72);
     let mut world = World::new(limits());

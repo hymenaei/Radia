@@ -21,12 +21,9 @@ target
 # rustc will dump stack traces when hitting an internal compiler error to PWD
 rustc-ice-*.txt
 
-# Don't commit any secrets and captures to the repo
+# Don't commit secrets to the repo
 .env
 .env.secret.toml
-
-# Don't commit any captures to the repo, they may contain sensitive information
-*.capture
 
 flamegraph.svg
 

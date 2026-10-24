@@ -4,16 +4,12 @@ use std::{
 };
 
 use llsd::{Limits, Map, Value, binary, notation, xml};
-use protocol::lludp::{FieldValue, Message, SchemaMessage};
-use scene::{EnvironmentProperty, EnvironmentPush};
+use protocol::lludp::Message;
+use render::scene::{EnvironmentProperty, EnvironmentPush};
 use tokio::sync::mpsc;
 use utils::{AssetId, ExperienceId};
 use uuid::Uuid;
 use world::Region;
-
-#[cfg(test)]
-#[path = "experience_environment_tests.rs"]
-mod tests;
 
 pub(crate) struct EnvironmentCommand {
     pub(crate) region: Region,
@@ -38,19 +34,16 @@ impl EnvironmentInbox {
 pub(super) struct InvalidPush;
 
 pub(super) fn decode(message: &Message, agent: Uuid) -> Result<Option<EnvironmentPush>, InvalidPush> {
-    let Message::Schema(message) = message else { return Ok(None) };
-    if message.schema().name != "GenericMessage" {
-        return Ok(None);
-    }
-    let Some(FieldValue::Bytes(method)) = field(message, "MethodData", "Method") else { return Err(InvalidPush) };
+    let Message::GenericMessage(message) = message else { return Ok(None) };
+    let method = message.method_data.method.as_slice();
     if method.strip_suffix(&[0]).unwrap_or(method) != b"PushExpEnvironment" {
         return Ok(None);
     }
-    if field(message, "AgentData", "AgentID") != Some(&FieldValue::Uuid(agent)) {
+    if message.agent_data.agent_id != agent {
         return Err(InvalidPush);
     }
-    let Some(FieldValue::Uuid(invoice)) = field(message, "MethodData", "Invoice") else { return Err(InvalidPush) };
-    let Some(FieldValue::Bytes(payload)) = field(message, "ParamList", "Parameter") else { return Err(InvalidPush) };
+    let Some(parameter) = message.param_list.as_ref().and_then(|parameters| parameters.first()) else { return Err(InvalidPush) };
+    let payload = parameter.parameter.as_slice();
     if payload.len() > 255 {
         return Err(InvalidPush);
     }
@@ -88,7 +81,7 @@ pub(super) fn decode(message: &Message, agent: Uuid) -> Result<Option<Environmen
         _ => return Err(InvalidPush),
     };
     let transition = Duration::try_from_secs_f64(seconds.max(0.0)).map_err(|_| InvalidPush)?;
-    let experience = ExperienceId::new(*invoice);
+    let experience = ExperienceId::new(message.method_data.invoice.unwrap_or_else(Uuid::nil));
     match action.as_str() {
         "ClearEnvironment" => Ok(Some(EnvironmentPush::Clear { experience, transition })),
         "PushFullEnvironment" => {
@@ -129,12 +122,80 @@ fn properties(value: Option<&Value>) -> Result<Vec<EnvironmentProperty>, Invalid
         .collect()
 }
 
-fn field<'a>(message: &'a SchemaMessage, block: &str, name: &str) -> Option<&'a FieldValue> {
-    let index = message.schema().blocks.iter().position(|schema| schema.name == block)?;
-    let schema = message.schema().blocks.get(index)?;
-    let field = schema.fields.iter().position(|field| field.name == name)?;
-    if message.field_was_supplied(index, 0, field) != Some(true) {
-        return None;
+#[cfg(test)]
+mod tests {
+    use protocol::messages::GenericMessage;
+    use protocol::messages::generic_message::{AgentData, MethodData, Parameter};
+
+    use super::*;
+
+    fn message(agent: Uuid, invoice: Uuid, body: &str) -> Message {
+        Message::GenericMessage(GenericMessage {
+            agent_data: AgentData { agent_id: agent, session_id: Uuid::nil(), transaction_id: Uuid::nil() },
+            method_data: MethodData { method: b"PushExpEnvironment\0".to_vec(), invoice: Some(invoice) },
+            param_list: Some(vec![Parameter { parameter: body.as_bytes().to_vec() }]),
+        })
     }
-    message.blocks().get(index)?.instances.first()?.fields.get(field)
+
+    #[test]
+    fn invoice_controls_identity() {
+        let agent = Uuid::from_u128(1);
+        let experience = Uuid::from_u128(2);
+        let body = "{'action':'PushFullEnvironment','public_id':u00000000-0000-0000-0000-000000000003,'action_data':{'asset_id':u00000000-0000-0000-0000-000000000004,'transition_time':r2.5}}";
+        let push = message(agent, experience, body);
+        let Some(EnvironmentPush::Full { experience: actual, asset, transition }) = decode(&push, agent).unwrap() else {
+            panic!("full push missing")
+        };
+        assert!(decode(&message(agent, Uuid::nil(), body), agent).is_err(), "a full push requires a non-nil experience ID");
+        assert_eq!(actual.uuid(), experience);
+        assert_eq!(asset.uuid(), Uuid::from_u128(4));
+        assert_eq!(transition, Duration::from_millis(2500));
+        assert!(decode(&push, Uuid::from_u128(5)).is_err(), "wrong-agent push must not be accepted");
+    }
+
+    #[test]
+    fn missing_patch_clears_experience() {
+        let agent = Uuid::from_u128(1);
+        let experience = Uuid::from_u128(2);
+        for settings in ["{}", "{'sky':!,'water':!}"] {
+            let body = format!("{{'action':'PushPartialEnvironment','action_data':{{'settings':{settings}}}}}");
+            let Some(EnvironmentPush::Clear { experience: Some(id), .. }) = decode(&message(agent, experience, &body), agent).unwrap()
+            else {
+                panic!("missing channels must clear")
+            };
+            assert_eq!(id.uuid(), experience);
+        }
+        let body = "{'action':'PushPartialEnvironment','action_data':{'settings':{'sky':{},'water':{}}}}";
+        let Some(EnvironmentPush::Partial { sky, water, .. }) = decode(&message(agent, experience, body), agent).unwrap() else {
+            panic!("empty maps must be a no-op patch")
+        };
+        assert!(sky.is_empty() && water.is_empty());
+        for body in ["{'action':'ClearEnvironment'}", "{'action':'ClearEnvironment','action_data':{'transition_time':i-1}}"] {
+            assert!(matches!(
+                decode(&message(agent, Uuid::nil(), body), agent).unwrap(),
+                Some(EnvironmentPush::Clear { experience: None, transition: Duration::ZERO })
+            ));
+        }
+        assert!(decode(&message(agent, experience, "{'action':'PushPartialEnvironment'}"), agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn partial_values_preserve_sources() {
+        let agent = Uuid::from_u128(1);
+        let body =
+            "{'action':'PushPartialEnvironment','action_data':{'settings':{'sky':{'gamma':r1.4},'water':{'water_fog_density':r2.0}}}}";
+        let Some(EnvironmentPush::Partial { sky, water, .. }) = decode(&message(agent, Uuid::from_u128(2), body), agent).unwrap() else {
+            panic!("partial push missing")
+        };
+        assert_eq!(sky[0].name, "gamma");
+        assert_eq!(notation::from_slice::<Value>(&sky[0].source).unwrap(), Value::Real(1.4));
+        assert_eq!(water[0].name, "water_fog_density");
+        for body in [
+            "{'action':'PushFullEnvironment','action_data':{'asset_id':u00000000-0000-0000-0000-000000000000}}",
+            "{'action':'PushPartialEnvironment','action_data':{'settings':{'sky':i1}}}",
+            "{'action':'ClearEnvironment','action_data':{'transition_time':rnan}}",
+        ] {
+            assert!(decode(&message(agent, Uuid::from_u128(2), body), agent).is_err(), "invalid push accepted: {body}");
+        }
+    }
 }

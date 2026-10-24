@@ -2,9 +2,10 @@ mod json;
 pub(crate) mod legacy;
 pub(crate) mod pbr;
 
-pub use legacy::{LegacyAlphaMode, LegacyMaterial, TexGen};
+pub use legacy::{LegacyAlphaMode, LegacyMaterial, TextureMapping};
 pub use pbr::{PbrAlphaMode, PbrMaterial};
 
+use math::UvTransform;
 use utils::AssetId;
 use uuid::Uuid;
 
@@ -55,28 +56,15 @@ impl From<Uuid> for TextureRef {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialTexture {
-    pub texture: TextureRef,
-    pub transform: TextureTransform,
+    pub source: TextureRef,
+    pub transform: UvTransform,
     pub tex_coord: u32,
     pub sampler: Sampler,
 }
 
 impl Default for MaterialTexture {
     fn default() -> Self {
-        Self { texture: TextureRef::Absent, transform: TextureTransform::default(), tex_coord: 0, sampler: Sampler::default() }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TextureTransform {
-    pub offset: [f32; 2],
-    pub scale: [f32; 2],
-    pub rotation: f32,
-}
-
-impl Default for TextureTransform {
-    fn default() -> Self {
-        Self { offset: [0.0; 2], scale: [1.0; 2], rotation: 0.0 }
+        Self { source: TextureRef::Absent, transform: UvTransform::default(), tex_coord: 0, sampler: Sampler::default() }
     }
 }
 
@@ -110,8 +98,8 @@ mod tests {
     #[test]
     fn color_channel_selection() {
         let color = MaterialTexture {
-            texture: TextureRef::Asset(AssetId::new(Uuid::from_u128(17))),
-            transform: TextureTransform { offset: [0.25, -0.5], scale: [2.0, -3.0], rotation: 0.75 },
+            source: TextureRef::Asset(AssetId::new(Uuid::from_u128(17))),
+            transform: UvTransform { offset: [0.25, -0.5], scale: [2.0, -3.0], rotation: 0.75 },
             tex_coord: 2,
             sampler: Sampler { wrap_s: Wrap::ClampToEdge, ..Sampler::default() },
         };

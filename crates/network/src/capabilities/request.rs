@@ -13,13 +13,7 @@ use tokio::{
     task::JoinSet,
     time,
 };
-
-use crate::{
-    capture::CaptureRecorder,
-    error::Error,
-    http::{self, Response, validate_http_url},
-    status::NetworkStatusHandle,
-};
+use tracing::{Instrument, Span};
 
 use super::{
     budget::{
@@ -29,6 +23,18 @@ use super::{
     },
     client::CapabilityUrl,
 };
+use crate::{
+    error::Error,
+    http::{self, Response, validate_http_url},
+    status::NetworkStatusHandle,
+};
+
+const CAPABILITY_URL_PARSE_BYTES_PER_INPUT_BYTE: usize = 4;
+const CAPABILITY_URL_PARSE_BYTES_PER_HOST_COMPONENT: usize = 80;
+const CAPABILITY_URL_PARSE_BYTES_PER_GRANT: usize = 512;
+const CAPABILITY_URL_PARSE_BASE_BYTES: usize = 2048;
+const CAPABILITY_URL_RETAINED_BYTES_PER_SERIALIZED_BYTE: usize = 2;
+const CAPABILITY_URL_RETAINED_BASE_BYTES: usize = 128;
 
 pub(super) struct AdmittedResponse {
     pub(super) body: Vec<u8>,
@@ -46,31 +52,6 @@ pub(super) struct AdmittedCapabilities {
 pub(super) struct SeedCapability {
     pub(super) url: Url,
     pub(super) input_bytes: usize,
-}
-
-pub(super) fn capability_error(error: CapabilityFailure) -> Error {
-    match error {
-        CapabilityFailure::Http(error) => Error::CapabilityHttp(error),
-        CapabilityFailure::Message(message) => Error::Capability(message),
-        CapabilityFailure::SessionClosed => Error::CapabilitySessionClosed,
-    }
-}
-
-pub(super) fn validate_capability_names(names: &[&str]) -> Result<(), Error> {
-    if names.len() > MAX_CAPABILITY_NAMES {
-        return Err(Error::Capability(format!("Capability discovery supports at most {MAX_CAPABILITY_NAMES} names.")));
-    }
-
-    let mut total_bytes = 0_usize;
-    for name in names {
-        if name.len() > MAX_CAPABILITY_NAME_BYTES {
-            return Err(Error::Capability(format!("A capability discovery name exceeds the {MAX_CAPABILITY_NAME_BYTES}-byte limit.")));
-        }
-        total_bytes = total_bytes.checked_add(name.len()).filter(|size| *size <= MAX_CAPABILITY_NAMES_BYTES).ok_or_else(|| {
-            Error::Capability(format!("Capability discovery names exceed the {MAX_CAPABILITY_NAMES_BYTES}-byte total limit."))
-        })?;
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +89,7 @@ pub(super) enum Command {
         names: Vec<String>,
         reply: oneshot::Sender<Result<AdmittedCapabilities, CapabilityFailure>>,
         deadline: RequestDeadline,
+        span: Span,
         _permit: OwnedSemaphorePermit,
     },
     Post {
@@ -116,6 +98,7 @@ pub(super) enum Command {
         max_response_bytes: usize,
         reply: oneshot::Sender<Result<AdmittedResponse, CapabilityFailure>>,
         deadline: RequestDeadline,
+        span: Span,
         _permit: OwnedSemaphorePermit,
     },
     GetBytes {
@@ -123,6 +106,7 @@ pub(super) enum Command {
         max_response_bytes: usize,
         reply: oneshot::Sender<Result<AdmittedResponse, CapabilityFailure>>,
         deadline: RequestDeadline,
+        span: Span,
         _permit: OwnedSemaphorePermit,
     },
 }
@@ -149,13 +133,101 @@ impl fmt::Display for CapabilityFailure {
     }
 }
 
+#[derive(Debug)]
+enum CapabilityDecodeError {
+    Message(String),
+    Admission(http::Error),
+}
+
+impl CapabilityDecodeError {
+    fn into_failure(self) -> CapabilityFailure {
+        match self {
+            Self::Message(message) => CapabilityFailure::Message(message),
+            Self::Admission(error) => CapabilityFailure::Http(error),
+        }
+    }
+
+    fn into_lookup_error(self) -> LookupError {
+        match self {
+            Self::Message(message) => LookupError::Permanent(message),
+            Self::Admission(error) => LookupError::permanent_http(error),
+        }
+    }
+}
+
+pub(super) enum LookupError {
+    Http { error: http::Error, transient: bool },
+    Permanent(String),
+}
+
+impl LookupError {
+    fn transient(error: http::Error) -> Self {
+        Self::Http { error, transient: true }
+    }
+
+    fn permanent_http(error: http::Error) -> Self {
+        Self::Http { error, transient: false }
+    }
+
+    pub(super) fn is_transient(&self) -> bool {
+        matches!(self, Self::Http { transient: true, .. })
+    }
+
+    pub(super) fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Http { error, .. } => error.retry_after(),
+            Self::Permanent(_) => None,
+        }
+    }
+
+    fn into_failure(self) -> CapabilityFailure {
+        match self {
+            Self::Http { error, .. } => CapabilityFailure::Http(error),
+            Self::Permanent(message) => CapabilityFailure::Message(message),
+        }
+    }
+}
+
+impl fmt::Display for LookupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Http { error, .. } => error.fmt(formatter),
+            Self::Permanent(message) => formatter.write_str(message),
+        }
+    }
+}
+
+pub(super) fn capability_error(error: CapabilityFailure) -> Error {
+    match error {
+        CapabilityFailure::Http(error) => Error::CapabilityHttp(error),
+        CapabilityFailure::Message(message) => Error::Capability(message),
+        CapabilityFailure::SessionClosed => Error::CapabilitySessionClosed,
+    }
+}
+
+pub(super) fn validate_capability_names(names: &[&str]) -> Result<(), Error> {
+    if names.len() > MAX_CAPABILITY_NAMES {
+        return Err(Error::Capability(format!("Capability discovery supports at most {MAX_CAPABILITY_NAMES} names.")));
+    }
+
+    let mut total_bytes = 0_usize;
+    for name in names {
+        if name.len() > MAX_CAPABILITY_NAME_BYTES {
+            return Err(Error::Capability(format!("A capability discovery name exceeds the {MAX_CAPABILITY_NAME_BYTES}-byte limit.")));
+        }
+        total_bytes = total_bytes.checked_add(name.len()).filter(|size| *size <= MAX_CAPABILITY_NAMES_BYTES).ok_or_else(|| {
+            Error::Capability(format!("Capability discovery names exceed the {MAX_CAPABILITY_NAMES_BYTES}-byte total limit."))
+        })?;
+    }
+    Ok(())
+}
+
 #[tracing::instrument(name = "capabilities.worker", level = "debug", skip_all)]
 pub(super) async fn run(
     client: http::Client,
     seed: Url,
     mut commands: mpsc::Receiver<Command>,
     session_closed: watch::Receiver<bool>,
-    capture: Option<CaptureRecorder>,
     status: NetworkStatusHandle,
 ) {
     let mut requests = JoinSet::new();
@@ -180,70 +252,70 @@ pub(super) async fn run(
         let client = client.clone();
         let seed = seed.clone();
         let session_closed = session_closed.clone();
-        let capture = capture.clone();
         let status = status.clone();
-        requests.spawn(async move {
-            match command {
-                Command::RequestCapabilities { names, mut reply, deadline, _permit } => {
-                    let result = tokio::select! {
-                        biased;
-                        _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
-                        _ = reply.closed() => return,
-                        _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
-                        result = request_capabilities(&client, &seed, &names, _permit) => result,
-                    };
-                    match &result {
-                        Ok((granted, _, _)) => status.note_capabilities(granted.keys().map(String::as_str)),
-                        Err(error) if !error.is_session_closed() => status.record_error(error.to_string()),
-                        Err(_) => {}
+        let span = match &command {
+            Command::RequestCapabilities { span, .. } | Command::Post { span, .. } | Command::GetBytes { span, .. } => span.clone(),
+        };
+        requests.spawn(
+            async move {
+                match command {
+                    Command::RequestCapabilities { names, mut reply, deadline, _permit, .. } => {
+                        let result = tokio::select! {
+                            biased;
+                            _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
+                            _ = reply.closed() => return,
+                            _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
+                            result = request_capabilities(&client, &seed, &names, _permit) => result,
+                        };
+                        match &result {
+                            Ok((granted, _, _)) => status.note_capabilities(granted.keys().map(String::as_str)),
+                            Err(error) if !error.is_session_closed() => status.record_error(error.to_string()),
+                            Err(_) => {}
+                        }
+                        let result = result.map(|(capabilities, memory, request)| AdmittedCapabilities {
+                            capabilities,
+                            _request: request,
+                            _memory: memory,
+                        });
+                        let _ = reply.send(result);
                     }
-                    if result.is_ok()
-                        && let Some(capture) = &capture
-                    {
-                        capture.lifecycle("capabilities_discovered");
+                    Command::Post { url, body, max_response_bytes, mut reply, deadline, _permit, .. } => {
+                        let result = tokio::select! {
+                            biased;
+                            _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
+                            _ = reply.closed() => return,
+                            _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
+                            result = post(&client, &url.url, body, "Capability request", max_response_bytes)
+                                => result.map_err(CapabilityFailure::Http),
+                        };
+                        if let Err(error) = &result
+                            && !error.is_session_closed()
+                        {
+                            status.record_error(error.to_string());
+                        }
+                        let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
+                        let _ = reply.send(result);
                     }
-                    let result = result.map(|(capabilities, memory, request)| AdmittedCapabilities {
-                        capabilities,
-                        _request: request,
-                        _memory: memory,
-                    });
-                    let _ = reply.send(result);
-                }
-                Command::Post { url, body, max_response_bytes, mut reply, deadline, _permit } => {
-                    let result = tokio::select! {
-                        biased;
-                        _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
-                        _ = reply.closed() => return,
-                        _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
-                        result = post(&client, &url.url, url.capture_endpoint.as_deref(), body, "Capability request", max_response_bytes)
-                            => result.map_err(CapabilityFailure::Http),
-                    };
-                    if let Err(error) = &result
-                        && !error.is_session_closed()
-                    {
-                        status.record_error(error.to_string());
+                    Command::GetBytes { url, max_response_bytes, mut reply, deadline, _permit, .. } => {
+                        let result = tokio::select! {
+                            biased;
+                            _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
+                            _ = reply.closed() => return,
+                            _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
+                            result = get_bytes(&client, &url.url, max_response_bytes) => result.map_err(CapabilityFailure::Http),
+                        };
+                        if let Err(error) = &result
+                            && !error.is_session_closed()
+                        {
+                            status.record_error(error.to_string());
+                        }
+                        let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
+                        let _ = reply.send(result);
                     }
-                    let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
-                    let _ = reply.send(result);
-                }
-                Command::GetBytes { url, max_response_bytes, mut reply, deadline, _permit } => {
-                    let result = tokio::select! {
-                        biased;
-                        _ = wait_for_session_close(session_closed) => Err(CapabilityFailure::SessionClosed),
-                        _ = reply.closed() => return,
-                        _ = time::sleep_until(deadline.at) => Err(CapabilityFailure::Http(deadline.http_error())),
-                        result = get_bytes(&client, &url.url, url.capture_endpoint.as_deref(), max_response_bytes) => result.map_err(CapabilityFailure::Http),
-                    };
-                    if let Err(error) = &result
-                        && !error.is_session_closed()
-                    {
-                        status.record_error(error.to_string());
-                    }
-                    let result = result.map(|response| into_admitted_response(response, max_response_bytes, _permit));
-                    let _ = reply.send(result);
                 }
             }
-        });
+            .instrument(span),
+        );
     }
 
     drop(commands);
@@ -279,10 +351,9 @@ fn decode_requested_capabilities(
     names: &[String],
 ) -> Result<(HashMap<String, CapabilityUrl>, Option<http::ResponseMemoryPermit>), CapabilityFailure> {
     let mut response = admit_seed_capability_decode(response).map_err(LookupError::into_failure)?;
-    let capabilities = decode_capabilities_with_memory(&response.body, names, response.memory.as_mut(), |name, url, _| {
-        CapabilityUrl::from_discovery(name, url)
-    })
-    .map_err(CapabilityDecodeError::into_failure)?;
+    let capabilities =
+        decode_capabilities_with_memory(&response.body, names, response.memory.as_mut(), |_, url, _| CapabilityUrl::from_discovery(url))
+            .map_err(CapabilityDecodeError::into_failure)?;
     Ok((capabilities, response.memory.take()))
 }
 
@@ -324,7 +395,6 @@ pub(super) async fn request_capabilities_response(
     let response = client
         .post_operation_bounded_classified(
             "seed_capability",
-            None,
             seed,
             "application/llsd+xml",
             Some("application/llsd+xml"),
@@ -403,13 +473,6 @@ fn decode_capabilities_from_value<T>(
     }
     Ok(granted)
 }
-
-const CAPABILITY_URL_PARSE_BYTES_PER_INPUT_BYTE: usize = 4;
-const CAPABILITY_URL_PARSE_BYTES_PER_HOST_COMPONENT: usize = 80;
-const CAPABILITY_URL_PARSE_BYTES_PER_GRANT: usize = 512;
-const CAPABILITY_URL_PARSE_BASE_BYTES: usize = 2048;
-const CAPABILITY_URL_RETAINED_BYTES_PER_SERIALIZED_BYTE: usize = 2;
-const CAPABILITY_URL_RETAINED_BASE_BYTES: usize = 128;
 
 fn capability_url_parse_memory_estimate(response: &Value, names: &[String]) -> Result<usize, CapabilityDecodeError> {
     let fields = response
@@ -505,86 +568,14 @@ pub(super) fn url_retained_memory_estimate(url: &Url, input_bytes: usize) -> usi
         .saturating_add(CAPABILITY_URL_RETAINED_BASE_BYTES)
 }
 
-#[derive(Debug)]
-enum CapabilityDecodeError {
-    Message(String),
-    Admission(http::Error),
-}
-
-impl CapabilityDecodeError {
-    fn into_failure(self) -> CapabilityFailure {
-        match self {
-            Self::Message(message) => CapabilityFailure::Message(message),
-            Self::Admission(error) => CapabilityFailure::Http(error),
-        }
-    }
-
-    fn into_lookup_error(self) -> LookupError {
-        match self {
-            Self::Message(message) => LookupError::Permanent(message),
-            Self::Admission(error) => LookupError::permanent_http(error),
-        }
-    }
-}
-
 fn seed_capability_llsd_limits() -> Limits {
     Limits { max_bytes: MAX_SEED_CAPABILITY_RESPONSE_BYTES, ..capability_llsd_limits() }
 }
 
-pub(super) enum LookupError {
-    Http { error: http::Error, transient: bool },
-    Permanent(String),
-}
-
-impl LookupError {
-    fn transient(error: http::Error) -> Self {
-        Self::Http { error, transient: true }
-    }
-
-    fn permanent_http(error: http::Error) -> Self {
-        Self::Http { error, transient: false }
-    }
-
-    pub(super) fn is_transient(&self) -> bool {
-        matches!(self, Self::Http { transient: true, .. })
-    }
-
-    pub(super) fn retry_after(&self) -> Option<Duration> {
-        match self {
-            Self::Http { error, .. } => error.retry_after(),
-            Self::Permanent(_) => None,
-        }
-    }
-
-    fn into_failure(self) -> CapabilityFailure {
-        match self {
-            Self::Http { error, .. } => CapabilityFailure::Http(error),
-            Self::Permanent(message) => CapabilityFailure::Message(message),
-        }
-    }
-}
-
-impl fmt::Display for LookupError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Http { error, .. } => error.fmt(formatter),
-            Self::Permanent(message) => formatter.write_str(message),
-        }
-    }
-}
-
-async fn post(
-    client: &http::Client,
-    url: &Url,
-    capture_endpoint: Option<&str>,
-    body: Vec<u8>,
-    context: &str,
-    max_response_bytes: usize,
-) -> Result<Response, http::Error> {
+async fn post(client: &http::Client, url: &Url, body: Vec<u8>, context: &str, max_response_bytes: usize) -> Result<Response, http::Error> {
     let response = client
         .post_operation_bounded_classified(
             "capability_post",
-            capture_endpoint,
             url,
             "application/llsd+xml",
             Some("application/llsd+xml"),
@@ -598,13 +589,8 @@ async fn post(
     Ok(response)
 }
 
-async fn get_bytes(
-    client: &http::Client,
-    url: &Url,
-    capture_endpoint: Option<&str>,
-    max_response_bytes: usize,
-) -> Result<Response, http::Error> {
-    let response = client.get_bounded_classified("capability_get", capture_endpoint, url, max_response_bytes).await?;
+async fn get_bytes(client: &http::Client, url: &Url, max_response_bytes: usize) -> Result<Response, http::Error> {
+    let response = client.get_bounded_classified("capability_get", url, max_response_bytes).await?;
     if !response.status.is_success() {
         return Err(http::Error::http_status(
             response.status,
@@ -620,28 +606,11 @@ fn into_admitted_response(response: Response, max_response_bytes: usize, request
     AdmittedResponse { body: response.body, max_response_bytes, _memory: response.memory, _request: request }
 }
 
-pub(super) fn logical_endpoint_label(name: &str) -> Option<String> {
-    const MAX_LABEL_BYTES: usize = 128;
-
-    if name.is_empty()
-        || name.len() > MAX_LABEL_BYTES
-        || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
-        return None;
-    }
-    Some(name.to_owned())
-}
-
 pub(super) fn decode_llsd_xml(body: &str, context: &str) -> Result<Value, String> {
     xml::from_slice_with_limits(body.as_bytes(), capability_llsd_limits()).map_err(|error| {
         let reason = llsd_error(error);
         format!("{context}: {reason}")
     })
-}
-
-#[cfg(test)]
-pub(super) fn decode_capability_value(body: &[u8]) -> Result<Value, Error> {
-    decode_capability_value_with_response_limit(body, MAX_CAPABILITY_RESPONSE_BYTES)
 }
 
 pub(super) fn decode_capability_value_with_response_limit(body: &[u8], max_response_bytes: usize) -> Result<Value, Error> {
@@ -674,301 +643,12 @@ fn llsd_error(error: llsd::Error) -> String {
         error => error.to_string(),
     }
 }
+
 fn string_value(value: &Value) -> Option<&str> {
     match value {
         Value::String(value) => Some(value),
         Value::Uri(value) => Some(value.as_str()),
         _ => None,
-    }
-}
-
-#[cfg(test)]
-mod admission_tests {
-    use super::*;
-    use reqwest::header::HeaderMap;
-    use std::future::poll_fn;
-    use std::{
-        sync::{self, Arc},
-        task::Poll,
-    };
-    use tokio::{
-        spawn,
-        sync::{Semaphore, oneshot},
-        task::yield_now,
-        time::timeout,
-    };
-
-    use super::super::{
-        budget::{COMMAND_CAPACITY, CapabilityBudget, LLSD_SCAN_WORKING_BYTES},
-        client::Client,
-    };
-
-    fn response(body: &[u8], memory: http::ResponseMemoryPermit) -> Response {
-        Response {
-            status: StatusCode::OK,
-            headers: HeaderMap::new(),
-            body: body.to_vec(),
-            elapsed: Duration::ZERO,
-            memory: Some(memory),
-            extra_memory: None,
-        }
-    }
-
-    fn capability_response_budget(limit: usize) -> http::ResponseMemoryBudget {
-        http::ResponseMemoryBudget::new(limit, 0, 0, 0)
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn cancellation_holds_seed_decode_slot_until_decoder_finishes() {
-        let body = b"<llsd><map><key>Texture</key><uri>https://cap.example/texture</uri></map></llsd>";
-        let names = vec!["Texture".to_owned()];
-        let body_capacity = body.to_vec().capacity();
-        let value = decode_capability_values(body).expect("decode seed response for URL estimate");
-        let parse_estimate = capability_url_parse_memory_estimate(&value, &names).expect("URL parsing estimate");
-        let bound = xml::value_allocation_bound(body, seed_capability_llsd_limits()).expect("seed response bound");
-        let limit = body_capacity + LLSD_SCAN_WORKING_BYTES.max(bound) + parse_estimate;
-        let budget = capability_response_budget(limit);
-        let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_capacity).expect("admit raw response");
-        let response = response(body, memory);
-        let slots = Arc::new(Semaphore::new(1));
-        let request_permit = Arc::clone(&slots).acquire_owned().await.expect("ordinary request slot");
-        let (entered, entered_rx) = oneshot::channel();
-        let (release, release_rx) = sync::mpsc::channel();
-        let task = spawn(spawn_blocking_with_permit(request_permit, move || {
-            let _ = entered.send(());
-            release_rx.recv().expect("release seed decoder");
-            decode_requested_capabilities(response, &names)
-        }));
-
-        entered_rx.await.expect("seed decoder started");
-        task.abort();
-        let error = match task.await {
-            Ok(_) => panic!("async waiter should be canceled"),
-            Err(error) => error,
-        };
-        assert!(error.is_cancelled());
-        assert_eq!(slots.available_permits(), 0, "the ordinary request slot stays with the decoder");
-        assert!(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).is_err(), "response memory stays with the decoder");
-
-        release.send(()).expect("unblock seed decoder");
-        timeout(Duration::from_secs(1), async {
-            loop {
-                let slot_released = match Arc::clone(&slots).try_acquire_owned() {
-                    Ok(permit) => {
-                        drop(permit);
-                        true
-                    }
-                    Err(_) => false,
-                };
-                let memory_released = match budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit) {
-                    Ok(permit) => {
-                        drop(permit);
-                        true
-                    }
-                    Err(_) => false,
-                };
-                if slot_released && memory_released {
-                    break;
-                }
-                yield_now().await;
-            }
-        })
-        .await
-        .expect("decoder completion should release the request slot and response memory");
-    }
-
-    #[test]
-    fn seed_endpoint_keeps_admission() {
-        let body = b"<llsd><map><key>Texture</key><uri>https://cap.example/texture</uri></map></llsd>";
-        let bound = xml::value_allocation_bound(body, seed_capability_llsd_limits()).expect("valid seed response bound");
-        let names = vec!["Texture".to_owned()];
-        let value = decode_capability_values(body).expect("decode seed response for URL admission estimate");
-        let parse_estimate = capability_url_parse_memory_estimate(&value, &names).expect("estimate URL parse admission");
-        drop(value);
-        let body_capacity = body.to_vec().capacity();
-        let decode_charge = body_capacity + bound;
-        let limit = body_capacity + LLSD_SCAN_WORKING_BYTES.max(bound) + parse_estimate;
-        let budget = capability_response_budget(limit);
-        let raw_memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_capacity).expect("admit raw response");
-        let response = match admit_seed_capability_decode(response(body, raw_memory)) {
-            Ok(response) => response,
-            Err(error) => panic!("valid seed response should be admitted: {error}"),
-        };
-        let available_before_url = limit - decode_charge;
-        assert!(
-            budget.try_reserve(http::ResponseMemoryClass::Ordinary, available_before_url).is_ok(),
-            "the scanner workspace is returned before decoding"
-        );
-        assert!(
-            budget.try_reserve(http::ResponseMemoryClass::Ordinary, available_before_url + 1).is_err(),
-            "the response permit holds raw input and the LLSD allocation bound before URL parsing"
-        );
-
-        let (mut capabilities, mut memory) =
-            decode_seed_capabilities(response, &names).unwrap_or_else(|_| panic!("admitted seed response decodes"));
-        let map_retained = capability_map_retained_memory_estimate(&capabilities);
-        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit - map_retained).expect("decoded map is charged"));
-        assert!(
-            budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit - map_retained + 1).is_err(),
-            "the response permit is reduced to the retained capability map"
-        );
-
-        let endpoint = capabilities.remove("Texture").expect("seed response includes Texture");
-        assert_eq!(endpoint.url.as_str(), "https://cap.example/texture");
-        drop(capabilities);
-        let endpoint_retained = url_retained_memory_estimate(&endpoint.url, endpoint.input_bytes);
-        memory.as_mut().expect("admitted response memory").shrink_to(endpoint_retained);
-        assert!(
-            budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit - endpoint_retained).is_ok(),
-            "only the decoded endpoint remains charged after its response map is dropped"
-        );
-        assert!(
-            budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit - endpoint_retained + 1).is_err(),
-            "the endpoint charge remains held until ownership is released"
-        );
-        drop(endpoint);
-        drop(memory);
-        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("seed endpoint admission returns after drop"));
-    }
-
-    #[test]
-    fn seed_url_parse_admission_exhaustion_returns_memory() {
-        let body = b"<llsd><map><key>Texture</key><uri>https://cap.example/texture</uri></map></llsd>";
-        let names = vec!["Texture".to_owned()];
-        let value = decode_capability_values(body).expect("decode seed response for URL admission estimate");
-        let parse_estimate = capability_url_parse_memory_estimate(&value, &names).expect("estimate URL parse admission");
-        drop(value);
-        let bound = xml::value_allocation_bound(body, seed_capability_llsd_limits()).expect("valid seed response bound");
-        let body_capacity = body.to_vec().capacity();
-        let limit = body_capacity + LLSD_SCAN_WORKING_BYTES.max(bound) + parse_estimate - 1;
-        let budget = capability_response_budget(limit);
-        let raw_memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_capacity).expect("admit raw response");
-        let response = match admit_seed_capability_decode(response(body, raw_memory)) {
-            Ok(response) => response,
-            Err(error) => panic!("admit LLSD decoding before URL parsing: {error}"),
-        };
-        let scanner_excess = LLSD_SCAN_WORKING_BYTES.saturating_sub(bound);
-        let scanner_charge = budget
-            .try_reserve(http::ResponseMemoryClass::Ordinary, scanner_excess)
-            .expect("keep scanner headroom unavailable to URL parsing");
-
-        let error = match decode_seed_capabilities(response, &names) {
-            Err(error) => error,
-            Ok(_) => panic!("URL parsing should fail when its admission estimate is unavailable"),
-        };
-
-        assert!(matches!(error, LookupError::Http { transient: false, .. }));
-        drop(scanner_charge);
-        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("URL admission failure returns all response memory"));
-    }
-
-    #[test]
-    fn malformed_seed_body_releases_admission() {
-        let body = b"<llsd><map></llsd>";
-        let limit = body.len() + LLSD_SCAN_WORKING_BYTES + 1024;
-        let budget = capability_response_budget(limit);
-        let raw_memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body.len()).expect("admit malformed response");
-
-        let error = match admit_seed_capability_decode(response(body, raw_memory)) {
-            Err(error) => error,
-            Ok(_) => panic!("malformed XML should fail allocation preflight"),
-        };
-
-        assert!(error.to_string().contains("response allocation preflight failed"));
-        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("malformed response admission is returned"));
-    }
-
-    #[test]
-    fn seed_capability_preflight_enforces_seed_body_limit() {
-        let oversized_body = vec![b' '; MAX_SEED_CAPABILITY_RESPONSE_BYTES + 1];
-        let limit = oversized_body.len() + LLSD_SCAN_WORKING_BYTES;
-        let budget = capability_response_budget(limit);
-        let raw_memory =
-            budget.try_reserve(http::ResponseMemoryClass::Ordinary, oversized_body.len()).expect("admit oversized response fixture");
-
-        let error = match admit_seed_capability_decode(response(&oversized_body, raw_memory)) {
-            Err(error) => error,
-            Ok(_) => panic!("an oversized seed response should fail allocation preflight"),
-        };
-
-        assert!(error.to_string().contains("input bytes limit exceeded"), "{error}");
-        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("oversized response admission is returned"));
-    }
-
-    #[test]
-    fn seed_decode_exhaustion_releases_admission() {
-        let body = b"<llsd><map><key>Texture</key><uri>https://cap.example/texture</uri></map></llsd>";
-        let bound = xml::value_allocation_bound(body, seed_capability_llsd_limits()).expect("valid seed response bound");
-        let limit = body.len() + LLSD_SCAN_WORKING_BYTES.max(bound) - 1;
-        let budget = capability_response_budget(limit);
-        let raw_memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body.len()).expect("admit raw response");
-
-        let error = match admit_seed_capability_decode(response(body, raw_memory)) {
-            Err(error) => error,
-            Ok(_) => panic!("decode should be rejected when allocation admission is unavailable"),
-        };
-
-        assert!(matches!(error, LookupError::Http { transient: false, .. }));
-        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("failed decode admission is returned"));
-    }
-
-    #[tokio::test]
-    async fn cancel_before_admission_uses_no_slot() {
-        let budget = CapabilityBudget::new();
-        let clients = (0..4)
-            .map(|_| {
-                Client::new_with_status_and_budget(
-                    Url::parse("http://127.0.0.1:9/seed").expect("seed URL"),
-                    None,
-                    NetworkStatusHandle::default(),
-                    budget.clone(),
-                )
-                .expect("active Tokio runtime")
-            })
-            .collect::<Vec<_>>();
-        let url = CapabilityUrl::parse("http://127.0.0.1:9/post").expect("capability URL");
-        let payload = Value::String("request".into());
-
-        for client in &clients {
-            let mut request = Box::pin(client.post(&url, &payload));
-            assert!(poll_fn(|context| Poll::Ready(request.as_mut().poll(context))).await.is_pending());
-            drop(request);
-        }
-
-        yield_now().await;
-        assert_eq!(budget.ordinary_requests.available_permits(), MAX_CONCURRENT_CAPABILITY_REQUESTS);
-        assert!(clients.iter().all(|client| client.commands.capacity() == COMMAND_CAPACITY));
-    }
-
-    #[tokio::test]
-    async fn deadline_covers_admission_wait() {
-        let budget = CapabilityBudget::new();
-        let client = Client::new_with_status_and_budget(
-            Url::parse("http://127.0.0.1:9/seed").expect("seed URL"),
-            None,
-            NetworkStatusHandle::default(),
-            budget.clone(),
-        )
-        .expect("active Tokio runtime")
-        .with_request_timeout(Duration::from_millis(30));
-        let url = CapabilityUrl::parse("http://127.0.0.1:9/capability").expect("capability URL");
-        let held = Arc::clone(&budget.ordinary_requests)
-            .acquire_many_owned(MAX_CONCURRENT_CAPABILITY_REQUESTS as u32)
-            .await
-            .expect("hold every ordinary request slot");
-        let started = Instant::now();
-
-        let error = client.get_bytes(&url).await.expect_err("a request waiting for admission must hit its deadline");
-
-        assert!(matches!(
-            &error,
-            Error::CapabilityHttp(http::Error::Timeout { elapsed, status: None, .. })
-                if elapsed.as_millis() >= 20 && *elapsed < Duration::from_millis(500)
-        ));
-        assert!(started.elapsed() < Duration::from_millis(500), "the admission wait should be bounded by the configured deadline");
-        assert_eq!(budget.ordinary_requests.available_permits(), 0);
-        drop(held);
-        assert_eq!(budget.ordinary_requests.available_permits(), MAX_CONCURRENT_CAPABILITY_REQUESTS);
     }
 }
 
@@ -1194,5 +874,294 @@ pub(crate) mod allocation_measurement {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+    use reqwest::header::HeaderMap;
+    use std::future::poll_fn;
+    use std::{
+        sync::{self, Arc},
+        task::Poll,
+    };
+    use tokio::{
+        spawn,
+        sync::{Semaphore, oneshot},
+        task::yield_now,
+        time::timeout,
+    };
+
+    use crate::capabilities::{
+        budget::{COMMAND_CAPACITY, CapabilityBudget, LLSD_SCAN_WORKING_BYTES},
+        client::Client,
+    };
+
+    fn response(body: &[u8], memory: http::ResponseMemoryPermit) -> Response {
+        Response {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: body.to_vec(),
+            elapsed: Duration::ZERO,
+            memory: Some(memory),
+            extra_memory: None,
+        }
+    }
+
+    fn capability_response_budget(limit: usize) -> http::ResponseMemoryBudget {
+        http::ResponseMemoryBudget::new(limit, 0, 0)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancellation_holds_seed_decode_slot_until_decoder_finishes() {
+        let body = b"<llsd><map><key>Texture</key><uri>https://cap.example/texture</uri></map></llsd>";
+        let names = vec!["Texture".to_owned()];
+        let body_capacity = body.to_vec().capacity();
+        let value = decode_capability_values(body).expect("decode seed response for URL estimate");
+        let parse_estimate = capability_url_parse_memory_estimate(&value, &names).expect("URL parsing estimate");
+        let bound = xml::value_allocation_bound(body, seed_capability_llsd_limits()).expect("seed response bound");
+        let limit = body_capacity + LLSD_SCAN_WORKING_BYTES.max(bound) + parse_estimate;
+        let budget = capability_response_budget(limit);
+        let memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_capacity).expect("admit raw response");
+        let response = response(body, memory);
+        let slots = Arc::new(Semaphore::new(1));
+        let request_permit = Arc::clone(&slots).acquire_owned().await.expect("ordinary request slot");
+        let (entered, entered_rx) = oneshot::channel();
+        let (release, release_rx) = sync::mpsc::channel();
+        let task = spawn(spawn_blocking_with_permit(request_permit, move || {
+            let _ = entered.send(());
+            release_rx.recv().expect("release seed decoder");
+            decode_requested_capabilities(response, &names)
+        }));
+
+        entered_rx.await.expect("seed decoder started");
+        task.abort();
+        let error = match task.await {
+            Ok(_) => panic!("async waiter should be canceled"),
+            Err(error) => error,
+        };
+        assert!(error.is_cancelled());
+        assert_eq!(slots.available_permits(), 0, "the ordinary request slot stays with the decoder");
+        assert!(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).is_err(), "response memory stays with the decoder");
+
+        release.send(()).expect("unblock seed decoder");
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let slot_released = match Arc::clone(&slots).try_acquire_owned() {
+                    Ok(permit) => {
+                        drop(permit);
+                        true
+                    }
+                    Err(_) => false,
+                };
+                let memory_released = match budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit) {
+                    Ok(permit) => {
+                        drop(permit);
+                        true
+                    }
+                    Err(_) => false,
+                };
+                if slot_released && memory_released {
+                    break;
+                }
+                yield_now().await;
+            }
+        })
+        .await
+        .expect("decoder completion should release the request slot and response memory");
+    }
+
+    #[test]
+    fn seed_endpoint_keeps_admission() {
+        let body = b"<llsd><map><key>Texture</key><uri>https://cap.example/texture</uri></map></llsd>";
+        let bound = xml::value_allocation_bound(body, seed_capability_llsd_limits()).expect("valid seed response bound");
+        let names = vec!["Texture".to_owned()];
+        let value = decode_capability_values(body).expect("decode seed response for URL admission estimate");
+        let parse_estimate = capability_url_parse_memory_estimate(&value, &names).expect("estimate URL parse admission");
+        drop(value);
+        let body_capacity = body.to_vec().capacity();
+        let decode_charge = body_capacity + bound;
+        let limit = body_capacity + LLSD_SCAN_WORKING_BYTES.max(bound) + parse_estimate;
+        let budget = capability_response_budget(limit);
+        let raw_memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_capacity).expect("admit raw response");
+        let response = match admit_seed_capability_decode(response(body, raw_memory)) {
+            Ok(response) => response,
+            Err(error) => panic!("valid seed response should be admitted: {error}"),
+        };
+        let available_before_url = limit - decode_charge;
+        assert!(
+            budget.try_reserve(http::ResponseMemoryClass::Ordinary, available_before_url).is_ok(),
+            "the scanner workspace is returned before decoding"
+        );
+        assert!(
+            budget.try_reserve(http::ResponseMemoryClass::Ordinary, available_before_url + 1).is_err(),
+            "the response permit holds raw input and the LLSD allocation bound before URL parsing"
+        );
+
+        let (mut capabilities, mut memory) =
+            decode_seed_capabilities(response, &names).unwrap_or_else(|_| panic!("admitted seed response decodes"));
+        let map_retained = capability_map_retained_memory_estimate(&capabilities);
+        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit - map_retained).expect("decoded map is charged"));
+        assert!(
+            budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit - map_retained + 1).is_err(),
+            "the response permit is reduced to the retained capability map"
+        );
+
+        let endpoint = capabilities.remove("Texture").expect("seed response includes Texture");
+        assert_eq!(endpoint.url.as_str(), "https://cap.example/texture");
+        drop(capabilities);
+        let endpoint_retained = url_retained_memory_estimate(&endpoint.url, endpoint.input_bytes);
+        memory.as_mut().expect("admitted response memory").shrink_to(endpoint_retained);
+        assert!(
+            budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit - endpoint_retained).is_ok(),
+            "only the decoded endpoint remains charged after its response map is dropped"
+        );
+        assert!(
+            budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit - endpoint_retained + 1).is_err(),
+            "the endpoint charge remains held until ownership is released"
+        );
+        drop(endpoint);
+        drop(memory);
+        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("seed endpoint admission returns after drop"));
+    }
+
+    #[test]
+    fn seed_url_parse_admission_exhaustion_returns_memory() {
+        let body = b"<llsd><map><key>Texture</key><uri>https://cap.example/texture</uri></map></llsd>";
+        let names = vec!["Texture".to_owned()];
+        let value = decode_capability_values(body).expect("decode seed response for URL admission estimate");
+        let parse_estimate = capability_url_parse_memory_estimate(&value, &names).expect("estimate URL parse admission");
+        drop(value);
+        let bound = xml::value_allocation_bound(body, seed_capability_llsd_limits()).expect("valid seed response bound");
+        let body_capacity = body.to_vec().capacity();
+        let limit = body_capacity + LLSD_SCAN_WORKING_BYTES.max(bound) + parse_estimate - 1;
+        let budget = capability_response_budget(limit);
+        let raw_memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body_capacity).expect("admit raw response");
+        let response = match admit_seed_capability_decode(response(body, raw_memory)) {
+            Ok(response) => response,
+            Err(error) => panic!("admit LLSD decoding before URL parsing: {error}"),
+        };
+        let scanner_excess = LLSD_SCAN_WORKING_BYTES.saturating_sub(bound);
+        let scanner_charge = budget
+            .try_reserve(http::ResponseMemoryClass::Ordinary, scanner_excess)
+            .expect("keep scanner headroom unavailable to URL parsing");
+
+        let error = match decode_seed_capabilities(response, &names) {
+            Err(error) => error,
+            Ok(_) => panic!("URL parsing should fail when its admission estimate is unavailable"),
+        };
+
+        assert!(matches!(error, LookupError::Http { transient: false, .. }));
+        drop(scanner_charge);
+        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("URL admission failure returns all response memory"));
+    }
+
+    #[test]
+    fn malformed_seed_body_releases_admission() {
+        let body = b"<llsd><map></llsd>";
+        let limit = body.len() + LLSD_SCAN_WORKING_BYTES + 1024;
+        let budget = capability_response_budget(limit);
+        let raw_memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body.len()).expect("admit malformed response");
+
+        let error = match admit_seed_capability_decode(response(body, raw_memory)) {
+            Err(error) => error,
+            Ok(_) => panic!("malformed XML should fail allocation preflight"),
+        };
+
+        assert!(error.to_string().contains("response allocation preflight failed"));
+        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("malformed response admission is returned"));
+    }
+
+    #[test]
+    fn seed_capability_preflight_enforces_seed_body_limit() {
+        let oversized_body = vec![b' '; MAX_SEED_CAPABILITY_RESPONSE_BYTES + 1];
+        let limit = oversized_body.len() + LLSD_SCAN_WORKING_BYTES;
+        let budget = capability_response_budget(limit);
+        let raw_memory =
+            budget.try_reserve(http::ResponseMemoryClass::Ordinary, oversized_body.len()).expect("admit oversized response fixture");
+
+        let error = match admit_seed_capability_decode(response(&oversized_body, raw_memory)) {
+            Err(error) => error,
+            Ok(_) => panic!("an oversized seed response should fail allocation preflight"),
+        };
+
+        assert!(error.to_string().contains("input bytes limit exceeded"), "{error}");
+        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("oversized response admission is returned"));
+    }
+
+    #[test]
+    fn seed_decode_exhaustion_releases_admission() {
+        let body = b"<llsd><map><key>Texture</key><uri>https://cap.example/texture</uri></map></llsd>";
+        let bound = xml::value_allocation_bound(body, seed_capability_llsd_limits()).expect("valid seed response bound");
+        let limit = body.len() + LLSD_SCAN_WORKING_BYTES.max(bound) - 1;
+        let budget = capability_response_budget(limit);
+        let raw_memory = budget.try_reserve(http::ResponseMemoryClass::Ordinary, body.len()).expect("admit raw response");
+
+        let error = match admit_seed_capability_decode(response(body, raw_memory)) {
+            Err(error) => error,
+            Ok(_) => panic!("decode should be rejected when allocation admission is unavailable"),
+        };
+
+        assert!(matches!(error, LookupError::Http { transient: false, .. }));
+        drop(budget.try_reserve(http::ResponseMemoryClass::Ordinary, limit).expect("failed decode admission is returned"));
+    }
+
+    #[tokio::test]
+    async fn cancel_before_admission_uses_no_slot() {
+        let budget = CapabilityBudget::new();
+        let clients = (0..4)
+            .map(|_| {
+                Client::new_with_status_and_budget(
+                    Url::parse("http://127.0.0.1:9/seed").expect("seed URL"),
+                    NetworkStatusHandle::default(),
+                    budget.clone(),
+                )
+                .expect("active Tokio runtime")
+            })
+            .collect::<Vec<_>>();
+        let url = CapabilityUrl::parse("http://127.0.0.1:9/post").expect("capability URL");
+        let payload = Value::String("request".into());
+
+        for client in &clients {
+            let mut request = Box::pin(client.post(&url, &payload));
+            assert!(poll_fn(|context| Poll::Ready(request.as_mut().poll(context))).await.is_pending());
+            drop(request);
+        }
+
+        yield_now().await;
+        assert_eq!(budget.ordinary_requests.available_permits(), MAX_CONCURRENT_CAPABILITY_REQUESTS);
+        assert!(clients.iter().all(|client| client.commands.capacity() == COMMAND_CAPACITY));
+    }
+
+    #[tokio::test]
+    async fn deadline_covers_admission_wait() {
+        let budget = CapabilityBudget::new();
+        let client = Client::new_with_status_and_budget(
+            Url::parse("http://127.0.0.1:9/seed").expect("seed URL"),
+            NetworkStatusHandle::default(),
+            budget.clone(),
+        )
+        .expect("active Tokio runtime")
+        .with_request_timeout(Duration::from_millis(30));
+        let url = CapabilityUrl::parse("http://127.0.0.1:9/capability").expect("capability URL");
+        let held = Arc::clone(&budget.ordinary_requests)
+            .acquire_many_owned(MAX_CONCURRENT_CAPABILITY_REQUESTS as u32)
+            .await
+            .expect("hold every ordinary request slot");
+        let started = Instant::now();
+
+        let error = client.get_bytes(&url).await.expect_err("a request waiting for admission must hit its deadline");
+
+        assert!(matches!(
+            &error,
+            Error::CapabilityHttp(http::Error::Timeout { elapsed, status: None, .. })
+                if elapsed.as_millis() >= 20 && *elapsed < Duration::from_millis(500)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500), "the admission wait should be bounded by the configured deadline");
+        assert_eq!(budget.ordinary_requests.available_permits(), 0);
+        drop(held);
+        assert_eq!(budget.ordinary_requests.available_permits(), MAX_CONCURRENT_CAPABILITY_REQUESTS);
     }
 }

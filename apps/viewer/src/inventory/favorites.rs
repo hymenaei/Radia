@@ -11,6 +11,7 @@ use network::{
 };
 use protocol::login::{self, ResponseData};
 use serde::{Deserialize, Serialize};
+use utils::RegionId;
 use uuid::Uuid;
 use world::RegionHandle;
 
@@ -36,12 +37,25 @@ pub struct FavoriteLocation {
 
 #[derive(Clone, Debug)]
 pub struct FavoriteLandmark {
-    pub name: String,
-    pub region_id: Option<Uuid>,
-    pub local_pos: Option<[f64; 3]>,
-    pub global_pos: Option<[f64; 3]>,
+    name: String,
+    destination: LandmarkDestination,
+}
 
-    pub region_handle: Option<u64>,
+impl FavoriteLandmark {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn destination(&self) -> LandmarkDestination {
+        self.destination
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LandmarkDestination {
+    Global([f64; 3]),
+    Region { id: RegionId, position: [f64; 3] },
+    RegionHandle { handle: RegionHandle, position: [f64; 3] },
 }
 
 #[derive(Clone, Debug)]
@@ -83,42 +97,26 @@ pub async fn load_favorites(
     let folder_id = favorite_folder_id(login_data)?;
     let landmarks = fetch_favorite_landmarks(capabilities, session.agent_id, folder_id).await?;
     let resolved = stream::iter(landmarks.into_iter().map(|landmark| async move {
-        let (region_name, position) = if let Some(global_pos) = landmark.global_pos {
-            let Some((cell, position)) = global_position(global_pos) else {
-                return Ok(None);
-            };
-            let region_name = region_lookup
-                .lookup_region_at(cell)
-                .await
-                .map_err(|error| format!("Could not look up a favorite landmark region: {error}"))?;
-            (region_name, position)
-        } else {
-            let Some(position) = landmark.local_pos else {
-                return Ok(None);
-            };
-            let region_name = if let Some(handle) = landmark.region_handle {
-                let origin = RegionHandle::new(handle).origin();
+        let (region_name, position) = match landmark.destination {
+            LandmarkDestination::Global(position) => {
+                let Some((cell, position)) = global_position(position) else {
+                    return Ok(None);
+                };
+                (region_lookup.lookup_region_at(cell).await, position)
+            }
+            LandmarkDestination::RegionHandle { handle, position } => {
+                let origin = handle.origin();
                 let Some(cell) = RegionGridCell::containing(origin.x, origin.y) else {
                     return Ok(None);
                 };
                 if map_request_coordinates(cell).is_none() {
                     return Ok(None);
                 }
-                region_lookup
-                    .lookup_region_at(cell)
-                    .await
-                    .map_err(|error| format!("Could not look up a favorite landmark region: {error}"))?
-            } else {
-                let Some(region_id) = landmark.region_id else {
-                    return Ok(None);
-                };
-                region_lookup
-                    .lookup_region_by_id(region_id)
-                    .await
-                    .map_err(|error| format!("Could not look up a favorite landmark region: {error}"))?
-            };
-            (region_name, position)
+                (region_lookup.lookup_region_at(cell).await, position)
+            }
+            LandmarkDestination::Region { id, position } => (region_lookup.lookup_region_by_id(id.uuid()).await, position),
         };
+        let region_name = region_name.map_err(|error| format!("Could not look up a favorite landmark region: {error}"))?;
         Ok(favorite_location(landmark.name, region_name, position))
     }))
     .buffer_unordered(REGION_LOOKUP_CONCURRENCY)
@@ -351,25 +349,23 @@ fn parse_landmark_asset(name: &str, bytes: &[u8]) -> Option<FavoriteLandmark> {
         }
     }
 
-    match version {
-        "Landmark version 1" => Some(FavoriteLandmark {
-            name: name.to_owned(),
-            region_id: None,
-            local_pos: None,
-            global_pos: fields.get("global_pos").or_else(|| fields.get("global_position")).and_then(|parts| parse_position(parts)),
-            region_handle: None,
-        })
-        .filter(|landmark| landmark.global_pos.is_some()),
-        "Landmark version 2" => Some(FavoriteLandmark {
-            name: name.to_owned(),
-            region_id: fields.get("region_id").and_then(|parts| parts.first()).and_then(|value| Uuid::parse_str(value).ok()),
-            local_pos: fields.get("local_pos").and_then(|parts| parse_position(parts)),
-            global_pos: None,
-            region_handle: fields.get("region_handle").and_then(|parts| parts.first()).and_then(|value| parse_region_handle(value)),
-        })
-        .filter(|landmark| (landmark.region_id.is_some() || landmark.region_handle.is_some()) && landmark.local_pos.is_some()),
-        _ => None,
-    }
+    let destination = match version {
+        "Landmark version 1" => {
+            let position = fields.get("global_pos").or_else(|| fields.get("global_position")).and_then(|parts| parse_position(parts))?;
+            LandmarkDestination::Global(position)
+        }
+        "Landmark version 2" => {
+            let position = fields.get("local_pos").and_then(|parts| parse_position(parts))?;
+            if let Some(handle) = fields.get("region_handle").and_then(|parts| parts.first()).and_then(|value| parse_region_handle(value)) {
+                LandmarkDestination::RegionHandle { handle: RegionHandle::new(handle), position }
+            } else {
+                let id = fields.get("region_id").and_then(|parts| parts.first()).and_then(|value| Uuid::parse_str(value).ok())?;
+                LandmarkDestination::Region { id: RegionId::new(id), position }
+            }
+        }
+        _ => return None,
+    };
+    Some(FavoriteLandmark { name: name.to_owned(), destination })
 }
 
 fn parse_position(parts: &[&str]) -> Option<[f64; 3]> {
@@ -439,9 +435,11 @@ fn string_field(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use llsd::{Map, Value};
+    use utils::RegionId;
     use uuid::Uuid;
+    use world::RegionHandle;
 
-    use super::{InventoryItem, RegionGridCell, global_position, parse_landmark_asset, parse_position};
+    use super::{InventoryItem, LandmarkDestination, RegionGridCell, global_position, parse_landmark_asset, parse_position};
 
     fn inventory_item(inventory_type: Value, asset_type: Value) -> InventoryItem {
         let value = Value::Map(Map::from([
@@ -474,10 +472,27 @@ mod tests {
 
         let landmark = parse_landmark_asset("Home", asset.as_bytes()).expect("region handle identifies the region");
 
-        assert_eq!(landmark.region_id, None);
-        assert_eq!(landmark.region_handle, Some(handle));
-        assert_eq!(landmark.local_pos, Some([128.0, 64.0, 30.0]));
+        assert_eq!(
+            landmark.destination(),
+            LandmarkDestination::RegionHandle { handle: RegionHandle::new(handle), position: [128.0, 64.0, 30.0] }
+        );
         assert!(parse_landmark_asset("Unlocated", b"Landmark version 2\nlocal_pos <128, 64, 30>\n").is_none());
+        assert!(parse_landmark_asset("Unpositioned", b"Landmark version 2\nregion_handle 0\n").is_none());
+    }
+
+    #[test]
+    fn region_reference_precedence() {
+        let id = Uuid::from_u128(42);
+        let position = [128.0, 64.0, 30.0];
+        for (handle, expected) in [
+            ("region_handle 512", LandmarkDestination::RegionHandle { handle: RegionHandle::new(512), position }),
+            ("region_handle invalid", LandmarkDestination::Region { id: RegionId::new(id), position }),
+            ("", LandmarkDestination::Region { id: RegionId::new(id), position }),
+        ] {
+            let asset = format!("Landmark version 2\nregion_id {id}\n{handle}\nlocal_pos <128, 64, 30>\n");
+            let landmark = parse_landmark_asset("Home", asset.as_bytes()).expect("at least one valid region reference");
+            assert_eq!(landmark.destination(), expected, "{handle:?}");
+        }
     }
 
     #[test]

@@ -234,9 +234,13 @@ mod tests {
 
     #[test]
     fn headers_and_work_are_bounded() {
-        assert!(matches!(Decoder::new(b'7', &[8, 1, 16, b'L']), Err(Error::UnsupportedLayer)));
-        assert!(matches!(Decoder::new(b'L', &[8, 1, 32, b'L']), Err(Error::UnsupportedPatchSize)));
-        assert!(matches!(Decoder::new(b'L', &[0; MAX_BYTES + 1]), Err(Error::PayloadLimit)));
+        for (case, actual, expected) in [
+            ("unsupported layer", Decoder::new(b'7', &[8, 1, 16, b'L']).map(|_| ()), Err(Error::UnsupportedLayer)),
+            ("unsupported patch size", Decoder::new(b'L', &[8, 1, 32, b'L']).map(|_| ()), Err(Error::UnsupportedPatchSize)),
+            ("payload limit", Decoder::new(b'L', &[0; MAX_BYTES + 1]).map(|_| ()), Err(Error::PayloadLimit)),
+        ] {
+            assert_eq!(actual, expected, "reject {case}");
+        }
         let patch = "00000000 00000000 00000000 10000000 01111111 00001000 00000000 00000000 00 10 ";
         let data = payload(&patch.repeat(MAX_PATCHES + 1));
         let mut layer = Decoder::new(b'L', &data).unwrap();

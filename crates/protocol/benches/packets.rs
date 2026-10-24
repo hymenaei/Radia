@@ -1,8 +1,12 @@
 use std::hint::black_box;
 
-use criterion::{BenchmarkGroup, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main, measurement::WallTime};
+use criterion::{BenchmarkGroup, BenchmarkId, Criterion, Throughput, measurement::WallTime};
 use protocol::lludp::{Message, MessageId, Packet};
 use test_support::{lludp::vectors, parse_hex_fixture};
+
+pub fn bench(c: &mut Criterion) {
+    bench_packets(c);
+}
 
 fn fixture(hex: &str) -> Vec<u8> {
     parse_hex_fixture(hex).expect("valid packet fixture")
@@ -63,6 +67,3 @@ fn bench_packets(c: &mut Criterion) {
     });
     rejections.finish();
 }
-
-criterion_group!(benches, bench_packets);
-criterion_main!(benches);

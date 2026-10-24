@@ -3,6 +3,7 @@ name = "protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autobenches = false
 
 [lints]
 workspace = true
@@ -14,7 +15,6 @@ dxr = { workspace = true, features = ["i8"] }
 md-5.workspace = true
 quick-xml.workspace = true
 math.workspace = true
-tracing.workspace = true
 
 [build-dependencies]
 sha2.workspace = true
@@ -26,5 +26,5 @@ proptest.workspace = true
 test-support.workspace = true
 
 [[bench]]
-name = "packets"
+name = "main"
 harness = false

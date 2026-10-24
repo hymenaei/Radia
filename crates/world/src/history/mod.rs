@@ -171,8 +171,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        Appearance, FaceAppearance, FieldUpdate, Kind, LocalAddress, ObjectObservation, ObjectPatch, Pose, PropertiesPatch, RegionInfo,
-        RegionOutcome, RenderMaterials, SculptFlags, Shape, SurfaceAppearance, UpdateSource, WorldLimits,
+        Appearance, FaceAppearance, FieldUpdate, Kind, LocalAddress, ObjectObservation, ObjectPatch, PbrMaterialAssignments, Pose,
+        PropertiesPatch, RegionInfo, RegionOutcome, SculptFlags, Shape, SurfaceAppearance, UpdateSource, WorldLimits,
     };
     use utils::AssetId;
 
@@ -343,8 +343,11 @@ mod tests {
         assert_region_revision(world.adopt_region(region).unwrap().outcome);
         let added = world.observe_object(observation(region, 1, 280, 1)).unwrap();
         let ApplyOutcome::Introduced(entity) = added.outcome else { panic!("expected object introduction") };
-        let appearance =
-            SurfaceAppearance::new(FaceAppearance { texture_id: Uuid::from_u128(281), ..FaceAppearance::default() }, Vec::new()).unwrap();
+        let appearance = SurfaceAppearance::new(
+            FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(281))), ..FaceAppearance::default() },
+            Vec::new(),
+        )
+        .unwrap();
 
         let applied = world
             .patch_object(ObjectPatch {
@@ -364,17 +367,17 @@ mod tests {
     }
 
     #[test]
-    fn render_material_changes_emit_appearance() {
+    fn pbr_material_changes_emit_appearance() {
         let region = Region::new(28);
         let mut world = World::new(limits(4));
         assert_region_revision(world.adopt_region(region).unwrap().outcome);
         let added = world.observe_object(observation(region, 1, 282, 1)).unwrap();
         let ApplyOutcome::Introduced(entity) = added.outcome else { panic!("expected object introduction") };
-        let materials = RenderMaterials::new(vec![(3, AssetId::new(Uuid::from_u128(283)))]).unwrap();
+        let materials = PbrMaterialAssignments::new(vec![(3, AssetId::new(Uuid::from_u128(283)))]).unwrap();
 
         let applied = world
             .patch_object(ObjectPatch {
-                render_materials: Some(materials),
+                pbr_materials: Some(materials),
                 ..ObjectPatch::new(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap())
             })
             .unwrap();

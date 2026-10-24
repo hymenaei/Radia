@@ -302,7 +302,11 @@ pub(super) fn schedule_recovery_requests(
     if let Some(dropped) = overflow_warning {
         tracing::warn!(dropped, "some object recovery targets could not be queued");
     }
-    let _ = wake_sender.try_send(());
+    match wake_sender.try_send(()) {
+        Ok(()) => {}
+        Err(error) if error.is_full() => {}
+        Err(error) => tracing::trace!(%error, "object recovery receiver closed"),
+    }
 }
 
 pub(super) async fn run_recovery_retries(

@@ -1,11 +1,8 @@
-use tracing::Span;
-
-use crate::{
-    lludp::{AllocationStrategy, LLUdpError, Message, MessageId, zero_code},
-    schema,
+use crate::lludp::{
+    AllocationStrategy, LLUdpError, Message, MessageId,
+    packet::{HEADER_BYTES, MAX_LLUDP_PACKET_SIZE, MAX_PACKET_RETAINED_CAPACITY_BYTES, Packet, PacketFlags, PacketHeader, ZeroCoding},
+    zero_code,
 };
-
-use super::{HEADER_BYTES, MAX_LLUDP_PACKET_SIZE, MAX_PACKET_RETAINED_CAPACITY_BYTES, Packet, PacketFlags, PacketHeader, ZeroCoding};
 
 pub struct PacketFrame<'a> {
     sequence: u32,
@@ -139,24 +136,10 @@ impl PreflightedPacketFrame<'_> {
         self.preflight
     }
 
-    #[tracing::instrument(
-        name = "protocol.packet.decode",
-        level = "debug",
-        skip_all,
-        fields(
-            datagram_bytes = self.datagram_len(),
-            sequence = tracing::field::Empty,
-            reliable = tracing::field::Empty,
-            message = tracing::field::Empty
-        )
-    )]
     pub fn decode(self) -> Result<Packet, LLUdpError> {
         let Self { frame, preflight, message_id_len, decoded_body_len } = self;
         let flags = frame.flags;
         let sequence = frame.sequence;
-        Span::current().record("sequence", sequence);
-        Span::current().record("reliable", flags.contains(PacketFlags::RELIABLE));
-
         let decode_payload = |message_bytes: &[u8]| Message::decode(preflight.message_id, &message_bytes[message_id_len..]);
         let (message, trailing_message_bytes) = if flags.contains(PacketFlags::ZEROCODED) {
             let mut decoded_body = Vec::with_capacity(decoded_body_len);
@@ -165,9 +148,6 @@ impl PreflightedPacketFrame<'_> {
         } else {
             decode_payload(frame.wire_body)?
         };
-        let message_name = schema::find_by_id(preflight.message_id).map_or("Unknown", |metadata| metadata.name);
-        Span::current().record("message", message_name);
-
         let mut appended_acks = Vec::with_capacity(frame.appended_ack_bytes.len() / 4);
         appended_acks.extend(frame.appended_acks());
         let packet = Packet {
@@ -181,13 +161,6 @@ impl PreflightedPacketFrame<'_> {
             return Err(LLUdpError::DecodedPacketTooLarge);
         }
         Ok(packet)
-    }
-
-    fn datagram_len(&self) -> usize {
-        6 + self.frame.extra_header.len()
-            + self.frame.wire_body.len()
-            + self.frame.appended_ack_bytes.len()
-            + usize::from(self.frame.flags.contains(PacketFlags::APPENDED_ACKS))
     }
 }
 
@@ -277,7 +250,7 @@ mod tests {
                 frame.wire_body.to_vec()
             };
             let (id, id_len) = MessageId::decode(&message_bytes).expect("decode fixture message ID");
-            let metadata = schema::find_by_id(id).expect("typed fixture has generated schema");
+            let metadata = crate::schema::find_by_id(id).expect("typed fixture has generated schema");
             let schema_bound = crate::lludp::schema_message::SchemaMessage::allocation_bound(metadata, &message_bytes[id_len..])
                 .expect("generated schema bounds typed message body");
             let packet = Packet::decode(&bytes).expect("decode typed fixture");

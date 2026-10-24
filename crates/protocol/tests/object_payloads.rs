@@ -1,3 +1,5 @@
+use std::assert_matches;
+
 use protocol::messages::object;
 use protocol::{
     LLUdpError,
@@ -25,7 +27,7 @@ fn assert_reencodes(packet: &Packet, bytes: &[u8]) {
 }
 
 #[test]
-fn object_extra_params_validates_param_size() {
+fn parameter_size_mismatches_fail() {
     let (bytes, packet) = decode(vectors::OBJECT_EXTRA_PARAMS);
     let Message::ObjectExtraParams(message) = packet.message() else {
         panic!("expected ObjectExtraParams");
@@ -40,26 +42,19 @@ fn object_extra_params_validates_param_size() {
     );
     assert_reencodes(&packet, &bytes);
 
-    let mut mismatched_size = bytes;
-    let local_id_offset = unique_offset(&mismatched_size, &0x0102_0304_u32.to_le_bytes());
-    let parameter_size_offset = local_id_offset + 7;
-    mismatched_size[parameter_size_offset..parameter_size_offset + 4].copy_from_slice(&17_u32.to_le_bytes());
-    assert!(matches!(Packet::decode(&mismatched_size), Err(LLUdpError::InvalidMessage)));
-}
-
-#[test]
-fn object_extra_params_checks_clear_size() {
-    let message = ObjectExtraParams {
+    let cleared = ObjectExtraParams {
         agent_id: Uuid::nil(),
         session_id: Uuid::nil(),
         object_data: vec![ExtraParamUpdate { local_id: 0x0102_0304, parameter_type: 0x0080, in_use: false, data: vec![1] }],
     };
-    let bytes = Packet::new(1, Message::ObjectExtraParams(message)).with_zero_coding(false).encode().expect("encode clear message");
-    let mut mismatched_size = bytes;
-    let local_id_offset = unique_offset(&mismatched_size, &0x0102_0304_u32.to_le_bytes());
-    let parameter_size_offset = local_id_offset + 7;
-    mismatched_size[parameter_size_offset..parameter_size_offset + 4].copy_from_slice(&2_u32.to_le_bytes());
-    assert!(matches!(Packet::decode(&mismatched_size), Err(LLUdpError::InvalidMessage)));
+    let cleared = Packet::new(1, Message::ObjectExtraParams(cleared)).with_zero_coding(false).encode().expect("encode clear message");
+
+    for (case, mut bytes, invalid_size) in [("in-use", bytes, 17_u32), ("clear", cleared, 2_u32)] {
+        let local_id_offset = unique_offset(&bytes, &0x0102_0304_u32.to_le_bytes());
+        let size_offset = local_id_offset + 7;
+        bytes[size_offset..size_offset + 4].copy_from_slice(&invalid_size.to_le_bytes());
+        assert_matches!(Packet::decode(&bytes), Err(LLUdpError::InvalidMessage), "reject {case} size mismatch");
+    }
 }
 
 #[test]
@@ -75,11 +70,10 @@ fn extra_params_respect_variable1_limit() {
         object_data: vec![ExtraParamUpdate { local_id: 1, parameter_type: 0x0080, in_use: true, data }],
     };
 
-    let fourteen_bindings = Packet::new(1, Message::ObjectExtraParams(update(parameter_data(14)))).with_zero_coding(false).encode();
-    assert!(fourteen_bindings.is_ok(), "14 bindings fit ObjectExtraParams ParamData Variable 1");
-
-    let fifteen_bindings = Packet::new(1, Message::ObjectExtraParams(update(parameter_data(15)))).with_zero_coding(false).encode();
-    assert!(matches!(fifteen_bindings, Err(LLUdpError::VariableFieldTooLong)));
+    for (count, expected) in [(14, Ok(())), (15, Err(LLUdpError::VariableFieldTooLong))] {
+        let result = Packet::new(1, Message::ObjectExtraParams(update(parameter_data(count)))).with_zero_coding(false).encode().map(|_| ());
+        assert_eq!(result, expected, "ObjectExtraParams with {count} bindings");
+    }
 }
 
 #[test]
@@ -87,11 +81,7 @@ fn texture_entry_paths_enforce_bounds() {
     let payload = vec![0; 47];
     let regular_limit = vec![0; object::MAX_TEXTURE_ENTRY_BYTES];
     assert!(object::decode_texture_entry(&regular_limit).unwrap().is_some());
-    assert_eq!(object::decode_texture_entry(&vec![0; object::MAX_TEXTURE_ENTRY_BYTES + 1]), Err(LLUdpError::InvalidMessage));
-
-    let compressed_limit = vec![0; object::MAX_TEXTURE_ENTRY_BYTES];
-    assert!(object::decode_texture_entry(&compressed_limit).unwrap().is_some());
-    assert_eq!(object::decode_texture_entry(&vec![0; object::MAX_TEXTURE_ENTRY_BYTES + 1]), Err(LLUdpError::InvalidMessage));
+    assert_matches!(object::decode_texture_entry(&vec![0; object::MAX_TEXTURE_ENTRY_BYTES + 1]), Err(LLUdpError::InvalidMessage));
 
     let binary_data = |payload: &[u8]| {
         let mut field = Vec::with_capacity(payload.len() + 4);
@@ -103,9 +93,9 @@ fn texture_entry_paths_enforce_bounds() {
     assert_eq!(terse_limit.len(), improved_terse_object_update::MAX_TEXTURE_ENTRY_FIELD_BYTES);
     assert!(improved_terse_object_update::decode_texture_entry(&terse_limit).unwrap().is_some());
     assert!(improved_terse_object_update::decode_texture_entry(&binary_data(&payload)).unwrap().is_some());
-    assert_eq!(
+    assert_matches!(
         improved_terse_object_update::decode_texture_entry(&vec![0; improved_terse_object_update::MAX_TEXTURE_ENTRY_FIELD_BYTES + 1]),
         Err(LLUdpError::InvalidMessage)
     );
-    assert_eq!(improved_terse_object_update::decode_texture_entry(&binary_data(&vec![0; 1021])), Err(LLUdpError::InvalidMessage));
+    assert_matches!(improved_terse_object_update::decode_texture_entry(&binary_data(&vec![0; 1021])), Err(LLUdpError::InvalidMessage));
 }

@@ -1,6 +1,9 @@
+#[cfg(test)]
+use std::slice::from_ref;
+#[cfg(test)]
+use std::sync;
 use std::{
-    fmt,
-    mem::take,
+    fmt, mem,
     net::SocketAddr,
     str::from_utf8,
     sync::{
@@ -23,7 +26,8 @@ use tokio::{
 use super::budget::{MAX_CONCURRENT_EVENT_QUEUES, MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES};
 use super::{
     budget::{
-        LLSD_SCAN_WORKING_BYTES, MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_SEED_CAPABILITY_RESPONSE_BYTES, spawn_blocking_with_permit,
+        LLSD_SCAN_WORKING_BYTES, MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
+        spawn_blocking_with_permit,
     },
     request::{
         LookupError, admit_and_decode_seed_capabilities, capability_llsd_limits, decode_llsd_xml, request_capabilities_response,
@@ -37,10 +41,6 @@ use crate::{
     simulator::EventRetention,
     status::NetworkStatusHandle,
 };
-#[cfg(test)]
-use std::slice::from_ref;
-#[cfg(test)]
-use std::sync;
 
 const EVENT_QUEUE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const EVENT_QUEUE_RETRY_INCREMENT: Duration = Duration::from_secs(3);
@@ -52,9 +52,9 @@ const SEED_LOOKUP_RETRY_LIMIT: u32 = 5;
 const MAX_SEED_RETRY_AFTER: Duration = Duration::from_secs(30);
 pub(crate) const EVENT_QUEUE_NAME: &str = "EventQueueGet";
 const LINDEN_HTTP_INTERNAL_ERROR: u16 = 499;
-pub(crate) const MAX_EVENT_QUEUE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_QUEUED_CAPABILITY_EVENT_BYTES: usize = 256 * 1024;
 const MAX_EVENT_QUEUE_BATCH_EVENTS: usize = 1024;
+
 static NEXT_EVENT_QUEUE_INCARNATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,29 +70,6 @@ pub(crate) struct EventQueueTask {
     task: JoinHandle<()>,
     completion: Completion,
     role: EventQueueRoleHandle,
-}
-
-enum Completion {
-    Pending(oneshot::Receiver<EventQueueExit>),
-    Finished(EventQueueExit),
-}
-
-#[derive(Clone)]
-pub(crate) struct EventQueueRoleHandle {
-    primary: watch::Sender<bool>,
-}
-
-impl EventQueueRoleHandle {
-    pub(crate) fn channel(is_primary: bool) -> (Self, watch::Receiver<bool>) {
-        let (primary, receiver) = watch::channel(is_primary);
-        (Self { primary }, receiver)
-    }
-
-    pub(crate) fn set_primary(&self, primary: bool) {
-        if *self.primary.borrow() != primary {
-            self.primary.send_replace(primary);
-        }
-    }
 }
 
 impl EventQueueTask {
@@ -128,11 +105,176 @@ impl Drop for EventQueueTask {
     }
 }
 
+enum Completion {
+    Pending(oneshot::Receiver<EventQueueExit>),
+    Finished(EventQueueExit),
+}
+
+#[derive(Clone)]
+pub(crate) struct EventQueueRoleHandle {
+    primary: watch::Sender<bool>,
+}
+
+impl EventQueueRoleHandle {
+    pub(crate) fn channel(is_primary: bool) -> (Self, watch::Receiver<bool>) {
+        let (primary, receiver) = watch::channel(is_primary);
+        (Self { primary }, receiver)
+    }
+
+    pub(crate) fn set_primary(&self, primary: bool) {
+        if *self.primary.borrow() != primary {
+            self.primary.send_replace(primary);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RetryOutcome {
     Retry,
     Stopped,
     LimitReached,
+}
+
+struct EventQueueScope {
+    ledger: CoverageLossLedger,
+    simulator_id: SimulatorId,
+    source: CoverageSource,
+}
+
+impl Drop for EventQueueScope {
+    fn drop(&mut self) {
+        self.ledger.retire(self.simulator_id, self.source);
+    }
+}
+
+struct PendingEventQueueLoss {
+    ledger: CoverageLossLedger,
+    simulator_id: SimulatorId,
+    source: CoverageSource,
+    notifier: EventQueueLossNotifier,
+    state: PendingLossState,
+}
+
+impl PendingEventQueueLoss {
+    fn new(ledger: CoverageLossLedger, simulator_id: SimulatorId, source: CoverageSource, notifier: EventQueueLossNotifier) -> Self {
+        Self { ledger, simulator_id, source, notifier, state: PendingLossState::Pending }
+    }
+
+    fn record(&mut self) {
+        if matches!(self.state, PendingLossState::Pending) {
+            self.ledger.record(self.simulator_id, self.source, CoverageLossReason::EventQueueAdmission);
+            self.state = PendingLossState::Recorded { reason: None };
+        }
+    }
+
+    async fn notify(&mut self, reason: String) -> EventSendOutcome {
+        self.record();
+        if let PendingLossState::Recorded { reason: stored } = &mut self.state {
+            *stored = Some(reason.clone());
+        }
+        self.notifier.notify(reason).await
+    }
+
+    fn commit(&mut self) {
+        if matches!(self.state, PendingLossState::Pending) {
+            self.state = PendingLossState::Committed;
+        }
+    }
+}
+
+impl Drop for PendingEventQueueLoss {
+    fn drop(&mut self) {
+        self.record();
+        if let PendingLossState::Recorded { reason } = mem::replace(&mut self.state, PendingLossState::Committed)
+            && !self.notifier.was_notified()
+        {
+            let notifier = self.notifier.clone();
+            let reason =
+                reason.unwrap_or_else(|| "EventQueueGet polling was canceled before its response could be admitted safely.".into());
+            if let Ok(runtime) = Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = notifier.notify(reason).await;
+                });
+            }
+        }
+    }
+}
+
+enum PendingLossState {
+    Pending,
+    Committed,
+    Recorded { reason: Option<String> },
+}
+
+#[derive(Clone)]
+struct EventQueueLossNotifier {
+    events: mpsc::Sender<EventEnvelope>,
+    simulator_id: SimulatorId,
+    source: SocketAddr,
+    shutdown: watch::Receiver<bool>,
+    session_closed: watch::Receiver<bool>,
+    notified: Arc<AtomicBool>,
+}
+
+impl EventQueueLossNotifier {
+    fn new(
+        events: mpsc::Sender<EventEnvelope>,
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        shutdown: watch::Receiver<bool>,
+        session_closed: watch::Receiver<bool>,
+    ) -> Self {
+        Self { events, simulator_id, source, shutdown, session_closed, notified: Arc::new(AtomicBool::new(false)) }
+    }
+
+    async fn notify(&self, reason: String) -> EventSendOutcome {
+        if self.notified.load(Ordering::Acquire) {
+            return EventSendOutcome::Sent;
+        }
+        if *self.shutdown.borrow() || *self.session_closed.borrow() {
+            return EventSendOutcome::Shutdown;
+        }
+
+        let permit = tokio::select! {
+            biased;
+            _ = wait_for_watch_true(self.shutdown.clone()) => return EventSendOutcome::Shutdown,
+            _ = wait_for_session_close(self.session_closed.clone()) => return EventSendOutcome::Shutdown,
+            result = self.events.reserve() => match result {
+                Ok(permit) => permit,
+                Err(_) => return EventSendOutcome::ReceiverClosed,
+            },
+        };
+        if self.notified.swap(true, Ordering::AcqRel) {
+            drop(permit);
+            return EventSendOutcome::Sent;
+        }
+
+        permit.send(EventEnvelope::new(Event::EventQueueCoverageLost { simulator_id: self.simulator_id, source: self.source, reason }));
+        EventSendOutcome::Sent
+    }
+
+    fn was_notified(&self) -> bool {
+        self.notified.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+enum BatchDecodeError {
+    Preflight(xml::BoundError),
+    Resource(Error),
+    Decode(String),
+    Task(JoinError),
+}
+
+impl fmt::Display for BatchDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Preflight(error) => write!(f, "EventQueueGet response allocation preflight failed: {error}"),
+            Self::Resource(error) => write!(f, "EventQueueGet decode memory is unavailable: {error}"),
+            Self::Decode(error) => f.write_str(error),
+            Self::Task(error) => write!(f, "EventQueueGet decoder task failed: {error}"),
+        }
+    }
 }
 
 async fn wait_for_watch_true(mut watch: watch::Receiver<bool>) {
@@ -263,129 +405,11 @@ async fn reserve_event_queue_slot<'a>(
     }
 }
 
-struct EventQueueScope {
-    ledger: CoverageLossLedger,
-    simulator_id: SimulatorId,
-    source: CoverageSource,
-}
-
-impl Drop for EventQueueScope {
-    fn drop(&mut self) {
-        self.ledger.retire(self.simulator_id, self.source);
-    }
-}
-
-struct PendingEventQueueLoss {
-    ledger: CoverageLossLedger,
-    simulator_id: SimulatorId,
-    source: CoverageSource,
-    notifier: EventQueueLossNotifier,
-    resolved: bool,
-    recorded: bool,
-    reason: Option<String>,
-}
-
-impl PendingEventQueueLoss {
-    fn new(ledger: CoverageLossLedger, simulator_id: SimulatorId, source: CoverageSource, notifier: EventQueueLossNotifier) -> Self {
-        Self { ledger, simulator_id, source, notifier, resolved: false, recorded: false, reason: None }
-    }
-
-    fn record(&mut self) {
-        if !self.resolved {
-            self.ledger.record(self.simulator_id, self.source, CoverageLossReason::EventQueueAdmission);
-            self.resolved = true;
-            self.recorded = true;
-        }
-    }
-
-    async fn notify(&mut self, reason: String) -> EventSendOutcome {
-        self.record();
-        self.reason = Some(reason.clone());
-        self.notifier.notify(reason).await
-    }
-
-    fn commit(&mut self) {
-        self.resolved = true;
-    }
-}
-
-impl Drop for PendingEventQueueLoss {
-    fn drop(&mut self) {
-        if !self.resolved {
-            self.record();
-        }
-        if self.recorded && !self.notifier.was_notified() {
-            let notifier = self.notifier.clone();
-            let reason = self
-                .reason
-                .clone()
-                .unwrap_or_else(|| "EventQueueGet polling was canceled before its response could be admitted safely.".into());
-            if let Ok(runtime) = Handle::try_current() {
-                runtime.spawn(async move {
-                    let _ = notifier.notify(reason).await;
-                });
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct EventQueueLossNotifier {
-    events: mpsc::Sender<EventEnvelope>,
-    simulator_id: SimulatorId,
-    source: SocketAddr,
-    shutdown: watch::Receiver<bool>,
-    session_closed: watch::Receiver<bool>,
-    notified: Arc<AtomicBool>,
-}
-
-impl EventQueueLossNotifier {
-    fn new(
-        events: mpsc::Sender<EventEnvelope>,
-        simulator_id: SimulatorId,
-        source: SocketAddr,
-        shutdown: watch::Receiver<bool>,
-        session_closed: watch::Receiver<bool>,
-    ) -> Self {
-        Self { events, simulator_id, source, shutdown, session_closed, notified: Arc::new(AtomicBool::new(false)) }
-    }
-
-    async fn notify(&self, reason: String) -> EventSendOutcome {
-        if self.notified.load(Ordering::Acquire) {
-            return EventSendOutcome::Sent;
-        }
-        if *self.shutdown.borrow() || *self.session_closed.borrow() {
-            return EventSendOutcome::Shutdown;
-        }
-
-        let permit = tokio::select! {
-            biased;
-            _ = wait_for_watch_true(self.shutdown.clone()) => return EventSendOutcome::Shutdown,
-            _ = wait_for_session_close(self.session_closed.clone()) => return EventSendOutcome::Shutdown,
-            result = self.events.reserve() => match result {
-                Ok(permit) => permit,
-                Err(_) => return EventSendOutcome::ReceiverClosed,
-            },
-        };
-        if self.notified.swap(true, Ordering::AcqRel) {
-            drop(permit);
-            return EventSendOutcome::Sent;
-        }
-
-        permit.send(EventEnvelope::new(Event::EventQueueCoverageLost { simulator_id: self.simulator_id, source: self.source, reason }));
-        EventSendOutcome::Sent
-    }
-
-    fn was_notified(&self) -> bool {
-        self.notified.load(Ordering::Acquire)
-    }
-}
-
 fn allocate_event_queue_incarnation() -> Option<u64> {
     NEXT_EVENT_QUEUE_INCARNATION.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1)).ok()
 }
 
-#[tracing::instrument(name = "capabilities.event_queue", level = "debug", skip_all)]
+#[tracing::instrument(name = "capabilities.event_queue", level = "debug", skip_all, fields(simulator = simulator_id.get()), ret)]
 pub(super) async fn run_event_queue(
     simulator_id: SimulatorId,
     source: SocketAddr,
@@ -639,7 +663,6 @@ pub(super) async fn run_event_queue(
                         }
                         let Some(next_batch_order) = batch_order.checked_add(1) else {
                             pending_loss.record();
-                            pending_loss.commit();
                             status.record_error("EventQueue batch-order counter exhausted; polling stopped.");
                             drop(batch_reservation);
                             drop(batch);
@@ -808,7 +831,6 @@ async fn post_event_queue_inner(
             client
                 .post_operation_bounded_classified_with_extra(
                     "event_queue",
-                    Some(EVENT_QUEUE_NAME),
                     url,
                     "application/llsd+xml",
                     Some("application/llsd+xml"),
@@ -822,7 +844,6 @@ async fn post_event_queue_inner(
             client
                 .post_operation_bounded_classified(
                     "event_queue",
-                    Some(EVENT_QUEUE_NAME),
                     url,
                     "application/llsd+xml",
                     Some("application/llsd+xml"),
@@ -878,25 +899,6 @@ pub(super) fn event_batch_allocation_bound(body: &[u8]) -> Result<usize, xml::Bo
         .and_then(|bytes| bytes.checked_add(capability_event_batch_retained_size(&[], 0)))
         .ok_or(xml::BoundError::Overflow)?;
     bound.checked_add(conversion).ok_or(xml::BoundError::Overflow)
-}
-
-#[derive(Debug)]
-enum BatchDecodeError {
-    Preflight(xml::BoundError),
-    Resource(Error),
-    Decode(String),
-    Task(JoinError),
-}
-
-impl fmt::Display for BatchDecodeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Preflight(error) => write!(f, "EventQueueGet response allocation preflight failed: {error}"),
-            Self::Resource(error) => write!(f, "EventQueueGet decode memory is unavailable: {error}"),
-            Self::Decode(error) => f.write_str(error),
-            Self::Task(error) => write!(f, "EventQueueGet decoder task failed: {error}"),
-        }
-    }
 }
 
 pub(crate) fn decode_event_batch(body: &[u8]) -> Result<(i32, Vec<CapabilityEvent>), String> {
@@ -957,13 +959,13 @@ fn llsd_heap_size(value: &mut Value) -> usize {
     match value {
         Value::String(value) => value.capacity(),
         Value::Uri(uri) => {
-            let text = take(uri).into_string();
+            let text = mem::take(uri).into_string();
             let capacity = text.capacity();
             *uri = Uri::from(text);
             capacity
         }
         Value::Binary(binary) => {
-            let bytes = take(binary).into_vec();
+            let bytes = mem::take(binary).into_vec();
             let capacity = bytes.capacity();
             *binary = Binary::from(bytes);
             capacity
@@ -1038,6 +1040,7 @@ async fn retry_event_queue_with_hint(
 
     pending_loss.commit();
     let delay = event_queue_retry_delay_with_hint(*error_count, retry_after);
+    tracing::debug!(attempt = *error_count, delay_ms = delay.as_millis(), "retrying event queue poll");
     *error_count += 1;
     wait_for_retry(delay, shutdown, session_closed).await
 }
@@ -1074,6 +1077,7 @@ async fn retry_seed_capability_lookup(
 
     *retries += 1;
     let delay = seed_retry_delay(*retries, retry_after);
+    tracing::debug!(attempt = *retries, delay_ms = delay.as_millis(), "retrying event queue discovery");
     wait_for_retry(delay, shutdown, session_closed).await
 }
 
@@ -1141,586 +1145,5 @@ pub(crate) fn seed_retry_delay(retry_count: u32, retry_after: Option<Duration>) 
 }
 
 #[cfg(test)]
-mod lifecycle_tests {
-    use super::*;
-    use std::{future::Future, net::SocketAddr};
-    use tokio::task::yield_now;
-    use tokio::time::timeout;
-
-    const TEST_TIMEOUT: Duration = Duration::from_secs(2);
-
-    #[tokio::test]
-    async fn completion_survives_cancelled_polling_and_repeated_reads() {
-        for exit in [Some(EventQueueExit::StoppedWithCoverageLoss), None] {
-            let (completed, completion) = oneshot::channel();
-            let (role, _) = EventQueueRoleHandle::channel(true);
-            let mut task = EventQueueTask::new(tokio::spawn(async {}), completion, role);
-            tokio::select! {
-                biased;
-                exit = task.completion() => panic!("completion is not ready: {exit:?}"),
-                _ = async {} => {},
-            }
-
-            if let Some(exit) = exit {
-                completed.send(exit).expect("completion receiver survives polling cancellation");
-            } else {
-                drop(completed);
-            }
-            let expected = exit.unwrap_or(EventQueueExit::TaskFailed);
-            assert_eq!(task.completion().await, expected);
-            assert_eq!(task.completion().await, expected);
-            assert_eq!(task.wait().await, expected);
-        }
-    }
-
-    #[tokio::test]
-    async fn cancelling_wait_aborts_the_worker_after_completion_is_reported() {
-        use std::{
-            future::pending,
-            pin::pin,
-            task::{Context, Waker},
-        };
-
-        let (worker_lifetime, worker_dropped) = oneshot::channel::<()>();
-        let worker = tokio::spawn(async move {
-            let _lifetime = worker_lifetime;
-            pending::<()>().await;
-        });
-        let (completed, completion) = oneshot::channel();
-        completed.send(EventQueueExit::Stopped).expect("report completion before the worker exits");
-        let (role, _) = EventQueueRoleHandle::channel(true);
-        let task = EventQueueTask::new(worker, completion, role);
-        {
-            let mut wait = pin!(task.wait());
-            assert!(wait.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-        }
-
-        assert!(timeout(TEST_TIMEOUT, worker_dropped).await.expect("cancelled wait must abort its worker").is_err());
-    }
-
-    #[test]
-    fn poll_retry_after_hint_is_bounded() {
-        assert_eq!(event_queue_retry_delay_with_hint(2, None), Duration::from_secs(7));
-        assert_eq!(event_queue_retry_delay_with_hint(2, Some(Duration::from_secs(5))), Duration::from_secs(5));
-        assert_eq!(event_queue_retry_delay_with_hint(2, Some(Duration::from_secs(90))), Duration::from_secs(30));
-    }
-
-    async fn close_while_pending<F>(future: F, session_closed: &watch::Sender<bool>) -> RetryOutcome
-    where
-        F: Future<Output = RetryOutcome>,
-    {
-        tokio::pin!(future);
-        tokio::select! {
-            biased;
-            outcome = &mut future => return outcome,
-            _ = yield_now() => {}
-        }
-        session_closed.send_replace(true);
-        timeout(TEST_TIMEOUT, &mut future).await.expect("session close cancels retry")
-    }
-
-    #[tokio::test]
-    async fn poll_backoff_stops_when_session_closes() {
-        let (events, _received) = mpsc::channel(1);
-        let (_shutdown, mut shutdown) = watch::channel(false);
-        let (session_closed, session_closed_receiver) = watch::channel(false);
-        let mut error_count = 0;
-
-        assert_eq!(
-            close_while_pending(
-                retry_event_queue(
-                    SimulatorId::new(1),
-                    &mut error_count,
-                    SocketAddr::from(([127, 0, 0, 1], 0)),
-                    &events,
-                    "poll failed".into(),
-                    &mut shutdown,
-                    &session_closed_receiver,
-                ),
-                &session_closed,
-            )
-            .await,
-            RetryOutcome::Stopped
-        );
-    }
-
-    #[tokio::test]
-    async fn seed_backoff_stops_when_session_closes() {
-        let (events, _received) = mpsc::channel(1);
-        let (_shutdown, mut shutdown) = watch::channel(false);
-        let (session_closed, session_closed_receiver) = watch::channel(false);
-        let mut retries = 0;
-
-        assert_eq!(
-            close_while_pending(
-                retry_seed_capability_lookup(
-                    SimulatorId::new(1),
-                    &mut retries,
-                    SocketAddr::from(([127, 0, 0, 1], 0)),
-                    &events,
-                    "seed lookup failed".into(),
-                    Some(Duration::from_secs(30)),
-                    &mut shutdown,
-                    &session_closed_receiver,
-                ),
-                &session_closed,
-            )
-            .await,
-            RetryOutcome::Stopped
-        );
-    }
-
-    #[tokio::test]
-    async fn poll_limit_notification_stops_when_session_closes() {
-        let (events, mut received) = mpsc::channel(1);
-        events.try_send(EventEnvelope::new(Event::Failed("occupy event channel".into()))).expect("fill event channel");
-        let (_shutdown, mut shutdown) = watch::channel(false);
-        let (session_closed, session_closed_receiver) = watch::channel(false);
-        let mut error_count = MAX_EVENT_QUEUE_ERRORS;
-
-        assert_eq!(
-            close_while_pending(
-                retry_event_queue(
-                    SimulatorId::new(1),
-                    &mut error_count,
-                    SocketAddr::from(([127, 0, 0, 1], 0)),
-                    &events,
-                    "poll failed".into(),
-                    &mut shutdown,
-                    &session_closed_receiver,
-                ),
-                &session_closed,
-            )
-            .await,
-            RetryOutcome::Stopped
-        );
-        assert!(matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_))));
-    }
-
-    #[tokio::test]
-    async fn seed_limit_notification_stops_when_session_closes() {
-        let (events, mut received) = mpsc::channel(1);
-        events.try_send(EventEnvelope::new(Event::Failed("occupy event channel".into()))).expect("fill event channel");
-        let (_shutdown, mut shutdown) = watch::channel(false);
-        let (session_closed, session_closed_receiver) = watch::channel(false);
-        let mut retries = SEED_LOOKUP_RETRY_LIMIT;
-
-        assert_eq!(
-            close_while_pending(
-                retry_seed_capability_lookup(
-                    SimulatorId::new(1),
-                    &mut retries,
-                    SocketAddr::from(([127, 0, 0, 1], 0)),
-                    &events,
-                    "seed lookup failed".into(),
-                    Some(Duration::from_secs(30)),
-                    &mut shutdown,
-                    &session_closed_receiver,
-                ),
-                &session_closed,
-            )
-            .await,
-            RetryOutcome::Stopped
-        );
-        assert!(matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_))));
-    }
-}
-
-#[cfg(test)]
-mod retained_size_tests {
-    use super::*;
-
-    #[test]
-    fn counts_owned_buffer_capacity() {
-        let mut uri_text = String::with_capacity(4096);
-        uri_text.push_str("uri");
-        let uri_capacity = uri_text.capacity();
-        let mut uri = Value::Uri(Uri::from(uri_text));
-        assert_eq!(llsd_heap_size(&mut uri), uri_capacity);
-        assert!(matches!(&uri, Value::Uri(value) if value.as_str() == "uri"));
-
-        let mut bytes = Vec::with_capacity(4096);
-        bytes.extend_from_slice(b"bin");
-        let binary_capacity = bytes.capacity();
-        let mut binary = Value::Binary(Binary::from(bytes));
-        assert_eq!(llsd_heap_size(&mut binary), binary_capacity);
-        assert!(matches!(&binary, Value::Binary(value) if value.as_slice() == b"bin"));
-    }
-}
-
-#[cfg(test)]
-mod event_queue_batch_tests {
-    use super::*;
-    use crate::{
-        coverage::CoverageLoss,
-        http::{ResponseMemoryBudget, ResponseMemoryClass},
-    };
-    use std::{
-        future::Future,
-        pin::pin,
-        task::{Context, Waker},
-    };
-    use tokio::{spawn, task::yield_now};
-
-    fn reserve_batch(budget: &Arc<Semaphore>) -> OwnedSemaphorePermit {
-        budget.clone().try_acquire_many_owned(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES as u32).expect("reserve one EventQueue batch")
-    }
-
-    fn source() -> CoverageSource {
-        CoverageSource::EventQueue { incarnation: 42 }
-    }
-
-    #[test]
-    fn decodes_second_life_event_body_as_message_blocks() {
-        let body = br#"<llsd><map>
-          <key>id</key><integer>9</integer>
-          <key>events</key><array><map>
-            <key>message</key><string>CrossedRegion</string>
-            <key>body</key><map>
-              <key>AgentData</key><array><map>
-                <key>AgentID</key><uuid>00000000-0000-0000-0000-000000000001</uuid>
-                <key>SessionID</key><uuid>00000000-0000-0000-0000-000000000002</uuid>
-              </map></array>
-              <key>RegionData</key><array><map>
-                <key>RegionHandle</key><binary encoding="base64">AAAAAAAAEjQ=</binary>
-                <key>SimIP</key><binary encoding="base64">wAACCg==</binary>
-                <key>SimPort</key><integer>13000</integer>
-                <key>SeedCapability</key><uri>https://example.test/seed</uri>
-              </map></array>
-              <key>Info</key><array><map></map></array>
-            </map>
-          </map></array>
-        </map></llsd>"#;
-
-        let (id, events) = decode_event_batch(body).expect("decode EventQueue response");
-        assert_eq!(id, 9);
-        assert_eq!(events.len(), 1);
-        let Value::Map(fields) = &events[0].body else { panic!("EventQueue body is a block map") };
-        assert!(matches!(fields.get("AgentData"), Some(Value::Array(_))));
-        assert!(matches!(fields.get("RegionData"), Some(Value::Array(_))));
-        assert!(matches!(fields.get("Info"), Some(Value::Array(_))));
-        assert!(!fields.contains_key("CrossedRegion"), "message name is carried beside body, not nested inside it");
-    }
-
-    fn event(message: &str) -> CapabilityEvent {
-        let mut body = Value::Undefined;
-        let retained_bytes = queued_event_retained_size(message.len(), &mut body);
-        CapabilityEvent { message: message.into(), body, retained_bytes }
-    }
-
-    fn pending_loss(ledger: &CoverageLossLedger, simulator_id: SimulatorId) -> PendingEventQueueLoss {
-        let (events, received) = mpsc::channel(1);
-        drop(received);
-        let (_shutdown, shutdown_receiver) = watch::channel(false);
-        let (_session_closed, session_closed_receiver) = watch::channel(false);
-        let notifier = EventQueueLossNotifier::new(
-            events,
-            simulator_id,
-            SocketAddr::from(([127, 0, 0, 1], 0)),
-            shutdown_receiver,
-            session_closed_receiver,
-        );
-        PendingEventQueueLoss::new(ledger.clone(), simulator_id, source(), notifier)
-    }
-
-    async fn send_batch(
-        events: &mpsc::Sender<EventEnvelope>,
-        simulator_id: SimulatorId,
-        batch: Vec<CapabilityEvent>,
-        shutdown: &watch::Receiver<bool>,
-        session_closed: &watch::Receiver<bool>,
-        budget: &Arc<Semaphore>,
-        ledger: &CoverageLossLedger,
-    ) -> EventSendOutcome {
-        let mut pending = pending_loss(ledger, simulator_id);
-        send_event_queue_batch(
-            events,
-            simulator_id,
-            SocketAddr::from(([127, 0, 0, 1], 0)),
-            source(),
-            0,
-            batch,
-            shutdown,
-            session_closed,
-            reserve_batch(budget),
-            ledger,
-            &mut pending,
-        )
-        .await
-    }
-
-    #[test]
-    fn closed_session_or_shutdown_skips_batch_reservation() {
-        for close_session in [false, true] {
-            let budget = Arc::new(Semaphore::new(MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES));
-            let (shutdown, shutdown_receiver) = watch::channel(false);
-            let (session_closed, session_closed_receiver) = watch::channel(false);
-            if close_session {
-                session_closed.send_replace(true);
-            } else {
-                shutdown.send_replace(true);
-            }
-
-            assert!(acquire_event_batch_reservation(Arc::clone(&budget), &shutdown_receiver, &session_closed_receiver).is_none());
-            assert_eq!(budget.available_permits(), MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES);
-        }
-    }
-
-    #[tokio::test]
-    async fn cancelled_batch_records_loss_without_prefix() {
-        let (events, mut received) = mpsc::channel(1);
-        events.try_send(EventEnvelope::new(Event::Failed("occupy the event slot".into()))).expect("fill event channel");
-        let (shutdown, shutdown_receiver) = watch::channel(false);
-        let (_session_closed, session_closed_receiver) = watch::channel(false);
-        let queued_event_bytes = Arc::new(Semaphore::new(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES));
-        let ledger = CoverageLossLedger::new();
-        let changed = ledger.subscribe();
-        let mut admission = pin!(send_batch(
-            &events,
-            SimulatorId::new(1),
-            vec![event("First"), event("Second")],
-            &shutdown_receiver,
-            &session_closed_receiver,
-            &queued_event_bytes,
-            &ledger,
-        ));
-        assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-        shutdown.send_replace(true);
-        assert!(matches!(admission.await, EventSendOutcome::Shutdown));
-        let mut changed = changed;
-        changed.changed().await.expect("durable loss wakes ledger subscribers");
-        assert!(matches!(
-            ledger.snapshot().losses.as_slice(),
-            [CoverageLoss::Source(loss)]
-                if loss.watermark.source == source() && loss.reason == CoverageLossReason::EventQueueAdmission
-        ));
-        assert!(matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_))));
-        assert!(received.try_recv().is_err(), "no event from a partial batch may escape");
-        assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES);
-    }
-
-    #[tokio::test]
-    async fn dropping_waiting_batch_admission_records_loss() {
-        let (events, mut received) = mpsc::channel(1);
-        events.try_send(EventEnvelope::new(Event::Failed("occupy the event slot".into()))).expect("fill event channel");
-        let (_shutdown, shutdown_receiver) = watch::channel(false);
-        let (_session_closed, session_closed_receiver) = watch::channel(false);
-        let queued_event_bytes = Arc::new(Semaphore::new(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES));
-        let ledger = CoverageLossLedger::new();
-        {
-            let mut admission = pin!(send_batch(
-                &events,
-                SimulatorId::new(3),
-                vec![event("First"), event("Second")],
-                &shutdown_receiver,
-                &session_closed_receiver,
-                &queued_event_bytes,
-                &ledger,
-            ));
-            assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-        }
-        assert!(matches!(
-            ledger.snapshot().losses.as_slice(),
-            [CoverageLoss::Source(loss)] if loss.reason == CoverageLossReason::EventQueueAdmission
-        ));
-        assert!(matches!(received.try_recv().map(EventEnvelope::into_event), Ok(Event::Failed(_))));
-        assert!(received.try_recv().is_err(), "cancellation cannot expose a batch prefix");
-        assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES);
-    }
-
-    #[tokio::test]
-    async fn accepts_event_at_size_limit_as_one_batch_event() {
-        let (events, mut received) = mpsc::channel(1);
-        let (_shutdown, shutdown_receiver) = watch::channel(false);
-        let (_session_closed, session_closed_receiver) = watch::channel(false);
-        let queued_event_bytes = Arc::new(Semaphore::new(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES));
-        let ledger = CoverageLossLedger::new();
-        let mut at_limit = event("limit");
-        at_limit.retained_bytes = MAX_QUEUED_CAPABILITY_EVENT_BYTES;
-        let expected_bytes = capability_event_batch_retained_size(from_ref(&at_limit), 1);
-
-        assert!(matches!(
-            send_batch(
-                &events,
-                SimulatorId::new(1),
-                vec![at_limit],
-                &shutdown_receiver,
-                &session_closed_receiver,
-                &queued_event_bytes,
-                &ledger,
-            )
-            .await,
-            EventSendOutcome::Sent
-        ));
-        let envelope = received.recv().await.expect("one batch envelope");
-        assert!(matches!(
-            &envelope.event,
-            Event::CapabilityEventBatch { order: EventQueueBatchOrder { incarnation: 42, ordinal: 0 }, events, .. } if events.len() == 1
-        ));
-        assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES - expected_bytes);
-        drop(envelope);
-        assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES);
-    }
-
-    #[tokio::test]
-    async fn event_batch_admission_is_atomic() {
-        let (events, mut received) = mpsc::channel(1);
-        events.try_send(EventEnvelope::new(Event::Failed("occupied".into()))).expect("fill event channel");
-        let (_shutdown, shutdown_receiver) = watch::channel(false);
-        let (_session_closed, session_closed_receiver) = watch::channel(false);
-        let queued_event_bytes = Arc::new(Semaphore::new(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES));
-        let ledger = CoverageLossLedger::new();
-        let batch = vec![event("First"), event("Second")];
-        let expected_bytes = capability_event_batch_retained_size(&batch, batch.capacity());
-        let mut admission = pin!(send_batch(
-            &events,
-            SimulatorId::new(1),
-            batch,
-            &shutdown_receiver,
-            &session_closed_receiver,
-            &queued_event_bytes,
-            &ledger,
-        ));
-        assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-        assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES - expected_bytes);
-        assert!(matches!(received.recv().await.map(EventEnvelope::into_event), Some(Event::Failed(_))));
-        assert!(matches!(admission.await, EventSendOutcome::Sent));
-        let envelope = received.recv().await.expect("one complete batch envelope");
-        let Event::CapabilityEventBatch { events: batch, .. } = &envelope.event else {
-            panic!("the EventQueue response must be one application event")
-        };
-        assert_eq!(batch.iter().map(|event| event.message.as_str()).collect::<Vec<_>>(), ["First", "Second"]);
-        assert_eq!(
-            envelope.coverage_watermark(),
-            Some(ledger.watermark(SimulatorId::new(1), source())),
-            "the batch carries its source watermark"
-        );
-        assert!(received.try_recv().is_err(), "one batch is one Network intake item");
-        assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES - expected_bytes);
-        drop(envelope);
-        assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES);
-    }
-
-    #[test]
-    fn event_budget_retries_after_dequeue() {
-        let queued_event_bytes = Arc::new(Semaphore::new(MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES));
-        let mut reservations = Vec::with_capacity(MAX_CONCURRENT_EVENT_QUEUES);
-        for _ in 0..MAX_CONCURRENT_EVENT_QUEUES {
-            reservations.push(reserve_batch(&queued_event_bytes));
-        }
-        assert_eq!(queued_event_bytes.available_permits(), 0);
-
-        let (_shutdown, shutdown_receiver) = watch::channel(false);
-        let (_session_closed, session_closed_receiver) = watch::channel(false);
-        assert!(acquire_event_batch_reservation(Arc::clone(&queued_event_bytes), &shutdown_receiver, &session_closed_receiver).is_none());
-
-        drop(reservations.pop());
-        let permit = acquire_event_batch_reservation(Arc::clone(&queued_event_bytes), &shutdown_receiver, &session_closed_receiver)
-            .expect("released batch capacity should admit another poll");
-        assert_eq!(queued_event_bytes.available_permits(), 0);
-        drop(permit);
-        drop(reservations);
-        assert_eq!(queued_event_bytes.available_permits(), MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES);
-    }
-
-    #[tokio::test]
-    async fn receiver_close_records_loss_and_releases_batch_bytes() {
-        let (events, received) = mpsc::channel(1);
-        let (_shutdown, shutdown_receiver) = watch::channel(false);
-        let (_session_closed, session_closed_receiver) = watch::channel(false);
-        let queued_event_bytes = Arc::new(Semaphore::new(MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES));
-        let ledger = CoverageLossLedger::new();
-        events.try_send(EventEnvelope::new(Event::Failed("hold the only downstream slot".into()))).expect("fill event channel");
-        let mut admission = pin!(send_batch(
-            &events,
-            SimulatorId::new(1),
-            vec![event("test")],
-            &shutdown_receiver,
-            &session_closed_receiver,
-            &queued_event_bytes,
-            &ledger,
-        ));
-        assert!(admission.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-        drop(received);
-        assert!(matches!(admission.await, EventSendOutcome::ReceiverClosed));
-        assert!(matches!(
-            ledger.snapshot().losses.as_slice(),
-            [CoverageLoss::Source(loss)] if loss.reason == CoverageLossReason::EventQueueAdmission
-        ));
-        assert_eq!(queued_event_bytes.available_permits(), MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES);
-    }
-
-    #[tokio::test]
-    async fn exhausted_budget_skips_decode() {
-        let body = b"<llsd><map><key>id</key><integer>1</integer><key>events</key><array/></map></llsd>".to_vec();
-        let available = body.len() + LLSD_SCAN_WORKING_BYTES;
-        let budget = ResponseMemoryBudget::new(0, 0, 0, available);
-        let raw = budget.try_reserve(ResponseMemoryClass::EventQueue, body.len()).expect("reserve input");
-        let workspace = budget.try_reserve(ResponseMemoryClass::EventQueue, LLSD_SCAN_WORKING_BYTES).expect("reserve scanner");
-        let event_queues = Arc::new(Semaphore::new(1));
-        let event_queue_permit = Arc::clone(&event_queues).acquire_owned().await.expect("EventQueue slot");
-        let result = decode_admitted_event_batch_with(body, Some(raw), Some(workspace), event_queue_permit, |_| {
-            panic!("decoder must not run without memory admission")
-        })
-        .await;
-        assert!(matches!(result, Err(BatchDecodeError::Resource(_))));
-        assert_eq!(event_queues.available_permits(), 1, "decode rejection returns its EventQueue slot");
-        assert!(budget.try_reserve(ResponseMemoryClass::EventQueue, available).is_ok());
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn cancellation_holds_decode_memory() {
-        let body = b"<llsd><map><key>id</key><integer>1</integer><key>events</key><array/></map></llsd>".to_vec();
-        let decoded_bytes = event_batch_allocation_bound(&body).expect("bound valid batch");
-        let reserved_bytes = body.len() + decoded_bytes;
-        let budget = ResponseMemoryBudget::new(0, 0, 0, reserved_bytes);
-        let raw_memory = budget.try_reserve(ResponseMemoryClass::EventQueue, body.len()).expect("reserve raw response");
-        let decoded_memory = budget.try_reserve(ResponseMemoryClass::EventQueue, decoded_bytes).expect("reserve decode workspace");
-        let event_queues = Arc::new(Semaphore::new(1));
-        let event_queue_permit = Arc::clone(&event_queues).acquire_owned().await.expect("EventQueue slot");
-        let (entered, entered_rx) = oneshot::channel();
-        let (release, release_rx) = sync::mpsc::channel();
-        let task =
-            spawn(decode_admitted_event_batch_with(body, Some(raw_memory), Some(decoded_memory), event_queue_permit, move |bytes| {
-                let _ = entered.send(());
-                release_rx.recv().expect("release blocking decoder");
-                decode_event_batch(bytes)
-            }));
-
-        entered_rx.await.expect("decoder should enter before cancellation");
-        task.abort();
-        let error = match task.await {
-            Ok(_) => panic!("async decoder task should be canceled"),
-            Err(error) => error,
-        };
-        assert!(error.is_cancelled());
-        assert!(budget.try_reserve(ResponseMemoryClass::EventQueue, 1).is_err(), "both permits remain held during decoding");
-        assert_eq!(event_queues.available_permits(), 0, "cancellation cannot admit a replacement poll before decode ends");
-
-        release.send(()).expect("unblock decoder");
-        time::timeout(Duration::from_secs(1), async {
-            loop {
-                let memory_released = match budget.try_reserve(ResponseMemoryClass::EventQueue, reserved_bytes) {
-                    Ok(permit) => {
-                        drop(permit);
-                        true
-                    }
-                    Err(_) => false,
-                };
-                let event_queue_released = match Arc::clone(&event_queues).try_acquire_owned() {
-                    Ok(permit) => {
-                        drop(permit);
-                        true
-                    }
-                    Err(_) => false,
-                };
-                if memory_released && event_queue_released {
-                    break;
-                }
-                yield_now().await;
-            }
-        })
-        .await
-        .expect("decoder completion should release response memory and the EventQueue slot");
-    }
-}
+#[path = "event_queue_tests.rs"]
+mod tests;

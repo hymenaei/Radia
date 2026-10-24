@@ -7,8 +7,7 @@ use world::{
     ApplyOutcome::{Introduced, Removed, Updated},
     Entity, Kind,
     Kind::Object,
-    LinearMotion, MAX_QUERY_STATE_MAINTENANCE_WORK, MAX_WORLD_QUERY_RESULTS, MAX_WORLD_QUERY_WORK, MotionPatch, ObjectObservation,
-    ObjectPatch,
+    LinearMotion, MAX_QUERY_STATE_MAINTENANCE_WORK, MAX_WORLD_QUERY_RESULTS, MAX_WORLD_QUERY_WORK, ObjectObservation, ObjectPatch,
     OrderEvidence::Ordered,
     ParentUpdate,
     ParentUpdate::{Local, Root},
@@ -283,7 +282,7 @@ fn motion_and_scale_changes_do_not_dirty_spatial_state() {
             observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
             apply_ok(world.observe_object(observation));
         }
-        assert!(!world.maintain_query_state(4096).unwrap().has_dirty_pressure);
+        assert_eq!(world.maintain_query_state(4096).unwrap().dirty_scopes, 0);
         for (order, expected, work) in [
             (3, WorldChangeClasses::MOTION, 0),
             (4, WorldChangeClasses::SCALE, 0),
@@ -303,7 +302,7 @@ fn motion_and_scale_changes_do_not_dirty_spatial_state() {
             } else {
                 let mut patch = ObjectPatch::new(source(region, order), local_id(1));
                 patch.pose = pose;
-                patch.linear_motion = MotionPatch { velocity, acceleration: None };
+                patch.linear_motion = LinearMotion { velocity, acceleration: None };
                 patch.angular_velocity = velocity;
                 patch.scale = scale;
                 apply_ok(world.patch_object(patch));
@@ -320,7 +319,7 @@ fn motion_and_scale_changes_do_not_dirty_spatial_state() {
             assert_eq!(classes, [expected], "observation={use_observation}, order={order}");
             let step = world.maintain_query_state(4096).unwrap();
             assert_eq!(step.work_used, work, "observation={use_observation}, order={order}");
-            assert!(!step.has_dirty_pressure);
+            assert_eq!(step.dirty_scopes, 0);
             #[cfg(feature = "invariants")]
             assert_eq!(world.check_invariants(), Ok(()));
         }
@@ -347,7 +346,7 @@ fn isolated_object_repair_does_not_scan_its_region() {
         observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
         apply_ok(world.observe_object(observation));
     }
-    while world.maintain_query_state(MAX_QUERY_STATE_MAINTENANCE_WORK).unwrap().has_dirty_pressure {}
+    while world.maintain_query_state(MAX_QUERY_STATE_MAINTENANCE_WORK).unwrap().dirty_scopes > 0 {}
     for order in [33, 34] {
         let mut patch = ObjectPatch::new(source(region, order), local_id(1));
         patch.pose = Some(Pose { position: Some(Vec3::splat(order as f32)), rotation: None });
@@ -384,7 +383,7 @@ fn subtree_repair_resumes_after_relationship_changes() {
         observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
         apply_ok(world.observe_object(observation));
     }
-    assert!(!world.maintain_query_state(4096).unwrap().has_dirty_pressure);
+    assert_eq!(world.maintain_query_state(4096).unwrap().dirty_scopes, 0);
     let mut patch = ObjectPatch::new(source(region, 131), local_id(1));
     patch.pose = Some(Pose { position: Some(Vec3::splat(128.0)), rotation: None });
     apply_ok(world.patch_object(patch));
@@ -394,7 +393,7 @@ fn subtree_repair_resumes_after_relationship_changes() {
     assert_eq!(page.items.iter().map(|item| item.id()).collect::<HashSet<_>>(), HashSet::from([uuid(1001), uuid(10), uuid(20)]));
     let step = world.maintain_query_state(2).unwrap();
     assert_eq!(step.work_used, 2);
-    assert!(step.has_dirty_pressure);
+    assert_ne!(step.dirty_scopes, 0);
 
     apply_ok(world.observe_object(object(region, 132, 10, 129, Object, Root)));
     let mut child = object(region, 133, 5, 131, Object, Local(local_id(1)));
@@ -412,7 +411,7 @@ fn subtree_repair_resumes_after_relationship_changes() {
         work += step.work_used;
         #[cfg(feature = "invariants")]
         assert_eq!(world.check_invariants(), Ok(()));
-        if !step.has_dirty_pressure {
+        if step.dirty_scopes == 0 {
             done = true;
             break;
         }
@@ -445,7 +444,7 @@ fn transferring_a_dirty_root_below_a_deep_parent_clears_its_old_scope() {
             observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
             apply_ok(world.observe_object(observation));
         }
-        assert!(!world.maintain_query_state(4096).unwrap().has_dirty_pressure);
+        assert_eq!(world.maintain_query_state(4096).unwrap().dirty_scopes, 0);
         let mut patch = ObjectPatch::new(source(first, 2), local_id(1));
         patch.pose = Some(Pose { position: Some(Vec3::X), rotation: Some(Quat::IDENTITY) });
         apply_ok(world.patch_object(patch));
@@ -459,7 +458,7 @@ fn transferring_a_dirty_root_below_a_deep_parent_clears_its_old_scope() {
         #[cfg(feature = "invariants")]
         assert_eq!(world.check_invariants(), Ok(()));
         let step = world.maintain_query_state(4096).unwrap();
-        assert!(!step.has_dirty_pressure);
+        assert_eq!(step.dirty_scopes, 0);
         assert_eq!(step.work_used, 19, "only the destination region needs repair");
         #[cfg(feature = "invariants")]
         assert_eq!(world.check_invariants(), Ok(()));
@@ -481,7 +480,7 @@ fn subtree_repair_reaches_newly_resolvable_deep_descendants() {
         observation.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
         apply_ok(world.observe_object(observation));
     }
-    assert!(!world.maintain_query_state(4096).unwrap().has_dirty_pressure);
+    assert_eq!(world.maintain_query_state(4096).unwrap().dirty_scopes, 0);
     let mut patch = ObjectPatch::new(source(region, 35), local_id(1));
     patch.pose = Some(Pose { position: Some(Vec3::splat(128.0)), rotation: None });
     apply_ok(world.patch_object(patch));
@@ -491,7 +490,7 @@ fn subtree_repair_reaches_newly_resolvable_deep_descendants() {
     assert_eq!(page.items.iter().map(|item| item.id()).collect::<HashSet<_>>(), (1..=17).map(uuid).collect());
     assert_eq!(page.unresolved.objects, 17);
     assert!(page.unresolved.complete);
-    assert!(!world.maintain_query_state(4096).unwrap().has_dirty_pressure);
+    assert_eq!(world.maintain_query_state(4096).unwrap().dirty_scopes, 0);
 
     let mut root = object(region, 36, 17, 17, Object, Root);
     root.pose = Some(Pose { position: Some(Vec3::splat(256.0)), rotation: Some(Quat::IDENTITY) });
@@ -506,7 +505,7 @@ fn subtree_repair_reaches_newly_resolvable_deep_descendants() {
     for _ in 0..20 {
         let step = world.maintain_query_state(1).unwrap();
         work += step.work_used;
-        if !step.has_dirty_pressure {
+        if step.dirty_scopes == 0 {
             break;
         }
     }

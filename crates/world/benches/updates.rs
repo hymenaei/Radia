@@ -7,10 +7,9 @@ use uuid::Uuid;
 use world::{
     Appearance,
     ApplyOutcome::{IgnoredStale, Unchanged},
-    AvatarAppearanceUpdate, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance, FieldUpdate, GltfMaterialOverride,
-    GltfMaterialOverrides, MotionPatch, ObjectPatch,
+    AvatarAppearanceUpdate, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance, FieldUpdate, LinearMotion, ObjectPatch,
     ParentUpdate::Root,
-    Pose, PropertiesPatch, RenderMaterials, SurfaceAppearance,
+    PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, Pose, PropertiesPatch, SurfaceAppearance,
 };
 
 use super::support::{
@@ -186,7 +185,7 @@ fn bench_mixed(group: &mut BenchmarkGroup<'_, WallTime>) {
                 }
                 for row in &scene.rows {
                     let mut patch = ObjectPatch::new(source(row.region, row.order), row.local_id);
-                    patch.linear_motion = MotionPatch { velocity: Some(velocity), acceleration: Some(acceleration) };
+                    patch.linear_motion = LinearMotion { velocity: Some(velocity), acceleration: Some(acceleration) };
                     let _ = black_box(scene.world.patch_object(patch).expect("motion update"));
                 }
                 for row in &scene.rows {
@@ -229,21 +228,21 @@ fn bench_mixed(group: &mut BenchmarkGroup<'_, WallTime>) {
 fn content_scene() -> Scene {
     let mut scene = populated_scene(10_000, false, false);
     let surface = SurfaceAppearance::new(
-        FaceAppearance { texture_id: Uuid::from_u128(99), ..FaceAppearance::default() },
+        FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(99))), ..FaceAppearance::default() },
         vec![(1, FaceAppearance::default())],
     )
     .expect("surface appearance");
-    let materials = RenderMaterials::new(vec![(1, AssetId::new(Uuid::from_u128(100)))]).expect("material bindings");
-    let overrides = GltfMaterialOverrides::new(vec![(1, GltfMaterialOverride { roughness: Some(0.5), ..GltfMaterialOverride::default() })])
+    let materials = PbrMaterialAssignments::new(vec![(1, AssetId::new(Uuid::from_u128(100)))]).expect("material bindings");
+    let overrides = PbrMaterialOverrides::new(vec![(1, PbrMaterialOverride { roughness: Some(0.5), ..PbrMaterialOverride::default() })])
         .expect("material overrides");
     for row in &scene.rows {
         let mut patch = ObjectPatch::new(source(row.region, row.order), row.local_id);
         patch.appearance = FieldUpdate::Set(Appearance::Surface);
         patch.surface_appearance = Some(surface.clone());
-        patch.render_materials = Some(materials.clone());
+        patch.pbr_materials = Some(materials.clone());
         let _ = scene.world.patch_object(patch).expect("surface content");
         let mut patch = ObjectPatch::new(source(row.region, row.order), row.local_id);
-        patch.gltf_material_overrides = Some(overrides.clone());
+        patch.pbr_material_overrides = Some(overrides.clone());
         let _ = scene.world.patch_object(patch).expect("material overrides");
     }
     scene

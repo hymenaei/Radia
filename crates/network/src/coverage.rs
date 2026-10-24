@@ -1,5 +1,3 @@
-//! Bounded loss accounting for simulator state sources.
-
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tokio::sync::watch;
@@ -8,35 +6,25 @@ use crate::SimulatorId;
 
 const MAX_COVERAGE_SCOPES: usize = 256;
 
-/// Identifies an ordered source of simulator state within a network session.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CoverageSource {
-    /// Messages admitted from the simulator's LLUDP circuit.
     Lludp,
-    /// Messages admitted by one EventQueue poll-task incarnation.
     EventQueue { incarnation: u64 },
 }
 
-/// Source-local progress attached to an admitted event.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CoverageWatermark {
     pub simulator_id: SimulatorId,
     pub source: CoverageSource,
-    /// The latest loss generation from this source when the event was admitted.
     pub generation: u64,
-    /// The latest session-wide ledger-overflow generation when the event was admitted.
     pub overflow_generation: u64,
 }
 
-/// Why an application item from a source could not be admitted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CoverageLossReason {
     DecodeAdmission,
-    /// Packet framing or fields failed allocation preflight.
     PreflightRejected,
-    /// The decoded-memory limit or supported allocation arithmetic was exceeded.
     DecodeLimit,
-    /// Decoded storage exceeded its admitted allocation estimate, an internal defect.
     AllocationEstimateMismatch,
     DecodeRejected,
     RetainedMemoryAdmission,
@@ -45,38 +33,28 @@ pub enum CoverageLossReason {
     EventQueueAdmission,
 }
 
-/// A coalesced, unacknowledged loss from one source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CoverageLossRecord {
     pub watermark: CoverageWatermark,
-    /// Oldest source-local generation not yet acknowledged in this scope.
     pub(crate) pending_from_generation: u64,
     pub reason: CoverageLossReason,
     pub retired: bool,
 }
 
-/// A loss that must be reconciled before covered events are applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CoverageLoss {
     Source(CoverageLossRecord),
-    /// The bounded ledger could not preserve a per-source loss record.
-    /// The viewer must treat session coverage as uncertain and recover conservatively.
-    SessionOverflow {
-        generation: u64,
-    },
+    SessionOverflow { generation: u64 },
 }
 
-/// Read-only view of the losses currently awaiting acknowledgement.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CoverageSnapshot {
     pub losses: Vec<CoverageLoss>,
     pub overflow_generation: Option<u64>,
-    /// Latest session-overflow generation already acknowledged by the consumer.
     pub(crate) acknowledged_overflow_generation: u64,
     pub(crate) overflow_exhausted: bool,
 }
 
-/// Result of recording one source-local loss.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoverageRecord {
     Recorded(CoverageWatermark),
@@ -112,11 +90,6 @@ struct LedgerInner {
     changed: watch::Sender<u64>,
 }
 
-/// Shared, bounded loss accounting owned by one Network session.
-///
-/// Source losses coalesce to the latest generation per simulator/source scope. If the bounded
-/// scope table fills, the ledger records a session-wide overflow generation instead of dropping
-/// the fact that coverage was lost. Changes wake subscribers independently of the event queue.
 #[derive(Clone)]
 pub struct CoverageLossLedger {
     inner: Arc<LedgerInner>,
@@ -134,7 +107,6 @@ impl CoverageLossLedger {
         Self { inner: Arc::new(LedgerInner { state: Mutex::new(LedgerState::default()), changed }) }
     }
 
-    /// Returns the current source and ledger-overflow generations for an admitted event.
     pub(crate) fn watermark(&self, simulator_id: SimulatorId, source: CoverageSource) -> CoverageWatermark {
         let state = self.lock();
         let scope = Scope { simulator_id, source };
@@ -142,7 +114,6 @@ impl CoverageLossLedger {
         CoverageWatermark { simulator_id, source, generation, overflow_generation: state.overflow_generation }
     }
 
-    /// Records an admission loss and wakes subscribers, even when the event queue is full.
     pub(crate) fn record(&self, simulator_id: SimulatorId, source: CoverageSource, reason: CoverageLossReason) -> CoverageRecord {
         let mut state = self.lock();
         let scope = Scope { simulator_id, source };
@@ -183,7 +154,6 @@ impl CoverageLossLedger {
         outcome
     }
 
-    /// Returns pending losses without changing the ledger.
     pub fn snapshot(&self) -> CoverageSnapshot {
         let state = self.lock();
         let losses = state
@@ -214,7 +184,6 @@ impl CoverageLossLedger {
         }
     }
 
-    /// Acknowledges only the source-local generations observed by the caller.
     pub fn acknowledge(&self, watermark: CoverageWatermark) {
         let mut state = self.lock();
         let scope = Scope { simulator_id: watermark.simulator_id, source: watermark.source };
@@ -231,7 +200,6 @@ impl CoverageLossLedger {
         self.notify();
     }
 
-    /// Acknowledges only the session-overflow generation observed by the caller.
     pub fn acknowledge_overflow(&self, generation: u64) {
         let mut state = self.lock();
         if !state.overflow_exhausted && generation <= state.overflow_generation {
@@ -241,7 +209,6 @@ impl CoverageLossLedger {
         self.notify();
     }
 
-    /// Marks a source as retired, retaining any unacknowledged loss until it is acknowledged.
     pub(crate) fn retire(&self, simulator_id: SimulatorId, source: CoverageSource) {
         let mut state = self.lock();
         let scope = Scope { simulator_id, source };
@@ -256,7 +223,6 @@ impl CoverageLossLedger {
         self.notify();
     }
 
-    /// Subscribes to ledger changes independently of the bounded event queue.
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.inner.changed.subscribe()
     }

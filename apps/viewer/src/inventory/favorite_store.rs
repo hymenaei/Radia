@@ -7,6 +7,7 @@ use std::{
 use network::Grid;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_str, to_vec_pretty};
+use utils::write_atomic;
 use uuid::Uuid;
 
 use super::FavoriteLocation;
@@ -18,31 +19,6 @@ const LOGIN_LOCATIONS_FILE: &str = "login_locations.json";
 pub struct FavoriteStore {
     #[serde(default)]
     agents: Vec<AgentFavorites>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct AgentFavorites {
-    grid: StoredGrid,
-    agent_id: Uuid,
-    username: String,
-    #[serde(default)]
-    favorites: Vec<FavoriteLocation>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum StoredGrid {
-    Agni,
-    Aditi,
-}
-
-impl From<Grid> for StoredGrid {
-    fn from(grid: Grid) -> Self {
-        match grid {
-            Grid::Agni => Self::Agni,
-            Grid::Aditi => Self::Aditi,
-        }
-    }
 }
 
 impl FavoriteStore {
@@ -97,6 +73,31 @@ impl FavoriteStore {
         self.remember_agent(grid, agent_id, username);
         if let Some(agent) = self.agents.iter_mut().find(|agent| agent.grid == grid_key && agent.agent_id == agent_id) {
             agent.favorites = favorites;
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AgentFavorites {
+    grid: StoredGrid,
+    agent_id: Uuid,
+    username: String,
+    #[serde(default)]
+    favorites: Vec<FavoriteLocation>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum StoredGrid {
+    Agni,
+    Aditi,
+}
+
+impl From<Grid> for StoredGrid {
+    fn from(grid: Grid) -> Self {
+        match grid {
+            Grid::Agni => Self::Agni,
+            Grid::Aditi => Self::Aditi,
         }
     }
 }
@@ -156,14 +157,7 @@ fn save_to(path: &Path, favorites: &FavoriteStore) -> Result<(), String> {
     fs::create_dir_all(directory).map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
 
     let contents = to_vec_pretty(favorites).map_err(|error| format!("Could not encode favorite landmarks: {error}"))?;
-    let temporary_path = path.with_extension("json.tmp");
-    fs::write(&temporary_path, contents)
-        .map_err(|error| format!("Could not write login locations to {}: {error}", temporary_path.display()))?;
-    if let Err(error) = fs::rename(&temporary_path, path) {
-        let _ = fs::remove_file(&temporary_path);
-        return Err(format!("Could not save login locations to {}: {error}", path.display()));
-    }
-    Ok(())
+    write_atomic(path, &contents).map_err(|error| format!("Could not save login locations to {}: {error}", path.display()))
 }
 
 #[cfg(test)]

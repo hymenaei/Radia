@@ -18,7 +18,7 @@ use network::capabilities::Client;
 use tokio::runtime::Runtime;
 use url::Url;
 use uuid::Uuid;
-use viewer::inventory::favorites::{favorite_folder_id, fetch_favorite_landmarks};
+use viewer::inventory::favorites::{LandmarkDestination, favorite_folder_id, fetch_favorite_landmarks};
 
 const AGENT_ID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 const FAVORITES_FOLDER_ID: &str = "11111111-2222-3333-4444-555555555555";
@@ -101,8 +101,8 @@ fn landmark_asset_parsed() {
 
     let landmarks = runtime.block_on(fetch_favorite_landmarks(&capabilities, agent_id, folder_id)).expect("landmark fixture is valid");
     assert_eq!(landmarks.len(), 1);
-    assert_eq!(landmarks[0].name, "Test Landmark");
-    assert_eq!(landmarks[0].global_pos, Some([256000.0, 512000.0, 30.0]));
+    assert_eq!(landmarks[0].name(), "Test Landmark");
+    assert_eq!(landmarks[0].destination(), LandmarkDestination::Global([256000.0, 512000.0, 30.0]));
 
     let requests = server.finish();
     assert_eq!(requests.len(), 3);
@@ -172,7 +172,7 @@ fn landmark_fetches_are_bounded_and_keep_folder_order() {
     let landmarks = landmarks.expect("landmark fixtures are valid");
     assert_eq!(landmarks.len(), ASSET_COUNT);
     for (index, landmark) in landmarks.iter().enumerate() {
-        assert_eq!(landmark.name, format!("Landmark {index:02}"));
+        assert_eq!(landmark.name(), format!("Landmark {index:02}"));
     }
 
     assert_eq!(requests.len(), ASSET_COUNT + 2);

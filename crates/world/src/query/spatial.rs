@@ -464,7 +464,6 @@ enum DirtyTask {
 pub struct QueryStateMaintenance {
     pub work_used: usize,
     pub dirty_scopes: usize,
-    pub has_dirty_pressure: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -657,8 +656,7 @@ impl World {
         let expired = self.recent.purge_expired(Instant::now(), work_limit - work_used);
         work_used = work_used.saturating_add(expired);
 
-        let dirty_scopes = self.spatial.dirty_scope_count();
-        Ok(QueryStateMaintenance { work_used, dirty_scopes, has_dirty_pressure: dirty_scopes > 0 })
+        Ok(QueryStateMaintenance { work_used, dirty_scopes: self.spatial.dirty_scope_count() })
     }
 }
 
@@ -717,11 +715,10 @@ mod tests {
         let repaired = world.maintain_query_state(1).expect("bounded maintenance");
         assert_eq!(repaired.work_used, 1);
         assert_eq!(repaired.dirty_scopes, 0);
-        assert!(!repaired.has_dirty_pressure);
 
         let idle = world.maintain_query_state(1).expect("maintenance after repair");
         assert_eq!(idle.work_used, 0);
-        assert!(!idle.has_dirty_pressure);
+        assert_eq!(idle.dirty_scopes, 0);
     }
 
     #[test]

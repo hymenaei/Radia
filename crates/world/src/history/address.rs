@@ -13,7 +13,7 @@ use crate::World;
 #[cfg(feature = "invariants")]
 use crate::object::storage::ObjectStore;
 use crate::update::Stamp;
-use crate::{Applied, ApplyOutcome, DeferredReason, LocalAddress, Recovery, Region, WorldLimits};
+use crate::{Applied, ApplyOutcome, DeferredReason, LocalAddress, Region, WorldLimits};
 
 #[derive(Debug, Default)]
 pub(crate) struct Tombstones {
@@ -149,47 +149,22 @@ impl World {
     pub(crate) fn preflight_address(&self, address: LocalAddress, id: Uuid, stamp: Stamp) -> Option<Applied> {
         if let Some(entity) = self.entity_at(address) {
             let record = self.store.record(entity).expect("address index contains a live entity");
-            if record.id != id && stamp <= record.state.binding.fence() {
-                let mut applied = Applied::unchanged();
-                applied.outcome = ApplyOutcome::IgnoredStale;
-                return Some(applied);
-            }
-            return None;
+            return (record.id != id && stamp <= record.state.binding.fence()).then(|| Applied::new(ApplyOutcome::IgnoredStale));
         }
         if let Some(tombstone) = self.tombstones.get(&address) {
-            if stamp <= *tombstone {
-                let mut applied = Applied::unchanged();
-                applied.outcome = ApplyOutcome::IgnoredStale;
-                return Some(applied);
-            }
-            return None;
+            return (stamp <= *tombstone).then(|| Applied::new(ApplyOutcome::IgnoredStale));
         }
-        if self.floors.get(&address.region).is_some_and(|floor| stamp <= *floor) {
-            return Some(Applied::deferred(
-                DeferredReason::AmbiguousOrder,
-                Recovery::from_targets(vec![address], self.limits.max_recovery_targets),
-            ));
-        }
-        None
+        self.floors.get(&address.region).is_some_and(|floor| stamp <= *floor).then(|| self.defer(DeferredReason::AmbiguousOrder, address))
     }
 
     pub(crate) fn unknown_address(&self, address: LocalAddress, stamp: Stamp) -> Applied {
-        if let Some(tombstone) = self.tombstones.get(&address) {
-            if stamp <= *tombstone {
-                return Applied::unchanged();
+        match self.tombstones.get(&address) {
+            Some(tombstone) if stamp <= *tombstone => Applied::unchanged(),
+            None if self.floors.get(&address.region).is_some_and(|floor| stamp <= *floor) => {
+                self.defer(DeferredReason::AmbiguousOrder, address)
             }
-            return Applied::deferred(
-                DeferredReason::UnknownObject,
-                Recovery::from_targets(vec![address], self.limits.max_recovery_targets),
-            );
+            Some(_) | None => self.defer(DeferredReason::UnknownObject, address),
         }
-        if self.floors.get(&address.region).is_some_and(|floor| stamp <= *floor) {
-            return Applied::deferred(
-                DeferredReason::AmbiguousOrder,
-                Recovery::from_targets(vec![address], self.limits.max_recovery_targets),
-            );
-        }
-        Applied::deferred(DeferredReason::UnknownObject, Recovery::from_targets(vec![address], self.limits.max_recovery_targets))
     }
 }
 

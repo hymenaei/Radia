@@ -1,45 +1,33 @@
 use super::error::LLUdpError;
 use math::{Quat, Vec3};
 
-/// LLUDP message frequency determines the on-wire message-ID width.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Frequency {
-    /// Message numbers 1 through 0xfe use one byte.
     High,
-    /// Message numbers 1 through 0xfe follow the 0xff prefix byte.
     Medium,
-    /// Message numbers 1 through 0xfff9 follow two 0xff bytes and use two big-endian bytes.
     Low,
-    /// IDs 0xffff_fffa through 0xffff_ffff use four big-endian bytes.
     Fixed,
 }
 
-/// A template message ID, represented without its frequency prefix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MessageId {
-    /// Frequency prefix that selects the encoded message-ID width.
     pub frequency: Frequency,
-    /// Message number within `frequency`, before wire encoding.
     pub number: u32,
 }
 
 impl MessageId {
-    /// Creates a high-frequency ID; encoding requires `1..=0xfe`.
     pub const fn high(number: u32) -> Self {
         Self { frequency: Frequency::High, number }
     }
 
-    /// Creates a medium-frequency ID; encoding requires `1..=0xfe`.
     pub const fn medium(number: u32) -> Self {
         Self { frequency: Frequency::Medium, number }
     }
 
-    /// Creates a low-frequency ID; encoding requires `1..=0xfff9`.
     pub const fn low(number: u32) -> Self {
         Self { frequency: Frequency::Low, number }
     }
 
-    /// Creates a fixed ID; encoding requires `0xffff_fffa..=0xffff_ffff`.
     pub const fn fixed(number: u32) -> Self {
         Self { frequency: Frequency::Fixed, number }
     }
@@ -166,31 +154,20 @@ mod tests {
     }
 }
 
-/// Chat values defined by the Second Life message template.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChatType {
-    /// Wire value `0`.
     Whisper,
-    /// Wire value `1`.
     Normal,
-    /// Wire value `2`.
     Shout,
-    /// Wire value `3`.
     Say,
-    /// Wire value `4`.
     StartTyping,
-    /// Wire value `5`.
     StopTyping,
-    /// Wire value `6`.
     Debug,
-    /// Wire value `8`.
     OwnerSay,
-    /// An unrecognized wire value, preserved for round trips.
     Unknown(u8),
 }
 
 impl ChatType {
-    /// Converts a template byte, preserving unknown values.
     pub const fn from_wire(value: u8) -> Self {
         match value {
             0 => Self::Whisper,
@@ -205,7 +182,6 @@ impl ChatType {
         }
     }
 
-    /// Returns the template byte, including the original value for `Unknown`.
     pub const fn to_wire(self) -> u8 {
         match self {
             Self::Whisper => 0,
@@ -221,21 +197,15 @@ impl ChatType {
     }
 }
 
-/// Origin values for ChatFromSimulator messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ChatSourceType {
-    /// Wire value `0`, for system-originated chat.
     System,
-    /// Wire value `1`, for agent-originated chat.
     Agent,
-    /// Wire value `2`, for object-originated chat.
     Object,
-    /// An unrecognized wire value, preserved for round trips.
     Unknown(u8),
 }
 
 impl ChatSourceType {
-    /// Converts a source-type byte, preserving unknown values.
     pub const fn from_wire(value: u8) -> Self {
         match value {
             0 => Self::System,
@@ -245,7 +215,6 @@ impl ChatSourceType {
         }
     }
 
-    /// Returns the source-type byte, including the original value for `Unknown`.
     pub const fn to_wire(self) -> u8 {
         match self {
             Self::System => 0,
@@ -256,21 +225,15 @@ impl ChatSourceType {
     }
 }
 
-/// Audibility values for ChatFromSimulator messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Audible {
-    /// Wire value `255`, meaning the sound cannot be heard.
     Not,
-    /// Wire value `0`, meaning the sound is barely audible.
     Barely,
-    /// Wire value `1`, meaning the sound is fully audible.
     Fully,
-    /// An unrecognized wire value, preserved for round trips.
     Unknown(u8),
 }
 
 impl Audible {
-    /// Converts an audibility byte, preserving unknown values.
     pub const fn from_wire(value: u8) -> Self {
         match value {
             u8::MAX => Self::Not,
@@ -280,7 +243,6 @@ impl Audible {
         }
     }
 
-    /// Returns the audibility byte, including the original value for `Unknown`.
     pub const fn to_wire(self) -> u8 {
         match self {
             Self::Not => u8::MAX,

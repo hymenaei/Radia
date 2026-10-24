@@ -1,5 +1,7 @@
 Run commands from the repository root unless stated otherwise. Windows is the primary development platform; use WSL2 for Linux builds and fuzzing. Tool versions are not pinned.
 
+Network HTTPS uses Reqwest 0.13 with rustls and aws-lc. Building aws-lc requires a C/C++ compiler. Windows x86-64 assembly uses NASM when available or the crate's enabled prebuilt objects. The selected non-FIPS build does not require CMake, bindgen, or Go. See the [aws-lc-rs build guide](https://github.com/aws/aws-lc-rs#build) for supported toolchains. Certificate verification follows the operating system trust configuration.
+
 ## Development
 
 ```bash
@@ -8,6 +10,10 @@ cargo check --workspace --all-targets
 cargo build --workspace --locked
 cargo build --workspace --release --locked
 cargo build -p <crate>
+cargo build -p viewer --bin viewer
+
+# Run Radia
+cargo run -p viewer --bin viewer
 
 # Build diagnostics
 cargo build --workspace --timings
@@ -93,7 +99,7 @@ cargo +nightly fuzz add <target>
 - Failures: `fuzz/artifacts/<target>/`
 - Coverage: `fuzz/coverage/<target>/`
 
-Corpus inputs are reused across runs. Back up the corpus before minimization. Use sanitized LLUDP fixtures as seeds; never commit raw captures.
+Corpus inputs are reused across runs. Back up the corpus before minimization. Use sanitized LLUDP fixtures as seeds; remove private session data before committing fixtures.
 
 Dictionaries contain protocol-specific byte sequences that guide mutations. Create and commit curated dictionaries using verified protocol constants. Pass `-dict=<file-path>` explicitly when running with a dictionary.
 

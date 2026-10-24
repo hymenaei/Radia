@@ -3,61 +3,47 @@ use std::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
-use protocol::lludp::Packet;
 #[cfg(test)]
 use std::sync::Arc;
+
 use tokio::net::UdpSocket;
 #[cfg(test)]
 use tokio::sync::{Notify, watch};
 
-use crate::{capture::CaptureRecorder, status::NetworkStatusHandle};
+use crate::status::NetworkStatusHandle;
 
 const MAX_IPV4_UDP_PAYLOAD: usize = u16::MAX as usize - 20 - 8;
 const MAX_IPV6_UDP_PAYLOAD: usize = u16::MAX as usize - 8;
 
+#[cfg(test)]
+pub(crate) struct SendGate {
+    pub(crate) paused: watch::Receiver<bool>,
+    pub(crate) entered: Arc<Notify>,
+}
+
 pub(crate) struct UdpTransport {
     socket: UdpSocket,
     max_payload_size: usize,
-    local_address: SocketAddr,
-    remote_address: SocketAddr,
-    circuit_id: u32,
-    capture: Option<CaptureRecorder>,
     status: NetworkStatusHandle,
     #[cfg(test)]
     send_gate: Option<SendGate>,
 }
 
-#[cfg(test)]
-pub(crate) struct SendGate {
-    paused: watch::Receiver<bool>,
-    entered: Arc<Notify>,
-}
-
 impl UdpTransport {
     #[cfg(test)]
     pub(crate) async fn connect(address: SocketAddr) -> Result<Self, String> {
-        Self::connect_with_status(address, 0, None, NetworkStatusHandle::default()).await
+        Self::connect_with_status(address, NetworkStatusHandle::default()).await
     }
 
-    pub(crate) async fn connect_with_status(
-        address: SocketAddr,
-        circuit_id: u32,
-        capture: Option<CaptureRecorder>,
-        status: NetworkStatusHandle,
-    ) -> Result<Self, String> {
+    pub(crate) async fn connect_with_status(address: SocketAddr, status: NetworkStatusHandle) -> Result<Self, String> {
         let socket = UdpSocket::bind(local_bind_address(address))
             .await
             .map_err(|error| format!("Could not open the simulator connection: {error}"))?;
         socket.connect(address).await.map_err(|error| format!("Could not reach the simulator: {error}"))?;
         let max_payload_size = if address.is_ipv4() { MAX_IPV4_UDP_PAYLOAD } else { MAX_IPV6_UDP_PAYLOAD };
-        let local_address = socket.local_addr().map_err(|error| format!("Could not inspect the simulator connection: {error}"))?;
         Ok(Self {
             socket,
             max_payload_size,
-            local_address,
-            remote_address: address,
-            circuit_id,
-            capture,
             status,
             #[cfg(test)]
             send_gate: None,
@@ -76,10 +62,6 @@ impl UdpTransport {
         self.send_gate = Some(send_gate);
     }
 
-    #[tracing::instrument(
-        name = "network.udp.socket_send", level = "debug", skip_all,
-        fields(datagram_bytes = bytes.len())
-    )]
     #[cfg(test)]
     pub(crate) async fn send(&self, bytes: &[u8]) -> Result<(), io::Error> {
         if bytes.len() > self.max_payload_size {
@@ -98,9 +80,6 @@ impl UdpTransport {
             return Err(io::Error::new(ErrorKind::WriteZero, "UDP socket sent an incomplete datagram."));
         }
         self.status.note_udp_sent();
-        if let Some(capture) = &self.capture {
-            capture.udp(self.circuit_id, "out", self.local_address, self.remote_address, bytes);
-        }
         Ok(())
     }
 
@@ -132,9 +111,6 @@ impl UdpTransport {
             return Err(io::Error::new(ErrorKind::WriteZero, "UDP socket sent an incomplete datagram."));
         }
         self.status.note_udp_sent();
-        if let Some(capture) = &self.capture {
-            capture.udp(self.circuit_id, "out", self.local_address, self.remote_address, bytes);
-        }
         Ok(())
     }
 
@@ -142,12 +118,6 @@ impl UdpTransport {
         let received = self.socket.recv(buffer).await?;
         self.status.note_udp_received();
         Ok(received)
-    }
-
-    pub(crate) fn record_received(&self, bytes: &[u8], packet: Option<&Packet>) {
-        if let Some(capture) = &self.capture {
-            capture.received_udp(self.circuit_id, self.remote_address, bytes, packet);
-        }
     }
 }
 
@@ -243,9 +213,9 @@ mod tests {
     fn ipv6_is_disabled(error: &io::Error) -> bool {
         match error.raw_os_error() {
             #[cfg(target_os = "linux")]
-            Some(97) => true, // EAFNOSUPPORT
+            Some(97) => true,
             #[cfg(windows)]
-            Some(10047) => true, // WSAEAFNOSUPPORT
+            Some(10047) => true,
             #[cfg(any(
                 target_os = "macos",
                 target_os = "ios",
@@ -256,7 +226,7 @@ mod tests {
                 target_os = "solaris",
                 target_os = "illumos"
             ))]
-            Some(47) => true, // EAFNOSUPPORT
+            Some(47) => true,
             _ => false,
         }
     }

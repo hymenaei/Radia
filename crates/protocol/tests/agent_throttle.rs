@@ -34,17 +34,14 @@ fn fixture_message() -> AgentThrottle {
 }
 
 #[test]
-fn agent_throttle_preserves_bit_rates_in_wire_order() {
+fn throttle_keeps_wire_rates() {
     let expected = parse_hex_fixture(vectors::AGENT_THROTTLE).expect("valid AgentThrottle fixture");
     let packet = Packet::new(3, fixture_message().into()).with_reliable().with_zero_coding(false);
 
     assert_eq!(packet.encode().expect("encode AgentThrottle"), expected);
     let decoded = Packet::decode(&expected).expect("decode AgentThrottle fixture");
     assert_eq!(decoded.message(), &Message::AgentThrottle(fixture_message()));
-}
 
-#[test]
-fn agent_throttle_encodes_bits_per_second() {
     let mut message = fixture_message();
     message.throttle.throttles.resend_bits_per_second = 8_192.0;
     let encoded = Packet::new(3, message.into()).with_reliable().with_zero_coding(false).encode().expect("encode AgentThrottle");
@@ -53,16 +50,17 @@ fn agent_throttle_encodes_bits_per_second() {
 }
 
 #[test]
-fn agent_throttle_rejects_invalid_rate_shape_and_values() {
+fn throttle_rejects_invalid_rates() {
     let mut short_rates = parse_hex_fixture(vectors::AGENT_THROTTLE).expect("valid AgentThrottle fixture");
     short_rates[50] = 4;
-    assert_eq!(Packet::decode(&short_rates), Err(LLUdpError::InvalidMessage));
-
     let mut nan_rate = parse_hex_fixture(vectors::AGENT_THROTTLE).expect("valid AgentThrottle fixture");
     nan_rate[51..55].copy_from_slice(&f32::NAN.to_le_bytes());
-    assert_eq!(Packet::decode(&nan_rate), Err(LLUdpError::InvalidMessage));
+
+    for (case, bytes) in [("short vector", short_rates), ("non-finite rate", nan_rate)] {
+        assert_eq!(Packet::decode(&bytes), Err(LLUdpError::InvalidMessage), "reject {case}");
+    }
 
     let mut negative_rate = fixture_message();
     negative_rate.throttle.throttles.resend_bits_per_second = -1.0;
-    assert_eq!(Packet::new(3, negative_rate.into()).encode(), Err(LLUdpError::InvalidMessage));
+    assert_eq!(Packet::new(3, negative_rate.into()).encode(), Err(LLUdpError::InvalidMessage), "reject negative rate");
 }

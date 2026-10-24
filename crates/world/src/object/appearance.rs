@@ -3,12 +3,14 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
+use math::UvTransform;
 use utils::AssetId;
 use uuid::Uuid;
 
+use crate::FieldUpdate;
+
 pub const MAX_SURFACE_FACES: usize = 45;
-pub const MAX_RENDER_MATERIAL_BINDINGS: usize = MAX_SURFACE_FACES;
-pub const GLTF_TEXTURE_INFO_COUNT: usize = 4;
+pub const MAX_PBR_MATERIAL_BINDINGS: usize = MAX_SURFACE_FACES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Appearance {
@@ -16,47 +18,66 @@ pub enum Appearance {
     Avatar,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextureMapping {
+    #[default]
+    Default,
+    Planar,
+    Unsupported(u8),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FaceAppearance {
-    pub texture_id: Uuid,
+    pub texture: Option<AssetId>,
     pub color: [u8; 4],
-    pub scale_s: f32,
-    pub scale_t: f32,
-    pub offset_s: f32,
-    pub offset_t: f32,
-    pub rotation: f32,
-    pub bump_shiny_fullbright: u8,
-    pub media_texgen: u8,
+    pub transform: UvTransform,
+    pub bump: u8,
+    pub shiny: u8,
+    pub fullbright: bool,
+    pub mapping: TextureMapping,
+    pub media: bool,
     pub glow: f32,
-    pub material_id: Uuid,
+    pub material: Option<AssetId>,
 }
 
 impl Default for FaceAppearance {
     fn default() -> Self {
         Self {
-            texture_id: Uuid::nil(),
+            texture: None,
             color: [u8::MAX; 4],
-            scale_s: 1.0,
-            scale_t: 1.0,
-            offset_s: 0.0,
-            offset_t: 0.0,
-            rotation: 0.0,
-            bump_shiny_fullbright: 0,
-            media_texgen: 0,
+            transform: UvTransform::default(),
+            bump: 0,
+            shiny: 0,
+            fullbright: false,
+            mapping: TextureMapping::Default,
+            media: false,
             glow: 0.0,
-            material_id: Uuid::nil(),
+            material: None,
         }
     }
 }
 
 impl FaceAppearance {
-    fn has_finite_values(self) -> bool {
-        self.scale_s.is_finite()
-            && self.scale_t.is_finite()
-            && self.offset_s.is_finite()
-            && self.offset_t.is_finite()
-            && self.rotation.is_finite()
-            && self.glow.is_finite()
+    fn validate(self) -> Result<(), SurfaceAppearanceError> {
+        if !self.transform.is_finite() || !self.glow.is_finite() {
+            return Err(SurfaceAppearanceError::NonFiniteValue);
+        }
+        if self.texture.is_some_and(|id| id.uuid().is_nil() || id.uuid() == Uuid::max()) {
+            return Err(SurfaceAppearanceError::InvalidValue("texture"));
+        }
+        if self.material.is_some_and(|id| id.uuid().is_nil()) {
+            return Err(SurfaceAppearanceError::InvalidValue("material"));
+        }
+        if self.bump > 31 {
+            return Err(SurfaceAppearanceError::InvalidValue("bump"));
+        }
+        if self.shiny > 3 {
+            return Err(SurfaceAppearanceError::InvalidValue("shiny"));
+        }
+        if matches!(self.mapping, TextureMapping::Unsupported(0 | 1)) {
+            return Err(SurfaceAppearanceError::InvalidValue("mapping"));
+        }
+        Ok(())
     }
 }
 
@@ -68,11 +89,12 @@ pub struct SurfaceAppearance {
 
 impl SurfaceAppearance {
     pub fn new(default_face: FaceAppearance, mut overrides: Vec<(u8, FaceAppearance)>) -> Result<Self, SurfaceAppearanceError> {
-        if !default_face.has_finite_values() || overrides.iter().any(|(_, face)| !face.has_finite_values()) {
-            return Err(SurfaceAppearanceError::NonFiniteValue);
-        }
         if overrides.len() > MAX_SURFACE_FACES {
             return Err(SurfaceAppearanceError::TooManyOverrides);
+        }
+        default_face.validate()?;
+        for (_, face) in &overrides {
+            face.validate()?;
         }
         if let Some((index, _)) = overrides.iter().find(|(index, _)| usize::from(*index) >= MAX_SURFACE_FACES) {
             return Err(SurfaceAppearanceError::FaceIndexOutOfRange(*index));
@@ -109,7 +131,7 @@ impl SurfaceAppearance {
     }
 
     pub(crate) fn heap_bytes(&self) -> usize {
-        self.overrides.capacity() * size_of::<(u8, FaceAppearance)>()
+        self.overrides.len() * size_of::<(u8, FaceAppearance)>()
     }
 }
 
@@ -119,6 +141,7 @@ pub enum SurfaceAppearanceError {
     DuplicateFaceIndex(u8),
     TooManyOverrides,
     NonFiniteValue,
+    InvalidValue(&'static str),
 }
 
 impl Display for SurfaceAppearanceError {
@@ -128,6 +151,7 @@ impl Display for SurfaceAppearanceError {
             Self::DuplicateFaceIndex(index) => write!(f, "surface face index {index} is duplicated"),
             Self::TooManyOverrides => f.write_str("too many surface face overrides"),
             Self::NonFiniteValue => f.write_str("surface appearance contains a non-finite value"),
+            Self::InvalidValue(field) => write!(f, "surface appearance contains an invalid {field}"),
         }
     }
 }
@@ -135,23 +159,23 @@ impl Display for SurfaceAppearanceError {
 impl Error for SurfaceAppearanceError {}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RenderMaterials {
+pub struct PbrMaterialAssignments {
     bindings: Vec<(u8, AssetId)>,
 }
 
-impl RenderMaterials {
-    pub fn new(mut bindings: Vec<(u8, AssetId)>) -> Result<Self, RenderMaterialsError> {
-        if bindings.len() > MAX_RENDER_MATERIAL_BINDINGS {
-            return Err(RenderMaterialsError::TooManyBindings);
+impl PbrMaterialAssignments {
+    pub fn new(mut bindings: Vec<(u8, AssetId)>) -> Result<Self, PbrMaterialAssignmentsError> {
+        if bindings.len() > MAX_PBR_MATERIAL_BINDINGS {
+            return Err(PbrMaterialAssignmentsError::TooManyBindings);
         }
         if let Some((index, _)) = bindings.iter().find(|(index, _)| usize::from(*index) >= MAX_SURFACE_FACES) {
-            return Err(RenderMaterialsError::FaceIndexOutOfRange(*index));
+            return Err(PbrMaterialAssignmentsError::FaceIndexOutOfRange(*index));
         }
 
         bindings.sort_unstable_by_key(|(index, _)| *index);
         for pair in bindings.windows(2) {
             if pair[0].0 == pair[1].0 {
-                return Err(RenderMaterialsError::DuplicateFaceIndex(pair[0].0));
+                return Err(PbrMaterialAssignmentsError::DuplicateFaceIndex(pair[0].0));
             }
         }
         bindings.retain(|(_, asset_id)| !asset_id.uuid().is_nil());
@@ -171,7 +195,7 @@ impl RenderMaterials {
     }
 
     pub(crate) fn heap_bytes(&self) -> usize {
-        self.bindings.capacity() * size_of::<(u8, AssetId)>()
+        self.bindings.len() * size_of::<(u8, AssetId)>()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -180,13 +204,13 @@ impl RenderMaterials {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RenderMaterialsError {
+pub enum PbrMaterialAssignmentsError {
     FaceIndexOutOfRange(u8),
     DuplicateFaceIndex(u8),
     TooManyBindings,
 }
 
-impl Display for RenderMaterialsError {
+impl Display for PbrMaterialAssignmentsError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::FaceIndexOutOfRange(index) => write!(f, "material face index {index} is out of range"),
@@ -196,82 +220,113 @@ impl Display for RenderMaterialsError {
     }
 }
 
-impl Error for RenderMaterialsError {}
+impl Error for PbrMaterialAssignmentsError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GltfAlphaMode {
+pub enum PbrAlphaMode {
     Opaque,
     Blend,
     Mask,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct GltfTextureTransform {
+pub struct PbrTextureTransformOverride {
     pub offset: Option<[f32; 2]>,
     pub scale: Option<[f32; 2]>,
     pub rotation: Option<f32>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct GltfMaterialOverride {
-    pub textures: [Option<Uuid>; GLTF_TEXTURE_INFO_COUNT],
-    pub base_color: Option<[f32; 4]>,
-    pub emissive: Option<[f32; 3]>,
-    pub metallic: Option<f32>,
-    pub roughness: Option<f32>,
-    pub alpha_mode: Option<GltfAlphaMode>,
-    pub alpha_cutoff: Option<f32>,
-    pub double_sided: Option<bool>,
-    pub texture_transforms: [GltfTextureTransform; GLTF_TEXTURE_INFO_COUNT],
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PbrTextureOverride {
+    pub texture: FieldUpdate<AssetId>,
+    pub transform: PbrTextureTransformOverride,
 }
 
-impl GltfMaterialOverride {
-    fn has_finite_values(self) -> bool {
-        self.base_color.is_none_or(|value| value.into_iter().all(f32::is_finite))
-            && self.emissive.is_none_or(|value| value.into_iter().all(f32::is_finite))
-            && self.metallic.is_none_or(f32::is_finite)
-            && self.roughness.is_none_or(f32::is_finite)
-            && self.alpha_cutoff.is_none_or(f32::is_finite)
-            && self.texture_transforms.iter().all(|transform| {
-                transform.offset.is_none_or(|value| value.into_iter().all(f32::is_finite))
-                    && transform.scale.is_none_or(|value| value.into_iter().all(f32::is_finite))
-                    && transform.rotation.is_none_or(f32::is_finite)
-            })
+impl Default for PbrTextureOverride {
+    fn default() -> Self {
+        Self { texture: FieldUpdate::Keep, transform: PbrTextureTransformOverride::default() }
+    }
+}
+
+impl PbrTextureOverride {
+    fn validate(self) -> Result<(), PbrMaterialOverridesError> {
+        if matches!(self.texture, FieldUpdate::Set(id) if id.uuid().is_nil() || id.uuid() == Uuid::max()) {
+            return Err(PbrMaterialOverridesError::InvalidTextureId);
+        }
+        if !self.transform.offset.is_none_or(|value| value.into_iter().all(f32::is_finite))
+            || !self.transform.scale.is_none_or(|value| value.into_iter().all(f32::is_finite))
+            || !self.transform.rotation.is_none_or(f32::is_finite)
+        {
+            return Err(PbrMaterialOverridesError::NonFiniteValue);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PbrMaterialOverride {
+    pub base_color: PbrTextureOverride,
+    pub normal: PbrTextureOverride,
+    pub metallic_roughness: PbrTextureOverride,
+    pub emissive: PbrTextureOverride,
+    pub base_color_factor: Option<[f32; 4]>,
+    pub emissive_factor: Option<[f32; 3]>,
+    pub metallic: Option<f32>,
+    pub roughness: Option<f32>,
+    pub alpha_mode: Option<PbrAlphaMode>,
+    pub alpha_cutoff: Option<f32>,
+    pub double_sided: Option<bool>,
+}
+
+impl PbrMaterialOverride {
+    fn validate(self) -> Result<(), PbrMaterialOverridesError> {
+        if !self.base_color_factor.is_none_or(|value| value.into_iter().all(f32::is_finite))
+            || !self.emissive_factor.is_none_or(|value| value.into_iter().all(f32::is_finite))
+            || !self.metallic.is_none_or(f32::is_finite)
+            || !self.roughness.is_none_or(f32::is_finite)
+            || !self.alpha_cutoff.is_none_or(f32::is_finite)
+        {
+            return Err(PbrMaterialOverridesError::NonFiniteValue);
+        }
+        for texture in [self.base_color, self.normal, self.metallic_roughness, self.emissive] {
+            texture.validate()?;
+        }
+        Ok(())
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GltfMaterialOverrides {
-    faces: Vec<(u8, GltfMaterialOverride)>,
+pub struct PbrMaterialOverrides {
+    faces: Vec<(u8, PbrMaterialOverride)>,
 }
 
-impl GltfMaterialOverrides {
-    pub fn new(mut faces: Vec<(u8, GltfMaterialOverride)>) -> Result<Self, GltfMaterialOverridesError> {
+impl PbrMaterialOverrides {
+    pub fn new(mut faces: Vec<(u8, PbrMaterialOverride)>) -> Result<Self, PbrMaterialOverridesError> {
         if faces.len() > MAX_SURFACE_FACES {
-            return Err(GltfMaterialOverridesError::TooManyFaces);
+            return Err(PbrMaterialOverridesError::TooManyFaces);
         }
         if let Some((index, _)) = faces.iter().find(|(index, _)| usize::from(*index) >= MAX_SURFACE_FACES) {
-            return Err(GltfMaterialOverridesError::FaceIndexOutOfRange(*index));
+            return Err(PbrMaterialOverridesError::FaceIndexOutOfRange(*index));
         }
         faces.sort_unstable_by_key(|(index, _)| *index);
         if let Some(pair) = faces.windows(2).find(|pair| pair[0].0 == pair[1].0) {
-            return Err(GltfMaterialOverridesError::DuplicateFaceIndex(pair[0].0));
+            return Err(PbrMaterialOverridesError::DuplicateFaceIndex(pair[0].0));
         }
-        if faces.iter().any(|(_, material)| !material.has_finite_values()) {
-            return Err(GltfMaterialOverridesError::NonFiniteValue);
+        for (_, material) in &faces {
+            material.validate()?;
         }
         Ok(Self { faces })
     }
 
-    pub fn faces(&self) -> &[(u8, GltfMaterialOverride)] {
+    pub fn faces(&self) -> &[(u8, PbrMaterialOverride)] {
         &self.faces
     }
 
     pub(crate) fn heap_bytes(&self) -> usize {
-        self.faces.capacity() * size_of::<(u8, GltfMaterialOverride)>()
+        self.faces.len() * size_of::<(u8, PbrMaterialOverride)>()
     }
 
-    pub fn face(&self, index: u8) -> Option<&GltfMaterialOverride> {
+    pub fn face(&self, index: u8) -> Option<&PbrMaterialOverride> {
         self.faces.binary_search_by_key(&index, |(face, _)| *face).ok().map(|offset| &self.faces[offset].1)
     }
 
@@ -281,22 +336,24 @@ impl GltfMaterialOverrides {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GltfMaterialOverridesError {
+pub enum PbrMaterialOverridesError {
     FaceIndexOutOfRange(u8),
     DuplicateFaceIndex(u8),
     TooManyFaces,
     NonFiniteValue,
+    InvalidTextureId,
 }
 
-impl Display for GltfMaterialOverridesError {
+impl Display for PbrMaterialOverridesError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::FaceIndexOutOfRange(index) => write!(f, "GLTF material face index {index} is out of range"),
-            Self::DuplicateFaceIndex(index) => write!(f, "GLTF material face index {index} is duplicated"),
-            Self::TooManyFaces => f.write_str("too many GLTF material faces"),
-            Self::NonFiniteValue => f.write_str("GLTF material override contains a non-finite value"),
+            Self::FaceIndexOutOfRange(index) => write!(f, "PBR material face index {index} is out of range"),
+            Self::DuplicateFaceIndex(index) => write!(f, "PBR material face index {index} is duplicated"),
+            Self::TooManyFaces => f.write_str("too many PBR material faces"),
+            Self::NonFiniteValue => f.write_str("PBR material override contains a non-finite value"),
+            Self::InvalidTextureId => f.write_str("PBR texture override contains an invalid asset ID"),
         }
     }
 }
 
-impl Error for GltfMaterialOverridesError {}
+impl Error for PbrMaterialOverridesError {}

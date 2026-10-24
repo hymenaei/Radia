@@ -229,12 +229,7 @@ fn kind(fields: &Map) -> Result<&str, Failure> {
 }
 
 fn number(value: &Value) -> Result<f32, Failure> {
-    let number = match value {
-        Value::Real(number) => *number as f32,
-        Value::Integer(number) => *number as f32,
-        _ => return Err(Failure::Malformed),
-    };
-    if number.is_finite() { Ok(number) } else { Err(Failure::Malformed) }
+    value.as_finite_f32().ok_or(Failure::Malformed)
 }
 
 fn scalar(fields: &Map, key: &str) -> Result<Option<f32>, Failure> {
@@ -443,7 +438,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::{Budget, Content, Priority, Request, Status, Store};
+    use crate::{Budget, Content, LoadJob, Priority, Request, Status, Store};
 
     const SKY: &[u8] = br#"<?llsd/notation?>
     {'type':'sky','name':'Authored sky','flags':i3,
@@ -569,10 +564,10 @@ mod tests {
         let now = Instant::now();
         let route = store.register_route().unwrap();
         let demand = store.request(route, Request::Environment(AssetId::new(Uuid::from_u128(1))), Priority::Visible, now).unwrap();
-        let mut job = store.next_job(now).unwrap();
-        assert!(store.try_start_decode(&mut job));
-        let prepared = job.prepare(DAY.to_vec());
-        store.complete(job, prepared, now);
+        let LoadJob::Fetch(job) = store.next_job(now).unwrap() else { panic!("fresh environment request unexpectedly used cached source") };
+        let input = job.complete(Ok(DAY.to_vec())).expect("fixture response fits");
+        let completion = store.start_decode(input).expect("decode admission").run();
+        store.complete(completion, now);
         let Status::Ready(Content::Environment(environment)) = demand.status() else { panic!("ready environment") };
         let retained = budget.stats().resident_bytes;
         assert!(retained > size_of::<EnvironmentDescription>());

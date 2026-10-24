@@ -5,15 +5,14 @@ use std::{
     mem::size_of,
 };
 
-use utils::AssetId;
 use uuid::Uuid;
 
 use crate::{
-    Appearance, AttachmentPoint, AvatarAppearance, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance, GltfMaterialOverride,
-    LinearMotion, ObjectMedia, PropertiesProvenance, RenderMaterials, SitTarget, SurfaceAppearance, Transform,
+    Appearance, AttachmentPoint, AvatarAppearance, LinearMotion, ObjectMedia, PbrMaterialAssignments, PropertiesProvenance, SitTarget,
+    SurfaceAppearance, Transform,
 };
 use crate::{
-    Entity, GltfMaterialOverrides, Kind, LocalAddress, Parent, PoseError, PoseState, Properties, Region, RegionInfo, Shape, WorldRevision,
+    Entity, Kind, LocalAddress, Parent, PbrMaterialOverrides, PoseError, PoseState, Properties, Region, RegionInfo, Shape, WorldRevision,
     WorldTransformState,
 };
 use crate::{Object, World, WorldChange, WorldId};
@@ -48,12 +47,6 @@ pub struct ObjectSummary {
     pub pose: Result<PoseState, PoseError>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ObjectSummaryRead {
-    pub hydration_revision: WorldRevision,
-    pub summary: ObjectSummary,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectListItem {
     pub entity: Entity,
@@ -62,23 +55,10 @@ pub struct ObjectListItem {
     pub address: LocalAddress,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ObjectListItemRead {
-    pub hydration_revision: WorldRevision,
-    pub item: ObjectListItem,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectListPage {
     pub hydration_revision: WorldRevision,
     pub objects: Vec<ObjectListItem>,
-    pub next: Option<ObjectPageCursor>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct ObjectPage {
-    pub hydration_revision: WorldRevision,
-    pub objects: Vec<ObjectSummary>,
     pub next: Option<ObjectPageCursor>,
 }
 
@@ -92,12 +72,6 @@ pub struct ObjectPageCursor {
 pub struct RegionSummary {
     pub region: Region,
     pub info: RegionInfo,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct RegionSummaryRead {
-    pub hydration_revision: WorldRevision,
-    pub summary: RegionSummary,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -124,8 +98,8 @@ pub struct ObjectDetail {
     pub shape: Option<Shape>,
     pub appearance: Option<Appearance>,
     pub surface_appearance: Option<SurfaceAppearance>,
-    pub render_materials: Option<RenderMaterials>,
-    pub gltf_material_overrides: Option<GltfMaterialOverrides>,
+    pub pbr_materials: Option<PbrMaterialAssignments>,
+    pub pbr_material_overrides: Option<PbrMaterialOverrides>,
     pub avatar_appearance: Option<AvatarAppearance>,
     pub attachment_point: Option<AttachmentPoint>,
     pub sit_target: Option<SitTarget>,
@@ -135,11 +109,12 @@ pub struct ObjectDetail {
 
 impl ObjectDetail {
     pub fn owned_bytes(&self) -> usize {
-        size_of::<Self>()
-            + self.surface_appearance.as_ref().map_or(0, SurfaceAppearance::heap_bytes)
-            + self.render_materials.as_ref().map_or(0, RenderMaterials::heap_bytes)
-            + self.gltf_material_overrides.as_ref().map_or(0, GltfMaterialOverrides::heap_bytes)
-            + self.avatar_appearance.as_ref().map_or(0, AvatarAppearance::heap_bytes)
+        detail_bytes(
+            self.surface_appearance.as_ref(),
+            self.pbr_materials.as_ref(),
+            self.pbr_material_overrides.as_ref(),
+            self.avatar_appearance.as_ref(),
+        )
     }
 }
 
@@ -232,28 +207,6 @@ impl World {
         }
     }
 
-    pub fn object_page(&self, cursor: Option<ObjectPageCursor>, limit: usize) -> Result<ObjectPage, WorldReadError> {
-        if limit == 0 || limit > MAX_OBJECT_PAGE_ITEMS {
-            return Err(WorldReadError::InvalidLimit);
-        }
-        if cursor.is_some_and(|cursor| cursor.world != self.id) {
-            return Err(WorldReadError::StaleSession);
-        }
-
-        let hydration_revision = self.revision();
-        let mut ids = match cursor {
-            Some(cursor) => self.store.ids().range((Excluded(cursor.after), Unbounded)),
-            None => self.store.ids().range(..),
-        };
-        let mut objects = Vec::with_capacity(limit);
-        for id in ids.by_ref().take(limit) {
-            objects.push(self.summary_for_id(*id));
-        }
-        let has_more = ids.next().is_some();
-        let next = has_more.then(|| ObjectPageCursor { world: self.id, after: objects.last().expect("nonzero page limit").id });
-        Ok(ObjectPage { hydration_revision, objects, next })
-    }
-
     pub fn object_list_page(&self, cursor: Option<ObjectPageCursor>, limit: usize) -> Result<ObjectListPage, WorldReadError> {
         if limit == 0 || limit > MAX_OBJECT_PAGE_ITEMS {
             return Err(WorldReadError::InvalidLimit);
@@ -262,28 +215,19 @@ impl World {
             return Err(WorldReadError::StaleSession);
         }
 
-        let hydration_revision = self.revision();
-        let mut ids = match cursor {
-            Some(cursor) => self.store.ids().range((Excluded(cursor.after), Unbounded)),
-            None => self.store.ids().range(..),
-        };
-        let mut objects = Vec::with_capacity(limit);
-        for id in ids.by_ref().take(limit) {
-            objects.push(self.list_item_for_id(*id));
-        }
-        let has_more = ids.next().is_some();
-        let next = has_more.then(|| ObjectPageCursor { world: self.id, after: objects.last().expect("nonzero page limit").id });
-        Ok(ObjectListPage { hydration_revision, objects, next })
-    }
-
-    pub fn object_list_item(&self, entity: Entity) -> Result<ObjectListItemRead, WorldReadError> {
-        let item = self.list_item_for_entity(entity)?;
-        Ok(ObjectListItemRead { hydration_revision: self.revision(), item })
-    }
-
-    pub fn object_summary(&self, entity: Entity) -> Result<ObjectSummaryRead, WorldReadError> {
-        let summary = self.summary_for_entity(entity)?;
-        Ok(ObjectSummaryRead { hydration_revision: self.revision(), summary })
+        let lower = cursor.map_or(Unbounded, |cursor| Excluded(cursor.after));
+        let mut ids = self.store.ids().range((lower, Unbounded));
+        let objects = ids
+            .by_ref()
+            .take(limit)
+            .map(|id| {
+                let entity = self.entity(*id).expect("object ordering index contains only live object IDs");
+                let record = self.store.record(entity).expect("UUID index contains only live entities");
+                ObjectListItem { entity, id: record.id, kind: record.kind, address: record.state.binding.address }
+            })
+            .collect::<Vec<_>>();
+        let next = ids.next().map(|_| ObjectPageCursor { world: self.id, after: objects.last().expect("nonzero page limit").id });
+        Ok(ObjectListPage { hydration_revision: self.revision(), objects, next })
     }
 
     pub fn region_page(&self, cursor: Option<RegionPageCursor>, limit: usize) -> Result<RegionPage, WorldReadError> {
@@ -320,14 +264,6 @@ impl World {
         let has_more = oversized_item || iter.next().is_some();
         let next = has_more.then(|| RegionPageCursor { world: self.id, after: after.expect("nonzero page limit") });
         Ok(RegionPage { hydration_revision, regions, next })
-    }
-
-    pub fn region_summary(&self, region: Region) -> Result<Option<RegionSummaryRead>, WorldReadError> {
-        let Some(info) = self.region(region) else { return Ok(None) };
-        if region_summary_bytes(info) > MAX_REGION_PAGE_BYTES {
-            return Err(WorldReadError::TooLarge);
-        }
-        Ok(Some(RegionSummaryRead { hydration_revision: self.revision(), summary: RegionSummary { region, info: info.clone() } }))
     }
 
     pub fn object_detail(&self, entity: Entity) -> Result<ObjectDetail, WorldReadError> {
@@ -410,8 +346,8 @@ impl World {
             shape: object.shape(),
             appearance: object.appearance(),
             surface_appearance: object.surface_appearance().cloned(),
-            render_materials: object.render_materials().cloned(),
-            gltf_material_overrides: object.gltf_material_overrides().cloned(),
+            pbr_materials: object.pbr_materials().cloned(),
+            pbr_material_overrides: object.pbr_material_overrides().cloned(),
             avatar_appearance: object.avatar_appearance().cloned(),
             attachment_point: object.attachment_point(),
             sit_target: object.sit_target(),
@@ -496,40 +432,6 @@ impl World {
             has_more: false,
         })
     }
-
-    fn summary_for_id(&self, id: Uuid) -> ObjectSummary {
-        let entity = self.entity(id).expect("object ordering index contains only live object IDs");
-        self.summary_for_entity(entity).expect("UUID index contains only live entities")
-    }
-
-    fn list_item_for_id(&self, id: Uuid) -> ObjectListItem {
-        let entity = self.entity(id).expect("object ordering index contains only live object IDs");
-        self.list_item_for_entity(entity).expect("UUID index contains only live entities")
-    }
-
-    fn list_item_for_entity(&self, entity: Entity) -> Result<ObjectListItem, WorldReadError> {
-        if entity.1 != self.id {
-            return Err(WorldReadError::StaleSession);
-        }
-        let object = self.store.record(entity).ok_or(WorldReadError::StaleIdentity)?;
-        Ok(ObjectListItem { entity, id: object.id, kind: object.kind, address: object.state.binding.address })
-    }
-
-    fn summary_for_entity(&self, entity: Entity) -> Result<ObjectSummary, WorldReadError> {
-        if entity.1 != self.id {
-            return Err(WorldReadError::StaleSession);
-        }
-        let object = self.store.record(entity).ok_or(WorldReadError::StaleIdentity)?;
-        Ok(ObjectSummary {
-            entity,
-            id: object.id,
-            kind: object.kind,
-            address: object.state.binding.address,
-            parent: object.state.parent,
-            local_transform: object.state.transform,
-            pose: self.resolve_pose(entity),
-        })
-    }
 }
 
 fn region_summary_bytes(info: &RegionInfo) -> usize {
@@ -537,24 +439,18 @@ fn region_summary_bytes(info: &RegionInfo) -> usize {
 }
 
 fn object_detail_bytes(object: &Object<'_>) -> usize {
-    let surface_bytes = object.surface_appearance().map_or(0, |value| {
-        size_of::<SurfaceAppearance>().saturating_add(value.overrides().count().saturating_mul(size_of::<(u8, FaceAppearance)>()))
-    });
-    let render_bytes = object.render_materials().map_or(0, |value| {
-        size_of::<RenderMaterials>().saturating_add(value.bindings().count().saturating_mul(size_of::<(u8, AssetId)>()))
-    });
-    let gltf_bytes = object.gltf_material_overrides().map_or(0, |value| {
-        size_of::<GltfMaterialOverrides>().saturating_add(value.faces().len().saturating_mul(size_of::<(u8, GltfMaterialOverride)>()))
-    });
-    let avatar_bytes = object.avatar_appearance().map_or(0, |value| {
-        size_of::<AvatarAppearance>()
-            .saturating_add(value.visual_params().count().saturating_mul(size_of::<(AvatarVisualParamIndex, u8)>()))
-            .saturating_add(value.texture_slots().map_or(0, |_| size_of::<AvatarTextureSlots>()))
-    });
+    detail_bytes(object.surface_appearance(), object.pbr_materials(), object.pbr_material_overrides(), object.avatar_appearance())
+}
 
+fn detail_bytes(
+    surface_appearance: Option<&SurfaceAppearance>,
+    pbr_materials: Option<&PbrMaterialAssignments>,
+    pbr_material_overrides: Option<&PbrMaterialOverrides>,
+    avatar_appearance: Option<&AvatarAppearance>,
+) -> usize {
     size_of::<ObjectDetail>()
-        .saturating_add(surface_bytes)
-        .saturating_add(render_bytes)
-        .saturating_add(gltf_bytes)
-        .saturating_add(avatar_bytes)
+        .saturating_add(surface_appearance.map_or(0, SurfaceAppearance::heap_bytes))
+        .saturating_add(pbr_materials.map_or(0, PbrMaterialAssignments::heap_bytes))
+        .saturating_add(pbr_material_overrides.map_or(0, PbrMaterialOverrides::heap_bytes))
+        .saturating_add(avatar_appearance.map_or(0, AvatarAppearance::heap_bytes))
 }

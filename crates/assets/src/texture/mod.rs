@@ -56,16 +56,16 @@ impl PixelFormat {
         }
     }
 
-    pub const fn alpha(self) -> Alpha {
+    pub const fn alpha(self) -> PixelAlpha {
         match self {
-            Self::GrayAlpha8 | Self::Rgba8 => Alpha::Straight,
-            Self::Gray8 | Self::Rgb8 => Alpha::Opaque,
+            Self::GrayAlpha8 | Self::Rgba8 => PixelAlpha::Straight,
+            Self::Gray8 | Self::Rgb8 => PixelAlpha::Opaque,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Alpha {
+pub enum PixelAlpha {
     Opaque,
     Straight,
 }
@@ -100,7 +100,7 @@ impl Image {
     pub const fn color_space(&self) -> ColorSpace {
         ColorSpace::Srgb
     }
-    pub const fn alpha(&self) -> Alpha {
+    pub const fn alpha(&self) -> PixelAlpha {
         self.format.alpha()
     }
     pub fn pixels(&self) -> &[u8] {
@@ -221,9 +221,11 @@ fn downsample(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+    use std::cell::Cell;
+
     use super::*;
     use crate::{Budget, budget::TEXTURE_WORK_BYTES};
-    use std::cell::Cell;
     use test_support::texture::RGBA_J2C;
 
     #[test]
@@ -264,7 +266,7 @@ mod tests {
             assert_eq!(budget.stats().charged_bytes, TEXTURE_WORK_BYTES);
             checks.get() == after_codec
         });
-        assert!(matches!(result, Err(Failure::Cancelled)));
+        assert_matches!(result.err(), Some(Failure::Cancelled));
         assert_eq!(checks.get(), after_codec);
         assert_eq!(budget.stats().charged_bytes, TEXTURE_WORK_BYTES);
         drop(reservation);

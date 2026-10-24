@@ -1,8 +1,9 @@
+use super::Effects;
 use super::lifecycle::RemovalCause;
 use crate::history::WorldChange::{RegionAdopted, RegionRetired, RegionUpdated};
 use crate::update::FieldStamp;
 use crate::{ApplyError, Region, RegionApplied, RegionInfo, RegionOutcome, UpdateSource};
-use crate::{RecentBatch, RegionState, World, newer_field};
+use crate::{RegionState, World, newer_field};
 
 impl World {
     pub fn adopt_region(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
@@ -10,7 +11,7 @@ impl World {
             return Err(ApplyError::RegionRetired);
         }
         if self.regions.contains_key(&region) {
-            return Ok(RegionApplied { outcome: RegionOutcome::Unchanged, recovery_cancellations: Vec::new() });
+            return Ok(RegionApplied::unchanged());
         }
         if self.regions.len().saturating_add(self.retired.len()) >= self.limits.max_region_registrations {
             return Err(ApplyError::RegistrationBudgetExhausted);
@@ -18,7 +19,7 @@ impl World {
         self.ensure_revision_available()?;
         self.regions.insert(region, RegionState::default());
         let revision = self.publish_changes(vec![RegionAdopted(region)]).expect("adopting a region journals a change");
-        Ok(RegionApplied { outcome: RegionOutcome::Adopted { revision }, recovery_cancellations: Vec::new() })
+        Ok(RegionApplied::new(RegionOutcome::Adopted { revision }))
     }
     pub fn patch_region(&mut self, region: Region, info: RegionInfo) -> Result<RegionApplied, ApplyError> {
         self.require_active_region(region)?;
@@ -53,7 +54,7 @@ impl World {
         let current = self.regions.get(&region).expect("metadata commit requires an active region");
         if info == current.info {
             self.regions.get_mut(&region).expect("active region remains registered").name_fence = name_fence;
-            return Ok(RegionApplied { outcome: RegionOutcome::Unchanged, recovery_cancellations: Vec::new() });
+            return Ok(RegionApplied::unchanged());
         }
         let origin_changed = current.info.resolved_origin() != info.resolved_origin();
         self.ensure_revision_available()?;
@@ -63,41 +64,33 @@ impl World {
         if origin_changed {
             self.mark_spatial_region(region);
         }
-        let revision = self.publish_changes(vec![RegionUpdated(region)]).expect("patching a region journals a change");
-        Ok(RegionApplied { outcome: RegionOutcome::Patched { revision }, recovery_cancellations: Vec::new() })
+        Ok(self.publish_region_patch(RegionUpdated(region)))
     }
     pub fn retire_region(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
         if self.retired.contains(&region) {
-            return Ok(RegionApplied { outcome: RegionOutcome::Unchanged, recovery_cancellations: Vec::new() });
+            return Ok(RegionApplied::unchanged());
         }
         self.require_active_region(region)?;
         self.ensure_revision_available()?;
         let removed = self.store.region_ids(region).map_or(0, |ids| ids.len());
-        let mut changes = Vec::with_capacity(removed.saturating_add(1));
-        let mut recovery_cancellations = Vec::new();
-        let mut recent = RecentBatch::default();
+        let mut effects = Effects { changes: Vec::with_capacity(removed.saturating_add(1)), ..Effects::default() };
         while let Some(id) = self.store.region_ids(region).and_then(|ids| ids.first()).copied() {
             let entity = self.entity(id).expect("object index contains only live entities");
-            self.remove_entity(
-                entity,
-                RemovalCause::RegionRetired,
-                None,
-                &mut changes,
-                &mut Vec::new(),
-                &mut recovery_cancellations,
-                &mut recent,
-            );
+            self.remove_entity(entity, RemovalCause::RegionRetired, None, &mut effects);
         }
-        self.recent.apply_batch(recent);
+        self.recent.apply_batch(effects.recent);
         let removed_region = self.regions.remove(&region).expect("active region remains registered");
         self.terrain_patches -= removed_region.terrain.patch_count();
         self.environment_bytes -= removed_region.environment.source_bytes();
         self.retired.insert(region);
         self.tombstones.remove_region(region);
         self.floors.remove(&region);
-        changes.push(RegionRetired { region, entities_removed: removed });
-        let revision = self.publish_changes(changes).expect("retiring a region journals a change");
-        Ok(RegionApplied { outcome: RegionOutcome::Retired { revision, entities_removed: removed }, recovery_cancellations })
+        effects.changes.push(RegionRetired { region, entities_removed: removed });
+        let revision = self.publish_changes(effects.changes).expect("retiring a region journals a change");
+        Ok(RegionApplied {
+            outcome: RegionOutcome::Retired { revision, entities_removed: removed },
+            recovery_cancellations: effects.recovery_cancellations,
+        })
     }
     fn validate_region_info(&self, info: &RegionInfo) -> Result<(), ApplyError> {
         if info.region_id.is_some_and(|id| id.is_nil()) {

@@ -68,11 +68,6 @@ impl ObjectStore {
         self.regions.get(&region)
     }
 
-    #[cfg(feature = "invariants")]
-    pub(crate) fn entities(&self) -> impl Iterator<Item = (Uuid, Entity)> + '_ {
-        self.entities.iter().map(|(id, entity)| (*id, *entity))
-    }
-
     pub(crate) fn insert(&mut self, record: ObjectRecord, facets: FacetSet, ordering: ObjectOrdering) -> Entity {
         let id = record.id;
         let address = record.state.binding.address;
@@ -209,40 +204,45 @@ impl ObjectStore {
     pub(crate) fn ordering_mut(&mut self, entity: hecs::Entity) -> &mut ObjectOrdering {
         self.ecs.query_one_mut::<&mut ObjectOrdering>(entity).expect("mutation target has ordering")
     }
+}
 
-    #[cfg(feature = "invariants")]
-    pub(crate) fn check_invariants(&self) -> Result<(), &'static str> {
-        let count = self.entities.len();
-        if self.ecs.len() as usize != count
-            || self.ecs.query::<(&ObjectRecord, &ObjectOrdering)>().iter().count() != count
-            || self.ids.len() != count
-            || self.addresses.len() != count
-        {
-            return Err("object storage and identity index counts differ");
-        }
-        let mut regions = HashMap::<Region, BTreeSet<Uuid>>::new();
-        let mut avatars = BTreeSet::new();
-        for (id, entity) in self.entities() {
-            let record = self.object_record(entity).ok_or("UUID index points to a dead or foreign entity")?;
-            if id.is_nil() || record.id != id || !self.ids.contains(&id) || self.entity_at(record.state.binding.address) != Some(entity) {
-                return Err("object identity indexes disagree with stored state");
-            }
-            regions.entry(record.state.binding.address.region()).or_default().insert(id);
-            if record.kind == Kind::Avatar {
-                avatars.insert(id);
-            }
-        }
-        if self
-            .ecs
-            .query::<(hecs::Entity, &ObjectRecord)>()
-            .iter()
-            .any(|(entity, _)| self.ecs.entity(entity).is_ok_and(|entry| !FacetSet::components_valid(entry)))
-        {
-            return Err("empty facet components are stored");
-        }
-        if self.regions != regions || self.avatars != avatars {
-            return Err("region or avatar indexes disagree with stored state");
-        }
-        Ok(())
+#[cfg(test)]
+pub(crate) fn object_store_entities(store: &ObjectStore) -> impl Iterator<Item = (Uuid, Entity)> + '_ {
+    store.entities.iter().map(|(id, entity)| (*id, *entity))
+}
+
+#[cfg(test)]
+pub(crate) fn object_store_invariants_hold(store: &ObjectStore) -> Result<(), &'static str> {
+    let count = store.entities.len();
+    if store.ecs.len() as usize != count
+        || store.ecs.query::<(&ObjectRecord, &ObjectOrdering)>().iter().count() != count
+        || store.ids.len() != count
+        || store.addresses.len() != count
+    {
+        return Err("object storage and identity index counts differ");
     }
+    let mut regions = HashMap::<Region, BTreeSet<Uuid>>::new();
+    let mut avatars = BTreeSet::new();
+    for (id, entity) in object_store_entities(store) {
+        let record = store.object_record(entity).ok_or("UUID index points to a dead or foreign entity")?;
+        if id.is_nil() || record.id != id || !store.ids.contains(&id) || store.entity_at(record.state.binding.address) != Some(entity) {
+            return Err("object identity indexes disagree with stored state");
+        }
+        regions.entry(record.state.binding.address.region()).or_default().insert(id);
+        if record.kind == Kind::Avatar {
+            avatars.insert(id);
+        }
+    }
+    if store
+        .ecs
+        .query::<(hecs::Entity, &ObjectRecord)>()
+        .iter()
+        .any(|(entity, _)| store.ecs.entity(entity).is_ok_and(|entry| !crate::mutation::facet::components_valid(entry)))
+    {
+        return Err("empty facet components are stored");
+    }
+    if store.regions != regions || store.avatars != avatars {
+        return Err("region or avatar indexes disagree with stored state");
+    }
+    Ok(())
 }

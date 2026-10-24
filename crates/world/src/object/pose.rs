@@ -228,16 +228,13 @@ mod tests {
         };
         let first = introduce(1_u32, 1, 1);
         let second = introduce(2_u32, 2, 2);
-        #[cfg(feature = "invariants")]
         let first_uuid = world.object(first).expect("first object is live").id();
-        #[cfg(feature = "invariants")]
         let second_uuid = world.object(second).expect("second object is live").id();
 
         world.state_mut(first).parent = Parent::Resolved(second);
         world.state_mut(second).parent = Parent::Resolved(first);
 
         assert_eq!(world.object(first).unwrap().world_pose(), Err(PoseError::TraversalLimitExceeded { max_edges: MAX_PARENT_EDGES }));
-        #[cfg(feature = "invariants")]
         {
             world.children.entry(second).or_default().insert(first_uuid, first);
             world.children.entry(first).or_default().insert(second_uuid, second);

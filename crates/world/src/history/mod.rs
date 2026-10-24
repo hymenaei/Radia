@@ -131,26 +131,26 @@ impl Journal {
     fn note_loss_through(&mut self, revision: WorldRevision) {
         self.lost_through = Some(self.lost_through.map_or(revision, |lost| lost.max(revision)));
     }
+}
 
-    #[cfg(feature = "invariants")]
-    pub(crate) fn invariants_hold(&self) -> bool {
-        let mut retained_changes = 0_usize;
-        let mut previous_revision = None;
-        for entry in &self.entries {
-            if entry.changes.is_empty() || entry.revision > self.revision {
-                return false;
-            }
-            if previous_revision.is_some_and(|previous| entry.revision <= previous) {
-                return false;
-            }
-            if self.lost_through.is_some_and(|lost| entry.revision <= lost) {
-                return false;
-            }
-            retained_changes = retained_changes.saturating_add(entry.changes.len());
-            previous_revision = Some(entry.revision);
+#[cfg(test)]
+pub(crate) fn journal_invariants_hold(journal: &Journal) -> bool {
+    let mut retained_changes = 0_usize;
+    let mut previous_revision = None;
+    for entry in &journal.entries {
+        if entry.changes.is_empty() || entry.revision > journal.revision {
+            return false;
         }
-        retained_changes == self.retained_changes && self.lost_through.is_none_or(|lost| lost <= self.revision)
+        if previous_revision.is_some_and(|previous| entry.revision <= previous) {
+            return false;
+        }
+        if journal.lost_through.is_some_and(|lost| entry.revision <= lost) {
+            return false;
+        }
+        retained_changes = retained_changes.saturating_add(entry.changes.len());
+        previous_revision = Some(entry.revision);
     }
+    retained_changes == journal.retained_changes && journal.lost_through.is_none_or(|lost| lost <= journal.revision)
 }
 
 #[cfg(test)]
@@ -411,7 +411,6 @@ mod tests {
         assert_eq!(world.journal.retained_changes, 0);
         assert_eq!(world.journal.lost_through, Some(revision));
         assert_eq!(world.change_page(before_retirement_cursor, 8), Err(crate::WorldReadError::ResyncRequired));
-        #[cfg(feature = "invariants")]
         assert_eq!(world.check_invariants(), Ok(()));
 
         let after_retirement_cursor = world.read_barrier().changes;
@@ -421,7 +420,6 @@ mod tests {
         assert!(matches!(changes.records.as_slice(), [record] if record.revision == world.revision()
             && matches!(record.change, RegionAdopted(adopted) if adopted == Region::new(30))));
         assert!(!changes.has_more);
-        #[cfg(feature = "invariants")]
         assert_eq!(world.check_invariants(), Ok(()));
     }
 
@@ -439,7 +437,6 @@ mod tests {
         assert_eq!(world.journal.retained_changes, 0);
         assert_eq!(world.journal.lost_through, Some(world.revision()));
         assert_eq!(world.change_page(before_adoption, 8), Err(crate::WorldReadError::ResyncRequired));
-        #[cfg(feature = "invariants")]
         assert_eq!(world.check_invariants(), Ok(()));
     }
 

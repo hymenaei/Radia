@@ -1,6 +1,6 @@
 mod history;
 mod identity;
-#[cfg(feature = "invariants")]
+#[cfg(test)]
 mod invariants;
 mod mutation;
 mod object;

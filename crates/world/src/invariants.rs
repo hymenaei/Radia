@@ -5,8 +5,9 @@ use uuid::Uuid;
 use crate::{Entity, LocalAddress, ObjectMedia, Parent};
 use crate::{MAX_ENVIRONMENT_BYTES, MAX_TERRAIN_PATCHES, World};
 
+#[cfg(test)]
 impl World {
-    pub fn check_invariants(&self) -> Result<(), &'static str> {
+    pub(crate) fn check_invariants(&self) -> Result<(), &'static str> {
         let environment_bytes: usize = self.regions.values().map(|state| state.environment.source_bytes()).sum();
         if environment_bytes != self.environment_bytes || environment_bytes > MAX_ENVIRONMENT_BYTES {
             return Err("environment source accounting is inconsistent");
@@ -15,7 +16,7 @@ impl World {
         if terrain_patches != self.terrain_patches || terrain_patches > MAX_TERRAIN_PATCHES {
             return Err("terrain patch accounting is inconsistent");
         }
-        self.store.check_invariants()?;
+        crate::object::storage::object_store_invariants_hold(&self.store)?;
         if self.store.len() > self.limits.max_entities
             || self.regions.len().saturating_add(self.retired.len()) > self.limits.max_region_registrations
             || self
@@ -28,7 +29,7 @@ impl World {
         let mut expected_children = HashMap::<Entity, BTreeMap<Uuid, Entity>>::new();
         let mut expected_pending_children = HashMap::<LocalAddress, HashSet<Entity>>::new();
         let mut object_media_bytes = 0_usize;
-        for (id, entity) in self.store.entities() {
+        for (id, entity) in crate::object::storage::object_store_entities(&self.store) {
             let object = self.object(entity).ok_or("UUID index points to an incomplete or dead ECS entity")?;
             let address = object.address();
             if !self.regions.contains_key(&address.region()) {
@@ -57,7 +58,7 @@ impl World {
         }
         let mut checked = HashSet::with_capacity(self.store.len());
         let mut path = HashSet::new();
-        for entity in self.store.entities().map(|(_, entity)| entity) {
+        for entity in crate::object::storage::object_store_entities(&self.store).map(|(_, entity)| entity) {
             path.clear();
             let mut current = entity;
             while !checked.contains(&current) {
@@ -78,12 +79,16 @@ impl World {
         if self.object_media_bytes != object_media_bytes {
             return Err("ObjectMedia byte accounting is inconsistent");
         }
-        if !self.tombstones.invariants_hold(&self.regions, &self.store) {
+        if !crate::history::address::tombstones_invariants_hold(&self.tombstones, &self.regions, &self.store) {
             return Err("tombstone indexes are inconsistent");
         }
-        if !self.journal.invariants_hold() {
+        if !crate::history::journal_invariants_hold(&self.journal) {
             return Err("change journal accounting is inconsistent");
         }
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "invariants_tests.rs"]
+mod tests;

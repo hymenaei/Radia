@@ -157,8 +157,6 @@ fn avatar_queries_follow_rebinding_replacement_and_retirement() {
 
     let _ = world.retire_region(second).unwrap();
     assert_eq!(world.avatars().count(), 0);
-    #[cfg(feature = "invariants")]
-    assert_eq!(world.check_invariants(), Ok(()));
 }
 
 #[test]

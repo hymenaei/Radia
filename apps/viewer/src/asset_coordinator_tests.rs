@@ -154,7 +154,7 @@ async fn missing_grants_and_discovery_retry() {
 
 #[tokio::test]
 async fn material_preparation_publishes_content() {
-    use assets::{PbrAlphaMode, Content, MaterialDescription, Status};
+    use assets::{Content, MaterialDescription, PbrAlphaMode, Status};
 
     let peer = Peer::new(2, |index, _, base| {
         if index == 0 {

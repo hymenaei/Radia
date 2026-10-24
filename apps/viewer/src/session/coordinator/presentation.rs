@@ -6,16 +6,18 @@ use std::{
 
 use futures::{channel::mpsc, stream::StreamExt};
 use network::{AgentSession, Grid, MfaChallenge};
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use render::scene::Camera;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use tokio::sync::watch;
 use uuid::Uuid;
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use crate::{asset_coordinator::AssetHandle, session::experience_environment::EnvironmentInbox, world_reader::WorldReader};
 use crate::{
-    asset_coordinator::AssetHandle,
     inventory::{FavoriteLocation, favorite_store::FavoriteStoreError, favorites::FavoritesError},
     remembered_login::{CredentialStoreError, RememberedLogin},
-    session::{ChatMessage, experience_environment::EnvironmentInbox},
-    world_reader::WorldReader,
+    session::ChatMessage,
 };
 
 const MAX_PENDING_CHAT_MESSAGES: usize = 64;
@@ -135,11 +137,15 @@ pub(crate) enum AuthenticationUpdate {
 }
 
 pub(crate) struct SessionReadyUpdate {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) environments: EnvironmentInbox,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) camera: watch::Sender<Option<Camera>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,
     pub(crate) region_name: Option<String>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) world_reader: WorldReader,
 }
 

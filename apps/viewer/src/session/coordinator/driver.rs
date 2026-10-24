@@ -27,7 +27,6 @@ use crate::{
     session::{
         CameraUplink, RegionLookup, Session, SessionHandle,
         environment::{Completion, EnvironmentIntake},
-        experience_environment::{EnvironmentInbox, EnvironmentSender},
         inbound::object_media_requests,
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
         recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error, warn_unrecovered},
@@ -36,6 +35,9 @@ use crate::{
     },
     world_reader::{ReadRequest, WorldReadHost},
 };
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use crate::session::experience_environment::{EnvironmentInbox, EnvironmentSender};
 
 type Cancellation = Shared<BoxFuture<'static, ()>>;
 
@@ -58,7 +60,9 @@ struct SessionDriver {
     reads: WorldReadHost,
     terrain: TerrainDecodeQueue,
     environments: EnvironmentIntake,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     environment_pushes: EnvironmentSender,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     environment_inbox: EnvironmentInbox,
     assets: AssetCoordinator,
     terrain_received: bool,
@@ -90,6 +94,7 @@ impl SessionDriver {
         let reads = WorldReadHost::new(session_world.world(), runtime.clone());
         let terrain = TerrainDecodeQueue::default();
         let environments = EnvironmentIntake::new(runtime.clone());
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let (environment_pushes, environment_inbox) = EnvironmentInbox::channel();
         let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone());
         let camera = CameraUplink::new();
@@ -107,7 +112,9 @@ impl SessionDriver {
             reads,
             terrain,
             environments,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             environment_pushes,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             environment_inbox,
             assets,
             terrain_received: false,
@@ -249,6 +256,7 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
                 if let Some(region) = self.session_world.region_for(simulator_id)
                     && let Err(error) = self.environment_pushes.clear_region(region)
                 {
@@ -394,6 +402,7 @@ impl SessionDriver {
         message: Message,
     ) {
         let region = self.session_world.region_for(simulator_id);
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         if matches!(packet_order, PacketOrder::Ordered(_))
             && Some(simulator_id) == self.primary_simulator
             && let (Some(agent), Some(region)) = (self.active_session.as_ref(), region)
@@ -477,11 +486,15 @@ impl SessionDriver {
         let lookup = RegionLookup::new(self.session_handle.clone(), simulator_id, &session, self.runtime.clone());
         self.region_lookup = Some(lookup.clone());
         self.mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             environments: self.environment_inbox.clone(),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             camera: self.camera.sender(),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             assets: self.assets.handle(),
             session: session.clone(),
             region_name: self.session_world.region_name(simulator_id).map(str::to_owned),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             world_reader: self.reads.reader(),
         }));
         if let Some(login_data) = login_data {

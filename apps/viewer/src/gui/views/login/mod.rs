@@ -530,7 +530,8 @@ impl LoginScreen {
     }
 
     fn apply_session_ready(&mut self, ready: SessionReadyUpdate, cx: &mut Context<Self>) {
-        let SessionReadyUpdate { session, region_name, world_reader, assets, camera, environments } = ready;
+        let session = ready.session;
+        let region_name = ready.region_name;
         let Some(active) = self.active_session.as_ref() else { return };
         let mailbox = active.presentation_mailbox.clone();
         self.login_phase = LoginPhase::Idle;
@@ -550,10 +551,20 @@ impl LoginScreen {
             }
         });
 
-        crate::gui::scene::start_session(self.session_generation, &world_reader, environments, &assets, session.agent_id, camera, cx);
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        crate::gui::scene::start_session(
+            self.session_generation,
+            &ready.world_reader,
+            ready.environments,
+            &ready.assets,
+            session.agent_id,
+            ready.camera,
+            cx,
+        );
     }
 
     pub(crate) fn end_session(&mut self, error: String, cx: &mut Context<Self>) {
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         crate::gui::scene::end_session(self.session_generation, cx);
         tracing::warn!(%error, "viewer session ended after a failure");
         self.login_phase = LoginPhase::Idle;
@@ -616,15 +627,7 @@ mod tests {
     use crate::remembered_login::CredentialStoreError;
 
     fn credential_error(detail: &str) -> CredentialStoreError {
-        #[cfg(target_os = "windows")]
-        {
-            CredentialStoreError::Open(detail.to_owned())
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = detail;
-            CredentialStoreError::Unsupported
-        }
+        CredentialStoreError::Open(detail.to_owned())
     }
 
     #[test]

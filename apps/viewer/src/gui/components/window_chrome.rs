@@ -118,7 +118,7 @@ mod platform {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "macos")]
 mod platform {
     pub(crate) fn appears_transparent() -> bool {
         false

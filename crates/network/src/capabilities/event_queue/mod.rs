@@ -25,7 +25,7 @@ use self::decode::{capability_event_batch_retained_size, decode_admitted_event_b
 #[cfg(test)]
 use self::decode::{decode_event_batch, llsd_heap_size, queued_event_retained_size};
 #[cfg(test)]
-use super::budget::{MAX_CONCURRENT_EVENT_QUEUES, MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES};
+use super::budget::MAX_SESSION_QUEUED_CAPABILITY_EVENT_BYTES;
 use super::{
     budget::{
         MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES, MAX_EVENT_QUEUE_RESPONSE_BYTES, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
@@ -35,9 +35,9 @@ use super::{
 };
 use crate::{
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
+    event::EventRetention,
     event::{CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventSendOutcome, SimulatorId},
     http::{self, Response},
-    simulator::EventRetention,
 };
 
 const EVENT_QUEUE_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -288,6 +288,11 @@ impl EventQueueLossNotifier {
     }
 }
 
+struct PollResources {
+    event_queue: Option<OwnedSemaphorePermit>,
+    batch: Option<OwnedSemaphorePermit>,
+}
+
 async fn acquire_budget_permit(budget: Arc<Semaphore>, stop: &Stop) -> Option<OwnedSemaphorePermit> {
     if stop.is_stopped() {
         return None;
@@ -486,11 +491,6 @@ fn exit_after_send(outcome: EventSendOutcome, sent: EventQueueExit) -> EventQueu
 
 async fn notify_loss_then(pending_loss: &mut PendingEventQueueLoss, reason: String, sent: EventQueueExit) -> EventQueueExit {
     exit_after_send(pending_loss.notify(reason).await, sent)
-}
-
-struct PollResources {
-    event_queue: Option<OwnedSemaphorePermit>,
-    batch: Option<OwnedSemaphorePermit>,
 }
 
 #[tracing::instrument(name = "capabilities.event_queue", level = "debug", skip_all, fields(simulator = context.simulator_id.get()), ret)]
@@ -826,5 +826,4 @@ pub(crate) fn seed_retry_delay(retry_count: u32, retry_after: Option<Duration>) 
 }
 
 #[cfg(test)]
-#[path = "../event_queue_tests.rs"]
 mod tests;

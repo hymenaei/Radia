@@ -1,3 +1,15 @@
+#[cfg(test)]
+pub(crate) mod test_values {
+    use std::time::Duration;
+
+    use super::Client;
+
+    pub(crate) fn client_with_request_timeout(mut client: Client, timeout: Duration) -> Client {
+        client.request_timeout = timeout;
+        client
+    }
+}
+
 use std::{collections::HashMap, fmt, future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
 use llsd::xml;
@@ -103,12 +115,6 @@ impl Client {
             budget,
             request_timeout: REQUEST_TIMEOUT,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_request_timeout(mut self, timeout: Duration) -> Self {
-        self.request_timeout = timeout;
-        self
     }
 
     #[tracing::instrument(
@@ -494,5 +500,5 @@ fn encode_request<Request: Serialize + ?Sized>(payload: &Request) -> Result<Vec<
 }
 
 #[cfg(test)]
-#[path = "client_tests.rs"]
+#[path = "tests/client.rs"]
 mod tests;

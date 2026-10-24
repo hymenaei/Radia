@@ -255,16 +255,6 @@ pub(crate) async fn login_at_url(
     result
 }
 
-#[cfg(test)]
-pub(crate) async fn login_at(
-    credentials: &LoginCredentials,
-    mfa_token: &str,
-    mfa_hash: &str,
-    login_url: &Url,
-) -> Result<LoginResponse, LoginError> {
-    login_request(credentials, mfa_token, mfa_hash, login_url).await
-}
-
 #[tracing::instrument(name = "network.login.request", level = "debug", skip_all, fields(grid = ?credentials.grid))]
 async fn login_request(
     credentials: &LoginCredentials,
@@ -418,13 +408,25 @@ mod tests {
     };
     use url::Url;
 
-    use crate::login::{LoginResponse, login_at};
-    use crate::test_support::http::{LocalServer, response};
-    use crate::{AgentSession, Event, Grid, LoginCredentials, PacketOrder::Ordered, StartLocation, event::SimulatorId};
+    use crate::fixtures::{
+        http::{LocalServer, response},
+        test_simulator_id,
+    };
+    use crate::login::{LoginResponse, login_request};
+    use crate::{AgentSession, Event, Grid, LoginCredentials, PacketOrder::Ordered, StartLocation};
 
     const AGENT_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
     const SESSION_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
     const FOLDER_ID: &str = "12345678-1234-5678-1234-567812345678";
+
+    async fn login_at(
+        credentials: &LoginCredentials,
+        mfa_token: &str,
+        mfa_hash: &str,
+        login_url: &Url,
+    ) -> Result<LoginResponse, super::LoginError> {
+        login_request(credentials, mfa_token, mfa_hash, login_url).await
+    }
 
     #[test]
     fn http_error_keeps_source() {
@@ -605,7 +607,7 @@ mod tests {
         ]);
 
         let (parsed, retained_bytes, peak_bytes, elapsed_ns): (Result<login::Response, super::LoginError>, i128, i128, u128) =
-            crate::capabilities::measure_allocations(|| super::parse_login_response(&body, reqwest::StatusCode::OK, "text/xml"));
+            crate::fixtures::allocation::measure(|| super::parse_login_response(&body, reqwest::StatusCode::OK, "text/xml"));
         let parsed = parsed.expect("crowded login response should decode");
         let login::Response::Authenticated(parsed) = parsed else { panic!("expected authenticated response") };
         let login::Value::Array(parsed_inventory) = parsed.data.get("inventory-skeleton").expect("inventory should be retained") else {
@@ -777,7 +779,7 @@ mod tests {
         assert!(event_debug.contains("[REDACTED]"));
 
         let event = Event::SimulatorMessage {
-            simulator_id: SimulatorId::new(1),
+            simulator_id: test_simulator_id(1),
             source: "192.0.2.123:13000".parse().expect("valid simulator address"),
             sequence: 7,
             packet_order: Ordered(7),

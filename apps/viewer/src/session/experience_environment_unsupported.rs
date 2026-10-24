@@ -1,15 +1,19 @@
+use std::convert::Infallible;
+
 use protocol::lludp::Message;
 use uuid::Uuid;
 use world::Region;
 
+pub(crate) type EnvironmentQueueError = Infallible;
+
 pub(crate) struct EnvironmentSender;
 
 impl EnvironmentSender {
-    pub(crate) fn clear_region(&self, _: Region) -> Result<(), String> {
+    pub(crate) fn clear_region(&self, _: Region) -> Result<(), EnvironmentQueueError> {
         Ok(())
     }
 
-    pub(crate) fn publish(&self, _: &Message, _: Uuid, _: Region, _: network::SimulatorId) -> Result<(), String> {
+    pub(crate) fn publish(&self, _: &Message, _: Uuid, _: Region, _: network::SimulatorId) -> Result<(), EnvironmentQueueError> {
         Ok(())
     }
 }

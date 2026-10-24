@@ -91,7 +91,7 @@ async fn cancelled_queues_release_packet_memory() {
 }
 
 #[tokio::test]
-async fn retired_capability_worker_is_joined() {
+async fn retired_capability_requests_are_waited_for() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let endpoint = simulator.local_addr().expect("simulator endpoint");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind held capability");
@@ -99,7 +99,7 @@ async fn retired_capability_worker_is_joined() {
     let mut connection = connect_with_status(login_session(endpoint), ResponseData::default(), NetworkStatusHandle::default())
         .await
         .expect("connect coordinator");
-    let client = connection.new_capability_client(seed.clone()).expect("track capability worker");
+    let client = connection.new_capability_client(seed.clone()).expect("track capability requests");
     let id = SimulatorId::allocate().expect("neighbor ID");
     let mut capabilities = HashMap::from([(
         id,
@@ -119,18 +119,18 @@ async fn retired_capability_worker_is_joined() {
     let (mut socket, _) = timeout(WAIT, listener.accept()).await.expect("request reaches server").expect("accept request");
     let mut bytes = [0; 1024];
     assert!(timeout(WAIT, socket.read(&mut bytes)).await.expect("read held request").expect("HTTP request bytes") > 0);
-    assert_eq!(connection.capability_workers.len(), 2, "root and neighbor workers stay tracked");
+    assert_eq!(connection.capability_request_waiters.len(), 2, "root and neighbor capability requests stay tracked");
     crate::simulator::coordinator::remove_simulator_capability(&mut capabilities, id);
     assert!(capabilities.is_empty());
-    timeout(WAIT, connection.finish_capability_workers()).await.expect("join retired and root workers");
-    assert!(connection.capability_workers.is_empty());
+    timeout(WAIT, connection.finish_capability_request_waiters()).await.expect("wait for retired and root capability requests");
+    assert!(connection.capability_request_waiters.is_empty());
     let result = timeout(WAIT, request).await.expect("closed request resolves").expect("request task");
     assert!(matches!(result, Err(Error::CapabilitySessionClosed)));
     assert!(matches!(client.request_capabilities(&["TestCapability"]).await, Err(Error::CapabilitySessionClosed)));
 }
 
 #[tokio::test]
-async fn capability_worker_count_is_bounded() {
+async fn capability_client_count_is_bounded() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let mut connection = connect_with_status(
         login_session(simulator.local_addr().expect("simulator endpoint")),
@@ -141,16 +141,16 @@ async fn capability_worker_count_is_bounded() {
     .expect("connect coordinator");
     let seed = connection.session.seed_capability.clone();
     let mut clients = Vec::new();
-    for _ in 1..crate::simulator::coordinator::MAX_CAPABILITY_WORKERS {
-        clients.push(connection.new_capability_client(seed.clone()).expect("admit worker within limit"));
+    for _ in 1..crate::simulator::coordinator::MAX_TRACKED_CAPABILITY_CLIENTS {
+        clients.push(connection.new_capability_client(seed.clone()).expect("admit client within limit"));
     }
     assert!(connection.new_capability_client(seed).is_err());
-    assert_eq!(connection.capability_workers.len(), crate::simulator::coordinator::MAX_CAPABILITY_WORKERS);
+    assert_eq!(connection.capability_request_waiters.len(), crate::simulator::coordinator::MAX_TRACKED_CAPABILITY_CLIENTS);
     for client in &clients {
         client.close_session();
     }
-    timeout(WAIT, connection.finish_capability_workers()).await.expect("join bounded workers");
-    assert!(connection.capability_workers.is_empty());
+    timeout(WAIT, connection.finish_capability_request_waiters()).await.expect("wait for bounded capability requests");
+    assert!(connection.capability_request_waiters.is_empty());
 }
 
 #[tokio::test(start_paused = true)]

@@ -747,7 +747,11 @@ impl<'a> CoordinatorRuntime<'a> {
                         )).await?;
                     }
                 }
-                _ = coordinator.capability_workers.join_next(), if !coordinator.capability_workers.is_empty() => {}
+                joined = coordinator.capability_request_waiters.join_next(), if !coordinator.capability_request_waiters.is_empty() => {
+                    if let Some(Err(error)) = joined {
+                        tracing::error!(%error, "Capability request waiter failed");
+                    }
+                }
                 joined = root_connection_workers.join_next(), if !root_connection_workers.is_empty() => {
                     if let Some(Err(error)) = joined {
                         let reason = format!("The primary simulator connection task failed: {error}");

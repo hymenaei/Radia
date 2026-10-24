@@ -59,7 +59,7 @@ const EVENT_BACKLOG_WARNING_THRESHOLD: usize = MAX_PENDING_SIMULATOR_EVENTS / 2;
 const EVENT_BACKLOG_WARNING_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_EVENTS_PER_PACKET: usize = 2;
 const MAX_QUEUED_SIMULATOR_EVENTS: usize = MAX_PENDING_SIMULATOR_EVENTS + MAX_EVENTS_PER_PACKET - 1;
-const MAX_CAPABILITY_WORKERS: usize = MAX_SIMULATOR_CONNECTIONS;
+const MAX_TRACKED_CAPABILITY_CLIENTS: usize = MAX_SIMULATOR_CONNECTIONS;
 const MAX_PRECONNECT_EVENTS: usize = 64;
 const NEIGHBOR_COMMAND_CAPACITY: usize = 8;
 const HANDOFF_COMMAND_RETRY_INTERVAL: Duration = Duration::from_millis(10);
@@ -230,7 +230,7 @@ pub(crate) struct SimulatorCoordinator {
     session: AgentSession,
     capabilities: Client,
     capability_budget: CapabilityBudget,
-    capability_workers: JoinSet<()>,
+    capability_request_waiters: JoinSet<()>,
     login_data: ResponseData,
     status: NetworkStatusHandle,
     event_backlog: PrimaryEventBacklog,
@@ -296,7 +296,7 @@ impl SimulatorCoordinator {
         if let Some(outbound_budget) = self.outbound_budget.take() {
             outbound_budget.shutdown().await;
         }
-        self.finish_capability_workers().await;
+        self.finish_capability_request_waiters().await;
         status.clear_simulator();
         match &result {
             Ok(()) => status.set_lifecycle(NetworkLifecycle::Disconnected),
@@ -318,17 +318,21 @@ impl SimulatorCoordinator {
     }
 
     fn new_capability_client(&mut self, seed: Url) -> Result<Client, String> {
-        if self.capability_workers.len() >= MAX_CAPABILITY_WORKERS {
-            return Err("The capability worker limit has been reached.".into());
+        if self.capability_request_waiters.len() >= MAX_TRACKED_CAPABILITY_CLIENTS {
+            return Err("The capability client limit has been reached.".into());
         }
         let client = Client::new_with_status_and_budget(seed, self.status.clone(), self.capability_budget.clone())?;
-        track_capability_worker(&mut self.capability_workers, &client);
+        track_capability_requests(&mut self.capability_request_waiters, &client);
         Ok(client)
     }
 
-    async fn finish_capability_workers(&mut self) {
+    async fn finish_capability_request_waiters(&mut self) {
         self.capabilities.close_session();
-        while self.capability_workers.join_next().await.is_some() {}
+        while let Some(result) = self.capability_request_waiters.join_next().await {
+            if let Err(error) = result {
+                tracing::error!(%error, "Capability request waiter failed");
+            }
+        }
     }
 
     fn publish_primary_terminal_event(
@@ -798,9 +802,9 @@ fn queue_primary_message(
     queue_connection_message(commands, message, delivery, None, cancel_target, true)
 }
 
-fn track_capability_worker(workers: &mut JoinSet<()>, client: &Client) {
+fn track_capability_requests(workers: &mut JoinSet<()>, client: &Client) {
     let client = client.clone();
-    workers.spawn(async move { client.wait_for_worker().await });
+    workers.spawn(async move { client.wait_for_requests().await });
 }
 
 fn remove_simulator_capability(capabilities: &mut HashMap<SimulatorId, SimulatorCapabilitySession>, simulator_id: SimulatorId) {

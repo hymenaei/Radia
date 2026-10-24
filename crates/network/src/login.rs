@@ -206,23 +206,18 @@ async fn login_request(
         .map_err(|error| format!("Could not prepare the login request: {error}"))?
         .with_status(status);
     tracing::debug!("Login request started");
-    let response = time::timeout_at(
-        deadline,
-        client.post_operation_bounded("login", login_url, "text/xml", None, body.into_bytes(), MAX_LOGIN_RESPONSE_BYTES),
-    )
-    .await
-    .map_err(|_| "Could not contact Second Life: the login operation exceeded its deadline.".to_string())?
-    .map_err(|error| format!("Could not contact Second Life: {error}"))?;
+    let response =
+        time::timeout_at(deadline, client.post("login", login_url, "text/xml", None, body.into_bytes(), MAX_LOGIN_RESPONSE_BYTES))
+            .await
+            .map_err(|_| "Could not contact Second Life: the login operation exceeded its deadline.".to_string())?
+            .map_err(|error| format!("Could not contact Second Life: {error}"))?;
     let status = response.status;
     let content_type = response.headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or_default().to_owned();
-    let crate::http::Response { body, memory, extra_memory, .. } = response;
+    let crate::http::Response { body, .. } = response;
     let parse = spawn_blocking_with_permit(operation_permit, move || {
-        let parsed = from_utf8(&body)
+        from_utf8(&body)
             .map_err(|_| "Second Life returned an XML-RPC login response that is not valid UTF-8.".to_string())
-            .and_then(|body| parse_login_response(body, status, &content_type));
-        drop(memory);
-        drop(extra_memory);
-        parsed
+            .and_then(|body| parse_login_response(body, status, &content_type))
     });
     let (response, _operation_permit) = time::timeout_at(deadline, parse)
         .await

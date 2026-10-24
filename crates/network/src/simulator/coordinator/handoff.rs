@@ -757,7 +757,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handoff_worker_is_tracked_after_retirement() {
+    async fn handoff_capability_requests_are_waited_for_after_retirement() {
         let root = UdpSocket::bind("127.0.0.1:0").await.expect("bind root simulator");
         let destination = UdpSocket::bind("127.0.0.1:0").await.expect("bind destination");
         let session = login_session(root.local_addr().expect("root endpoint"));
@@ -785,11 +785,13 @@ mod tests {
         let client = connection
             .ensure_handoff_capabilities(id, &target, events, shutdown, &mut queues, &mut owners, &mut capabilities)
             .expect("start destination capability");
-        assert_eq!(connection.capability_workers.len(), 2);
+        assert_eq!(connection.capability_request_waiters.len(), 2);
         remove_simulator_capability(&mut capabilities, id);
         assert!(capabilities.is_empty());
-        timeout(Duration::from_secs(2), connection.finish_capability_workers()).await.expect("join root and retired destination workers");
-        assert!(connection.capability_workers.is_empty());
+        timeout(Duration::from_secs(2), connection.finish_capability_request_waiters())
+            .await
+            .expect("wait for root and retired destination capability requests");
+        assert!(connection.capability_request_waiters.is_empty());
         while timeout(Duration::from_secs(2), queues.join_next()).await.expect("join retired EventQueue").is_some() {}
         assert!(matches!(client.request_capabilities(&["TestCapability"]).await, Err(Error::CapabilitySessionClosed)));
     }

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use super::{
     ConnectionTaskResult, NEIGHBOR_COMMAND_CAPACITY, PrimaryEventBacklog, PrimaryRoute, PrimaryState, SimulatorConnection,
     SimulatorConnectionOptions, SimulatorConnectionState, SimulatorCoordinator, SimulatorCoordinatorOptions, SimulatorEvent,
-    SimulatorMemoryBudget, SimulatorTaskOutcome, track_capability_worker,
+    SimulatorMemoryBudget, SimulatorTaskOutcome, track_capability_requests,
 };
 use crate::{
     AgentSession,
@@ -87,8 +87,8 @@ impl SimulatorCoordinator {
             let capabilities =
                 Client::new_with_status_and_budget(session.seed_capability.clone(), status.clone(), capability_budget.clone())?;
             let outbound_budget = OutboundBudget::new(options.upstream_bytes_per_second().get());
-            let mut capability_workers = JoinSet::new();
-            track_capability_worker(&mut capability_workers, &capabilities);
+            let mut capability_request_waiters = JoinSet::new();
+            track_capability_requests(&mut capability_request_waiters, &capabilities);
             let (neighbor_events, neighbor_event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY);
             let (neighbor_requests, neighbor_request_receiver) = mpsc::channel(32);
             let (root_commands, root_command_receiver) = mpsc::channel(NEIGHBOR_COMMAND_CAPACITY);
@@ -160,13 +160,23 @@ impl SimulatorCoordinator {
             match Self::wait_for_primary_startup(&mut startup_disconnect, ready_receiver).await {
                 Ok(true) => {}
                 Ok(false) => {
-                    Self::shutdown_connect_attempt(&mut root_connection_workers, &capabilities, &mut capability_workers, outbound_budget)
-                        .await;
+                    Self::shutdown_connect_attempt(
+                        &mut root_connection_workers,
+                        &capabilities,
+                        &mut capability_request_waiters,
+                        outbound_budget,
+                    )
+                    .await;
                     return Ok(None);
                 }
                 Err(error) => {
-                    Self::shutdown_connect_attempt(&mut root_connection_workers, &capabilities, &mut capability_workers, outbound_budget)
-                        .await;
+                    Self::shutdown_connect_attempt(
+                        &mut root_connection_workers,
+                        &capabilities,
+                        &mut capability_request_waiters,
+                        outbound_budget,
+                    )
+                    .await;
                     return Err(error);
                 }
             }
@@ -196,7 +206,7 @@ impl SimulatorCoordinator {
                 session,
                 capabilities,
                 capability_budget,
-                capability_workers,
+                capability_request_waiters,
                 login_data,
                 status,
                 event_backlog: PrimaryEventBacklog::default(),
@@ -231,12 +241,16 @@ impl SimulatorCoordinator {
     async fn shutdown_connect_attempt(
         root_connection_workers: &mut JoinSet<ConnectionTaskResult>,
         capabilities: &Client,
-        capability_workers: &mut JoinSet<()>,
+        capability_request_waiters: &mut JoinSet<()>,
         outbound_budget: OutboundBudget,
     ) {
         root_connection_workers.shutdown().await;
         capabilities.close_session_and_wait().await;
-        while capability_workers.join_next().await.is_some() {}
+        while let Some(result) = capability_request_waiters.join_next().await {
+            if let Err(error) = result {
+                tracing::error!(%error, "Capability request waiter failed during startup shutdown");
+            }
+        }
         outbound_budget.shutdown().await;
     }
 

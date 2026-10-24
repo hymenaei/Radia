@@ -15,7 +15,7 @@ use assets::{
 use futures::{FutureExt, StreamExt, channel::oneshot, pin_mut, stream::FuturesUnordered};
 use network::{
     Error,
-    capabilities::{CapabilityUrl, Client, HttpError},
+    capabilities::{CapabilityUrl, Client, HttpErrorKind},
 };
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{OnceCell, mpsc, watch};
@@ -214,18 +214,17 @@ fn classify_network_error(error: Error) -> Failure {
     match error {
         Error::CapabilitySessionClosed | Error::SessionClosed => Failure::RouteClosed,
         Error::CapabilityRequestCanceled => Failure::Cancelled,
-        Error::CapabilityHttp(error) => match error {
-            HttpError::HttpStatus { status, retry_after, .. } => match status.as_u16() {
-                401 | 403 => Failure::Denied,
-                404 | 410 => Failure::NotFound,
-                408 | 429 | 500..=599 => Failure::Transient { retry_after: retry_after.unwrap_or_default() },
+        Error::CapabilityHttp(error) => match error.kind {
+            HttpErrorKind::HttpStatus => match error.status.map(|status| status.as_u16()) {
+                Some(401 | 403) => Failure::Denied,
+                Some(404 | 410) => Failure::NotFound,
+                Some(408 | 429 | 500..=599) => Failure::Transient { retry_after: error.retry_after.unwrap_or_default() },
                 _ => Failure::Malformed,
             },
-            HttpError::Transport { retry_after, .. } | HttpError::Timeout { retry_after, .. } => {
-                Failure::Transient { retry_after: retry_after.unwrap_or_default() }
-            }
-            HttpError::ResourceExhausted { .. } => Failure::TooLarge,
-            HttpError::Cancelled { .. } => Failure::Cancelled,
+            HttpErrorKind::Transport | HttpErrorKind::Timeout => Failure::Transient { retry_after: error.retry_after.unwrap_or_default() },
+            HttpErrorKind::ResourceExhausted => Failure::TooLarge,
+            HttpErrorKind::Cancelled => Failure::Cancelled,
+            HttpErrorKind::InvalidUrl => Failure::Malformed,
             _ => Failure::Malformed,
         },
         _ => Failure::Malformed,

@@ -1,28 +1,25 @@
 use std::{collections::HashMap, fmt, future::Future, net::SocketAddr, sync::Arc, time::Duration};
 
-#[cfg(test)]
-use std::sync;
-
 use llsd::xml;
 use reqwest::Url;
 use serde::Serialize;
 use tokio::{
     runtime::Handle,
-    sync::{Mutex, OwnedSemaphorePermit, mpsc, oneshot, watch},
-    task::{AbortHandle, JoinError, JoinHandle},
+    sync::{OwnedSemaphorePermit, mpsc, oneshot, watch},
+    task::AbortHandle,
     time,
 };
-use tracing::{Instrument, Span};
+use tracing::Instrument;
 
 use super::{
     budget::{
-        COMMAND_CAPACITY, CapabilityBudget, EVENT_QUEUE_REQUEST_TIMEOUT, LLSD_SCAN_WORKING_BYTES, MAX_CAPABILITY_REQUEST_BODY_BYTES,
-        MAX_CAPABILITY_RESPONSE_BYTES, REQUEST_TIMEOUT, spawn_blocking_with_permit,
+        CapabilityBudget, EVENT_QUEUE_REQUEST_TIMEOUT, MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES, REQUEST_TIMEOUT,
+        spawn_blocking_with_permit,
     },
-    event_queue::{self, EventQueueTask},
+    event_queue::{self, EventQueueContext, EventQueueTask, Stop},
     request::{
-        AdmittedCapabilities, AdmittedResponse, Command, RequestDeadline, capability_error, capability_llsd_limits_with_response_limit,
-        decode_capability_value_with_response_limit, run, validate_capability_names, wait_for_session_close,
+        RequestDeadline, decode_capability_value_with_response_limit, decode_seed_capabilities, get_capability_bytes, post_capability,
+        request_capabilities_response, validate_capability_names, wait_for_session_close,
     },
 };
 use crate::{
@@ -32,43 +29,6 @@ use crate::{
     http::{self, validate_http_url},
     status::NetworkStatusHandle,
 };
-
-#[cfg(test)]
-const TEST_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[cfg(test)]
-pub(crate) struct DecodeGate {
-    entered: sync::mpsc::Sender<()>,
-    released: sync::Mutex<bool>,
-    release: sync::Condvar,
-}
-
-#[cfg(test)]
-impl DecodeGate {
-    pub(crate) fn new() -> (Arc<Self>, sync::mpsc::Receiver<()>) {
-        let (entered, entered_rx) = sync::mpsc::channel();
-        (Arc::new(Self { entered, released: sync::Mutex::new(false), release: sync::Condvar::new() }), entered_rx)
-    }
-
-    pub(crate) fn release(&self) {
-        *self.released.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
-        self.release.notify_all();
-    }
-
-    pub(crate) fn wait(&self) {
-        if self.entered.send(()).is_err() {
-            return;
-        }
-        let mut released = self.released.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        while !*released {
-            let (next, result) = self.release.wait_timeout(released, TEST_TIMEOUT).unwrap_or_else(|poisoned| poisoned.into_inner());
-            released = next;
-            if !*released && result.timed_out() {
-                panic!("timed out waiting for test to release decoder");
-            }
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct CapabilityUrl {
@@ -82,7 +42,7 @@ impl CapabilityUrl {
 
     pub fn parse(value: &str) -> Result<Self, Error> {
         let url = Url::parse(value).map_err(|_| Error::Capability("Capability URL is invalid.".into()))?;
-        validate_http_url(&url).map_err(Error::Capability)?;
+        validate_http_url(&url).map_err(|error| Error::Capability(error.to_string()))?;
         Ok(Self { url })
     }
 
@@ -111,10 +71,9 @@ impl fmt::Debug for CapabilityUrl {
 pub struct Client {
     seed: Arc<Url>,
     runtime: Handle,
-    pub(super) commands: mpsc::Sender<Command>,
     http: http::Client,
     session_closed: watch::Sender<bool>,
-    request_worker: Arc<RequestWorker>,
+    requests: RequestTracker,
     pub(super) budget: CapabilityBudget,
     status: NetworkStatusHandle,
     request_timeout: Duration,
@@ -136,23 +95,16 @@ impl Client {
     }
 
     pub(crate) fn new_with_status_and_budget(seed: Url, status: NetworkStatusHandle, budget: CapabilityBudget) -> Result<Self, String> {
-        validate_http_url(&seed)?;
+        validate_http_url(&seed).map_err(|error| error.to_string())?;
         let runtime = Handle::try_current().map_err(|_| "A Tokio runtime is required for capability requests.".to_string())?;
-        let http = budget
-            .http_client()?
-            .with_status(status.clone())
-            .with_memory_budget(budget.response_memory.clone(), http::ResponseMemoryClass::Ordinary);
-        let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
-        let (session_closed, session_closed_receiver) = watch::channel(false);
-        let task = runtime.spawn(run(http.clone(), seed.clone(), receiver, session_closed_receiver, status.clone()).in_current_span());
-        let request_worker = Arc::new(RequestWorker { task: Mutex::new(Some(task)) });
+        let http = budget.http_client()?.with_status(status.clone());
+        let (session_closed, _) = watch::channel(false);
         Ok(Self {
             seed: Arc::new(seed),
             runtime,
-            commands,
             http,
             session_closed,
-            request_worker,
+            requests: RequestTracker::new(),
             budget,
             status,
             request_timeout: REQUEST_TIMEOUT,
@@ -172,45 +124,42 @@ impl Client {
     pub async fn request_capabilities(&self, names: &[&str]) -> Result<HashMap<String, CapabilityUrl>, Error> {
         validate_capability_names(names)?;
         let deadline = RequestDeadline::new(self.request_timeout);
-        let permit = self.acquire_request_permit(deadline).await?;
-        let names = names.iter().map(|name| (*name).to_owned()).collect();
+        let names = names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
         if deadline.expired() {
             return Err(deadline.error());
         }
         let client = self.clone();
-        self.on_runtime(async move { client.request_capabilities_admitted(names, deadline, permit).await }).await
-    }
-
-    async fn request_capabilities_admitted(
-        &self,
-        names: Vec<String>,
-        deadline: RequestDeadline,
-        permit: OwnedSemaphorePermit,
-    ) -> Result<HashMap<String, CapabilityUrl>, Error> {
-        let (reply, response) = oneshot::channel();
-        time::timeout_at(
-            deadline.at,
-            self.commands.send(Command::RequestCapabilities { names, reply, deadline, span: Span::current(), _permit: permit }),
-        )
+        self.on_runtime(async move {
+            let seed = client.seed.as_ref().clone();
+            let request_names = names.clone();
+            let (response, permit) = client
+                .run_with_permit(deadline, move |http, permit| async move {
+                    let response =
+                        request_capabilities_response(&http, &seed, &request_names, super::budget::MAX_SEED_CAPABILITY_RESPONSE_BYTES)
+                            .await?;
+                    Ok((response, permit))
+                })
+                .await?;
+            let decode_names = names.clone();
+            let decode_guard = client.requests.track();
+            let decode = spawn_blocking_with_permit(permit, move || {
+                let _decode_guard = decode_guard;
+                decode_seed_capabilities(response, &decode_names)
+            });
+            let (result, permit) = client
+                .race_request(deadline, async {
+                    time::timeout_at(deadline.at, decode)
+                        .await
+                        .map_err(|_| deadline.error())?
+                        .map_err(|error| Error::Capability(format!("Capability response decoder failed: {error}")))
+                })
+                .await?;
+            drop(permit);
+            let capabilities = result?;
+            client.status.note_capabilities(capabilities.keys().map(String::as_str));
+            Ok(capabilities.into_iter().map(|(name, url)| (name, CapabilityUrl::from_discovery(url))).collect())
+        })
         .await
-        .map_err(|_| deadline.error())?
-        .map_err(|_| Error::CapabilitySessionClosed)?;
-        let response = time::timeout_at(deadline.at, response)
-            .await
-            .map_err(|_| deadline.error())?
-            .map_err(|_| self.request_ended_error())?
-            .map_err(capability_error)?;
-        let AdmittedCapabilities { capabilities, _request, _memory } = response;
-        drop(_memory);
-        drop(_request);
-        Ok(capabilities)
-    }
-
-    pub async fn post<Request>(&self, url: &CapabilityUrl, payload: &Request) -> Result<llsd::Value, Error>
-    where
-        Request: Serialize + ?Sized,
-    {
-        self.post_with_response_limit(url, payload, MAX_CAPABILITY_RESPONSE_BYTES).await
     }
 
     pub async fn post_with_response_limit<Request>(
@@ -222,48 +171,31 @@ impl Client {
     where
         Request: Serialize + ?Sized,
     {
-        if max_response_bytes == 0 || max_response_bytes > MAX_CAPABILITY_RESPONSE_BYTES {
-            return Err(Error::Capability(format!(
-                "Capability response limit must be between 1 and {MAX_CAPABILITY_RESPONSE_BYTES} bytes."
-            )));
-        }
+        validate_response_limit(max_response_bytes)?;
         let deadline = RequestDeadline::new(self.request_timeout);
-        let permit = self.acquire_request_permit(deadline).await?;
-        let body = xml::to_vec_with_max_bytes(payload, MAX_CAPABILITY_REQUEST_BODY_BYTES)
-            .map_err(|error| Error::Capability(format!("Could not encode an LLSD request: {error}")))?;
+        let body = encode_request(payload)?;
         if deadline.expired() {
             return Err(deadline.error());
         }
         let client = self.clone();
         let url = url.clone();
         self.on_runtime(async move {
-            let response = client.post_admitted(url, body, max_response_bytes, deadline, permit).await?;
-            decode_admitted_response(response, client.http.clone(), deadline, || {}).await
+            let (response, permit) = client
+                .run_with_permit(deadline, |http, permit| async move {
+                    let response = post_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
+                    Ok((response, permit))
+                })
+                .await?;
+            client.decode_admitted_response(response, max_response_bytes, deadline, permit).await
         })
         .await
     }
 
-    async fn post_admitted(
-        &self,
-        url: CapabilityUrl,
-        body: Vec<u8>,
-        max_response_bytes: usize,
-        deadline: RequestDeadline,
-        permit: OwnedSemaphorePermit,
-    ) -> Result<AdmittedResponse, Error> {
-        let (reply, response) = oneshot::channel();
-        time::timeout_at(
-            deadline.at,
-            self.commands.send(Command::Post { url, body, max_response_bytes, reply, deadline, span: Span::current(), _permit: permit }),
-        )
-        .await
-        .map_err(|_| deadline.error())?
-        .map_err(|_| Error::CapabilitySessionClosed)?;
-        time::timeout_at(deadline.at, response)
-            .await
-            .map_err(|_| deadline.error())?
-            .map_err(|_| self.request_ended_error())?
-            .map_err(capability_error)
+    pub async fn post<Request>(&self, url: &CapabilityUrl, payload: &Request) -> Result<llsd::Value, Error>
+    where
+        Request: Serialize + ?Sized,
+    {
+        self.post_with_response_limit(url, payload, MAX_CAPABILITY_RESPONSE_BYTES).await
     }
 
     pub async fn post_bytes_with_response_limit<Request>(
@@ -275,97 +207,100 @@ impl Client {
     where
         Request: Serialize + ?Sized,
     {
-        if max_response_bytes == 0 || max_response_bytes > MAX_CAPABILITY_RESPONSE_BYTES {
-            return Err(Error::Capability(format!(
-                "Capability response limit must be between 1 and {MAX_CAPABILITY_RESPONSE_BYTES} bytes."
-            )));
-        }
+        validate_response_limit(max_response_bytes)?;
         let deadline = RequestDeadline::new(self.request_timeout);
-        let permit = self.acquire_request_permit(deadline).await?;
-        let body = xml::to_vec_with_max_bytes(payload, MAX_CAPABILITY_REQUEST_BODY_BYTES)
-            .map_err(|error| Error::Capability(format!("Could not encode an LLSD request: {error}")))?;
+        let body = encode_request(payload)?;
         if deadline.expired() {
             return Err(deadline.error());
         }
         let client = self.clone();
         let url = url.clone();
-        let response = self.on_runtime(async move { client.post_admitted(url, body, max_response_bytes, deadline, permit).await }).await?;
-        Ok(response.body)
-    }
-
-    pub async fn get(&self, url: &CapabilityUrl) -> Result<llsd::Value, Error> {
-        self.get_with_decode_hook(url, || {}).await
-    }
-
-    pub(super) async fn get_with_decode_hook(
-        &self,
-        url: &CapabilityUrl,
-        before_decode: impl FnOnce() + Send + 'static,
-    ) -> Result<llsd::Value, Error> {
-        let deadline = RequestDeadline::new(self.request_timeout);
-        let permit = self.acquire_request_permit(deadline).await?;
-        let client = self.clone();
-        let url = url.clone();
         self.on_runtime(async move {
-            let response = client.get_bytes_admitted_with_permit(url, MAX_CAPABILITY_RESPONSE_BYTES, deadline, permit).await?;
-            decode_admitted_response(response, client.http.clone(), deadline, before_decode).await
+            let (response, permit) = client
+                .run_with_permit(deadline, |http, permit| async move {
+                    let response = post_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
+                    Ok((response, permit))
+                })
+                .await?;
+            drop(permit);
+            Ok(response.body)
         })
         .await
     }
 
-    pub async fn get_bytes(&self, url: &CapabilityUrl) -> Result<Vec<u8>, Error> {
-        self.get_bytes_with_response_limit(url, MAX_CAPABILITY_RESPONSE_BYTES).await
-    }
-
     pub async fn get_bytes_with_response_limit(&self, url: &CapabilityUrl, max_response_bytes: usize) -> Result<Vec<u8>, Error> {
-        if max_response_bytes == 0 || max_response_bytes > MAX_CAPABILITY_RESPONSE_BYTES {
-            return Err(Error::Capability(format!(
-                "Capability response limit must be between 1 and {MAX_CAPABILITY_RESPONSE_BYTES} bytes."
-            )));
-        }
+        validate_response_limit(max_response_bytes)?;
         let deadline = RequestDeadline::new(self.request_timeout);
-        let permit = self.acquire_request_permit(deadline).await?;
         let client = self.clone();
         let url = url.clone();
-        let response =
-            self.on_runtime(async move { client.get_bytes_admitted_with_permit(url, max_response_bytes, deadline, permit).await }).await?;
-        Ok(response.body)
+        self.on_runtime(async move {
+            let (response, permit) = client
+                .run_with_permit(deadline, |http, permit| async move {
+                    let response = get_capability_bytes(&http, &url.url, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
+                    Ok((response, permit))
+                })
+                .await?;
+            drop(permit);
+            Ok(response.body)
+        })
+        .await
     }
 
-    async fn get_bytes_admitted_with_permit(
-        &self,
-        url: CapabilityUrl,
-        max_response_bytes: usize,
-        deadline: RequestDeadline,
-        permit: OwnedSemaphorePermit,
-    ) -> Result<AdmittedResponse, Error> {
-        let (reply, response) = oneshot::channel();
-        time::timeout_at(
-            deadline.at,
-            self.commands.send(Command::GetBytes { url, max_response_bytes, reply, deadline, span: Span::current(), _permit: permit }),
-        )
-        .await
-        .map_err(|_| deadline.error())?
-        .map_err(|_| Error::CapabilitySessionClosed)?;
-        time::timeout_at(deadline.at, response)
-            .await
-            .map_err(|_| deadline.error())?
-            .map_err(|_| self.request_ended_error())?
-            .map_err(capability_error)
+    async fn run_with_permit<T, F, Fut>(&self, deadline: RequestDeadline, operation: F) -> Result<T, Error>
+    where
+        F: FnOnce(http::Client, OwnedSemaphorePermit) -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
+        let permit = self.acquire_request_permit(deadline).await?;
+        self.race_request(deadline, operation(self.http.clone(), permit)).await
     }
 
     async fn acquire_request_permit(&self, deadline: RequestDeadline) -> Result<OwnedSemaphorePermit, Error> {
         let budget = Arc::clone(&self.budget.ordinary_requests);
         let session_closed = self.session_closed.subscribe();
-        self.on_runtime(async move {
-            tokio::select! {
-                biased;
-                _ = wait_for_session_close(session_closed) => Err(Error::CapabilitySessionClosed),
-                permit = budget.acquire_owned() => permit.map_err(|_| Error::CapabilityRequestCanceled),
-                _ = time::sleep_until(deadline.at) => Err(deadline.error()),
-            }
-        })
-        .await
+        if *session_closed.borrow() {
+            return Err(Error::CapabilitySessionClosed);
+        }
+        tokio::select! {
+            biased;
+            _ = wait_for_session_close(session_closed) => Err(Error::CapabilitySessionClosed),
+            _ = time::sleep_until(deadline.at) => Err(deadline.error()),
+            permit = budget.acquire_owned() => permit.map_err(|_| Error::CapabilityRequestCanceled),
+        }
+    }
+
+    async fn race_request<T>(&self, deadline: RequestDeadline, operation: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
+        let session_closed = self.session_closed.subscribe();
+        tokio::select! {
+            biased;
+            _ = wait_for_session_close(session_closed) => Err(Error::CapabilitySessionClosed),
+            _ = time::sleep_until(deadline.at) => Err(deadline.error()),
+            result = operation => result,
+        }
+    }
+
+    async fn decode_admitted_response(
+        &self,
+        response: http::Response,
+        max_response_bytes: usize,
+        deadline: RequestDeadline,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<llsd::Value, Error> {
+        let decode_guard = self.requests.track();
+        let decode = spawn_blocking_with_permit(permit, move || {
+            let _decode_guard = decode_guard;
+            decode_capability_value_with_response_limit(&response.body, max_response_bytes)
+        });
+        let (result, permit) = self
+            .race_request(deadline, async {
+                time::timeout_at(deadline.at, decode)
+                    .await
+                    .map_err(|_| deadline.error())?
+                    .map_err(|error| Error::Capability(format!("LLSD response decoder task failed: {error}")))
+            })
+            .await?;
+        drop(permit);
+        result
     }
 
     fn on_runtime<T, F>(&self, future: F) -> impl Future<Output = Result<T, Error>> + '_
@@ -373,26 +308,44 @@ impl Client {
         T: Send + 'static,
         F: Future<Output = Result<T, Error>> + Send + 'static,
     {
-        let task = self.runtime.spawn(future.in_current_span());
-        let abort = AbortOnDrop(task.abort_handle());
+        let requests = self.requests.clone();
+        let runtime = self.runtime.clone();
+        let status = self.status.clone();
+        let session_closed = self.session_closed.subscribe();
         async move {
+            let request = requests.track();
+            if *session_closed.borrow() {
+                drop(request);
+                return Err(Error::CapabilitySessionClosed);
+            }
+            let task = runtime.spawn(
+                async move {
+                    let _request = request;
+                    future.await
+                }
+                .in_current_span(),
+            );
+            let abort = AbortOnDrop(task.abort_handle());
             let result = task.await;
             drop(abort);
             match result {
-                Ok(result) => result,
+                Ok(result) => {
+                    if let Err(error) = &result
+                        && !matches!(error, Error::CapabilitySessionClosed | Error::CapabilityRequestCanceled)
+                    {
+                        status.record_error(error.to_string());
+                    }
+                    result
+                }
                 Err(error) => {
                     if error.is_panic() {
-                        self.status.record_error("The capability request task failed.");
+                        status.record_error("The capability request task failed.");
                         return Err(Error::Capability("The capability request task failed.".into()));
                     }
-                    Err(self.request_ended_error())
+                    if *session_closed.borrow() { Err(Error::CapabilitySessionClosed) } else { Err(Error::CapabilityRequestCanceled) }
                 }
             }
         }
-    }
-
-    fn request_ended_error(&self) -> Error {
-        if *self.session_closed.borrow() { Error::CapabilitySessionClosed } else { Error::CapabilityRequestCanceled }
     }
 
     pub(crate) fn close_session(&self) {
@@ -401,13 +354,12 @@ impl Client {
 
     pub(crate) async fn close_session_and_wait(&self) {
         self.close_session();
-        self.wait_for_worker().await;
+        self.wait_for_requests().await;
     }
 
-    pub(crate) async fn wait_for_worker(&self) {
-        if self.request_worker.wait().await.is_err() {
-            self.status.record_error("The capability request worker failed during shutdown.");
-        }
+    pub(crate) async fn wait_for_requests(&self) {
+        wait_for_session_close(self.session_closed.subscribe()).await;
+        self.requests.wait_until_idle().await;
     }
 
     pub(crate) fn start_event_queue(
@@ -442,11 +394,7 @@ impl Client {
         is_primary: bool,
     ) -> Result<EventQueueTask, String> {
         let runtime = Handle::try_current().map_err(|_| "The simulator event queue requires an active Tokio runtime.".to_string())?;
-        let http = self
-            .http
-            .clone()
-            .with_timeout(Some(EVENT_QUEUE_REQUEST_TIMEOUT))
-            .with_memory_budget(self.budget.response_memory.clone(), http::ResponseMemoryClass::EventQueue);
+        let http = self.http.clone().with_timeout(Some(EVENT_QUEUE_REQUEST_TIMEOUT));
         let seed = self.seed.as_ref().clone();
         let status = self.status.clone();
         let ordinary_requests = Arc::clone(&self.budget.ordinary_requests);
@@ -456,26 +404,26 @@ impl Client {
         let (role, primary) = event_queue::EventQueueRoleHandle::channel(is_primary);
         let session_closed = self.session_closed.subscribe();
         let (completed, completion) = oneshot::channel();
+        let context = EventQueueContext {
+            simulator_id,
+            source,
+            seed,
+            http,
+            events,
+            status,
+            ordinary_requests,
+            primary_event_queues,
+            neighbor_event_queues,
+            queued_event_bytes,
+            coverage_losses,
+        };
+        let stop = Stop::new(shutdown, session_closed);
         let task = runtime.spawn(
             async move {
-                let exit = event_queue::run_event_queue(
-                    simulator_id,
-                    source,
-                    seed,
-                    http,
-                    events,
-                    shutdown,
-                    primary,
-                    status,
-                    session_closed,
-                    ordinary_requests,
-                    primary_event_queues,
-                    neighbor_event_queues,
-                    queued_event_bytes,
-                    coverage_losses,
-                )
-                .await;
-                let _ = completed.send(exit);
+                let exit = event_queue::run_event_queue(context, stop, primary).await;
+                if let Err(exit) = completed.send(exit) {
+                    tracing::debug!(?exit, "EventQueueGet completion receiver was dropped");
+                }
             }
             .in_current_span(),
         );
@@ -483,19 +431,45 @@ impl Client {
     }
 }
 
-struct RequestWorker {
-    task: Mutex<Option<JoinHandle<()>>>,
+struct RequestTracker {
+    active: watch::Sender<usize>,
 }
 
-impl RequestWorker {
-    async fn wait(&self) -> Result<(), JoinError> {
-        let mut task = self.task.lock().await;
-        let result = match task.as_mut() {
-            Some(task) => task.await,
-            None => return Ok(()),
-        };
-        *task = None;
-        result
+impl RequestTracker {
+    fn new() -> Self {
+        let (active, _) = watch::channel(0);
+        Self { active }
+    }
+
+    fn track(&self) -> RequestGuard {
+        self.active.send_modify(|active| *active = active.saturating_add(1));
+        RequestGuard(self.active.clone())
+    }
+
+    async fn wait_until_idle(&self) {
+        let mut active = self.active.subscribe();
+        loop {
+            if *active.borrow() == 0 {
+                return;
+            }
+            if active.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+impl Clone for RequestTracker {
+    fn clone(&self) -> Self {
+        Self { active: self.active.clone() }
+    }
+}
+
+struct RequestGuard(watch::Sender<usize>);
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        self.0.send_modify(|active| *active = active.saturating_sub(1));
     }
 }
 
@@ -507,65 +481,16 @@ impl Drop for AbortOnDrop {
     }
 }
 
-fn capability_preflight_error(error: xml::BoundError) -> Error {
-    match error {
-        xml::BoundError::Malformed => Error::Capability(format!("Could not decode an LLSD response: {error}")),
-        xml::BoundError::LimitExceeded(_) | xml::BoundError::Overflow => {
-            Error::CapabilityHttp(http::Error::resource_exhausted(format!("Could not admit LLSD response decoding: {error}")))
-        }
-        _ => Error::Capability(format!("Could not decode an LLSD response: {error}")),
+fn validate_response_limit(max_response_bytes: usize) -> Result<(), Error> {
+    if max_response_bytes == 0 || max_response_bytes > MAX_CAPABILITY_RESPONSE_BYTES {
+        return Err(Error::Capability(format!("Capability response limit must be between 1 and {MAX_CAPABILITY_RESPONSE_BYTES} bytes.")));
     }
+    Ok(())
 }
 
-fn admit_capability_decode_memory_with_response_limit(
-    body: &[u8],
-    http: &http::Client,
-    max_response_bytes: usize,
-) -> Result<http::ResponseMemoryPermit, Error> {
-    let mut memory =
-        http.try_reserve_memory(http::ResponseMemoryClass::Ordinary, LLSD_SCAN_WORKING_BYTES).map_err(Error::CapabilityHttp)?;
-    let bound = xml::value_allocation_bound(body, capability_llsd_limits_with_response_limit(max_response_bytes))
-        .map_err(capability_preflight_error)?;
-    memory.try_grow(bound).map_err(Error::CapabilityHttp)?;
-    Ok(memory)
-}
-
-async fn decode_admitted_response(
-    response: AdmittedResponse,
-    http: http::Client,
-    deadline: RequestDeadline,
-    before_decode: impl FnOnce() + Send + 'static,
-) -> Result<llsd::Value, Error> {
-    let AdmittedResponse { body, max_response_bytes, _memory: raw_memory, _request: request } = response;
-    let (decoded, request) = time::timeout_at(
-        deadline.at,
-        spawn_blocking_with_permit(request, move || {
-            let decoded = if deadline.expired() {
-                Err(deadline.error())
-            } else {
-                admit_capability_decode_memory_with_response_limit(&body, &http, max_response_bytes).and_then(|memory| {
-                    if deadline.expired() {
-                        return Err(deadline.error());
-                    }
-                    before_decode();
-                    if deadline.expired() {
-                        return Err(deadline.error());
-                    }
-                    decode_capability_value_with_response_limit(&body, max_response_bytes).map(|value| (value, memory))
-                })
-            };
-            drop(body);
-            drop(raw_memory);
-            decoded
-        }),
-    )
-    .await
-    .map_err(|_| deadline.error())?
-    .map_err(|error| Error::Capability(format!("LLSD response decoder task failed: {error}")))?;
-    drop(request);
-    let (value, memory) = decoded?;
-    drop(memory);
-    Ok(value)
+fn encode_request<Request: Serialize + ?Sized>(payload: &Request) -> Result<Vec<u8>, Error> {
+    xml::to_vec_with_max_bytes(payload, MAX_CAPABILITY_REQUEST_BODY_BYTES)
+        .map_err(|error| Error::Capability(format!("Could not encode an LLSD request: {error}")))
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     mem::size_of,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use assets::{Content, Environment, EnvironmentDescription, Priority, Request, Status};
@@ -67,9 +68,10 @@ impl RegionEnvironment {
         candidate: Candidate,
         identity: u64,
         work: &mut MeshWork,
+        budget: &Budget,
     ) -> Option<Self> {
         let bytes = inline_bytes(&description);
-        let lease = work.lease.split(bytes)?;
+        let lease = work.lease.split(bytes).or_else(|| budget.reserve(bytes))?;
         Some(Self(Arc::new(ResolvedEnvironment {
             description: ResolvedDescription::Inline(description),
             day_length_seconds: candidate.day_length_seconds,
@@ -195,6 +197,8 @@ enum CandidateSource {
 enum Pending {
     Asset { ticket: AssetTicket, index: usize },
     Inline { index: usize },
+    StaleSession,
+    Retry { index: usize },
 }
 
 struct Entry {
@@ -212,11 +216,12 @@ pub(in crate::scene) struct RegionEnvironmentResolver {
     tickets: HashMap<AssetTicket, (Region, u64, usize)>,
     events: VecDeque<AssetChange>,
     generation: u64,
+    retry_at: Option<Instant>,
 }
 
 impl RegionEnvironmentResolver {
     pub(in crate::scene) fn new(budget: Budget) -> Self {
-        Self { budget, entries: BTreeMap::new(), tickets: HashMap::new(), events: VecDeque::new(), generation: 0 }
+        Self { budget, entries: BTreeMap::new(), tickets: HashMap::new(), events: VecDeque::new(), generation: 0, retry_at: None }
     }
 
     pub(in crate::scene) fn matches(&self, region: Region, source: &EnvironmentRead) -> bool {
@@ -269,6 +274,7 @@ impl RegionEnvironmentResolver {
         }
         self.entries.clear();
         self.tickets.clear();
+        self.retry_at = None;
     }
 
     pub(in crate::scene) fn event(&mut self) -> Option<AssetChange> {
@@ -319,13 +325,51 @@ impl RegionEnvironmentResolver {
         self.entries.values().any(|entry| entry.pending.is_none() && entry.next < entry.candidates.len())
     }
 
+    pub(in crate::scene) fn retry_ready(&mut self, now: Instant) {
+        if !self.retry_at.is_some_and(|retry_at| now >= retry_at) {
+            return;
+        }
+        for entry in self.entries.values_mut() {
+            if let Some(Pending::Retry { index }) = entry.pending.take() {
+                entry.next = index;
+            }
+        }
+        self.retry_at = None;
+    }
+
+    pub(in crate::scene) fn retry_at(&mut self, now: Instant) -> Option<Instant> {
+        if !self.entries.values().any(|entry| matches!(entry.pending, Some(Pending::Retry { .. }))) {
+            self.retry_at = None;
+            return None;
+        }
+        Some(*self.retry_at.get_or_insert(now + Duration::from_millis(200)))
+    }
+
+    pub(in crate::scene) fn retry_capacity(&mut self, region: Region, generation: u64, index: usize) {
+        let Some(entry) = self.entries.get_mut(&region) else { return };
+        if entry.generation == generation && entry.pending.is_none() {
+            entry.pending = Some(Pending::Retry { index });
+        }
+    }
+
     pub(in crate::scene) fn complete_asset(&mut self, ticket: AssetTicket, status: &Status) -> Resolution {
         let Some((region, generation, index)) = self.tickets.get(&ticket).copied() else {
             return Resolution::Unhandled;
         };
+        if matches!(status, Status::StaleSession) {
+            self.tickets.remove(&ticket);
+            self.events.push_back(AssetChange::Release(ticket));
+            if let Some(entry) = self.entries.get_mut(&region)
+                && entry.generation == generation
+                && matches!(entry.pending, Some(Pending::Asset { ticket: pending, index: pending_index }) if pending == ticket && pending_index == index)
+            {
+                entry.pending = Some(Pending::StaleSession);
+            }
+            return Resolution::Pending;
+        }
         let result = match status {
             Status::Ready(Content::Environment(environment)) => Some(Ok(environment.clone())),
-            Status::Failed { .. } | Status::StaleSession | Status::Ready(_) => Some(Err(())),
+            Status::Failed { .. } | Status::Ready(_) => Some(Err(())),
             _ => None,
         };
         let Some(result) = result else { return Resolution::Pending };
@@ -379,14 +423,6 @@ impl RegionEnvironmentResolver {
             }
             Err(_) => failure(entry, completion.region, completion.index),
         }
-    }
-
-    pub(in crate::scene) fn failed(&mut self, region: Region, generation: u64, index: usize) -> Resolution {
-        let Some(entry) = self.entries.get_mut(&region) else { return Resolution::Unhandled };
-        if entry.generation != generation || entry.pending.is_some() {
-            return Resolution::Unhandled;
-        }
-        failure(entry, region, index)
     }
 
     fn cancel_pending(&mut self, region: Region) {

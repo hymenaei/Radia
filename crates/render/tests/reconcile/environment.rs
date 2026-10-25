@@ -193,6 +193,36 @@ fn parcel_failure_falls_back_to_region_then_none() {
 }
 
 #[test]
+fn stale_session_releases_ticket_without_falling_back() {
+    let mut world = world();
+    let region = Region::new(1);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    settle(&mut scene, &mut view, &world, &mut now);
+    let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
+    let _ = world
+        .observe_environment(
+            target,
+            source(1, 1),
+            assignment(EnvironmentSource::Inline(b"{'type':'sky','name':'region'}".as_slice().into()), 1, None, None, None),
+        )
+        .unwrap();
+    let parcel = ParcelLocalId::new(7).unwrap();
+    let _ = world.observe_agent_parcel(source(1, 2), Some(parcel)).unwrap();
+    let parcel_target = world.environment_target(region, EnvironmentScope::Parcel(parcel)).unwrap();
+    let asset = AssetId::new(Uuid::from_u128(119));
+    let _ =
+        world.observe_environment(parcel_target, source(1, 3), assignment(EnvironmentSource::Asset(asset), 1, None, None, None)).unwrap();
+    scene.notify_world_change();
+    let request = settle_materials(&mut scene, &mut view, &world, &mut now).requested.into_iter().next().expect("parcel request");
+    scene.complete_asset(request.ticket, assets::Status::StaleSession);
+    let completion = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(completion.released.contains(&request.ticket));
+    assert!(completion.requested.is_empty());
+    assert!(view.environment(region).is_none());
+}
+
+#[test]
 fn retirement_releases_environment_ticket_and_source_charge() {
     let mut world = world();
     let region = Region::new(1);

@@ -278,19 +278,17 @@ impl Reconciler {
         let environment = match candidate.value {
             ReadyValue::Asset(environment) => RegionEnvironment::asset(environment, candidate.candidate.clone(), identity, &self.budget),
             ReadyValue::Inline(description, mut work) => {
-                RegionEnvironment::inline(description, candidate.candidate.clone(), identity, &mut work)
+                RegionEnvironment::inline(description, candidate.candidate.clone(), identity, &mut work, &self.budget)
             }
         };
         let Some(environment) = environment else {
-            let resolution = self.preparation.environments.failed(candidate.region, candidate.generation, candidate.index);
-            self.resolve_environment(resolution);
+            self.preparation.environments.retry_capacity(candidate.region, candidate.generation, candidate.index);
             return;
         };
         let old_bytes = self.state.mirror.environments.get(&candidate.region).map_or(0, RegionEnvironment::retained_bytes);
         let new_bytes = environment.retained_bytes();
         if self.retain_environment(new_bytes, old_bytes).is_err() {
-            let resolution = self.preparation.environments.failed(candidate.region, candidate.generation, candidate.index);
-            self.resolve_environment(resolution);
+            self.preparation.environments.retry_capacity(candidate.region, candidate.generation, candidate.index);
             return;
         }
         self.environment_identity = self.environment_identity.checked_add(1).expect("environment identities exhausted");

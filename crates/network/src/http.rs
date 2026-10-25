@@ -2,7 +2,7 @@ use std::{
     error,
     fmt::{self, Debug, Display, Formatter},
     future::Future,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 use reqwest::{
@@ -10,7 +10,7 @@ use reqwest::{
     header::{ACCEPT, CONTENT_TYPE, HeaderMap, RETRY_AFTER},
     redirect::Policy,
 };
-use tokio::time;
+use tokio::time::{self, Instant};
 
 #[derive(Clone)]
 pub(crate) struct Client {

@@ -494,16 +494,17 @@ fn format_error(error: FormatError) -> StorageError {
     }
 }
 
-fn resolve_default_cache_dir() -> Result<PathBuf, StorageError> {
-    dirs::cache_dir()
-        .map(|directory| directory.join("radia").join("storage"))
-        .ok_or(StorageError::Io(io::Error::new(io::ErrorKind::NotFound, "local cache directory is unavailable")))
-}
-
 pub fn default_cache_dir() -> Result<PathBuf, StorageError> {
-    resolve_default_cache_dir()
+    let root =
+        dirs::cache_dir().ok_or(StorageError::Io(io::Error::new(io::ErrorKind::NotFound, "local cache directory is unavailable")))?;
+    Ok(if cfg!(windows) {
+        root.join("Radia").join("cache")
+    } else if cfg!(target_os = "macos") {
+        root.join("Radia")
+    } else {
+        root.join("radia")
+    })
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
 mod tests;

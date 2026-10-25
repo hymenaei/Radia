@@ -32,25 +32,32 @@ struct VoidWaterOutput {
 @fragment fn void_water_fragment(ray: VoidWaterRay) -> VoidWaterOutput {
     let near = void_water.inverse * vec4<f32>(ray.ndc, 1.0, 1.0);
     let direction = safe_normalize(near.xyz / near.w);
+    let distance = abs(void_water.plane.x) / max(abs(direction.z), 0.000001);
+    let true_intersection = direction * distance;
+    let direction_eye = (void_water.view * vec4<f32>(direction, 0.0)).xyz;
+    let view_distance = distance * -direction_eye.z;
+    let point = direction * min(distance, void_water.plane.z / max(-direction_eye.z, 0.000001));
+    let coordinates = water_coordinates(point, void_water.surface);
+    let big_dx = dpdx(coordinates.big);
+    let big_dy = dpdy(coordinates.big);
+    let first_dx = dpdx(coordinates.first);
+    let first_dy = dpdy(coordinates.first);
+    let second_dx = dpdx(coordinates.second);
+    let second_dy = dpdy(coordinates.second);
     if (void_water.plane.x < 0.0 && direction.z >= 0.0) || (void_water.plane.x > 0.0 && direction.z <= 0.0) {
         discard;
     }
-    let distance = abs(void_water.plane.x) / max(abs(direction.z), 0.000001);
-    let point = direction * min(distance, void_water.plane.z);
-    if distance < void_water.plane.z {
-        for (var index = 0u; index < u32(void_water.plane.y); index += 1u) {
-            let region = void_water.regions[index];
-            if all(point.xy >= region.xy) && all(point.xy < region.xy + region.zw) {
-                discard;
-            }
+    for (var index = 0u; index < u32(void_water.plane.y); index += 1u) {
+        let region = void_water.regions[index];
+        if all(true_intersection.xy >= region.xy) && all(true_intersection.xy < region.xy + region.zw) {
+            discard;
         }
     }
-    let coordinates = water_coordinates(point, void_water.surface);
     let blend = void_water.surface.fresnel.z;
     let wave1 = select(
         blend_normal(
-            linear_to_srgb(textureSample(void_water_normal_image, void_water_normal_sampler, coordinates.big).xyz),
-            linear_to_srgb(textureSample(void_water_normal_next_image, void_water_normal_sampler, coordinates.big).xyz),
+            linear_to_srgb(textureSampleGrad(void_water_normal_image, void_water_normal_sampler, coordinates.big, big_dx, big_dy).xyz),
+            linear_to_srgb(textureSampleGrad(void_water_normal_next_image, void_water_normal_sampler, coordinates.big, big_dx, big_dy).xyz),
             blend,
         ),
         vec3<f32>(0.0, 0.0, 1.0),
@@ -58,8 +65,8 @@ struct VoidWaterOutput {
     );
     let wave2 = select(
         blend_normal(
-            linear_to_srgb(textureSample(void_water_normal_image, void_water_normal_sampler, coordinates.first).xyz),
-            linear_to_srgb(textureSample(void_water_normal_next_image, void_water_normal_sampler, coordinates.first).xyz),
+            linear_to_srgb(textureSampleGrad(void_water_normal_image, void_water_normal_sampler, coordinates.first, first_dx, first_dy).xyz),
+            linear_to_srgb(textureSampleGrad(void_water_normal_next_image, void_water_normal_sampler, coordinates.first, first_dx, first_dy).xyz),
             blend,
         ),
         vec3<f32>(0.0, 0.0, 1.0),
@@ -67,8 +74,8 @@ struct VoidWaterOutput {
     );
     let wave3 = select(
         blend_normal(
-            linear_to_srgb(textureSample(void_water_normal_image, void_water_normal_sampler, coordinates.second).xyz),
-            linear_to_srgb(textureSample(void_water_normal_next_image, void_water_normal_sampler, coordinates.second).xyz),
+            linear_to_srgb(textureSampleGrad(void_water_normal_image, void_water_normal_sampler, coordinates.second, second_dx, second_dy).xyz),
+            linear_to_srgb(textureSampleGrad(void_water_normal_next_image, void_water_normal_sampler, coordinates.second, second_dx, second_dy).xyz),
             blend,
         ),
         vec3<f32>(0.0, 0.0, 1.0),
@@ -93,8 +100,8 @@ struct VoidWaterOutput {
         void_water.surface,
         void_water.atmosphere,
     );
-    let finite_depth = void_water.plane.w * (void_water.plane.z / max(distance, void_water.plane.w) - 1.0) / (void_water.plane.z - void_water.plane.w);
-    let depth = select(max(finite_depth, 0.00000001), 0.00000001, distance >= void_water.plane.z);
+    let finite_depth = void_water.plane.w * (void_water.plane.z / max(view_distance, void_water.plane.w) - 1.0) / (void_water.plane.z - void_water.plane.w);
+    let depth = select(max(finite_depth, 0.00000001), 0.0, view_distance >= void_water.plane.z);
     var output: VoidWaterOutput;
     output.color = color;
     output.depth = depth;

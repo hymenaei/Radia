@@ -85,10 +85,16 @@ struct Surface {
 @fragment fn region_water_fragment(v: Output) -> RegionWater {
     let clip = camera.projection * vec4<f32>(v.relative_position, 1.0);
     let coordinates = water_coordinates(v.relative_position, surface_water);
+    let big_dx = dpdx(coordinates.big);
+    let big_dy = dpdy(coordinates.big);
+    let first_dx = dpdx(coordinates.first);
+    let first_dy = dpdy(coordinates.first);
+    let second_dx = dpdx(coordinates.second);
+    let second_dy = dpdy(coordinates.second);
     let wave1 = select(
         blend_normal(
-            linear_to_srgb(textureSample(water_normal_image, water_normal_sampler, coordinates.big).xyz),
-            linear_to_srgb(textureSample(water_normal_next_image, water_normal_sampler, coordinates.big).xyz),
+            linear_to_srgb(textureSampleGrad(water_normal_image, water_normal_sampler, coordinates.big, big_dx, big_dy).xyz),
+            linear_to_srgb(textureSampleGrad(water_normal_next_image, water_normal_sampler, coordinates.big, big_dx, big_dy).xyz),
             surface_water.fresnel.z,
         ),
         vec3<f32>(0.0, 0.0, 1.0),
@@ -96,8 +102,8 @@ struct Surface {
     );
     let wave2 = select(
         blend_normal(
-            linear_to_srgb(textureSample(water_normal_image, water_normal_sampler, coordinates.first).xyz),
-            linear_to_srgb(textureSample(water_normal_next_image, water_normal_sampler, coordinates.first).xyz),
+            linear_to_srgb(textureSampleGrad(water_normal_image, water_normal_sampler, coordinates.first, first_dx, first_dy).xyz),
+            linear_to_srgb(textureSampleGrad(water_normal_next_image, water_normal_sampler, coordinates.first, first_dx, first_dy).xyz),
             surface_water.fresnel.z,
         ),
         vec3<f32>(0.0, 0.0, 1.0),
@@ -105,8 +111,8 @@ struct Surface {
     );
     let wave3 = select(
         blend_normal(
-            linear_to_srgb(textureSample(water_normal_image, water_normal_sampler, coordinates.second).xyz),
-            linear_to_srgb(textureSample(water_normal_next_image, water_normal_sampler, coordinates.second).xyz),
+            linear_to_srgb(textureSampleGrad(water_normal_image, water_normal_sampler, coordinates.second, second_dx, second_dy).xyz),
+            linear_to_srgb(textureSampleGrad(water_normal_next_image, water_normal_sampler, coordinates.second, second_dx, second_dy).xyz),
             surface_water.fresnel.z,
         ),
         vec3<f32>(0.0, 0.0, 1.0),

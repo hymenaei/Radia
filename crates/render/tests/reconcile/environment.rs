@@ -3,6 +3,7 @@ use super::support::{
     EnvironmentSource, ExperienceId, Instant, ParcelLocalId, ReadFailure, ReconcileStep, Reconciler, Region, Uuid, WorldReadError,
     prepared_asset, settle, settle_materials, source, world,
 };
+use render::environment::Schedule;
 
 #[test]
 fn parcel_environment_precedes_region_and_inherit_falls_through() {
@@ -38,18 +39,14 @@ fn parcel_environment_precedes_region_and_inherit_falls_through() {
     settle(&mut scene, &mut view, &world, &mut now);
     let environment = view.environment(region).unwrap();
     assert_eq!(environment.description().name, "parcel");
-    assert_eq!(environment.day_length_seconds(), 7200);
-    assert_eq!(environment.day_offset_seconds(), 3000);
-    assert_eq!(environment.altitudes(), [1000.0, 2000.0, 3000.0]);
+    assert_eq!(environment.schedule(), Schedule { day_length: 7200.0, day_offset: 3000.0, altitudes: [1000.0, 2000.0, 3000.0] });
     let inherit = assignment(EnvironmentSource::Inherit, 2, None, None, None);
     let _ = world.observe_environment(parcel_target, source(1, 4), inherit).unwrap();
     scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
     let environment = view.environment(region).unwrap();
     assert_eq!(environment.description().name, "region");
-    assert_eq!(environment.day_length_seconds(), 9000);
-    assert_eq!(environment.day_offset_seconds(), 3000);
-    assert_eq!(environment.altitudes(), [1000.0, 2000.0, 3000.0]);
+    assert_eq!(environment.schedule(), Schedule { day_length: 9000.0, day_offset: 3000.0, altitudes: [1000.0, 2000.0, 3000.0] });
 }
 
 #[test]

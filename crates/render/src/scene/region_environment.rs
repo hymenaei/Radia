@@ -8,14 +8,12 @@ use std::{
 use assets::{Content, Environment, EnvironmentDescription, Priority, Request, Status};
 use world::{EnvironmentAssignment, EnvironmentRead, EnvironmentSource, Region};
 
+use crate::environment::Schedule;
 use crate::scene::{
     AssetChange, AssetRequest, AssetTicket, Budget, MAX_REGIONS,
     budget::{Lease, MeshWork},
     model::SceneLifetime,
 };
-
-const DEFAULT_DAY_LENGTH_SECONDS: u32 = 14_400;
-const DEFAULT_DAY_OFFSET_SECONDS: i32 = 57_600;
 
 #[derive(Clone)]
 pub struct RegionEnvironment(Arc<ResolvedEnvironment>);
@@ -28,16 +26,8 @@ impl RegionEnvironment {
         }
     }
 
-    pub fn day_length_seconds(&self) -> u32 {
-        self.0.day_length_seconds
-    }
-
-    pub fn day_offset_seconds(&self) -> i32 {
-        self.0.day_offset_seconds
-    }
-
-    pub fn altitudes(&self) -> [f32; 3] {
-        self.0.altitudes
+    pub fn schedule(&self) -> Schedule {
+        self.0.schedule
     }
 
     pub fn identity(&self) -> u64 {
@@ -55,9 +45,7 @@ impl RegionEnvironment {
         let lease = budget.reserve(size_of::<ResolvedEnvironment>() + 32)?;
         Some(Self(Arc::new(ResolvedEnvironment {
             description: ResolvedDescription::Asset(environment),
-            day_length_seconds: candidate.day_length_seconds,
-            day_offset_seconds: candidate.day_offset_seconds,
-            altitudes: candidate.altitudes,
+            schedule: candidate.schedule,
             identity,
             _lease: lease,
         })))
@@ -74,19 +62,14 @@ impl RegionEnvironment {
         let lease = work.lease.split(bytes).or_else(|| budget.reserve(bytes))?;
         Some(Self(Arc::new(ResolvedEnvironment {
             description: ResolvedDescription::Inline(description),
-            day_length_seconds: candidate.day_length_seconds,
-            day_offset_seconds: candidate.day_offset_seconds,
-            altitudes: candidate.altitudes,
+            schedule: candidate.schedule,
             identity,
             _lease: lease,
         })))
     }
 
     pub(in crate::scene) fn same_environment(&self, candidate: &ReadyValue, schedule: &Candidate) -> bool {
-        self.description() == candidate.description()
-            && self.day_length_seconds() == schedule.day_length_seconds
-            && self.day_offset_seconds() == schedule.day_offset_seconds
-            && self.altitudes() == schedule.altitudes
+        self.description() == candidate.description() && self.schedule() == schedule.schedule
     }
 }
 
@@ -96,9 +79,7 @@ fn inline_bytes(description: &EnvironmentDescription) -> usize {
 
 struct ResolvedEnvironment {
     description: ResolvedDescription,
-    day_length_seconds: u32,
-    day_offset_seconds: i32,
-    altitudes: [f32; 3],
+    schedule: Schedule,
     identity: u64,
     _lease: Lease,
 }
@@ -183,9 +164,7 @@ impl ReadyValue {
 #[derive(Clone)]
 pub(in crate::scene) struct Candidate {
     source: CandidateSource,
-    pub(in crate::scene) day_length_seconds: u32,
-    pub(in crate::scene) day_offset_seconds: i32,
-    pub(in crate::scene) altitudes: [f32; 3],
+    schedule: Schedule,
 }
 
 #[derive(Clone)]
@@ -464,17 +443,20 @@ fn candidate(assignment: &EnvironmentAssignment, region: Option<&EnvironmentAssi
         EnvironmentSource::Inline(bytes) => CandidateSource::Inline(Arc::clone(bytes)),
         EnvironmentSource::Inherit => return None,
     };
+    let defaults = Schedule::default();
     Some(Candidate {
         source,
-        day_length_seconds: assignment
-            .day_length_seconds
-            .or_else(|| region.and_then(|value| value.day_length_seconds))
-            .unwrap_or(DEFAULT_DAY_LENGTH_SECONDS),
-        day_offset_seconds: assignment
-            .day_offset_seconds
-            .or_else(|| region.and_then(|value| value.day_offset_seconds))
-            .unwrap_or(DEFAULT_DAY_OFFSET_SECONDS),
-        altitudes: region.and_then(|value| value.altitudes).unwrap_or([0.0; 3]),
+        schedule: Schedule {
+            day_length: assignment
+                .day_length_seconds
+                .or_else(|| region.and_then(|value| value.day_length_seconds))
+                .map_or(defaults.day_length, f64::from),
+            day_offset: assignment
+                .day_offset_seconds
+                .or_else(|| region.and_then(|value| value.day_offset_seconds))
+                .map_or(defaults.day_offset, f64::from),
+            altitudes: region.and_then(|value| value.altitudes).unwrap_or(defaults.altitudes),
+        },
     })
 }
 

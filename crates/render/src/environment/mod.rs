@@ -2,7 +2,7 @@ mod transition;
 
 use std::f32::consts::PI;
 
-use assets::{CelestialBody, DayCycle, EnvironmentDescription, EnvironmentSettings, Keyframe, Sky, TextureRef, Water};
+use assets::{CelestialBody, DayCycle, EnvironmentDescription, EnvironmentSettings, Haze, Keyframe, Sky, TextureRef, Water};
 use math::{Quat, Vec3};
 use utils::AssetId;
 use uuid::Uuid;
@@ -301,7 +301,7 @@ fn overlay(state: &mut SkyState, sky: &Sky) {
         state.clouds.variance = value;
     }
     overlay_texture(&mut state.clouds.texture, sky.clouds.texture);
-    overlay_haze(&mut state.haze, sky);
+    overlay_haze(&mut state.haze, &sky.haze);
     if let Some(value) = sky.gamma {
         state.gamma = value;
     }
@@ -325,27 +325,26 @@ fn overlay_body(state: &mut CelestialBodyState, body: &CelestialBody) {
     }
 }
 
-fn overlay_haze(state: &mut HazeState, sky: &Sky) {
-    let legacy = sky.legacy_haze.as_ref();
-    if let Some(value) = legacy.and_then(|haze| haze.ambient).or(sky.haze.ambient) {
+fn overlay_haze(state: &mut HazeState, haze: &Haze) {
+    if let Some(value) = haze.ambient {
         state.ambient = value;
     }
-    if let Some(value) = legacy.and_then(|haze| haze.blue_density).or(sky.haze.blue_density) {
+    if let Some(value) = haze.blue_density {
         state.blue_density = value;
     }
-    if let Some(value) = legacy.and_then(|haze| haze.blue_horizon).or(sky.haze.blue_horizon) {
+    if let Some(value) = haze.blue_horizon {
         state.blue_horizon = value;
     }
-    if let Some(value) = legacy.and_then(|haze| haze.density_multiplier).or(sky.haze.density_multiplier) {
+    if let Some(value) = haze.density_multiplier {
         state.density_multiplier = value;
     }
-    if let Some(value) = legacy.and_then(|haze| haze.distance_multiplier).or(sky.haze.distance_multiplier) {
+    if let Some(value) = haze.distance_multiplier {
         state.distance_multiplier = value;
     }
-    if let Some(value) = legacy.and_then(|haze| haze.density).or(sky.haze.density) {
+    if let Some(value) = haze.density {
         state.density = value;
     }
-    if let Some(value) = legacy.and_then(|haze| haze.horizon).or(sky.haze.horizon) {
+    if let Some(value) = haze.horizon {
         state.horizon = value;
     }
 }

@@ -238,18 +238,23 @@ impl EventQueueTestServer {
                 match response {
                     EventServerResponse::Response(response) => {
                         stream.write_all(&response).expect("write test HTTP response");
+                        async_request_sender.send(request).expect("async test should read request");
                     }
                     EventServerResponse::Controlled(response) => {
+                        async_request_sender.send(request.clone()).expect("async test should read request");
                         let response = response.recv_timeout(TEST_TIMEOUT).expect("controlled HTTP response");
                         stream.write_all(&response).expect("write controlled HTTP response");
                     }
                     EventServerResponse::Hold => {
+                        async_request_sender.send(request).expect("async test should read request");
                         let mut byte = [0];
                         let _ = stream.read(&mut byte);
                     }
-                    EventServerResponse::DropConnection => drop(stream),
+                    EventServerResponse::DropConnection => {
+                        drop(stream);
+                        async_request_sender.send(request).expect("async test should read request");
+                    }
                 }
-                async_request_sender.send(request).expect("async test should read request");
             }
         });
         Self { base, address, requests, async_requests, stop, worker: Some(worker) }

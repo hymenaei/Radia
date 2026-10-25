@@ -2,7 +2,7 @@ use std::{
     error,
     fmt::{self, Debug, Display, Formatter},
     future::Future,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 use reqwest::{
@@ -10,7 +10,7 @@ use reqwest::{
     header::{ACCEPT, CONTENT_TYPE, HeaderMap, RETRY_AFTER},
     redirect::Policy,
 };
-use tokio::time;
+use tokio::time::{self, Instant};
 
 #[derive(Clone)]
 pub(crate) struct Client {
@@ -178,6 +178,14 @@ impl Error {
 
     pub(crate) fn is_timeout_after(&self, minimum: Duration) -> bool {
         self.kind == ErrorKind::Timeout && self.status.is_none() && self.elapsed >= minimum
+    }
+
+    pub(crate) fn is_transport_without_response_after(&self, minimum: Duration) -> bool {
+        self.kind == ErrorKind::Transport && self.status.is_none() && self.elapsed >= minimum
+    }
+
+    pub(crate) fn is_transient(&self) -> bool {
+        matches!(self.kind, ErrorKind::Transport | ErrorKind::Timeout)
     }
 
     pub(crate) fn is_resource_exhausted(&self) -> bool {

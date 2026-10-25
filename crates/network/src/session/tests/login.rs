@@ -63,7 +63,7 @@ pub(super) async fn fake_http(simulator_port: u16) -> (String, oneshot::Receiver
     fake_http_with_mfa(simulator_port, false).await
 }
 
-pub(super) async fn fake_http_with_event_queue_disconnect(
+pub(super) async fn fake_http_with_event_queue_failure(
     simulator_port: u16,
 ) -> (String, oneshot::Receiver<Vec<u8>>, oneshot::Sender<()>, JoinHandle<Vec<Vec<u8>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake HTTP server");
@@ -71,7 +71,7 @@ pub(super) async fn fake_http_with_event_queue_disconnect(
     let login_body = login_xml(simulator_port, &format!("http://{address}/seed"));
     let seed_body = format!("<llsd><map><key>EventQueueGet</key><string>http://{address}/events</string></map></llsd>");
     let (poll_started, poll_observed) = oneshot::channel();
-    let (disconnect_poll, poll_disconnect) = oneshot::channel();
+    let (fail_poll, poll_failure) = oneshot::channel();
     let worker = spawn(async move {
         let mut requests = Vec::with_capacity(3);
         let (mut stream, _) = listener.accept().await.expect("accept fake login request");
@@ -90,12 +90,15 @@ pub(super) async fn fake_http_with_event_queue_disconnect(
         let request = read_http_request(&mut stream).await;
         let _ = poll_started.send(request.clone());
         requests.push(request);
-        let _ = poll_disconnect.await;
-        drop(stream);
+        let _ = poll_failure.await;
+        stream
+            .write_all(&response(401, "Unauthorized", "text/plain", None, "denied"))
+            .await
+            .expect("write permanent EventQueueGet failure");
         requests
     });
 
-    (format!("http://{address}/login.cgi"), poll_observed, disconnect_poll, worker)
+    (format!("http://{address}/login.cgi"), poll_observed, fail_poll, worker)
 }
 
 pub(super) async fn fake_http_with_mfa(
@@ -441,7 +444,7 @@ async fn network_thread_login() {
 pub(super) async fn event_queue_coverage_loss_keeps_viewer_session_connected() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let simulator_address = simulator.local_addr().expect("read simulator address");
-    let (login_url, poll_started, disconnect_poll, http_task) = fake_http_with_event_queue_disconnect(simulator_address.port()).await;
+    let (login_url, poll_started, fail_poll, http_task) = fake_http_with_event_queue_failure(simulator_address.port()).await;
     let (mut session, retained_handle, worker) = spawn_network_thread_session(test_credentials(), login_url);
 
     std::assert_matches!(login_next_event(&mut session.events).await, Event::LoginAccepted { .. });
@@ -463,7 +466,7 @@ pub(super) async fn event_queue_coverage_loss_keeps_viewer_session_connected() {
         }
     }
 
-    disconnect_poll.send(()).expect("release the failed EventQueueGet request");
+    fail_poll.send(()).expect("release the permanent EventQueueGet failure");
     let mut saw_coverage_loss = false;
     let mut saw_queue_failure = false;
     while !saw_coverage_loss || !saw_queue_failure {

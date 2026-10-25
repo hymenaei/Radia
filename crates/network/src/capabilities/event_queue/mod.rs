@@ -666,7 +666,10 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                     }
                 }
             }
-            Err(error) if error.is_timeout_after(MIN_EMPTY_POLL_DURATION) => {
+            Err(error)
+                if error.is_timeout_after(MIN_EMPTY_POLL_DURATION)
+                    || error.is_transport_without_response_after(MIN_EMPTY_POLL_DURATION) =>
+            {
                 pending_loss.commit();
                 error_count = 0;
             }
@@ -675,6 +678,29 @@ pub(super) async fn run_event_queue(context: EventQueueContext, stop: Stop, mut 
                 drop(poll);
                 let reason = format!("EventQueueGet response could not be admitted: {error}");
                 return notify_loss_then(&mut pending_loss, reason, EventQueueExit::StoppedWithCoverageLoss).await;
+            }
+            Err(error) if error.is_transient() => {
+                let retry_after = error.retry_after;
+                drop(poll);
+                let error = format!("EventQueueGet request failed: {error}");
+                match retry_event_queue_with_hint(
+                    simulator_id,
+                    &mut error_count,
+                    source,
+                    &events,
+                    error.clone(),
+                    retry_after,
+                    &stop,
+                    &mut pending_loss,
+                )
+                .await
+                {
+                    RetryOutcome::Retry => {}
+                    RetryOutcome::Stopped => return EventQueueExit::Stopped,
+                    RetryOutcome::LimitReached => {
+                        return notify_loss_then(&mut pending_loss, error, EventQueueExit::RetryLimitReached).await;
+                    }
+                }
             }
             Err(error) => {
                 pending_loss.record();
@@ -802,10 +828,8 @@ fn event_queue_retry_delay_with_hint(error_count: u32, retry_after: Option<Durat
 
 fn expected_empty_poll(status: StatusCode, elapsed: Duration) -> bool {
     elapsed >= MIN_EMPTY_POLL_DURATION
-        && matches!(
-            status,
-            StatusCode::INTERNAL_SERVER_ERROR | StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
-        )
+        && (status.as_u16() == LINDEN_HTTP_INTERNAL_ERROR
+            || matches!(status, StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT))
 }
 
 fn retryable_event_queue_error(status: StatusCode) -> bool {

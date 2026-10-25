@@ -90,7 +90,7 @@ impl Builder {
             }
         }
         for (index, vertex) in self.vertices.iter_mut().enumerate() {
-            vertex.normal = normals[root(&mut self.parents, index)];
+            vertex.normal = normals[root(&mut self.parents, index)].try_normalize().unwrap_or(Vec3::Z);
         }
         for (index, normal) in self.normal_overrides {
             self.vertices[index].normal = normal;
@@ -605,14 +605,16 @@ fn cap(mesh: &mut Builder, profile: &Profile, cap_profile: &[Point], ring: &Ring
         mesh.vertex((min_position + max_position) * 0.5, (min_uv + max_uv) * 0.5)?;
     }
     if profile.inner.is_empty() {
-        let pivot = mesh.vertex_count() - 1;
-        for index in 0..pivot - base - 1 {
-            let a = base + index;
-            let b = a + 1;
-            if top {
-                mesh.triangle(pivot, a, b)?;
-            } else {
-                mesh.triangle(pivot, b, a)?;
+        if let Some(pivot) = mesh.vertex_count().checked_sub(1).filter(|pivot| *pivot >= base) {
+            let triangle_count = pivot.saturating_sub(base).saturating_sub(1);
+            for index in 0..triangle_count {
+                let a = base + index;
+                let b = a + 1;
+                if top {
+                    mesh.triangle(pivot, a, b)?;
+                } else {
+                    mesh.triangle(pivot, b, a)?;
+                }
             }
         }
     } else {
@@ -653,18 +655,24 @@ fn cap(mesh: &mut Builder, profile: &Profile, cap_profile: &[Point], ring: &Ring
             }
         }
     }
-    let first_triangle = &mesh.indices[start..start + 3];
-    let a = mesh.vertices[first_triangle[0] as usize].position;
-    let b = mesh.vertices[first_triangle[1] as usize].position;
-    let c = mesh.vertices[first_triangle[2] as usize].position;
-    let cross = (b - a).cross(c - a);
-    let normal = if cross.length_squared() > 0.00001 {
-        cross / cross.length()
-    } else if cross.z >= 0.0 {
-        Vec3::Z
-    } else {
-        -Vec3::Z
-    };
+    let normal = mesh
+        .indices
+        .get(start..)
+        .and_then(|indices| {
+            let triangle = indices.get(..3)?;
+            let a = mesh.vertices.get(*triangle.first()? as usize)?.position;
+            let b = mesh.vertices.get(*triangle.get(1)? as usize)?.position;
+            let c = mesh.vertices.get(*triangle.get(2)? as usize)?.position;
+            let cross = (b - a).cross(c - a);
+            Some(if cross.length_squared() > 0.00001 {
+                cross / cross.length()
+            } else if cross.z >= 0.0 {
+                Vec3::Z
+            } else {
+                -Vec3::Z
+            })
+        })
+        .unwrap_or(if top { Vec3::Z } else { -Vec3::Z });
     for index in base..mesh.vertex_count() {
         mesh.normal_override(index, normal);
     }
@@ -727,11 +735,11 @@ mod tests {
     };
 
     use assets::mesh::{MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh};
-    use math::{Vec2, Vec3};
+    use math::{Quat, Vec2, Vec3};
     use proptest::prelude::*;
     use world::PrimShape;
 
-    use super::{Detail, MeshBuildError, tessellate};
+    use super::{Builder, Detail, MeshBuildError, Point, Profile, Ring, cap, tessellate};
 
     fn generate_at(shape: PrimShape, detail: Detail) -> Mesh {
         tessellate(shape, detail, &AtomicBool::new(false)).unwrap()
@@ -804,6 +812,7 @@ mod tests {
         prop_assert!(mesh.indices().iter().all(|index| (*index as usize) < mesh.vertices().len()), "{detail:?} index is in range");
         for vertex in mesh.vertices() {
             prop_assert!(vertex.position.is_finite() && vertex.uv.is_finite() && vertex.normal.is_finite());
+            prop_assert!((vertex.normal.length() - 1.0).abs() < 1e-5, "normal is unit length");
             prop_assert!(vertex.position.length() <= 3.0, "normalized bound used by camera planning");
             prop_assert!(vertex.position.cmpge(mesh.bounds().min).all() && vertex.position.cmple(mesh.bounds().max).all());
         }
@@ -825,7 +834,7 @@ mod tests {
             assert_eq!(face.slot, slot as u8, "box face slots follow Second Life material order");
             for index in &mesh.indices()[face.indices.start as usize..face.indices.end as usize] {
                 let vertex = mesh.vertices()[*index as usize];
-                close(vertex.normal.normalize(), expected);
+                close(vertex.normal, expected);
                 if face.slot == 0 {
                     assert!(vertex.uv.distance(Vec2::new(vertex.position.x + 0.5, vertex.position.y + 0.5)) < 1e-5);
                 }
@@ -835,7 +844,28 @@ mod tests {
             }
         }
         let first_side_index = mesh.indices()[mesh.faces()[1].indices.start as usize] as usize;
-        close(mesh.vertices()[first_side_index].normal, -Vec3::Y * (2.0 / 9.0));
+        close(mesh.vertices()[first_side_index].normal, -Vec3::Y);
+    }
+
+    #[test]
+    fn caps_without_triangles_keep_finite_normals() {
+        let point = Point { position: Vec2::ZERO, t: 0.0 };
+        let ring = Ring { position: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec2::ONE, t: 0.0 };
+        let make_cap = |inner: Vec<Point>, open: bool, top: bool| {
+            let mut mesh = Builder::default();
+            let profile =
+                Profile { outer: Vec::new(), inner, cap_begin: Vec::new(), cap_end: Vec::new(), sides: None, inner_flat: false, open };
+            cap(&mut mesh, &profile, &[point], &ring, top).unwrap();
+            mesh
+        };
+
+        let open = make_cap(Vec::new(), true, true);
+        assert!(open.faces[0].indices.is_empty());
+        assert_eq!(open.normal_overrides, [(0, Vec3::Z)]);
+
+        let hollow = make_cap(vec![point], true, false);
+        assert!(hollow.faces[0].indices.is_empty());
+        assert_eq!(hollow.normal_overrides, [(0, -Vec3::Z), (1, -Vec3::Z)]);
     }
 
     #[test]
@@ -983,7 +1013,7 @@ mod tests {
         let first = vertex_at(&mesh, 1, Vec2::new(1.0, 0.0));
         let next = vertex_at(&mesh, 2, Vec2::ZERO);
         close(first.position, next.position);
-        assert!(first.normal.normalize().distance(next.normal.normalize()) > 0.2);
+        assert!(first.normal.distance(next.normal) > 0.2);
     }
 
     #[test]

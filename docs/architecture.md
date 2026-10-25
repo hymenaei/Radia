@@ -24,7 +24,7 @@ Composes startup, GUI screens and primitives, persistence, and subsystem coordin
 
 ### `crates/assets`
 
-Decodes textures, materials, and environments and owns their values plus the bounded CPU mesh representation. Its per-session Store coordinates demand, route eligibility, priority, retries, refinement, and work reservations. `next_job` yields fetch work or cached decode input. Fetched bytes become a `DecodeInput`; the Store admits that input as a `DecodeJob`, and decoding produces a charged `LoadCompletion`. The viewer owns network fetching and decode scheduling, so asset policy stays independent of transport.
+Decodes textures, materials, and environments and owns their values plus the bounded CPU mesh representation. Its per-session Store coordinates demand, route eligibility, priority, retries, refinement, and work reservations. `next_job` yields fetch work or cached decode input. Fetched bytes become a `DecodeInput`; the Store admits that input as a `DecodeJob`, and decoding produces a charged `LoadCompletion`. Its `cache` layer maps asset kind and ID to generic storage keys and merges validated byte extents. Persistent layout, hashing, quotas, recovery, process locking, and eviction belong to `storage`. The viewer owns network fetching and decode scheduling, so asset policy stays independent of transport.
 
 ### `crates/llsd`
 
@@ -47,6 +47,10 @@ Owns Second Life wire types, LLUDP framing and field codecs, and typed messages 
 Derives bounded scene state from World and Assets, then renders it through GPU-owned resources. Reconciliation reads bounded World pages and change journals; it owns visibility and mesh demand, selects prim detail, tessellates prims, builds terrain and water geometry, and resolves materials. Region and parcel environment assignments come from World and publish as decoded scene environments; experience overrides bypass World and are published through Render.
 
 `scene::prim` and `scene::surface` build the reusable CPU `assets::mesh::Mesh`; `scene::mesh` retains meshes and their identities. The model layer holds scene objects, regions, patches, and recovery status. `SceneView` applies sequence-checked batches and acknowledges delivery; abandoned deliveries trigger recovery, and stale work cannot publish after recovery or teardown. GPU modules own surfaces, buffers, textures, draw preparation, and resource retirement.
+
+### `crates/storage`
+
+Owns versioned, size-bounded persistent bytes for opaque fixed-size keys. One writer owns index mutations; bounded readers verify SHA-256 hashes on access without waiting for disk writes. Atomic data and index replacement, the directory process lock, and startup cleanup preserve recoverable state without rescanning payload contents. Consumers choose keys and validate their domain payloads; storage records usage and applies LRU eviction.
 
 ### `crates/test-support`
 

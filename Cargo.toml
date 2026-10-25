@@ -10,6 +10,7 @@ members = [
     "crates/protocol",
     "crates/world",
     "crates/render",
+    "crates/storage",
     "crates/assets",
 ]
 default-members = ["apps/viewer"]
@@ -26,6 +27,7 @@ math = { path = "crates/math" }
 network = { path = "crates/network" }
 protocol = { path = "crates/protocol" }
 render = { path = "crates/render" }
+storage = { path = "crates/storage" }
 test-support = { path = "crates/test-support" }
 utils = { path = "crates/utils" }
 world = { path = "crates/world" }

@@ -1,4 +1,5 @@
 mod budget;
+pub mod cache;
 mod content;
 mod envelope;
 mod environment;

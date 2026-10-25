@@ -180,6 +180,14 @@ impl Error {
         self.kind == ErrorKind::Timeout && self.status.is_none() && self.elapsed >= minimum
     }
 
+    pub(crate) fn is_transport_without_response_after(&self, minimum: Duration) -> bool {
+        self.kind == ErrorKind::Transport && self.status.is_none() && self.elapsed >= minimum
+    }
+
+    pub(crate) fn is_transient(&self) -> bool {
+        matches!(self.kind, ErrorKind::Transport | ErrorKind::Timeout)
+    }
+
     pub(crate) fn is_resource_exhausted(&self) -> bool {
         self.kind == ErrorKind::ResourceExhausted
     }

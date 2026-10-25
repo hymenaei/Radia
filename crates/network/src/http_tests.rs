@@ -13,7 +13,7 @@ use url::Url;
 
 use crate::fixtures::http::{LocalServer, response};
 
-use super::{Client, ErrorKind, RETRY_AFTER, Response, retry_after_delay, validate_http_url};
+use super::{Client, Error, ErrorKind, RETRY_AFTER, Response, retry_after_delay, validate_http_url};
 
 #[test]
 fn retry_after_formats() {
@@ -174,6 +174,18 @@ async fn operation_deadline_covers_body_reading() {
     assert!(!error.is_timeout_after(Duration::from_millis(250)), "a body timeout has response metadata");
     release_body.send(()).expect("release held response body");
     server.await.expect("server should finish");
+}
+
+#[test]
+fn long_transport_is_empty_poll() {
+    let long_transport = Error::new(ErrorKind::Transport, Duration::from_secs(30), None, None, "closed".into());
+    let fast_transport = Error::new(ErrorKind::Transport, Duration::from_secs(9), None, None, "closed".into());
+    let response_transport = Error::new(ErrorKind::Transport, Duration::from_secs(30), Some(StatusCode::OK), None, "truncated".into());
+
+    assert!(long_transport.is_transport_without_response_after(Duration::from_secs(10)));
+    assert!(!fast_transport.is_transport_without_response_after(Duration::from_secs(10)));
+    assert!(!response_transport.is_transport_without_response_after(Duration::from_secs(10)));
+    assert!(long_transport.is_transient());
 }
 
 #[tokio::test]

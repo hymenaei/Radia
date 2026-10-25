@@ -419,13 +419,12 @@ fn viewer_retry_backoff() {
 
 #[test]
 fn long_poll_error_classification() {
-    for status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::BAD_GATEWAY, StatusCode::SERVICE_UNAVAILABLE, StatusCode::GATEWAY_TIMEOUT]
-    {
+    let linden_error = StatusCode::from_u16(499).expect("499 is a valid HTTP status");
+    for status in [linden_error, StatusCode::BAD_GATEWAY, StatusCode::SERVICE_UNAVAILABLE, StatusCode::GATEWAY_TIMEOUT] {
         assert!(!expected_empty_poll(status, Duration::from_secs(10) - Duration::from_nanos(1)));
         assert!(expected_empty_poll(status, Duration::from_secs(10)));
     }
-    let linden_error = StatusCode::from_u16(499).expect("499 is a valid HTTP status");
-    for status in [linden_error, StatusCode::NOT_FOUND, StatusCode::TOO_MANY_REQUESTS] {
+    for status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::NOT_FOUND, StatusCode::TOO_MANY_REQUESTS] {
         assert!(!expected_empty_poll(status, Duration::from_secs(10)));
         assert!(!expected_empty_poll(status, Duration::from_secs(30)));
     }

@@ -16,18 +16,19 @@ struct SkyUniform {
 }
 
 @group(0) @binding(0) var<uniform> sky: SkyUniform;
-@group(1) @binding(0) var image: texture_2d<f32>;
-@group(1) @binding(1) var image_sampler: sampler;
-@group(2) @binding(0) var image_next: texture_2d<f32>;
-@group(2) @binding(1) var image_next_sampler: sampler;
-@group(3) @binding(0) var rainbow_image: texture_2d<f32>;
-@group(3) @binding(1) var rainbow_sampler: sampler;
-@group(4) @binding(0) var rainbow_next_image: texture_2d<f32>;
-@group(4) @binding(1) var rainbow_next_sampler: sampler;
-@group(5) @binding(0) var halo_image: texture_2d<f32>;
-@group(5) @binding(1) var halo_sampler: sampler;
-@group(6) @binding(0) var halo_next_image: texture_2d<f32>;
-@group(6) @binding(1) var halo_next_sampler: sampler;
+@group(1) @binding(0) var sun_image: texture_2d<f32>;
+@group(1) @binding(1) var sun_next_image: texture_2d<f32>;
+@group(1) @binding(2) var moon_image: texture_2d<f32>;
+@group(1) @binding(3) var moon_next_image: texture_2d<f32>;
+@group(1) @binding(4) var cloud_image: texture_2d<f32>;
+@group(1) @binding(5) var cloud_next_image: texture_2d<f32>;
+@group(1) @binding(6) var bloom_image: texture_2d<f32>;
+@group(1) @binding(7) var bloom_next_image: texture_2d<f32>;
+@group(1) @binding(8) var rainbow_image: texture_2d<f32>;
+@group(1) @binding(9) var rainbow_next_image: texture_2d<f32>;
+@group(1) @binding(10) var halo_image: texture_2d<f32>;
+@group(1) @binding(11) var halo_next_image: texture_2d<f32>;
+@group(1) @binding(12) var environment_sampler: sampler;
 
 struct SkyRay {
     @builtin(position) position: vec4<f32>,
@@ -62,8 +63,8 @@ fn sphere_uv(direction: vec3<f32>, body_direction: vec3<f32>, radius: f32) -> ve
 
 fn cloud_noise(uv: vec2<f32>) -> vec4<f32> {
     return mix(
-        textureSample(image, image_sampler, uv),
-        textureSample(image_next, image_next_sampler, uv),
+        textureSample(cloud_image, environment_sampler, uv),
+        textureSample(cloud_next_image, environment_sampler, uv),
         sky.blends.z,
     );
 }
@@ -77,8 +78,8 @@ fn rainbow_color(optical_dot: f32) -> vec3<f32> {
     vertical = clamp(vertical, 0.0, 0.25) + interior;
     let horizontal = (sky.optics.y - 5.0) / 1024.0 + 0.5;
     let uv = vec2<f32>(horizontal, vertical);
-    let first = textureSample(rainbow_image, rainbow_sampler, uv);
-    let second = textureSample(rainbow_next_image, rainbow_next_sampler, uv);
+    let first = textureSample(rainbow_image, environment_sampler, uv);
+    let second = textureSample(rainbow_next_image, environment_sampler, uv);
     return pow(max(mix(first.rgb, second.rgb, sky.cloud_flags.z), vec3<f32>(0.0)), vec3<f32>(1.8)) * sky.optics.x;
 }
 
@@ -89,8 +90,8 @@ fn halo_color(optical_dot: f32) -> vec3<f32> {
     let dot_value = clamp(optical_dot, 0.1, 1.0);
     let vertical = sqrt(clamp(1.0 - dot_value * dot_value, 0.0, 1.0));
     let uv = vec2<f32>(0.0, vertical);
-    let first = textureSample(halo_image, halo_sampler, uv);
-    let second = textureSample(halo_next_image, halo_next_sampler, uv);
+    let first = textureSample(halo_image, environment_sampler, uv);
+    let second = textureSample(halo_next_image, environment_sampler, uv);
     return mix(first.rgb, second.rgb, sky.cloud_flags.w) * sky.optics.z;
 }
 
@@ -160,8 +161,12 @@ fn body_fragment_color(direction: vec3<f32>, body: vec4<f32>, sample_index: u32,
     let separation = sqrt(max(1.0 - pow(dot(direction, body_direction), 2.0), 0.0));
     let disc = 1.0 - smoothstep(radius * 0.88, radius, separation);
     let uv = sphere_uv(direction, body_direction, radius);
-    let current = textureSample(image, image_sampler, uv);
-    let next = textureSample(image_next, image_next_sampler, uv);
+    var current = textureSample(sun_image, environment_sampler, uv);
+    var next = textureSample(sun_next_image, environment_sampler, uv);
+    if !is_sun {
+        current = textureSample(moon_image, environment_sampler, uv);
+        next = textureSample(moon_next_image, environment_sampler, uv);
+    }
     if is_sun {
         let textured = max(sky.texture_flags.x, sky.texture_flags.y) > 0.5;
         let texture_color = mix(current, next, sky.blends.x);

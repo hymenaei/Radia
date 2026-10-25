@@ -7,9 +7,8 @@ struct WaterUniform {
 }
 @group(0) @binding(0) var<uniform> water: WaterUniform;
 @group(1) @binding(0) var normal_image: texture_2d<f32>;
-@group(1) @binding(1) var normal_sampler: sampler;
-@group(2) @binding(0) var normal_next_image: texture_2d<f32>;
-@group(2) @binding(1) var normal_next_sampler: sampler;
+@group(1) @binding(1) var normal_next_image: texture_2d<f32>;
+@group(1) @binding(2) var normal_sampler: sampler;
 
 struct Ray {
     @builtin(position) position: vec4<f32>,
@@ -48,9 +47,9 @@ struct WaterOutput {
     let coordinates = water_coordinates(point, water.surface);
     let normal = blended_water_normal(
         textureSample(normal_image, normal_sampler, coordinates.first).xyz,
-        textureSample(normal_next_image, normal_next_sampler, coordinates.first).xyz,
+        textureSample(normal_next_image, normal_sampler, coordinates.first).xyz,
         textureSample(normal_image, normal_sampler, coordinates.second).xyz,
-        textureSample(normal_next_image, normal_next_sampler, coordinates.second).xyz,
+        textureSample(normal_next_image, normal_sampler, coordinates.second).xyz,
         water.surface,
     );
     let color = water_surface_color(direction, normal, distance, water.plane.z, water.surface, water.atmosphere);

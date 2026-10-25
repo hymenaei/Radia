@@ -34,7 +34,7 @@ use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion};
 use crate::{
-    pipeline::{Sky, SurfacePipelines, TexturePair, Water},
+    pipeline::{Sky, SurfacePipelines, Water},
     texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
 
@@ -215,7 +215,6 @@ pub(crate) struct GeometryRenderer {
     water_regions: [Vec4; MAX_REGIONS],
     water_region_ids: [u128; MAX_REGIONS],
     water_region_count: usize,
-    water_textures: TexturePair,
     instances: Buffer,
     indirect: Buffer,
     indirect_first_instance: bool,
@@ -262,9 +261,9 @@ impl GeometryRenderer {
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
-        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout);
-        let water = Water::new(device, format, &textures.layout);
-        let sky = Sky::new(device, format, &textures.layout);
+        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures);
+        let water = Water::new(device, format, &textures);
+        let sky = Sky::new(device, format, &textures);
         let indirect_bytes = MAX_FACE_INSTANCES * INDIRECT_DRAW_BYTES;
         Self {
             queue: queue.clone(),
@@ -276,7 +275,6 @@ impl GeometryRenderer {
             water_regions: [Vec4::ZERO; MAX_REGIONS],
             water_region_ids: [0; MAX_REGIONS],
             water_region_count: 0,
-            water_textures: TexturePair::default(),
             water,
             sky,
             instances: buffer(device, "Face instances", INSTANCE_BUFFER_BYTES, BufferUsages::VERTEX),
@@ -403,8 +401,7 @@ impl GeometryRenderer {
         self.textures.set_soft_cap(mib);
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
-        self.sky.draw(pass, &self.textures);
-        self.water.draw(pass, &self.textures);
+        self.water.draw(pass);
         let mut pipeline = None;
         let mut texture = None;
         let mut terrain = None;
@@ -413,9 +410,6 @@ impl GeometryRenderer {
             if pipeline != Some(draw.key.pipeline) {
                 self.pipelines.bind_pipeline(pass, draw.key.pipeline);
                 pipeline = Some(draw.key.pipeline);
-            }
-            if draw.key.pipeline == crate::pipeline::Pipeline::Water {
-                self.pipelines.bind_water_texture(pass, &self.textures, self.water_textures);
             }
             if texture != Some(draw.key.texture) {
                 pass.set_bind_group(1, self.textures.binding(draw.key.texture), &[]);
@@ -451,6 +445,7 @@ impl GeometryRenderer {
                 }
             }
         }
+        self.sky.draw(pass);
     }
 
     pub(crate) fn submitted(&mut self, frame: FrameLease) {

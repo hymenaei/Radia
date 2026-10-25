@@ -251,6 +251,13 @@ pub(crate) struct TextureState {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TextureViewState {
+    revision: u64,
+    ready: bool,
+    fallback: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GeometryTextureState(pub(crate) u64);
 
 #[derive(Clone, Copy)]
@@ -280,7 +287,6 @@ pub(crate) struct Textures {
     pixels: Vec<UploadPixels>,
     pub(crate) layout: BindGroupLayout,
     pub(crate) terrain_layout: BindGroupLayout,
-    fallback: BindGroup,
     terrain_fallback: TextureView,
     terrain_sampler: wgpu::Sampler,
     _terrain_alpha_ramp: Texture,
@@ -288,6 +294,10 @@ pub(crate) struct Textures {
     terrain_alpha_ramp_sampler: wgpu::Sampler,
     terrain_bindings: HashMap<Region, TerrainBinding>,
     changed_ids: HashSet<TextureId>,
+    pub(crate) pair_layout: BindGroupLayout,
+    pub(crate) default_sampler: wgpu::Sampler,
+    fallback: BindGroup,
+    fallback_view: TextureView,
     mip_layout: BindGroupLayout,
     mip_pipeline: RenderPipeline,
     pub(crate) uploaded: usize,
@@ -356,6 +366,38 @@ impl Textures {
         });
         let terrain_layout = device
             .create_bind_group_layout(&BindGroupLayoutDescriptor { label: Some("Terrain detail textures"), entries: &terrain_entries });
+        let pair_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Texture pair"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let default_sampler = make_sampler(device, Sampler::default());
         let texture = device.create_texture(&TextureDescriptor {
             label: Some("Neutral image"),
             size: Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -372,7 +414,6 @@ impl Textures {
             TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
             Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
-        let fallback = binding(device, &layout, &texture.create_view(&TextureViewDescriptor::default()), Sampler::default());
         let neutral = device.create_texture(&TextureDescriptor {
             label: Some("Neutral terrain detail"),
             size: Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -423,6 +464,8 @@ impl Textures {
             mipmap_filter: MipmapFilterMode::Nearest,
             ..Default::default()
         });
+        let fallback_view = texture.create_view(&TextureViewDescriptor::default());
+        let fallback = binding_with_sampler(device, &layout, &fallback_view, &default_sampler);
         let mip_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Mipmap source"),
             entries: &[BindGroupLayoutEntry {
@@ -482,7 +525,6 @@ impl Textures {
             pixels: Vec::new(),
             layout,
             terrain_layout,
-            fallback,
             terrain_fallback,
             terrain_sampler,
             _terrain_alpha_ramp: terrain_alpha_ramp,
@@ -490,6 +532,10 @@ impl Textures {
             terrain_alpha_ramp_sampler,
             terrain_bindings: HashMap::new(),
             changed_ids: HashSet::new(),
+            pair_layout,
+            default_sampler,
+            fallback,
+            fallback_view,
             mip_layout,
             mip_pipeline,
             uploaded: 0,
@@ -766,6 +812,39 @@ impl Textures {
         .unwrap_or(&self.fallback)
     }
 
+    pub(crate) fn view(&self, key: Option<TextureKey>) -> &TextureView {
+        key.and_then(|key| {
+            let entry = self.entries.get(&key.id)?;
+            let gpu = match &entry.state {
+                TextureUploadState::Ready(gpu) => gpu,
+                _ => entry.fallback.as_ref()?,
+            };
+            Some(&gpu.view)
+        })
+        .unwrap_or(&self.fallback_view)
+    }
+
+    pub(crate) fn view_state(&self, key: Option<TextureKey>) -> Option<TextureViewState> {
+        let key = key?;
+        Some(self.entries.get(&key.id).map_or(TextureViewState::default(), |entry| TextureViewState {
+            revision: entry.revision,
+            ready: matches!(&entry.state, TextureUploadState::Ready(_)),
+            fallback: entry.fallback.is_some(),
+        }))
+    }
+
+    pub(crate) fn pair_binding(&self, device: &Device, first: Option<TextureKey>, second: Option<TextureKey>) -> BindGroup {
+        device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Texture pair"),
+            layout: &self.pair_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: BindingResource::TextureView(self.view(first)) },
+                BindGroupEntry { binding: 1, resource: BindingResource::TextureView(self.view(second)) },
+                BindGroupEntry { binding: 2, resource: BindingResource::Sampler(&self.default_sampler) },
+            ],
+        })
+    }
+
     pub(crate) fn failure(&self) -> Option<Failure> {
         self.entries.values().find_map(|entry| match entry.state {
             TextureUploadState::Failed(failure) => Some(failure),
@@ -902,6 +981,22 @@ fn allocation_bytes(descriptor: &TextureDescriptor<'_>) -> Option<usize> {
 }
 
 fn binding(device: &Device, layout: &BindGroupLayout, view: &TextureView, settings: Sampler) -> BindGroup {
+    let sampler = make_sampler(device, settings);
+    binding_with_sampler(device, layout, view, &sampler)
+}
+
+fn binding_with_sampler(device: &Device, layout: &BindGroupLayout, view: &TextureView, sampler: &wgpu::Sampler) -> BindGroup {
+    device.create_bind_group(&BindGroupDescriptor {
+        label: Some("Scene image"),
+        layout,
+        entries: &[
+            BindGroupEntry { binding: 0, resource: BindingResource::TextureView(view) },
+            BindGroupEntry { binding: 1, resource: BindingResource::Sampler(sampler) },
+        ],
+    })
+}
+
+fn make_sampler(device: &Device, settings: Sampler) -> wgpu::Sampler {
     let address = |wrap| match wrap {
         Wrap::ClampToEdge => AddressMode::ClampToEdge,
         Wrap::MirroredRepeat => AddressMode::MirrorRepeat,
@@ -915,7 +1010,7 @@ fn binding(device: &Device, layout: &BindGroupLayout, view: &TextureView, settin
         Some(MinFilter::NearestMipmapLinear) => (FilterMode::Nearest, FilterMode::Linear, true),
         Some(MinFilter::LinearMipmapLinear) | None => (FilterMode::Linear, FilterMode::Linear, true),
     };
-    let sampler = device.create_sampler(&SamplerDescriptor {
+    device.create_sampler(&SamplerDescriptor {
         address_mode_u: address(settings.wrap_s),
         address_mode_v: address(settings.wrap_t),
         mag_filter: if settings.mag_filter == Some(Filter::Nearest) { FilterMode::Nearest } else { FilterMode::Linear },
@@ -923,14 +1018,6 @@ fn binding(device: &Device, layout: &BindGroupLayout, view: &TextureView, settin
         mipmap_filter: if mipmap_filter == FilterMode::Nearest { MipmapFilterMode::Nearest } else { MipmapFilterMode::Linear },
         lod_max_clamp: if mipmaps { 32.0 } else { 0.0 },
         ..Default::default()
-    });
-    device.create_bind_group(&BindGroupDescriptor {
-        label: Some("Scene image"),
-        layout,
-        entries: &[
-            BindGroupEntry { binding: 0, resource: BindingResource::TextureView(view) },
-            BindGroupEntry { binding: 1, resource: BindingResource::Sampler(&sampler) },
-        ],
     })
 }
 

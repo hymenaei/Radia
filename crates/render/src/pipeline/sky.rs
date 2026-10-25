@@ -1,5 +1,5 @@
 use assets::Sampler;
-use math::Mat4;
+use math::{DVec3, Mat4, Quat, Vec3};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
@@ -16,13 +16,10 @@ use crate::{
     texture::{TextureKey, TextureViewState, Textures},
 };
 
-const UNIFORM_FLOATS: usize = 16 + ATMOSPHERE_FLOATS + 12 * 4;
+const UNIFORM_FLOATS: usize = 16 + ATMOSPHERE_FLOATS + 16 + 12 * 4;
 const UNIFORM_BYTES: usize = UNIFORM_FLOATS * 4;
 const STAR_UNIFORM_FLOATS: usize = 24;
 const STAR_UNIFORM_BYTES: usize = STAR_UNIFORM_FLOATS * 4;
-const CLOUD_PROJECTION_BIAS: f32 = 0.2;
-const CLOUD_HORIZON_FADE_START: f32 = 0.12;
-const CLOUD_HORIZON_FADE_END: f32 = 0.32;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct TexturePair {
@@ -60,7 +57,14 @@ impl Sky {
     pub(crate) fn new(device: &Device, format: TextureFormat, textures: &Textures) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Sky and atmosphere"),
-            source: ShaderSource::Wgsl(concat!(include_str!("../shaders/atmosphere.wgsl"), include_str!("../shaders/sky.wgsl")).into()),
+            source: ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../shaders/atmosphere.wgsl"),
+                    include_str!("../shaders/water_common.wgsl"),
+                    include_str!("../shaders/sky.wgsl")
+                )
+                .into(),
+            ),
         });
         let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Sky uniform"),
@@ -265,7 +269,7 @@ impl Sky {
         queue: &Queue,
         projection: Mat4,
         inverse: Mat4,
-        altitude: f32,
+        camera_position: DVec3,
         viewport: [u32; 2],
         environment: Option<&Evaluated>,
         cloud_scroll: [f32; 2],
@@ -302,14 +306,21 @@ impl Sky {
             self.texture_states = states;
         }
         let Some(environment) = environment else { return };
+        let cloud_blend = if environment.sky.clouds.scroll_rate == [0.0; 2] { 0.0 } else { cloud_textures.factor };
         let mut values = [0.0; UNIFORM_FLOATS];
         let mut offset = 0;
         append(&mut values, &mut offset, inverse.to_cols_array());
-        append(&mut values, &mut offset, atmosphere_values(Some(environment), altitude));
+        append(&mut values, &mut offset, atmosphere_values(Some(environment)));
         append(&mut values, &mut offset, environment.sky.sun_direction);
         append(&mut values, &mut offset, [environment.sky.sun.scale]);
+        let (sun_right, sun_up) = body_basis(&environment.sky.sun);
+        append(&mut values, &mut offset, sun_right.extend(0.0).to_array());
+        append(&mut values, &mut offset, sun_up.extend(0.0).to_array());
         append(&mut values, &mut offset, environment.sky.moon_direction);
         append(&mut values, &mut offset, [environment.sky.moon.scale]);
+        let (moon_right, moon_up) = body_basis(&environment.sky.moon);
+        append(&mut values, &mut offset, moon_right.extend(0.0).to_array());
+        append(&mut values, &mut offset, moon_up.extend(0.0).to_array());
         append(
             &mut values,
             &mut offset,
@@ -323,20 +334,11 @@ impl Sky {
         append(
             &mut values,
             &mut offset,
-            [
-                environment.sky.clouds.density[1][0],
-                environment.sky.clouds.density[1][1],
-                environment.sky.clouds.density[1][2],
-                CLOUD_HORIZON_FADE_END,
-            ],
+            [environment.sky.clouds.density[1][0], environment.sky.clouds.density[1][1], environment.sky.clouds.density[1][2], 0.0],
         );
-        append(
-            &mut values,
-            &mut offset,
-            [environment.sky.clouds.scale, environment.sky.clouds.variance, CLOUD_PROJECTION_BIAS, CLOUD_HORIZON_FADE_START],
-        );
+        append(&mut values, &mut offset, [environment.sky.clouds.scale, environment.sky.clouds.variance, 0.0, 0.0]);
         append(&mut values, &mut offset, [cloud_scroll[0], cloud_scroll[1], 0.0, 0.0]);
-        append(&mut values, &mut offset, [sun_textures.factor, moon_textures.factor, cloud_textures.factor, rainbow_textures.factor]);
+        append(&mut values, &mut offset, [sun_textures.factor, moon_textures.factor, cloud_blend, rainbow_textures.factor]);
         append(
             &mut values,
             &mut offset,
@@ -357,7 +359,11 @@ impl Sky {
                 resident(halo_textures.next),
             ],
         );
-        append(&mut values, &mut offset, [environment.sky.moisture, environment.sky.droplet_radius, environment.sky.ice, 0.0]);
+        append(
+            &mut values,
+            &mut offset,
+            [environment.sky.moisture, environment.sky.droplet_radius, environment.sky.ice, camera_position.z as f32],
+        );
         let mut bytes = [0; UNIFORM_BYTES];
         for (target, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
             *target = value.to_le_bytes();
@@ -367,9 +373,10 @@ impl Sky {
         star_values[..16].copy_from_slice(&projection.to_cols_array());
         star_values[16] = viewport[0].max(1) as f32;
         star_values[17] = viewport[1].max(1) as f32;
-        star_values[18] = star_brightness(environment.sky.star_brightness, environment.sky.sun_direction[2]);
+        star_values[18] = star_brightness(environment.sky.star_brightness);
         star_values[19] = bloom_textures.factor;
         star_values[20] = (animation_time * 0.5).rem_euclid(1.25);
+        star_values[21] = animation_time * 0.01;
         let mut star_bytes = [0; STAR_UNIFORM_BYTES];
         for (target, value) in star_bytes.as_chunks_mut::<4>().0.iter_mut().zip(star_values) {
             *target = value.to_le_bytes();
@@ -451,18 +458,15 @@ fn resident(key: Option<TextureKey>) -> f32 {
     if key.is_some() { 1.0 } else { 0.0 }
 }
 
-#[cfg(test)]
-fn cloud_projection(direction: [f32; 3]) -> [f32; 2] {
-    let factor = (1.0 + CLOUD_PROJECTION_BIAS) / (direction[2].max(CLOUD_HORIZON_FADE_START) + CLOUD_PROJECTION_BIAS);
-    [direction[0] * factor, direction[1] * factor]
-}
-
-#[cfg(test)]
-fn cloud_uv(direction: [f32; 3], scale: f32) -> [f32; 2] {
-    let projected = cloud_projection(direction);
-    let planar = [(1.0 - projected[1]) * 0.5, (1.0 - projected[0]) * 0.5];
-    let flipped = [-planar[0], planar[1]];
-    [(flipped[0] - 0.5) / scale + 0.5, (flipped[1] - 0.5) / scale + 0.5]
+fn body_basis(body: &crate::environment::CelestialBodyState) -> (Vec3, Vec3) {
+    let direction = (Quat::from_array(body.rotation) * Vec3::X).normalize();
+    if direction.z > 0.99 {
+        let rotation = Quat::from_array(body.rotation);
+        ((rotation * -Vec3::Y).normalize(), (rotation * Vec3::Z).normalize())
+    } else {
+        let right = direction.cross(Vec3::Z).normalize();
+        (right, right.cross(direction).normalize())
+    }
 }
 
 fn uniform_layout(device: &Device, label: &str, visibility: ShaderStages) -> BindGroupLayout {
@@ -508,47 +512,5 @@ fn append<const N: usize>(target: &mut [f32; UNIFORM_FLOATS], offset: &mut usize
     if let Some(slice) = target.get_mut(*offset..offset.saturating_add(N)) {
         slice.copy_from_slice(&values);
         *offset += N;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cloud_uv_matches_legacy_overhead() {
-        let scale = 0.75;
-        let projected = cloud_uv([0.0, 0.0, 1.0], scale);
-        let legacy = [0.5 - 1.0 / scale, 0.5];
-        assert!(projected.into_iter().zip(legacy).all(|(actual, expected)| (actual - expected).abs() < 0.00001));
-        let direction = [0.001, -0.002, (1.0_f32 - 0.000005).sqrt()];
-        let near_zenith = cloud_uv(direction, scale);
-        let legacy_planar = [(1.0 - direction[1]) * 0.5, (1.0 - direction[0]) * 0.5];
-        let legacy_flipped = [-legacy_planar[0], legacy_planar[1]];
-        let legacy_near_zenith = [(legacy_flipped[0] - 0.5) / scale + 0.5, (legacy_flipped[1] - 0.5) / scale + 0.5];
-        assert!(near_zenith.into_iter().zip(legacy_near_zenith).all(|(actual, expected)| (actual - expected).abs() < 0.005));
-    }
-
-    #[test]
-    fn cloud_projection_shrinks_with_elevation() {
-        let elevations = [0.0_f32, 0.15, 0.3, 0.6, 1.0];
-        let radii = elevations.map(|up| {
-            let horizontal = (1.0 - up * up).sqrt();
-            let projected = cloud_projection([horizontal, 0.0, up]);
-            projected[0].abs()
-        });
-        assert!(radii.windows(2).all(|pair| pair[0] > pair[1]));
-    }
-
-    #[test]
-    fn cloud_projection_is_finite_at_fade() {
-        let up = CLOUD_HORIZON_FADE_START;
-        let horizontal = (1.0 - up * up).sqrt();
-        let projected = cloud_projection([horizontal, 0.0, up]);
-        assert!(projected.into_iter().all(f32::is_finite));
-        let uv = cloud_uv([horizontal, 0.0, up], 0.75);
-        assert!(uv.into_iter().all(f32::is_finite));
-        let below = cloud_projection([horizontal, 0.0, -CLOUD_PROJECTION_BIAS]);
-        assert!(below.into_iter().all(f32::is_finite));
     }
 }

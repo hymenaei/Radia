@@ -22,12 +22,12 @@ pub(crate) fn stars() -> [Star; STAR_COUNT] {
     })
 }
 
-pub(crate) fn star_brightness(brightness: f32, sun_altitude: f32) -> f32 {
+pub(crate) fn star_brightness(brightness: f32) -> f32 {
     let alpha = brightness / 500.0;
     if alpha < 0.001 {
         return 0.0;
     }
-    alpha * (-sun_altitude * 20.0).clamp(0.0, 1.0)
+    alpha
 }
 
 fn random(seed: &mut u64) -> f32 {
@@ -59,11 +59,9 @@ mod tests {
     }
 
     #[test]
-    fn star_brightness_uses_legacy_setting_scale_and_sun_fade() {
-        assert_eq!(star_brightness(0.49, -0.1), 0.0);
-        assert_eq!(star_brightness(250.0, 0.05), 0.0);
-        assert!((star_brightness(250.0, -0.025) - 0.25).abs() < 0.000_1);
-        assert_eq!(star_brightness(250.0, -0.05), 0.5);
-        assert_eq!(star_brightness(250.0, -0.5), 0.5);
+    fn star_brightness_uses_legacy_setting_scale_without_sun_fade() {
+        assert_eq!(star_brightness(0.49), 0.0);
+        assert_eq!(star_brightness(250.0), 0.5);
+        assert_eq!(star_brightness(500.0), 1.0);
     }
 }

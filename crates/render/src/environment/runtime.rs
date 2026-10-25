@@ -26,6 +26,7 @@ pub struct ActiveEnvironment {
     cloud_scroll: [f64; 2],
     cloud_rate: [f32; 2],
     cloud_time: Option<SystemTime>,
+    animation_origin: Option<Instant>,
     animation_time: f32,
     water_scroll: [f32; 4],
 }
@@ -33,8 +34,8 @@ pub struct ActiveEnvironment {
 impl ActiveEnvironment {
     pub fn update(&mut self, view: &SceneView, agent: Option<(Region, f64)>, wall_time: SystemTime, now: Instant) -> bool {
         self.advance_cloud_scroll(wall_time);
-        let wall_seconds = wall_time.duration_since(UNIX_EPOCH).map_or(0.0, |duration| duration.as_secs_f64());
-        self.animation_time = wall_seconds.rem_euclid(2.5) as f32;
+        let animation_origin = *self.animation_origin.get_or_insert(now);
+        self.animation_time = now.duration_since(animation_origin).as_secs_f32();
         let Some((region, altitude)) = agent.filter(|(_, altitude)| altitude.is_finite()) else {
             return self.clear_environment();
         };
@@ -43,7 +44,7 @@ impl ActiveEnvironment {
         let changed = self.composition != Some(identity) || self.altitude != Some(altitude);
         let deadline = self.next_deadline.is_some_and(|deadline| now >= deadline);
         if !changed && !deadline {
-            self.water_scroll = self.evaluated.as_ref().map_or([0.0; 4], |evaluated| water_scroll(evaluated.water.waves, wall_seconds));
+            self.water_scroll = [self.animation_time * 0.5, 0.0, 0.0, 0.0];
             return false;
         }
         if self.composition != Some(identity) {
@@ -70,7 +71,7 @@ impl ActiveEnvironment {
         let (evaluated, next) = self.transition.update(self.transition_identity, target, duration, now);
         let output_changed = self.evaluated.as_ref() != Some(&evaluated);
         self.cloud_rate = evaluated.sky.clouds.scroll_rate;
-        self.water_scroll = water_scroll(evaluated.water.waves, wall_seconds);
+        self.water_scroll = [self.animation_time * 0.5, 0.0, 0.0, 0.0];
         self.evaluated = Some(evaluated);
         self.next_deadline = next;
         output_changed
@@ -106,8 +107,7 @@ impl ActiveEnvironment {
 
     pub fn stars_animate(&self, view: &SceneView) -> bool {
         self.evaluated.as_ref().is_some_and(|evaluated| {
-            star_brightness(evaluated.sky.star_brightness, evaluated.sky.sun_direction[2]) >= 0.001
-                && texture_available(view, evaluated.sky.bloom)
+            star_brightness(evaluated.sky.star_brightness) >= 0.001 && texture_available(view, evaluated.sky.bloom)
         })
     }
 
@@ -139,20 +139,9 @@ impl ActiveEnvironment {
         self.next_deadline = None;
         self.cloud_scroll = [0.0; 2];
         self.cloud_rate = [0.0; 2];
-        self.animation_time = 0.0;
         self.water_scroll = [0.0; 4];
         changed
     }
-}
-
-fn water_scroll(waves: [[f32; 2]; 2], wall_seconds: f64) -> [f32; 4] {
-    let phase = wall_seconds * 0.5;
-    [
-        (f64::from(waves[1][0]) * phase * 0.13).rem_euclid(1.0) as f32,
-        (f64::from(waves[1][1]) * phase * 0.13).rem_euclid(1.0) as f32,
-        (f64::from(waves[0][0]) * phase * 0.1).rem_euclid(1.0) as f32,
-        (f64::from(waves[0][1]) * phase * 0.1).rem_euclid(1.0) as f32,
-    ]
 }
 
 fn texture_available(view: &SceneView, texture: TextureBlend) -> bool {
@@ -417,20 +406,19 @@ mod tests {
     }
 
     #[test]
-    fn water_scroll_tracks_wall_time_without_periodic_time_wraps() {
-        let waves = [[1.05, -0.42], [1.11, -1.16]];
-        let start = water_scroll(waves, 0.0);
-        let next = water_scroll(waves, 1.0);
-        assert_eq!(start, [0.0; 4]);
-        assert!((next[0] - 0.07215).abs() < 0.00001);
-        assert!((next[1] - 0.9246).abs() < 0.00001);
-        assert!((next[2] - 0.0525).abs() < 0.00001);
-        assert!((next[3] - 0.979).abs() < 0.00001);
-        let before = water_scroll(waves, 4095.999);
-        let after = water_scroll(waves, 4096.0);
-        for (a, b) in before.into_iter().zip(after) {
-            let distance = (a - b).abs().min(1.0 - (a - b).abs());
-            assert!(distance < 0.0001);
-        }
+    fn water_phase_uses_elapsed_runtime_seconds() {
+        let mut world = world();
+        let region = Region::new(1);
+        add_region_environment(&mut world, region, b"{'type':'water'}", None);
+        let (mut scene, mut view) = Reconciler::new(Budget::default());
+        scene.notify_world_change();
+        settle(&mut scene, &mut view, &world);
+        let mut active = ActiveEnvironment::default();
+        let now = Instant::now();
+        active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now);
+        assert_eq!(active.water_scroll(), [0.0; 4]);
+        active.update(&view, Some((region, 0.0)), UNIX_EPOCH, now + Duration::from_secs(2));
+        assert_eq!(active.animation_time(), 2.0);
+        assert_eq!(active.water_scroll(), [1.0, 0.0, 0.0, 0.0]);
     }
 }

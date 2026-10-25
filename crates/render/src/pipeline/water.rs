@@ -8,6 +8,7 @@ use wgpu::{
 };
 
 use super::atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values};
+use super::surface::camera_view;
 use crate::{
     environment::Evaluated,
     scene::{Camera, MAX_REGIONS},
@@ -16,14 +17,13 @@ use crate::{
 
 use super::TexturePair;
 
-pub(crate) const COLOR: Vec4 = Vec4::new(0.025, 0.09, 0.14, 1.0);
+pub(crate) const COLOR: Vec4 = Vec4::new(0.0156, 0.149, 0.2509, 1.0);
 pub(crate) const DEFAULT_FRESNEL: [f32; 4] = [0.5, 0.3999, 0.0, 0.0];
-pub(crate) const DEFAULT_NORMAL_SCALE: f32 = 2.0;
-pub(crate) const DEFAULT_SCALE_ABOVE: f32 = 0.0299;
+pub(crate) const DEFAULT_NORMAL_SCALE: f32 = 1.75;
 pub(crate) const DEFAULT_BLUR: f32 = 0.04;
 pub(crate) const DEFAULT_WAVES: [f32; 4] = [1.04999, -0.42, 1.10999, -1.16];
 const REGION_FLOATS: usize = MAX_REGIONS * 4;
-const UNIFORM_FLOATS: usize = 16 + 36 + ATMOSPHERE_FLOATS + REGION_FLOATS;
+const UNIFORM_FLOATS: usize = 32 + 36 + ATMOSPHERE_FLOATS + REGION_FLOATS;
 const UNIFORM_BYTES: usize = UNIFORM_FLOATS * 4;
 
 pub(crate) struct Water {
@@ -122,39 +122,24 @@ impl Water {
             self.normal_view_states = states;
         }
         self.normal = normal;
-        let Some(height) = relative_height(height, camera.position().z) else {
+        let Some(relative_water_height) = relative_height(height, camera.position().z) else {
             return;
         };
         let count = region_count.min(MAX_REGIONS);
         let far = camera.draw_distance().clamp(0.1, f64::from(f32::MAX) / 16.0) as f32;
         let near = 0.05_f32;
-        let water = environment.map(|environment| &environment.water);
-        let fog_color = water.map_or(COLOR.to_array(), |water| [water.fog_color[0], water.fog_color[1], water.fog_color[2], 1.0]);
         let normal_present = normal.current.is_some() || normal.next.is_some();
-        let scale_above = water.map_or(DEFAULT_SCALE_ABOVE, |water| water.scale_above);
-        let origin = water_origin(camera.position(), scale_above);
-        let parameters = water.map_or(DEFAULT_FRESNEL, |water| {
-            [water.fresnel_offset, water.fresnel_scale, water.fog_density, if normal_present { 1.0 } else { 0.0 }]
-        });
-        let normal_scale = water.map_or([DEFAULT_NORMAL_SCALE; 3], |water| water.normal_scale);
-        let waves = water.map_or(DEFAULT_WAVES, |water| [water.waves[0][0], water.waves[0][1], water.waves[1][0], water.waves[1][1]]);
         let mut values = [0.0; UNIFORM_FLOATS];
         let mut offset = 0;
         append(&mut values, &mut offset, inverse.to_cols_array());
-        append(&mut values, &mut offset, [height, count as f32, far, near]);
-        append(&mut values, &mut offset, fog_color);
-        append(&mut values, &mut offset, parameters);
+        append(&mut values, &mut offset, camera_view(camera).to_cols_array());
+        append(&mut values, &mut offset, [relative_water_height, count as f32, far, near]);
         append(
             &mut values,
             &mut offset,
-            [normal_scale[0], normal_scale[1], normal_scale[2], water.map_or(DEFAULT_SCALE_ABOVE, |water| water.scale_above)],
+            water_surface_values(environment, camera.position(), height, scroll, normal.factor, normal_present),
         );
-        append(&mut values, &mut offset, waves);
-        append(&mut values, &mut offset, scroll);
-        append(&mut values, &mut offset, [water.map_or(DEFAULT_BLUR, |water| water.blur), normal.factor, 0.0, 0.0]);
-        append(&mut values, &mut offset, [origin[0], origin[1], origin[2], origin[3]]);
-        append(&mut values, &mut offset, [origin[4], origin[5], origin[6], origin[7]]);
-        append(&mut values, &mut offset, atmosphere_values(environment, camera.position().z as f32));
+        append(&mut values, &mut offset, atmosphere_values(environment));
         for region in regions {
             append(&mut values, &mut offset, region.to_array());
         }
@@ -176,22 +161,82 @@ impl Water {
     }
 }
 
-pub(crate) fn water_origin(position: DVec3, scale_above: f32) -> [f32; 8] {
-    let scale = if scale_above.is_finite() { (scale_above / DEFAULT_SCALE_ABOVE).clamp(0.0, 4.0) } else { 1.0 };
-    let position_period = TAU / 0.02;
-    let phase = |coordinate: f64, frequency: f64| {
-        if frequency <= 0.000_001 { 0.0 } else { (coordinate.rem_euclid(1.0 / frequency) * frequency).rem_euclid(1.0) as f32 }
+#[derive(Clone, Copy)]
+struct WaterOrigins {
+    sweep: [f32; 2],
+    big: [f32; 2],
+    first: [f32; 2],
+    second: [f32; 2],
+}
+
+fn water_origin(position: DVec3) -> WaterOrigins {
+    let phase = |coordinate: f64, frequency: f64| (coordinate * frequency).rem_euclid(1.0) as f32;
+    WaterOrigins {
+        sweep: [(position.x.rem_euclid(TAU / 0.08)) as f32, (position.y.rem_euclid(TAU / 0.02)) as f32],
+        big: [phase(position.x, 0.04), phase(position.y, 0.04)],
+        first: [phase(position.x, 0.45), phase(position.y, 0.9)],
+        second: [phase(position.x, 0.1), phase(position.y, 0.2)],
+    }
+}
+
+pub(crate) fn water_surface_values(
+    environment: Option<&Evaluated>,
+    camera_position: DVec3,
+    water_height: Option<f64>,
+    time: [f32; 4],
+    normal_blend: f32,
+    normal_present: bool,
+) -> [f32; 32] {
+    let water = environment.map(|environment| &environment.water);
+    let fog_color = water.map_or([COLOR.x, COLOR.y, COLOR.z], |water| water.fog_color);
+    let density = water.map_or(2.0, |water| water.fog_density);
+    let underwater_modifier = water.map_or(0.25, |water| water.underwater_fog);
+    let underwater = water_height.is_some_and(|height| camera_position.z < height);
+    let fog_density = modified_water_fog_density(density, underwater_modifier, underwater);
+    let fog_ks = water_fog_ks(environment);
+    let plane_w = water_height.map_or(0.0, |height| camera_position.z as f32 - height as f32);
+    let normal_scale = water.map_or([DEFAULT_NORMAL_SCALE; 3], |water| water.normal_scale);
+    let blur = water.map_or(DEFAULT_BLUR, |water| water.blur).max(0.0) * 2.0;
+    let fresnel = water.map_or(DEFAULT_FRESNEL, |water| [water.fresnel_offset, water.fresnel_scale, 0.0, 0.0]);
+    let waves = water.map_or(DEFAULT_WAVES, |water| [water.waves[0][0], water.waves[0][1], water.waves[1][0], water.waves[1][1]]);
+    let origin = water_origin(camera_position);
+    let mut values = [0.0; 32];
+    values[..4].copy_from_slice(&[fog_color[0], fog_color[1], fog_color[2], if water_height.is_some() { 1.0 } else { 0.0 }]);
+    values[4..8].copy_from_slice(&[fog_density, fog_ks, plane_w, if underwater { 1.0 } else { 0.0 }]);
+    values[8..12].copy_from_slice(&[normal_scale[0], normal_scale[1], normal_scale[2], blur]);
+    values[12..16].copy_from_slice(&[fresnel[0], fresnel[1], normal_blend, if normal_present { 1.0 } else { 0.0 }]);
+    values[16..20].copy_from_slice(&waves);
+    values[20..24].copy_from_slice(&[time[0], origin.sweep[0], origin.sweep[1], camera_position.z as f32]);
+    values[24..28].copy_from_slice(&[origin.big[0], origin.big[1], origin.first[0], origin.first[1]]);
+    values[28..32].copy_from_slice(&[origin.second[0], origin.second[1], 0.0, 0.0]);
+    values
+}
+
+pub(crate) fn modified_water_fog_density(density: f32, modifier: f32, underwater: bool) -> f32 {
+    if !underwater || modifier <= 0.0 {
+        return density;
+    }
+    density.powf(modifier)
+}
+
+pub(crate) fn water_fog_values(environment: Option<&Evaluated>, camera_position: DVec3, water_height: Option<f64>) -> [f32; 8] {
+    water_surface_values(environment, camera_position, water_height, [0.0; 4], 0.0, false)[..8]
+        .try_into()
+        .expect("water fog uses two four-component values")
+}
+
+fn water_fog_ks(environment: Option<&Evaluated>) -> f32 {
+    let Some(environment) = environment else { return 1.0 / 0.3 };
+    let sun_up = environment.sky.sun_direction[2] >= 0.0;
+    let moon_up = environment.sky.moon_direction[2] >= 0.0;
+    let light_direction = if sun_up {
+        environment.sky.sun_direction
+    } else if moon_up {
+        environment.sky.moon_direction
+    } else {
+        [0.0, 0.0, -1.0]
     };
-    [
-        position.x.rem_euclid(position_period) as f32,
-        position.y.rem_euclid(position_period) as f32,
-        0.0,
-        0.0,
-        phase(position.x, 0.45 * f64::from(scale)),
-        phase(position.y, 0.9 * f64::from(scale)),
-        phase(position.x, 0.1 * f64::from(scale)),
-        phase(position.y, 0.2 * f64::from(scale)),
-    ]
+    1.0 / light_direction[2].max(-0.1).max(0.3)
 }
 
 fn relative_height(height: Option<f64>, camera_z: f64) -> Option<f32> {
@@ -213,6 +258,7 @@ fn append<const N: usize>(target: &mut [f32; UNIFORM_FLOATS], offset: &mut usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::environment::{Schedule, Sources, evaluate};
 
     #[test]
     fn water_plane_keeps_both_sides() {
@@ -223,23 +269,31 @@ mod tests {
     }
 
     #[test]
-    fn water_texture_phase_survives_camera_rebasing() {
-        let world = DVec3::new(31_004.25, -58_113.75, 0.0);
-        let first_camera = DVec3::new(31_000.0, -58_100.0, 20.0);
-        let second_camera = DVec3::new(31_120.0, -58_040.0, 20.0);
-        let first_origin = water_origin(first_camera, DEFAULT_SCALE_ABOVE);
-        let second_origin = water_origin(second_camera, DEFAULT_SCALE_ABOVE);
-        let first = [
-            ((world.x - first_camera.x) * 0.45 + f64::from(first_origin[4])).rem_euclid(1.0),
-            ((world.y - first_camera.y) * 0.9 + f64::from(first_origin[5])).rem_euclid(1.0),
-        ];
-        let second = [
-            ((world.x - second_camera.x) * 0.45 + f64::from(second_origin[4])).rem_euclid(1.0),
-            ((world.y - second_camera.y) * 0.9 + f64::from(second_origin[5])).rem_euclid(1.0),
-        ];
-        for (first, second) in first.into_iter().zip(second) {
-            let distance = (first - second).abs().min(1.0 - (first - second).abs());
-            assert!(distance < 0.00001);
-        }
+    fn water_uniforms_match_windlight_settings_and_fog_rules() {
+        let environment = evaluate(
+            &Sources {
+                base: None,
+                schedule: Schedule::default(),
+                experience_day: None,
+                experience_sky: None,
+                experience_water: None,
+                sky_override: None,
+                water_override: None,
+            },
+            0.0,
+            0.0,
+        );
+        let above = water_surface_values(Some(&environment), DVec3::new(25.0, 10.0, 20.0), Some(10.0), [5.0; 4], 0.25, true);
+        assert_eq!(&above[4..8], &[2.0, 1.0 / environment.sky.sun_direction[2].max(0.3), 10.0, 0.0]);
+        assert_eq!(&above[8..16], &[1.75, 1.75, 1.75, 0.08, 0.5, 0.3999, 0.25, 1.0]);
+        assert_eq!(&above[16..24], &[1.04999, -0.42, 1.10999, -1.16, 5.0, 25.0, 10.0, 20.0]);
+        assert_eq!(&above[24..32], &[0.0, 0.4, 0.25, 0.0, 0.5, 0.0, 0.0, 0.0]);
+        let below = water_surface_values(Some(&environment), DVec3::new(25.0, 10.0, 0.0), Some(10.0), [0.0; 4], 0.0, false);
+        assert!((below[4] - 2.0_f32.powf(0.25)).abs() < 0.000001);
+        assert_eq!(below[6], -10.0);
+        assert_eq!(below[7], 1.0);
+        assert_eq!(modified_water_fog_density(2.0, 0.25, false), 2.0);
+        assert_eq!(modified_water_fog_density(2.0, 0.5, true), 2.0_f32.sqrt());
+        assert_eq!(modified_water_fog_density(2.0, 2.0, true), 4.0);
     }
 }

@@ -114,6 +114,7 @@ pub struct SkyState {
     pub sunlight: [f32; 3],
     pub moon_brightness: f32,
     pub star_brightness: f32,
+    pub reflection_probe_ambiance: Option<f32>,
     pub clouds: CloudsState,
     pub haze: HazeState,
     pub bloom: TextureBlend,
@@ -293,6 +294,9 @@ fn overlay(state: &mut SkyState, sky: &Sky) {
     if let Some(value) = sky.star_brightness {
         state.star_brightness = value;
     }
+    if let Some(value) = sky.reflection_probe_ambiance {
+        state.reflection_probe_ambiance = Some(value);
+    }
     if let Some(value) = sky.clouds.color {
         state.clouds.color = value;
     }
@@ -439,6 +443,7 @@ fn sky_defaults(position: f32) -> SkyState {
         sunlight: [0.7342, 0.7815, 0.8999],
         moon_brightness: 0.5,
         star_brightness: 250.0,
+        reflection_probe_ambiance: None,
         clouds: CloudsState {
             color: [0.4099, 0.4099, 0.4099],
             density: [[1.0, 0.526, 1.0]; 2],
@@ -552,6 +557,10 @@ fn blend_sky(start: &SkyState, end: &SkyState, factor: f32) -> SkyState {
         sunlight: blend_array(start.sunlight, end.sunlight, factor),
         moon_brightness: lerp(start.moon_brightness, end.moon_brightness, factor),
         star_brightness: lerp(start.star_brightness, end.star_brightness, factor),
+        reflection_probe_ambiance: match (start.reflection_probe_ambiance, end.reflection_probe_ambiance) {
+            (None, None) => None,
+            (start, end) => Some(lerp(start.unwrap_or(0.0), end.unwrap_or(0.0), factor)),
+        },
         clouds,
         haze: blend_haze(&start.haze, &end.haze, factor),
         bloom: blend_texture(start.bloom, end.bloom, factor),

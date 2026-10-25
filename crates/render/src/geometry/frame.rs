@@ -3,19 +3,30 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assets::Priority;
+use assets::{Priority, TextureId};
 use math::{Frustum, Quat, Vec3, flips_winding};
 use wgpu::{CommandEncoder, Device};
 use world::FaceAppearance;
 
 use super::{FramePreparation, FramePreparationKey, GeometryRenderer, Instance, MAX_INSTANCES, PickFace, PrepareTimes, ShadingMode, Stats};
+use crate::FrameInput;
+use crate::environment::{Evaluated, TextureBlend};
 use crate::geometry::{
     batching::{Batches, DrawKey},
     instance::{instance_base, is_visible, packed_instance},
 };
 use crate::material::{FaceMaterial, FaceParams};
-use crate::pipeline::{COLOR, Pipeline};
+use crate::pipeline::{COLOR, Pipeline, TexturePair, blend_keys};
 use crate::scene::{Camera, Placement, PreparedMesh, SceneView, SurfaceKind, texture_animation};
+use crate::texture::TextureKey;
+
+#[derive(Clone, Copy, Default)]
+struct EnvironmentPairs {
+    sun: TexturePair,
+    moon: TexturePair,
+    cloud: TexturePair,
+    water: TexturePair,
+}
 
 impl GeometryRenderer {
     pub(crate) fn prepare(
@@ -25,18 +36,32 @@ impl GeometryRenderer {
         view: &SceneView,
         camera: Camera,
         size: [u32; 2],
-        water_height: Option<f64>,
+        frame_input: FrameInput<'_>,
     ) {
         let started = Instant::now();
         let animation_now = started;
         let mut times = PrepareTimes::default();
-        let key = FramePreparationKey { version: view.version(), camera, size, water_height };
+        let key = FramePreparationKey {
+            version: view.version(),
+            camera,
+            size,
+            water_height: frame_input.water_height,
+            environment: frame_input.environment.cloned(),
+        };
         let same = self.prepared.as_ref().is_some_and(|prepared| prepared.key == key);
+        self.epoch = self.epoch.checked_add(1).expect("render frame space exhausted");
+        self.requested_textures.clear();
+        if let Some(environment) = frame_input.environment {
+            request_environment_textures(view, environment, &mut self.textures, self.epoch, &mut self.requested_textures);
+        }
+        let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size);
         if same {
             let upload_started = Instant::now();
             self.textures.upload(device, encoder, self.epoch);
             times.textures = upload_started.elapsed();
             if self.prepared.as_ref().is_some_and(|prepared| prepared.reusable(&key, self.textures.state(), self.memory.mesh_state())) {
+                let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
+                self.update_environment_uniforms(view, camera, projection, frame_input, pairs);
                 self.stats.uploaded_bytes = 0;
                 self.memory_stats();
                 self.record_prepare(started, times, 0);
@@ -44,11 +69,8 @@ impl GeometryRenderer {
             }
         }
         let visibility_started = Instant::now();
-        self.epoch = self.epoch.checked_add(1).expect("render frame space exhausted");
         self.stats = Stats::default();
         self.visible.clear();
-        let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size);
-        self.water.update(&self.queue, view, camera, projection, water_height);
         let objects = view.objects().filter_map(|object| {
             let (Some((_, mesh)), Placement::Ready(transform)) = (object.mesh(), object.placement()) else { return None };
             let animation = object
@@ -110,7 +132,6 @@ impl GeometryRenderer {
         candidates.sort_unstable_by_key(|(id, _, _, _, _)| *id);
         times.visibility = visibility_started.elapsed();
         let requests_started = Instant::now();
-        self.requested_textures.clear();
         let mut request = |face: &FaceMaterial, priority| {
             let Some(texture) = face.base_color_texture.as_ref().and_then(|binding| binding.image()) else { return };
             if self.requested_textures.contains(&texture.id()) {
@@ -149,6 +170,8 @@ impl GeometryRenderer {
             self.textures.upload(device, encoder, self.epoch);
         }
         times.textures += upload_started.elapsed();
+        let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
+        self.update_environment_uniforms(view, camera, projection, frame_input, pairs);
         let faces_started = Instant::now();
         let mut batches = Batches::default();
         let mut uploaded = 0;
@@ -190,8 +213,12 @@ impl GeometryRenderer {
                         params.params[0] = 1.0;
                     }
                     ShadingMode::Water => {
-                        params.color = COLOR.to_array();
+                        params.color = frame_input.environment.map_or(COLOR.to_array(), |environment| {
+                            [environment.water.fog_color[0], environment.water.fog_color[1], environment.water.fog_color[2], 1.0]
+                        });
                         params.params[0] = 1.0;
+                        params.texture =
+                            selected_water_normal(frame_input.environment.map(|environment| environment.water.normal_map), pairs.water);
                     }
                     ShadingMode::Studio => {}
                 }
@@ -249,6 +276,28 @@ impl GeometryRenderer {
         self.record_prepare(started, times, uploaded);
     }
 
+    fn update_environment_uniforms(
+        &mut self,
+        view: &SceneView,
+        camera: Camera,
+        projection: math::Mat4,
+        frame_input: FrameInput<'_>,
+        pairs: EnvironmentPairs,
+    ) {
+        let normal = selected_water_normal(frame_input.environment.map(|environment| environment.water.normal_map), pairs.water);
+        self.pipelines.update_environment(&self.queue, camera.draw_distance() as f32, frame_input.environment, normal);
+        self.water.update(&self.queue, view, camera, projection.inverse(), frame_input.water_height, frame_input.environment, normal);
+        self.sky.update(
+            &self.queue,
+            projection.inverse(),
+            frame_input.environment,
+            frame_input.cloud_scroll,
+            pairs.sun,
+            pairs.moon,
+            pairs.cloud,
+        );
+    }
+
     fn record_prepare(&mut self, started: Instant, times: PrepareTimes, uploaded: usize) {
         self.stats.prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
         if self.stats.prepare_ms >= 16.0 && self.slow_report.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
@@ -283,6 +332,44 @@ fn surface_pipeline(blend: bool, double_sided: bool, scale: Vec3) -> Pipeline {
     }
 }
 
+fn request_environment_textures(
+    view: &SceneView,
+    environment: &Evaluated,
+    textures: &mut super::Textures,
+    epoch: u64,
+    requested: &mut HashSet<TextureId>,
+) {
+    for blend in [environment.sky.sun.texture, environment.sky.moon.texture, environment.sky.clouds.texture, environment.water.normal_map] {
+        for id in [blend.current, blend.next].into_iter().flatten() {
+            if let Some(handle) = view.environment_texture(id)
+                && requested.insert(handle.id())
+            {
+                textures.request(handle, epoch, Priority::Visible);
+            }
+        }
+    }
+}
+
+fn environment_pairs(
+    device: &Device,
+    view: &SceneView,
+    textures: &mut super::Textures,
+    environment: Option<&Evaluated>,
+) -> EnvironmentPairs {
+    let Some(environment) = environment else { return EnvironmentPairs::default() };
+    EnvironmentPairs {
+        sun: blend_keys(device, environment.sky.sun.texture, view, textures),
+        moon: blend_keys(device, environment.sky.moon.texture, view, textures),
+        cloud: blend_keys(device, environment.sky.clouds.texture, view, textures),
+        water: blend_keys(device, environment.water.normal_map, view, textures),
+    }
+}
+
+fn selected_water_normal(blend: Option<TextureBlend>, pair: TexturePair) -> Option<TextureKey> {
+    let factor = blend.map_or(0.0, |blend| blend.factor);
+    if factor < 0.5 { pair.current } else { pair.next.or(pair.current) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +384,7 @@ mod tests {
             camera: Camera::new(DVec3::ZERO, Vec3::X, 1.0, [720, 720]).unwrap(),
             size: [1280, 720],
             water_height: Some(20.0),
+            environment: None,
         }
     }
 

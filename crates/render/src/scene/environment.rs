@@ -46,9 +46,13 @@ impl ExperienceSetting {
     pub fn transition(&self) -> Duration {
         self.0.transition
     }
+    pub fn region(&self) -> Region {
+        self.0.region
+    }
 }
 
 struct Setting {
+    region: Region,
     experience: ExperienceId,
     environment: Environment,
     transition: Duration,
@@ -68,9 +72,13 @@ impl ExperienceProperty {
     pub fn transition(&self) -> Duration {
         self.0.transition
     }
+    pub fn region(&self) -> Region {
+        self.0.region
+    }
 }
 
 struct Property {
+    region: Region,
     experience: ExperienceId,
     source: Arc<[u8]>,
     transition: Duration,
@@ -84,13 +92,16 @@ struct State {
     water: Option<ExperienceSetting>,
     sky_properties: BTreeMap<String, ExperienceProperty>,
     water_properties: BTreeMap<String, ExperienceProperty>,
-    clear_transition: Duration,
+    clear_transition: Option<Duration>,
 }
 
 #[derive(Clone)]
 pub struct ViewerEnvironment(Arc<Snapshot>);
 
 impl ViewerEnvironment {
+    pub fn day(&self) -> Option<&ExperienceSetting> {
+        self.0.state.day.as_ref()
+    }
     pub fn sky(&self) -> Option<&ExperienceSetting> {
         self.0.state.sky.as_ref().or(self.0.state.day.as_ref())
     }
@@ -110,7 +121,44 @@ impl ViewerEnvironment {
         self.0.water_overrides.as_ref()
     }
     pub fn clear_transition(&self) -> Duration {
-        self.0.state.clear_transition
+        self.0.state.clear_transition.unwrap_or(Duration::ZERO)
+    }
+    pub fn version(&self) -> u64 {
+        self.0.version
+    }
+    pub fn transition(&self) -> Option<Duration> {
+        let sky = self.sky().map(ExperienceSetting::transition);
+        let water = self.water().map(ExperienceSetting::transition);
+        self.day()
+            .map(ExperienceSetting::transition)
+            .into_iter()
+            .chain(sky)
+            .chain(water)
+            .chain(self.0.state.sky_properties.values().map(ExperienceProperty::transition))
+            .chain(self.0.state.water_properties.values().map(ExperienceProperty::transition))
+            .max()
+            .or(self.0.state.clear_transition)
+    }
+    pub fn transition_for_region(&self, region: Region) -> Option<Duration> {
+        let transitions = self
+            .day()
+            .filter(|setting| setting.region() == region)
+            .map(ExperienceSetting::transition)
+            .into_iter()
+            .chain(self.sky().filter(|setting| setting.region() == region).map(ExperienceSetting::transition))
+            .chain(self.water().filter(|setting| setting.region() == region).map(ExperienceSetting::transition))
+            .chain(self.0.state.sky_properties.values().filter(|property| property.region() == region).map(ExperienceProperty::transition))
+            .chain(
+                self.0.state.water_properties.values().filter(|property| property.region() == region).map(ExperienceProperty::transition),
+            );
+        transitions.max().or_else(|| {
+            (self.sky().is_none()
+                && self.water().is_none()
+                && self.0.state.sky_properties.is_empty()
+                && self.0.state.water_properties.is_empty())
+            .then_some(self.0.state.clear_transition)
+            .flatten()
+        })
     }
 }
 
@@ -118,11 +166,13 @@ struct Snapshot {
     state: State,
     sky_overrides: Option<Sky>,
     water_overrides: Option<Water>,
+    version: u64,
     _lease: Lease,
 }
 
 struct Pending {
     ticket: AssetTicket,
+    region: Region,
     experience: ExperienceId,
     transition: Duration,
     result: Option<Result<Environment, Failure>>,
@@ -166,7 +216,7 @@ impl ViewerEnvironments {
                 }
                 let lease = self.budget.reserve(size_of::<Pending>() + 64).ok_or(EnvironmentPushError::Capacity)?;
                 let ticket = AssetTicket::new();
-                self.pending.push_back(Pending { ticket, experience, transition, result: None, _lease: lease });
+                self.pending.push_back(Pending { ticket, region, experience, transition, result: None, _lease: lease });
                 self.events.push_back(AssetChange::Request(AssetRequest {
                     ticket,
                     region,
@@ -187,7 +237,7 @@ impl ViewerEnvironments {
                 }
                 state.sky_properties.retain(|_, property| experience.is_some_and(|id| id != property.experience()));
                 state.water_properties.retain(|_, property| experience.is_some_and(|id| id != property.experience()));
-                state.clear_transition = transition;
+                state.clear_transition = Some(transition);
                 self.store(state)?;
                 self.pending.retain(|pending| {
                     if experience.is_none_or(|id| id == pending.experience) {
@@ -211,8 +261,8 @@ impl ViewerEnvironments {
                 Water::from_properties(water.iter().map(|property| (property.name.as_str(), property.source.as_ref())))
                     .map_err(|_| EnvironmentPushError::Invalid)?;
                 let mut state = self.state();
-                self.properties(&mut state.sky_properties, sky, experience, transition)?;
-                self.properties(&mut state.water_properties, water, experience, transition)?;
+                self.properties(&mut state.sky_properties, sky, region, experience, transition)?;
+                self.properties(&mut state.water_properties, water, region, experience, transition)?;
                 self.store(state)?;
             }
         }
@@ -238,6 +288,7 @@ impl ViewerEnvironments {
                 let mut state = self.state();
                 let Some(lease) = self.budget.reserve(size_of::<Setting>() + 32) else { break };
                 let setting = ExperienceSetting(Arc::new(Setting {
+                    region: pending.region,
                     experience: pending.experience,
                     environment: environment.clone(),
                     transition: pending.transition,
@@ -278,8 +329,9 @@ impl ViewerEnvironments {
                 .map(|key| key.capacity() + size_of::<ExperienceProperty>() + 128)
                 .sum::<usize>();
         let lease = self.budget.reserve(bytes).ok_or(EnvironmentPushError::Capacity)?;
-        self.current = Some(ViewerEnvironment(Arc::new(Snapshot { state, sky_overrides, water_overrides, _lease: lease })));
-        self.version = self.version.checked_add(1).expect("viewer environment version exhausted");
+        let version = self.version.checked_add(1).expect("viewer environment version exhausted");
+        self.current = Some(ViewerEnvironment(Arc::new(Snapshot { state, sky_overrides, water_overrides, version, _lease: lease })));
+        self.version = version;
         Ok(())
     }
 
@@ -287,6 +339,7 @@ impl ViewerEnvironments {
         &self,
         target: &mut BTreeMap<String, ExperienceProperty>,
         properties: Vec<EnvironmentProperty>,
+        region: Region,
         experience: ExperienceId,
         transition: Duration,
     ) -> Result<(), EnvironmentPushError> {
@@ -308,7 +361,7 @@ impl ViewerEnvironments {
             let lease = self.budget.reserve(bytes).ok_or(EnvironmentPushError::Capacity)?;
             target.insert(
                 property.name,
-                ExperienceProperty(Arc::new(Property { experience, source: property.source, transition, _lease: lease })),
+                ExperienceProperty(Arc::new(Property { region, experience, source: property.source, transition, _lease: lease })),
             );
         }
         Ok(())

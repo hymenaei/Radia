@@ -10,9 +10,18 @@ use wgpu::{
 
 use crate::scene::Camera;
 
+use crate::{environment::Evaluated, texture::TextureKey};
+
+use super::{
+    atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values},
+    water::{COLOR, DEFAULT_FRESNEL, DEFAULT_NORMAL_SCALE, DEFAULT_WAVES},
+};
+
 pub(crate) const INSTANCE_BYTES: usize = 192;
 pub(crate) const VERTEX_BYTES: usize = 32;
 const CAMERA_BYTES: usize = 144;
+const ATMOSPHERE_BYTES: usize = (ATMOSPHERE_FLOATS + 4) * 4;
+const WATER_BYTES: usize = 16 * 4;
 const KEY_LIGHT: Vec3 = Vec3::new(-0.3, 0.5, 1.0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -36,13 +45,17 @@ pub(crate) struct SurfacePipelines {
     water: RenderPipeline,
     camera: Buffer,
     binding: BindGroup,
+    atmosphere: Buffer,
+    atmosphere_binding: BindGroup,
+    water_uniform: Buffer,
+    water_binding: BindGroup,
 }
 
 impl SurfacePipelines {
     pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Scene preview"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/surface.wgsl").into()),
+            source: ShaderSource::Wgsl(concat!(include_str!("../shaders/atmosphere.wgsl"), include_str!("../shaders/surface.wgsl")).into()),
         });
         let attributes = [
             VertexAttribute { format: VertexFormat::Float32x4, offset: 0, shader_location: 3 },
@@ -67,9 +80,11 @@ impl SurfacePipelines {
                 count: None,
             }],
         });
+        let atmosphere_layout = uniform_layout(device, "Surface atmosphere");
+        let water_layout = uniform_layout(device, "Surface water");
         let plain_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Surface pipelines"),
-            bind_group_layouts: &[Some(&camera_layout), Some(textures)],
+            bind_group_layouts: &[Some(&camera_layout), Some(textures), Some(&atmosphere_layout), Some(&water_layout)],
             immediate_size: 0,
         });
         let buffers = [
@@ -162,8 +177,26 @@ impl SurfacePipelines {
             layout: &camera_layout,
             entries: &[BindGroupEntry { binding: 0, resource: BindingResource::Buffer(camera.as_entire_buffer_binding()) }],
         });
+        let atmosphere = uniform_buffer(device, "Surface atmosphere", ATMOSPHERE_BYTES);
+        let atmosphere_binding = uniform_binding(device, "Surface atmosphere", &atmosphere_layout, &atmosphere);
+        let water_uniform = uniform_buffer(device, "Surface water", WATER_BYTES);
+        let water_binding = uniform_binding(device, "Surface water", &water_layout, &water_uniform);
 
-        Self { pipeline, flipped_winding, double_sided, blend, blend_flipped, blend_double_sided, water, camera, binding }
+        Self {
+            pipeline,
+            flipped_winding,
+            double_sided,
+            blend,
+            blend_flipped,
+            blend_double_sided,
+            water,
+            camera,
+            binding,
+            atmosphere,
+            atmosphere_binding,
+            water_uniform,
+            water_binding,
+        }
     }
     pub(crate) fn update_camera_uniform(&self, queue: &Queue, camera: Camera, size: [u32; 2]) -> Mat4 {
         let projection = projection(camera, size);
@@ -190,7 +223,93 @@ impl SurfacePipelines {
             Pipeline::Water => &self.water,
         });
         pass.set_bind_group(0, &self.binding, &[]);
+        pass.set_bind_group(2, &self.atmosphere_binding, &[]);
+        pass.set_bind_group(3, &self.water_binding, &[]);
     }
+
+    pub(crate) fn update_environment(
+        &self,
+        queue: &Queue,
+        draw_distance: f32,
+        environment: Option<&Evaluated>,
+        normal_map: Option<TextureKey>,
+    ) {
+        let mut atmosphere = [0.0; ATMOSPHERE_FLOATS + 4];
+        atmosphere[..ATMOSPHERE_FLOATS].copy_from_slice(&atmosphere_values(environment));
+        if let Some(distance) = atmosphere.get_mut(ATMOSPHERE_FLOATS) {
+            *distance = draw_distance;
+        }
+        let mut atmosphere_bytes = [0; ATMOSPHERE_BYTES];
+        write_floats(queue, &self.atmosphere, &mut atmosphere_bytes, &atmosphere);
+
+        let Some(environment) = environment else {
+            let mut values = [0.0; 16];
+            values[..4].copy_from_slice(&COLOR.to_array());
+            values[4..8].copy_from_slice(&DEFAULT_FRESNEL);
+            values[8] = DEFAULT_NORMAL_SCALE;
+            values[12..16].copy_from_slice(&DEFAULT_WAVES);
+            let mut water_bytes = [0; WATER_BYTES];
+            write_floats(queue, &self.water_uniform, &mut water_bytes, &values);
+            return;
+        };
+        let water = &environment.water;
+        let values = [
+            water.fog_color[0],
+            water.fog_color[1],
+            water.fog_color[2],
+            1.0,
+            water.fresnel_offset,
+            water.fresnel_scale,
+            water.fog_density,
+            if normal_map.is_some() { 1.0 } else { 0.0 },
+            water.normal_scale[0],
+            0.0,
+            0.0,
+            0.0,
+            water.waves[0][0],
+            water.waves[0][1],
+            water.waves[1][0],
+            water.waves[1][1],
+        ];
+        let mut water_bytes = [0; WATER_BYTES];
+        write_floats(queue, &self.water_uniform, &mut water_bytes, &values);
+    }
+}
+
+fn uniform_layout(device: &Device, label: &str) -> BindGroupLayout {
+    device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+            count: None,
+        }],
+    })
+}
+
+fn uniform_buffer(device: &Device, label: &str, bytes: usize) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some(label),
+        size: bytes as u64,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn uniform_binding(device: &Device, label: &str, layout: &BindGroupLayout, buffer: &Buffer) -> BindGroup {
+    device.create_bind_group(&BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[BindGroupEntry { binding: 0, resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()) }],
+    })
+}
+
+fn write_floats(queue: &Queue, buffer: &Buffer, bytes: &mut [u8], values: &[f32]) {
+    for (target, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
+        target.copy_from_slice(&value.to_le_bytes());
+    }
+    queue.write_buffer(buffer, 0, bytes);
 }
 
 pub(crate) fn projection(camera: Camera, size: [u32; 2]) -> Mat4 {

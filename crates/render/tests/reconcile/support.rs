@@ -93,6 +93,7 @@ pub(super) struct AssetWork {
     pub(super) reads: usize,
     pub(super) builds: usize,
     pub(super) requested: Vec<AssetRequest>,
+    pub(super) environment_requested: Vec<AssetRequest>,
     pub(super) released: Vec<AssetTicket>,
 }
 
@@ -100,7 +101,15 @@ pub(super) fn settle_materials(scene: &mut Reconciler, view: &mut SceneView, wor
     let mut work = AssetWork::default();
     for _ in 0..20_000 {
         match scene.poll(*now) {
-            ReconcileStep::Asset(AssetChange::Request(request)) => work.requested.push(request),
+            ReconcileStep::Asset(AssetChange::Request(request)) => {
+                if request.priority == Priority::Background
+                    && matches!(&request.request, Request::Texture { size, .. } if size.edge() == 128)
+                {
+                    work.environment_requested.push(request);
+                } else {
+                    work.requested.push(request);
+                }
+            }
             ReconcileStep::Asset(AssetChange::Release(ticket)) => work.released.push(ticket),
             ReconcileStep::Read(job) => {
                 work.reads += 1;

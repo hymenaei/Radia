@@ -12,6 +12,7 @@ impl Reconciler {
                 + self.state.mirror.patches.len()
                 + self.state.mirror.water.len()
                 + self.state.mirror.surfaces.len()
+                + self.state.mirror.environment_textures.len()
         } else {
             dirty.removed.len()
                 + dirty.retired.len()
@@ -21,6 +22,7 @@ impl Reconciler {
                 + dirty.patches.len()
                 + dirty.water.len()
                 + dirty.surfaces.len()
+                + dirty.environment_textures.len()
         };
         debug_assert!(count <= MAX_BATCH_CHANGES);
         let mut changes = Vec::with_capacity(count);
@@ -32,6 +34,10 @@ impl Reconciler {
             changes.extend(self.state.mirror.patches.iter().map(|((region, _), patch)| Change::Patch(*region, patch.clone())));
             changes.extend(self.state.mirror.water.iter().map(|(region, height)| Change::Water(*region, *height)));
             changes.extend(self.state.mirror.surfaces.values().cloned().map(Change::Surface));
+            changes.extend(
+                self.state.mirror.environment_textures.iter().map(|(id, handle)| Change::EnvironmentTexture(*id, Some(handle.clone()))),
+            );
+            self.preparation.environment_textures.clear_dirty();
         } else {
             changes.extend(dirty.removed.into_iter().map(Change::Remove));
             changes.extend(dirty.retired.into_iter().map(Change::Retire));
@@ -55,6 +61,12 @@ impl Reconciler {
             changes.extend(dirty.surfaces.into_iter().map(|(region, kind)| {
                 self.state.mirror.surfaces.get(&(region, kind)).cloned().map_or(Change::RemoveSurface(region, kind), Change::Surface)
             }));
+            changes.extend(
+                dirty
+                    .environment_textures
+                    .into_iter()
+                    .map(|id| Change::EnvironmentTexture(id, self.state.mirror.environment_textures.get(&id).cloned())),
+            );
         }
         changes
     }

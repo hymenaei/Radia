@@ -350,6 +350,7 @@ impl Reconciler {
         if let Some(old) = self.state.mirror.environments.remove(&region) {
             self.state.bytes -= old.retained_bytes();
         }
+        self.sync_environment_textures();
         self.world.environments.remove(&region);
         self.publication.dirty.environments.remove(&region);
         self.state.mirror.patches.retain(|(r, _), _| {

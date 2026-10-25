@@ -27,7 +27,8 @@ use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{Camera, MeshId, SharedMesh, ViewVersion};
 use crate::{
-    pipeline::{INSTANCE_BYTES, SurfacePipelines, Water},
+    environment::Evaluated,
+    pipeline::{INSTANCE_BYTES, Sky, SurfacePipelines, Water},
     texture::{TextureCompletion, TextureJob, TextureState, Textures},
 };
 
@@ -157,6 +158,7 @@ struct FramePreparationKey {
     camera: Camera,
     size: [u32; 2],
     water_height: Option<f64>,
+    environment: Option<Evaluated>,
 }
 
 struct FramePreparation {
@@ -191,6 +193,7 @@ pub(crate) struct GeometryRenderer {
     memory: Arc<Accounting>,
     pipelines: SurfacePipelines,
     water: Water,
+    sky: Sky,
     textures: Textures,
     requested_textures: HashSet<TextureId>,
     instances: Buffer,
@@ -219,13 +222,16 @@ impl GeometryRenderer {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
         let pipelines = SurfacePipelines::new(device, format, &textures.layout);
+        let water = Water::new(device, format, &textures.layout);
+        let sky = Sky::new(device, format, &textures.layout);
         Self {
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
             pipelines,
             textures,
             requested_textures: HashSet::new(),
-            water: Water::new(device, format),
+            water,
+            sky,
             instances: buffer(device, "Face instances", MAX_FACE_INSTANCES * INSTANCE_BYTES, BufferUsages::VERTEX),
             depth: None,
             meshes: HashMap::new(),
@@ -302,7 +308,7 @@ impl GeometryRenderer {
         self.textures.set_soft_cap(mib);
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
-        self.water.draw(pass);
+        self.water.draw(pass, &self.textures);
         pass.set_vertex_buffer(1, self.instances.slice(..));
         let mut pipeline = None;
         let mut texture = None;
@@ -331,6 +337,7 @@ impl GeometryRenderer {
                 draw.first..draw.first + draw.count,
             );
         }
+        self.sky.draw(pass, &self.textures);
     }
 
     pub(crate) fn submitted(&mut self, frame: FrameLease) {

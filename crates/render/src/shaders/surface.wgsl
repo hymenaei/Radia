@@ -6,6 +6,18 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var image: texture_2d<f32>;
 @group(1) @binding(1) var image_sampler: sampler;
+struct SurfaceAtmosphere {
+    atmosphere: Atmosphere,
+    distance: vec4<f32>,
+}
+struct SurfaceWater {
+    fog_color: vec4<f32>,
+    params: vec4<f32>,
+    normal: vec4<f32>,
+    waves: vec4<f32>,
+}
+@group(2) @binding(0) var<uniform> surface_atmosphere: SurfaceAtmosphere;
+@group(3) @binding(0) var<uniform> surface_water: SurfaceWater;
 
 struct Input {
     @location(0) position: vec3<f32>,
@@ -75,11 +87,28 @@ struct Water {
     @builtin(frag_depth) depth: f32,
 }
 
+struct Surface {
+    @location(0) color: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+}
+
 @fragment fn water_fragment(v: Output) -> Water {
     let clip = camera.projection * vec4<f32>(v.relative_position, 1.0);
+    let direction = safe_normalize(v.relative_position);
+    let horizon = horizon_color(vec3<f32>(direction.xy, 0.0), surface_atmosphere.atmosphere);
+    var normal = vec3<f32>(0.0, 0.0, 1.0);
+    if surface_water.params.w > 0.5 {
+        let uv = v.relative_position.xy * surface_water.normal.x * 0.015 + surface_water.waves.xy * 0.03 + surface_water.waves.zw * -0.02;
+        let sampled = textureSample(image, image_sampler, uv).xyz * 2.0 - vec3<f32>(1.0);
+        normal = safe_normalize(mix(normal, safe_normalize(sampled), 0.12));
+    }
+    let cosine = max(dot(normal, safe_normalize(-direction)), 0.0);
+    let fresnel = clamp(surface_water.params.x + surface_water.params.y * pow(1.0 - cosine, 5.0), 0.0, 1.0);
+    let body = mix(surface_water.fog_color.xyz, horizon, fresnel);
+    let color = aerial_perspective(body, direction, length(v.position_view), surface_atmosphere.distance.x, surface_water.params.z, surface_atmosphere.atmosphere);
     var water: Water;
-    water.color = vec4<f32>(v.color.rgb, 1.0);
-    water.depth = clamp(clip.z / clip.w, 0.0, 1.0);
+    water.color = vec4<f32>(color, 1.0);
+    water.depth = max(clamp(clip.z / clip.w, 0.0, 1.0), 0.00000001);
     return water;
 }
 fn studio(v: Output, color: vec3<f32>, front: bool) -> vec3<f32> {
@@ -94,9 +123,22 @@ fn studio(v: Output, color: vec3<f32>, front: bool) -> vec3<f32> {
     return color * (0.15 + 0.85 * key) + vec3<f32>(specular);
 }
 
-@fragment fn fragment(v: Output, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+@fragment fn fragment(v: Output, @builtin(front_facing) front: bool) -> Surface {
     let color = textureSample(image, image_sampler, v.uv) * v.color;
     if v.params.y == 1.0 && color.a < v.params.z { discard; }
     let alpha = select(1.0, clamp(color.a, 0.0, 1.0), v.params.y == 2.0);
-    return vec4<f32>(mix(studio(v, color.rgb, front), color.rgb, v.params.x), alpha);
+    let surface = mix(studio(v, color.rgb, front), color.rgb, v.params.x);
+    let direction = safe_normalize(v.relative_position);
+    let fogged = aerial_perspective(
+        surface,
+        direction,
+        length(v.position_view),
+        surface_atmosphere.distance.x,
+        surface_atmosphere.atmosphere.haze.y,
+        surface_atmosphere.atmosphere,
+    );
+    var output: Surface;
+    output.color = vec4<f32>(fogged, alpha);
+    output.depth = max(v.position.z, 0.00000001);
+    return output;
 }

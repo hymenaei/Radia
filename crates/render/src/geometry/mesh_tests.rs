@@ -34,7 +34,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     });
     let mut encoder = device.create_command_encoder(&Default::default());
     let depth = geometry.depth(device, [128, 128]).unwrap();
-    geometry.prepare(device, &mut encoder, &view, camera, [128, 128], None);
+    geometry.prepare(device, &mut encoder, &view, camera, [128, 128], crate::FrameInput::default());
     let mut meshes: Vec<_> = geometry.meshes.values().collect();
     meshes.sort_by_key(|mesh| mesh.allocation.vertices().start);
     assert_eq!(meshes.len(), 2);

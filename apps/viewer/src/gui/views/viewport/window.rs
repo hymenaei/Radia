@@ -81,7 +81,8 @@ pub(super) struct SceneWindow {
     platform: egui_winit::State,
     next_ui: Option<Instant>,
     next_environment: Option<Instant>,
-    next_cloud: Option<Instant>,
+    next_sky: Option<Instant>,
+    next_water: Option<Instant>,
     window: Arc<Window>,
     generation: u64,
     frame_work: Duration,
@@ -138,7 +139,8 @@ impl SceneWindow {
             platform,
             next_ui: None,
             next_environment: None,
-            next_cloud: None,
+            next_sky: None,
+            next_water: None,
             window,
             generation,
             frame_work: Duration::ZERO,
@@ -284,7 +286,8 @@ impl SceneWindow {
         {
             self.feed = Some(feed);
             self.next_environment = None;
-            self.next_cloud = None;
+            self.next_sky = None;
+            self.next_water = None;
             self.dirty = true;
         }
         if let Some(feed) = &mut self.feed {
@@ -556,6 +559,8 @@ impl SceneWindow {
             water_height: feed.water_height,
             environment: feed.evaluated(),
             cloud_scroll: feed.cloud_scroll(),
+            animation_time: feed.animation_time(),
+            water_scroll: feed.water_scroll(),
         });
         let result = {
             let renderer = self.renderer.as_mut().expect("renderer ensured before frame submission");
@@ -579,10 +584,20 @@ impl SceneWindow {
                     if self.dirty {
                         self.next_frame += FRAME_INTERVAL;
                     }
-                    self.next_cloud =
-                        cloud_frame_deadline(observation, self.feed.as_ref().is_some_and(SceneFeed::clouds_animate), Instant::now());
+                    self.next_sky = sky_frame_deadline(
+                        observation,
+                        self.feed.as_ref().is_some_and(|feed| feed.clouds_animate() || feed.stars_animate()),
+                        Instant::now(),
+                    );
+                    self.next_water = water_frame_deadline(
+                        observation,
+                        self.feed.as_ref().and_then(|feed| feed.water_height),
+                        self.feed.as_ref().is_some_and(SceneFeed::water_animate),
+                        Instant::now(),
+                    );
                 } else {
-                    self.next_cloud = None;
+                    self.next_sky = None;
+                    self.next_water = None;
                     self.next_frame += FRAME_INTERVAL;
                 }
                 let first_frame = presented && !self.ready;
@@ -664,8 +679,12 @@ impl SceneWindow {
             self.next_environment = None;
             self.dirty = true;
         }
-        if deadline_passed(self.next_cloud, now) {
-            self.next_cloud = None;
+        if deadline_passed(self.next_sky, now) {
+            self.next_sky = None;
+            self.dirty = true;
+        }
+        if deadline_passed(self.next_water, now) {
+            self.next_water = None;
             self.dirty = true;
         }
         if self.next_ui.is_some_and(|at| now >= at) {
@@ -679,7 +698,15 @@ impl SceneWindow {
             let redraw = (self.dirty && can_redraw).then_some(self.next_frame.max(now + Duration::from_millis(1)));
             let poll = pending.then_some(now + FRAME_INTERVAL);
             event_loop.set_control_flow(
-                match redraw.into_iter().chain(poll).chain(self.next_ui).chain(self.next_environment).chain(self.next_cloud).min() {
+                match redraw
+                    .into_iter()
+                    .chain(poll)
+                    .chain(self.next_ui)
+                    .chain(self.next_environment)
+                    .chain(self.next_sky)
+                    .chain(self.next_water)
+                    .min()
+                {
                     Some(at) => ControlFlow::WaitUntil(at),
                     None => ControlFlow::Wait,
                 },
@@ -698,8 +725,13 @@ fn deadline_passed(deadline: Option<Instant>, now: Instant) -> bool {
     deadline.is_some_and(|deadline| now >= deadline)
 }
 
-fn cloud_frame_deadline(camera: Option<scene::Camera>, animating: bool, now: Instant) -> Option<Instant> {
+fn sky_frame_deadline(camera: Option<scene::Camera>, animating: bool, now: Instant) -> Option<Instant> {
     let visible = camera.is_some_and(camera_sees_sky);
+    (visible && animating).then(|| now + FRAME_INTERVAL)
+}
+
+fn water_frame_deadline(camera: Option<scene::Camera>, height: Option<f64>, animating: bool, now: Instant) -> Option<Instant> {
+    let visible = camera.zip(height).is_some_and(|(camera, height)| camera_sees_water(camera, height));
     (visible && animating).then(|| now + FRAME_INTERVAL)
 }
 
@@ -708,6 +740,16 @@ fn camera_sees_sky(camera: scene::Camera) -> bool {
     let half_fov = camera.vertical_fov() as f32 * 0.5;
     let maximum_vertical = direction.z * half_fov.cos() + (1.0 - direction.z * direction.z).max(0.0).sqrt() * half_fov.sin();
     maximum_vertical > 0.0
+}
+
+fn camera_sees_water(camera: scene::Camera, height: f64) -> bool {
+    if !height.is_finite() || camera.position().z <= height {
+        return false;
+    }
+    let direction = camera.direction();
+    let half_fov = camera.vertical_fov() as f32 * 0.5;
+    let minimum_vertical = direction.z * half_fov.cos() - (1.0 - direction.z * direction.z).max(0.0).sqrt() * half_fov.sin();
+    minimum_vertical < 0.0
 }
 
 impl Drop for SceneWindow {
@@ -791,7 +833,7 @@ mod tests {
     };
 
     use super::{PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError};
-    use super::{cloud_frame_deadline, deadline_passed};
+    use super::{deadline_passed, sky_frame_deadline, water_frame_deadline};
     use math::{DVec3, Vec3};
     use render::scene::Camera;
 
@@ -837,14 +879,27 @@ mod tests {
     }
 
     #[test]
-    fn cloud_redraws_require_visible_sky_and_nonzero_scroll() {
+    fn sky_redraws_require_visible_sky_and_animation() {
         let now = Instant::now();
         let sky = Camera::new(DVec3::ZERO, Vec3::Z, 1.0, [1280, 720]).unwrap();
         let ground = Camera::new(DVec3::ZERO, Vec3::NEG_Z, 1.0, [1280, 720]).unwrap();
-        assert_eq!(cloud_frame_deadline(Some(sky), true, now), Some(now + super::FRAME_INTERVAL));
-        assert_eq!(cloud_frame_deadline(Some(sky), false, now), None);
-        assert_eq!(cloud_frame_deadline(Some(ground), true, now), None);
-        assert_eq!(cloud_frame_deadline(None, true, now), None);
+        assert_eq!(sky_frame_deadline(Some(sky), true, now), Some(now + super::FRAME_INTERVAL));
+        assert_eq!(sky_frame_deadline(Some(sky), false, now), None);
+        assert_eq!(sky_frame_deadline(Some(ground), true, now), None);
+        assert_eq!(sky_frame_deadline(None, true, now), None);
+    }
+
+    #[test]
+    fn water_redraws_require_visible_water_and_nonzero_waves() {
+        let now = Instant::now();
+        let water = Camera::new(DVec3::new(0.0, 0.0, 10.0), Vec3::NEG_Z, 1.0, [1280, 720]).unwrap();
+        let sky = Camera::new(DVec3::new(0.0, 0.0, 10.0), Vec3::Z, 1.0, [1280, 720]).unwrap();
+        let below = Camera::new(DVec3::new(0.0, 0.0, -1.0), Vec3::NEG_Z, 1.0, [1280, 720]).unwrap();
+        assert_eq!(water_frame_deadline(Some(water), Some(0.0), true, now), Some(now + super::FRAME_INTERVAL));
+        assert_eq!(water_frame_deadline(Some(water), Some(0.0), false, now), None);
+        assert_eq!(water_frame_deadline(Some(sky), Some(0.0), true, now), None);
+        assert_eq!(water_frame_deadline(Some(below), Some(0.0), true, now), None);
+        assert_eq!(water_frame_deadline(Some(water), None, true, now), None);
     }
 
     #[test]

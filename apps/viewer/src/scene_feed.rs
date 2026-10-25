@@ -133,7 +133,23 @@ impl SceneFeed {
     }
 
     pub(crate) fn clouds_animate(&self) -> bool {
-        self.environment.clouds_animate()
+        self.environment.clouds_animate(&self.view)
+    }
+
+    pub(crate) fn stars_animate(&self) -> bool {
+        self.environment.stars_animate(&self.view)
+    }
+
+    pub(crate) fn water_animate(&self) -> bool {
+        self.environment.water_animate(&self.view)
+    }
+
+    pub(crate) fn animation_time(&self) -> f32 {
+        self.environment.animation_time()
+    }
+
+    pub(crate) fn water_scroll(&self) -> [f32; 4] {
+        self.environment.water_scroll()
     }
 
     pub(crate) fn update_environment(&mut self, now: Instant) -> bool {

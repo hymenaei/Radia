@@ -1,5 +1,5 @@
 use math::camera::rh::{proj::directx::perspective, view::look_to_mat4};
-use math::{Mat4, Vec3};
+use math::{DVec3, Mat4, Vec3};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
     BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
@@ -10,21 +10,20 @@ use wgpu::{
 
 use crate::scene::Camera;
 
-use crate::{
-    environment::Evaluated,
-    texture::{TextureKey, Textures},
-};
+use crate::{environment::Evaluated, texture::Textures};
+
+use super::TexturePair;
 
 use super::{
     atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values},
-    water::{COLOR, DEFAULT_FRESNEL, DEFAULT_NORMAL_SCALE, DEFAULT_WAVES},
+    water::{COLOR, DEFAULT_BLUR, DEFAULT_FRESNEL, DEFAULT_NORMAL_SCALE, DEFAULT_SCALE_ABOVE, DEFAULT_WAVES, water_origin},
 };
 
 pub(crate) const INSTANCE_BYTES: usize = 192;
 pub(crate) const VERTEX_BYTES: usize = 32;
 const CAMERA_BYTES: usize = 144;
 const ATMOSPHERE_BYTES: usize = (ATMOSPHERE_FLOATS + 4) * 4;
-const WATER_BYTES: usize = 16 * 4;
+const WATER_BYTES: usize = 32 * 4;
 const KEY_LIGHT: Vec3 = Vec3::new(-0.3, 0.5, 1.0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -58,7 +57,14 @@ impl SurfacePipelines {
     pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Scene preview"),
-            source: ShaderSource::Wgsl(concat!(include_str!("../shaders/atmosphere.wgsl"), include_str!("../shaders/surface.wgsl")).into()),
+            source: ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../shaders/atmosphere.wgsl"),
+                    include_str!("../shaders/water_common.wgsl"),
+                    include_str!("../shaders/surface.wgsl")
+                )
+                .into(),
+            ),
         });
         let attributes = [
             VertexAttribute { format: VertexFormat::Float32x4, offset: 0, shader_location: 3 },
@@ -92,7 +98,14 @@ impl SurfacePipelines {
         });
         let region_water_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Region water pipeline"),
-            bind_group_layouts: &[Some(&camera_layout), Some(textures), Some(&atmosphere_layout), Some(&water_layout), Some(textures)],
+            bind_group_layouts: &[
+                Some(&camera_layout),
+                Some(textures),
+                Some(&atmosphere_layout),
+                Some(&water_layout),
+                Some(textures),
+                Some(textures),
+            ],
             immediate_size: 0,
         });
         let buffers = [
@@ -169,6 +182,7 @@ impl SurfacePipelines {
             layout: Some(&region_water_layout),
             vertex: VertexState { entry_point: Some("vertex"), ..descriptor.vertex.clone() },
             fragment: Some(FragmentState { entry_point: Some("water_fragment"), ..descriptor.fragment.clone().expect("scene fragment") }),
+            primitive: PrimitiveState { cull_mode: None, ..descriptor.primitive },
             depth_stencil: Some(DepthStencilState {
                 depth_compare: Some(CompareFunction::GreaterEqual),
                 ..descriptor.depth_stencil.clone().expect("scene depth")
@@ -236,8 +250,9 @@ impl SurfacePipelines {
         pass.set_bind_group(3, &self.water_binding, &[]);
     }
 
-    pub(crate) fn bind_water_texture(&self, pass: &mut RenderPass<'_>, textures: &Textures, key: Option<TextureKey>) {
-        pass.set_bind_group(4, textures.binding(key), &[]);
+    pub(crate) fn bind_water_texture(&self, pass: &mut RenderPass<'_>, textures: &Textures, pair: TexturePair) {
+        pass.set_bind_group(4, textures.binding(pair.current), &[]);
+        pass.set_bind_group(5, textures.binding(pair.next), &[]);
     }
 
     pub(crate) fn update_environment(
@@ -245,8 +260,10 @@ impl SurfacePipelines {
         queue: &Queue,
         draw_distance: f32,
         altitude: f32,
+        camera_position: DVec3,
         environment: Option<&Evaluated>,
-        normal_map: Option<TextureKey>,
+        normal_map: TexturePair,
+        scroll: [f32; 4],
     ) {
         let mut atmosphere = [0.0; ATMOSPHERE_FLOATS + 4];
         atmosphere[..ATMOSPHERE_FLOATS].copy_from_slice(&atmosphere_values(environment, altitude));
@@ -257,17 +274,24 @@ impl SurfacePipelines {
         write_floats(queue, &self.atmosphere, &mut atmosphere_bytes, &atmosphere);
 
         let Some(environment) = environment else {
-            let mut values = [0.0; 16];
+            let origin = water_origin(camera_position, DEFAULT_SCALE_ABOVE);
+            let mut values = [0.0; 32];
             values[..4].copy_from_slice(&COLOR.to_array());
             values[4..8].copy_from_slice(&DEFAULT_FRESNEL);
-            values[8] = DEFAULT_NORMAL_SCALE;
+            values[8..12].copy_from_slice(&[DEFAULT_NORMAL_SCALE, DEFAULT_NORMAL_SCALE, DEFAULT_NORMAL_SCALE, DEFAULT_SCALE_ABOVE]);
             values[12..16].copy_from_slice(&DEFAULT_WAVES);
+            values[16..20].copy_from_slice(&scroll);
+            values[20..24].copy_from_slice(&[0.0, DEFAULT_BLUR, 0.0, 0.0]);
+            values[24..28].copy_from_slice(&origin[..4]);
+            values[28..32].copy_from_slice(&origin[4..]);
             let mut water_bytes = [0; WATER_BYTES];
             write_floats(queue, &self.water_uniform, &mut water_bytes, &values);
             return;
         };
         let water = &environment.water;
-        let values = [
+        let origin = water_origin(camera_position, water.scale_above);
+        let mut values = [0.0; 32];
+        values[..24].copy_from_slice(&[
             water.fog_color[0],
             water.fog_color[1],
             water.fog_color[2],
@@ -275,16 +299,26 @@ impl SurfacePipelines {
             water.fresnel_offset,
             water.fresnel_scale,
             water.fog_density,
-            if normal_map.is_some() { 1.0 } else { 0.0 },
+            if normal_map.current.is_some() || normal_map.next.is_some() { 1.0 } else { 0.0 },
             water.normal_scale[0],
-            0.0,
-            0.0,
-            0.0,
+            water.normal_scale[1],
+            water.normal_scale[2],
+            water.scale_above,
             water.waves[0][0],
             water.waves[0][1],
             water.waves[1][0],
             water.waves[1][1],
-        ];
+            scroll[0],
+            scroll[1],
+            scroll[2],
+            scroll[3],
+            0.0,
+            water.blur,
+            normal_map.factor,
+            0.0,
+        ]);
+        values[24..28].copy_from_slice(&origin[..4]);
+        values[28..32].copy_from_slice(&origin[4..]);
         let mut water_bytes = [0; WATER_BYTES];
         write_floats(queue, &self.water_uniform, &mut water_bytes, &values);
     }

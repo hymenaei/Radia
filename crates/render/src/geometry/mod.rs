@@ -27,7 +27,7 @@ use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{Camera, MAX_REGIONS, MeshId, SharedMesh, ViewVersion};
 use crate::{
-    pipeline::{INSTANCE_BYTES, Sky, SurfacePipelines, Water},
+    pipeline::{INSTANCE_BYTES, Sky, SurfacePipelines, TexturePair, Water},
     texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
 
@@ -203,7 +203,7 @@ pub(crate) struct GeometryRenderer {
     water_regions: [Vec4; MAX_REGIONS],
     water_region_ids: [u128; MAX_REGIONS],
     water_region_count: usize,
-    water_normal: Option<crate::texture::TextureKey>,
+    water_textures: TexturePair,
     instances: Buffer,
     depth: Option<Depth>,
     meshes: HashMap<MeshId, GpuMesh>,
@@ -244,7 +244,7 @@ impl GeometryRenderer {
             water_regions: [Vec4::ZERO; MAX_REGIONS],
             water_region_ids: [0; MAX_REGIONS],
             water_region_count: 0,
-            water_normal: None,
+            water_textures: TexturePair::default(),
             water,
             sky,
             instances: buffer(device, "Face instances", MAX_FACE_INSTANCES * INSTANCE_BYTES, BufferUsages::VERTEX),
@@ -338,7 +338,7 @@ impl GeometryRenderer {
                 texture = Some(draw.texture);
             }
             if draw.pipeline == crate::pipeline::Pipeline::Water {
-                self.pipelines.bind_water_texture(pass, &self.textures, self.water_normal);
+                self.pipelines.bind_water_texture(pass, &self.textures, self.water_textures);
             }
             let mesh = &self.meshes[&draw.mesh];
             let allocation = &mesh.allocation;

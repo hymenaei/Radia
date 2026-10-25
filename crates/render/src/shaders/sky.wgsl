@@ -11,12 +11,23 @@ struct SkyUniform {
     blends: vec4<f32>,
     texture_flags: vec4<f32>,
     cloud_flags: vec4<f32>,
+    texture_flags2: vec4<f32>,
+    optics: vec4<f32>,
 }
+
 @group(0) @binding(0) var<uniform> sky: SkyUniform;
 @group(1) @binding(0) var image: texture_2d<f32>;
 @group(1) @binding(1) var image_sampler: sampler;
 @group(2) @binding(0) var image_next: texture_2d<f32>;
 @group(2) @binding(1) var image_next_sampler: sampler;
+@group(3) @binding(0) var rainbow_image: texture_2d<f32>;
+@group(3) @binding(1) var rainbow_sampler: sampler;
+@group(4) @binding(0) var rainbow_next_image: texture_2d<f32>;
+@group(4) @binding(1) var rainbow_next_sampler: sampler;
+@group(5) @binding(0) var halo_image: texture_2d<f32>;
+@group(5) @binding(1) var halo_sampler: sampler;
+@group(6) @binding(0) var halo_next_image: texture_2d<f32>;
+@group(6) @binding(1) var halo_next_sampler: sampler;
 
 struct SkyRay {
     @builtin(position) position: vec4<f32>,
@@ -40,7 +51,11 @@ fn ray_direction(ndc: vec2<f32>) -> vec3<f32> {
 
 fn sphere_uv(direction: vec3<f32>, body_direction: vec3<f32>, radius: f32) -> vec2<f32> {
     var right = cross(vec3<f32>(0.0, 0.0, 1.0), body_direction);
-    right = safe_normalize(right);
+    if dot(right, right) < 0.000001 {
+        right = vec3<f32>(1.0, 0.0, 0.0);
+    } else {
+        right = safe_normalize(right);
+    }
     let up = safe_normalize(cross(body_direction, right));
     return vec2<f32>(0.5) + vec2<f32>(dot(direction, right), dot(direction, up)) / (2.0 * radius);
 }
@@ -53,9 +68,37 @@ fn cloud_noise(uv: vec2<f32>) -> vec4<f32> {
     );
 }
 
+fn rainbow_color(optical_dot: f32) -> vec3<f32> {
+    if sky.optics.x <= 0.0 || max(sky.texture_flags2.x, sky.texture_flags2.y) < 0.5 {
+        return vec3<f32>(0.0);
+    }
+    var vertical = clamp(-0.575 - optical_dot, 0.0, 1.0);
+    let interior = max(0.0, vertical - 0.25) * 4.2857;
+    vertical = clamp(vertical, 0.0, 0.25) + interior;
+    let horizontal = (sky.optics.y - 5.0) / 1024.0 + 0.5;
+    let uv = vec2<f32>(horizontal, vertical);
+    let first = textureSample(rainbow_image, rainbow_sampler, uv);
+    let second = textureSample(rainbow_next_image, rainbow_next_sampler, uv);
+    return pow(max(mix(first.rgb, second.rgb, sky.cloud_flags.z), vec3<f32>(0.0)), vec3<f32>(1.8)) * sky.optics.x;
+}
+
+fn halo_color(optical_dot: f32) -> vec3<f32> {
+    if sky.optics.z <= 0.0 || max(sky.texture_flags2.z, sky.texture_flags2.w) < 0.5 {
+        return vec3<f32>(0.0);
+    }
+    let dot_value = clamp(optical_dot, 0.1, 1.0);
+    let vertical = sqrt(clamp(1.0 - dot_value * dot_value, 0.0, 1.0));
+    let uv = vec2<f32>(0.0, vertical);
+    let first = textureSample(halo_image, halo_sampler, uv);
+    let second = textureSample(halo_next_image, halo_next_sampler, uv);
+    return mix(first.rgb, second.rgb, sky.cloud_flags.w) * sky.optics.z;
+}
+
 @fragment fn sky_fragment(ray: SkyRay) -> @location(0) vec4<f32> {
     let direction = ray_direction(ray.ndc);
-    let color = atmosphere_color(direction, sky.atmosphere);
+    let terms = atmosphere_terms(direction, sky.atmosphere);
+    let optical_dot = dot(terms.ray, terms.light);
+    let color = windlight_soft_clip(windlight_haze(direction, sky.atmosphere) + rainbow_color(optical_dot) + halo_color(optical_dot));
     return vec4<f32>(color, 1.0);
 }
 
@@ -64,79 +107,81 @@ fn cloud_noise(uv: vec2<f32>) -> vec4<f32> {
     if sky.cloud.x < 0.001 {
         discard;
     }
-    var uv1 = vec2<f32>((direction.x - 1.0) * 0.5, (1.0 - direction.y) * 0.5);
+    let planar = vec2<f32>((-direction.y + 1.0) * 0.5, (-direction.x + 1.0) * 0.5);
+    var uv1 = vec2<f32>(-planar.x, planar.y);
     uv1 = (uv1 - vec2<f32>(0.5)) / sky.cloud.x + vec2<f32>(0.5);
     let light_world = safe_normalize(sky.atmosphere.light_direction.xyz);
     let light = vec3<f32>(light_world.x, light_world.z, light_world.y);
-    let uv2 = uv1 + light.xz * 0.0125;
-    let uv3 = uv1 * 16.0;
+    let uv2 = uv1 + vec2<f32>(light.x, light.z) * 0.0125;
+    var uv3 = uv1 * 16.0;
     let uv4 = uv2 * 16.0;
     let disturbance_scale = sky.cloud.y * (1.0 - sky.cloud.x * 0.25);
-    let disturbance = vec2<f32>(cloud_noise(uv1 / 8.0).x, cloud_noise((uv3 + uv1) / 16.0).x)
-        * disturbance_scale;
-    let disturbance2 = vec2<f32>(cloud_noise((uv1 + uv3) / 4.0).x, cloud_noise((uv4 + uv2) / 8.0).x)
-        * disturbance_scale;
-    let scroll_offset = vec2<f32>(-sky.scroll.x, sky.scroll.y);
-    let large_offset = sky.cloud_density1.xy + scroll_offset;
-    let small_offset = sky.cloud_density2.xy;
-    let visible_large = uv1 + large_offset + disturbance * 0.2;
-    let shadow_large = uv2 + large_offset;
-    let visible_small = uv3 + small_offset;
-    let shadow_small = uv4 + small_offset;
+    let disturbance = vec2<f32>(cloud_noise(uv1 / 8.0).x, cloud_noise((uv3 + uv1) / 16.0).x) * disturbance_scale;
+    let disturbance2 = vec2<f32>(cloud_noise((uv1 + uv3) / 4.0).x, cloud_noise((uv4 + uv2) / 8.0).x) * disturbance_scale;
+    let scroll = vec2<f32>(-sky.scroll.x, sky.scroll.y);
+    uv1 += sky.cloud_density1.xy + scroll + disturbance * 0.2;
+    let shadow_large = uv2 + sky.cloud_density1.xy + scroll;
+    uv3 += sky.cloud_density2.xy;
     let density_variance = min(1.0, max(0.0, (disturbance.x * 2.0 + disturbance.y * 2.0 + disturbance2.x + disturbance2.y) * 4.0));
     let cloud_density = 2.0 * (sky.atmosphere.glow.w - 0.25) * (1.0 - density_variance * density_variance);
-    var alpha1 = (cloud_noise(visible_large).x - 0.5)
-        + (cloud_noise(visible_small).x - 0.5) * sky.cloud_density2.z;
+    var alpha1 = (cloud_noise(uv1).x - 0.5) + (cloud_noise(uv3).x - 0.5) * sky.cloud_density2.z;
     alpha1 = min(max(alpha1 + cloud_density, 0.0) * 10.0 * sky.cloud_density1.z, 1.0);
     alpha1 = 1.0 - alpha1 * alpha1;
     alpha1 = 1.0 - alpha1 * alpha1;
-    let relative_altitude = direction.z * max(sky.atmosphere.haze.w - sky.atmosphere.distance.y, 0.0);
-    let altitude_blend = clamp((relative_altitude + 512.0) / max(sky.atmosphere.haze.w, 1.0), 0.0, 1.0);
-    alpha1 *= altitude_blend * smoothstep(-0.025, 0.075, direction.z);
+    alpha1 *= smoothstep(-0.02, 0.02, direction.z);
     alpha1 = clamp(alpha1, 0.0, 1.0);
     var alpha2 = cloud_noise(shadow_large).x - 0.5;
     alpha2 = min(max(alpha2 + cloud_density, 0.0) * 2.5 * sky.cloud_density1.z, 1.0);
     alpha2 = 1.0 - alpha2;
     alpha2 = 1.0 - alpha2 * alpha2;
     let terms = atmosphere_terms(direction, sky.atmosphere);
-    let sun_up = sky.atmosphere.sunlight.w >= 0.5;
-    let cloud_light_factor = select(0.7, 1.0, sun_up);
-    let cloud_off_axis = 1.0 / max(0.000001, terms.light.y * 2.0);
+    let cloud_shadow = sky.atmosphere.glow.w;
+    let ambient = sky.atmosphere.ambient.xyz
+        + (vec3<f32>(1.0) - sky.atmosphere.ambient.xyz) * cloud_shadow * 0.5;
+    let sunlight = terms.sunlight * max(1.0 - cloud_shadow, 0.0);
+    let below_cloud = sky.atmosphere.blue_horizon.xyz * terms.blue_weight * (sunlight + ambient)
+        + vec3<f32>(sky.atmosphere.haze.x) * terms.haze_weight * (sunlight * terms.glow_term + ambient);
     let cloud_sunlight = max(sky.atmosphere.sunlight.xyz, vec3<f32>(0.0))
-        * cloud_light_factor
-        * exp(-terms.light_atten * cloud_off_axis);
-    let haze = sqrt(terms.transparency);
-    let cloud_sun = cloud_sunlight * terms.glow_term * sky.cloud_color.xyz * haze;
-    let cloud_ambient = terms.ambient_below * sky.cloud_color.xyz * haze
-        + terms.additive_below * (vec3<f32>(1.0) - haze);
-    let color = clamp(cloud_sun * (1.0 - alpha2) + cloud_ambient, vec3<f32>(0.0), vec3<f32>(1.0)) * 2.0;
+        * exp(-terms.light_atten / max(terms.light.y * 2.0, 0.000001));
+    let transparency = sqrt(terms.transparency);
+    let sun_color = cloud_sunlight * terms.glow_term * sky.cloud_color.xyz * transparency;
+    let ambient_color = ambient * sky.cloud_color.xyz * transparency
+        + below_cloud * (vec3<f32>(1.0) - transparency);
+    let color = clamp(sun_color * (1.0 - alpha2) + ambient_color, vec3<f32>(0.0), vec3<f32>(1.0)) * 2.0;
     return vec4<f32>(color, alpha1);
 }
 
 fn body_fragment_color(direction: vec3<f32>, body: vec4<f32>, sample_index: u32, is_sun: bool) -> vec4<f32> {
     let body_direction = safe_normalize(body.xyz);
-    let radius = clamp(body.w * 0.009, 0.002, 0.06);
+    let radius = clamp(body.w * 0.009, 0.0, 0.06);
+    if radius <= 0.000001 {
+        discard;
+    }
     let separation = sqrt(max(1.0 - pow(dot(direction, body_direction), 2.0), 0.0));
     let disc = 1.0 - smoothstep(radius * 0.88, radius, separation);
-    let altitude = smoothstep(-0.04, 0.1, body_direction.z);
-    let weights = select(vec2<f32>(sky.texture_flags.z, sky.texture_flags.w), vec2<f32>(sky.texture_flags.x, sky.texture_flags.y), is_sun);
-    let texture_present = select(weights.x, weights.y, sample_index == 1u) > 0.5;
-    let blend = select(sky.blends.y, sky.blends.x, is_sun);
-    let weight = select(1.0 - blend, blend, sample_index == 1u);
     let uv = sphere_uv(direction, body_direction, radius);
-    var color = vec3<f32>(0.74, 0.78, 0.9);
-    var alpha = disc;
-    if texture_present {
-        let sampled = textureSample(image, image_sampler, uv);
-        color = sampled.rgb;
-        alpha *= sampled.a;
-    }
+    let current = textureSample(image, image_sampler, uv);
+    let next = textureSample(image_next, image_next_sampler, uv);
     if is_sun {
-        color *= max(sky.atmosphere.sunlight.xyz, vec3<f32>(0.0));
-    } else {
-        color *= sky.cloud_flags.z;
+        let textured = max(sky.texture_flags.x, sky.texture_flags.y) > 0.5;
+        let texture_color = mix(current, next, sky.blends.x);
+        let solar_color = select(max(sky.atmosphere.sunlight.xyz, vec3<f32>(0.0)), texture_color.rgb, textured);
+        let texture_alpha = select(1.0, texture_color.a, textured);
+        let fade = smoothstep(-0.02, 0.04, body_direction.z);
+        let alpha = disc * texture_alpha * fade;
+        return vec4<f32>(solar_color, alpha);
     }
-    return vec4<f32>(color, alpha * altitude * weight);
+    let textured = max(sky.texture_flags.z, sky.texture_flags.w) > 0.5;
+    if !textured {
+        discard;
+    }
+    let texture_color = mix(current, next, sky.blends.y);
+    if texture_color.a <= 2.0 / 255.0 {
+        discard;
+    }
+    let moon_up_fade = select(1.0, clamp(body_direction.z * body_direction.z * 4.0, 0.0, 1.0), body_direction.z > 0.0);
+    let alpha = disc * texture_color.a * moon_up_fade;
+    return vec4<f32>(texture_color.rgb * sky.cloud_flags.x, alpha);
 }
 
 @fragment fn sun_fragment(ray: SkyRay) -> @location(0) vec4<f32> {

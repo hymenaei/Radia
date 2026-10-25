@@ -17,6 +17,7 @@ struct Builder {
     indices: Vec<u32>,
     faces: Vec<Face>,
     parents: Vec<usize>,
+    normal_overrides: Vec<(usize, Vec3)>,
 }
 
 impl Builder {
@@ -37,10 +38,7 @@ impl Builder {
         if self.indices.len() + 3 > MAX_MESH_INDICES {
             return Err(MeshBuildError::TooComplex);
         }
-        let cross = (self.vertices[b].position - self.vertices[a].position).cross(self.vertices[c].position - self.vertices[a].position);
-        if cross.length_squared() > 1e-20 {
-            self.indices.extend([a as u32, b as u32, c as u32]);
-        }
+        self.indices.extend([a as u32, b as u32, c as u32]);
         Ok(())
     }
 
@@ -61,11 +59,13 @@ impl Builder {
     }
 
     fn seam(&mut self, a: usize, b: usize) {
-        if self.vertices[a].position.distance_squared(self.vertices[b].position) <= 1e-12 {
-            let a = root(&mut self.parents, a);
-            let b = root(&mut self.parents, b);
-            self.parents[b] = a;
-        }
+        let a = root(&mut self.parents, a);
+        let b = root(&mut self.parents, b);
+        self.parents[b] = a;
+    }
+
+    fn normal_override(&mut self, index: usize, normal: Vec3) {
+        self.normal_overrides.push((index, normal));
     }
 
     fn finish(mut self, cancelled: &AtomicBool) -> Result<Mesh, MeshBuildError> {
@@ -73,19 +73,27 @@ impl Builder {
             return Err(MeshBuildError::Degenerate);
         }
         let mut normals = vec![Vec3::ZERO; self.vertices.len()];
-        for (ordinal, triangle) in self.indices.as_chunks::<3>().0.iter().enumerate() {
-            if ordinal % 256 == 0 && cancelled.load(Ordering::Acquire) {
-                return Err(MeshBuildError::Cancelled);
-            }
-            let [a, b, c] = [triangle[0] as usize, triangle[1] as usize, triangle[2] as usize];
-            let normal =
-                (self.vertices[b].position - self.vertices[a].position).cross(self.vertices[c].position - self.vertices[a].position);
-            for index in [a, b, c] {
-                normals[root(&mut self.parents, index)] += normal;
+        for face in &self.faces {
+            let indices = &self.indices[face.indices.start as usize..face.indices.end as usize];
+            for (ordinal, triangle) in indices.as_chunks::<3>().0.iter().enumerate() {
+                if ordinal % 256 == 0 && cancelled.load(Ordering::Acquire) {
+                    return Err(MeshBuildError::Cancelled);
+                }
+                let [a, b, c] = [triangle[0] as usize, triangle[1] as usize, triangle[2] as usize];
+                let normal =
+                    (self.vertices[b].position - self.vertices[a].position).cross(self.vertices[c].position - self.vertices[a].position);
+                for index in [a, b, c] {
+                    normals[root(&mut self.parents, index)] += normal;
+                }
+                let extra = if ordinal % 2 == 0 { b } else { c };
+                normals[root(&mut self.parents, extra)] += normal;
             }
         }
         for (index, vertex) in self.vertices.iter_mut().enumerate() {
             vertex.normal = normals[root(&mut self.parents, index)].try_normalize().unwrap_or(Vec3::Z);
+        }
+        for (index, normal) in self.normal_overrides {
+            self.vertices[index].normal = normal;
         }
         Mesh::from_parts(self.vertices, self.indices, self.faces).map_err(MeshBuildError::from)
     }
@@ -108,10 +116,11 @@ struct Point {
 struct Profile {
     outer: Vec<Point>,
     inner: Vec<Point>,
+    cap_begin: Vec<Point>,
+    cap_end: Vec<Point>,
     sides: Option<usize>,
     inner_flat: bool,
     open: bool,
-    uv_scale: f32,
 }
 
 struct Ring {
@@ -151,8 +160,22 @@ impl Params {
         if profile > 5 || hole > 3 || shape.path_curve & 15 != 0 || ![0x10, 0x20, 0x30, 0x40, 0x80].contains(&path) {
             return Err(MeshBuildError::UnsupportedShape);
         }
-        let s = [f32::from(shape.profile_begin) / 50000.0, 1.0 - f32::from(shape.profile_end) / 50000.0];
-        let t = [f32::from(shape.path_begin) / 50000.0, 1.0 - f32::from(shape.path_end) / 50000.0];
+        let mut s = [f32::from(shape.profile_begin) / 50000.0, 1.0 - f32::from(shape.profile_end) / 50000.0];
+        let mut t = [f32::from(shape.path_begin) / 50000.0, 1.0 - f32::from(shape.path_end) / 50000.0];
+        if s[1] >= 0.0149 && s[1] < 0.02 {
+            s[1] = 0.02;
+        }
+        for cut in [&mut s, &mut t] {
+            if cut[0] < 0.0 || cut[0] > 0.98 || cut[1] < 0.02 || cut[1] > 1.0 {
+                return Err(MeshBuildError::InvalidParameters);
+            }
+            if cut[0] > cut[1] - 0.02 {
+                if cut[0] - (cut[1] - 0.02) > 0.01 {
+                    return Err(MeshBuildError::InvalidParameters);
+                }
+                cut[0] = cut[1] - 0.02;
+            }
+        }
         let hollow = f32::from(shape.profile_hollow) / 50000.0;
         let scale = Vec2::new(2.0 - f32::from(shape.path_scale_x) / 100.0, 2.0 - f32::from(shape.path_scale_y) / 100.0);
         let shear = Vec2::new(f32::from(shape.path_shear_x), f32::from(shape.path_shear_y)) / 100.0;
@@ -162,13 +185,7 @@ impl Params {
         let mut radius = f32::from(shape.path_radius_offset) / 100.0;
         let mut skew = f32::from(shape.path_skew) / 100.0;
         let max_hollow = if hole == 2 && [0, 3, 5].contains(&profile) { 0.7 } else { 0.95 };
-        if s[0] < 0.0
-            || s[1] > 1.0
-            || s[1] - s[0] < 0.01999
-            || t[0] < 0.0
-            || t[1] > 1.0
-            || t[1] - t[0] < 0.01999
-            || hollow > max_hollow
+        if hollow > max_hollow
             || scale.min_element() < 0.0
             || scale.max_element() > 2.0
             || shear.abs().max_element() > 0.5
@@ -204,9 +221,16 @@ pub(super) fn tessellate(shape: PrimShape, detail: Detail, cancelled: &AtomicBoo
     let params = Params::new(shape)?;
     let profile = profile(&params, detail);
     let (path, closed) = path(&params, detail);
+    let uncut_cube =
+        params.profile == 1 && params.hole == 0 && params.hollow == 0.0 && !profile.open && params.path == 0x10 && params.t == [0.0, 1.0];
+    let pole_normals = params.path == 0x20 && params.profile == 5;
     let mut mesh = Builder::default();
     if !closed {
-        cap(&mut mesh, &profile, path.last().expect("nonempty bounded path"), true)?;
+        if uncut_cube {
+            cube_cap(&mut mesh, &profile, path.last().expect("nonempty bounded path"), true)?;
+        } else {
+            cap(&mut mesh, &profile, &profile.cap_begin, path.last().expect("nonempty bounded path"), true)?;
+        }
     }
     check(cancelled)?;
     if let Some(sides) = profile.sides {
@@ -220,30 +244,49 @@ pub(super) fn tessellate(shape: PrimShape, detail: Detail, cancelled: &AtomicBoo
                 end += 1;
             }
             let start = mesh.begin_face();
-            side_grid(&mut mesh, &profile.outer[begin..=end], &path, profile.uv_scale, false, false, closed, cancelled)?;
+            let points = &profile.outer[begin..=end];
+            side_grid(
+                &mut mesh,
+                points,
+                &path,
+                sides as f32,
+                (points[0].t * sides as f32).floor(),
+                false,
+                false,
+                closed,
+                pole_normals,
+                cancelled,
+            )?;
             mesh.end_face(start)?;
             begin = end;
         }
     } else {
         let start = mesh.begin_face();
-        side_grid(&mut mesh, &profile.outer, &path, 1.0, false, !profile.open, closed, cancelled)?;
+        side_grid(&mut mesh, &profile.outer, &path, 1.0, 0.0, false, !profile.open, closed, pole_normals, cancelled)?;
         mesh.end_face(start)?;
     }
     if !profile.inner.is_empty() {
         let points: Vec<_> = profile.inner.iter().rev().copied().collect();
         let start = mesh.begin_face();
-        let uv_scale = params.hollow * if matches!(params.profile, 2..=4) { 0.5 } else { 1.0 };
+        let uv_origin = if profile.inner_flat { points[0].t.floor() } else { 0.0 };
         if profile.inner_flat {
-            for edge in points.windows(2) {
-                side_grid(&mut mesh, edge, &path, uv_scale, false, false, closed, cancelled)?;
+            let mut flat_points = vec![points[0]];
+            for point in points.iter().skip(1) {
+                flat_points.extend([*point, *point]);
             }
+            flat_points.push(if profile.open { *points.last().expect("inner profile endpoints") } else { points[0] });
+            side_grid(&mut mesh, &flat_points, &path, 1.0, uv_origin, false, !profile.open, closed, pole_normals, cancelled)?;
         } else {
-            side_grid(&mut mesh, &points, &path, uv_scale, false, !profile.open, closed, cancelled)?;
+            side_grid(&mut mesh, &points, &path, 1.0, uv_origin, false, !profile.open, closed, pole_normals, cancelled)?;
         }
         mesh.end_face(start)?;
     }
     if !closed {
-        cap(&mut mesh, &profile, &path[0], false)?;
+        if uncut_cube {
+            cube_cap(&mut mesh, &profile, &path[0], false)?;
+        } else {
+            cap(&mut mesh, &profile, &profile.cap_end, &path[0], false)?;
+        }
     }
     if profile.open {
         let outer_begin = profile.outer[0];
@@ -253,7 +296,7 @@ pub(super) fn tessellate(shape: PrimShape, detail: Detail, cancelled: &AtomicBoo
         let inner_end = profile.inner.last().copied().unwrap_or(center);
         for edge in [[inner_begin, outer_begin], [outer_end, inner_end]] {
             let start = mesh.begin_face();
-            side_grid(&mut mesh, &edge, &path, 1.0, true, false, closed, cancelled)?;
+            side_grid(&mut mesh, &edge, &path, 1.0, 0.0, true, false, closed, pole_normals, cancelled)?;
             mesh.end_face(start)?;
         }
     }
@@ -284,19 +327,32 @@ fn polygon(sides: usize, offset: f32, span: f32, cut: [f32; 2], split: usize, fa
         let b = Vec2::new(end_angle.cos(), end_angle.sin()) * radius;
         Point { position: a.lerp(b, fraction), t }
     };
-    let mut points = vec![point(cut[0])];
-    let first = (cut[0] * sides as f32).floor() as usize + 1;
-    let last = (cut[1] * sides as f32).ceil() as usize;
-    for sample in first..=last {
-        let t = (sample as f32 / sides as f32).min(cut[1]);
-        let previous = points.last().expect("first profile point").t;
-        if t <= previous + 1e-7 {
-            continue;
-        }
-        for i in 1..=split {
-            points.push(point(previous + (t - previous) * i as f32 / (split + 1) as f32));
+    let first_side = (cut[0] * sides as f32).floor() as usize;
+    let first_t = first_side as f32 / sides as f32;
+    let mut points = Vec::new();
+    if (cut[0] - first_t) * (sides as f32) < 0.9999 {
+        points.push(point(cut[0]));
+    }
+    let mut sample = first_side + 1;
+    let mut t = sample as f32 / sides as f32;
+    while t < cut[1] {
+        if let Some(previous) = points.last().map(|point| point.t) {
+            for i in 1..=split {
+                points.push(point(previous + (t - previous) * i as f32 / (split + 1) as f32));
+            }
         }
         points.push(point(t));
+        sample += 1;
+        t = sample as f32 / sides as f32;
+    }
+    let end_fraction = (cut[1] - (t - 1.0 / sides as f32)) * sides as f32;
+    if end_fraction > 0.0001 {
+        if let Some(previous) = points.last().map(|point| point.t) {
+            for i in 1..=split {
+                points.push(point(previous + (cut[1] - previous) * i as f32 / (split + 1) as f32));
+            }
+        }
+        points.push(point(cut[1]));
     }
     points
 }
@@ -308,15 +364,18 @@ fn profile(params: &Params, detail: Detail) -> Profile {
         2..=4 => Some(3),
         _ => None,
     };
-    if [0x10, 0x80].contains(&params.path) && params.scale != Vec2::ONE && sides.is_some() {
+    if params.path == 0x10 && params.scale != Vec2::ONE && sides.is_some() {
         split = 0;
     }
     let half = params.profile == 5;
-    let mut count = sides.unwrap_or_else(|| (6.0 * detail.scale() * if half { 0.5 } else { 1.0 }).floor() as usize);
-    if params.hollow > 0.0 && params.hole == 2 && sides.is_none() {
-        let divisor = if half { 2 } else { 4 };
-        count = count.div_ceil(divisor) * divisor;
-    }
+    let circle_detail = 6.0 * detail.scale() * if half { 0.5 } else { 1.0 };
+    let circle_detail = if params.hollow > 0.0 && params.hole == 2 && sides.is_none() {
+        let divisor = if half { 2.0 } else { 4.0 };
+        (circle_detail / divisor).ceil() * divisor
+    } else {
+        circle_detail
+    };
+    let count = sides.unwrap_or(circle_detail.floor() as usize);
     let offset = if half {
         0.5
     } else if params.profile == 1 {
@@ -325,10 +384,7 @@ fn profile(params: &Params, detail: Detail) -> Profile {
         0.0
     };
     let span = if half { 0.5 } else { 1.0 };
-    let mut outer = polygon(count, offset, span, params.s, if sides.is_some() { split } else { 0 }, 1.0);
-    if half && params.hollow == 0.0 && params.s == [0.0, 1.0] {
-        outer.push(outer[0]);
-    }
+    let outer = polygon(count, offset, span, params.s, if sides.is_some() { split } else { 0 }, 1.0);
     let open = if half { params.s != [0.0, 1.0] || params.hollow > 0.0 } else { params.s[1] - params.s[0] < 0.99 };
     let inner_flat = match params.hole {
         0 => sides.is_some(),
@@ -353,14 +409,29 @@ fn profile(params: &Params, detail: Detail) -> Profile {
     } else {
         Vec::new()
     };
-    Profile { outer, inner, sides, inner_flat, open, uv_scale: sides.map_or(1.0, |sides| sides as f32) }
+    let mut cap_begin = outer.clone();
+    let mut cap_end = outer.clone();
+    if params.hollow == 0.0 && open {
+        let center = Point { position: Vec2::ZERO, t: 0.0 };
+        cap_begin.push(center);
+        cap_end.push(center);
+    } else if half && params.hollow == 0.0 && params.s == [0.0, 1.0] {
+        let center = Point { position: Vec2::ZERO, t: 0.0 };
+        cap_begin.push(center);
+        cap_end.push(center);
+        cap_end.push(outer[0]);
+    }
+    Profile { outer, inner, cap_begin, cap_end, sides, inner_flat, open }
 }
 
 fn path(params: &Params, detail: Detail) -> (Vec<Ring>, bool) {
     let twist = (params.twist[1] - params.twist[0]).abs();
     if [0x10, 0x80].contains(&params.path) {
-        let split =
-            if params.scale != Vec2::ONE && (1..=4).contains(&params.profile) { 0 } else { (detail.scale() * 0.66).floor() as usize };
+        let split = if params.path == 0x10 && params.scale != Vec2::ONE && (1..=4).contains(&params.profile) {
+            0
+        } else {
+            (detail.scale() * 0.66).floor() as usize
+        };
         let count = ((twist * 3.5 * (detail.scale() - 0.5)).floor() as usize + 2).max(split + 2);
         let begin = (Vec2::splat(2.0) - params.scale).min(Vec2::ONE);
         let end = params.scale.min(Vec2::ONE);
@@ -412,11 +483,15 @@ fn path(params: &Params, detail: Detail) -> (Vec<Ring>, bool) {
     let radii = if radius_offset < 0.0 { [radius * (1.0 + radius_offset), radius] } else { [radius, radius * (1.0 - radius_offset)] };
     let begin = (Vec2::ONE + params.taper).min(Vec2::ONE);
     let end = (Vec2::ONE - params.taper).min(Vec2::ONE);
-    let closed = params.t == [0.0, 1.0]
-        && params.skew.abs() <= 0.001
-        && (end - begin).abs().max_element() <= 0.001
-        && (radii[1] - radii[0]).abs() <= 0.001
-        && params.twist[0] == params.twist[1];
+    let closed = if params.path == 0x30 {
+        params.t[1] - params.t[0] >= 0.99 && params.scale.x >= 0.99 && params.twist[0] == params.twist[1]
+    } else {
+        params.t[1] - params.t[0] >= 1.0
+            && params.skew.abs() <= 0.001
+            && (end - begin).abs().max_element() <= 0.001
+            && (radii[1] - radii[0]).abs() <= 0.001
+            && params.twist[0] == params.twist[1]
+    };
     let mut samples = vec![params.t[0]];
     for i in (params.t[0] * sides as f32).floor() as usize + 1..=(params.t[1] * sides as f32).ceil() as usize {
         let t = (i as f32 / sides as f32).min(params.t[1]);
@@ -454,18 +529,19 @@ fn side_grid(
     points: &[Point],
     path: &[Ring],
     uv_scale: f32,
+    uv_origin: f32,
     cut: bool,
     wrap_s: bool,
     wrap_t: bool,
+    pole_normals: bool,
     cancelled: &AtomicBool,
 ) -> Result<(), MeshBuildError> {
     let base = mesh.vertex_count();
     let width = points.len();
-    let begin_uv = if uv_scale > 1.0 { (points[0].t * uv_scale).floor() } else { 0.0 };
     for ring in path {
         check(cancelled)?;
         for (i, point) in points.iter().enumerate() {
-            let s = if cut { i as f32 } else { point.t * uv_scale - begin_uv };
+            let s = if cut { i as f32 } else { point.t * uv_scale - uv_origin };
             mesh.vertex(ring.point(*point), Vec2::new(s, ring.t))?;
         }
     }
@@ -477,7 +553,12 @@ fn side_grid(
             mesh.triangle(a, a + 1, a + width + 1)?;
         }
     }
-    if wrap_s {
+    let bottom_converges = path[0].point(points[0]).distance_squared(path[path.len() - 2].point(points[0])) < 1e-6;
+    let top_converges = path[0]
+        .point(*points.last().expect("profile endpoints"))
+        .distance_squared(path[path.len() - 2].point(*points.last().expect("profile endpoints")))
+        < 1e-6;
+    if wrap_s && !bottom_converges {
         for row in 0..path.len() {
             mesh.seam(base + row * width, base + row * width + width - 1);
         }
@@ -487,41 +568,157 @@ fn side_grid(
             mesh.seam(base + column, base + (path.len() - 1) * width + column);
         }
     }
-    for (column, point) in points.iter().enumerate() {
-        if path.iter().all(|ring| ring.point(*point).distance_squared(path[0].point(*point)) <= 1e-12) {
-            for row in 1..path.len() {
-                mesh.seam(base + column, base + row * width + column);
+    if pole_normals {
+        if bottom_converges {
+            for row in 0..path.len() {
+                mesh.normal_override(base + row * width, Vec3::X);
+            }
+        }
+        if top_converges {
+            for row in 0..path.len() {
+                mesh.normal_override(base + row * width + width - 1, -Vec3::X);
             }
         }
     }
     Ok(())
 }
 
-fn cap(mesh: &mut Builder, profile: &Profile, ring: &Ring, top: bool) -> Result<(), MeshBuildError> {
+fn cap(mesh: &mut Builder, profile: &Profile, cap_profile: &[Point], ring: &Ring, top: bool) -> Result<(), MeshBuildError> {
     let start = mesh.begin_face();
-    let vertex = |mesh: &mut Builder, point: Point| {
-        mesh.vertex(ring.point(point), Vec2::new(point.position.x + 0.5, if top { point.position.y + 0.5 } else { 0.5 - point.position.y }))
-    };
-    let outer: Vec<_> = profile.outer.iter().copied().map(|point| vertex(mesh, point)).collect::<Result<_, _>>()?;
-    let triangle = |mesh: &mut Builder, a, b, c| {
-        if top { mesh.triangle(a, b, c) } else { mesh.triangle(a, c, b) }
-    };
+    let mut points = cap_profile.to_vec();
+    points.extend(profile.inner.iter().rev().copied());
+    let base = mesh.vertex_count();
+    let mut min_position = Vec3::splat(f32::INFINITY);
+    let mut max_position = Vec3::splat(f32::NEG_INFINITY);
+    let mut min_uv = Vec2::splat(f32::INFINITY);
+    let mut max_uv = Vec2::splat(f32::NEG_INFINITY);
+    for point in &points {
+        let position = ring.point(*point);
+        let uv = Vec2::new(point.position.x + 0.5, if top { point.position.y + 0.5 } else { 0.5 - point.position.y });
+        min_position = min_position.min(position);
+        max_position = max_position.max(position);
+        min_uv = min_uv.min(uv);
+        max_uv = max_uv.max(uv);
+        mesh.vertex(position, uv)?;
+    }
+    if profile.inner.is_empty() && !profile.open {
+        mesh.vertex((min_position + max_position) * 0.5, (min_uv + max_uv) * 0.5)?;
+    }
     if profile.inner.is_empty() {
-        let center = vertex(mesh, Point { position: Vec2::ZERO, t: 0.0 })?;
-        for edge in outer.windows(2) {
-            triangle(mesh, center, edge[0], edge[1])?;
+        if let Some(pivot) = mesh.vertex_count().checked_sub(1).filter(|pivot| *pivot >= base) {
+            let triangle_count = pivot.saturating_sub(base).saturating_sub(1);
+            for index in 0..triangle_count {
+                let a = base + index;
+                let b = a + 1;
+                if top {
+                    mesh.triangle(pivot, a, b)?;
+                } else {
+                    mesh.triangle(pivot, b, a)?;
+                }
+            }
         }
     } else {
-        let inner: Vec<_> = profile.inner.iter().copied().map(|point| vertex(mesh, point)).collect::<Result<_, _>>()?;
-        let mut a = 0;
-        let mut b = 0;
-        while a + 1 < outer.len() || b + 1 < inner.len() {
-            if b + 1 == inner.len() || (a + 1 < outer.len() && profile.outer[a + 1].t <= profile.inner[b + 1].t) {
-                triangle(mesh, outer[a], outer[a + 1], inner[b])?;
-                a += 1;
+        let mut first = 0;
+        let mut last = points.len() - 1;
+        while last - first > 1 {
+            let p1 = points[first].position;
+            let p2 = points[last].position;
+            let pa = points[first + 1].position;
+            let pb = points[last - 1].position;
+            let area_1a2 = (pa - p1).perp_dot(p2 - p1);
+            let area_1ba = (pb - p1).perp_dot(pa - p1);
+            let area_21b = (p1 - p2).perp_dot(pb - p2);
+            let area_2ab = (pa - p2).perp_dot(pb - p2);
+            let first_valid = area_1a2 >= 0.0 && area_2ab >= 0.0;
+            let last_valid = area_21b >= 0.0 && area_1ba >= 0.0;
+            let use_first = if !first_valid {
+                false
+            } else if !last_valid {
+                true
             } else {
-                triangle(mesh, outer[a], inner[b + 1], inner[b])?;
-                b += 1;
+                (p1 - pa).length_squared() < (p2 - pb).length_squared()
+            };
+            if use_first {
+                if top {
+                    mesh.triangle(base + first, base + first + 1, base + last)?;
+                } else {
+                    mesh.triangle(base + first, base + last, base + first + 1)?;
+                }
+                first += 1;
+            } else {
+                if top {
+                    mesh.triangle(base + first, base + last - 1, base + last)?;
+                } else {
+                    mesh.triangle(base + first, base + last, base + last - 1)?;
+                }
+                last -= 1;
+            }
+        }
+    }
+    let normal = mesh
+        .indices
+        .get(start..)
+        .and_then(|indices| {
+            let triangle = indices.get(..3)?;
+            let a = mesh.vertices.get(*triangle.first()? as usize)?.position;
+            let b = mesh.vertices.get(*triangle.get(1)? as usize)?.position;
+            let c = mesh.vertices.get(*triangle.get(2)? as usize)?.position;
+            let cross = (b - a).cross(c - a);
+            Some(if cross.length_squared() > 0.00001 {
+                cross / cross.length()
+            } else if cross.z >= 0.0 {
+                Vec3::Z
+            } else {
+                -Vec3::Z
+            })
+        })
+        .unwrap_or(if top { Vec3::Z } else { -Vec3::Z });
+    for index in base..mesh.vertex_count() {
+        mesh.normal_override(index, normal);
+    }
+    mesh.end_face(start)
+}
+
+fn cube_cap(mesh: &mut Builder, profile: &Profile, ring: &Ring, top: bool) -> Result<(), MeshBuildError> {
+    let start = mesh.begin_face();
+    let grid = (profile.outer.len() - 1) / 4;
+    let mut corners = [(Vec3::ZERO, Vec2::ZERO); 4];
+    for (corner, value) in corners.iter_mut().enumerate() {
+        let point = profile.outer[grid * corner];
+        value.0 = ring.point(point);
+        value.1 = Vec2::new(point.position.x + 0.5, 0.5 - point.position.y);
+    }
+    let normal =
+        (corners[1].0 - corners[0].0).cross(corners[2].0 - corners[1].0).try_normalize().unwrap_or(Vec3::Z) * if top { 1.0 } else { -1.0 };
+    if top {
+        let uv = corners[0].1;
+        corners[0].1 = corners[3].1;
+        corners[3].1 = uv;
+        let uv = corners[1].1;
+        corners[1].1 = corners[2].1;
+        corners[2].1 = uv;
+    }
+    let base = mesh.vertex_count();
+    let row_size = grid + 1;
+    for gx in 0..=grid {
+        for gy in 0..=grid {
+            let u = gx as f32 / grid as f32;
+            let v = gy as f32 / grid as f32;
+            let position = corners[0].0 + (corners[1].0 - corners[0].0) * u + (corners[3].0 - corners[0].0) * v;
+            let uv = corners[0].1 + (corners[1].1 - corners[0].1) * u + (corners[3].1 - corners[0].1) * v;
+            let index = mesh.vertex(position, uv)?;
+            mesh.normal_override(index, normal);
+        }
+    }
+    for gy in 0..grid {
+        for gx in 0..grid {
+            let base = base + gy * row_size + gx;
+            if top {
+                mesh.triangle(base, base + row_size, base + row_size + 1)?;
+                mesh.triangle(base + row_size + 1, base + 1, base)?;
+            } else {
+                mesh.triangle(base, base + 1, base + row_size + 1)?;
+                mesh.triangle(base + row_size + 1, base + row_size, base)?;
             }
         }
     }
@@ -531,17 +728,34 @@ fn cap(mesh: &mut Builder, profile: &Profile, ring: &Ring, top: bool) -> Result<
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
-    use std::{collections::HashMap, f32::consts::PI, sync::atomic::AtomicBool};
+    use std::{
+        collections::HashMap,
+        f32::consts::{PI, TAU},
+        sync::atomic::AtomicBool,
+    };
 
     use assets::mesh::{MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh};
-    use math::{Vec2, Vec3};
+    use math::{Quat, Vec2, Vec3};
     use proptest::prelude::*;
     use world::PrimShape;
 
-    use super::{Detail, MeshBuildError, tessellate};
+    use super::{Builder, Detail, MeshBuildError, Point, Profile, Ring, cap, tessellate};
+
+    fn generate_at(shape: PrimShape, detail: Detail) -> Mesh {
+        tessellate(shape, detail, &AtomicBool::new(false)).unwrap()
+    }
 
     fn generate(shape: PrimShape) -> Mesh {
-        tessellate(shape, Detail::High, &AtomicBool::new(false)).unwrap()
+        generate_at(shape, Detail::High)
+    }
+
+    fn vertex_at(mesh: &Mesh, slot: usize, uv: Vec2) -> assets::mesh::Vertex {
+        let face = &mesh.faces()[slot];
+        mesh.indices()[face.indices.start as usize..face.indices.end as usize]
+            .iter()
+            .map(|index| mesh.vertices()[*index as usize])
+            .find(|vertex| vertex.uv.distance(uv) < 1e-6)
+            .unwrap_or_else(|| panic!("missing UV {uv:?} in face slot {slot}"))
     }
 
     fn volume(mesh: &Mesh) -> f32 {
@@ -598,8 +812,8 @@ mod tests {
         prop_assert!(mesh.indices().iter().all(|index| (*index as usize) < mesh.vertices().len()), "{detail:?} index is in range");
         for vertex in mesh.vertices() {
             prop_assert!(vertex.position.is_finite() && vertex.uv.is_finite() && vertex.normal.is_finite());
+            prop_assert!((vertex.normal.length() - 1.0).abs() < 1e-5, "normal is unit length");
             prop_assert!(vertex.position.length() <= 3.0, "normalized bound used by camera planning");
-            prop_assert!((vertex.normal.length() - 1.0).abs() < 1e-5);
             prop_assert!(vertex.position.cmpge(mesh.bounds().min).all() && vertex.position.cmple(mesh.bounds().max).all());
         }
         for (slot, face) in mesh.faces().iter().enumerate() {
@@ -629,6 +843,29 @@ mod tests {
                 }
             }
         }
+        let first_side_index = mesh.indices()[mesh.faces()[1].indices.start as usize] as usize;
+        close(mesh.vertices()[first_side_index].normal, -Vec3::Y);
+    }
+
+    #[test]
+    fn caps_without_triangles_keep_finite_normals() {
+        let point = Point { position: Vec2::ZERO, t: 0.0 };
+        let ring = Ring { position: Vec3::ZERO, rotation: Quat::IDENTITY, scale: Vec2::ONE, t: 0.0 };
+        let make_cap = |inner: Vec<Point>, open: bool, top: bool| {
+            let mut mesh = Builder::default();
+            let profile =
+                Profile { outer: Vec::new(), inner, cap_begin: Vec::new(), cap_end: Vec::new(), sides: None, inner_flat: false, open };
+            cap(&mut mesh, &profile, &[point], &ring, top).unwrap();
+            mesh
+        };
+
+        let open = make_cap(Vec::new(), true, true);
+        assert!(open.faces[0].indices.is_empty());
+        assert_eq!(open.normal_overrides, [(0, Vec3::Z)]);
+
+        let hollow = make_cap(vec![point], true, false);
+        assert!(hollow.faces[0].indices.is_empty());
+        assert_eq!(hollow.normal_overrides, [(0, -Vec3::Z), (1, -Vec3::Z)]);
     }
 
     #[test]
@@ -682,6 +919,249 @@ mod tests {
     }
 
     #[test]
+    fn primitive_lods_match_reference_counts() {
+        let details = [Detail::Lowest, Detail::Low, Detail::Medium, Detail::High];
+        let cases = [
+            ("box", PrimShape::default(), [(24, 36), (24, 36), (54, 144), (96, 324)], 6),
+            ("cylinder", PrimShape { profile_curve: 0, ..PrimShape::default() }, [(30, 72), (42, 108), (82, 270), (152, 576)], 3),
+            (
+                "sphere",
+                PrimShape { path_curve: 0x20, profile_curve: 5, ..PrimShape::default() },
+                [(28, 108), (50, 216), (128, 630), (325, 1728)],
+                1,
+            ),
+            (
+                "torus",
+                PrimShape { path_curve: 0x20, profile_curve: 0, path_scale_x: 150, path_scale_y: 150, ..PrimShape::default() },
+                [(49, 216), (100, 486), (256, 1350), (625, 3456)],
+                1,
+            ),
+        ];
+        for (name, shape, expected, faces) in cases {
+            for (detail, (vertices, indices)) in details.into_iter().zip(expected) {
+                let mesh = generate_at(shape, detail);
+                assert_eq!(mesh.vertices().len(), vertices, "{name} {detail:?} vertices");
+                assert_eq!(mesh.indices().len(), indices, "{name} {detail:?} indices");
+                assert_eq!(mesh.faces().len(), faces, "{name} {detail:?} faces");
+            }
+        }
+    }
+
+    #[test]
+    fn sphere_poles_follow_axis() {
+        let mesh = generate(PrimShape { path_curve: 0x20, profile_curve: 5, ..PrimShape::default() });
+        let face = &mesh.faces()[0];
+        let indices = &mesh.indices()[face.indices.start as usize..face.indices.end as usize];
+        let first =
+            indices.iter().map(|index| mesh.vertices()[*index as usize]).find(|vertex| vertex.uv == Vec2::ZERO).expect("first sphere pole");
+        let last = indices
+            .iter()
+            .map(|index| mesh.vertices()[*index as usize])
+            .find(|vertex| vertex.uv == Vec2::new(1.0, 0.0))
+            .expect("opposite sphere pole");
+        close(first.position, Vec3::X * 0.5);
+        close(first.normal, Vec3::X);
+        close(last.position, -Vec3::X * 0.5);
+        close(last.normal, -Vec3::X);
+        for vertex in mesh.vertices().iter().filter(|vertex| vertex.position.distance(Vec3::X * 0.5) < 1e-6) {
+            close(vertex.normal, Vec3::X);
+        }
+        for vertex in mesh.vertices().iter().filter(|vertex| vertex.position.distance(-Vec3::X * 0.5) < 1e-6) {
+            close(vertex.normal, -Vec3::X);
+        }
+    }
+
+    #[test]
+    fn face_slots_and_uvs_follow_reference() {
+        let shapes = [
+            PrimShape { profile_curve: 0, ..PrimShape::default() },
+            PrimShape { path_curve: 0x20, profile_curve: 5, ..PrimShape::default() },
+            PrimShape { path_curve: 0x20, profile_curve: 0, path_scale_x: 150, path_scale_y: 150, ..PrimShape::default() },
+            PrimShape { path_curve: 0x30, profile_curve: 0, ..PrimShape::default() },
+            PrimShape { path_twist: 50, ..PrimShape::default() },
+        ];
+        for shape in shapes {
+            let reference = generate_at(shape, Detail::Lowest);
+            let reference_slots: Vec<_> = reference.faces().iter().map(|face| face.slot).collect();
+            for detail in [Detail::Low, Detail::Medium, Detail::High] {
+                let mesh = generate_at(shape, detail);
+                assert_eq!(mesh.faces().iter().map(|face| face.slot).collect::<Vec<_>>(), reference_slots);
+                for (face, reference_face) in mesh.faces().iter().zip(reference.faces()) {
+                    for uv in [Vec2::ZERO, Vec2::X, Vec2::Y, Vec2::ONE] {
+                        let reference_has_uv = reference.indices()
+                            [reference_face.indices.start as usize..reference_face.indices.end as usize]
+                            .iter()
+                            .map(|index| reference.vertices()[*index as usize].uv)
+                            .any(|actual| actual.distance(uv) < 1e-6);
+                        if reference_has_uv {
+                            let actual = mesh.indices()[face.indices.start as usize..face.indices.end as usize]
+                                .iter()
+                                .map(|index| mesh.vertices()[*index as usize].uv)
+                                .find(|actual| actual.distance(uv) < 1e-6)
+                                .unwrap_or_else(|| panic!("shared parametric UV {uv:?} missing at {detail:?}"));
+                            assert!(actual.distance(uv) < 1e-6);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flat_profile_faces_keep_hard_normals() {
+        let mesh = generate(PrimShape { path_twist: 50, ..PrimShape::default() });
+        let first = vertex_at(&mesh, 1, Vec2::new(1.0, 0.0));
+        let next = vertex_at(&mesh, 2, Vec2::ZERO);
+        close(first.position, next.position);
+        assert!(first.normal.distance(next.normal) > 0.2);
+    }
+
+    #[test]
+    fn cut_vertices_match_reference_samples() {
+        let shape = PrimShape { profile_curve: 1, profile_begin: 6250, profile_end: 6250, ..PrimShape::default() };
+        let expected = [
+            Vec3::new(0.0, -0.5, -0.5),
+            Vec3::new(0.5, -0.5, -0.5),
+            Vec3::new(0.5, 0.5, -0.5),
+            Vec3::new(-0.5, 0.5, -0.5),
+            Vec3::new(-0.5, 0.0, -0.5),
+        ];
+        for detail in [Detail::Lowest, Detail::Low, Detail::Medium, Detail::High] {
+            let mesh = generate_at(shape, detail);
+            for position in expected {
+                assert!(
+                    mesh.vertices().iter().any(|vertex| vertex.position.distance(position) < 2e-5),
+                    "missing {position:?} at {detail:?}"
+                );
+            }
+        }
+        let curved = PrimShape { profile_curve: 0, profile_begin: 6250, profile_end: 6250, ..PrimShape::default() };
+        for (detail, sides, radius) in
+            [(Detail::Lowest, 6, 0.525), (Detail::Low, 9, 0.5), (Detail::Medium, 15, 0.5), (Detail::High, 24, 0.5)]
+        {
+            let mesh = generate_at(curved, detail);
+            for t in [0.125, 0.875] {
+                let vertex = mesh.vertices().iter().find(|vertex| vertex.uv.distance(Vec2::new(t, 0.0)) < 1e-6).expect("cut endpoint UV");
+                let base = (t * sides as f32).floor();
+                let fraction = t * sides as f32 - base;
+                let start = TAU * (base / sides as f32);
+                let end = start + TAU / sides as f32;
+                let a = Vec2::new(start.cos(), start.sin()) * radius;
+                let b = Vec2::new(end.cos(), end.sin()) * radius;
+                close(vertex.position, a.lerp(b, fraction).extend(-0.5));
+            }
+        }
+    }
+
+    #[test]
+    fn triangle_cut_faces_keep_uv_ranges() {
+        let mesh = generate(PrimShape { profile_curve: 2, profile_begin: 12500, profile_end: 12500, ..PrimShape::default() });
+        assert_eq!(mesh.faces().len(), 7);
+        for (slot, expected) in [(1, [0.75, 1.0]), (2, [0.0, 1.0]), (3, [0.0, 0.25])] {
+            let face = &mesh.faces()[slot];
+            let indices = &mesh.indices()[face.indices.start as usize..face.indices.end as usize];
+            let min_u = indices.iter().map(|index| mesh.vertices()[*index as usize].uv.x).fold(f32::INFINITY, f32::min);
+            let max_u = indices.iter().map(|index| mesh.vertices()[*index as usize].uv.x).fold(f32::NEG_INFINITY, f32::max);
+            let min_v = indices.iter().map(|index| mesh.vertices()[*index as usize].uv.y).fold(f32::INFINITY, f32::min);
+            let max_v = indices.iter().map(|index| mesh.vertices()[*index as usize].uv.y).fold(f32::NEG_INFINITY, f32::max);
+            assert!((min_u - expected[0]).abs() < 1e-5, "triangle face {slot} starts at {min_u}");
+            assert!((max_u - expected[1]).abs() < 1e-5, "triangle face {slot} ends at {max_u}");
+            assert!(min_v.abs() < 1e-5 && (max_v - 1.0).abs() < 1e-5, "triangle face {slot} path UV range is {min_v}..{max_v}");
+        }
+    }
+
+    #[test]
+    fn mixed_hollows_match_areas() {
+        let cases = [
+            (
+                PrimShape { profile_curve: 1 | (1 << 4), profile_hollow: 12500, ..PrimShape::default() },
+                1.0 - 24.0 * 0.125_f32.powi(2) * 0.5 * (PI / 12.0).sin(),
+            ),
+            (
+                PrimShape { profile_curve: 2 << 4, profile_hollow: 12500, ..PrimShape::default() },
+                24.0 * 0.5_f32.powi(2) * 0.5 * (PI / 12.0).sin() - 0.0625,
+            ),
+        ];
+        for (shape, expected) in cases {
+            let mesh = generate(shape);
+            assert!((volume(&mesh) - expected).abs() < 2e-5, "{shape:?}: {} != {expected}", volume(&mesh));
+        }
+    }
+
+    #[test]
+    fn flat_hollow_faces_match_reference_counts() {
+        let shape = PrimShape { profile_hollow: 25000, ..PrimShape::default() };
+        for (detail, vertices, indices) in [(Detail::Lowest, 56, 126), (Detail::High, 220, 810)] {
+            let mesh = generate_at(shape, detail);
+            assert_eq!(mesh.vertices().len(), vertices, "{detail:?} vertices");
+            assert_eq!(mesh.indices().len(), indices, "{detail:?} indices");
+            assert_eq!(mesh.faces().len(), 7, "{detail:?} faces");
+        }
+    }
+
+    #[test]
+    fn quantized_limits_keep_valid_cuts() {
+        let shape =
+            PrimShape { profile_curve: 2 << 4, profile_begin: 49000, path_begin: 49000, profile_hollow: 35000, ..PrimShape::default() };
+        let mesh = generate(shape);
+        let indices = &mesh.indices()[mesh.faces()[1].indices.start as usize..mesh.faces()[1].indices.end as usize];
+        let min_u = indices.iter().map(|index| mesh.vertices()[*index as usize].uv.x).fold(f32::INFINITY, f32::min);
+        let max_u = indices.iter().map(|index| mesh.vertices()[*index as usize].uv.x).fold(f32::NEG_INFINITY, f32::max);
+        let min_v = indices.iter().map(|index| mesh.vertices()[*index as usize].uv.y).fold(f32::INFINITY, f32::min);
+        let max_v = indices.iter().map(|index| mesh.vertices()[*index as usize].uv.y).fold(f32::NEG_INFINITY, f32::max);
+        assert!((min_u - 0.98).abs() < 1e-5 && (max_u - 1.0).abs() < 1e-5);
+        assert!((min_v - 0.98).abs() < 1e-5 && (max_v - 1.0).abs() < 1e-5);
+        let outside_limit = PrimShape { profile_begin: 49001, ..shape };
+        assert_matches!(tessellate(outside_limit, Detail::High, &AtomicBool::new(false)).err(), Some(MeshBuildError::InvalidParameters));
+    }
+
+    #[test]
+    fn combined_path_modifiers_compose() {
+        let mesh = generate(PrimShape {
+            path_curve: 0x20,
+            profile_curve: 0,
+            profile_begin: 12500,
+            profile_end: 12500,
+            path_begin: 12500,
+            path_end: 12500,
+            path_scale_x: 150,
+            path_scale_y: 150,
+            path_shear_x: 20,
+            path_shear_y: -10,
+            path_taper_x: 20,
+            path_taper_y: -15,
+            path_twist: 50,
+            ..PrimShape::default()
+        });
+        let vertex = mesh.vertices().iter().find(|vertex| vertex.uv == Vec2::splat(0.25)).expect("first cut ring sample");
+        let radial = 0.221875 / 2.0_f32.sqrt();
+        close(vertex.position, Vec3::new(0.05 + radial, -0.025, 0.25 - radial));
+    }
+
+    #[test]
+    fn circle2_path_matches_samples() {
+        let mesh = generate_at(PrimShape { path_curve: 0x30, profile_curve: 0, ..PrimShape::default() }, Detail::Lowest);
+        assert_eq!(mesh.faces().len(), 1);
+        assert_eq!(mesh.vertices().len(), 49);
+        assert_eq!(mesh.indices().len(), 216);
+        let first = mesh.vertices().iter().find(|vertex| vertex.uv == Vec2::ZERO).expect("first path sample");
+        let next = mesh.vertices().iter().find(|vertex| vertex.uv == Vec2::new(0.0, 1.0 / 6.0)).expect("second path sample");
+        close(first.position, Vec3::new(-0.025, 0.0, 0.0));
+        close(next.position, Vec3::new(-1.025, 0.0, 0.0));
+    }
+
+    #[test]
+    fn test_curve_matches_samples() {
+        let mesh = generate_at(
+            PrimShape { path_curve: 0x40, profile_curve: 0, path_scale_x: 150, path_scale_y: 125, path_twist: 50, ..PrimShape::default() },
+            Detail::Lowest,
+        );
+        assert_eq!(mesh.faces().len(), 3);
+        let vertex = mesh.vertices().iter().find(|vertex| vertex.uv == Vec2::new(0.0, 0.25)).expect("quarter path sample");
+        close(vertex.position, Vec3::new(0.459375, -(PI / 8.0).sin() / 8.0, -0.375 + (PI / 8.0).cos() / 8.0));
+    }
+
+    #[test]
     fn closed_prims_have_no_boundary_edges() {
         for (name, shape) in [
             ("box", PrimShape::default()),
@@ -697,7 +1177,7 @@ mod tests {
     fn collapsed_path_keeps_face() {
         let mesh = generate(PrimShape { path_curve: 0x10, path_scale_x: 200, path_scale_y: 200, ..PrimShape::default() });
 
-        assert!(mesh.faces()[0].indices.is_empty());
+        assert!(!mesh.faces()[0].indices.is_empty());
         assert!(mesh.faces().iter().any(|face| !face.indices.is_empty()));
     }
 
@@ -730,7 +1210,7 @@ mod tests {
             .iter()
             .filter_map(|face| {
                 let vertices = &mesh.indices()[face.indices.start as usize..face.indices.end as usize];
-                vertices.iter().map(|i| mesh.vertices()[*i as usize]).find(|v| v.uv == Vec2::splat(0.5)).map(|v| v.position)
+                vertices.iter().map(|i| mesh.vertices()[*i as usize]).find(|v| v.uv.distance(Vec2::splat(0.5)) < 1e-6).map(|v| v.position)
             })
             .collect();
         assert!(centers.iter().any(|p| p.distance(Vec3::new(-5.0 / 14.0, 0.25, 0.0)) < 2e-5));
@@ -750,7 +1230,7 @@ mod tests {
         let cap = &tapered.faces()[0];
         assert!(tapered.indices()[cap.indices.start as usize..cap.indices.end as usize].iter().any(|i| {
             let v = tapered.vertices()[*i as usize];
-            v.uv == Vec2::splat(0.5) && v.position.distance(Vec3::new(0.0, 0.125, 0.0)) < 2e-5
+            v.uv.distance(Vec2::splat(0.5)) < 1e-6 && v.position.distance(Vec3::new(0.0, 0.125, 0.0)) < 2e-5
         }));
     }
 

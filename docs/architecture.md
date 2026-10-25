@@ -50,7 +50,7 @@ Derives bounded scene state from World and Assets, then renders it through GPU-o
 
 ### `crates/storage`
 
-Owns versioned, size-bounded persistent bytes for opaque fixed-size keys. One writer owns index mutations; bounded readers verify SHA-256 hashes on access without waiting for disk writes. Atomic data and index replacement, the directory process lock, and startup cleanup preserve recoverable state without rescanning payload contents. Consumers choose keys and validate their domain payloads; storage records usage and applies LRU eviction.
+Owns versioned, size-bounded persistent bytes for opaque fixed-size keys. One writer batches index journal appends and compacts them into atomic snapshots; bounded readers verify SHA-256 hashes on access without waiting for disk writes. Startup replays the snapshot and journal, while the writer sweeps orphan files in bounded background steps. Data and journal appends are not synced per write; missing or short data is removed at lookup, and bytes are never returned before size and hash verification. Compacted snapshots and reset journals are synced before replacement. Consumers choose keys and validate their domain payloads; storage records usage and applies LRU eviction.
 
 ### `crates/test-support`
 

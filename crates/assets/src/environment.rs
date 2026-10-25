@@ -146,7 +146,6 @@ pub struct Sky {
     pub star_brightness: Option<f32>,
     pub clouds: Clouds,
     pub haze: Haze,
-    pub legacy_haze: Option<Haze>,
     pub atmosphere: Atmosphere,
     pub gamma: Option<f32>,
     pub glow: Option<[f32; 3]>,
@@ -270,11 +269,19 @@ fn number(value: &Value) -> Result<f32, Failure> {
 }
 
 fn scalar(fields: &Map, key: &str) -> Result<Option<f32>, Failure> {
-    fields.get(key).map(number).transpose()
+    scalar_value(fields.get(key))
+}
+
+fn scalar_value(value: Option<&Value>) -> Result<Option<f32>, Failure> {
+    value.map(number).transpose()
 }
 
 fn vector<const N: usize>(fields: &Map, key: &str) -> Result<Option<[f32; N]>, Failure> {
-    let Some(value) = fields.get(key) else { return Ok(None) };
+    vector_value(fields.get(key))
+}
+
+fn vector_value<const N: usize>(value: Option<&Value>) -> Result<Option<[f32; N]>, Failure> {
+    let Some(value) = value else { return Ok(None) };
     let Value::Array(values) = value else { return Err(Failure::Malformed) };
     if values.len() != N && !(N == 3 && values.len() == 4) {
         return Err(Failure::Malformed);
@@ -315,14 +322,16 @@ fn body(fields: &Map, rotation: &str, image: &str, scale: &str) -> Result<Celest
 }
 
 fn haze(fields: &Map) -> Result<Haze, Failure> {
+    let legacy = fields.get("legacy_haze").map(object).transpose()?;
+    let selected = |key| legacy.and_then(|fields| fields.get(key)).or_else(|| fields.get(key));
     Ok(Haze {
-        ambient: vector(fields, "ambient")?,
-        blue_density: vector(fields, "blue_density")?,
-        blue_horizon: vector(fields, "blue_horizon")?,
-        density_multiplier: scalar(fields, "density_multiplier")?,
-        distance_multiplier: scalar(fields, "distance_multiplier")?,
-        density: scalar(fields, "haze_density")?,
-        horizon: scalar(fields, "haze_horizon")?,
+        ambient: vector_value(selected("ambient"))?,
+        blue_density: vector_value(selected("blue_density"))?,
+        blue_horizon: vector_value(selected("blue_horizon"))?,
+        density_multiplier: scalar_value(selected("density_multiplier"))?,
+        distance_multiplier: scalar_value(selected("distance_multiplier"))?,
+        density: scalar_value(selected("haze_density"))?,
+        horizon: scalar_value(selected("haze_horizon"))?,
     })
 }
 
@@ -370,7 +379,6 @@ fn sky(fields: &Map) -> Result<Sky, Failure> {
             texture: texture(fields, "cloud_id")?,
         },
         haze: haze(fields)?,
-        legacy_haze: fields.get("legacy_haze").map(|value| object(value).and_then(haze)).transpose()?,
         atmosphere: Atmosphere {
             planet_radius: scalar(fields, "planet_radius")?,
             bottom_radius: scalar(fields, "sky_bottom_radius")?,
@@ -483,6 +491,7 @@ mod tests {
      'sunlight_color':[r0.7342,r0.7815,r0.8999,r0],
      'cloud_scroll_rate':[r0.2,r0.01],'cloud_color':[r0.4099,r0.4099,r0.4099,r0],
      'legacy_haze':{'ambient':[r0.25,r0.25,r0.25],'haze_density':r0.7},
+     'haze_density':r0.2,
      'rayleigh_config':[{'width':r0,'exp_term':r1,'exp_scale':r-0.000125}],
      'reflection_probe_ambiance':r0,
      'sun_id':u00112233-4455-6677-8899-aabbccddeeff,'moon_id':u00000000-0000-0000-0000-000000000000}
@@ -509,7 +518,8 @@ mod tests {
         assert_eq!(sky.sun.texture, TextureRef::Asset(AssetId::new(Uuid::from_u128(0x00112233445566778899aabbccddeeff))));
         assert_eq!(sky.sunlight, Some([0.7342, 0.7815, 0.8999]));
         assert_eq!(sky.clouds.scroll_rate, Some([0.2, 0.01]));
-        assert_eq!(sky.legacy_haze.unwrap().density, Some(0.7));
+        assert_eq!(sky.haze.ambient, Some([0.25, 0.25, 0.25]));
+        assert_eq!(sky.haze.density, Some(0.7));
         assert_eq!(sky.atmosphere.rayleigh.as_ref().unwrap()[0].exponential_scale, Some(-0.000125));
         assert_eq!(sky.reflection_probe_ambiance, Some(0.0), "authored zero must remain distinct from automatic ambiance");
         assert_eq!(sky.gamma, None, "missing parameters remain absent until evaluation applies defaults");
@@ -524,6 +534,26 @@ mod tests {
         assert_eq!(sky.sunlight, None);
         assert_eq!(sky.clouds.color, None);
         assert_eq!(sky.sun.texture, TextureRef::Absent);
+    }
+
+    #[test]
+    fn sky_haze_prefers_legacy_values_per_field() {
+        let sky = Sky::from_properties([
+            ("legacy_haze", b"{'haze_density':r2}".as_slice()),
+            ("haze_density", b"r1".as_slice()),
+            ("haze_horizon", b"r0.75".as_slice()),
+        ])
+        .unwrap();
+        assert_eq!(sky.haze.density, Some(2.0));
+        assert_eq!(sky.haze.horizon, Some(0.75));
+
+        let EnvironmentSettings::Sky(sky) =
+            decode(br#"{'type':'sky','legacy_haze':{'haze_density':r2},'haze_density':r1,'haze_horizon':r0.75}"#).unwrap().settings
+        else {
+            panic!("sky")
+        };
+        assert_eq!(sky.haze.density, Some(2.0));
+        assert_eq!(sky.haze.horizon, Some(0.75));
     }
 
     #[test]

@@ -190,6 +190,38 @@ fn parcel_failure_falls_back_to_region_then_none() {
 }
 
 #[test]
+fn retryable_failure_keeps_waiting_for_the_store() {
+    let mut world = world();
+    let region = Region::new(1);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    settle(&mut scene, &mut view, &world, &mut now);
+    let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
+    let region_asset = AssetId::new(Uuid::from_u128(114));
+    let _ =
+        world.observe_environment(target, source(1, 1), assignment(EnvironmentSource::Asset(region_asset), 1, None, None, None)).unwrap();
+    let parcel = ParcelLocalId::new(7).unwrap();
+    let _ = world.observe_agent_parcel(source(1, 2), Some(parcel)).unwrap();
+    let parcel_target = world.environment_target(region, EnvironmentScope::Parcel(parcel)).unwrap();
+    let parcel_asset = AssetId::new(Uuid::from_u128(115));
+    let _ = world
+        .observe_environment(parcel_target, source(1, 3), assignment(EnvironmentSource::Asset(parcel_asset), 1, None, None, None))
+        .unwrap();
+    scene.notify_world_change();
+    let request = settle_materials(&mut scene, &mut view, &world, &mut now).requested.into_iter().next().expect("parcel request");
+    scene.complete_asset(
+        request.ticket,
+        assets::Status::Failed { failure: assets::Failure::Deadline, retry_at: Some(now + Duration::from_secs(1)) },
+    );
+    let retrying = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(!retrying.released.contains(&request.ticket));
+    assert!(retrying.requested.is_empty());
+    scene.complete_asset(request.ticket, prepared_asset(request.request, b"{'type':'sky','name':'parcel'}".to_vec()));
+    settle(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(view.environment(region).unwrap().description().name, "parcel");
+}
+
+#[test]
 fn stale_session_releases_ticket_without_falling_back() {
     let mut world = world();
     let region = Region::new(1);

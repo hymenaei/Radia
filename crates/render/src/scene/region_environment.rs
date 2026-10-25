@@ -309,7 +309,8 @@ impl RegionEnvironmentResolver {
             return;
         }
         for entry in self.entries.values_mut() {
-            if let Some(Pending::Retry { index }) = entry.pending.take() {
+            if let Some(Pending::Retry { index }) = entry.pending {
+                entry.pending = None;
                 entry.next = index;
             }
         }
@@ -348,7 +349,7 @@ impl RegionEnvironmentResolver {
         }
         let result = match status {
             Status::Ready(Content::Environment(environment)) => Some(Ok(environment.clone())),
-            Status::Failed { .. } | Status::Ready(_) => Some(Err(())),
+            Status::Failed { retry_at: None, .. } | Status::Ready(_) => Some(Err(())),
             _ => None,
         };
         let Some(result) = result else { return Resolution::Pending };

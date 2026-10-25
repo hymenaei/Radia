@@ -203,6 +203,9 @@ impl ViewerEnvironments {
                 if sky.is_empty() && water.is_empty() {
                     return Ok(());
                 }
+                if sky.len() > MAX_PROPERTIES || water.len() > MAX_PROPERTIES {
+                    return Err(EnvironmentPushError::Capacity);
+                }
                 Sky::from_properties(sky.iter().map(|property| (property.name.as_str(), property.source.as_ref())))
                     .map_err(|_| EnvironmentPushError::Invalid)?;
                 Water::from_properties(water.iter().map(|property| (property.name.as_str(), property.source.as_ref())))

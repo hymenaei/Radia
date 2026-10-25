@@ -1,5 +1,5 @@
 use assets::Sampler;
-use math::{DVec3, Mat4, Quat, Vec3};
+use math::{Mat4, Quat, Vec3};
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
@@ -269,7 +269,6 @@ impl Sky {
         queue: &Queue,
         projection: Mat4,
         inverse: Mat4,
-        camera_position: DVec3,
         viewport: [u32; 2],
         environment: Option<&Evaluated>,
         cloud_scroll: [f32; 2],
@@ -359,11 +358,7 @@ impl Sky {
                 resident(halo_textures.next),
             ],
         );
-        append(
-            &mut values,
-            &mut offset,
-            [environment.sky.moisture, environment.sky.droplet_radius, environment.sky.ice, camera_position.z as f32],
-        );
+        append(&mut values, &mut offset, [environment.sky.moisture, environment.sky.droplet_radius, environment.sky.ice, 0.0]);
         let mut bytes = [0; UNIFORM_BYTES];
         for (target, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
             *target = value.to_le_bytes();

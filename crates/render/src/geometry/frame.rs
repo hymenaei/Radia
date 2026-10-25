@@ -439,7 +439,6 @@ impl GeometryRenderer {
             &self.queue,
             projection,
             projection.inverse(),
-            camera.position(),
             size,
             frame_input.environment,
             frame_input.cloud_scroll,

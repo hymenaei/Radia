@@ -1,9 +1,13 @@
 use crate::environment::Evaluated;
 
-pub(crate) const ATMOSPHERE_FLOATS: usize = 40;
+pub(crate) const SKY_DOME_RADIUS: f32 = 15_000.0;
+pub(crate) const SKY_DOME_OFFSET: f32 = 0.96;
+pub(crate) const SKY_DOME_HEIGHT: f32 = SKY_DOME_RADIUS * SKY_DOME_OFFSET;
+pub(crate) const ATMOSPHERE_FLOATS: usize = 44;
 
 pub(crate) fn atmosphere_values(environment: Option<&Evaluated>) -> [f32; ATMOSPHERE_FLOATS] {
     let mut values = [0.0; ATMOSPHERE_FLOATS];
+    values[40..44].copy_from_slice(&[SKY_DOME_RADIUS, SKY_DOME_HEIGHT, 0.0, 0.0]);
     let Some(environment) = environment else { return values };
     let haze = &environment.sky.haze;
     let sun_up = environment.sky.sun_direction[2] >= 0.0;
@@ -80,6 +84,7 @@ mod tests {
         assert_eq!(&values[28..32], &[0.8, 0.0, 1.0, 1.0]);
         assert_eq!(&values[32..36], &[0.17364812, 0.0, 0.9848078, 1.0154265]);
         assert_eq!(&values[36..40], &[0.8816109, 0.9384076, 1.0805798, 0.0]);
+        assert_eq!(&values[40..44], &[15_000.0, 14_400.0, 0.0, 0.0]);
     }
 
     #[test]

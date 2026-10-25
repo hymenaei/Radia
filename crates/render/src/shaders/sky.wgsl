@@ -62,9 +62,11 @@ fn sphere_uv(direction: vec3<f32>, body_direction: vec3<f32>, radius: f32) -> ve
 }
 
 fn cloud_noise(uv: vec2<f32>) -> vec4<f32> {
+    let gradient_x = dpdx(uv);
+    let gradient_y = dpdy(uv);
     return mix(
-        textureSample(cloud_image, environment_sampler, uv),
-        textureSample(cloud_next_image, environment_sampler, uv),
+        textureSampleGrad(cloud_image, environment_sampler, uv, gradient_x, gradient_y),
+        textureSampleGrad(cloud_next_image, environment_sampler, uv, gradient_x, gradient_y),
         sky.blends.z,
     );
 }
@@ -108,7 +110,9 @@ fn halo_color(optical_dot: f32) -> vec3<f32> {
     if sky.cloud.x < 0.001 {
         discard;
     }
-    let planar = vec2<f32>((-direction.y + 1.0) * 0.5, (-direction.x + 1.0) * 0.5);
+    let projected_up = max(direction.z, sky.cloud.w);
+    let uv_h = direction.xy * ((1.0 + sky.cloud.z) / (projected_up + sky.cloud.z));
+    let planar = vec2<f32>((-uv_h.y + 1.0) * 0.5, (-uv_h.x + 1.0) * 0.5);
     var uv1 = vec2<f32>(-planar.x, planar.y);
     uv1 = (uv1 - vec2<f32>(0.5)) / sky.cloud.x + vec2<f32>(0.5);
     let light_world = safe_normalize(sky.atmosphere.light_direction.xyz);
@@ -129,7 +133,7 @@ fn halo_color(optical_dot: f32) -> vec3<f32> {
     alpha1 = min(max(alpha1 + cloud_density, 0.0) * 10.0 * sky.cloud_density1.z, 1.0);
     alpha1 = 1.0 - alpha1 * alpha1;
     alpha1 = 1.0 - alpha1 * alpha1;
-    alpha1 *= smoothstep(-0.02, 0.02, direction.z);
+    alpha1 *= smoothstep(sky.cloud.w, sky.cloud_density2.w, direction.z);
     alpha1 = clamp(alpha1, 0.0, 1.0);
     var alpha2 = cloud_noise(shadow_large).x - 0.5;
     alpha2 = min(max(alpha2 + cloud_density, 0.0) * 2.5 * sky.cloud_density1.z, 1.0);

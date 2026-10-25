@@ -86,36 +86,25 @@ struct Surface {
 @fragment fn water_fragment(v: Output) -> Water {
     let clip = camera.projection * vec4<f32>(v.relative_position, 1.0);
     let direction = safe_normalize(v.relative_position);
+    let coordinates = water_coordinates(v.relative_position, surface_water);
+    let normal = blended_water_normal(
+        textureSample(water_normal_image, water_normal_sampler, coordinates.first).xyz,
+        textureSample(water_normal_next_image, water_normal_sampler, coordinates.first).xyz,
+        textureSample(water_normal_image, water_normal_sampler, coordinates.second).xyz,
+        textureSample(water_normal_next_image, water_normal_sampler, coordinates.second).xyz,
+        surface_water,
+    );
     var color: vec3<f32>;
     if v.relative_position.z > 0.0 {
-        let horizon = horizon_color(vec3<f32>(direction.xy, 0.0), surface_atmosphere.atmosphere);
-        var normal = vec3<f32>(0.0, 0.0, 1.0);
-        if surface_water.params.w > 0.5 {
-            let uv = v.relative_position.xy * surface_water.normal.x * 0.015
-                + surface_water.scroll.xy * 0.03
-                + surface_water.scroll.zw * -0.02;
-            let sampled = textureSample(water_normal_image, water_normal_sampler, uv).xyz * 2.0 - vec3<f32>(1.0);
-            normal = safe_normalize(mix(normal, safe_normalize(sampled), 0.12));
-        }
-        let cosine = max(dot(normal, safe_normalize(-direction)), 0.0);
-        let fresnel = clamp(surface_water.params.x + surface_water.params.y * pow(1.0 - cosine, 5.0), 0.0, 1.0);
-        color = aerial_perspective(
-            mix(surface_water.fog_color.xyz, horizon, fresnel),
+        color = water_under_surface_color(
             direction,
+            normal,
             length(v.position_view),
             surface_atmosphere.distance.x,
-            surface_water.params.z,
+            surface_water,
             surface_atmosphere.atmosphere,
         );
     } else {
-        let coordinates = water_coordinates(v.relative_position, surface_water);
-        let normal = blended_water_normal(
-            textureSample(water_normal_image, water_normal_sampler, coordinates.first).xyz,
-            textureSample(water_normal_next_image, water_normal_sampler, coordinates.first).xyz,
-            textureSample(water_normal_image, water_normal_sampler, coordinates.second).xyz,
-            textureSample(water_normal_next_image, water_normal_sampler, coordinates.second).xyz,
-            surface_water,
-        );
         color = water_surface_color(
             direction,
             normal,

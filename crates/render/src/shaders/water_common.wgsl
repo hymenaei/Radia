@@ -71,3 +71,24 @@ fn water_surface_color(
     let glint = pow(max(dot(normal, halfway), 0.0), exponent) * max(atmosphere.sunlight.xyz, vec3<f32>(0.0)) * sun_up * 0.25;
     return max(aerial_perspective(body + glint, direction, distance, draw_distance, water.params.z, atmosphere), vec3<f32>(0.0));
 }
+
+fn water_under_surface_color(
+    direction: vec3<f32>,
+    normal: vec3<f32>,
+    distance: f32,
+    draw_distance: f32,
+    water: WaterSurface,
+    atmosphere: Atmosphere,
+) -> vec3<f32> {
+    let horizon = horizon_color(vec3<f32>(direction.xy, 0.0), atmosphere);
+    let cosine = max(dot(normal, -safe_normalize(direction)), 0.0);
+    let fresnel = clamp(water.params.x + water.params.y * pow(1.0 - cosine, 5.0), 0.0, 1.0);
+    return aerial_perspective(
+        mix(water.fog_color.xyz, horizon, fresnel),
+        direction,
+        distance,
+        draw_distance,
+        water.params.z,
+        atmosphere,
+    );
+}

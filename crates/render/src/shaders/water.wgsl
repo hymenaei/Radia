@@ -31,10 +31,10 @@ struct WaterOutput {
 @fragment fn fragment(ray: Ray) -> WaterOutput {
     let near = water.inverse * vec4<f32>(ray.ndc, 1.0, 1.0);
     let direction = safe_normalize(near.xyz / near.w);
-    if direction.z >= 0.0 {
+    if (water.plane.x < 0.0 && direction.z >= 0.0) || (water.plane.x > 0.0 && direction.z <= 0.0) {
         discard;
     }
-    let distance = abs(water.plane.x) / max(-direction.z, 0.000001);
+    let distance = abs(water.plane.x) / max(abs(direction.z), 0.000001);
     let point = direction * min(distance, water.plane.z);
     if distance < water.plane.z {
         for (var index = 0u; index < u32(water.plane.y); index += 1u) {
@@ -52,7 +52,12 @@ struct WaterOutput {
         textureSample(normal_next_image, normal_sampler, coordinates.second).xyz,
         water.surface,
     );
-    let color = water_surface_color(direction, normal, distance, water.plane.z, water.surface, water.atmosphere);
+    var color: vec3<f32>;
+    if water.plane.x > 0.0 {
+        color = water_under_surface_color(direction, normal, distance, water.plane.z, water.surface, water.atmosphere);
+    } else {
+        color = water_surface_color(direction, normal, distance, water.plane.z, water.surface, water.atmosphere);
+    }
     let finite_depth = water.plane.w * (water.plane.z / max(distance, water.plane.w) - 1.0) / (water.plane.z - water.plane.w);
     let depth = select(max(finite_depth, 0.00000001), 0.00000001, distance >= water.plane.z);
     var output: WaterOutput;

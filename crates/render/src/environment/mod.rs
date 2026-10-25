@@ -1,3 +1,4 @@
+mod runtime;
 mod transition;
 
 use std::f32::consts::PI;
@@ -7,6 +8,7 @@ use math::{Quat, Vec3};
 use utils::AssetId;
 use uuid::Uuid;
 
+pub use runtime::ActiveEnvironment;
 pub use transition::Transition;
 
 const DEFAULT_DAY_LENGTH: f64 = 14_400.0;

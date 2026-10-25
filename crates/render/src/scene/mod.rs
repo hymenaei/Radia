@@ -3,6 +3,7 @@ mod budget;
 mod camera;
 mod dependencies;
 mod environment;
+mod environment_textures;
 mod mesh;
 mod mesh_cache;
 mod model;

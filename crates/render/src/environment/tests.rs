@@ -258,7 +258,7 @@ fn defaults_match_viewer() {
     let result = evaluate(&sources(None), 0.0, 0.0);
     assert_eq!(result.sky.clouds.color, [0.4099, 0.4099, 0.4099]);
     assert_eq!(result.sky.sun.texture.current, None);
-    assert_eq!(result.sky.moon.texture.current, Some(AssetId::new(Uuid::from_u128(0xd07f6eedb96a47cdb51d400ad4a1c428))));
+    assert_eq!(result.sky.moon.texture.current, super::DEFAULT_MOON_TEXTURE);
     assert_eq!(result.water.fog_density, 2.0);
     assert_eq!(result.water.normal_scale, [1.75; 3]);
     assert_eq!(result.sky.haze.ambient, [0.25; 3]);

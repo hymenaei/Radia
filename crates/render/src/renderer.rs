@@ -17,6 +17,7 @@ use wgpu::{
     RequestAdapterOptions, RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureViewDescriptor,
 };
 
+use crate::environment::Evaluated;
 use crate::geometry::{GeometryRenderer, PickError, Stats};
 use crate::gpu_timing::GpuTimings;
 use crate::scene::{AgentPose, Camera, SceneView};
@@ -221,7 +222,7 @@ impl Renderer {
         mut overlay: Overlay,
         scene: Option<(&SceneView, Camera)>,
         agent_pose: Option<AgentPose>,
-        water_height: Option<f64>,
+        frame_input: FrameInput<'_>,
         before_present: impl FnOnce(),
     ) -> Result<bool, Error> {
         for (id, deltas) in overlay.textures.set.drain() {
@@ -229,7 +230,7 @@ impl Renderer {
                 self.overlay.update_texture(&self.device, &self.queue, id, &delta);
             }
         }
-        let result = self.draw_frame(&overlay, scene, agent_pose, water_height, before_present);
+        let result = self.draw_frame(&overlay, scene, agent_pose, frame_input, before_present);
         for id in overlay.textures.free.drain() {
             self.overlay.free_texture(&id);
         }
@@ -241,7 +242,7 @@ impl Renderer {
         overlay: &Overlay,
         scene: Option<(&SceneView, Camera)>,
         agent_pose: Option<AgentPose>,
-        water_height: Option<f64>,
+        frame_input: FrameInput<'_>,
         before_present: impl FnOnce(),
     ) -> Result<bool, Error> {
         self.poll()?;
@@ -274,7 +275,7 @@ impl Renderer {
         let depth = if let Some((scene, camera)) = scene {
             let depth = self.geometry.depth(&self.device, self.size);
             if depth.is_some() {
-                self.geometry.prepare(&self.device, &mut encoder, scene, agent_pose, camera, self.size, water_height);
+                self.geometry.prepare_with_environment(&self.device, &mut encoder, scene, agent_pose, camera, self.size, frame_input);
             }
             depth
         } else {
@@ -353,6 +354,13 @@ pub struct Overlay {
     pub pixels_per_point: f32,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct FrameInput<'a> {
+    pub water_height: Option<f64>,
+    pub environment: Option<&'a Evaluated>,
+    pub cloud_scroll: [f32; 2],
+}
+
 pub struct Progress {
     pub redraw: bool,
     pub pending: bool,
@@ -386,9 +394,11 @@ mod tests {
     #[test]
     fn shaders_validate() {
         for (name, source) in [
-            ("surface", include_str!("shaders/surface.wgsl")),
-            ("terrain", concat!(include_str!("shaders/surface.wgsl"), "\n", include_str!("shaders/terrain.wgsl"))),
-            ("water", include_str!("shaders/water.wgsl")),
+            ("atmosphere", include_str!("shaders/atmosphere.wgsl")),
+            ("surface", concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/surface.wgsl"))),
+            ("terrain", concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/surface.wgsl"), "\n", include_str!("shaders/terrain.wgsl"))),
+            ("water", concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"))),
+            ("sky", concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/sky.wgsl"))),
             ("mipmap", include_str!("shaders/mipmap.wgsl")),
         ] {
             let module = wgsl::parse_str(source).unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));

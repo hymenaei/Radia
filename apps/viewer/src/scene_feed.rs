@@ -2,9 +2,10 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     sync::OnceLock,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use assets::EnvironmentSettings;
 use futures::{
     FutureExt, StreamExt,
     channel::oneshot,
@@ -14,6 +15,7 @@ use futures::{
 };
 use math::motion::{self as kinematics};
 use network::CircuitMotionStatus;
+use render::environment::{Evaluated, Schedule, Sources, Transition, evaluate};
 use render::scene::{
     ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, MotionCircuit, Object, ReadFailure, ReadJob, ReadQuery,
     ReadReply, ReconcileStep, Reconciler, SceneView,
@@ -22,7 +24,10 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 use uuid::Uuid;
-use world::{Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, WorldPose};
+use world::{
+    Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, Region, WorldPose,
+    WorldTransformState,
+};
 
 use crate::{
     agent_movement::MovementObservation,
@@ -115,6 +120,15 @@ pub(crate) struct SceneFeed {
     agent_id: Uuid,
     agent: Option<Entity>,
     pub(crate) water_height: Option<f64>,
+    transition: Transition,
+    transition_identity: u64,
+    composition: Option<CompositionIdentity>,
+    altitude: Option<f64>,
+    evaluated: Option<Evaluated>,
+    next_environment: Option<Instant>,
+    cloud_scroll: [f64; 2],
+    cloud_rate: [f32; 2],
+    cloud_time: Option<SystemTime>,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
     agent_motion: watch::Receiver<Option<AgentMotionSample>>,
@@ -127,6 +141,15 @@ pub(crate) struct SceneFeed {
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositionIdentity {
+    region: Region,
+    environment: Option<u64>,
+    viewer_version: u64,
+}
+
+const DEFAULT_ENVIRONMENT_TRANSITION: Duration = Duration::from_secs(5);
 
 impl SceneFeed {
     pub(crate) fn start(
@@ -162,6 +185,15 @@ impl SceneFeed {
             agent_id,
             agent: None,
             water_height: None,
+            transition: Transition::default(),
+            transition_identity: 0,
+            composition: None,
+            altitude: None,
+            evaluated: None,
+            next_environment: None,
+            cloud_scroll: [0.0; 2],
+            cloud_rate: [0.0; 2],
+            cloud_time: None,
             camera,
             movement,
             agent_motion,
@@ -296,6 +328,91 @@ impl SceneFeed {
         }
     }
 
+    pub(crate) fn evaluated(&self) -> Option<&Evaluated> {
+        self.evaluated.as_ref()
+    }
+
+    pub(crate) fn next_environment(&self) -> Option<Instant> {
+        self.next_environment
+    }
+
+    pub(crate) fn cloud_scroll(&self) -> [f32; 2] {
+        [self.cloud_scroll[0] as f32, self.cloud_scroll[1] as f32]
+    }
+
+    pub(crate) fn clouds_animate(&self) -> bool {
+        self.evaluated.is_some() && self.cloud_rate.iter().any(|rate| *rate != 0.0)
+    }
+
+    pub(crate) fn update_environment(&mut self, now: Instant) -> bool {
+        let wall_time = SystemTime::now();
+        self.advance_cloud_scroll(wall_time);
+        let Some(agent) = self.agent() else {
+            return self.clear_environment();
+        };
+        let region = agent.detail().summary.address.region();
+        let altitude = avatar_altitude(agent);
+        let viewer = self.view.viewer_environment();
+        let identity = composition_identity(&self.view, region);
+        let changed = self.composition != Some(identity) || self.altitude != Some(altitude);
+        let deadline = self.next_environment.is_some_and(|deadline| now >= deadline);
+        if !changed && !deadline {
+            return false;
+        }
+        if self.composition != Some(identity) {
+            self.transition_identity = self.transition_identity.checked_add(1).expect("environment transition identities exhausted");
+            self.composition = Some(identity);
+        }
+        self.altitude = Some(altitude);
+        let sources = compose_sources(&self.view, region, viewer);
+        let has_environment = sources.base.is_some()
+            || sources.experience_day.is_some()
+            || sources.experience_sky.is_some()
+            || sources.experience_water.is_some()
+            || sources.sky_override.is_some()
+            || sources.water_override.is_some();
+        if !has_environment {
+            let changed = self.clear_environment();
+            self.composition = Some(identity);
+            self.altitude = Some(altitude);
+            return changed;
+        }
+        let utc = wall_time.duration_since(UNIX_EPOCH).map_or(0.0, |duration| duration.as_secs_f64());
+        let target = evaluate(&sources, utc, altitude);
+        let duration = viewer.and_then(|viewer| viewer.transition_for_region(region)).unwrap_or(DEFAULT_ENVIRONMENT_TRANSITION);
+        let (evaluated, next) = self.transition.update(self.transition_identity, target, duration, now);
+        let output_changed = self.evaluated.as_ref() != Some(&evaluated);
+        self.cloud_rate = evaluated.sky.clouds.scroll_rate;
+        self.evaluated = Some(evaluated);
+        self.next_environment = next;
+        output_changed
+    }
+
+    fn advance_cloud_scroll(&mut self, now: SystemTime) {
+        if let Some(previous) = self.cloud_time
+            && let Some(delta) = now.duration_since(previous).ok()
+        {
+            let seconds = delta.as_secs_f64();
+            for index in 0..self.cloud_scroll.len() {
+                let Some(rate) = self.cloud_rate.get(index).copied() else { continue };
+                let Some(offset) = self.cloud_scroll.get_mut(index) else { continue };
+                *offset = if rate == 0.0 { 0.0 } else { (*offset + f64::from(rate) * seconds / 100.0).rem_euclid(1.0) };
+            }
+        }
+        self.cloud_time = Some(now);
+    }
+
+    fn clear_environment(&mut self) -> bool {
+        let changed = self.evaluated.take().is_some();
+        self.transition = Transition::default();
+        self.composition = None;
+        self.altitude = None;
+        self.next_environment = None;
+        self.cloud_scroll = [0.0; 2];
+        self.cloud_rate = [0.0; 2];
+        changed
+    }
+
     pub(crate) fn drain(&mut self) -> Result<(), ApplyError> {
         if self.view.status() == render::scene::Status::Closed {
             self.agent = None;
@@ -327,6 +444,60 @@ struct AssetStatusEvent {
     ticket: AssetTicket,
     status: assets::Status,
     demand: Option<assets::Demand>,
+}
+
+struct ExperienceSources<'a> {
+    day: Option<&'a assets::EnvironmentDescription>,
+    sky: Option<&'a assets::EnvironmentDescription>,
+    water: Option<&'a assets::EnvironmentDescription>,
+}
+
+fn experience_sources(viewer: Option<&render::scene::ViewerEnvironment>, region: Region) -> ExperienceSources<'_> {
+    let mut sources = ExperienceSources { day: None, sky: None, water: None };
+    let Some(viewer) = viewer else { return sources };
+    for setting in [viewer.day(), viewer.sky(), viewer.water()].into_iter().flatten() {
+        if setting.region() != region {
+            continue;
+        }
+        let target = match &setting.environment().settings {
+            EnvironmentSettings::DayCycle(_) => &mut sources.day,
+            EnvironmentSettings::Sky(_) => &mut sources.sky,
+            EnvironmentSettings::Water(_) => &mut sources.water,
+        };
+        *target = Some(setting.environment());
+    }
+    sources
+}
+
+fn compose_sources<'a>(view: &'a SceneView, region: Region, viewer: Option<&'a render::scene::ViewerEnvironment>) -> Sources<'a> {
+    let base = view.environment(region);
+    let experience = experience_sources(viewer, region);
+    Sources {
+        base: base.map(|environment| environment.description()),
+        schedule: base.map_or_else(Schedule::default, |environment| environment.schedule()),
+        experience_day: experience.day,
+        experience_sky: experience.sky,
+        experience_water: experience.water,
+        sky_override: viewer.and_then(|viewer| viewer.sky_overrides()),
+        water_override: viewer.and_then(|viewer| viewer.water_overrides()),
+    }
+}
+
+fn composition_identity(view: &SceneView, region: Region) -> CompositionIdentity {
+    CompositionIdentity {
+        region,
+        environment: view.environment(region).map(|environment| environment.identity()),
+        viewer_version: view.viewer_environment().map_or(0, |viewer| viewer.version()),
+    }
+}
+
+fn avatar_altitude(agent: &Object) -> f64 {
+    let altitude = match agent.detail().world_transform {
+        Ok(WorldTransformState::Resolved(transform)) => Some(transform.pose.position.z),
+        Ok(WorldTransformState::MissingScale(pose) | WorldTransformState::Provisional { pose, .. }) => Some(pose.position.z),
+        Ok(WorldTransformState::Unresolved(_)) | Err(_) => None,
+    };
+    altitude.filter(|value| value.is_finite()).unwrap_or(0.0)
 }
 
 struct AssetSubscriptions {
@@ -590,3 +761,7 @@ async fn run(
 #[cfg(test)]
 #[path = "scene_feed_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "scene_feed_environment_tests.rs"]
+mod environment_tests;

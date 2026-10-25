@@ -8,7 +8,7 @@ use std::{
 use egui::{Context, DragValue, Slider, ViewportId};
 use futures::executor::block_on;
 use render::scene;
-use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
+use render::{CompressionQuality, FrameInput, Overlay, Renderer, Retirement, TextureCompletion};
 use tracing::Instrument;
 #[cfg(target_os = "linux")]
 use winit::platform::startup_notify::{EventLoopExtStartupNotify, WindowAttributesExtStartupNotify, reset_activation_token_env};
@@ -90,6 +90,8 @@ pub(super) struct SceneWindow {
     egui: Context,
     platform: egui_winit::State,
     next_ui: Option<Instant>,
+    next_environment: Option<Instant>,
+    next_cloud: Option<Instant>,
     window: Arc<Window>,
     generation: u64,
     frame_times: FrameTimes,
@@ -167,6 +169,8 @@ impl SceneWindow {
             egui,
             platform,
             next_ui: None,
+            next_environment: None,
+            next_cloud: None,
             window,
             generation,
             frame_times: FrameTimes::default(),
@@ -318,6 +322,8 @@ impl SceneWindow {
             && generation == self.generation
         {
             self.feed = Some(feed);
+            self.next_environment = None;
+            self.next_cloud = None;
             self.dirty = true;
         }
         if let Some(feed) = &mut self.feed {
@@ -504,6 +510,12 @@ impl SceneWindow {
         self.dirty = false;
         if !self.ensure_renderer(now)? {
             return Ok(DrawActions::default());
+        }
+        if let Some(feed) = &mut self.feed {
+            feed.update_environment(now);
+            self.next_environment = feed.next_environment();
+        } else {
+            self.next_environment = None;
         }
         self.complete_texture_jobs();
         let debug_ui = self.draw_debug_ui(now);
@@ -722,11 +734,15 @@ impl SceneWindow {
         }
         let scene = self.feed.as_ref().zip(observation).map(|(feed, camera)| (&feed.view, camera));
         let avatar_pose = self.feed.as_ref().zip(agent_pose).map(|(feed, pose)| scene::AgentPose::new(feed.agent_id(), pose));
-        let water_height = self.feed.as_ref().and_then(|feed| feed.water_height);
+        let frame_input = self.feed.as_ref().map_or_else(FrameInput::default, |feed| FrameInput {
+            water_height: feed.water_height,
+            environment: feed.evaluated(),
+            cloud_scroll: feed.cloud_scroll(),
+        });
         let result = {
             let renderer = self.renderer.as_mut().expect("renderer ensured before frame submission");
             renderer.set_texture_soft_cap(self.texture_soft_cap);
-            renderer.draw(ui.overlay, scene, avatar_pose, water_height, || self.window.pre_present_notify())
+            renderer.draw(ui.overlay, scene, avatar_pose, frame_input, || self.window.pre_present_notify())
         };
         self.dispatch_texture_jobs();
         let completed = Instant::now();
@@ -749,8 +765,11 @@ impl SceneWindow {
                     } else {
                         self.next_frame = completed;
                     }
+                    self.next_cloud =
+                        cloud_frame_deadline(observation, self.feed.as_ref().is_some_and(SceneFeed::clouds_animate), Instant::now());
                 } else {
                     self.next_frame = next_frame_deadline(scheduled_deadline, completed, self.frame_interval);
+                    self.next_cloud = None;
                 }
                 let first_frame = presented && !self.ready;
                 self.ready |= presented;
@@ -836,6 +855,14 @@ impl SceneWindow {
         let display_interval = display_refresh_interval(&self.window);
         self.frame_interval = redraw_interval(display_interval, self.focused, self.controls.active() || self.stop_clear_pending);
         let now = Instant::now();
+        if deadline_passed(self.next_environment, now) {
+            self.next_environment = None;
+            self.dirty = true;
+        }
+        if deadline_passed(self.next_cloud, now) {
+            self.next_cloud = None;
+            self.dirty = true;
+        }
         if self.next_ui.is_some_and(|at| now >= at) {
             self.next_ui = None;
             self.dirty = true;
@@ -846,10 +873,20 @@ impl SceneWindow {
         } else {
             let redraw = (self.dirty && can_redraw).then_some(self.next_frame.max(now + Duration::from_millis(1)));
             let poll = pending.then_some(now + self.frame_interval);
-            event_loop.set_control_flow(match redraw.into_iter().chain(poll).chain(self.animation_redraw_at).chain(self.next_ui).min() {
-                Some(at) => ControlFlow::WaitUntil(at),
-                None => ControlFlow::Wait,
-            });
+            event_loop.set_control_flow(
+                match redraw
+                    .into_iter()
+                    .chain(poll)
+                    .chain(self.animation_redraw_at)
+                    .chain(self.next_ui)
+                    .chain(self.next_environment)
+                    .chain(self.next_cloud)
+                    .min()
+                {
+                    Some(at) => ControlFlow::WaitUntil(at),
+                    None => ControlFlow::Wait,
+                },
+            );
         }
     }
 
@@ -858,6 +895,22 @@ impl SceneWindow {
             self.retired = Some(renderer.retire());
         }
     }
+}
+
+fn deadline_passed(deadline: Option<Instant>, now: Instant) -> bool {
+    deadline.is_some_and(|deadline| now >= deadline)
+}
+
+fn cloud_frame_deadline(camera: Option<scene::Camera>, animating: bool, now: Instant) -> Option<Instant> {
+    let visible = camera.is_some_and(camera_sees_sky);
+    (visible && animating).then(|| now + FRAME_INTERVAL)
+}
+
+fn camera_sees_sky(camera: scene::Camera) -> bool {
+    let direction = camera.direction();
+    let half_fov = camera.vertical_fov() as f32 * 0.5;
+    let maximum_vertical = direction.z * half_fov.cos() + (1.0 - direction.z * direction.z).max(0.0).sqrt() * half_fov.sin();
+    maximum_vertical > 0.0
 }
 
 impl Drop for SceneWindow {
@@ -926,6 +979,9 @@ mod tests {
     };
 
     use super::{PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError};
+    use super::{cloud_frame_deadline, deadline_passed};
+    use math::{DVec3, Vec3};
+    use render::scene::Camera;
 
     #[test]
     fn presentation_resets_recovery_limit() {
@@ -966,5 +1022,25 @@ mod tests {
         let error = SceneWindowError::Renderer(render::Error::UnsupportedSurface);
         let source = Error::source(&error).expect("renderer creation error must retain its source");
         assert!(source.downcast_ref::<render::Error>().is_some());
+    }
+
+    #[test]
+    fn cloud_redraws_require_visible_sky_and_nonzero_scroll() {
+        let now = Instant::now();
+        let sky = Camera::new(DVec3::ZERO, Vec3::Z, 1.0, [1280, 720]).unwrap();
+        let ground = Camera::new(DVec3::ZERO, Vec3::NEG_Z, 1.0, [1280, 720]).unwrap();
+        assert_eq!(cloud_frame_deadline(Some(sky), true, now), Some(now + super::FRAME_INTERVAL));
+        assert_eq!(cloud_frame_deadline(Some(sky), false, now), None);
+        assert_eq!(cloud_frame_deadline(Some(ground), true, now), None);
+        assert_eq!(cloud_frame_deadline(None, true, now), None);
+    }
+
+    #[test]
+    fn environment_deadline_only_invalidates_after_it_passes() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(16);
+        assert!(!deadline_passed(Some(deadline), now));
+        assert!(deadline_passed(Some(deadline), deadline));
+        assert!(!deadline_passed(None, now));
     }
 }

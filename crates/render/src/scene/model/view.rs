@@ -6,6 +6,8 @@ use std::{
     time::Instant,
 };
 
+use assets::TextureHandle;
+use utils::AssetId;
 use world::{Entity, Region, WorldRevision};
 
 use super::{Batch, Change, MeshChange, Mirror, SceneLifetime, Status};
@@ -217,6 +219,9 @@ impl SceneView {
 
     pub fn environment(&self, region: Region) -> Option<&RegionEnvironment> {
         if self.session.is_active() { self.mirror.environments.get(&region) } else { None }
+    }
+    pub fn environment_texture(&self, id: AssetId) -> Option<&TextureHandle> {
+        if self.session.is_active() { self.mirror.environment_textures.get(&id) } else { None }
     }
     pub fn patches(&self) -> impl Iterator<Item = (Region, &Patch)> {
         self.mirror.patches.iter().filter(|_| self.session.is_active()).map(|((region, _), patch)| (*region, patch))

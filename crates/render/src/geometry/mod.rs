@@ -34,7 +34,7 @@ use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{AgentPose, Camera, MeshId, ViewVersion};
 use crate::{
-    pipeline::{SurfacePipelines, Water},
+    pipeline::{Sky, SurfacePipelines, Water},
     texture::{TextureCompletion, TextureJob, TextureState, Textures},
 };
 
@@ -207,6 +207,7 @@ pub(crate) struct GeometryRenderer {
     memory: Arc<Accounting>,
     pipelines: SurfacePipelines,
     water: Water,
+    sky: Sky,
     textures: Textures,
     requested_textures: HashSet<TextureId>,
     instances: Buffer,
@@ -254,6 +255,8 @@ impl GeometryRenderer {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
         let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout);
+        let water = Water::new(device, format, &textures.layout);
+        let sky = Sky::new(device, format, &textures.layout);
         let indirect_bytes = MAX_FACE_INSTANCES * INDIRECT_DRAW_BYTES;
         Self {
             queue: queue.clone(),
@@ -261,7 +264,8 @@ impl GeometryRenderer {
             pipelines,
             textures,
             requested_textures: HashSet::new(),
-            water: Water::new(device, format),
+            water,
+            sky,
             instances: buffer(device, "Face instances", INSTANCE_BUFFER_BYTES, BufferUsages::VERTEX),
             indirect: buffer(device, "Scene indexed draws", indirect_bytes, BufferUsages::INDIRECT),
             indirect_first_instance: device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
@@ -385,7 +389,8 @@ impl GeometryRenderer {
         self.textures.set_soft_cap(mib);
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
-        self.water.draw(pass);
+        self.sky.draw(pass, &self.textures);
+        self.water.draw(pass, &self.textures);
         let mut pipeline = None;
         let mut texture = None;
         let mut terrain = None;

@@ -15,10 +15,10 @@ const MAX_DAY_LENGTH: f64 = 604_800.0;
 const DEFAULT_DAY_OFFSET: f64 = 57_600.0;
 const MAX_DAY_OFFSET: f64 = 86_400.0;
 
-const DEFAULT_SUN_TEXTURE: Option<AssetId> = None;
-const DEFAULT_MOON_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0xd07f6eedb96a47cdb51d400ad4a1c428)));
-const DEFAULT_CLOUD_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x1dc1368fe8fef02da08d9d9f11c1af6b)));
-const DEFAULT_WATER_NORMAL_MAP: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x822ded499a6cf61ccb896df54f42cdf4)));
+pub(crate) const DEFAULT_SUN_TEXTURE: Option<AssetId> = None;
+pub(crate) const DEFAULT_MOON_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0xd07f6eedb96a47cdb51d400ad4a1c428)));
+pub(crate) const DEFAULT_CLOUD_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x1dc1368fe8fef02da08d9d9f11c1af6b)));
+pub(crate) const DEFAULT_WATER_NORMAL_MAP: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x822ded499a6cf61ccb896df54f42cdf4)));
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Schedule {

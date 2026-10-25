@@ -72,7 +72,7 @@ fn transform(v: Input) -> Output {
     return transform(v);
 }
 
-struct Water {
+struct RegionWater {
     @location(0) color: vec4<f32>,
     @builtin(frag_depth) depth: f32,
 }
@@ -82,7 +82,7 @@ struct Surface {
     @builtin(frag_depth) depth: f32,
 }
 
-@fragment fn water_fragment(v: Output) -> Water {
+@fragment fn region_water_fragment(v: Output) -> RegionWater {
     let clip = camera.projection * vec4<f32>(v.relative_position, 1.0);
     let coordinates = water_coordinates(v.relative_position, surface_water);
     let wave1 = select(
@@ -130,7 +130,7 @@ struct Surface {
         surface_water,
         surface_atmosphere.atmosphere,
     );
-    var water: Water;
+    var water: RegionWater;
     water.color = color;
     water.depth = max(clamp(clip.z / clip.w, 0.0, 1.0), 0.00000001);
     return water;

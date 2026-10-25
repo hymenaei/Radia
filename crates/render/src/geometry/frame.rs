@@ -28,7 +28,7 @@ struct EnvironmentPairs {
     bloom: TexturePair,
     rainbow: TexturePair,
     halo: TexturePair,
-    water: TexturePair,
+    water_normal: TexturePair,
 }
 
 impl GeometryRenderer {
@@ -97,7 +97,7 @@ impl GeometryRenderer {
                     pickable: true,
                     faces: Vec::new(),
                     shading: ShadingMode::Studio,
-                    water_region: None,
+                    region_water_id: None,
                 },
                 object.materials(),
                 animation,
@@ -111,7 +111,7 @@ impl GeometryRenderer {
                     let (x, y) = patch.coordinates();
                     (1, u16::from(y) * 16 + u16::from(x), ShadingMode::Terrain)
                 }
-                SurfaceKind::Water => (0, 0, ShadingMode::Water),
+                SurfaceKind::RegionWater => (0, 0, ShadingMode::RegionWater),
             };
             Some((
                 (kind, u128::from(surface.region.get()), index),
@@ -120,10 +120,10 @@ impl GeometryRenderer {
                     position: surface.position,
                     rotation: Quat::IDENTITY,
                     scale: Vec3::ONE,
-                    pickable: surface.kind != SurfaceKind::Water,
+                    pickable: surface.kind != SurfaceKind::RegionWater,
                     faces: Vec::new(),
                     shading,
-                    water_region: (surface.kind == SurfaceKind::Water).then(|| u128::from(surface.region.get())),
+                    region_water_id: (surface.kind == SurfaceKind::RegionWater).then(|| u128::from(surface.region.get())),
                 },
                 None,
                 None,
@@ -187,7 +187,7 @@ impl GeometryRenderer {
         let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
         let faces_started = Instant::now();
         let mut batches = Batches::default();
-        self.water_region_count = 0;
+        self.region_water_count = 0;
         let mut uploaded = 0;
         let mut pending_meshes = HashSet::new();
         let mut pending_textures = HashSet::new();
@@ -226,7 +226,7 @@ impl GeometryRenderer {
                         params.color = [0.18, 0.23, 0.13, 1.0];
                         params.params[0] = 1.0;
                     }
-                    ShadingMode::Water => {}
+                    ShadingMode::RegionWater => {}
                     ShadingMode::Studio => {}
                 }
                 if params.blend && params.color[3] <= 0.0 {
@@ -238,8 +238,8 @@ impl GeometryRenderer {
                 {
                     pending_textures.insert(key.id);
                 }
-                let pipeline = if matches!(instance.shading, ShadingMode::Water) {
-                    Pipeline::Water
+                let pipeline = if matches!(instance.shading, ShadingMode::RegionWater) {
+                    Pipeline::RegionWater
                 } else {
                     surface_pipeline(params.blend, params.double_sided, instance.scale)
                 };
@@ -254,8 +254,8 @@ impl GeometryRenderer {
                     continue;
                 }
                 animated_faces |= animate_frame && params.texture.is_some();
-                if let Some(region) = instance.water_region {
-                    self.include_water_region(region, instance.position, camera.position());
+                if let Some(region) = instance.region_water_id {
+                    self.include_region_water(region, instance.position, camera.position());
                 }
                 instance.faces.push(PickFace { indices: face.indices.clone(), double_sided: params.double_sided });
             }
@@ -272,7 +272,7 @@ impl GeometryRenderer {
         }
         self.update_environment_uniforms(device, camera, projection, size, frame_input, pairs);
         self.stats.instances = self.visible.len();
-        self.stats.draw_calls = self.draws.len() + usize::from(self.water.active);
+        self.stats.draw_calls = self.draws.len() + usize::from(self.void_water.active);
         self.memory_stats();
         self.prepared = Some(FramePreparation {
             key,
@@ -297,7 +297,7 @@ impl GeometryRenderer {
         frame_input: FrameInput<'_>,
         pairs: EnvironmentPairs,
     ) {
-        let normal = pairs.water;
+        let normal = pairs.water_normal;
         self.pipelines.update_environment(
             device,
             &self.textures,
@@ -308,7 +308,7 @@ impl GeometryRenderer {
             frame_input.water_height,
             frame_input.water_scroll,
         );
-        self.water.update(
+        self.void_water.update(
             device,
             &self.textures,
             &self.queue,
@@ -318,8 +318,8 @@ impl GeometryRenderer {
             frame_input.environment,
             normal,
             frame_input.water_scroll,
-            &self.water_regions,
-            self.water_region_count,
+            &self.region_water_bounds,
+            self.region_water_count,
         );
         self.sky.update(
             device,
@@ -341,19 +341,19 @@ impl GeometryRenderer {
         );
     }
 
-    fn include_water_region(&mut self, region: u128, position: math::DVec3, camera: math::DVec3) {
-        if self.water_region_ids.get(..self.water_region_count).is_some_and(|ids| ids.contains(&region)) {
+    fn include_region_water(&mut self, region: u128, position: math::DVec3, camera: math::DVec3) {
+        if self.region_water_ids.get(..self.region_water_count).is_some_and(|ids| ids.contains(&region)) {
             return;
         }
         let relative = (position - camera).as_vec3();
         if !relative.is_finite() {
             return;
         }
-        let Some(cutout) = self.water_regions.get_mut(self.water_region_count) else { return };
+        let Some(cutout) = self.region_water_bounds.get_mut(self.region_water_count) else { return };
         *cutout = math::Vec4::new(relative.x, relative.y, 256.0, 256.0);
-        let Some(id) = self.water_region_ids.get_mut(self.water_region_count) else { return };
+        let Some(id) = self.region_water_ids.get_mut(self.region_water_count) else { return };
         *id = region;
-        self.water_region_count += 1;
+        self.region_water_count += 1;
     }
 
     fn record_prepare(&mut self, started: Instant, times: PrepareTimes, uploaded: usize) {
@@ -422,7 +422,7 @@ fn environment_pairs(
         bloom: blend_keys(device, environment.sky.bloom, view, textures),
         rainbow: blend_keys(device, environment.sky.rainbow, view, textures),
         halo: blend_keys(device, environment.sky.halo, view, textures),
-        water: blend_keys(device, environment.water.normal_map, view, textures),
+        water_normal: blend_keys(device, environment.water.normal_map, view, textures),
     }
 }
 

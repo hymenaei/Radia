@@ -86,7 +86,7 @@ mod tests {
             pickable: true,
             faces: Vec::new(),
             shading: ShadingMode::Studio,
-            water_region: None,
+            region_water_id: None,
         };
         let bytes = instance_base(&instance, DVec3::ZERO);
         let column = |index: usize| {

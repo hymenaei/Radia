@@ -386,46 +386,27 @@ mod tests {
         for (name, source) in [
             ("atmosphere", include_str!("shaders/atmosphere.wgsl")),
             (
-                "surface",
-                concat!(
-                    include_str!("shaders/atmosphere.wgsl"),
-                    include_str!("shaders/water_common.wgsl"),
-                    include_str!("shaders/surface.wgsl")
-                ),
+                "region water and surfaces",
+                concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/surface.wgsl")),
             ),
             (
-                "water",
+                "void water",
                 concat!(
                     include_str!("shaders/atmosphere.wgsl"),
-                    include_str!("shaders/water_common.wgsl"),
-                    include_str!("shaders/water.wgsl")
+                    include_str!("shaders/water.wgsl"),
+                    include_str!("shaders/void_water.wgsl")
                 ),
             ),
-            (
-                "sky",
-                concat!(
-                    include_str!("shaders/atmosphere.wgsl"),
-                    include_str!("shaders/water_common.wgsl"),
-                    include_str!("shaders/sky.wgsl")
-                ),
-            ),
+            ("sky", concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/sky.wgsl"))),
             ("stars", include_str!("shaders/stars.wgsl")),
             ("mipmap", include_str!("shaders/mipmap.wgsl")),
             (
                 "exposure",
-                concat!(
-                    include_str!("shaders/atmosphere.wgsl"),
-                    include_str!("shaders/water_common.wgsl"),
-                    include_str!("shaders/exposure.wgsl")
-                ),
+                concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/exposure.wgsl")),
             ),
             (
                 "tonemap",
-                concat!(
-                    include_str!("shaders/atmosphere.wgsl"),
-                    include_str!("shaders/water_common.wgsl"),
-                    include_str!("shaders/tonemap.wgsl")
-                ),
+                concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/tonemap.wgsl")),
             ),
         ] {
             let module = wgsl::parse_str(source).unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));

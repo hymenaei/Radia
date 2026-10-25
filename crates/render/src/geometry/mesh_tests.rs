@@ -72,7 +72,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
                 pickable: true,
                 faces: Vec::new(),
                 shading: ShadingMode::Studio,
-                water_region: None,
+                region_water_id: None,
             };
             let params = FaceParams::new(Some(&object.materials().unwrap()[0]));
             let packed = packed_instance(&instance_base(&instance, camera.position()), &params, instance.scale);

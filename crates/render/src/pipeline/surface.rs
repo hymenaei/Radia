@@ -37,7 +37,7 @@ pub(crate) enum Pipeline {
     Blend,
     BlendFlipped,
     BlendDoubleSided,
-    Water,
+    RegionWater,
 }
 
 pub(crate) struct SurfacePipelines {
@@ -47,14 +47,14 @@ pub(crate) struct SurfacePipelines {
     blend: RenderPipeline,
     blend_flipped: RenderPipeline,
     blend_double_sided: RenderPipeline,
-    water: RenderPipeline,
+    region_water: RenderPipeline,
     frame_environment_layout: BindGroupLayout,
     camera: Buffer,
     binding: BindGroup,
     atmosphere: Buffer,
-    water_uniform: Buffer,
-    water_normal_keys: [Option<TextureKey>; 2],
-    water_normal_states: [Option<TextureViewState>; 2],
+    region_water_uniform: Buffer,
+    region_water_normal_keys: [Option<TextureKey>; 2],
+    region_water_normal_states: [Option<TextureViewState>; 2],
 }
 
 impl SurfacePipelines {
@@ -64,7 +64,7 @@ impl SurfacePipelines {
             source: ShaderSource::Wgsl(
                 concat!(
                     include_str!("../shaders/atmosphere.wgsl"),
-                    include_str!("../shaders/water_common.wgsl"),
+                    include_str!("../shaders/water.wgsl"),
                     include_str!("../shaders/surface.wgsl")
                 )
                 .into(),
@@ -174,11 +174,14 @@ impl SurfacePipelines {
             primitive: PrimitiveState { cull_mode: None, ..blended.primitive },
             ..blended
         });
-        let water = device.create_render_pipeline(&RenderPipelineDescriptor {
+        let region_water = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Region water"),
             layout: Some(&plain_layout),
             vertex: VertexState { entry_point: Some("vertex"), ..descriptor.vertex.clone() },
-            fragment: Some(FragmentState { entry_point: Some("water_fragment"), ..descriptor.fragment.clone().expect("scene fragment") }),
+            fragment: Some(FragmentState {
+                entry_point: Some("region_water_fragment"),
+                ..descriptor.fragment.clone().expect("scene fragment")
+            }),
             primitive: PrimitiveState { cull_mode: None, ..descriptor.primitive },
             depth_stencil: Some(DepthStencilState {
                 depth_compare: Some(CompareFunction::GreaterEqual),
@@ -193,14 +196,14 @@ impl SurfacePipelines {
             mapped_at_creation: false,
         });
         let atmosphere = uniform_buffer(device, "Surface atmosphere", ATMOSPHERE_BYTES);
-        let water_uniform = uniform_buffer(device, "Surface water", WATER_BYTES);
+        let region_water_uniform = uniform_buffer(device, "Region water", WATER_BYTES);
         let binding = device.create_bind_group(&BindGroupDescriptor {
             label: Some("Frame environment"),
             layout: &frame_environment_layout,
             entries: &[
                 BindGroupEntry { binding: 0, resource: BindingResource::Buffer(camera.as_entire_buffer_binding()) },
                 BindGroupEntry { binding: 1, resource: BindingResource::Buffer(atmosphere.as_entire_buffer_binding()) },
-                BindGroupEntry { binding: 2, resource: BindingResource::Buffer(water_uniform.as_entire_buffer_binding()) },
+                BindGroupEntry { binding: 2, resource: BindingResource::Buffer(region_water_uniform.as_entire_buffer_binding()) },
                 BindGroupEntry { binding: 3, resource: BindingResource::TextureView(texture_store.view(None)) },
                 BindGroupEntry { binding: 4, resource: BindingResource::TextureView(texture_store.view(None)) },
                 BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&texture_store.default_sampler) },
@@ -213,14 +216,14 @@ impl SurfacePipelines {
             blend,
             blend_flipped,
             blend_double_sided,
-            water,
+            region_water,
             frame_environment_layout,
             camera,
             binding,
             atmosphere,
-            water_uniform,
-            water_normal_keys: [None, None],
-            water_normal_states: [None, None],
+            region_water_uniform,
+            region_water_normal_keys: [None, None],
+            region_water_normal_states: [None, None],
         }
     }
     pub(crate) fn update_camera_uniform(&self, queue: &Queue, camera: Camera, size: [u32; 2]) -> Mat4 {
@@ -245,7 +248,7 @@ impl SurfacePipelines {
             Pipeline::Blend => &self.blend,
             Pipeline::BlendFlipped => &self.blend_flipped,
             Pipeline::BlendDoubleSided => &self.blend_double_sided,
-            Pipeline::Water => &self.water,
+            Pipeline::RegionWater => &self.region_water,
         });
         pass.set_bind_group(0, &self.binding, &[]);
     }
@@ -264,7 +267,7 @@ impl SurfacePipelines {
         let atmosphere = atmosphere_values(environment);
         let mut atmosphere_bytes = [0; ATMOSPHERE_BYTES];
         write_floats(queue, &self.atmosphere, &mut atmosphere_bytes, &atmosphere);
-        let water_values = water_surface_values(
+        let region_water_values = water_surface_values(
             environment,
             camera_position,
             water_height,
@@ -272,25 +275,25 @@ impl SurfacePipelines {
             normal_map.factor,
             normal_map.current.is_some() || normal_map.next.is_some(),
         );
-        let mut water_bytes = [0; WATER_BYTES];
-        write_floats(queue, &self.water_uniform, &mut water_bytes, &water_values);
+        let mut region_water_bytes = [0; WATER_BYTES];
+        write_floats(queue, &self.region_water_uniform, &mut region_water_bytes, &region_water_values);
         let keys = [normal_map.current, normal_map.next];
         let states = keys.map(|key| textures.view_state(key));
-        if keys != self.water_normal_keys || states != self.water_normal_states {
+        if keys != self.region_water_normal_keys || states != self.region_water_normal_states {
             self.binding = device.create_bind_group(&BindGroupDescriptor {
                 label: Some("Frame environment"),
                 layout: &self.frame_environment_layout,
                 entries: &[
                     BindGroupEntry { binding: 0, resource: BindingResource::Buffer(self.camera.as_entire_buffer_binding()) },
                     BindGroupEntry { binding: 1, resource: BindingResource::Buffer(self.atmosphere.as_entire_buffer_binding()) },
-                    BindGroupEntry { binding: 2, resource: BindingResource::Buffer(self.water_uniform.as_entire_buffer_binding()) },
+                    BindGroupEntry { binding: 2, resource: BindingResource::Buffer(self.region_water_uniform.as_entire_buffer_binding()) },
                     BindGroupEntry { binding: 3, resource: BindingResource::TextureView(textures.view(normal_map.current)) },
                     BindGroupEntry { binding: 4, resource: BindingResource::TextureView(textures.view(normal_map.next)) },
                     BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&textures.default_sampler) },
                 ],
             });
-            self.water_normal_keys = keys;
-            self.water_normal_states = states;
+            self.region_water_normal_keys = keys;
+            self.region_water_normal_states = states;
         }
     }
 }

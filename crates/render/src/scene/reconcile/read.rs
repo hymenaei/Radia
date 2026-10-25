@@ -223,8 +223,8 @@ impl Reconciler {
                     }
                     if self.state.mirror.water.get(region).copied() != Some(page.water_height) {
                         self.state.mirror.water.insert(*region, page.water_height);
-                        if page.water_height.is_some() || self.state.mirror.surfaces.contains_key(&(*region, SurfaceKind::Water)) {
-                            self.preparation.surfaces.water(*region);
+                        if page.water_height.is_some() || self.state.mirror.surfaces.contains_key(&(*region, SurfaceKind::RegionWater)) {
+                            self.preparation.surfaces.region_water(*region);
                         }
                         self.publication.dirty.water.insert(*region);
                     }

@@ -162,7 +162,7 @@ mod tests {
             pickable: true,
             faces: vec![PickFace { indices, double_sided }],
             shading: ShadingMode::Studio,
-            water_region: None,
+            region_water_id: None,
         }
     }
 

@@ -51,7 +51,3 @@ Start with the protocol, format, observed behavior, or failing compatibility cas
 For each compatibility decision, record the behavior Radia must preserve, the source URL and revision, the specification or template version, and the provenance of any fixture. Redact session data before adding captured fixtures. Implement the behavior behind Radia's own boundaries and verify it with tests. Do not translate source files or mirror abstractions. The ignore categories are priorities, not bans on inspection; consult any file that resolves a real compatibility question.
 
 **Preserve what Second Life requires. Redesign how Radia achieves it.**
-
-## Procedural prim output
-
-Use [`llvolume.cpp` at revision `e34b5c188e758b6d24b768cc44fbee459be2855c`](https://raw.githubusercontent.com/secondlife/viewer/e34b5c188e758b6d24b768cc44fbee459be2855c/indra/llmath/llvolume.cpp) as the reference for classic prim mesh output. Preserve its positions, winding, UVs, face order, and detail counts. Side normals come from raw triangle cross products accumulated per face, with alternating diagonal weighting, seam stitching, and sphere pole overrides. Generic caps use flat normals and source triangulation; uncut square caps use a planar grid. Regression expectations in `crates/render/src/scene/prim.rs` are derived from those algorithms rather than captured viewer meshes.

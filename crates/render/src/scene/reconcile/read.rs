@@ -4,14 +4,15 @@ use world::{
 };
 
 use super::{
-    Arc, Change, Entity, EnvironmentData, Instant, Lease, MAX_OBJECT_PAGE_ITEMS, MAX_OBJECTS, MAX_PATCHES, MAX_PENDING, MAX_REGIONS,
-    MAX_RETAINED_BYTES, Object, PATCH_BYTES, Patch, READ_BYTES, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler,
-    RecoveryReason, Region, RegionData, RegionSummary, SurfaceKind, Weak, WorldReadError, WorldRevision, size_of,
+    Arc, Change, Entity, Instant, Lease, MAX_OBJECT_PAGE_ITEMS, MAX_OBJECTS, MAX_PATCHES, MAX_PENDING, MAX_REGIONS, MAX_RETAINED_BYTES,
+    Object, PATCH_BYTES, Patch, READ_BYTES, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, RecoveryReason, Region,
+    RegionData, RegionSummary, SurfaceKind, Weak, WorldReadError, WorldRevision, size_of,
 };
+use crate::scene::region_environment::RegionEnvironmentResolver;
 
 impl Reconciler {
     pub(super) fn read(&mut self, query: ReadQuery, now: Instant) -> ReconcileStep {
-        let bytes = if matches!(query, ReadQuery::Environment(_)) { MAX_ENVIRONMENT_READ_BYTES + 32 } else { READ_BYTES };
+        let bytes = if matches!(query, ReadQuery::Environment(_)) { MAX_ENVIRONMENT_READ_BYTES + 512 } else { READ_BYTES };
         let Some(lease) = self.budget.reserve(bytes) else {
             self.begin_recovery(RecoveryReason::Capacity, now);
             return ReconcileStep::Continue;
@@ -167,23 +168,31 @@ impl Reconciler {
                 self.publication.publish = !partial;
             }
             (ReadQuery::Environment(region), ReadReply::Environment(source)) => {
-                let old_bytes = self.state.mirror.environments.get(region).map_or(0, |source| source.source().retained_bytes() + 32);
+                let old_source_bytes = self.preparation.environments.source_bytes(*region);
                 if let Some(source) = source {
                     if source.region != *region || !self.state.mirror.regions.contains_key(region) {
                         return Err(RecoveryReason::InvalidReply);
                     }
-                    let bytes = source.retained_bytes() + 32;
-                    if bytes > MAX_ENVIRONMENT_READ_BYTES + 32 {
-                        return Err(RecoveryReason::Capacity);
+                    if !RegionEnvironmentResolver::has_source(&source) {
+                        self.retain(0, old_source_bytes)?;
+                        self.preparation.environments.remove(*region);
+                        self.clear_environment(*region);
+                    } else if !self.preparation.environments.matches(*region, &source) {
+                        let bytes = RegionEnvironmentResolver::retained_bytes(&source);
+                        if bytes > MAX_ENVIRONMENT_READ_BYTES + 512 {
+                            return Err(RecoveryReason::Capacity);
+                        }
+                        self.retain(bytes, old_source_bytes)?;
+                        let charge = lease.split(bytes).ok_or(RecoveryReason::Capacity)?;
+                        if !self.preparation.environments.observe(source, charge) {
+                            return Err(RecoveryReason::Capacity);
+                        }
                     }
-                    let charge = lease.split(bytes).ok_or(RecoveryReason::Capacity)?;
-                    self.retain(bytes, old_bytes)?;
-                    self.state.mirror.environments.insert(*region, EnvironmentData::new(source, charge));
                 } else {
-                    self.state.bytes -= old_bytes;
-                    self.state.mirror.environments.remove(region);
+                    self.retain(0, old_source_bytes)?;
+                    self.preparation.environments.remove(*region);
+                    self.clear_environment(*region);
                 }
-                self.publication.dirty.environments.insert(*region);
                 self.publication.publish = true;
             }
             (ReadQuery::Terrain(region, _), ReadReply::Terrain(page)) => match page {
@@ -335,8 +344,10 @@ impl Reconciler {
         if let Some(old) = self.state.mirror.regions.remove(&region) {
             self.state.bytes -= region_bytes(&old);
         }
+        self.state.bytes -= self.preparation.environments.source_bytes(region);
+        self.preparation.environments.retire(region);
         if let Some(old) = self.state.mirror.environments.remove(&region) {
-            self.state.bytes -= old.source().retained_bytes() + 32;
+            self.state.bytes -= old.retained_bytes();
         }
         self.world.environments.remove(&region);
         self.publication.dirty.environments.remove(&region);

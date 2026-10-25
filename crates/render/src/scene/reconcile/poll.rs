@@ -2,9 +2,13 @@ use super::{
     Change, DeliveryState, Duration, Instant, MAX_OBJECT_DETAIL_BATCH_ITEMS, MeshChange, MeshJob, POLL_DELAY, READ_QUANTUM, ReadQuery,
     ReconcileStep, Reconciler, RecoveryReason, Status, SurfaceStep, WORK, Work,
 };
+use crate::scene::region_environment::EnvironmentStart;
 
 impl Reconciler {
     pub fn poll(&mut self, now: Instant) -> ReconcileStep {
+        if let Some(event) = self.preparation.environments.event() {
+            return ReconcileStep::Asset(event);
+        }
         if !self.session.is_active() {
             return ReconcileStep::Closed;
         }
@@ -14,6 +18,13 @@ impl Reconciler {
         }
         if let Some(event) = self.preparation.assets.event() {
             return ReconcileStep::Asset(event);
+        }
+        self.preparation.environments.retry_ready(now);
+        if let Some(start) = self.preparation.environments.start(self.world.epoch, self.session.clone()) {
+            return match start {
+                EnvironmentStart::Asset(event) => ReconcileStep::Asset(event),
+                EnvironmentStart::Inline(job) => ReconcileStep::Build(MeshJob(Work::Environment(job))),
+            };
         }
         if self.world.reading.as_ref().is_some_and(|reading| reading.upgrade().is_none()) {
             self.world.reading = None;
@@ -185,7 +196,13 @@ impl Reconciler {
             ReconcileStep::Wait(now + POLL_DELAY)
         } else if self.preparation.meshes.has_work() || self.preparation.assets.has_work() {
             ReconcileStep::Continue
-        } else if self.preparation.meshes.retry_admission() || self.preparation.assets.retry_admission() || self.viewer.waiting() {
+        } else if let Some(retry_at) = self.preparation.environments.retry_at(now) {
+            ReconcileStep::Wait(retry_at)
+        } else if self.preparation.meshes.retry_admission()
+            || self.preparation.assets.retry_admission()
+            || self.preparation.environments.waiting()
+            || self.viewer.waiting()
+        {
             ReconcileStep::Wait(now + Duration::from_millis(200))
         } else if self.preparation.meshes.waiting() || surfaces_waiting {
             ReconcileStep::Wait(now + POLL_DELAY)

@@ -9,6 +9,7 @@ mod model;
 mod planning;
 mod prim;
 mod reconcile;
+mod region_environment;
 mod surface;
 
 pub use asset_demand::{AssetChange, AssetRequest, AssetTicket};
@@ -26,5 +27,6 @@ pub use planning::{MeshCompletion, MeshJob};
 pub use reconcile::{
     MAX_BATCH_CHANGES, MAX_OBJECTS, MAX_REGIONS, MAX_RETAINED_BYTES, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler,
 };
+pub use region_environment::RegionEnvironment;
 pub use surface::{Surface, SurfaceKind};
 pub use utils::ExperienceId;

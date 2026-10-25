@@ -23,8 +23,9 @@ use crate::scene::{
     budget::Lease,
     dependencies::{Dependencies, DependencyTraversal},
     environment::ViewerEnvironments,
-    model::{Change, DeliveryState, EnvironmentData, MeshChange, Mirror, Receipt, SceneLifetime},
+    model::{Change, DeliveryState, MeshChange, Mirror, Receipt, SceneLifetime},
     planning::{Completion, MeshPlanner, Work},
+    region_environment::{ReadyCandidate, ReadyValue, RegionEnvironment, RegionEnvironmentResolver, Resolution},
     surface::{SurfaceJobs, SurfaceStep},
 };
 
@@ -133,6 +134,7 @@ pub struct Reconciler {
     publication: PublicationState,
     recovery: RecoveryState,
     viewer: ViewerEnvironments,
+    environment_identity: u64,
 }
 
 impl Reconciler {
@@ -146,6 +148,7 @@ impl Reconciler {
             preparation: Preparation {
                 meshes: MeshPlanner::new(budget.clone()),
                 assets: AssetDemand::new(budget.clone()),
+                environments: RegionEnvironmentResolver::new(budget.clone()),
                 surfaces: SurfaceJobs::new(budget.clone()),
                 expansion: DependencyTraversal::default(),
                 scan: VecDeque::new(),
@@ -162,6 +165,7 @@ impl Reconciler {
                 published_status: Status::Loading,
             },
             recovery: RecoveryState { startup: true, status: Status::Loading, status_pending: false, failures: 0, retry: None },
+            environment_identity: 1,
             budget,
         };
         (scene, view)
@@ -188,6 +192,14 @@ impl Reconciler {
     }
 
     pub fn complete_asset(&mut self, ticket: AssetTicket, status: assets::Status) {
+        match self.preparation.environments.complete_asset(ticket, &status) {
+            Resolution::Unhandled => {}
+            Resolution::Pending => return,
+            resolution => {
+                self.resolve_environment(resolution);
+                return;
+            }
+        }
         if self.viewer.complete(ticket, &status) {
             return;
         }
@@ -208,6 +220,10 @@ impl Reconciler {
                     self.publication.publish = true;
                 }
             }
+            Completion::Environment(completion) => {
+                let resolution = self.preparation.environments.complete_inline(completion, self.world.epoch, &self.session);
+                self.resolve_environment(resolution);
+            }
         }
     }
 
@@ -226,6 +242,66 @@ impl Reconciler {
         self.publication.publish = false;
         self.publication.replace = true;
         self.recovery.startup = false;
+    }
+
+    pub(super) fn clear_environment(&mut self, region: Region) {
+        if let Some(environment) = self.state.mirror.environments.remove(&region) {
+            self.state.bytes -= environment.retained_bytes();
+            self.publication.dirty.environments.insert(region);
+            self.publication.publish = true;
+        }
+    }
+
+    fn resolve_environment(&mut self, resolution: Resolution) {
+        match resolution {
+            Resolution::Unhandled | Resolution::Pending => {}
+            Resolution::Failed { region, exhausted } => {
+                if exhausted {
+                    self.clear_environment(region);
+                }
+            }
+            Resolution::Ready(candidate) => self.install_environment(candidate),
+        }
+    }
+
+    fn install_environment(&mut self, candidate: ReadyCandidate) {
+        if self
+            .state
+            .mirror
+            .environments
+            .get(&candidate.region)
+            .is_some_and(|current| current.same_environment(&candidate.value, &candidate.candidate))
+        {
+            return;
+        }
+        let identity = self.environment_identity;
+        let environment = match candidate.value {
+            ReadyValue::Asset(environment) => RegionEnvironment::asset(environment, candidate.candidate.clone(), identity, &self.budget),
+            ReadyValue::Inline(description, mut work) => {
+                RegionEnvironment::inline(description, candidate.candidate.clone(), identity, &mut work, &self.budget)
+            }
+        };
+        let Some(environment) = environment else {
+            self.preparation.environments.retry_capacity(candidate.region, candidate.generation, candidate.index);
+            return;
+        };
+        let old_bytes = self.state.mirror.environments.get(&candidate.region).map_or(0, RegionEnvironment::retained_bytes);
+        let new_bytes = environment.retained_bytes();
+        if self.retain_environment(new_bytes, old_bytes).is_err() {
+            self.preparation.environments.retry_capacity(candidate.region, candidate.generation, candidate.index);
+            return;
+        }
+        self.environment_identity = self.environment_identity.checked_add(1).expect("environment identities exhausted");
+        self.state.mirror.environments.insert(candidate.region, environment);
+        self.publication.dirty.environments.insert(candidate.region);
+        self.publication.publish = true;
+    }
+
+    fn retain_environment(&mut self, new: usize, old: usize) -> Result<(), RecoveryReason> {
+        let total =
+            (self.state.bytes - old).checked_add(new).filter(|bytes| *bytes <= MAX_RETAINED_BYTES).ok_or(RecoveryReason::Capacity)?;
+        self.state.bytes = total;
+        Ok(())
     }
 
     fn begin_recovery(&mut self, reason: RecoveryReason, now: Instant) {
@@ -308,6 +384,7 @@ struct SceneState {
 struct Preparation {
     meshes: MeshPlanner,
     assets: AssetDemand,
+    environments: RegionEnvironmentResolver,
     surfaces: SurfaceJobs,
     expansion: DependencyTraversal,
     scan: VecDeque<Entity>,
@@ -317,6 +394,7 @@ impl Preparation {
     fn reset(&mut self, budget: Budget) {
         self.meshes.reset(budget.clone());
         self.assets.reset();
+        self.environments.reset();
         self.surfaces = SurfaceJobs::new(budget);
         self.expansion.clear();
         self.scan.clear();

@@ -1,3 +1,4 @@
+pub mod environment;
 mod geometry;
 pub mod material;
 mod pipeline;

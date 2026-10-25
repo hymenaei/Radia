@@ -16,7 +16,7 @@ use std::{
 };
 
 use assets::TextureId;
-use math::{DVec3, Quat, Vec3};
+use math::{DVec3, Quat, Vec3, Vec4};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, IndexFormat, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
@@ -25,11 +25,10 @@ use wgpu::{
 use self::batching::{DrawCommand, MAX_FACE_INSTANCES};
 use self::mesh::GpuMesh;
 use self::storage::Storage;
-use crate::scene::{Camera, MeshId, SharedMesh, ViewVersion};
+use crate::scene::{Camera, MAX_REGIONS, MeshId, SharedMesh, ViewVersion};
 use crate::{
-    environment::Evaluated,
     pipeline::{INSTANCE_BYTES, Sky, SurfacePipelines, Water},
-    texture::{TextureCompletion, TextureJob, TextureState, Textures},
+    texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
 
 pub use pick::PickError;
@@ -132,6 +131,7 @@ pub(crate) struct Instance {
     pickable: bool,
     faces: Vec<PickFace>,
     shading: ShadingMode,
+    water_region: Option<u128>,
 }
 
 pub(crate) struct PickFace {
@@ -157,25 +157,28 @@ struct FramePreparationKey {
     version: ViewVersion,
     camera: Camera,
     size: [u32; 2],
-    water_height: Option<f64>,
-    environment: Option<Evaluated>,
 }
 
 struct FramePreparation {
     key: FramePreparationKey,
     textures: TextureState,
+    geometry_textures: GeometryTextureState,
     meshes: MeshState,
     more_meshes: bool,
     animated_faces: bool,
 }
 
 impl FramePreparation {
-    fn needs_frame(&self, textures: TextureState, meshes: MeshState) -> bool {
-        self.animated_faces || self.more_meshes || self.textures != textures || self.meshes != meshes
+    fn needs_frame(&self, textures: TextureState, geometry_textures: GeometryTextureState, meshes: MeshState) -> bool {
+        self.animated_faces
+            || self.more_meshes
+            || self.textures != textures
+            || self.geometry_textures != geometry_textures
+            || self.meshes != meshes
     }
 
-    fn reusable(&self, key: &FramePreparationKey, textures: TextureState, meshes: MeshState) -> bool {
-        self.key == *key && self.textures == textures && self.meshes == meshes && !self.more_meshes && !self.animated_faces
+    fn reusable(&self, key: &FramePreparationKey, textures: GeometryTextureState, meshes: MeshState) -> bool {
+        self.key == *key && self.geometry_textures == textures && self.meshes == meshes && !self.more_meshes && !self.animated_faces
     }
 }
 
@@ -196,6 +199,11 @@ pub(crate) struct GeometryRenderer {
     sky: Sky,
     textures: Textures,
     requested_textures: HashSet<TextureId>,
+    visible_textures: HashSet<TextureId>,
+    water_regions: [Vec4; MAX_REGIONS],
+    water_region_ids: [u128; MAX_REGIONS],
+    water_region_count: usize,
+    water_normal: Option<crate::texture::TextureKey>,
     instances: Buffer,
     depth: Option<Depth>,
     meshes: HashMap<MeshId, GpuMesh>,
@@ -215,7 +223,9 @@ impl GeometryRenderer {
     }
 
     pub(crate) fn needs_frame(&self) -> bool {
-        self.prepared.as_ref().is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.memory.mesh_state()))
+        self.prepared
+            .as_ref()
+            .is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.textures.geometry_state(), self.memory.mesh_state()))
             || self.textures.uploading()
     }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
@@ -230,6 +240,11 @@ impl GeometryRenderer {
             pipelines,
             textures,
             requested_textures: HashSet::new(),
+            visible_textures: HashSet::new(),
+            water_regions: [Vec4::ZERO; MAX_REGIONS],
+            water_region_ids: [0; MAX_REGIONS],
+            water_region_count: 0,
+            water_normal: None,
             water,
             sky,
             instances: buffer(device, "Face instances", MAX_FACE_INSTANCES * INSTANCE_BYTES, BufferUsages::VERTEX),
@@ -321,6 +336,9 @@ impl GeometryRenderer {
             if texture != Some(draw.texture) {
                 pass.set_bind_group(1, self.textures.binding(draw.texture), &[]);
                 texture = Some(draw.texture);
+            }
+            if draw.pipeline == crate::pipeline::Pipeline::Water {
+                self.pipelines.bind_water_texture(pass, &self.textures, self.water_normal);
             }
             let mesh = &self.meshes[&draw.mesh];
             let allocation = &mesh.allocation;

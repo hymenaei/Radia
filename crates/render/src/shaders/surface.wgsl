@@ -18,6 +18,8 @@ struct SurfaceWater {
 }
 @group(2) @binding(0) var<uniform> surface_atmosphere: SurfaceAtmosphere;
 @group(3) @binding(0) var<uniform> surface_water: SurfaceWater;
+@group(4) @binding(0) var water_normal_image: texture_2d<f32>;
+@group(4) @binding(1) var water_normal_sampler: sampler;
 
 struct Input {
     @location(0) position: vec3<f32>,
@@ -76,12 +78,6 @@ fn transform(v: Input) -> Output {
     return transform(v);
 }
 
-@vertex fn water_vertex(v: Input) -> Output {
-    var out = transform(v);
-    out.position.z = max(out.position.z, 0.0);
-    return out;
-}
-
 struct Water {
     @location(0) color: vec4<f32>,
     @builtin(frag_depth) depth: f32,
@@ -99,7 +95,7 @@ struct Surface {
     var normal = vec3<f32>(0.0, 0.0, 1.0);
     if surface_water.params.w > 0.5 {
         let uv = v.relative_position.xy * surface_water.normal.x * 0.015 + surface_water.waves.xy * 0.03 + surface_water.waves.zw * -0.02;
-        let sampled = textureSample(image, image_sampler, uv).xyz * 2.0 - vec3<f32>(1.0);
+        let sampled = textureSample(water_normal_image, water_normal_sampler, uv).xyz * 2.0 - vec3<f32>(1.0);
         normal = safe_normalize(mix(normal, safe_normalize(sampled), 0.12));
     }
     let cosine = max(dot(normal, safe_normalize(-direction)), 0.0);

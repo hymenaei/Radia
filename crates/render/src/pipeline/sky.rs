@@ -57,6 +57,11 @@ impl Sky {
             bind_group_layouts: &[Some(&layout), Some(textures)],
             immediate_size: 0,
         });
+        let cloud_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Cloud layers"),
+            bind_group_layouts: &[Some(&layout), Some(textures), Some(textures)],
+            immediate_size: 0,
+        });
         let buffers = [];
         let targets = [Some(ColorTargetState { format, blend: None, write_mask: ColorWrites::ALL })];
         let depth = Some(DepthStencilState {
@@ -97,6 +102,7 @@ impl Sky {
         };
         let cloud = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Cloud layer"),
+            layout: Some(&cloud_pipeline_layout),
             fragment: Some(FragmentState { entry_point: Some("cloud_fragment"), ..translucent.fragment.clone().expect("sky fragment") }),
             ..translucent.clone()
         });
@@ -139,6 +145,7 @@ impl Sky {
         &mut self,
         queue: &Queue,
         inverse: Mat4,
+        altitude: f32,
         environment: Option<&Evaluated>,
         cloud_scroll: [f32; 2],
         sun_textures: TexturePair,
@@ -153,7 +160,7 @@ impl Sky {
         let mut values = [0.0; UNIFORM_FLOATS];
         let mut offset = 0;
         append(&mut values, &mut offset, inverse.to_cols_array());
-        append(&mut values, &mut offset, atmosphere_values(Some(environment)));
+        append(&mut values, &mut offset, atmosphere_values(Some(environment), altitude));
         append(&mut values, &mut offset, environment.sky.sun_direction);
         append(&mut values, &mut offset, [environment.sky.sun.scale]);
         append(&mut values, &mut offset, environment.sky.moon_direction);
@@ -175,17 +182,13 @@ impl Sky {
         );
         append(&mut values, &mut offset, [environment.sky.clouds.scale, environment.sky.clouds.variance, 0.0, 0.0]);
         append(&mut values, &mut offset, [cloud_scroll[0], cloud_scroll[1], 0.0, 0.0]);
-        append(&mut values, &mut offset, [sun_textures.factor, moon_textures.factor, cloud_textures.factor, environment.sky.gamma]);
+        append(&mut values, &mut offset, [sun_textures.factor, moon_textures.factor, cloud_textures.factor, 0.0]);
         append(
             &mut values,
             &mut offset,
             [resident(sun_textures.current), resident(sun_textures.next), resident(moon_textures.current), resident(moon_textures.next)],
         );
-        append(
-            &mut values,
-            &mut offset,
-            [resident(cloud_textures.current), resident(cloud_textures.next), environment.sky.moon_brightness, environment.sky.gamma],
-        );
+        append(&mut values, &mut offset, [0.0, 0.0, environment.sky.moon_brightness, 0.0]);
         let mut bytes = [0; UNIFORM_BYTES];
         for (target, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
             *target = value.to_le_bytes();
@@ -202,7 +205,7 @@ impl Sky {
         pass.set_pipeline(&self.sky);
         pass.set_bind_group(1, textures.binding(None), &[]);
         pass.draw(0..3, 0..1);
-        draw_pair(pass, &self.cloud, textures, self.cloud_textures);
+        draw_cloud(pass, &self.cloud, textures, self.cloud_textures);
         draw_pair(pass, &self.sun, textures, self.sun_textures);
         draw_pair(pass, &self.moon, textures, self.moon_textures);
     }
@@ -218,13 +221,31 @@ fn draw_pair(pass: &mut RenderPass<'_>, pipeline: &RenderPipeline, textures: &Te
     }
 }
 
+fn draw_cloud(pass: &mut RenderPass<'_>, pipeline: &RenderPipeline, textures: &Textures, pair: TexturePair) {
+    if pair.current.is_none() && pair.next.is_none() {
+        return;
+    }
+    let current = pair.current.or(pair.next);
+    let next = pair.next.or(pair.current);
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(1, textures.binding(current), &[]);
+    pass.set_bind_group(2, textures.binding(next), &[]);
+    pass.draw(0..3, 0..1);
+}
+
 fn resident(key: Option<TextureKey>) -> f32 {
     if key.is_some() { 1.0 } else { 0.0 }
 }
 
 pub(crate) fn blend_keys(device: &Device, blend: TextureBlend, view: &SceneView, textures: &mut Textures) -> TexturePair {
-    let current = resident_key(device, blend.current, view, textures);
-    let next = resident_key(device, blend.next, view, textures);
+    let mut current = resident_key(device, blend.current, view, textures);
+    let mut next = resident_key(device, blend.next, view, textures);
+    if current.is_none() {
+        current = next.take();
+    }
+    if next.is_none() {
+        next = current;
+    }
     TexturePair { current, next, factor: if current == next { 0.0 } else { blend.factor } }
 }
 

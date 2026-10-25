@@ -10,7 +10,10 @@ use wgpu::{
 
 use crate::scene::Camera;
 
-use crate::{environment::Evaluated, texture::TextureKey};
+use crate::{
+    environment::Evaluated,
+    texture::{TextureKey, Textures},
+};
 
 use super::{
     atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values},
@@ -87,6 +90,11 @@ impl SurfacePipelines {
             bind_group_layouts: &[Some(&camera_layout), Some(textures), Some(&atmosphere_layout), Some(&water_layout)],
             immediate_size: 0,
         });
+        let region_water_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Region water pipeline"),
+            bind_group_layouts: &[Some(&camera_layout), Some(textures), Some(&atmosphere_layout), Some(&water_layout), Some(textures)],
+            immediate_size: 0,
+        });
         let buffers = [
             VertexBufferLayout {
                 array_stride: VERTEX_BYTES as u64,
@@ -158,7 +166,8 @@ impl SurfacePipelines {
         });
         let water = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Region water"),
-            vertex: VertexState { entry_point: Some("water_vertex"), ..descriptor.vertex.clone() },
+            layout: Some(&region_water_layout),
+            vertex: VertexState { entry_point: Some("vertex"), ..descriptor.vertex.clone() },
             fragment: Some(FragmentState { entry_point: Some("water_fragment"), ..descriptor.fragment.clone().expect("scene fragment") }),
             depth_stencil: Some(DepthStencilState {
                 depth_compare: Some(CompareFunction::GreaterEqual),
@@ -227,15 +236,20 @@ impl SurfacePipelines {
         pass.set_bind_group(3, &self.water_binding, &[]);
     }
 
+    pub(crate) fn bind_water_texture(&self, pass: &mut RenderPass<'_>, textures: &Textures, key: Option<TextureKey>) {
+        pass.set_bind_group(4, textures.binding(key), &[]);
+    }
+
     pub(crate) fn update_environment(
         &self,
         queue: &Queue,
         draw_distance: f32,
+        altitude: f32,
         environment: Option<&Evaluated>,
         normal_map: Option<TextureKey>,
     ) {
         let mut atmosphere = [0.0; ATMOSPHERE_FLOATS + 4];
-        atmosphere[..ATMOSPHERE_FLOATS].copy_from_slice(&atmosphere_values(environment));
+        atmosphere[..ATMOSPHERE_FLOATS].copy_from_slice(&atmosphere_values(environment, altitude));
         if let Some(distance) = atmosphere.get_mut(ATMOSPHERE_FLOATS) {
             *distance = draw_distance;
         }

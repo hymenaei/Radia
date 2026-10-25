@@ -36,17 +36,19 @@ fn smooth_positive(value: f32) -> f32 {
 
 fn atmosphere_terms(direction: vec3<f32>, atmosphere: Atmosphere) -> AtmosphereTerms {
     var terms: AtmosphereTerms;
-    terms.ray = safe_normalize(vec3<f32>(direction.x, direction.z, direction.y));
+    let max_y = max(atmosphere.haze.w, 0.0);
+    let altitude = clamp(atmosphere.distance.y, -32000.0, max_y);
+    var relative_position = safe_normalize(vec3<f32>(direction.x, direction.z, direction.y)) * 15000.0;
+    relative_position.y += 50.0 - altitude;
+    terms.ray = safe_normalize(relative_position);
     let light_world = safe_normalize(atmosphere.light_direction.xyz);
     terms.light = vec3<f32>(light_world.x, light_world.z, light_world.y);
     let up = terms.ray.y;
     let below = 1.0 - smoothstep(-0.05, 0.05, up);
-    let altitude = atmosphere.distance.y;
-    let upper_span = max(atmosphere.haze.w - altitude, 0.0);
-    let lower_span = max(32000.0 + altitude, 0.0);
+    let upper_span = max_y;
+    let lower_span = 32000.0;
     let span = mix(upper_span, lower_span, below);
     let rel_pos_len = span * inverseSqrt(up * up + 0.000001);
-    let max_y = max(atmosphere.haze.w, 0.0);
     terms.light_atten = (atmosphere.blue_density.xyz + vec3<f32>(atmosphere.haze.y * 0.25))
         * (atmosphere.haze.z * max_y);
     let combined_density = max(abs(atmosphere.blue_density.xyz) + vec3<f32>(abs(atmosphere.haze.y)), vec3<f32>(0.000001));
@@ -58,7 +60,8 @@ fn atmosphere_terms(direction: vec3<f32>, atmosphere: Atmosphere) -> AtmosphereT
     terms.sunlight = sunlight * exp(-terms.light_atten * off_axis);
     terms.transparency = exp(-combined_density * (rel_pos_len * atmosphere.haze.z));
     let glow_angle = max(1.0 - dot(terms.ray, terms.light), 0.001) * atmosphere.glow.x;
-    terms.glow_term = select(0.0, pow(glow_angle, atmosphere.glow.z) + 0.25, atmosphere.sunlight.w >= 0.5);
+    let glow_factor = atmosphere.distance.w;
+    terms.glow_term = select(0.0, glow_factor * (pow(glow_angle, atmosphere.glow.z) + 0.25), glow_factor >= 1.0);
     terms.ambient_below = atmosphere.ambient.xyz
         + max(vec3<f32>(0.0), vec3<f32>(1.0) - atmosphere.ambient.xyz) * atmosphere.glow.w * 0.5;
     let sunlight_below = terms.sunlight * max(1.0 - atmosphere.glow.w, 0.0);
@@ -79,8 +82,8 @@ fn windlight_haze(direction: vec3<f32>, atmosphere: Atmosphere) -> vec3<f32> {
     let above_cloud = (blue_haze * (terms.sunlight + atmosphere.ambient.xyz)
         + haze_color * (terms.sunlight * terms.glow_term + atmosphere.ambient.xyz))
         * (vec3<f32>(1.0) - terms.transparency);
-    let below_transparency = sqrt(terms.transparency);
-    return above_cloud + (terms.additive_below - above_cloud) * (vec3<f32>(1.0) - below_transparency);
+    let below_cloud_blend = vec3<f32>(1.0) - sqrt(terms.transparency);
+    return above_cloud + (terms.additive_below - above_cloud) * below_cloud_blend;
 }
 
 fn windlight_soft_clip(color: vec3<f32>) -> vec3<f32> {

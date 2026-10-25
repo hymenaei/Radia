@@ -34,7 +34,7 @@ use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion};
 use crate::{
-    pipeline::{Sky, SurfacePipelines, Water},
+    pipeline::{Sky, SurfacePipelines, TexturePair, Water},
     texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
 
@@ -215,7 +215,7 @@ pub(crate) struct GeometryRenderer {
     water_regions: [Vec4; MAX_REGIONS],
     water_region_ids: [u128; MAX_REGIONS],
     water_region_count: usize,
-    water_normal: Option<crate::texture::TextureKey>,
+    water_textures: TexturePair,
     instances: Buffer,
     indirect: Buffer,
     indirect_first_instance: bool,
@@ -276,7 +276,7 @@ impl GeometryRenderer {
             water_regions: [Vec4::ZERO; MAX_REGIONS],
             water_region_ids: [0; MAX_REGIONS],
             water_region_count: 0,
-            water_normal: None,
+            water_textures: TexturePair::default(),
             water,
             sky,
             instances: buffer(device, "Face instances", INSTANCE_BUFFER_BYTES, BufferUsages::VERTEX),
@@ -415,7 +415,7 @@ impl GeometryRenderer {
                 pipeline = Some(draw.key.pipeline);
             }
             if draw.key.pipeline == crate::pipeline::Pipeline::Water {
-                self.pipelines.bind_water_texture(pass, &self.textures, self.water_normal);
+                self.pipelines.bind_water_texture(pass, &self.textures, self.water_textures);
             }
             if texture != Some(draw.key.texture) {
                 pass.set_bind_group(1, self.textures.binding(draw.key.texture), &[]);

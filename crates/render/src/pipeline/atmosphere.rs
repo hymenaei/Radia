@@ -7,7 +7,21 @@ pub(crate) fn atmosphere_values(environment: Option<&Evaluated>, altitude: f32) 
     let Some(environment) = environment else { return values };
     let haze = &environment.sky.haze;
     let sun_up = environment.sky.sun_direction[2] >= 0.0;
-    let light_direction = if sun_up { environment.sky.sun_direction } else { environment.sky.moon_direction };
+    let moon_up = environment.sky.moon_direction[2] >= 0.0;
+    let light_direction = if sun_up {
+        environment.sky.sun_direction
+    } else if moon_up {
+        environment.sky.moon_direction
+    } else {
+        [0.0, 0.0, -1.0]
+    };
+    let glow_factor = if sun_up {
+        1.0
+    } else if moon_up {
+        environment.sky.moon_brightness * 0.25
+    } else {
+        0.0
+    };
     let values_source = [
         [haze.blue_horizon[0], haze.blue_horizon[1], haze.blue_horizon[2], 0.0],
         [haze.blue_density[0], haze.blue_density[1], haze.blue_density[2], 0.0],
@@ -16,7 +30,7 @@ pub(crate) fn atmosphere_values(environment: Option<&Evaluated>, altitude: f32) 
         [light_direction[0], light_direction[1], light_direction[2], 0.0],
         [haze.ambient[0], haze.ambient[1], haze.ambient[2], 1.0],
         [environment.sky.glow[0], environment.sky.glow[1], environment.sky.glow[2], environment.sky.clouds.shadow],
-        [haze.distance_multiplier, altitude, 0.0, 0.0],
+        [haze.distance_multiplier, altitude, environment.sky.gamma, glow_factor],
     ];
     for (target, value) in values.iter_mut().zip(values_source.into_iter().flatten()) {
         *target = value;
@@ -29,18 +43,18 @@ fn horizon_color(direction: [f64; 3], atmosphere: &[f32; ATMOSPHERE_FLOATS]) -> 
     if atmosphere[23] <= 0.0 {
         return [0.024; 3];
     }
-    let ray = normalize([direction[0], direction[2], direction[1]]);
+    let max_y = f64::from(atmosphere[11]).max(0.0);
+    let altitude = f64::from(atmosphere[29]).clamp(-32000.0, max_y);
+    let mut relative_position = normalize([direction[0], direction[2], direction[1]]).map(|component| component * 15000.0);
+    relative_position[1] += 50.0 - altitude;
+    let ray = normalize(relative_position);
     let light_world = normalize([f64::from(atmosphere[16]), f64::from(atmosphere[18]), f64::from(atmosphere[17])]);
     let light = light_world;
     let up = ray[1];
     let below = 1.0 - smoothstep(-0.05, 0.05, up);
-    let altitude = f64::from(atmosphere[29]);
-    let upper_span = (f64::from(atmosphere[11]) - altitude).max(0.0);
-    let lower_span = (32000.0 + altitude).max(0.0);
-    let rel_pos_len = (upper_span * (1.0 - below) + lower_span * below) / (up * up + 0.000001).sqrt();
+    let rel_pos_len = (max_y * (1.0 - below) + 32000.0 * below) / (up * up + 0.000001).sqrt();
     let haze_density = f64::from(atmosphere[9]);
     let density_multiplier = f64::from(atmosphere[10]);
-    let max_y = f64::from(atmosphere[11]).max(0.0);
     let blue_density = [atmosphere[4], atmosphere[5], atmosphere[6]].map(f64::from);
     let light_atten = blue_density.map(|density| (density + haze_density * 0.25) * density_multiplier * max_y);
     let combined_density = blue_density.map(|density| density.abs() + haze_density.abs());
@@ -54,7 +68,8 @@ fn horizon_color(direction: [f64; 3], atmosphere: &[f32; ATMOSPHERE_FLOATS]) -> 
     let transparency = combined_density.map(|density| (-density * rel_pos_len * density_multiplier).exp());
     let dot = ray.iter().zip(light).map(|(a, b)| a * b).sum::<f64>();
     let glow_angle = ((1.0 - dot).max(0.001) * f64::from(atmosphere[24])).max(0.0);
-    let glow_term = if atmosphere[15] >= 0.5 { glow_angle.powf(f64::from(atmosphere[26])) + 0.25 } else { 0.0 };
+    let glow_factor = f64::from(atmosphere[31]);
+    let glow_term = if glow_factor < 1.0 { 0.0 } else { glow_factor * (glow_angle.powf(f64::from(atmosphere[26])) + 0.25) };
     let blue_horizon = [0, 1, 2].map(|index| f64::from(atmosphere[index]));
     let haze_horizon = f64::from(atmosphere[8]);
     let ambient = [20, 21, 22].map(|index| f64::from(atmosphere[index]));
@@ -112,7 +127,7 @@ mod tests {
         let zenith = horizon_color([0.0, 0.0, 1.0], &atmosphere);
         let horizon = horizon_color([1.0, 0.0, 0.0], &atmosphere);
         let expected_zenith = [0.2004713, 0.2440249, 0.3701902];
-        let expected_horizon = [0.4240980, 0.5070074, 0.7515412];
+        let expected_horizon = [0.4242817, 0.5072095, 0.7518440];
         for (actual, expected) in zenith.into_iter().zip(expected_zenith) {
             assert!((actual - expected).abs() < 0.0001, "zenith {zenith:?}");
         }

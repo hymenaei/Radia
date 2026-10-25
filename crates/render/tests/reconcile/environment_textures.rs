@@ -35,8 +35,13 @@ fn environment_keyframes_demand_unique_texture_ids_with_per_environment_and_glob
             _ => None,
         })
         .collect();
-    assert_eq!(work.environment_requested.len(), 64);
-    assert_eq!(unique.len(), 64, "keyframes and regions share each requested asset ID once");
+    assert!(work.environment_requested.len() <= 64, "environment demand stays within the global cap");
+    assert_eq!(unique.len(), work.environment_requested.len(), "keyframes and regions share each requested asset ID once");
+    for region in ids {
+        let start = u128::from(region.get()) * 10_000;
+        let frame_ids: std::collections::BTreeSet<_> = (1..=20).map(|index| AssetId::new(Uuid::from_u128(start + index))).collect();
+        assert_eq!(unique.intersection(&frame_ids).count(), 11, "the per-environment cap leaves eleven unique sun textures after defaults");
+    }
 }
 
 #[test]

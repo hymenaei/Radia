@@ -10,7 +10,7 @@ use world::{Kind, WorldPose};
 
 use crate::{
     FrameInput,
-    environment::{Evaluated, TextureBlend},
+    environment::Evaluated,
     geometry::{
         cache::CacheUpdate,
         draw_list::MAX_FACE_INSTANCES,
@@ -20,7 +20,7 @@ use crate::{
     material::FaceParams,
     pipeline::{COLOR, TexturePair, blend_keys},
     scene::{AgentPose, Camera, Object, Placement, SceneView, motion, texture_animation},
-    texture::{TextureKey, Textures},
+    texture::Textures,
 };
 
 use super::{FramePreparation, FramePreparationKey, GeometryRenderer, PrepareTimes, ShadingMode, Stats};
@@ -30,6 +30,9 @@ struct EnvironmentPairs {
     sun: TexturePair,
     moon: TexturePair,
     cloud: TexturePair,
+    bloom: TexturePair,
+    rainbow: TexturePair,
+    halo: TexturePair,
     water: TexturePair,
 }
 
@@ -103,7 +106,7 @@ impl GeometryRenderer {
                 let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, self.cache.origin);
                 let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
                 self.update_water_regions(camera.position());
-                self.update_environment_uniforms(camera, projection, frame_input, pairs);
+                self.update_environment_uniforms(camera, projection, size, frame_input, pairs);
                 if let Some(prepared) = self.prepared.as_mut() {
                     prepared.textures = self.textures.state();
                     prepared.geometry_textures = self.textures.geometry_state();
@@ -334,7 +337,7 @@ impl GeometryRenderer {
         self.cache.version = Some(view.version());
         let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
         self.update_water_regions(camera.position());
-        self.update_environment_uniforms(camera, projection, frame_input, pairs);
+        self.update_environment_uniforms(camera, projection, size, frame_input, pairs);
         self.cache.next_candidates.clear();
         let animation_deadline = self
             .cache
@@ -401,17 +404,20 @@ impl GeometryRenderer {
         &mut self,
         camera: Camera,
         projection: Mat4,
+        size: [u32; 2],
         frame_input: FrameInput<'_>,
         pairs: EnvironmentPairs,
     ) {
-        let normal = selected_water_normal(frame_input.environment.map(|environment| environment.water.normal_map), pairs.water);
-        self.water_normal = normal;
+        let normal = pairs.water;
+        self.water_textures = normal;
         self.pipelines.update_environment(
             &self.queue,
             camera.draw_distance() as f32,
             camera.position().z as f32,
+            camera.position(),
             frame_input.environment,
             normal,
+            frame_input.water_scroll,
         );
         self.water.update(
             &self.queue,
@@ -420,18 +426,25 @@ impl GeometryRenderer {
             frame_input.water_height,
             frame_input.environment,
             normal,
+            frame_input.water_scroll,
             &self.water_regions,
             self.water_region_count,
         );
         self.sky.update(
             &self.queue,
+            projection,
             projection.inverse(),
             camera.position().z as f32,
+            size,
             frame_input.environment,
             frame_input.cloud_scroll,
+            frame_input.animation_time,
             pairs.sun,
             pairs.moon,
             pairs.cloud,
+            pairs.bloom,
+            pairs.rainbow,
+            pairs.halo,
         );
     }
 
@@ -709,7 +722,15 @@ fn next_animation_deadline(item: &super::items::CachedItem, now: Instant) -> Opt
 }
 
 fn request_environment_textures(view: &SceneView, environment: &Evaluated, textures: &mut Textures, epoch: u64) {
-    for blend in [environment.sky.sun.texture, environment.sky.moon.texture, environment.sky.clouds.texture, environment.water.normal_map] {
+    for blend in [
+        environment.sky.sun.texture,
+        environment.sky.moon.texture,
+        environment.sky.clouds.texture,
+        environment.sky.bloom,
+        environment.sky.rainbow,
+        environment.sky.halo,
+        environment.water.normal_map,
+    ] {
         for id in [blend.current, blend.next].into_iter().flatten() {
             if let Some(handle) = view.environment_texture(id) {
                 textures.request_environment(handle, epoch);
@@ -729,12 +750,11 @@ fn environment_pairs(
         sun: blend_keys(device, environment.sky.sun.texture, view, textures),
         moon: blend_keys(device, environment.sky.moon.texture, view, textures),
         cloud: blend_keys(device, environment.sky.clouds.texture, view, textures),
+        bloom: blend_keys(device, environment.sky.bloom, view, textures),
+        rainbow: blend_keys(device, environment.sky.rainbow, view, textures),
+        halo: blend_keys(device, environment.sky.halo, view, textures),
         water: blend_keys(device, environment.water.normal_map, view, textures),
     }
-}
-
-fn selected_water_normal(blend: Option<TextureBlend>, pair: TexturePair) -> Option<TextureKey> {
-    if blend.is_some_and(|blend| blend.factor >= 0.5) { pair.next.or(pair.current) } else { pair.current }
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 mod runtime;
+mod stars;
 mod transition;
 
 use std::f32::consts::PI;
@@ -9,6 +10,7 @@ use utils::AssetId;
 use uuid::Uuid;
 
 pub use runtime::ActiveEnvironment;
+pub(crate) use stars::{STAR_COUNT, star_brightness, stars};
 pub use transition::Transition;
 
 const DEFAULT_DAY_LENGTH: f64 = 14_400.0;
@@ -21,6 +23,9 @@ pub(crate) const DEFAULT_SUN_TEXTURE: Option<AssetId> = None;
 pub(crate) const DEFAULT_MOON_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0xd07f6eedb96a47cdb51d400ad4a1c428)));
 pub(crate) const DEFAULT_CLOUD_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x1dc1368fe8fef02da08d9d9f11c1af6b)));
 pub(crate) const DEFAULT_WATER_NORMAL_MAP: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x822ded499a6cf61ccb896df54f42cdf4)));
+pub(crate) const DEFAULT_BLOOM_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x3c59f7fe9dc847f98aafa9dd1fbc3bef)));
+pub(crate) const DEFAULT_RAINBOW_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x11b4c57c56b304ed1f822004363882e4)));
+pub(crate) const DEFAULT_HALO_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x12149143f59991a777acb52a3c0f59cd)));
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Schedule {
@@ -111,6 +116,12 @@ pub struct SkyState {
     pub star_brightness: f32,
     pub clouds: CloudsState,
     pub haze: HazeState,
+    pub bloom: TextureBlend,
+    pub rainbow: TextureBlend,
+    pub halo: TextureBlend,
+    pub moisture: f32,
+    pub droplet_radius: f32,
+    pub ice: f32,
     pub gamma: f32,
     pub glow: [f32; 3],
     pub max_y: f32,
@@ -313,6 +324,18 @@ fn overlay(state: &mut SkyState, sky: &Sky) {
     if let Some(value) = sky.max_y {
         state.max_y = value;
     }
+    overlay_texture(&mut state.bloom, sky.bloom);
+    overlay_texture(&mut state.rainbow, sky.rainbow);
+    overlay_texture(&mut state.halo, sky.halo);
+    if let Some(value) = sky.atmosphere.moisture {
+        state.moisture = value;
+    }
+    if let Some(value) = sky.atmosphere.droplet_radius {
+        state.droplet_radius = value;
+    }
+    if let Some(value) = sky.atmosphere.ice {
+        state.ice = value;
+    }
     state.sun_direction = direction(state.sun.rotation);
     state.moon_direction = direction(state.moon.rotation);
 }
@@ -426,6 +449,12 @@ fn sky_defaults(position: f32) -> SkyState {
             texture: TextureBlend { current: DEFAULT_CLOUD_TEXTURE, next: None, factor: 0.0 },
         },
         haze: default_haze(),
+        bloom: TextureBlend { current: DEFAULT_BLOOM_TEXTURE, next: None, factor: 0.0 },
+        rainbow: TextureBlend { current: DEFAULT_RAINBOW_TEXTURE, next: None, factor: 0.0 },
+        halo: TextureBlend { current: DEFAULT_HALO_TEXTURE, next: None, factor: 0.0 },
+        moisture: 0.0,
+        droplet_radius: 800.0,
+        ice: 0.0,
         gamma: 1.0,
         glow: [5.0, 0.001, -0.4799],
         max_y: 1605.0,
@@ -525,6 +554,12 @@ fn blend_sky(start: &SkyState, end: &SkyState, factor: f32) -> SkyState {
         star_brightness: lerp(start.star_brightness, end.star_brightness, factor),
         clouds,
         haze: blend_haze(&start.haze, &end.haze, factor),
+        bloom: blend_texture(start.bloom, end.bloom, factor),
+        rainbow: blend_texture(start.rainbow, end.rainbow, factor),
+        halo: blend_texture(start.halo, end.halo, factor),
+        moisture: lerp(start.moisture, end.moisture, factor),
+        droplet_radius: lerp(start.droplet_radius, end.droplet_radius, factor),
+        ice: lerp(start.ice, end.ice, factor),
         gamma: lerp(start.gamma, end.gamma, factor),
         glow: blend_array(start.glow, end.glow, factor),
         max_y: lerp(start.max_y, end.max_y, factor),

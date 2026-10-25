@@ -7,7 +7,10 @@ use utils::AssetId;
 use world::Region;
 
 use crate::{
-    environment::{DEFAULT_CLOUD_TEXTURE, DEFAULT_MOON_TEXTURE, DEFAULT_SUN_TEXTURE, DEFAULT_WATER_NORMAL_MAP},
+    environment::{
+        DEFAULT_BLOOM_TEXTURE, DEFAULT_CLOUD_TEXTURE, DEFAULT_HALO_TEXTURE, DEFAULT_MOON_TEXTURE, DEFAULT_RAINBOW_TEXTURE,
+        DEFAULT_SUN_TEXTURE, DEFAULT_WATER_NORMAL_MAP,
+    },
     scene::{AssetChange, AssetRequest, AssetTicket, ViewerEnvironment, region_environment::RegionEnvironment},
 };
 
@@ -163,6 +166,9 @@ fn sky_textures(sky: &Sky, ids: &mut Vec<AssetId>) {
     add_resolved(ids, sky.sun.texture, DEFAULT_SUN_TEXTURE);
     add_resolved(ids, sky.moon.texture, DEFAULT_MOON_TEXTURE);
     add_resolved(ids, sky.clouds.texture, DEFAULT_CLOUD_TEXTURE);
+    add_resolved(ids, sky.bloom, DEFAULT_BLOOM_TEXTURE);
+    add_resolved(ids, sky.rainbow, DEFAULT_RAINBOW_TEXTURE);
+    add_resolved(ids, sky.halo, DEFAULT_HALO_TEXTURE);
 }
 
 fn water_textures(water: &Water, ids: &mut Vec<AssetId>) {
@@ -184,10 +190,13 @@ fn add_resolved(ids: &mut Vec<AssetId>, texture: TextureRef, default: Option<Ass
 }
 
 fn override_sky_textures(sky: &Sky) -> Vec<AssetId> {
-    let mut ids = Vec::with_capacity(3);
+    let mut ids = Vec::with_capacity(6);
     add_resolved(&mut ids, sky.sun.texture, DEFAULT_SUN_TEXTURE);
     add_resolved(&mut ids, sky.moon.texture, DEFAULT_MOON_TEXTURE);
     add_resolved(&mut ids, sky.clouds.texture, DEFAULT_CLOUD_TEXTURE);
+    add_resolved(&mut ids, sky.bloom, DEFAULT_BLOOM_TEXTURE);
+    add_resolved(&mut ids, sky.rainbow, DEFAULT_RAINBOW_TEXTURE);
+    add_resolved(&mut ids, sky.halo, DEFAULT_HALO_TEXTURE);
     ids
 }
 

@@ -44,6 +44,14 @@ const GREEN_SKY: &[u8] = br#"<?llsd/notation?>
 {'type':'sky','sunlight_color':[r0,r1,r0]}
 "#;
 
+const HAZE_SKY: &[u8] = br#"<?llsd/notation?>
+{'type':'sky','ambient':[r0.1,r0.2,r0.3],'blue_density':[r0.11,r0.12,r0.13],
+ 'blue_horizon':[r0.2,r0.3,r0.4],'density_multiplier':r0.15,
+ 'distance_multiplier':r0.16,'haze_density':r0.17,
+ 'legacy_haze':{'ambient':[r0.8,r0.7,r0.6],'blue_horizon':[r0.5,r0.4,r0.3],
+  'distance_multiplier':r0.25,'haze_density':r0.35}}
+"#;
+
 const BLUE_WATER: &[u8] = br#"<?llsd/notation?>
 {'type':'water','water_fog_density':r7,'normal_map':u00000000-0000-0000-0000-000000000000}
 "#;
@@ -251,7 +259,21 @@ fn defaults_match_viewer() {
     assert_eq!(result.sky.moon.texture.current, Some(AssetId::new(Uuid::from_u128(0xd07f6eedb96a47cdb51d400ad4a1c428))));
     assert_eq!(result.water.fog_density, 2.0);
     assert_eq!(result.water.normal_scale, [1.75; 3]);
-    assert_eq!(result.sky.atmosphere.absorption.len(), 2);
+    assert_eq!(result.sky.haze.ambient, [0.25; 3]);
+    assert_eq!(result.sky.haze.horizon, 0.19);
+}
+
+#[test]
+fn haze_fields_prefer_legacy_then_top_level_then_default() {
+    let sky = environment(HAZE_SKY);
+    let result = evaluated(&sky, 0.0, 0.0, Schedule::default());
+    assert_eq!(result.sky.haze.ambient, [0.8, 0.7, 0.6]);
+    assert_eq!(result.sky.haze.blue_density, [0.11, 0.12, 0.13]);
+    assert_eq!(result.sky.haze.blue_horizon, [0.5, 0.4, 0.3]);
+    close(result.sky.haze.density_multiplier, 0.15);
+    close(result.sky.haze.distance_multiplier, 0.25);
+    close(result.sky.haze.density, 0.35);
+    close(result.sky.haze.horizon, 0.19);
 }
 
 #[test]

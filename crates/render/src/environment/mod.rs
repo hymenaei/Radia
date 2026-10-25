@@ -2,9 +2,7 @@ mod transition;
 
 use std::f32::consts::PI;
 
-use assets::{
-    Atmosphere, CelestialBody, DayCycle, DensityLayer, EnvironmentDescription, EnvironmentSettings, Haze, Keyframe, Sky, TextureRef, Water,
-};
+use assets::{CelestialBody, DayCycle, EnvironmentDescription, EnvironmentSettings, Keyframe, Sky, TextureRef, Water};
 use math::{Quat, Vec3};
 use utils::AssetId;
 use uuid::Uuid;
@@ -20,10 +18,6 @@ const MAX_DAY_OFFSET: f64 = 86_400.0;
 const DEFAULT_SUN_TEXTURE: Option<AssetId> = None;
 const DEFAULT_MOON_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0xd07f6eedb96a47cdb51d400ad4a1c428)));
 const DEFAULT_CLOUD_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x1dc1368fe8fef02da08d9d9f11c1af6b)));
-const DEFAULT_BLOOM_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x3c59f7fe9dc8479f8aafa9dd1fbc3bef)));
-const DEFAULT_RAINBOW_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x11b4c57c56b304ed1f822004363882e4)));
-const DEFAULT_HALO_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x12149143f59991a777acb52a3c0f59cd)));
-const DEFAULT_WATER_TRANSPARENT_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x2bfd38847e2769b9ba3a3e673f680004)));
 const DEFAULT_WATER_NORMAL_MAP: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x822ded499a6cf61ccb896df54f42cdf4)));
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -105,30 +99,6 @@ pub struct HazeState {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DensityLayerState {
-    pub width: f32,
-    pub exponential_term: f32,
-    pub exponential_scale: f32,
-    pub linear_term: f32,
-    pub constant_term: f32,
-    pub anisotropy: f32,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct AtmosphereState {
-    pub planet_radius: f32,
-    pub bottom_radius: f32,
-    pub top_radius: f32,
-    pub sun_arc: f32,
-    pub rayleigh: Vec<DensityLayerState>,
-    pub mie: Vec<DensityLayerState>,
-    pub absorption: Vec<DensityLayerState>,
-    pub moisture: f32,
-    pub droplet_radius: f32,
-    pub ice: f32,
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct SkyState {
     pub sun: CelestialBodyState,
     pub moon: CelestialBodyState,
@@ -139,17 +109,9 @@ pub struct SkyState {
     pub star_brightness: f32,
     pub clouds: CloudsState,
     pub haze: HazeState,
-    pub legacy_haze: Option<HazeState>,
-    pub atmosphere: AtmosphereState,
     pub gamma: f32,
     pub glow: [f32; 3],
     pub max_y: f32,
-    pub dome_offset: f32,
-    pub dome_radius: f32,
-    pub reflection_probe_ambiance: f32,
-    pub bloom: TextureBlend,
-    pub rainbow: TextureBlend,
-    pub halo: TextureBlend,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -160,7 +122,6 @@ pub struct WaterState {
     pub blur: f32,
     pub fresnel_offset: f32,
     pub fresnel_scale: f32,
-    pub transparent_texture: TextureBlend,
     pub normal_map: TextureBlend,
     pub normal_scale: [f32; 3],
     pub scale_above: f32,
@@ -183,16 +144,18 @@ pub fn evaluate(sources: &Sources<'_>, utc_seconds: f64, altitude: f64) -> Evalu
     let inherited = sources.experience_day.or(sources.base);
     let sky_source = sources.experience_sky.or(inherited);
     let water_source = sources.experience_water.or(inherited);
-    let (mut sky, sky_track, sky_cycles) = sky_source
+    let (sky, sky_track, sky_cycles) = sky_source
         .and_then(|source| sample_sky(source, day_position, altitude, schedule.altitudes))
         .unwrap_or_else(|| (sky_defaults(0.0), None, false));
-    let (mut water, water_cycles) =
+    let (water, water_cycles) =
         water_source.and_then(|source| sample_water(source, day_position)).unwrap_or_else(|| (water_defaults(0.0), false));
+    let mut sky = sky;
+    let mut water = water;
     if let Some(override_sky) = sources.sky_override {
-        apply_sky_override(&mut sky, override_sky);
+        overlay(&mut sky, override_sky);
     }
     if let Some(override_water) = sources.water_override {
-        apply_water_override(&mut water, override_water);
+        overlay_water(&mut water, override_water);
     }
     Evaluated { sky, water, sky_track, day_position, cycle_length: (sky_cycles || water_cycles).then_some(schedule.day_length) }
 }
@@ -299,84 +262,135 @@ where
     Some((state(start), state(end), factor))
 }
 
-fn texture(id: TextureRef, default: Option<AssetId>) -> TextureBlend {
-    let current = match id {
-        TextureRef::Absent => default,
-        TextureRef::Clear => None,
-        TextureRef::Asset(id) => Some(id),
-    };
-    TextureBlend { current, next: None, factor: 0.0 }
-}
-
-fn texture_at(value: TextureBlend) -> Option<AssetId> {
-    if value.factor < 0.5 { value.current } else { value.next.or(value.current) }
-}
-
-fn blend_texture(start: TextureBlend, end: TextureBlend, factor: f32) -> TextureBlend {
-    let current = texture_at(start);
-    let next = texture_at(end);
-    if current == next { TextureBlend { current, next: None, factor: 0.0 } } else { TextureBlend { current, next, factor } }
-}
-
 fn sky_state(sky: &Sky, position: f32) -> SkyState {
-    let defaults = sky_defaults(position);
-    let sun = celestial_state(&sky.sun, &defaults.sun);
-    let moon = celestial_state(&sky.moon, &defaults.moon);
-    SkyState {
-        sun_direction: direction(sun.rotation),
-        moon_direction: direction(moon.rotation),
-        sun,
-        moon,
-        sunlight: sky.sunlight.unwrap_or(defaults.sunlight),
-        moon_brightness: sky.moon_brightness.unwrap_or(defaults.moon_brightness),
-        star_brightness: sky.star_brightness.unwrap_or(defaults.star_brightness),
-        clouds: CloudsState {
-            color: sky.clouds.color.unwrap_or(defaults.clouds.color),
-            density: [
-                sky.clouds.density[0].unwrap_or(defaults.clouds.density[0]),
-                sky.clouds.density[1].unwrap_or(defaults.clouds.density[1]),
-            ],
-            scale: sky.clouds.scale.unwrap_or(defaults.clouds.scale),
-            scroll_rate: sky.clouds.scroll_rate.unwrap_or(defaults.clouds.scroll_rate),
-            shadow: sky.clouds.shadow.unwrap_or(defaults.clouds.shadow),
-            variance: sky.clouds.variance.unwrap_or(defaults.clouds.variance),
-            texture: texture(sky.clouds.texture, DEFAULT_CLOUD_TEXTURE),
-        },
-        haze: haze_state(&sky.haze, &defaults.haze),
-        legacy_haze: sky.legacy_haze.as_ref().map(|haze| haze_state(haze, &defaults.haze)),
-        atmosphere: atmosphere_state(&sky.atmosphere, &defaults.atmosphere),
-        gamma: sky.gamma.unwrap_or(defaults.gamma),
-        glow: sky.glow.unwrap_or(defaults.glow),
-        max_y: sky.max_y.unwrap_or(defaults.max_y),
-        dome_offset: sky.dome_offset.unwrap_or(defaults.dome_offset),
-        dome_radius: sky.dome_radius.unwrap_or(defaults.dome_radius),
-        reflection_probe_ambiance: sky.reflection_probe_ambiance.unwrap_or(defaults.reflection_probe_ambiance),
-        bloom: texture(sky.bloom, DEFAULT_BLOOM_TEXTURE),
-        rainbow: texture(sky.rainbow, DEFAULT_RAINBOW_TEXTURE),
-        halo: texture(sky.halo, DEFAULT_HALO_TEXTURE),
+    let mut state = sky_defaults(position);
+    overlay(&mut state, sky);
+    state
+}
+
+fn overlay(state: &mut SkyState, sky: &Sky) {
+    overlay_body(&mut state.sun, &sky.sun);
+    overlay_body(&mut state.moon, &sky.moon);
+    if let Some(value) = sky.sunlight {
+        state.sunlight = value;
+    }
+    if let Some(value) = sky.moon_brightness {
+        state.moon_brightness = value;
+    }
+    if let Some(value) = sky.star_brightness {
+        state.star_brightness = value;
+    }
+    if let Some(value) = sky.clouds.color {
+        state.clouds.color = value;
+    }
+    for (target, value) in state.clouds.density.iter_mut().zip(sky.clouds.density) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+    if let Some(value) = sky.clouds.scale {
+        state.clouds.scale = value;
+    }
+    if let Some(value) = sky.clouds.scroll_rate {
+        state.clouds.scroll_rate = value;
+    }
+    if let Some(value) = sky.clouds.shadow {
+        state.clouds.shadow = value;
+    }
+    if let Some(value) = sky.clouds.variance {
+        state.clouds.variance = value;
+    }
+    overlay_texture(&mut state.clouds.texture, sky.clouds.texture);
+    overlay_haze(&mut state.haze, sky);
+    if let Some(value) = sky.gamma {
+        state.gamma = value;
+    }
+    if let Some(value) = sky.glow {
+        state.glow = value;
+    }
+    if let Some(value) = sky.max_y {
+        state.max_y = value;
+    }
+    state.sun_direction = direction(state.sun.rotation);
+    state.moon_direction = direction(state.moon.rotation);
+}
+
+fn overlay_body(state: &mut CelestialBodyState, body: &CelestialBody) {
+    if let Some(value) = body.rotation {
+        state.rotation = value;
+    }
+    overlay_texture(&mut state.texture, body.texture);
+    if let Some(value) = body.scale {
+        state.scale = value;
     }
 }
 
-fn celestial_state(body: &CelestialBody, defaults: &CelestialBodyState) -> CelestialBodyState {
-    let rotation = body.rotation.unwrap_or(defaults.rotation);
-    CelestialBodyState { rotation, texture: texture(body.texture, defaults.texture.current), scale: body.scale.unwrap_or(defaults.scale) }
+fn overlay_haze(state: &mut HazeState, sky: &Sky) {
+    let legacy = sky.legacy_haze.as_ref();
+    if let Some(value) = legacy.and_then(|haze| haze.ambient).or(sky.haze.ambient) {
+        state.ambient = value;
+    }
+    if let Some(value) = legacy.and_then(|haze| haze.blue_density).or(sky.haze.blue_density) {
+        state.blue_density = value;
+    }
+    if let Some(value) = legacy.and_then(|haze| haze.blue_horizon).or(sky.haze.blue_horizon) {
+        state.blue_horizon = value;
+    }
+    if let Some(value) = legacy.and_then(|haze| haze.density_multiplier).or(sky.haze.density_multiplier) {
+        state.density_multiplier = value;
+    }
+    if let Some(value) = legacy.and_then(|haze| haze.distance_multiplier).or(sky.haze.distance_multiplier) {
+        state.distance_multiplier = value;
+    }
+    if let Some(value) = legacy.and_then(|haze| haze.density).or(sky.haze.density) {
+        state.density = value;
+    }
+    if let Some(value) = legacy.and_then(|haze| haze.horizon).or(sky.haze.horizon) {
+        state.horizon = value;
+    }
 }
 
-fn water_state(water: &Water, position: f32) -> WaterState {
-    let defaults = water_defaults(position);
-    WaterState {
-        fog_color: water.fog_color.unwrap_or(defaults.fog_color),
-        fog_density: water.fog_density.unwrap_or(defaults.fog_density),
-        underwater_fog: water.underwater_fog.unwrap_or(defaults.underwater_fog),
-        blur: water.blur.unwrap_or(defaults.blur),
-        fresnel_offset: water.fresnel_offset.unwrap_or(defaults.fresnel_offset),
-        fresnel_scale: water.fresnel_scale.unwrap_or(defaults.fresnel_scale),
-        transparent_texture: texture(water.transparent_texture, DEFAULT_WATER_TRANSPARENT_TEXTURE),
-        normal_map: texture(water.normal_map, DEFAULT_WATER_NORMAL_MAP),
-        normal_scale: water.normal_scale.unwrap_or(defaults.normal_scale),
-        scale_above: water.scale_above.unwrap_or(defaults.scale_above),
-        scale_below: water.scale_below.unwrap_or(defaults.scale_below),
-        waves: [water.waves[0].unwrap_or(defaults.waves[0]), water.waves[1].unwrap_or(defaults.waves[1])],
+fn overlay_water(state: &mut WaterState, water: &Water) {
+    if let Some(value) = water.fog_color {
+        state.fog_color = value;
+    }
+    if let Some(value) = water.fog_density {
+        state.fog_density = value;
+    }
+    if let Some(value) = water.underwater_fog {
+        state.underwater_fog = value;
+    }
+    if let Some(value) = water.blur {
+        state.blur = value;
+    }
+    if let Some(value) = water.fresnel_offset {
+        state.fresnel_offset = value;
+    }
+    if let Some(value) = water.fresnel_scale {
+        state.fresnel_scale = value;
+    }
+    overlay_texture(&mut state.normal_map, water.normal_map);
+    if let Some(value) = water.normal_scale {
+        state.normal_scale = value;
+    }
+    if let Some(value) = water.scale_above {
+        state.scale_above = value;
+    }
+    if let Some(value) = water.scale_below {
+        state.scale_below = value;
+    }
+    for (target, value) in state.waves.iter_mut().zip(water.waves) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+}
+
+fn overlay_texture(state: &mut TextureBlend, value: TextureRef) {
+    match value {
+        TextureRef::Absent => {}
+        TextureRef::Clear => *state = TextureBlend { current: None, next: None, factor: 0.0 },
+        TextureRef::Asset(id) => *state = TextureBlend { current: Some(id), next: None, factor: 0.0 },
     }
 }
 
@@ -411,59 +425,9 @@ fn sky_defaults(position: f32) -> SkyState {
             texture: TextureBlend { current: DEFAULT_CLOUD_TEXTURE, next: None, factor: 0.0 },
         },
         haze: default_haze(),
-        legacy_haze: None,
-        atmosphere: AtmosphereState {
-            planet_radius: 6360.0,
-            bottom_radius: 6360.0,
-            top_radius: 6420.0,
-            sun_arc: 0.00045,
-            rayleigh: vec![DensityLayerState {
-                width: 0.0,
-                exponential_term: 1.0,
-                exponential_scale: -1.0 / 8000.0,
-                linear_term: 0.0,
-                constant_term: 0.0,
-                anisotropy: 0.0,
-            }],
-            mie: vec![DensityLayerState {
-                width: 0.0,
-                exponential_term: 1.0,
-                exponential_scale: -1.0 / 1200.0,
-                linear_term: 0.0,
-                constant_term: 0.0,
-                anisotropy: 0.8,
-            }],
-            absorption: vec![
-                DensityLayerState {
-                    width: 25_000.0,
-                    exponential_term: 0.0,
-                    exponential_scale: 0.0,
-                    linear_term: -1.0 / 25_000.0,
-                    constant_term: -2.0 / 3.0,
-                    anisotropy: 0.0,
-                },
-                DensityLayerState {
-                    width: 0.0,
-                    exponential_term: 0.0,
-                    exponential_scale: 0.0,
-                    linear_term: -1.0 / 15_000.0,
-                    constant_term: 8.0 / 3.0,
-                    anisotropy: 0.0,
-                },
-            ],
-            moisture: 0.0,
-            droplet_radius: 800.0,
-            ice: 0.0,
-        },
         gamma: 1.0,
         glow: [5.0, 0.001, -0.4799],
         max_y: 1605.0,
-        dome_offset: 0.96,
-        dome_radius: 15_000.0,
-        reflection_probe_ambiance: 0.0,
-        bloom: TextureBlend { current: DEFAULT_BLOOM_TEXTURE, next: None, factor: 0.0 },
-        rainbow: TextureBlend { current: DEFAULT_RAINBOW_TEXTURE, next: None, factor: 0.0 },
-        halo: TextureBlend { current: DEFAULT_HALO_TEXTURE, next: None, factor: 0.0 },
     }
 }
 
@@ -479,6 +443,12 @@ fn default_haze() -> HazeState {
     }
 }
 
+fn water_state(water: &Water, position: f32) -> WaterState {
+    let mut state = water_defaults(position);
+    overlay_water(&mut state, water);
+    state
+}
+
 fn water_defaults(position: f32) -> WaterState {
     let normal_scale = 2.0 + (position * 0.5 - 0.25);
     WaterState {
@@ -488,7 +458,6 @@ fn water_defaults(position: f32) -> WaterState {
         blur: 0.04,
         fresnel_offset: 0.5,
         fresnel_scale: 0.3999,
-        transparent_texture: TextureBlend { current: DEFAULT_WATER_TRANSPARENT_TEXTURE, next: None, factor: 0.0 },
         normal_map: TextureBlend { current: DEFAULT_WATER_NORMAL_MAP, next: None, factor: 0.0 },
         normal_scale: [normal_scale; 3],
         scale_above: 0.0299,
@@ -508,254 +477,14 @@ fn direction(rotation: [f32; 4]) -> [f32; 3] {
     (rotation * Vec3::X).normalize_or_zero().to_array()
 }
 
-fn haze_state(haze: &Haze, defaults: &HazeState) -> HazeState {
-    HazeState {
-        ambient: haze.ambient.unwrap_or(defaults.ambient),
-        blue_density: haze.blue_density.unwrap_or(defaults.blue_density),
-        blue_horizon: haze.blue_horizon.unwrap_or(defaults.blue_horizon),
-        density_multiplier: haze.density_multiplier.unwrap_or(defaults.density_multiplier),
-        distance_multiplier: haze.distance_multiplier.unwrap_or(defaults.distance_multiplier),
-        density: haze.density.unwrap_or(defaults.density),
-        horizon: haze.horizon.unwrap_or(defaults.horizon),
-    }
+fn texture_at(value: TextureBlend) -> Option<AssetId> {
+    if value.factor < 0.5 { value.current } else { value.next.or(value.current) }
 }
 
-fn atmosphere_state(atmosphere: &Atmosphere, defaults: &AtmosphereState) -> AtmosphereState {
-    AtmosphereState {
-        planet_radius: atmosphere.planet_radius.unwrap_or(defaults.planet_radius),
-        bottom_radius: atmosphere.bottom_radius.unwrap_or(defaults.bottom_radius),
-        top_radius: atmosphere.top_radius.unwrap_or(defaults.top_radius),
-        sun_arc: atmosphere.sun_arc.unwrap_or(defaults.sun_arc),
-        rayleigh: density_layers(atmosphere.rayleigh.as_deref(), &defaults.rayleigh),
-        mie: density_layers(atmosphere.mie.as_deref(), &defaults.mie),
-        absorption: density_layers(atmosphere.absorption.as_deref(), &defaults.absorption),
-        moisture: atmosphere.moisture.unwrap_or(defaults.moisture),
-        droplet_radius: atmosphere.droplet_radius.unwrap_or(defaults.droplet_radius),
-        ice: atmosphere.ice.unwrap_or(defaults.ice),
-    }
-}
-
-fn density_layers(source: Option<&[DensityLayer]>, defaults: &[DensityLayerState]) -> Vec<DensityLayerState> {
-    source.map_or_else(
-        || defaults.to_vec(),
-        |layers| {
-            layers
-                .iter()
-                .enumerate()
-                .map(|(index, layer)| {
-                    let default = defaults.get(index).cloned().unwrap_or_default();
-                    density_layer(layer, &default)
-                })
-                .collect()
-        },
-    )
-}
-
-fn density_layer(layer: &DensityLayer, defaults: &DensityLayerState) -> DensityLayerState {
-    DensityLayerState {
-        width: layer.width.unwrap_or(defaults.width),
-        exponential_term: layer.exponential_term.unwrap_or(defaults.exponential_term),
-        exponential_scale: layer.exponential_scale.unwrap_or(defaults.exponential_scale),
-        linear_term: layer.linear_term.unwrap_or(defaults.linear_term),
-        constant_term: layer.constant_term.unwrap_or(defaults.constant_term),
-        anisotropy: layer.anisotropy.unwrap_or(defaults.anisotropy),
-    }
-}
-
-impl Default for DensityLayerState {
-    fn default() -> Self {
-        Self { width: 0.0, exponential_term: 0.0, exponential_scale: 0.0, linear_term: 0.0, constant_term: 0.0, anisotropy: 0.0 }
-    }
-}
-
-fn apply_sky_override(state: &mut SkyState, sky: &Sky) {
-    if let Some(rotation) = sky.sun.rotation {
-        state.sun.rotation = rotation;
-        state.sun_direction = direction(rotation);
-    }
-    apply_texture_override(&mut state.sun.texture, sky.sun.texture);
-    if let Some(scale) = sky.sun.scale {
-        state.sun.scale = scale;
-    }
-    if let Some(rotation) = sky.moon.rotation {
-        state.moon.rotation = rotation;
-        state.moon_direction = direction(rotation);
-    }
-    apply_texture_override(&mut state.moon.texture, sky.moon.texture);
-    if let Some(scale) = sky.moon.scale {
-        state.moon.scale = scale;
-    }
-    if let Some(sunlight) = sky.sunlight {
-        state.sunlight = sunlight;
-    }
-    if let Some(brightness) = sky.moon_brightness {
-        state.moon_brightness = brightness;
-    }
-    if let Some(brightness) = sky.star_brightness {
-        state.star_brightness = brightness;
-    }
-    if let Some(color) = sky.clouds.color {
-        state.clouds.color = color;
-    }
-    for (target, value) in state.clouds.density.iter_mut().zip(sky.clouds.density) {
-        if let Some(value) = value {
-            *target = value;
-        }
-    }
-    if let Some(scale) = sky.clouds.scale {
-        state.clouds.scale = scale;
-    }
-    if let Some(rate) = sky.clouds.scroll_rate {
-        state.clouds.scroll_rate = rate;
-    }
-    if let Some(shadow) = sky.clouds.shadow {
-        state.clouds.shadow = shadow;
-    }
-    if let Some(variance) = sky.clouds.variance {
-        state.clouds.variance = variance;
-    }
-    apply_texture_override(&mut state.clouds.texture, sky.clouds.texture);
-    apply_haze_override(&mut state.haze, &sky.haze);
-    if let Some(haze) = &sky.legacy_haze {
-        let target = state.legacy_haze.get_or_insert_with(|| state.haze.clone());
-        apply_haze_override(target, haze);
-    }
-    apply_atmosphere_override(&mut state.atmosphere, &sky.atmosphere);
-    if let Some(gamma) = sky.gamma {
-        state.gamma = gamma;
-    }
-    if let Some(glow) = sky.glow {
-        state.glow = glow;
-    }
-    if let Some(max_y) = sky.max_y {
-        state.max_y = max_y;
-    }
-    if let Some(offset) = sky.dome_offset {
-        state.dome_offset = offset;
-    }
-    if let Some(radius) = sky.dome_radius {
-        state.dome_radius = radius;
-    }
-    if let Some(ambiance) = sky.reflection_probe_ambiance {
-        state.reflection_probe_ambiance = ambiance;
-    }
-    apply_texture_override(&mut state.bloom, sky.bloom);
-    apply_texture_override(&mut state.rainbow, sky.rainbow);
-    apply_texture_override(&mut state.halo, sky.halo);
-}
-
-fn apply_texture_override(state: &mut TextureBlend, value: TextureRef) {
-    match value {
-        TextureRef::Absent => {}
-        TextureRef::Clear => *state = TextureBlend { current: None, next: None, factor: 0.0 },
-        TextureRef::Asset(id) => *state = TextureBlend { current: Some(id), next: None, factor: 0.0 },
-    }
-}
-
-fn apply_haze_override(state: &mut HazeState, haze: &Haze) {
-    if let Some(value) = haze.ambient {
-        state.ambient = value;
-    }
-    if let Some(value) = haze.blue_density {
-        state.blue_density = value;
-    }
-    if let Some(value) = haze.blue_horizon {
-        state.blue_horizon = value;
-    }
-    if let Some(value) = haze.density_multiplier {
-        state.density_multiplier = value;
-    }
-    if let Some(value) = haze.distance_multiplier {
-        state.distance_multiplier = value;
-    }
-    if let Some(value) = haze.density {
-        state.density = value;
-    }
-    if let Some(value) = haze.horizon {
-        state.horizon = value;
-    }
-}
-
-fn apply_atmosphere_override(state: &mut AtmosphereState, atmosphere: &Atmosphere) {
-    if let Some(value) = atmosphere.planet_radius {
-        state.planet_radius = value;
-    }
-    if let Some(value) = atmosphere.bottom_radius {
-        state.bottom_radius = value;
-    }
-    if let Some(value) = atmosphere.top_radius {
-        state.top_radius = value;
-    }
-    if let Some(value) = atmosphere.sun_arc {
-        state.sun_arc = value;
-    }
-    if let Some(value) = &atmosphere.rayleigh {
-        state.rayleigh = override_density_layers(value, &state.rayleigh);
-    }
-    if let Some(value) = &atmosphere.mie {
-        state.mie = override_density_layers(value, &state.mie);
-    }
-    if let Some(value) = &atmosphere.absorption {
-        state.absorption = override_density_layers(value, &state.absorption);
-    }
-    if let Some(value) = atmosphere.moisture {
-        state.moisture = value;
-    }
-    if let Some(value) = atmosphere.droplet_radius {
-        state.droplet_radius = value;
-    }
-    if let Some(value) = atmosphere.ice {
-        state.ice = value;
-    }
-}
-
-fn override_density_layers(source: &[DensityLayer], current: &[DensityLayerState]) -> Vec<DensityLayerState> {
-    source
-        .iter()
-        .enumerate()
-        .map(|(index, layer)| {
-            let defaults = DensityLayerState::default();
-            let previous = current.get(index).unwrap_or(&defaults);
-            density_layer(layer, previous)
-        })
-        .collect()
-}
-
-fn apply_water_override(state: &mut WaterState, water: &Water) {
-    if let Some(value) = water.fog_color {
-        state.fog_color = value;
-    }
-    if let Some(value) = water.fog_density {
-        state.fog_density = value;
-    }
-    if let Some(value) = water.underwater_fog {
-        state.underwater_fog = value;
-    }
-    if let Some(value) = water.blur {
-        state.blur = value;
-    }
-    if let Some(value) = water.fresnel_offset {
-        state.fresnel_offset = value;
-    }
-    if let Some(value) = water.fresnel_scale {
-        state.fresnel_scale = value;
-    }
-    apply_texture_override(&mut state.transparent_texture, water.transparent_texture);
-    apply_texture_override(&mut state.normal_map, water.normal_map);
-    if let Some(value) = water.normal_scale {
-        state.normal_scale = value;
-    }
-    if let Some(value) = water.scale_above {
-        state.scale_above = value;
-    }
-    if let Some(value) = water.scale_below {
-        state.scale_below = value;
-    }
-    for (target, value) in state.waves.iter_mut().zip(water.waves) {
-        if let Some(value) = value {
-            *target = value;
-        }
-    }
+fn blend_texture(start: TextureBlend, end: TextureBlend, factor: f32) -> TextureBlend {
+    let current = texture_at(start);
+    let next = texture_at(end);
+    if current == next { TextureBlend { current, next: None, factor: 0.0 } } else { TextureBlend { current, next, factor } }
 }
 
 fn blend_sky(start: &SkyState, end: &SkyState, factor: f32) -> SkyState {
@@ -795,22 +524,9 @@ fn blend_sky(start: &SkyState, end: &SkyState, factor: f32) -> SkyState {
         star_brightness: lerp(start.star_brightness, end.star_brightness, factor),
         clouds,
         haze: blend_haze(&start.haze, &end.haze, factor),
-        legacy_haze: match (&start.legacy_haze, &end.legacy_haze) {
-            (Some(start), Some(end)) => Some(blend_haze(start, end, factor)),
-            (Some(start), None) => Some(blend_haze(start, &default_haze(), factor)),
-            (None, Some(end)) => Some(blend_haze(&default_haze(), end, factor)),
-            (None, None) => None,
-        },
-        atmosphere: blend_atmosphere(&start.atmosphere, &end.atmosphere, factor),
         gamma: lerp(start.gamma, end.gamma, factor),
         glow: blend_array(start.glow, end.glow, factor),
         max_y: lerp(start.max_y, end.max_y, factor),
-        dome_offset: lerp(start.dome_offset, end.dome_offset, factor),
-        dome_radius: lerp(start.dome_radius, end.dome_radius, factor),
-        reflection_probe_ambiance: lerp(start.reflection_probe_ambiance, end.reflection_probe_ambiance, factor),
-        bloom: blend_texture(start.bloom, end.bloom, factor),
-        rainbow: blend_texture(start.rainbow, end.rainbow, factor),
-        halo: blend_texture(start.halo, end.halo, factor),
     }
 }
 
@@ -837,39 +553,6 @@ fn blend_haze(start: &HazeState, end: &HazeState, factor: f32) -> HazeState {
     }
 }
 
-fn blend_atmosphere(start: &AtmosphereState, end: &AtmosphereState, factor: f32) -> AtmosphereState {
-    AtmosphereState {
-        planet_radius: lerp(start.planet_radius, end.planet_radius, factor),
-        bottom_radius: lerp(start.bottom_radius, end.bottom_radius, factor),
-        top_radius: lerp(start.top_radius, end.top_radius, factor),
-        sun_arc: lerp(start.sun_arc, end.sun_arc, factor),
-        rayleigh: blend_layers(&start.rayleigh, &end.rayleigh, factor),
-        mie: blend_layers(&start.mie, &end.mie, factor),
-        absorption: blend_layers(&start.absorption, &end.absorption, factor),
-        moisture: lerp(start.moisture, end.moisture, factor),
-        droplet_radius: lerp(start.droplet_radius, end.droplet_radius, factor),
-        ice: lerp(start.ice, end.ice, factor),
-    }
-}
-
-fn blend_layers(start: &[DensityLayerState], end: &[DensityLayerState], factor: f32) -> Vec<DensityLayerState> {
-    let default = DensityLayerState::default();
-    (0..start.len().max(end.len()))
-        .map(|index| {
-            let start = start.get(index).unwrap_or(&default);
-            let end = end.get(index).unwrap_or(&default);
-            DensityLayerState {
-                width: lerp(start.width, end.width, factor),
-                exponential_term: lerp(start.exponential_term, end.exponential_term, factor),
-                exponential_scale: lerp(start.exponential_scale, end.exponential_scale, factor),
-                linear_term: lerp(start.linear_term, end.linear_term, factor),
-                constant_term: lerp(start.constant_term, end.constant_term, factor),
-                anisotropy: lerp(start.anisotropy, end.anisotropy, factor),
-            }
-        })
-        .collect()
-}
-
 fn blend_water(start: &WaterState, end: &WaterState, factor: f32) -> WaterState {
     if factor >= 1.0 {
         return end.clone();
@@ -881,7 +564,6 @@ fn blend_water(start: &WaterState, end: &WaterState, factor: f32) -> WaterState 
         blur: lerp(start.blur, end.blur, factor),
         fresnel_offset: lerp(start.fresnel_offset, end.fresnel_offset, factor),
         fresnel_scale: lerp(start.fresnel_scale, end.fresnel_scale, factor),
-        transparent_texture: blend_texture(start.transparent_texture, end.transparent_texture, factor),
         normal_map: blend_texture(start.normal_map, end.normal_map, factor),
         normal_scale: blend_array(start.normal_scale, end.normal_scale, factor),
         scale_above: lerp(start.scale_above, end.scale_above, factor),
@@ -899,5 +581,4 @@ fn blend_array<const N: usize>(start: [f32; N], end: [f32; N], factor: f32) -> [
 }
 
 #[cfg(test)]
-#[path = "../environment_tests.rs"]
 mod tests;

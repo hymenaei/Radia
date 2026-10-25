@@ -20,9 +20,8 @@ struct StarVertex {
 @group(0) @binding(0) var<uniform> state: StarUniform;
 @group(1) @binding(0) var<storage, read> star_field: array<Star>;
 @group(2) @binding(0) var bloom_image: texture_2d<f32>;
-@group(2) @binding(1) var bloom_sampler: sampler;
-@group(3) @binding(0) var bloom_next_image: texture_2d<f32>;
-@group(3) @binding(1) var bloom_next_sampler: sampler;
+@group(2) @binding(1) var bloom_next_image: texture_2d<f32>;
+@group(2) @binding(2) var bloom_sampler: sampler;
 
 @vertex fn vertex(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) star_index: u32) -> StarVertex {
     let star = star_field[star_index];
@@ -50,7 +49,7 @@ struct StarVertex {
 
 @fragment fn fragment(input: StarVertex) -> @location(0) vec4<f32> {
     let sample_current = textureSample(bloom_image, bloom_sampler, input.uv);
-    let sample_next = textureSample(bloom_next_image, bloom_next_sampler, input.uv);
+    let sample_next = textureSample(bloom_next_image, bloom_sampler, input.uv);
     let bloom = mix(sample_current, sample_next, state.viewport_alpha_blend.w);
     let twinkle = abs(fract(input.screen_position.x + input.screen_position.y));
     let alpha = smoothstep(0.0, 0.9, input.alpha) * 32.0 * twinkle * bloom.a;

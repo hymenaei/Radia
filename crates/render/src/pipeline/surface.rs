@@ -4,13 +4,16 @@ use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
     BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
     DepthStencilState, Device, Face, FragmentState, FrontFace, MultisampleState, PipelineLayoutDescriptor, PrimitiveState, Queue,
-    RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat,
-    VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
+    RenderPass, RenderPipeline, RenderPipelineDescriptor, SamplerBindingType, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    TextureFormat, TextureSampleType, TextureViewDimension, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
 };
 
 use crate::scene::Camera;
 
-use crate::{environment::Evaluated, texture::Textures};
+use crate::{
+    environment::Evaluated,
+    texture::{TextureKey, TextureViewState, Textures},
+};
 
 use super::TexturePair;
 
@@ -45,16 +48,17 @@ pub(crate) struct SurfacePipelines {
     blend_flipped: RenderPipeline,
     blend_double_sided: RenderPipeline,
     water: RenderPipeline,
+    frame_environment_layout: BindGroupLayout,
     camera: Buffer,
     binding: BindGroup,
     atmosphere: Buffer,
-    atmosphere_binding: BindGroup,
     water_uniform: Buffer,
-    water_binding: BindGroup,
+    water_normal_keys: [Option<TextureKey>; 2],
+    water_normal_states: [Option<TextureViewState>; 2],
 }
 
 impl SurfacePipelines {
-    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout) -> Self {
+    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout, texture_store: &Textures) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Scene preview"),
             source: ShaderSource::Wgsl(
@@ -80,32 +84,25 @@ impl SurfacePipelines {
             VertexAttribute { format: VertexFormat::Float32x4, offset: 160, shader_location: 13 },
             VertexAttribute { format: VertexFormat::Float32x4, offset: 176, shader_location: 14 },
         ];
-        let camera_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Surface camera"),
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::VERTEX_FRAGMENT,
-                ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                count: None,
-            }],
+        let frame_environment_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Frame environment"),
+            entries: &[
+                uniform_entry(0, ShaderStages::VERTEX_FRAGMENT),
+                uniform_entry(1, ShaderStages::FRAGMENT),
+                uniform_entry(2, ShaderStages::FRAGMENT),
+                texture_entry(3),
+                texture_entry(4),
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
-        let atmosphere_layout = uniform_layout(device, "Surface atmosphere");
-        let water_layout = uniform_layout(device, "Surface water");
         let plain_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Surface pipelines"),
-            bind_group_layouts: &[Some(&camera_layout), Some(textures), Some(&atmosphere_layout), Some(&water_layout)],
-            immediate_size: 0,
-        });
-        let region_water_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Region water pipeline"),
-            bind_group_layouts: &[
-                Some(&camera_layout),
-                Some(textures),
-                Some(&atmosphere_layout),
-                Some(&water_layout),
-                Some(textures),
-                Some(textures),
-            ],
+            bind_group_layouts: &[Some(&frame_environment_layout), Some(textures)],
             immediate_size: 0,
         });
         let buffers = [
@@ -179,7 +176,7 @@ impl SurfacePipelines {
         });
         let water = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Region water"),
-            layout: Some(&region_water_layout),
+            layout: Some(&plain_layout),
             vertex: VertexState { entry_point: Some("vertex"), ..descriptor.vertex.clone() },
             fragment: Some(FragmentState { entry_point: Some("water_fragment"), ..descriptor.fragment.clone().expect("scene fragment") }),
             primitive: PrimitiveState { cull_mode: None, ..descriptor.primitive },
@@ -195,16 +192,20 @@ impl SurfacePipelines {
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let binding = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("Camera"),
-            layout: &camera_layout,
-            entries: &[BindGroupEntry { binding: 0, resource: BindingResource::Buffer(camera.as_entire_buffer_binding()) }],
-        });
         let atmosphere = uniform_buffer(device, "Surface atmosphere", ATMOSPHERE_BYTES);
-        let atmosphere_binding = uniform_binding(device, "Surface atmosphere", &atmosphere_layout, &atmosphere);
         let water_uniform = uniform_buffer(device, "Surface water", WATER_BYTES);
-        let water_binding = uniform_binding(device, "Surface water", &water_layout, &water_uniform);
-
+        let binding = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Frame environment"),
+            layout: &frame_environment_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: BindingResource::Buffer(camera.as_entire_buffer_binding()) },
+                BindGroupEntry { binding: 1, resource: BindingResource::Buffer(atmosphere.as_entire_buffer_binding()) },
+                BindGroupEntry { binding: 2, resource: BindingResource::Buffer(water_uniform.as_entire_buffer_binding()) },
+                BindGroupEntry { binding: 3, resource: BindingResource::TextureView(texture_store.view(None)) },
+                BindGroupEntry { binding: 4, resource: BindingResource::TextureView(texture_store.view(None)) },
+                BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&texture_store.default_sampler) },
+            ],
+        });
         Self {
             pipeline,
             flipped_winding,
@@ -213,12 +214,13 @@ impl SurfacePipelines {
             blend_flipped,
             blend_double_sided,
             water,
+            frame_environment_layout,
             camera,
             binding,
             atmosphere,
-            atmosphere_binding,
             water_uniform,
-            water_binding,
+            water_normal_keys: [None, None],
+            water_normal_states: [None, None],
         }
     }
     pub(crate) fn update_camera_uniform(&self, queue: &Queue, camera: Camera, size: [u32; 2]) -> Mat4 {
@@ -246,17 +248,12 @@ impl SurfacePipelines {
             Pipeline::Water => &self.water,
         });
         pass.set_bind_group(0, &self.binding, &[]);
-        pass.set_bind_group(2, &self.atmosphere_binding, &[]);
-        pass.set_bind_group(3, &self.water_binding, &[]);
-    }
-
-    pub(crate) fn bind_water_texture(&self, pass: &mut RenderPass<'_>, textures: &Textures, pair: TexturePair) {
-        pass.set_bind_group(4, textures.binding(pair.current), &[]);
-        pass.set_bind_group(5, textures.binding(pair.next), &[]);
     }
 
     pub(crate) fn update_environment(
-        &self,
+        &mut self,
+        device: &Device,
+        textures: &Textures,
         queue: &Queue,
         draw_distance: f32,
         altitude: f32,
@@ -272,6 +269,24 @@ impl SurfacePipelines {
         }
         let mut atmosphere_bytes = [0; ATMOSPHERE_BYTES];
         write_floats(queue, &self.atmosphere, &mut atmosphere_bytes, &atmosphere);
+        let keys = [normal_map.current, normal_map.next];
+        let states = keys.map(|key| textures.view_state(key));
+        if keys != self.water_normal_keys || states != self.water_normal_states {
+            self.binding = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("Frame environment"),
+                layout: &self.frame_environment_layout,
+                entries: &[
+                    BindGroupEntry { binding: 0, resource: BindingResource::Buffer(self.camera.as_entire_buffer_binding()) },
+                    BindGroupEntry { binding: 1, resource: BindingResource::Buffer(self.atmosphere.as_entire_buffer_binding()) },
+                    BindGroupEntry { binding: 2, resource: BindingResource::Buffer(self.water_uniform.as_entire_buffer_binding()) },
+                    BindGroupEntry { binding: 3, resource: BindingResource::TextureView(textures.view(normal_map.current)) },
+                    BindGroupEntry { binding: 4, resource: BindingResource::TextureView(textures.view(normal_map.next)) },
+                    BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&textures.default_sampler) },
+                ],
+            });
+            self.water_normal_keys = keys;
+            self.water_normal_states = states;
+        }
 
         let Some(environment) = environment else {
             let origin = water_origin(camera_position, DEFAULT_SCALE_ABOVE);
@@ -324,16 +339,26 @@ impl SurfacePipelines {
     }
 }
 
-fn uniform_layout(device: &Device, label: &str) -> BindGroupLayout {
-    device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-        label: Some(label),
-        entries: &[BindGroupLayoutEntry {
-            binding: 0,
-            visibility: ShaderStages::FRAGMENT,
-            ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-            count: None,
-        }],
-    })
+fn uniform_entry(binding: u32, visibility: ShaderStages) -> BindGroupLayoutEntry {
+    BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+        count: None,
+    }
+}
+
+fn texture_entry(binding: u32) -> BindGroupLayoutEntry {
+    BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::FRAGMENT,
+        ty: BindingType::Texture {
+            sample_type: TextureSampleType::Float { filterable: true },
+            view_dimension: TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
 }
 
 fn uniform_buffer(device: &Device, label: &str, bytes: usize) -> Buffer {
@@ -342,14 +367,6 @@ fn uniform_buffer(device: &Device, label: &str, bytes: usize) -> Buffer {
         size: bytes as u64,
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         mapped_at_creation: false,
-    })
-}
-
-fn uniform_binding(device: &Device, label: &str, layout: &BindGroupLayout, buffer: &Buffer) -> BindGroup {
-    device.create_bind_group(&BindGroupDescriptor {
-        label: Some(label),
-        layout,
-        entries: &[BindGroupEntry { binding: 0, resource: BindingResource::Buffer(buffer.as_entire_buffer_binding()) }],
     })
 }
 

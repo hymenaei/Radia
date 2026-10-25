@@ -338,7 +338,9 @@ impl Retirement {
 #[cfg(test)]
 mod tests {
     use wgpu::naga::{
+        AddressSpace, ImageClass, TypeInner,
         front::wgsl,
+        proc::Layouter,
         valid::{Capabilities, ValidationFlags, Validator},
     };
 
@@ -368,6 +370,62 @@ mod tests {
         ] {
             let module = wgsl::parse_str(source).unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
             Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap_or_else(|error| panic!("{name}: {error}"));
+            validate_default_limits(name, &module);
         }
+    }
+
+    fn validate_default_limits(name: &str, module: &wgpu::naga::Module) {
+        let limits = wgpu::Limits::default();
+        let mut bindings_per_group = vec![0_u32; limits.max_bind_groups as usize];
+        let mut sampled_textures = 0_u32;
+        let mut samplers = 0_u32;
+        let mut layouter = Layouter::default();
+        layouter.update(module.to_ctx()).unwrap_or_else(|error| panic!("{name}: {error}"));
+        for (_, global) in module.global_variables.iter() {
+            if let Some(binding) = global.binding.as_ref() {
+                assert!(
+                    binding.group < limits.max_bind_groups,
+                    "{name}: bind group {} reaches the default limit {}",
+                    binding.group,
+                    limits.max_bind_groups
+                );
+                let Some(group_count) = bindings_per_group.get_mut(binding.group as usize) else {
+                    panic!("{name}: group {} is not represented by default limits", binding.group);
+                };
+                *group_count += 1;
+                assert!(
+                    binding.binding < limits.max_bindings_per_bind_group,
+                    "{name}: binding {} reaches the default per-group limit {}",
+                    binding.binding,
+                    limits.max_bindings_per_bind_group
+                );
+            }
+            if global.space == AddressSpace::Uniform {
+                let size = layouter[global.ty].size;
+                assert!(
+                    u64::from(size) <= limits.max_uniform_buffer_binding_size,
+                    "{name}: uniform is {size} bytes; default limit is {}",
+                    limits.max_uniform_buffer_binding_size
+                );
+            }
+            if global.space == AddressSpace::Handle {
+                match module.types[global.ty].inner {
+                    TypeInner::Image { class: ImageClass::Sampled { .. } | ImageClass::Depth { .. }, .. } => sampled_textures += 1,
+                    TypeInner::Sampler { .. } => samplers += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(bindings_per_group.into_iter().all(|count| count <= limits.max_bindings_per_bind_group));
+        assert!(
+            sampled_textures <= limits.max_sampled_textures_per_shader_stage,
+            "{name}: {sampled_textures} sampled textures; default stage limit is {}",
+            limits.max_sampled_textures_per_shader_stage
+        );
+        assert!(
+            samplers <= limits.max_samplers_per_shader_stage,
+            "{name}: {samplers} samplers; default stage limit is {}",
+            limits.max_samplers_per_shader_stage
+        );
     }
 }

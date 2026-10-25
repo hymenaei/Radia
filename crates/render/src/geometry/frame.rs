@@ -64,7 +64,7 @@ impl GeometryRenderer {
         if self.prepared.as_ref().is_some_and(|prepared| prepared.reusable(&key, self.textures.geometry_state(), self.memory.mesh_state()))
         {
             let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
-            self.update_environment_uniforms(camera, projection, size, frame_input, pairs);
+            self.update_environment_uniforms(device, camera, projection, size, frame_input, pairs);
             if let Some(prepared) = self.prepared.as_mut() {
                 prepared.textures = self.textures.state();
                 prepared.geometry_textures = self.textures.geometry_state();
@@ -270,7 +270,7 @@ impl GeometryRenderer {
         if !bytes.is_empty() {
             self.queue.write_buffer(&self.instances, 0, &bytes);
         }
-        self.update_environment_uniforms(camera, projection, size, frame_input, pairs);
+        self.update_environment_uniforms(device, camera, projection, size, frame_input, pairs);
         self.stats.instances = self.visible.len();
         self.stats.draw_calls = self.draws.len() + usize::from(self.water.active);
         self.memory_stats();
@@ -290,6 +290,7 @@ impl GeometryRenderer {
 
     fn update_environment_uniforms(
         &mut self,
+        device: &Device,
         camera: Camera,
         projection: math::Mat4,
         size: [u32; 2],
@@ -297,8 +298,9 @@ impl GeometryRenderer {
         pairs: EnvironmentPairs,
     ) {
         let normal = pairs.water;
-        self.water_textures = normal;
         self.pipelines.update_environment(
+            device,
+            &self.textures,
             &self.queue,
             camera.draw_distance() as f32,
             camera.position().z as f32,
@@ -308,6 +310,8 @@ impl GeometryRenderer {
             frame_input.water_scroll,
         );
         self.water.update(
+            device,
+            &self.textures,
             &self.queue,
             camera,
             projection.inverse(),
@@ -319,6 +323,8 @@ impl GeometryRenderer {
             self.water_region_count,
         );
         self.sky.update(
+            device,
+            &self.textures,
             &self.queue,
             projection,
             projection.inverse(),

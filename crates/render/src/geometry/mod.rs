@@ -27,7 +27,7 @@ use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{Camera, MAX_REGIONS, MeshId, SharedMesh, ViewVersion};
 use crate::{
-    pipeline::{INSTANCE_BYTES, Sky, SurfacePipelines, TexturePair, Water},
+    pipeline::{INSTANCE_BYTES, Sky, SurfacePipelines, Water},
     texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
 
@@ -203,7 +203,6 @@ pub(crate) struct GeometryRenderer {
     water_regions: [Vec4; MAX_REGIONS],
     water_region_ids: [u128; MAX_REGIONS],
     water_region_count: usize,
-    water_textures: TexturePair,
     instances: Buffer,
     depth: Option<Depth>,
     meshes: HashMap<MeshId, GpuMesh>,
@@ -231,9 +230,9 @@ impl GeometryRenderer {
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
-        let pipelines = SurfacePipelines::new(device, format, &textures.layout);
-        let water = Water::new(device, format, &textures.layout);
-        let sky = Sky::new(device, format, &textures.layout);
+        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures);
+        let water = Water::new(device, format, &textures);
+        let sky = Sky::new(device, format, &textures);
         Self {
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
@@ -244,7 +243,6 @@ impl GeometryRenderer {
             water_regions: [Vec4::ZERO; MAX_REGIONS],
             water_region_ids: [0; MAX_REGIONS],
             water_region_count: 0,
-            water_textures: TexturePair::default(),
             water,
             sky,
             instances: buffer(device, "Face instances", MAX_FACE_INSTANCES * INSTANCE_BYTES, BufferUsages::VERTEX),
@@ -323,7 +321,7 @@ impl GeometryRenderer {
         self.textures.set_soft_cap(mib);
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
-        self.water.draw(pass, &self.textures);
+        self.water.draw(pass);
         pass.set_vertex_buffer(1, self.instances.slice(..));
         let mut pipeline = None;
         let mut texture = None;
@@ -336,9 +334,6 @@ impl GeometryRenderer {
             if texture != Some(draw.texture) {
                 pass.set_bind_group(1, self.textures.binding(draw.texture), &[]);
                 texture = Some(draw.texture);
-            }
-            if draw.pipeline == crate::pipeline::Pipeline::Water {
-                self.pipelines.bind_water_texture(pass, &self.textures, self.water_textures);
             }
             let mesh = &self.meshes[&draw.mesh];
             let allocation = &mesh.allocation;
@@ -355,7 +350,7 @@ impl GeometryRenderer {
                 draw.first..draw.first + draw.count,
             );
         }
-        self.sky.draw(pass, &self.textures);
+        self.sky.draw(pass);
     }
 
     pub(crate) fn submitted(&mut self, frame: FrameLease) {

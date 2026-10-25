@@ -1,9 +1,9 @@
 use math::{DVec3, Mat4, Vec4};
 use std::f64::consts::TAU;
 use wgpu::{
-    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindingResource, BindingType, Buffer,
-    BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction, DepthStencilState, Device,
-    FragmentState, MultisampleState, PipelineLayoutDescriptor, PrimitiveState, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor,
+    BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindingResource, BindingType, Buffer, BufferBindingType,
+    BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction, DepthStencilState, Device, FragmentState,
+    MultisampleState, PipelineLayoutDescriptor, PrimitiveState, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor,
     ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat, VertexState,
 };
 
@@ -11,7 +11,7 @@ use super::atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values};
 use crate::{
     environment::Evaluated,
     scene::{Camera, MAX_REGIONS},
-    texture::Textures,
+    texture::{TextureViewState, Textures},
 };
 
 use super::TexturePair;
@@ -32,10 +32,12 @@ pub(crate) struct Water {
     binding: BindGroup,
     pub(crate) active: bool,
     normal: TexturePair,
+    normal_binding: BindGroup,
+    normal_view_states: [Option<TextureViewState>; 2],
 }
 
 impl Water {
-    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout) -> Self {
+    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &Textures) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Far water and atmosphere"),
             source: ShaderSource::Wgsl(
@@ -58,7 +60,7 @@ impl Water {
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Far water"),
-            bind_group_layouts: &[Some(&layout), Some(textures), Some(textures)],
+            bind_group_layouts: &[Some(&layout), Some(&textures.pair_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
@@ -94,11 +96,14 @@ impl Water {
             layout: &layout,
             entries: &[BindGroupEntry { binding: 0, resource: BindingResource::Buffer(uniform.as_entire_buffer_binding()) }],
         });
-        Self { pipeline, uniform, binding, active: false, normal: TexturePair::default() }
+        let normal_binding = textures.pair_binding(device, None, None);
+        Self { pipeline, uniform, binding, active: false, normal: TexturePair::default(), normal_binding, normal_view_states: [None, None] }
     }
 
     pub(crate) fn update(
         &mut self,
+        device: &Device,
+        textures: &Textures,
         queue: &Queue,
         camera: Camera,
         inverse: Mat4,
@@ -110,6 +115,12 @@ impl Water {
         region_count: usize,
     ) {
         self.active = false;
+        let keys = [normal.current, normal.next];
+        let states = keys.map(|key| textures.view_state(key));
+        if keys != [self.normal.current, self.normal.next] || states != self.normal_view_states {
+            self.normal_binding = textures.pair_binding(device, normal.current, normal.next);
+            self.normal_view_states = states;
+        }
         self.normal = normal;
         let Some(height) = height
             .map(|height| height - camera.position().z)
@@ -158,12 +169,11 @@ impl Water {
         self.active = true;
     }
 
-    pub(crate) fn draw(&self, pass: &mut RenderPass<'_>, textures: &Textures) {
+    pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
         if self.active {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.binding, &[]);
-            pass.set_bind_group(1, textures.binding(self.normal.current), &[]);
-            pass.set_bind_group(2, textures.binding(self.normal.next), &[]);
+            pass.set_bind_group(1, &self.normal_binding, &[]);
             pass.draw(0..3, 0..1);
         }
     }

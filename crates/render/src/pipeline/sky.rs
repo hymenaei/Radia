@@ -5,15 +5,15 @@ use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
     BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages,
     ColorTargetState, ColorWrites, CompareFunction, DepthStencilState, Device, FragmentState, MultisampleState, PipelineLayoutDescriptor,
-    PrimitiveState, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages,
-    TextureFormat, VertexState,
+    PrimitiveState, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, SamplerBindingType, ShaderModuleDescriptor, ShaderSource,
+    ShaderStages, TextureFormat, TextureSampleType, TextureViewDimension, VertexState,
 };
 
 use super::atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values};
 use crate::{
     environment::{Evaluated, STAR_COUNT, TextureBlend, star_brightness, stars},
     scene::SceneView,
-    texture::{TextureKey, Textures},
+    texture::{TextureKey, TextureViewState, Textures},
 };
 
 const UNIFORM_FLOATS: usize = 16 + ATMOSPHERE_FLOATS + 12 * 4;
@@ -36,9 +36,14 @@ pub(crate) struct Sky {
     stars: RenderPipeline,
     uniform: Buffer,
     binding: BindGroup,
+    texture_layout: BindGroupLayout,
+    texture_binding: BindGroup,
+    texture_keys: [Option<TextureKey>; 12],
+    texture_states: [Option<TextureViewState>; 12],
     star_uniform: Buffer,
     star_binding: BindGroup,
     star_buffer_binding: BindGroup,
+    star_texture_binding: BindGroup,
     active: bool,
     sun_textures: TexturePair,
     moon_textures: TexturePair,
@@ -49,7 +54,7 @@ pub(crate) struct Sky {
 }
 
 impl Sky {
-    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout) -> Self {
+    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &Textures) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Sky and atmosphere"),
             source: ShaderSource::Wgsl(concat!(include_str!("../shaders/atmosphere.wgsl"), include_str!("../shaders/sky.wgsl")).into()),
@@ -63,22 +68,15 @@ impl Sky {
                 count: None,
             }],
         });
+        let texture_layout = sky_texture_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Sky"),
-            bind_group_layouts: &[
-                Some(&layout),
-                Some(textures),
-                Some(textures),
-                Some(textures),
-                Some(textures),
-                Some(textures),
-                Some(textures),
-            ],
+            bind_group_layouts: &[Some(&layout), Some(&texture_layout)],
             immediate_size: 0,
         });
         let cloud_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Cloud layers"),
-            bind_group_layouts: &[Some(&layout), Some(textures), Some(textures)],
+            bind_group_layouts: &[Some(&layout), Some(&texture_layout)],
             immediate_size: 0,
         });
         let buffers = [];
@@ -155,7 +153,7 @@ impl Sky {
         });
         let star_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("WindLight stars"),
-            bind_group_layouts: &[Some(&star_layout), Some(&star_data_layout), Some(textures), Some(textures)],
+            bind_group_layouts: &[Some(&star_layout), Some(&star_data_layout), Some(&textures.pair_layout)],
             immediate_size: 0,
         });
         let star_targets = [Some(ColorTargetState {
@@ -228,6 +226,9 @@ impl Sky {
             layout: &star_data_layout,
             entries: &[BindGroupEntry { binding: 0, resource: star_buffer.as_entire_binding() }],
         });
+        let texture_keys = [None; 12];
+        let texture_binding = sky_texture_binding(device, &texture_layout, textures, texture_keys);
+        let star_texture_binding = textures.pair_binding(device, None, None);
         Self {
             sky,
             cloud,
@@ -236,9 +237,14 @@ impl Sky {
             stars: stars_pipeline,
             uniform,
             binding,
+            texture_layout,
+            texture_binding,
+            texture_keys,
+            texture_states: [None; 12],
             star_uniform,
             star_binding,
             star_buffer_binding,
+            star_texture_binding,
             active: false,
             sun_textures: TexturePair::default(),
             moon_textures: TexturePair::default(),
@@ -251,6 +257,8 @@ impl Sky {
 
     pub(crate) fn update(
         &mut self,
+        device: &Device,
+        textures: &Textures,
         queue: &Queue,
         projection: Mat4,
         inverse: Mat4,
@@ -273,6 +281,23 @@ impl Sky {
         self.bloom_textures = bloom_textures;
         self.rainbow_textures = rainbow_textures;
         self.halo_textures = halo_textures;
+        let mut keys = [None; 12];
+        for (index, pair) in
+            [sun_textures, moon_textures, cloud_textures, bloom_textures, rainbow_textures, halo_textures].into_iter().enumerate()
+        {
+            let pair = pair_keys(pair);
+            if let Some(target) = keys.get_mut(index * 2..index * 2 + 2) {
+                target.copy_from_slice(&pair);
+            }
+        }
+        let states = keys.map(|key| textures.view_state(key));
+        if keys != self.texture_keys || states != self.texture_states {
+            self.texture_binding = sky_texture_binding(device, &self.texture_layout, textures, keys);
+            let bloom = pair_keys(bloom_textures);
+            self.star_texture_binding = textures.pair_binding(device, bloom[0], bloom[1]);
+            self.texture_keys = keys;
+            self.texture_states = states;
+        }
         let Some(environment) = environment else { return };
         let mut values = [0.0; UNIFORM_FLOATS];
         let mut offset = 0;
@@ -341,54 +366,73 @@ impl Sky {
         self.active = true;
     }
 
-    pub(crate) fn draw(&self, pass: &mut RenderPass<'_>, textures: &Textures) {
+    pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
         if !self.active {
             return;
         }
         pass.set_bind_group(0, &self.binding, &[]);
+        pass.set_bind_group(1, &self.texture_binding, &[]);
         pass.set_pipeline(&self.sky);
-        pass.set_bind_group(1, textures.binding(None), &[]);
-        bind_pair(pass, textures, 3, self.rainbow_textures);
-        bind_pair(pass, textures, 5, self.halo_textures);
         pass.draw(0..3, 0..1);
-        draw_pair(pass, &self.sun, textures, self.sun_textures);
+        draw_body(pass, &self.sun);
         if self.moon_textures.current.is_some() || self.moon_textures.next.is_some() {
-            draw_pair(pass, &self.moon, textures, self.moon_textures);
+            draw_body(pass, &self.moon);
         }
         if self.bloom_textures.current.is_some() || self.bloom_textures.next.is_some() {
             pass.set_pipeline(&self.stars);
             pass.set_bind_group(0, &self.star_binding, &[]);
             pass.set_bind_group(1, &self.star_buffer_binding, &[]);
-            bind_pair(pass, textures, 2, self.bloom_textures);
+            pass.set_bind_group(2, &self.star_texture_binding, &[]);
             pass.draw(0..6, 0..STAR_COUNT as u32);
         }
-        draw_cloud(pass, &self.cloud, textures, self.cloud_textures);
+        if self.cloud_textures.current.is_some() || self.cloud_textures.next.is_some() {
+            pass.set_pipeline(&self.cloud);
+            pass.set_bind_group(0, &self.binding, &[]);
+            pass.set_bind_group(1, &self.texture_binding, &[]);
+            pass.draw(0..3, 0..1);
+        }
     }
 }
 
-fn draw_pair(pass: &mut RenderPass<'_>, pipeline: &RenderPipeline, textures: &Textures, pair: TexturePair) {
+fn draw_body(pass: &mut RenderPass<'_>, pipeline: &RenderPipeline) {
     pass.set_pipeline(pipeline);
-    bind_pair(pass, textures, 1, pair);
     pass.draw(0..3, 0..1);
 }
 
-fn bind_pair(pass: &mut RenderPass<'_>, textures: &Textures, group: u32, pair: TexturePair) {
-    let current = pair.current.or(pair.next);
-    let next = pair.next.or(pair.current);
-    pass.set_bind_group(group, textures.binding(current), &[]);
-    pass.set_bind_group(group + 1, textures.binding(next), &[]);
+fn pair_keys(pair: TexturePair) -> [Option<TextureKey>; 2] {
+    [pair.current.or(pair.next), pair.next.or(pair.current)]
 }
 
-fn draw_cloud(pass: &mut RenderPass<'_>, pipeline: &RenderPipeline, textures: &Textures, pair: TexturePair) {
-    if pair.current.is_none() && pair.next.is_none() {
-        return;
+fn sky_texture_layout(device: &Device) -> BindGroupLayout {
+    let mut entries = Vec::with_capacity(13);
+    for binding in 0..12 {
+        entries.push(BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Texture {
+                sample_type: TextureSampleType::Float { filterable: true },
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
     }
-    let current = pair.current.or(pair.next);
-    let next = pair.next.or(pair.current);
-    pass.set_pipeline(pipeline);
-    pass.set_bind_group(1, textures.binding(current), &[]);
-    pass.set_bind_group(2, textures.binding(next), &[]);
-    pass.draw(0..3, 0..1);
+    entries.push(BindGroupLayoutEntry {
+        binding: 12,
+        visibility: ShaderStages::FRAGMENT,
+        ty: BindingType::Sampler(SamplerBindingType::Filtering),
+        count: None,
+    });
+    device.create_bind_group_layout(&BindGroupLayoutDescriptor { label: Some("Sky textures"), entries: &entries })
+}
+
+fn sky_texture_binding(device: &Device, layout: &BindGroupLayout, textures: &Textures, keys: [Option<TextureKey>; 12]) -> BindGroup {
+    let mut entries = Vec::with_capacity(13);
+    for (binding, key) in keys.into_iter().enumerate() {
+        entries.push(BindGroupEntry { binding: binding as u32, resource: BindingResource::TextureView(textures.view(key)) });
+    }
+    entries.push(BindGroupEntry { binding: 12, resource: BindingResource::Sampler(&textures.default_sampler) });
+    device.create_bind_group(&BindGroupDescriptor { label: Some("Sky textures"), layout, entries: &entries })
 }
 
 fn resident(key: Option<TextureKey>) -> f32 {

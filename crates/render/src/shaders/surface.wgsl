@@ -10,12 +10,11 @@ struct SurfaceAtmosphere {
     atmosphere: Atmosphere,
     distance: vec4<f32>,
 }
-@group(2) @binding(0) var<uniform> surface_atmosphere: SurfaceAtmosphere;
-@group(3) @binding(0) var<uniform> surface_water: WaterSurface;
-@group(4) @binding(0) var water_normal_image: texture_2d<f32>;
-@group(4) @binding(1) var water_normal_sampler: sampler;
-@group(5) @binding(0) var water_normal_next_image: texture_2d<f32>;
-@group(5) @binding(1) var water_normal_next_sampler: sampler;
+@group(0) @binding(1) var<uniform> surface_atmosphere: SurfaceAtmosphere;
+@group(0) @binding(2) var<uniform> surface_water: WaterSurface;
+@group(0) @binding(3) var water_normal_image: texture_2d<f32>;
+@group(0) @binding(4) var water_normal_next_image: texture_2d<f32>;
+@group(0) @binding(5) var water_normal_sampler: sampler;
 
 struct Input {
     @location(0) position: vec3<f32>,
@@ -112,9 +111,9 @@ struct Surface {
         let coordinates = water_coordinates(v.relative_position, surface_water);
         let normal = blended_water_normal(
             textureSample(water_normal_image, water_normal_sampler, coordinates.first).xyz,
-            textureSample(water_normal_next_image, water_normal_next_sampler, coordinates.first).xyz,
+            textureSample(water_normal_next_image, water_normal_sampler, coordinates.first).xyz,
             textureSample(water_normal_image, water_normal_sampler, coordinates.second).xyz,
-            textureSample(water_normal_next_image, water_normal_next_sampler, coordinates.second).xyz,
+            textureSample(water_normal_next_image, water_normal_sampler, coordinates.second).xyz,
             surface_water,
         );
         color = water_surface_color(

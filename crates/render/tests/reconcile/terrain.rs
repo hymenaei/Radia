@@ -346,7 +346,7 @@ fn water_precedes_terrain_builds() {
                 view.apply(batch).unwrap();
                 for surface in view.surfaces() {
                     if appeared.insert(surface.region) {
-                        assert_eq!(surface.kind, SurfaceKind::Water, "observed water must not wait behind its terrain queue");
+                        assert_eq!(surface.kind, SurfaceKind::RegionWater, "observed water must not wait behind its terrain queue");
                         let PreparedMesh::Ready(mesh) = &surface.mesh else { panic!("water mesh must be ready") };
                         assert_eq!(mesh.mesh().vertices().len(), 4);
                     }
@@ -394,7 +394,7 @@ fn terrain_samples_and_gaps() {
     assert_eq!(mesh.indices().len(), 15 * 15 * 6, "unknown neighbors must leave uncovered cells");
     assert_eq!(mesh.vertices()[0].position, Vec3::new(0.0, 0.0, 7.0));
     assert_eq!(mesh.vertices()[255].position, Vec3::new(15.0, 15.0, 82.0));
-    assert!(!view.surfaces().any(|surface| surface.kind == SurfaceKind::Water));
+    assert!(!view.surfaces().any(|surface| surface.kind == SurfaceKind::RegionWater));
     for (order, (x, y)) in [(1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
         let _ = world.observe_terrain_patch(source(1, order as u64 + 2), plane(x, y)).unwrap();
     }
@@ -474,7 +474,7 @@ fn terrain_region_edges() {
     let east_position = positions[&(Region::new(2), SurfaceKind::Terrain(TerrainPatchId::new(0, 0).unwrap()))];
     assert_eq!(west_position + west_edge.position.as_dvec3(), east_position + east_edge.position.as_dvec3());
     assert_eq!(west_position, origin + DVec3::X * 240.0);
-    let water = view.surfaces().find(|s| s.kind == SurfaceKind::Water).unwrap();
+    let water = view.surfaces().find(|s| s.kind == SurfaceKind::RegionWater).unwrap();
     assert_eq!(water.region, Region::new(1));
     assert_eq!(water.position, origin);
     let PreparedMesh::Ready(mesh) = &water.mesh else { panic!("expected water") };

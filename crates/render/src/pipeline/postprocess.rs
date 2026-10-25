@@ -46,7 +46,7 @@ impl PostProcess {
             source: ShaderSource::Wgsl(
                 concat!(
                     include_str!("../shaders/atmosphere.wgsl"),
-                    include_str!("../shaders/water_common.wgsl"),
+                    include_str!("../shaders/water.wgsl"),
                     include_str!("../shaders/exposure.wgsl")
                 )
                 .into(),
@@ -57,7 +57,7 @@ impl PostProcess {
             source: ShaderSource::Wgsl(
                 concat!(
                     include_str!("../shaders/atmosphere.wgsl"),
-                    include_str!("../shaders/water_common.wgsl"),
+                    include_str!("../shaders/water.wgsl"),
                     include_str!("../shaders/tonemap.wgsl")
                 )
                 .into(),

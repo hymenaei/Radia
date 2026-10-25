@@ -34,7 +34,7 @@ use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion};
 use crate::{
-    pipeline::{Sky, SurfacePipelines, Water},
+    pipeline::{Sky, SurfacePipelines, VoidWater},
     texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
 
@@ -149,7 +149,7 @@ impl Drop for FrameLease {
 enum ShadingMode {
     Studio,
     Terrain,
-    Water,
+    RegionWater,
 }
 
 struct Depth {
@@ -207,14 +207,14 @@ pub(crate) struct GeometryRenderer {
     queue: Queue,
     memory: Arc<Accounting>,
     pipelines: SurfacePipelines,
-    water: Water,
+    void_water: VoidWater,
     sky: Sky,
     textures: Textures,
     requested_textures: HashSet<TextureId>,
     visible_textures: HashSet<TextureId>,
-    water_regions: [Vec4; MAX_REGIONS],
-    water_region_ids: [u128; MAX_REGIONS],
-    water_region_count: usize,
+    region_water_bounds: [Vec4; MAX_REGIONS],
+    region_water_ids: [u128; MAX_REGIONS],
+    region_water_count: usize,
     instances: Buffer,
     indirect: Buffer,
     indirect_first_instance: bool,
@@ -262,7 +262,7 @@ impl GeometryRenderer {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
         let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures);
-        let water = Water::new(device, format, &textures);
+        let void_water = VoidWater::new(device, format, &textures);
         let sky = Sky::new(device, format, &textures);
         let indirect_bytes = MAX_FACE_INSTANCES * INDIRECT_DRAW_BYTES;
         Self {
@@ -272,10 +272,10 @@ impl GeometryRenderer {
             textures,
             requested_textures: HashSet::new(),
             visible_textures: HashSet::new(),
-            water_regions: [Vec4::ZERO; MAX_REGIONS],
-            water_region_ids: [0; MAX_REGIONS],
-            water_region_count: 0,
-            water,
+            region_water_bounds: [Vec4::ZERO; MAX_REGIONS],
+            region_water_ids: [0; MAX_REGIONS],
+            region_water_count: 0,
+            void_water,
             sky,
             instances: buffer(device, "Face instances", INSTANCE_BUFFER_BYTES, BufferUsages::VERTEX),
             indirect: buffer(device, "Scene indexed draws", indirect_bytes, BufferUsages::INDIRECT),
@@ -401,7 +401,7 @@ impl GeometryRenderer {
         self.textures.set_soft_cap(mib);
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
-        self.water.draw(pass);
+        self.void_water.draw(pass);
         let mut pipeline = None;
         let mut texture = None;
         let mut terrain = None;

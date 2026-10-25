@@ -128,7 +128,7 @@ mod tests {
         let far = camera.with_quality(512.0, 1.0).expect("far draw distance");
         let frustum = Frustum::from_clip_matrix(Mat4::from_scale(Vec3::splat(0.001)));
         let position = DVec3::new(100.0, 0.0, 0.0);
-        for shading in [ShadingMode::Terrain, ShadingMode::Water] {
+        for shading in [ShadingMode::Terrain, ShadingMode::RegionWater] {
             assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), shading, close, &frustum));
             assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), shading, far, &frustum));
         }

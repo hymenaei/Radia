@@ -179,7 +179,7 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
                 params.color = [0.18, 0.23, 0.13, 1.0];
                 params.params[0] = 1.0;
             }
-            ShadingMode::Water => {
+            ShadingMode::RegionWater => {
                 params.color = COLOR.to_array();
                 params.params[0] = 1.0;
             }
@@ -191,7 +191,7 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
         let texture = material.and_then(|material| material.base_color_texture.as_ref()).and_then(|binding| binding.image()).cloned();
         let pipeline = match shading {
             ShadingMode::Terrain => Pipeline::Terrain,
-            ShadingMode::Water => Pipeline::Water,
+            ShadingMode::RegionWater => Pipeline::RegionWater,
             ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, scale, invert_normals),
         };
         let key = DrawKey { mesh: mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture: params.texture, terrain };

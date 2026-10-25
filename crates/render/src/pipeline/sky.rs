@@ -60,7 +60,7 @@ impl Sky {
             source: ShaderSource::Wgsl(
                 concat!(
                     include_str!("../shaders/atmosphere.wgsl"),
-                    include_str!("../shaders/water_common.wgsl"),
+                    include_str!("../shaders/water.wgsl"),
                     include_str!("../shaders/sky.wgsl")
                 )
                 .into(),

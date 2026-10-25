@@ -33,7 +33,7 @@ struct EnvironmentPairs {
     bloom: TexturePair,
     rainbow: TexturePair,
     halo: TexturePair,
-    water: TexturePair,
+    water_normal: TexturePair,
 }
 
 impl GeometryRenderer {
@@ -105,7 +105,7 @@ impl GeometryRenderer {
             }) {
                 let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, self.cache.origin);
                 let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
-                self.update_water_regions(camera.position());
+                self.update_region_water_bounds(camera.position());
                 self.update_environment_uniforms(device, camera, projection, size, frame_input, pairs);
                 if let Some(prepared) = self.prepared.as_mut() {
                     prepared.textures = self.textures.state();
@@ -336,7 +336,7 @@ impl GeometryRenderer {
         self.cache.size = size;
         self.cache.version = Some(view.version());
         let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
-        self.update_water_regions(camera.position());
+        self.update_region_water_bounds(camera.position());
         self.update_environment_uniforms(device, camera, projection, size, frame_input, pairs);
         self.cache.next_candidates.clear();
         let animation_deadline = self
@@ -370,8 +370,8 @@ impl GeometryRenderer {
         self.stats.instances = self.draw_list.visible_items();
         let draw_submissions =
             if self.indirect_first_instance { self.draw_list.draw_batches().len() } else { self.draw_list.draws().len() };
-        self.stats.draw_calls = draw_submissions + usize::from(self.water.active);
-        self.stats.draw_commands = self.draw_list.draws().len() + usize::from(self.water.active);
+        self.stats.draw_calls = draw_submissions + usize::from(self.void_water.active);
+        self.stats.draw_commands = self.draw_list.draws().len() + usize::from(self.void_water.active);
         self.stats.pending_meshes = self.pending_meshes.len();
         self.stats.pending_textures = self.pending_textures.len();
         if self.stats.omitted_faces > 0 && self.draw_report.is_none_or(|at| at.elapsed() >= Duration::from_secs(5)) {
@@ -409,7 +409,7 @@ impl GeometryRenderer {
         frame_input: FrameInput<'_>,
         pairs: EnvironmentPairs,
     ) {
-        let normal = pairs.water;
+        let normal = pairs.water_normal;
         self.pipelines.update_environment(
             device,
             &self.textures,
@@ -420,7 +420,7 @@ impl GeometryRenderer {
             frame_input.water_height,
             frame_input.water_scroll,
         );
-        self.water.update(
+        self.void_water.update(
             device,
             &self.textures,
             &self.queue,
@@ -430,8 +430,8 @@ impl GeometryRenderer {
             frame_input.environment,
             normal,
             frame_input.water_scroll,
-            &self.water_regions,
-            self.water_region_count,
+            &self.region_water_bounds,
+            self.region_water_count,
         );
         self.sky.update(
             device,
@@ -453,24 +453,24 @@ impl GeometryRenderer {
         );
     }
 
-    fn update_water_regions(&mut self, camera: DVec3) {
-        self.water_region_count = 0;
+    fn update_region_water_bounds(&mut self, camera: DVec3) {
+        self.region_water_count = 0;
         for index in self.cache.visible.iter().copied() {
             let Some((region, position)) = self.cache.items.get(index).and_then(|item| {
-                (item.surface_kind == Some(crate::scene::SurfaceKind::Water)).then_some((item.region, item.position))
+                (item.surface_kind == Some(crate::scene::SurfaceKind::RegionWater)).then_some((item.region, item.position))
             }) else {
                 continue;
             };
             let relative = (position - camera).as_vec3();
-            if !relative.is_finite() || self.water_region_count >= self.water_regions.len() {
+            if !relative.is_finite() || self.region_water_count >= self.region_water_bounds.len() {
                 continue;
             }
-            if self.water_region_ids[..self.water_region_count].contains(&u128::from(region.get())) {
+            if self.region_water_ids[..self.region_water_count].contains(&u128::from(region.get())) {
                 continue;
             }
-            self.water_regions[self.water_region_count] = math::Vec4::new(relative.x, relative.y, 256.0, 256.0);
-            self.water_region_ids[self.water_region_count] = u128::from(region.get());
-            self.water_region_count += 1;
+            self.region_water_bounds[self.region_water_count] = math::Vec4::new(relative.x, relative.y, 256.0, 256.0);
+            self.region_water_ids[self.region_water_count] = u128::from(region.get());
+            self.region_water_count += 1;
         }
     }
 
@@ -707,7 +707,7 @@ fn current_params(source: Option<&Object>, shading: ShadingMode, face: &CachedFa
             params.color = [0.18, 0.23, 0.13, 1.0];
             params.params[0] = 1.0;
         }
-        ShadingMode::Water => {
+        ShadingMode::RegionWater => {
             params.color = COLOR.to_array();
             params.params[0] = 1.0;
         }
@@ -758,7 +758,7 @@ fn environment_pairs(
         bloom: blend_keys(device, environment.sky.bloom, view, textures),
         rainbow: blend_keys(device, environment.sky.rainbow, view, textures),
         halo: blend_keys(device, environment.sky.halo, view, textures),
-        water: blend_keys(device, environment.water.normal_map, view, textures),
+        water_normal: blend_keys(device, environment.water.normal_map, view, textures),
     }
 }
 
@@ -925,7 +925,7 @@ mod tests {
         let (_, mesh) = object.mesh().expect("fixture mesh");
         let info = mesh_info(mesh);
         let mut draw_list = DrawList::default();
-        for (shading, pipeline) in [(ShadingMode::Terrain, Pipeline::Terrain), (ShadingMode::Water, Pipeline::Water)] {
+        for (shading, pipeline) in [(ShadingMode::Terrain, Pipeline::Terrain), (ShadingMode::RegionWater, Pipeline::RegionWater)] {
             let faces = cached_faces(
                 CachedFaceContext {
                     id: (1, 1, 0),

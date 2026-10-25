@@ -8,7 +8,6 @@ struct Camera {
 @group(1) @binding(1) var image_sampler: sampler;
 struct SurfaceAtmosphere {
     atmosphere: Atmosphere,
-    distance: vec4<f32>,
 }
 @group(0) @binding(1) var<uniform> surface_atmosphere: SurfaceAtmosphere;
 @group(0) @binding(2) var<uniform> surface_water: WaterSurface;
@@ -85,37 +84,54 @@ struct Surface {
 
 @fragment fn water_fragment(v: Output) -> Water {
     let clip = camera.projection * vec4<f32>(v.relative_position, 1.0);
-    let direction = safe_normalize(v.relative_position);
     let coordinates = water_coordinates(v.relative_position, surface_water);
-    let normal = blended_water_normal(
-        textureSample(water_normal_image, water_normal_sampler, coordinates.first).xyz,
-        textureSample(water_normal_next_image, water_normal_sampler, coordinates.first).xyz,
-        textureSample(water_normal_image, water_normal_sampler, coordinates.second).xyz,
-        textureSample(water_normal_next_image, water_normal_sampler, coordinates.second).xyz,
-        surface_water,
+    let wave1 = select(
+        blend_normal(
+            linear_to_srgb(textureSample(water_normal_image, water_normal_sampler, coordinates.big).xyz),
+            linear_to_srgb(textureSample(water_normal_next_image, water_normal_sampler, coordinates.big).xyz),
+            surface_water.fresnel.z,
+        ),
+        vec3<f32>(0.0, 0.0, 1.0),
+        surface_water.fresnel.w < 0.5,
     );
-    var color: vec3<f32>;
-    if v.relative_position.z > 0.0 {
-        color = water_under_surface_color(
-            direction,
-            normal,
-            length(v.position_view),
-            surface_atmosphere.distance.x,
-            surface_water,
-            surface_atmosphere.atmosphere,
-        );
-    } else {
-        color = water_surface_color(
-            direction,
-            normal,
-            length(v.position_view),
-            surface_atmosphere.distance.x,
-            surface_water,
-            surface_atmosphere.atmosphere,
-        );
-    }
+    let wave2 = select(
+        blend_normal(
+            linear_to_srgb(textureSample(water_normal_image, water_normal_sampler, coordinates.first).xyz),
+            linear_to_srgb(textureSample(water_normal_next_image, water_normal_sampler, coordinates.first).xyz),
+            surface_water.fresnel.z,
+        ),
+        vec3<f32>(0.0, 0.0, 1.0),
+        surface_water.fresnel.w < 0.5,
+    );
+    let wave3 = select(
+        blend_normal(
+            linear_to_srgb(textureSample(water_normal_image, water_normal_sampler, coordinates.second).xyz),
+            linear_to_srgb(textureSample(water_normal_next_image, water_normal_sampler, coordinates.second).xyz),
+            surface_water.fresnel.z,
+        ),
+        vec3<f32>(0.0, 0.0, 1.0),
+        surface_water.fresnel.w < 0.5,
+    );
+    let light_direction_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_direction.xyz, 0.0)).xyz;
+    let light_norm_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_norm.xyz, 0.0)).xyz;
+    let normal_eye = safe_normalize(v.normal);
+    let tangent_eye = (camera.view * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz;
+    let color = shade_water(
+        v.relative_position,
+        v.position_view,
+        light_direction_eye,
+        light_norm_eye,
+        normal_eye,
+        tangent_eye,
+        camera.view,
+        wave1,
+        wave2,
+        wave3,
+        surface_water,
+        surface_atmosphere.atmosphere,
+    );
     var water: Water;
-    water.color = vec4<f32>(color, 1.0);
+    water.color = color;
     water.depth = max(clamp(clip.z / clip.w, 0.0, 1.0), 0.00000001);
     return water;
 }
@@ -136,15 +152,9 @@ fn studio(v: Output, color: vec3<f32>, front: bool) -> vec3<f32> {
     if v.params.y == 1.0 && color.a < v.params.z { discard; }
     let alpha = select(1.0, clamp(color.a, 0.0, 1.0), v.params.y == 2.0);
     let surface = mix(studio(v, color.rgb, front), color.rgb, v.params.x);
-    let direction = safe_normalize(v.relative_position);
-    let fogged = aerial_perspective(
-        surface,
-        direction,
-        length(v.position_view),
-        surface_atmosphere.distance.x,
-        surface_atmosphere.atmosphere.haze.y,
-        surface_atmosphere.atmosphere,
-    );
+    let light_direction_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_direction.xyz, 0.0)).xyz;
+    let light_norm_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_norm.xyz, 0.0)).xyz;
+    let fogged = atmospheric_surface(surface, v.position_view, light_direction_eye, light_norm_eye, surface_atmosphere.atmosphere);
     var output: Surface;
     output.color = vec4<f32>(fogged, alpha);
     output.depth = max(v.position.z, 0.00000001);

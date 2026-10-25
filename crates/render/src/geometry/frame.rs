@@ -302,11 +302,10 @@ impl GeometryRenderer {
             device,
             &self.textures,
             &self.queue,
-            camera.draw_distance() as f32,
-            camera.position().z as f32,
             camera.position(),
             frame_input.environment,
             normal,
+            frame_input.water_height,
             frame_input.water_scroll,
         );
         self.water.update(
@@ -328,7 +327,7 @@ impl GeometryRenderer {
             &self.queue,
             projection,
             projection.inverse(),
-            camera.position().z as f32,
+            camera.position(),
             size,
             frame_input.environment,
             frame_input.cloud_scroll,

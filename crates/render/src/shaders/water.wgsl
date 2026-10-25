@@ -1,5 +1,6 @@
 struct WaterUniform {
     inverse: mat4x4<f32>,
+    view: mat4x4<f32>,
     plane: vec4<f32>,
     surface: WaterSurface,
     atmosphere: Atmosphere,
@@ -45,23 +46,57 @@ struct WaterOutput {
         }
     }
     let coordinates = water_coordinates(point, water.surface);
-    let normal = blended_water_normal(
-        textureSample(normal_image, normal_sampler, coordinates.first).xyz,
-        textureSample(normal_next_image, normal_sampler, coordinates.first).xyz,
-        textureSample(normal_image, normal_sampler, coordinates.second).xyz,
-        textureSample(normal_next_image, normal_sampler, coordinates.second).xyz,
-        water.surface,
+    let blend = water.surface.fresnel.z;
+    let wave1 = select(
+        blend_normal(
+            linear_to_srgb(textureSample(normal_image, normal_sampler, coordinates.big).xyz),
+            linear_to_srgb(textureSample(normal_next_image, normal_sampler, coordinates.big).xyz),
+            blend,
+        ),
+        vec3<f32>(0.0, 0.0, 1.0),
+        water.surface.fresnel.w < 0.5,
     );
-    var color: vec3<f32>;
-    if water.plane.x > 0.0 {
-        color = water_under_surface_color(direction, normal, distance, water.plane.z, water.surface, water.atmosphere);
-    } else {
-        color = water_surface_color(direction, normal, distance, water.plane.z, water.surface, water.atmosphere);
-    }
+    let wave2 = select(
+        blend_normal(
+            linear_to_srgb(textureSample(normal_image, normal_sampler, coordinates.first).xyz),
+            linear_to_srgb(textureSample(normal_next_image, normal_sampler, coordinates.first).xyz),
+            blend,
+        ),
+        vec3<f32>(0.0, 0.0, 1.0),
+        water.surface.fresnel.w < 0.5,
+    );
+    let wave3 = select(
+        blend_normal(
+            linear_to_srgb(textureSample(normal_image, normal_sampler, coordinates.second).xyz),
+            linear_to_srgb(textureSample(normal_next_image, normal_sampler, coordinates.second).xyz),
+            blend,
+        ),
+        vec3<f32>(0.0, 0.0, 1.0),
+        water.surface.fresnel.w < 0.5,
+    );
+    let position_eye = (water.view * vec4<f32>(point, 1.0)).xyz;
+    let light_direction_eye = (water.view * vec4<f32>(water.atmosphere.light_direction.xyz, 0.0)).xyz;
+    let light_norm_eye = (water.view * vec4<f32>(water.atmosphere.light_norm.xyz, 0.0)).xyz;
+    let normal_eye = (water.view * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xyz;
+    let tangent_eye = (water.view * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz;
+    let color = shade_water(
+        point,
+        position_eye,
+        light_direction_eye,
+        light_norm_eye,
+        normal_eye,
+        tangent_eye,
+        water.view,
+        wave1,
+        wave2,
+        wave3,
+        water.surface,
+        water.atmosphere,
+    );
     let finite_depth = water.plane.w * (water.plane.z / max(distance, water.plane.w) - 1.0) / (water.plane.z - water.plane.w);
     let depth = select(max(finite_depth, 0.00000001), 0.00000001, distance >= water.plane.z);
     var output: WaterOutput;
-    output.color = vec4<f32>(color, 1.0);
+    output.color = color;
     output.depth = depth;
     return output;
 }

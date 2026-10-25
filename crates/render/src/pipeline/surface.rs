@@ -19,13 +19,13 @@ use super::TexturePair;
 
 use super::{
     atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values},
-    water::{COLOR, DEFAULT_BLUR, DEFAULT_FRESNEL, DEFAULT_NORMAL_SCALE, DEFAULT_SCALE_ABOVE, DEFAULT_WAVES, water_origin},
+    water::water_surface_values,
 };
 
 pub(crate) const INSTANCE_BYTES: usize = 192;
 pub(crate) const VERTEX_BYTES: usize = 32;
 const CAMERA_BYTES: usize = 144;
-const ATMOSPHERE_BYTES: usize = (ATMOSPHERE_FLOATS + 4) * 4;
+const ATMOSPHERE_BYTES: usize = ATMOSPHERE_FLOATS * 4;
 const WATER_BYTES: usize = 32 * 4;
 const KEY_LIGHT: Vec3 = Vec3::new(-0.3, 0.5, 1.0);
 
@@ -255,20 +255,25 @@ impl SurfacePipelines {
         device: &Device,
         textures: &Textures,
         queue: &Queue,
-        draw_distance: f32,
-        altitude: f32,
         camera_position: DVec3,
         environment: Option<&Evaluated>,
         normal_map: TexturePair,
+        water_height: Option<f64>,
         scroll: [f32; 4],
     ) {
-        let mut atmosphere = [0.0; ATMOSPHERE_FLOATS + 4];
-        atmosphere[..ATMOSPHERE_FLOATS].copy_from_slice(&atmosphere_values(environment, altitude));
-        if let Some(distance) = atmosphere.get_mut(ATMOSPHERE_FLOATS) {
-            *distance = draw_distance;
-        }
+        let atmosphere = atmosphere_values(environment);
         let mut atmosphere_bytes = [0; ATMOSPHERE_BYTES];
         write_floats(queue, &self.atmosphere, &mut atmosphere_bytes, &atmosphere);
+        let water_values = water_surface_values(
+            environment,
+            camera_position,
+            water_height,
+            scroll,
+            normal_map.factor,
+            normal_map.current.is_some() || normal_map.next.is_some(),
+        );
+        let mut water_bytes = [0; WATER_BYTES];
+        write_floats(queue, &self.water_uniform, &mut water_bytes, &water_values);
         let keys = [normal_map.current, normal_map.next];
         let states = keys.map(|key| textures.view_state(key));
         if keys != self.water_normal_keys || states != self.water_normal_states {
@@ -287,55 +292,6 @@ impl SurfacePipelines {
             self.water_normal_keys = keys;
             self.water_normal_states = states;
         }
-
-        let Some(environment) = environment else {
-            let origin = water_origin(camera_position, DEFAULT_SCALE_ABOVE);
-            let mut values = [0.0; 32];
-            values[..4].copy_from_slice(&COLOR.to_array());
-            values[4..8].copy_from_slice(&DEFAULT_FRESNEL);
-            values[8..12].copy_from_slice(&[DEFAULT_NORMAL_SCALE, DEFAULT_NORMAL_SCALE, DEFAULT_NORMAL_SCALE, DEFAULT_SCALE_ABOVE]);
-            values[12..16].copy_from_slice(&DEFAULT_WAVES);
-            values[16..20].copy_from_slice(&scroll);
-            values[20..24].copy_from_slice(&[0.0, DEFAULT_BLUR, 0.0, 0.0]);
-            values[24..28].copy_from_slice(&origin[..4]);
-            values[28..32].copy_from_slice(&origin[4..]);
-            let mut water_bytes = [0; WATER_BYTES];
-            write_floats(queue, &self.water_uniform, &mut water_bytes, &values);
-            return;
-        };
-        let water = &environment.water;
-        let origin = water_origin(camera_position, water.scale_above);
-        let mut values = [0.0; 32];
-        values[..24].copy_from_slice(&[
-            water.fog_color[0],
-            water.fog_color[1],
-            water.fog_color[2],
-            1.0,
-            water.fresnel_offset,
-            water.fresnel_scale,
-            water.fog_density,
-            if normal_map.current.is_some() || normal_map.next.is_some() { 1.0 } else { 0.0 },
-            water.normal_scale[0],
-            water.normal_scale[1],
-            water.normal_scale[2],
-            water.scale_above,
-            water.waves[0][0],
-            water.waves[0][1],
-            water.waves[1][0],
-            water.waves[1][1],
-            scroll[0],
-            scroll[1],
-            scroll[2],
-            scroll[3],
-            0.0,
-            water.blur,
-            normal_map.factor,
-            0.0,
-        ]);
-        values[24..28].copy_from_slice(&origin[..4]);
-        values[28..32].copy_from_slice(&origin[4..]);
-        let mut water_bytes = [0; WATER_BYTES];
-        write_floats(queue, &self.water_uniform, &mut water_bytes, &values);
     }
 }
 
@@ -381,7 +337,7 @@ pub(crate) fn projection(camera: Camera, size: [u32; 2]) -> Mat4 {
     perspective(camera.vertical_fov() as f32, size[0] as f32 / size[1] as f32, camera.draw_distance() as f32, 0.05) * camera_view(camera)
 }
 
-fn camera_view(camera: Camera) -> Mat4 {
+pub(crate) fn camera_view(camera: Camera) -> Mat4 {
     let direction = camera.direction();
     let up = if direction.dot(Vec3::Z).abs() > 0.999 { Vec3::Y } else { Vec3::Z };
     look_to_mat4(Vec3::ZERO, direction, up)

@@ -9,7 +9,7 @@ use wgpu::{
 use super::atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values};
 use crate::{
     environment::Evaluated,
-    scene::{Camera, MAX_REGIONS, SceneView},
+    scene::{Camera, MAX_REGIONS},
     texture::{TextureKey, Textures},
 };
 
@@ -88,12 +88,13 @@ impl Water {
     pub(crate) fn update(
         &mut self,
         queue: &Queue,
-        view: &SceneView,
         camera: Camera,
         inverse: Mat4,
         height: Option<f64>,
         environment: Option<&Evaluated>,
         normal: Option<TextureKey>,
+        regions: &[Vec4; MAX_REGIONS],
+        region_count: usize,
     ) {
         self.active = false;
         self.normal = normal;
@@ -103,18 +104,7 @@ impl Water {
         else {
             return;
         };
-        let mut regions = [Vec4::ZERO; MAX_REGIONS];
-        let mut count = 0;
-        for surface in view.surfaces().filter(|surface| surface.kind == crate::scene::SurfaceKind::Water).take(MAX_REGIONS) {
-            let relative = (surface.position - camera.position()).as_vec3();
-            if !relative.is_finite() {
-                continue;
-            }
-            if let Some(target) = regions.get_mut(count) {
-                *target = Vec4::new(relative.x, relative.y, 256.0, 256.0);
-                count += 1;
-            }
-        }
+        let count = region_count.min(MAX_REGIONS);
         let far = camera.draw_distance().clamp(0.1, f64::from(f32::MAX) / 16.0) as f32;
         let near = 0.05_f32;
         let water = environment.map(|environment| &environment.water);
@@ -132,7 +122,7 @@ impl Water {
         append(&mut values, &mut offset, parameters);
         append(&mut values, &mut offset, [normal_scale, 0.0, 0.0, 0.0]);
         append(&mut values, &mut offset, waves);
-        append(&mut values, &mut offset, atmosphere_values(environment));
+        append(&mut values, &mut offset, atmosphere_values(environment, camera.position().z as f32));
         for region in regions {
             append(&mut values, &mut offset, region.to_array());
         }

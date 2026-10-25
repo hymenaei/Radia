@@ -236,6 +236,7 @@ struct TextureEntry {
     revision: u64,
     state_revision: u64,
     evicted: bool,
+    geometry: bool,
     state: TextureUploadState,
     fallback: Option<GpuTexture>,
 }
@@ -249,8 +250,18 @@ pub(crate) struct TextureState {
     pub(crate) cap: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GeometryTextureState(pub(crate) u64);
+
+#[derive(Clone, Copy)]
+pub(crate) enum TextureUsage {
+    Environment,
+    Geometry,
+}
+
 pub(crate) struct Textures {
     revision: u64,
+    geometry_revision: u64,
     queue: Queue,
     memory: Arc<Accounting>,
     conversion_failures: u64,
@@ -452,6 +463,7 @@ impl Textures {
         });
         Self {
             revision: 0,
+            geometry_revision: 0,
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
             conversion_failures: 0,
@@ -485,6 +497,20 @@ impl Textures {
     }
 
     pub(crate) fn request(&mut self, texture: &TextureHandle, epoch: u64, priority: Priority) {
+        self.request_with_usage(texture, epoch, priority, TextureUsage::Geometry);
+    }
+
+    pub(crate) fn request_environment(&mut self, texture: &TextureHandle, epoch: u64) {
+        self.request_with_usage(texture, epoch, Priority::Visible, TextureUsage::Environment);
+    }
+
+    pub(crate) fn touch(&mut self, id: TextureId, epoch: u64) {
+        if let Some(entry) = self.entries.get_mut(&id) {
+            entry.used = epoch;
+        }
+    }
+
+    fn request_with_usage(&mut self, texture: &TextureHandle, epoch: u64, priority: Priority, usage: TextureUsage) {
         let Some(info) = texture.info() else { return };
         let events = texture.events();
         if !self.events.iter().any(|registered| registered.same_source(&events)) {
@@ -497,13 +523,19 @@ impl Textures {
             revision: info.revision,
             state_revision: 0,
             evicted: false,
+            geometry: false,
             state: TextureUploadState::Dormant,
             fallback: None,
         });
+        let geometry_added = matches!(usage, TextureUsage::Geometry) && !entry.geometry;
+        entry.geometry |= matches!(usage, TextureUsage::Geometry);
         if priority == Priority::Visible {
             entry.used = epoch;
         }
         if entry.revision == info.revision && !matches!(entry.state, TextureUploadState::Dormant) {
+            if geometry_added {
+                self.changed(id);
+            }
             return;
         }
         if entry.evicted && priority == Priority::Background {
@@ -754,6 +786,13 @@ impl Textures {
             entry.state_revision = entry.state_revision.checked_add(1).expect("texture entry state space exhausted");
         }
         self.changed_ids.insert(id);
+        if self.entries.get(&id).is_some_and(|entry| entry.geometry) {
+            self.geometry_revision = self.geometry_revision.checked_add(1).expect("geometry texture state space exhausted");
+        }
+    }
+
+    pub(crate) fn geometry_state(&self) -> GeometryTextureState {
+        GeometryTextureState(self.geometry_revision)
     }
     pub(crate) fn state(&self) -> TextureState {
         TextureState {

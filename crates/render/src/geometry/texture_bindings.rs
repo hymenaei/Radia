@@ -26,14 +26,17 @@ pub(super) struct TerrainDemand {
 impl GeometryRenderer {
     pub(super) fn request_frame_textures(&mut self, view: &SceneView, background: &[Entity]) {
         self.requested_textures.clear();
+        self.visible_textures.clear();
         let epoch = self.epoch;
         {
-            let (draw_list, requested, textures) = (&self.draw_list, &mut self.requested_textures, &mut self.textures);
+            let (draw_list, requested, visible, textures) =
+                (&self.draw_list, &mut self.requested_textures, &mut self.visible_textures, &mut self.textures);
             for demand in draw_list.texture_demands() {
-                if let Some(handle) = &demand.handle
-                    && requested.insert(handle.id())
-                {
-                    textures.request(handle, epoch, Priority::Visible);
+                if let Some(handle) = &demand.handle {
+                    visible.insert(handle.id());
+                    if requested.insert(handle.id()) {
+                        textures.request(handle, epoch, Priority::Visible);
+                    }
                 }
             }
             for demand in draw_list.terrain_demands() {

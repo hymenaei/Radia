@@ -3,7 +3,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assets::{Priority, TextureId};
 use math::{DVec3, Mat4};
 use uuid::Uuid;
 use wgpu::{CommandEncoder, Device};
@@ -75,24 +74,41 @@ impl GeometryRenderer {
         self.stats.blended_sorts = 0;
         self.stats.animated_faces_visited = 0;
         self.stats.animated_faces_changed = 0;
-        let key = FramePreparationKey { version: view.version(), camera, agent_pose, size, water_height: frame_input.water_height };
+        self.epoch = self.epoch.checked_add(1).expect("render frame space exhausted");
+        for id in &self.visible_textures {
+            self.textures.touch(*id, self.epoch);
+        }
+        if let Some(environment) = frame_input.environment {
+            request_environment_textures(view, environment, &mut self.textures, self.epoch);
+        }
+        let key = FramePreparationKey { version: view.geometry_version(), camera, agent_pose, size };
         let same = self.prepared.as_ref().is_some_and(|prepared| prepared.key == key);
         let motion_was_active = self.motion_redraw;
         self.motion_redraw = false;
         if same {
-            self.requested_textures.clear();
-            if let Some(environment) = frame_input.environment {
-                request_environment_textures(view, environment, &mut self.textures, self.epoch, &mut self.requested_textures);
+            let texture_progress = self
+                .prepared
+                .as_ref()
+                .is_some_and(|prepared| prepared.textures != self.textures.state())
+                || self.textures.uploading();
+            if texture_progress {
+                let upload_started = Instant::now();
+                self.textures.upload(device, encoder, self.epoch);
+                times.textures = upload_started.elapsed();
             }
-            let upload_started = Instant::now();
-            self.textures.upload(device, encoder, self.epoch);
-            times.textures = upload_started.elapsed();
             if self.prepared.as_ref().is_some_and(|prepared| {
-                !motion_was_active && prepared.reusable(&key, self.textures.state(), self.memory.mesh_state(), started)
+                !motion_was_active
+                    && prepared.reusable(&key, self.textures.geometry_state(), self.memory.mesh_state(), started)
             }) {
                 let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, self.cache.origin);
                 let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
-                self.update_environment_uniforms(view, camera, projection, frame_input, pairs);
+                self.update_water_regions(camera.position());
+                self.update_environment_uniforms(camera, projection, frame_input, pairs);
+                if let Some(prepared) = self.prepared.as_mut() {
+                    prepared.textures = self.textures.state();
+                    prepared.geometry_textures = self.textures.geometry_state();
+                    prepared.meshes = self.memory.mesh_state();
+                }
                 self.stats.uploaded_bytes = 0;
                 self.memory_stats();
                 self.record_prepare(started, times, 0);
@@ -101,7 +117,6 @@ impl GeometryRenderer {
         }
 
         self.stats = Stats::default();
-        self.epoch = self.epoch.checked_add(1).expect("render frame space exhausted");
         let previous_camera = self.cache.camera;
         let camera_changed = previous_camera != Some(camera) || self.cache.size != size;
         let camera_position_changed = previous_camera.is_none_or(|previous| previous.position() != camera.position());
@@ -118,7 +133,6 @@ impl GeometryRenderer {
         update.pose_items.sort_unstable();
         update.pose_items.dedup();
         let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, origin);
-        self.water.update(&self.queue, view, camera, projection, water_height);
         let (candidates_changed, replacement_visibility_changed) = if update.full_visibility || camera_changed {
             self.rebuild_candidates(camera, projection)
         } else if !update.pose_items.is_empty() {
@@ -268,9 +282,6 @@ impl GeometryRenderer {
 
         let requests_started = Instant::now();
         self.request_frame_textures(view, &update.background);
-        if let Some(environment) = frame_input.environment {
-            request_environment_textures(view, environment, &mut self.textures, self.epoch, &mut self.requested_textures);
-        }
         times.requests = requests_started.elapsed();
 
         let draw_updates_started = Instant::now();
@@ -312,8 +323,6 @@ impl GeometryRenderer {
         }
         let texture_changes = self.textures.take_changed_ids();
         self.prepare_texture_bindings(device, layout, &texture_changes, &update.terrain_regions);
-        let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
-        self.update_environment_uniforms(view, camera, projection, frame_input, pairs);
         times.textures += texture_started.elapsed();
         if visible_changed {
             std::mem::swap(&mut self.cache.visible, &mut self.cache.next_visible);
@@ -323,6 +332,9 @@ impl GeometryRenderer {
         self.cache.origin = origin;
         self.cache.size = size;
         self.cache.version = Some(view.version());
+        let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
+        self.update_water_regions(camera.position());
+        self.update_environment_uniforms(camera, projection, frame_input, pairs);
         self.cache.next_candidates.clear();
         let animation_deadline = self
             .cache
@@ -374,6 +386,7 @@ impl GeometryRenderer {
         self.prepared = Some(FramePreparation {
             key,
             textures: self.textures.state(),
+            geometry_textures: self.textures.geometry_state(),
             meshes: self.memory.mesh_state(),
             more_meshes: self.has_ready_replacement()
                 || (!self.pending_meshes.is_empty()
@@ -386,32 +399,61 @@ impl GeometryRenderer {
 
     fn update_environment_uniforms(
         &mut self,
-        view: &SceneView,
         camera: Camera,
         projection: Mat4,
         frame_input: FrameInput<'_>,
         pairs: EnvironmentPairs,
     ) {
         let normal = selected_water_normal(frame_input.environment.map(|environment| environment.water.normal_map), pairs.water);
-        self.pipelines.update_environment(&self.queue, camera.draw_distance() as f32, frame_input.environment, normal);
+        self.water_normal = normal;
+        self.pipelines.update_environment(
+            &self.queue,
+            camera.draw_distance() as f32,
+            camera.position().z as f32,
+            frame_input.environment,
+            normal,
+        );
         self.water.update(
             &self.queue,
-            view,
             camera,
             projection.inverse(),
             frame_input.water_height,
             frame_input.environment,
             normal,
+            &self.water_regions,
+            self.water_region_count,
         );
         self.sky.update(
             &self.queue,
             projection.inverse(),
+            camera.position().z as f32,
             frame_input.environment,
             frame_input.cloud_scroll,
             pairs.sun,
             pairs.moon,
             pairs.cloud,
         );
+    }
+
+    fn update_water_regions(&mut self, camera: DVec3) {
+        self.water_region_count = 0;
+        for index in self.cache.visible.iter().copied() {
+            let Some((region, position)) = self.cache.items.get(index).and_then(|item| {
+                (item.surface_kind == Some(crate::scene::SurfaceKind::Water)).then_some((item.region, item.position))
+            }) else {
+                continue;
+            };
+            let relative = (position - camera).as_vec3();
+            if !relative.is_finite() || self.water_region_count >= self.water_regions.len() {
+                continue;
+            }
+            if self.water_region_ids[..self.water_region_count].contains(&u128::from(region.get())) {
+                continue;
+            }
+            self.water_regions[self.water_region_count] = math::Vec4::new(relative.x, relative.y, 256.0, 256.0);
+            self.water_region_ids[self.water_region_count] = u128::from(region.get());
+            self.water_region_count += 1;
+        }
     }
 
     fn apply_agent_pose(&mut self, agent_pose: Option<AgentPose>, origin: DVec3, update: &mut CacheUpdate) {
@@ -666,19 +708,11 @@ fn next_animation_deadline(item: &super::items::CachedItem, now: Instant) -> Opt
     texture_animation::next_update_after(animation, elapsed, offset).and_then(|delay| now.checked_add(delay))
 }
 
-fn request_environment_textures(
-    view: &SceneView,
-    environment: &Evaluated,
-    textures: &mut Textures,
-    epoch: u64,
-    requested: &mut HashSet<TextureId>,
-) {
+fn request_environment_textures(view: &SceneView, environment: &Evaluated, textures: &mut Textures, epoch: u64) {
     for blend in [environment.sky.sun.texture, environment.sky.moon.texture, environment.sky.clouds.texture, environment.water.normal_map] {
         for id in [blend.current, blend.next].into_iter().flatten() {
-            if let Some(handle) = view.environment_texture(id)
-                && requested.insert(handle.id())
-            {
-                textures.request(handle, epoch, Priority::Visible);
+            if let Some(handle) = view.environment_texture(id) {
+                textures.request_environment(handle, epoch);
             }
         }
     }
@@ -721,11 +755,10 @@ mod tests {
 
     fn prepare_key(view: &SceneView) -> FramePreparationKey {
         FramePreparationKey {
-            version: view.version(),
+            version: view.geometry_version(),
             camera: Camera::new(DVec3::ZERO, Vec3::X, 1.0, [720, 720]).expect("fixture camera"),
             agent_pose: None,
             size: [1280, 720],
-            water_height: Some(20.0),
         }
     }
 
@@ -740,27 +773,30 @@ mod tests {
         let prepared = FramePreparation {
             key: prepare_key(&view),
             textures: texture_state(),
+            geometry_textures: crate::texture::GeometryTextureState::default(),
             meshes: MeshState::default(),
             more_meshes: false,
             animation_deadline: None,
         };
         let now = Instant::now();
-        assert!(prepared.reusable(&prepare_key(&view), texture_state(), MeshState::default(), now));
+        assert!(prepared.reusable(
+            &prepare_key(&view),
+            crate::texture::GeometryTextureState::default(),
+            MeshState::default(),
+            now
+        ));
         let mut moved = prepare_key(&view);
         moved.camera = Camera::new(DVec3::X, Vec3::X, 1.0, [720, 720]).expect("moved camera");
-        assert!(!prepared.reusable(&moved, texture_state(), MeshState::default(), now));
+        assert!(!prepared.reusable(&moved, crate::texture::GeometryTextureState::default(), MeshState::default(), now));
         let mut resized = prepare_key(&view);
         resized.size[0] = 1600;
-        assert!(!prepared.reusable(&resized, texture_state(), MeshState::default(), now));
+        assert!(!prepared.reusable(&resized, crate::texture::GeometryTextureState::default(), MeshState::default(), now));
         let mut quality = prepare_key(&view);
         quality.camera = quality.camera.with_quality(128.0, 2.0).expect("changed quality");
-        assert!(!prepared.reusable(&quality, texture_state(), MeshState::default(), now));
-        let mut water = prepare_key(&view);
-        water.water_height = Some(21.0);
-        assert!(!prepared.reusable(&water, texture_state(), MeshState::default(), now));
-        assert!(!prepared.reusable(&prepare_key(&other), texture_state(), MeshState::default(), now));
+        assert!(!prepared.reusable(&quality, crate::texture::GeometryTextureState::default(), MeshState::default(), now));
+        assert!(!prepared.reusable(&prepare_key(&other), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
         scene.close();
-        assert!(!prepared.reusable(&prepare_key(&view), texture_state(), MeshState::default(), now));
+        assert!(!prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
     }
 
     #[test]
@@ -770,6 +806,7 @@ mod tests {
         let mut prepared = FramePreparation {
             key: prepare_key(&view),
             textures: state,
+            geometry_textures: crate::texture::GeometryTextureState::default(),
             meshes: MeshState::default(),
             more_meshes: false,
             animation_deadline: None,
@@ -783,14 +820,46 @@ mod tests {
             ("soft cap change", TextureState { cap: 64 * 1024 * 1024, ..state }),
         ] {
             assert!(
-                !prepared.reusable(&prepare_key(&view), changed, MeshState::default(), now),
-                "{reason} must allow preparation to progress"
+                prepared.needs_frame(
+                    changed,
+                    crate::texture::GeometryTextureState::default(),
+                    MeshState::default(),
+                    now
+                ),
+                "{reason} must allow texture progress to schedule a frame"
             );
+            assert!(prepared.reusable(
+                &prepare_key(&view),
+                crate::texture::GeometryTextureState::default(),
+                MeshState::default(),
+                now
+            ));
         }
-        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState { bytes: 4, revision: 0 }, now));
-        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState { bytes: 0, revision: 1 }, now));
+        assert!(!prepared.reusable(
+            &prepare_key(&view),
+            crate::texture::GeometryTextureState::default(),
+            MeshState { bytes: 4, revision: 0 },
+            now
+        ));
+        assert!(!prepared.reusable(
+            &prepare_key(&view),
+            crate::texture::GeometryTextureState::default(),
+            MeshState { bytes: 0, revision: 1 },
+            now
+        ));
+        assert!(prepared.needs_frame(
+            state,
+            crate::texture::GeometryTextureState(1),
+            MeshState::default(),
+            now
+        ));
         prepared.more_meshes = true;
-        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState::default(), now));
+        assert!(!prepared.reusable(
+            &prepare_key(&view),
+            crate::texture::GeometryTextureState::default(),
+            MeshState::default(),
+            now
+        ));
     }
 
     #[test]
@@ -802,16 +871,17 @@ mod tests {
         let mut prepared = FramePreparation {
             key: prepare_key(&view),
             textures: state,
+            geometry_textures: crate::texture::GeometryTextureState::default(),
             meshes: MeshState::default(),
             more_meshes: false,
             animation_deadline: Some(deadline),
         };
-        assert!(!prepared.needs_frame(state, MeshState::default(), now));
-        assert!(prepared.reusable(&prepare_key(&view), state, MeshState::default(), now));
-        assert!(prepared.needs_frame(state, MeshState::default(), deadline));
-        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState::default(), deadline));
+        assert!(!prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default(), now));
+        assert!(prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
+        assert!(prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default(), deadline));
+        assert!(!prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), deadline));
         prepared.animation_deadline = None;
-        assert!(!prepared.needs_frame(state, MeshState::default(), deadline));
+        assert!(!prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default(), deadline));
     }
 
     #[test]

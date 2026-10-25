@@ -18,7 +18,7 @@ use std::{
 };
 
 use assets::TextureId;
-use math::motion::RegionBounds;
+use math::{Vec4, motion::RegionBounds};
 use uuid::Uuid;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
@@ -32,10 +32,10 @@ use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
 use self::items::ItemIndex;
 use self::mesh::GpuMesh;
 use self::storage::Storage;
-use crate::scene::{AgentPose, Camera, MeshId, ViewVersion};
+use crate::scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion};
 use crate::{
     pipeline::{Sky, SurfacePipelines, Water},
-    texture::{TextureCompletion, TextureJob, TextureState, Textures},
+    texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
 
 pub use pick::PickError;
@@ -165,28 +165,29 @@ struct FramePreparationKey {
     camera: Camera,
     agent_pose: Option<AgentPose>,
     size: [u32; 2],
-    water_height: Option<f64>,
 }
 
 struct FramePreparation {
     key: FramePreparationKey,
     textures: TextureState,
+    geometry_textures: GeometryTextureState,
     meshes: MeshState,
     more_meshes: bool,
     animation_deadline: Option<Instant>,
 }
 
 impl FramePreparation {
-    fn needs_frame(&self, textures: TextureState, meshes: MeshState, now: Instant) -> bool {
+    fn needs_frame(&self, textures: TextureState, geometry_textures: GeometryTextureState, meshes: MeshState, now: Instant) -> bool {
         self.animation_deadline.is_some_and(|deadline| deadline <= now)
             || self.more_meshes
             || self.textures != textures
+            || self.geometry_textures != geometry_textures
             || self.meshes != meshes
     }
 
-    fn reusable(&self, key: &FramePreparationKey, textures: TextureState, meshes: MeshState, now: Instant) -> bool {
+    fn reusable(&self, key: &FramePreparationKey, geometry_textures: GeometryTextureState, meshes: MeshState, now: Instant) -> bool {
         self.key == *key
-            && self.textures == textures
+            && self.geometry_textures == geometry_textures
             && self.meshes == meshes
             && !self.more_meshes
             && self.animation_deadline.is_none_or(|deadline| deadline > now)
@@ -210,6 +211,11 @@ pub(crate) struct GeometryRenderer {
     sky: Sky,
     textures: Textures,
     requested_textures: HashSet<TextureId>,
+    visible_textures: HashSet<TextureId>,
+    water_regions: [Vec4; MAX_REGIONS],
+    water_region_ids: [u128; MAX_REGIONS],
+    water_region_count: usize,
+    water_normal: Option<crate::texture::TextureKey>,
     instances: Buffer,
     indirect: Buffer,
     indirect_first_instance: bool,
@@ -243,7 +249,9 @@ impl GeometryRenderer {
     }
 
     pub(crate) fn needs_frame(&self, now: Instant) -> bool {
-        self.prepared.as_ref().is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.memory.mesh_state(), now))
+        self.prepared.as_ref().is_some_and(|prepared| {
+            prepared.needs_frame(self.textures.state(), self.textures.geometry_state(), self.memory.mesh_state(), now)
+        })
             || self.motion_redraw
             || self.textures.uploading()
     }
@@ -264,6 +272,11 @@ impl GeometryRenderer {
             pipelines,
             textures,
             requested_textures: HashSet::new(),
+            visible_textures: HashSet::new(),
+            water_regions: [Vec4::ZERO; MAX_REGIONS],
+            water_region_ids: [0; MAX_REGIONS],
+            water_region_count: 0,
+            water_normal: None,
             water,
             sky,
             instances: buffer(device, "Face instances", INSTANCE_BUFFER_BYTES, BufferUsages::VERTEX),
@@ -355,6 +368,7 @@ impl GeometryRenderer {
             }
         }
         self.draw_list.clear();
+        self.visible_textures.clear();
         self.stats.instances = 0;
         self.stats.draw_calls = 0;
         self.stats.draw_commands = 0;
@@ -399,6 +413,9 @@ impl GeometryRenderer {
             if pipeline != Some(draw.key.pipeline) {
                 self.pipelines.bind_pipeline(pass, draw.key.pipeline);
                 pipeline = Some(draw.key.pipeline);
+            }
+            if draw.key.pipeline == crate::pipeline::Pipeline::Water {
+                self.pipelines.bind_water_texture(pass, &self.textures, self.water_normal);
             }
             if texture != Some(draw.key.texture) {
                 pass.set_bind_group(1, self.textures.binding(draw.key.texture), &[]);

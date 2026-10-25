@@ -1,3 +1,9 @@
+use std::{
+    sync::{Arc, Barrier, mpsc},
+    thread,
+    time::Duration,
+};
+
 use proptest::prelude::*;
 use tempfile::tempdir;
 use utils::AssetId;
@@ -48,6 +54,57 @@ fn conflicting_overlap_preserves_existing_extent() {
         panic!("initial extent remains available");
     };
     assert_eq!(asset.extents, vec![Extent { offset: 0, bytes: b"abcd".to_vec() }]);
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
+fn unrelated_assets_use_independent_merge_locks() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let first = resource(1, Kind::Texture);
+    let first_stripe = stripe_index(first).expect("first stripe");
+    let second = (2..10_000u128)
+        .map(|id| resource(id, Kind::Texture))
+        .find(|resource| stripe_index(*resource).is_ok_and(|stripe| stripe != first_stripe))
+        .expect("resource on another stripe");
+    let held = cache.write_guard(first).expect("lock first asset");
+    let (sender, receiver) = mpsc::sync_channel(1);
+
+    thread::scope(|scope| {
+        let cache_ref = &cache;
+        scope.spawn(move || {
+            let result = cache_ref.put_extent(second, validated_extent(4, 0, b"data".to_vec()));
+            sender.send(result).expect("send unrelated write result");
+        });
+        receiver.recv_timeout(Duration::from_secs(3)).expect("unrelated asset write completes").expect("store unrelated asset");
+    });
+
+    drop(held);
+    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handle released")).shutdown().expect("close cache");
+}
+
+#[test]
+fn concurrent_extents_for_one_asset_both_survive() {
+    let directory = tempdir().expect("cache directory");
+    let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
+    let resource = resource(4, Kind::Texture);
+    let barrier = Arc::new(Barrier::new(2));
+
+    thread::scope(|scope| {
+        for (offset, bytes) in [(0, b"abc".to_vec()), (3, b"def".to_vec())] {
+            let cache = &cache;
+            let barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                barrier.wait();
+                cache.put_extent(resource, validated_extent(6, offset, bytes))
+            });
+        }
+    });
+
+    let AssetLookup::Hit(asset) = cache.lookup(resource) else {
+        panic!("concurrent asset extents form a complete payload");
+    };
+    assert_eq!(asset.extents, vec![Extent { offset: 0, bytes: b"abcdef".to_vec() }]);
     cache.shutdown().expect("close cache");
 }
 

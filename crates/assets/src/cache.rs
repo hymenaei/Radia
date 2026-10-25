@@ -1,6 +1,8 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     error::Error,
     fmt,
+    hash::{Hash, Hasher},
     io::{self, Cursor, Read, Write},
     path::Path,
     sync::{Mutex, MutexGuard},
@@ -13,6 +15,7 @@ use crate::{Kind, Resource};
 const MAGIC: &[u8; 8] = b"RADEXT01";
 const HEADER_BYTES: usize = 20;
 const MAX_EXTENTS: usize = 4096;
+const WRITE_STRIPES: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Extent {
@@ -95,7 +98,7 @@ impl Error for AssetCacheError {
 
 pub struct AssetCache {
     storage: StorageCache,
-    write_lock: Mutex<()>,
+    write_locks: [Mutex<()>; WRITE_STRIPES],
 }
 
 impl fmt::Debug for AssetCache {
@@ -107,7 +110,7 @@ impl fmt::Debug for AssetCache {
 impl AssetCache {
     pub fn open(directory: impl AsRef<Path>, size_limit: u64) -> Result<Self, AssetCacheError> {
         let storage = StorageCache::open(directory, size_limit).map_err(AssetCacheError::Storage)?;
-        Ok(Self { storage, write_lock: Mutex::new(()) })
+        Ok(Self { storage, write_locks: std::array::from_fn(|_| Mutex::new(())) })
     }
 
     pub fn open_default(size_limit: u64) -> Result<Self, AssetCacheError> {
@@ -135,7 +138,7 @@ impl AssetCache {
     pub fn put_extent(&self, resource: Resource, extent: ValidatedExtent) -> Result<(), AssetCacheError> {
         let ValidatedExtent { total_size, offset, bytes } = extent;
         validate_extent(resource.kind, total_size, offset, &bytes)?;
-        let _guard = self.write_guard()?;
+        let _guard = self.write_guard(resource)?;
         let key = storage_key(resource);
         let existing = match self.storage.lookup(key) {
             StorageLookup::Hit(value) => match decode(resource.kind, value) {
@@ -161,12 +164,10 @@ impl AssetCache {
     }
 
     pub fn clear(&self) -> Result<(), AssetCacheError> {
-        let _guard = self.write_guard()?;
         self.storage.clear().map_err(AssetCacheError::Storage)
     }
 
     pub fn set_size_limit(&self, limit: u64) -> Result<(), AssetCacheError> {
-        let _guard = self.write_guard()?;
         self.storage.set_size_limit(limit).map_err(AssetCacheError::Storage)
     }
 
@@ -182,13 +183,21 @@ impl AssetCache {
         self.storage.shutdown().map_err(AssetCacheError::Storage)
     }
 
-    fn write_guard(&self) -> Result<MutexGuard<'_, ()>, AssetCacheError> {
-        match self.write_lock.try_lock() {
-            Ok(guard) => Ok(guard),
-            Err(std::sync::TryLockError::WouldBlock) => Err(AssetCacheError::Unavailable(UnavailableReason::WriteQueueFull)),
-            Err(std::sync::TryLockError::Poisoned(error)) => Ok(error.into_inner()),
-        }
+    fn write_guard(&self, resource: Resource) -> Result<MutexGuard<'_, ()>, AssetCacheError> {
+        let stripe = stripe_index(resource)?;
+        let lock = self.write_locks.get(stripe).ok_or(AssetCacheError::TooLarge)?;
+        Ok(match lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        })
     }
+}
+
+fn stripe_index(resource: Resource) -> Result<usize, AssetCacheError> {
+    let mut hasher = DefaultHasher::new();
+    resource.hash(&mut hasher);
+    let stripe_count = u64::try_from(WRITE_STRIPES).map_err(|_| AssetCacheError::TooLarge)?;
+    usize::try_from(hasher.finish() % stripe_count).map_err(|_| AssetCacheError::TooLarge)
 }
 
 fn map_storage_error(error: StorageError) -> AssetCacheError {

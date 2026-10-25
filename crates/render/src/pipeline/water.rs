@@ -122,10 +122,7 @@ impl Water {
             self.normal_view_states = states;
         }
         self.normal = normal;
-        let Some(height) = height
-            .map(|height| height - camera.position().z)
-            .filter(|height| height.is_finite() && *height < 0.0 && height.abs() < f64::from(f32::MAX) / 16.0)
-        else {
+        let Some(height) = relative_height(height, camera.position().z) else {
             return;
         };
         let count = region_count.min(MAX_REGIONS);
@@ -144,7 +141,7 @@ impl Water {
         let mut values = [0.0; UNIFORM_FLOATS];
         let mut offset = 0;
         append(&mut values, &mut offset, inverse.to_cols_array());
-        append(&mut values, &mut offset, [height as f32, count as f32, far, near]);
+        append(&mut values, &mut offset, [height, count as f32, far, near]);
         append(&mut values, &mut offset, fog_color);
         append(&mut values, &mut offset, parameters);
         append(
@@ -197,6 +194,15 @@ pub(crate) fn water_origin(position: DVec3, scale_above: f32) -> [f32; 8] {
     ]
 }
 
+fn relative_height(height: Option<f64>, camera_z: f64) -> Option<f32> {
+    let height = height? - camera_z;
+    if !height.is_finite() || height == 0.0 || height.abs() >= f64::from(f32::MAX) / 16.0 {
+        return None;
+    }
+    let height = height as f32;
+    (height.is_finite() && height != 0.0).then_some(height)
+}
+
 fn append<const N: usize>(target: &mut [f32; UNIFORM_FLOATS], offset: &mut usize, values: [f32; N]) {
     if let Some(slice) = target.get_mut(*offset..(*offset).saturating_add(N)) {
         slice.copy_from_slice(&values);
@@ -207,6 +213,14 @@ fn append<const N: usize>(target: &mut [f32; UNIFORM_FLOATS], offset: &mut usize
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn water_plane_keeps_both_sides() {
+        assert_eq!(relative_height(Some(25.0), 10.0), Some(15.0));
+        assert_eq!(relative_height(Some(5.0), 10.0), Some(-5.0));
+        assert_eq!(relative_height(Some(10.0), 10.0), None);
+        assert_eq!(relative_height(None, 10.0), None);
+    }
 
     #[test]
     fn water_texture_phase_survives_camera_rebasing() {

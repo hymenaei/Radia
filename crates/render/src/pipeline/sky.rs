@@ -20,6 +20,9 @@ const UNIFORM_FLOATS: usize = 16 + ATMOSPHERE_FLOATS + 12 * 4;
 const UNIFORM_BYTES: usize = UNIFORM_FLOATS * 4;
 const STAR_UNIFORM_FLOATS: usize = 24;
 const STAR_UNIFORM_BYTES: usize = STAR_UNIFORM_FLOATS * 4;
+const CLOUD_PROJECTION_BIAS: f32 = 0.2;
+const CLOUD_HORIZON_FADE_START: f32 = 0.12;
+const CLOUD_HORIZON_FADE_END: f32 = 0.32;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct TexturePair {
@@ -320,9 +323,18 @@ impl Sky {
         append(
             &mut values,
             &mut offset,
-            [environment.sky.clouds.density[1][0], environment.sky.clouds.density[1][1], environment.sky.clouds.density[1][2], 0.0],
+            [
+                environment.sky.clouds.density[1][0],
+                environment.sky.clouds.density[1][1],
+                environment.sky.clouds.density[1][2],
+                CLOUD_HORIZON_FADE_END,
+            ],
         );
-        append(&mut values, &mut offset, [environment.sky.clouds.scale, environment.sky.clouds.variance, 0.0, 0.0]);
+        append(
+            &mut values,
+            &mut offset,
+            [environment.sky.clouds.scale, environment.sky.clouds.variance, CLOUD_PROJECTION_BIAS, CLOUD_HORIZON_FADE_START],
+        );
         append(&mut values, &mut offset, [cloud_scroll[0], cloud_scroll[1], 0.0, 0.0]);
         append(&mut values, &mut offset, [sun_textures.factor, moon_textures.factor, cloud_textures.factor, rainbow_textures.factor]);
         append(
@@ -439,6 +451,20 @@ fn resident(key: Option<TextureKey>) -> f32 {
     if key.is_some() { 1.0 } else { 0.0 }
 }
 
+#[cfg(test)]
+fn cloud_projection(direction: [f32; 3]) -> [f32; 2] {
+    let factor = (1.0 + CLOUD_PROJECTION_BIAS) / (direction[2].max(CLOUD_HORIZON_FADE_START) + CLOUD_PROJECTION_BIAS);
+    [direction[0] * factor, direction[1] * factor]
+}
+
+#[cfg(test)]
+fn cloud_uv(direction: [f32; 3], scale: f32) -> [f32; 2] {
+    let projected = cloud_projection(direction);
+    let planar = [(1.0 - projected[1]) * 0.5, (1.0 - projected[0]) * 0.5];
+    let flipped = [-planar[0], planar[1]];
+    [(flipped[0] - 0.5) / scale + 0.5, (flipped[1] - 0.5) / scale + 0.5]
+}
+
 fn uniform_layout(device: &Device, label: &str, visibility: ShaderStages) -> BindGroupLayout {
     device.create_bind_group_layout(&BindGroupLayoutDescriptor {
         label: Some(label),
@@ -482,5 +508,47 @@ fn append<const N: usize>(target: &mut [f32; UNIFORM_FLOATS], offset: &mut usize
     if let Some(slice) = target.get_mut(*offset..offset.saturating_add(N)) {
         slice.copy_from_slice(&values);
         *offset += N;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloud_uv_matches_legacy_overhead() {
+        let scale = 0.75;
+        let projected = cloud_uv([0.0, 0.0, 1.0], scale);
+        let legacy = [0.5 - 1.0 / scale, 0.5];
+        assert!(projected.into_iter().zip(legacy).all(|(actual, expected)| (actual - expected).abs() < 0.00001));
+        let direction = [0.001, -0.002, (1.0_f32 - 0.000005).sqrt()];
+        let near_zenith = cloud_uv(direction, scale);
+        let legacy_planar = [(1.0 - direction[1]) * 0.5, (1.0 - direction[0]) * 0.5];
+        let legacy_flipped = [-legacy_planar[0], legacy_planar[1]];
+        let legacy_near_zenith = [(legacy_flipped[0] - 0.5) / scale + 0.5, (legacy_flipped[1] - 0.5) / scale + 0.5];
+        assert!(near_zenith.into_iter().zip(legacy_near_zenith).all(|(actual, expected)| (actual - expected).abs() < 0.005));
+    }
+
+    #[test]
+    fn cloud_projection_shrinks_with_elevation() {
+        let elevations = [0.0_f32, 0.15, 0.3, 0.6, 1.0];
+        let radii = elevations.map(|up| {
+            let horizontal = (1.0 - up * up).sqrt();
+            let projected = cloud_projection([horizontal, 0.0, up]);
+            projected[0].abs()
+        });
+        assert!(radii.windows(2).all(|pair| pair[0] > pair[1]));
+    }
+
+    #[test]
+    fn cloud_projection_is_finite_at_fade() {
+        let up = CLOUD_HORIZON_FADE_START;
+        let horizontal = (1.0 - up * up).sqrt();
+        let projected = cloud_projection([horizontal, 0.0, up]);
+        assert!(projected.into_iter().all(f32::is_finite));
+        let uv = cloud_uv([horizontal, 0.0, up], 0.75);
+        assert!(uv.into_iter().all(f32::is_finite));
+        let below = cloud_projection([horizontal, 0.0, -CLOUD_PROJECTION_BIAS]);
+        assert!(below.into_iter().all(f32::is_finite));
     }
 }

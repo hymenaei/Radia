@@ -155,6 +155,8 @@ fn day_position_wraps_safely() {
     assert!(negative.day_position.is_finite());
     assert!((0.0..=1.0).contains(&negative.day_position));
     close(negative.day_position as f32, 14_399.0 / 14_400.0);
+    let before_epoch = evaluated(&day, -1.0, 0.0, Schedule { day_offset: 0.0, ..schedule });
+    close(before_epoch.day_position as f32, 14_399.0 / 14_400.0);
     let huge = evaluated(&day, f64::MAX, 0.0, schedule);
     assert!(huge.day_position.is_finite());
     assert!((0.0..=1.0).contains(&huge.day_position));
@@ -356,6 +358,14 @@ fn cycle_uses_coarse_redraw() {
     let mut transition = Transition::default();
     let (_, next) = transition.update(1, evaluated(&day, 0.0, 0.0, Schedule::default()), Duration::ZERO, now);
     assert_eq!(next, now.checked_add(Duration::from_secs(60)));
+}
+
+#[test]
+fn single_key_cycle_stays_idle() {
+    let day = environment(GREEN_DAY);
+    let mut transition = Transition::default();
+    let (_, next) = transition.update(1, evaluated(&day, 0.0, 0.0, Schedule::default()), Duration::ZERO, Instant::now());
+    assert_eq!(next, None);
 }
 
 #[test]

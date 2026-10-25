@@ -162,7 +162,7 @@ pub fn evaluate(sources: &Sources<'_>, utc_seconds: f64, altitude: f64) -> Evalu
 
 fn day_position(schedule: Schedule, utc_seconds: f64) -> f64 {
     let utc_seconds = if utc_seconds.is_finite() { utc_seconds } else { 0.0 };
-    let position = (utc_seconds + schedule.day_offset) % schedule.day_length / schedule.day_length;
+    let position = (utc_seconds + schedule.day_offset).rem_euclid(schedule.day_length) / schedule.day_length;
     if position.is_finite() { position.clamp(0.0, 1.0) } else { 0.0 }
 }
 
@@ -181,7 +181,7 @@ fn sample_sky(source: &EnvironmentDescription, position: f64, altitude: f64, alt
         EnvironmentSettings::DayCycle(day) => {
             let requested = selected_track(altitude, altitudes);
             let (track_number, track) = selected_sky_track(day, requested)?;
-            Some((sample_sky_track(track, position as f32)?, Some(track_number), true))
+            Some((sample_sky_track(track, position as f32)?, Some(track_number), track.len() > 1))
         }
         EnvironmentSettings::Water(_) => None,
     }
@@ -206,7 +206,7 @@ fn sample_sky_track(track: &[Keyframe<Sky>], position: f32) -> Option<SkyState> 
 fn sample_water(source: &EnvironmentDescription, position: f64) -> Option<(WaterState, bool)> {
     match &source.settings {
         EnvironmentSettings::Water(water) => Some((water_state(water, 0.0), false)),
-        EnvironmentSettings::DayCycle(day) => Some((sample_water_track(day.water(), position as f32)?, true)),
+        EnvironmentSettings::DayCycle(day) => Some((sample_water_track(day.water(), position as f32)?, day.water().len() > 1)),
         EnvironmentSettings::Sky(_) => None,
     }
 }

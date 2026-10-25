@@ -8,8 +8,9 @@ use crate::{Failure, TextureRef};
 
 const MAX_KEYS: usize = 56;
 const MAX_FRAMES: usize = 280;
+const MAX_PROPERTY_BYTES: usize = 2 * 1024;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct EnvironmentDescription {
     pub name: String,
     pub flags: u32,
@@ -17,7 +18,11 @@ pub struct EnvironmentDescription {
 }
 
 impl EnvironmentDescription {
-    pub(crate) fn retained_bytes(&self) -> usize {
+    pub fn decode(bytes: &[u8]) -> Result<Self, Failure> {
+        decode(bytes)
+    }
+
+    pub fn retained_bytes(&self) -> usize {
         let shared = 2 * size_of::<usize>();
         size_of::<Self>()
             + self.name.capacity()
@@ -40,14 +45,14 @@ impl EnvironmentDescription {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum EnvironmentSettings {
     Sky(Box<Sky>),
     Water(Box<Water>),
     DayCycle(DayCycle),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct DayCycle {
     water: Vec<Keyframe<Water>>,
     skies: [Vec<Keyframe<Sky>>; 4],
@@ -63,7 +68,7 @@ impl DayCycle {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Keyframe<T> {
     position: f32,
     settings: Arc<T>,
@@ -155,7 +160,12 @@ pub struct Sky {
 }
 
 impl Sky {
-    fn retained_bytes(&self) -> usize {
+    pub fn from_properties<'a>(properties: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Result<Self, Failure> {
+        let fields = properties_map(properties)?;
+        sky(&fields)
+    }
+
+    pub fn retained_bytes(&self) -> usize {
         size_of::<Self>()
             + [&self.atmosphere.rayleigh, &self.atmosphere.mie, &self.atmosphere.absorption]
                 .into_iter()
@@ -180,16 +190,15 @@ pub struct Water {
     pub waves: [Option<[f32; 2]>; 2],
 }
 
+impl Water {
+    pub fn from_properties<'a>(properties: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Result<Self, Failure> {
+        let fields = properties_map(properties)?;
+        water(&fields)
+    }
+}
+
 pub(crate) fn decode(bytes: &[u8]) -> Result<EnvironmentDescription, Failure> {
-    let limits = Limits {
-        max_bytes: 2 * 1024 * 1024,
-        max_depth: 12,
-        max_values: 32_768,
-        max_container_items: MAX_FRAMES,
-        max_string_bytes: 1024,
-        max_map_key_bytes: 128,
-        max_binary_bytes: 0,
-    };
+    let limits = limits(2 * 1024 * 1024);
     let start = bytes.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(bytes.len());
     let input = bytes.get(start..).ok_or(Failure::Malformed)?;
     let value = if input.starts_with(b"<?llsd/binary") {
@@ -218,6 +227,34 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<EnvironmentDescription, Failure> {
         _ => return Err(Failure::Unsupported),
     };
     Ok(EnvironmentDescription { name, flags, settings })
+}
+
+fn properties_map<'a>(properties: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> Result<Map, Failure> {
+    let limits = limits(MAX_PROPERTY_BYTES);
+    let mut fields = Map::new();
+    for (name, bytes) in properties {
+        if name.len() > 128 {
+            return Err(Failure::TooLarge);
+        }
+        if bytes.len() > MAX_PROPERTY_BYTES {
+            return Err(Failure::TooLarge);
+        }
+        let value = notation::from_slice_with_limits(bytes, limits).map_err(|_| Failure::Malformed)?;
+        fields.insert(name.to_owned(), value);
+    }
+    Ok(fields)
+}
+
+fn limits(max_bytes: usize) -> Limits {
+    Limits {
+        max_bytes,
+        max_depth: 12,
+        max_values: 32_768,
+        max_container_items: MAX_FRAMES,
+        max_string_bytes: 1024,
+        max_map_key_bytes: 128,
+        max_binary_bytes: 0,
+    }
 }
 
 fn object(value: &Value) -> Result<&Map, Failure> {
@@ -478,6 +515,24 @@ mod tests {
         assert_eq!(sky.gamma, None, "missing parameters remain absent until evaluation applies defaults");
         assert_eq!(sky.moon.texture, TextureRef::Clear, "authored nil must remain distinct from a missing texture field");
         assert_eq!(sky.clouds.texture, TextureRef::Absent);
+    }
+
+    #[test]
+    fn sky_properties_set_only_known_fields() {
+        let sky = Sky::from_properties([("gamma", b"r1.5".as_slice()), ("future", b"{'value':r2}".as_slice())]).unwrap();
+        assert_eq!(sky.gamma, Some(1.5));
+        assert_eq!(sky.sunlight, None);
+        assert_eq!(sky.clouds.color, None);
+        assert_eq!(sky.sun.texture, TextureRef::Absent);
+    }
+
+    #[test]
+    fn water_properties_validate_values() {
+        let water = Water::from_properties([("water_fog_density", b"r2".as_slice()), ("unknown", b"'ignored'".as_slice())]).unwrap();
+        assert_eq!(water.fog_density, Some(2.0));
+        assert_eq!(water.fog_color, None);
+        assert_eq!(water.transparent_texture, TextureRef::Absent);
+        assert_eq!(Water::from_properties([("water_fog_density", b"'bad'".as_slice())]), Err(Failure::Malformed));
     }
 
     #[test]

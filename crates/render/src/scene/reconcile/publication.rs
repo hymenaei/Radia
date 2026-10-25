@@ -27,8 +27,7 @@ impl Reconciler {
         if self.publication.replace {
             changes.push(Change::ViewerEnvironment(self.viewer.current()));
             changes.extend(self.state.mirror.regions.values().cloned().map(Change::Region));
-            changes
-                .extend(self.state.mirror.environments.iter().map(|(region, source)| Change::Environment(*region, Some(source.clone()))));
+            changes.extend(self.state.mirror.environments.iter().map(|(region, value)| Change::Environment(*region, Some(value.clone()))));
             changes.extend(self.state.mirror.objects.values().cloned().map(Change::Object));
             changes.extend(self.state.mirror.patches.iter().map(|((region, _), patch)| Change::Patch(*region, patch.clone())));
             changes.extend(self.state.mirror.water.iter().map(|(region, height)| Change::Water(*region, *height)));

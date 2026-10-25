@@ -14,8 +14,9 @@ use std::{
     },
 };
 
-use world::{Entity, EnvironmentRead, Region, RegionSummary, TerrainPatch, TerrainPatchId, WorldRevision};
+use world::{Entity, Region, RegionSummary, TerrainPatch, TerrainPatchId, WorldRevision};
 
+use crate::scene::region_environment::RegionEnvironment;
 use crate::scene::{MeshKey, PreparedMesh, Surface, SurfaceKind, ViewerEnvironment, asset_demand::MaterialChange, budget::Lease};
 
 #[derive(Clone, Debug)]
@@ -31,7 +32,7 @@ impl SceneLifetime {
     pub(in crate::scene) fn close(&self) {
         self.0.store(false, Ordering::Release);
     }
-    fn same(&self, other: &Self) -> bool {
+    pub(in crate::scene) fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
@@ -46,24 +47,6 @@ impl RegionData {
     pub fn summary(&self) -> &RegionSummary {
         &self.0.summary
     }
-}
-
-#[derive(Clone)]
-pub(in crate::scene) struct EnvironmentData(Arc<EnvironmentValue>);
-
-impl EnvironmentData {
-    pub(in crate::scene) fn new(source: EnvironmentRead, lease: Lease) -> Self {
-        Self(Arc::new(EnvironmentValue { source, _lease: lease }))
-    }
-
-    pub(in crate::scene) fn source(&self) -> &EnvironmentRead {
-        &self.0.source
-    }
-}
-
-struct EnvironmentValue {
-    source: EnvironmentRead,
-    _lease: Lease,
 }
 
 struct RegionValue {
@@ -117,7 +100,7 @@ pub(in crate::scene) enum Change {
     Material(MaterialChange),
     Remove(Entity),
     Region(RegionData),
-    Environment(Region, Option<EnvironmentData>),
+    Environment(Region, Option<RegionEnvironment>),
     Retire(Region),
     Patch(Region, Patch),
     Water(Region, Option<f32>),
@@ -149,7 +132,7 @@ pub(in crate::scene) struct Mirror {
     pub(in crate::scene) viewer_environment: Option<ViewerEnvironment>,
     pub(in crate::scene) objects: HashMap<Entity, Object>,
     pub(in crate::scene) regions: BTreeMap<Region, RegionData>,
-    pub(in crate::scene) environments: BTreeMap<Region, EnvironmentData>,
+    pub(in crate::scene) environments: BTreeMap<Region, RegionEnvironment>,
     pub(in crate::scene) patches: BTreeMap<(Region, TerrainPatchId), Patch>,
     pub(in crate::scene) water: BTreeMap<Region, Option<f32>>,
     pub(in crate::scene) surfaces: BTreeMap<(Region, SurfaceKind), Surface>,

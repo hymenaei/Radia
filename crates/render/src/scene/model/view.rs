@@ -3,10 +3,10 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
-use world::{Entity, EnvironmentRead, Region, WorldRevision};
+use world::{Entity, Region, WorldRevision};
 
-use super::{Batch, EnvironmentData, Mirror, SceneLifetime, Status};
-use crate::scene::{Object, Patch, RegionData, Surface, ViewerEnvironment};
+use super::{Batch, Mirror, SceneLifetime, Status};
+use crate::scene::{Object, Patch, RegionData, Surface, ViewerEnvironment, region_environment::RegionEnvironment};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApplyError {
@@ -111,8 +111,8 @@ impl SceneView {
         if self.session.is_active() { self.mirror.regions.get(&region) } else { None }
     }
 
-    pub fn environment(&self, region: Region) -> Option<&EnvironmentRead> {
-        if self.session.is_active() { self.mirror.environments.get(&region).map(EnvironmentData::source) } else { None }
+    pub fn environment(&self, region: Region) -> Option<&RegionEnvironment> {
+        if self.session.is_active() { self.mirror.environments.get(&region) } else { None }
     }
     pub fn patches(&self) -> impl Iterator<Item = (Region, &Patch)> {
         self.mirror.patches.iter().filter(|_| self.session.is_active()).map(|((region, _), patch)| (*region, patch))

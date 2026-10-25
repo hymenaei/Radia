@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use assets::{Content, Environment, EnvironmentSettings, Failure, Priority, Request, Status};
+use assets::{Content, Environment, EnvironmentSettings, Failure, Priority, Request, Sky, Status, Water};
 use utils::{AssetId, ExperienceId};
 use world::Region;
 
@@ -103,6 +103,12 @@ impl ViewerEnvironment {
     pub fn water_properties(&self) -> &BTreeMap<String, ExperienceProperty> {
         &self.0.state.water_properties
     }
+    pub fn sky_overrides(&self) -> Option<&Sky> {
+        self.0.sky_overrides.as_ref()
+    }
+    pub fn water_overrides(&self) -> Option<&Water> {
+        self.0.water_overrides.as_ref()
+    }
     pub fn clear_transition(&self) -> Duration {
         self.0.state.clear_transition
     }
@@ -110,6 +116,8 @@ impl ViewerEnvironment {
 
 struct Snapshot {
     state: State,
+    sky_overrides: Option<Sky>,
+    water_overrides: Option<Water>,
     _lease: Lease,
 }
 
@@ -195,6 +203,10 @@ impl ViewerEnvironments {
                 if sky.is_empty() && water.is_empty() {
                     return Ok(());
                 }
+                Sky::from_properties(sky.iter().map(|property| (property.name.as_str(), property.source.as_ref())))
+                    .map_err(|_| EnvironmentPushError::Invalid)?;
+                Water::from_properties(water.iter().map(|property| (property.name.as_str(), property.source.as_ref())))
+                    .map_err(|_| EnvironmentPushError::Invalid)?;
                 let mut state = self.state();
                 self.properties(&mut state.sky_properties, sky, experience, transition)?;
                 self.properties(&mut state.water_properties, water, experience, transition)?;
@@ -251,8 +263,11 @@ impl ViewerEnvironments {
     }
 
     fn store(&mut self, state: State) -> Result<(), EnvironmentPushError> {
+        let sky_overrides = overrides_sky(&state.sky_properties)?;
+        let water_overrides = overrides_water(&state.water_properties)?;
         let bytes = size_of::<Snapshot>()
             + 32
+            + sky_overrides.as_ref().map_or(0, |sky| sky.retained_bytes().saturating_sub(size_of::<Sky>()))
             + state
                 .sky_properties
                 .keys()
@@ -260,7 +275,7 @@ impl ViewerEnvironments {
                 .map(|key| key.capacity() + size_of::<ExperienceProperty>() + 128)
                 .sum::<usize>();
         let lease = self.budget.reserve(bytes).ok_or(EnvironmentPushError::Capacity)?;
-        self.current = Some(ViewerEnvironment(Arc::new(Snapshot { state, _lease: lease })));
+        self.current = Some(ViewerEnvironment(Arc::new(Snapshot { state, sky_overrides, water_overrides, _lease: lease })));
         self.version = self.version.checked_add(1).expect("viewer environment version exhausted");
         Ok(())
     }
@@ -295,4 +310,22 @@ impl ViewerEnvironments {
         }
         Ok(())
     }
+}
+
+fn overrides_sky(properties: &BTreeMap<String, ExperienceProperty>) -> Result<Option<Sky>, EnvironmentPushError> {
+    if properties.is_empty() {
+        return Ok(None);
+    }
+    Sky::from_properties(properties.iter().map(|(name, property)| (name.as_str(), property.source())))
+        .map(Some)
+        .map_err(|_| EnvironmentPushError::Invalid)
+}
+
+fn overrides_water(properties: &BTreeMap<String, ExperienceProperty>) -> Result<Option<Water>, EnvironmentPushError> {
+    if properties.is_empty() {
+        return Ok(None);
+    }
+    Water::from_properties(properties.iter().map(|(name, property)| (name.as_str(), property.source())))
+        .map(Some)
+        .map_err(|_| EnvironmentPushError::Invalid)
 }

@@ -10,6 +10,7 @@ use crate::scene::{
     Budget, Camera, Geometry, MeshBuildError, MeshKey, Object, Placement, PreparedMesh,
     mesh_cache::{MeshCache, PrimCompletion, PrimJob},
     model::{MeshChange, Mirror},
+    region_environment::{EnvironmentDecodeCompletion, EnvironmentDecodeJob},
     surface::{SurfaceCompletion, SurfaceJob},
 };
 
@@ -20,6 +21,7 @@ impl MeshJob {
         MeshCompletion(match self.0 {
             Work::Prim(job) => Completion::Prim(job.run()),
             Work::Surface(job) => Completion::Surface(job.run()),
+            Work::Environment(job) => Completion::Environment(job.run()),
         })
     }
 }
@@ -27,6 +29,7 @@ impl MeshJob {
 pub(in crate::scene) enum Work {
     Prim(PrimJob),
     Surface(Box<SurfaceJob>),
+    Environment(EnvironmentDecodeJob),
 }
 
 pub struct MeshCompletion(pub(in crate::scene) Completion);
@@ -34,6 +37,7 @@ pub struct MeshCompletion(pub(in crate::scene) Completion);
 pub(in crate::scene) enum Completion {
     Prim(PrimCompletion),
     Surface(SurfaceCompletion),
+    Environment(EnvironmentDecodeCompletion),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

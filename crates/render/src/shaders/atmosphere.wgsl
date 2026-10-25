@@ -9,6 +9,7 @@ struct Atmosphere {
     distance: vec4<f32>,
     light_norm: vec4<f32>,
     water_specular: vec4<f32>,
+    dome: vec4<f32>,
 }
 
 struct AtmosphereTerms {
@@ -54,10 +55,12 @@ fn linear_to_srgb(color: vec3<f32>) -> vec3<f32> {
     return select(high, low, color <= vec3<f32>(0.0031308));
 }
 
-fn sky_dome_position(direction: vec3<f32>, camera_height: f32) -> vec3<f32> {
+fn sky_dome_position(direction: vec3<f32>, atmosphere: Atmosphere) -> vec3<f32> {
     let dome_direction = world_to_dome(safe_normalize(direction));
+    let radius = atmosphere.dome.x;
+    let camera_height = atmosphere.dome.y;
     let height_along_ray = dome_direction.y * camera_height;
-    let distance = -height_along_ray + sqrt(max(height_along_ray * height_along_ray + 15000.0 * 15000.0 - camera_height * camera_height, 0.0));
+    let distance = -height_along_ray + sqrt(max(height_along_ray * height_along_ray + radius * radius - camera_height * camera_height, 0.0));
     return dome_direction * distance + vec3<f32>(0.0, 50.0, 0.0);
 }
 
@@ -110,8 +113,8 @@ fn windlight_sky_base(relative_position: vec3<f32>, atmosphere: Atmosphere) -> v
     return color;
 }
 
-fn sky_linear_color(direction: vec3<f32>, camera_height: f32, atmosphere: Atmosphere) -> vec3<f32> {
-    let relative_position = clamp_sky_altitude(sky_dome_position(direction, camera_height), atmosphere.haze.w);
+fn sky_linear_color(direction: vec3<f32>, atmosphere: Atmosphere) -> vec3<f32> {
+    let relative_position = clamp_sky_altitude(sky_dome_position(direction, atmosphere), atmosphere.haze.w);
     let color = clamp(windlight_sky_base(relative_position, atmosphere) * 2.0, vec3<f32>(0.0), vec3<f32>(5.0));
     return srgb_to_linear(color) * atmosphere.distance.z;
 }

@@ -123,8 +123,8 @@ fn pbr_punctual(
     return result;
 }
 
-fn water_radiance_from_sky_without_probes(direction: vec3<f32>, camera_height: f32, atmosphere: Atmosphere) -> vec3<f32> {
-    return sky_linear_color(direction, camera_height, atmosphere);
+fn water_radiance_from_sky_without_probes(direction: vec3<f32>, atmosphere: Atmosphere) -> vec3<f32> {
+    return sky_linear_color(direction, atmosphere);
 }
 
 fn transform_water_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, sample: vec3<f32>) -> vec3<f32> {
@@ -180,7 +180,7 @@ fn shade_water(
     let atmosphere_terms = object_atmosphere_terms(position_eye, light_direction_eye, light_norm_eye, atmosphere);
     let punctual_color = clamp(punctual.nl * (punctual.diffuse + punctual.specular), vec3<f32>(0.0), vec3<f32>(10.0))
         * atmosphere_terms.sunlight * atmosphere_terms.attenuation;
-    let radiance = water_radiance_from_sky_without_probes(reflected_direction, water.animation.w, atmosphere) * fresnel.y;
+    let radiance = water_radiance_from_sky_without_probes(reflected_direction, atmosphere) * fresnel.y;
     let color = mix(fb.rgb, radiance, min(1.0, fresnel.x)) + punctual_color;
     let specular = min(max(max(punctual_color.r, punctual_color.g), punctual_color.b), 0.0);
     let output = min(vec4<f32>(1.0), max(vec4<f32>(color, specular), vec4<f32>(0.0)));

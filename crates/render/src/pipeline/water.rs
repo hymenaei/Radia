@@ -47,7 +47,7 @@ pub(crate) fn water_surface_values(
     values[8..12].copy_from_slice(&[normal_scale[0], normal_scale[1], normal_scale[2], blur]);
     values[12..16].copy_from_slice(&[fresnel[0], fresnel[1], normal_blend, if normal_present { 1.0 } else { 0.0 }]);
     values[16..20].copy_from_slice(&waves);
-    values[20..24].copy_from_slice(&[time[0], origin.sweep[0], origin.sweep[1], camera_position.z as f32]);
+    values[20..24].copy_from_slice(&[time[0], origin.sweep[0], origin.sweep[1], 0.0]);
     values[24..28].copy_from_slice(&[origin.big[0], origin.big[1], origin.first[0], origin.first[1]]);
     values[28..32].copy_from_slice(&[origin.second[0], origin.second[1], 0.0, 0.0]);
     values
@@ -110,7 +110,7 @@ mod tests {
         let above = water_surface_values(Some(&environment), DVec3::new(25.0, 10.0, 20.0), Some(10.0), [5.0; 4], 0.25, true);
         assert_eq!(&above[4..8], &[2.0, 1.0 / environment.sky.sun_direction[2].max(0.3), 10.0, 0.0]);
         assert_eq!(&above[8..16], &[1.75, 1.75, 1.75, 0.08, 0.5, 0.3999, 0.25, 1.0]);
-        assert_eq!(&above[16..24], &[1.04999, -0.42, 1.10999, -1.16, 5.0, 25.0, 10.0, 20.0]);
+        assert_eq!(&above[16..24], &[1.04999, -0.42, 1.10999, -1.16, 5.0, 25.0, 10.0, 0.0]);
         assert_eq!(&above[24..32], &[0.0, 0.4, 0.25, 0.0, 0.5, 0.0, 0.0, 0.0]);
         let below = water_surface_values(Some(&environment), DVec3::new(25.0, 10.0, 0.0), Some(10.0), [0.0; 4], 0.0, false);
         assert!((below[4] - 2.0_f32.powf(0.25)).abs() < 0.000001);

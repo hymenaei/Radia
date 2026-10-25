@@ -54,9 +54,9 @@ fn ray_direction(ndc: vec2<f32>) -> vec3<f32> {
     return safe_normalize(near.xyz / near.w);
 }
 
-fn sky_dome_uv(direction: vec3<f32>) -> vec2<f32> {
-    let ray = safe_normalize(direction);
-    return vec2<f32>(-ray.x, -ray.y) * 0.5 + vec2<f32>(0.5);
+fn sky_dome_uv(dome_position: vec3<f32>, atmosphere: Atmosphere) -> vec2<f32> {
+    let dome_point = (dome_position + vec3<f32>(0.0, atmosphere.dome.y - 50.0, 0.0)) / atmosphere.dome.x;
+    return vec2<f32>(-dome_point.z, -dome_point.x) * 0.5 + vec2<f32>(0.5);
 }
 
 fn cloud_noise(uv: vec2<f32>) -> vec4<f32> {
@@ -64,7 +64,7 @@ fn cloud_noise(uv: vec2<f32>) -> vec4<f32> {
     let gradient_y = dpdy(uv);
     let first = textureSampleGrad(cloud_image, environment_sampler, uv, gradient_x, gradient_y);
     let second = textureSampleGrad(cloud_next_image, environment_sampler, uv, gradient_x, gradient_y);
-    return mix(vec4<f32>(linear_to_srgb(first.rgb), first.a), vec4<f32>(linear_to_srgb(second.rgb), second.a), sky.blends.z);
+    return mix(first, second, sky.blends.z);
 }
 
 fn rainbow_color(optical_dot: f32) -> vec3<f32> {
@@ -95,7 +95,7 @@ fn halo_color(optical_dot: f32) -> vec3<f32> {
 
 @fragment fn sky_fragment(ray: SkyRay) -> @location(0) vec4<f32> {
     let direction = ray_direction(ray.ndc);
-    let relative_position = clamp_sky_altitude(sky_dome_position(direction, sky.optics.w), sky.atmosphere.haze.w);
+    let relative_position = clamp_sky_altitude(sky_dome_position(direction, sky.atmosphere), sky.atmosphere.haze.w);
     let terms = sky_atmosphere_terms(relative_position, sky.atmosphere);
     let optical_dot = dot(terms.ray, terms.light);
     let sky_color = clamp((windlight_sky_base(relative_position, sky.atmosphere) + rainbow_color(optical_dot) + halo_color(optical_dot)) * 2.0, vec3<f32>(0.0), vec3<f32>(5.0));
@@ -107,13 +107,13 @@ fn halo_color(optical_dot: f32) -> vec3<f32> {
     if sky.cloud.x < 0.001 {
         discard;
     }
-    let dome_position = sky_dome_position(direction, sky.optics.w);
+    let dome_position = sky_dome_position(direction, sky.atmosphere);
     var altitude_blend = clamp((dome_position.y + 512.0) / sky.atmosphere.haze.w, 0.0, 1.0);
     if dome_position.y < 0.0 {
         altitude_blend = 0.0;
     }
     let relative_position = clamp_sky_altitude(dome_position, sky.atmosphere.haze.w);
-    var uv1 = sky_dome_uv(direction);
+    var uv1 = sky_dome_uv(dome_position, sky.atmosphere);
     uv1.x = -uv1.x;
     uv1 = (uv1 - vec2<f32>(0.5)) / sky.cloud.x + vec2<f32>(0.5);
     let light_world = sky.atmosphere.light_norm.xyz;

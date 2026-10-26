@@ -3,6 +3,7 @@ pub mod chat;
 pub mod circuit;
 pub mod generic_message;
 pub mod generic_streaming_message;
+pub mod inventory;
 pub mod map;
 pub mod object;
 pub mod parcel;
@@ -17,6 +18,10 @@ pub use self::chat::{ChatFromSimulator, ChatFromViewer};
 pub use self::circuit::{CompletePingCheck, PacketAck, PingId, StartPingCheck, UseCircuitCode};
 pub use self::generic_message::GenericMessage;
 pub use self::generic_streaming_message::GenericStreamingMessage;
+pub use self::inventory::{
+    BulkUpdateInventory, InventoryFolderBlock, InventoryItemBlock, MoveInventoryItem, MoveInventoryItemBlock, RemoveInventoryFolder,
+    RemoveInventoryItem, RemoveInventoryObjects, SaveAssetIntoInventory, UpdateCreateInventoryItem,
+};
 pub use self::map::{MapBlockReply, MapBlockRequest};
 pub use self::object::{
     CacheMissType, CachedObjectReference, ExtraParamUpdate, ExtraParameter, ImprovedTerseObjectUpdate, KillObject, ObjectData,

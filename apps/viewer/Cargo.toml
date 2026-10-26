@@ -71,3 +71,4 @@ tokio = { workspace = true, features = ["test-util"] }
 gpui = { workspace = true, features = ["test-support"] }
 test-support.workspace = true
 tempfile.workspace = true
+proptest.workspace = true

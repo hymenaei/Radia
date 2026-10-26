@@ -541,10 +541,22 @@ pub enum InventoryChange {
 pub struct ChangeSet {
     pub revision: InventoryRevision,
     pub changes: Vec<InventoryChange>,
+    pub refetch_categories: Vec<CategoryKey>,
 }
 
 impl ChangeSet {
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+        self.changes.is_empty() && self.refetch_categories.is_empty()
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InventoryDelta {
+    pub created_categories: Vec<Category>,
+    pub updated_categories: Vec<Category>,
+    pub created_items: Vec<Item>,
+    pub updated_items: Vec<Item>,
+    pub removed_categories: Vec<CategoryKey>,
+    pub removed_items: Vec<ItemKey>,
+    pub updated_category_versions: Vec<(CategoryKey, ServerVersion)>,
 }

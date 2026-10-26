@@ -124,17 +124,26 @@ impl Inventory {
 
     pub(crate) fn publish(
         &mut self,
-        mut next: InventoryState,
+        next: InventoryState,
         changes: Vec<crate::InventoryChange>,
     ) -> Result<crate::ChangeSet, InventoryError> {
+        self.publish_with_refetch(next, changes, Vec::new())
+    }
+
+    pub(crate) fn publish_with_refetch(
+        &mut self,
+        mut next: InventoryState,
+        changes: Vec<crate::InventoryChange>,
+        refetch_categories: Vec<CategoryKey>,
+    ) -> Result<crate::ChangeSet, InventoryError> {
         if changes.is_empty() {
-            return Ok(crate::ChangeSet { revision: self.state.revision, changes });
+            return Ok(crate::ChangeSet { revision: self.state.revision, changes, refetch_categories });
         }
         let revision = self.state.revision.0.checked_add(1).ok_or(InventoryError::RevisionExhausted)?;
         let revision = InventoryRevision(revision);
         next.revision = revision;
         self.state = Arc::new(next);
-        Ok(crate::ChangeSet { revision, changes })
+        Ok(crate::ChangeSet { revision, changes, refetch_categories })
     }
 
     fn install_categories(&mut self, categories: impl IntoIterator<Item = Category>) -> Result<(), InventoryError> {

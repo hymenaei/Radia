@@ -3,8 +3,8 @@ use std::{hint::black_box, mem::size_of, sync::Arc};
 use ::inventory as inventory_model;
 use criterion::{BatchSize, Criterion};
 use inventory_model::{
-    AssetType, Category, CategoryKey, Inventory, InventoryChild, InventoryLimits, InventoryOwner, InventoryType, Item, ItemKey,
-    PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
+    AssetType, Category, CategoryKey, Inventory, InventoryChild, InventoryDelta, InventoryLimits, InventoryOwner, InventoryType, Item,
+    ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
 };
 use test_support::allocation;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
@@ -33,6 +33,20 @@ pub(super) fn bench(criterion: &mut Criterion) {
 
     let inventory = item_inventory();
     criterion.bench_function("inventory/snapshot_100k_items", |bench| bench.iter(|| black_box(inventory.snapshot())));
+
+    let (mut inventory, delta_a, delta_b) = one_item_deltas();
+    let mut use_a = false;
+    criterion.bench_function("inventory/apply_one_item_delta_100k", |bench| {
+        bench.iter_batched(
+            || {
+                use_a = !use_a;
+                if use_a { delta_a.clone() } else { delta_b.clone() }
+            },
+            |delta| black_box(inventory.apply_delta(delta).expect("single item delta should apply")),
+            BatchSize::SmallInput,
+        );
+    });
+    report_delta_allocations();
 }
 
 fn report_memory() {
@@ -60,6 +74,30 @@ fn report_memory() {
         size_of::<Category>(),
     );
     black_box((root, items, folders, snapshot, changed_snapshot));
+}
+
+fn report_delta_allocations() {
+    let (mut inventory, delta_a, _) = one_item_deltas();
+    let (changes, allocations) = allocation::measure(|| inventory.apply_delta(delta_a).expect("single item delta should apply"));
+    eprintln!(
+        "inventory apply_one_item_delta_100k allocations: alloc_calls={}, realloc_calls={}, live={} B, peak={} B",
+        allocations.allocation_calls, allocations.reallocation_calls, allocations.live_bytes, allocations.peak_bytes,
+    );
+    black_box((inventory, changes));
+}
+
+fn one_item_deltas() -> (Inventory, InventoryDelta, InventoryDelta) {
+    let inventory = item_inventory();
+    let original = inventory.snapshot().item(item(0).key).expect("benchmark item should exist").clone();
+    let mut changed_a = original.clone();
+    changed_a.name = Arc::from("delta-a");
+    let mut changed_b = original;
+    changed_b.name = Arc::from("delta-b");
+    (
+        inventory,
+        InventoryDelta { updated_items: vec![changed_a], ..InventoryDelta::default() },
+        InventoryDelta { updated_items: vec![changed_b], ..InventoryDelta::default() },
+    )
 }
 
 fn root_inventory() -> Inventory {

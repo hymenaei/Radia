@@ -6,6 +6,8 @@ Simulator traffic enters through LLUDP circuits and HTTP capabilities. `network`
 
 Login returns the personal inventory and Library roots and folder skeletons. `protocol` parses those bounded wire values; the viewer session translates them into normalized categories and owns the single mutable inventory model. The model exposes immutable snapshots and revisions, while the session owns a watch channel of snapshots for GUI readers. Favorites lookup uses the personal folder type. Future inventory fetches and edits enter through the same model mutation API.
 
+UDP inventory messages and EventQueue inventory events enter that same session intake in delivery order and translate into atomic inventory deltas. The session applies each delta before handling the next event. A known folder version rejects an older delta or fetch result. An unknown or mismatched delta version leaves the folder incomplete and reports that it needs a refetch. UDP and EventQueue updates without version evidence use their delivered order.
+
 Render's scene reconciliation reads bounded World pages and change journals through the viewer's `WorldReader` bridge. It combines accepted object, terrain, and environment state with available assets, then publishes batches for the viewport's `SceneView`. GPU drawing borrows that view; it does not read network messages or mutate World.
 
 Transport coverage loss and scene recovery are separate concerns. Session intake tracks where simulator observations may be incomplete and requests recovery where supported. Scene reconciliation can rebuild its derived state after history loss, rejected reads, or capacity pressure, but cannot recover observations that World never received. Neither successful rendering nor a populated scene proves complete simulator state.
@@ -22,7 +24,7 @@ Each entry identifies a crate's responsibility, its important boundaries, and co
 
 ### `apps/viewer`
 
-Composes startup, GUI screens and primitives, persistence, and subsystem coordinators. Session intake is the sole owner of World and translates protocol messages into domain observations while preserving source order and coverage-loss information. The asset coordinator runs network fetches on service workers and reserved cache reads, decodes, and writes on blocking workers. Successful network decodes enqueue bounded cache writes; session shutdown drains work already in flight. The viewer opens one cache at the local default location and shares raw cached payloads across sessions, while each session keeps its own Store and route state. The scene feed schedules reconciliation and delivers sequenced batches to the viewport.
+Composes startup, GUI screens and primitives, persistence, and subsystem coordinators. Session intake is the sole owner of World and inventory, translating protocol messages into domain observations and deltas in source order. The asset coordinator runs network fetches on service workers and reserved cache reads, decodes, and writes on blocking workers. Successful network decodes enqueue bounded cache writes; session shutdown drains work already in flight. The viewer opens one cache at the local default location and shares raw cached payloads across sessions, while each session keeps its own Store and route state. The scene feed schedules reconciliation and delivers sequenced batches to the viewport.
 
 ### `crates/assets`
 
@@ -34,7 +36,7 @@ Owns LLSD values, Serde integration, and XML, binary, and notation codecs. Decod
 
 ### `crates/inventory`
 
-Owns normalized personal inventory and Library categories, items, parent and child indexes, link resolution, folder completeness, and validated mutation planning. The viewer session translates login data, owns the mutable model and its snapshot notification channel, and applies model updates; GUI readers receive immutable snapshots. `protocol` owns login wire parsing and `network` owns transport; `inventory` has no dependency on either boundary.
+Owns normalized personal inventory and Library categories, items, parent and child indexes, link resolution, folder completeness, and validated mutation planning. Atomic deltas apply categories before items, removals afterward, and returned folder versions last. The viewer session translates login and live update data, owns the mutable model and its snapshot notification channel, and applies model updates; GUI readers receive immutable snapshots. `protocol` owns wire parsing and `network` owns transport; `inventory` has no dependency on either boundary.
 
 ### `crates/math`
 

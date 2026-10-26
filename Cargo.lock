@@ -8934,6 +8934,7 @@ dependencies = [
  "llsd",
  "math",
  "network",
+ "proptest",
  "protocol",
  "render",
  "serde",

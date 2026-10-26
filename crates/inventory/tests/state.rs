@@ -4,9 +4,9 @@ use std::{
 };
 
 use inventory::{
-    AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryError, InventoryLimits, InventoryNodeId,
-    InventoryNodeKey, InventoryOwner, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions, SaleInfo, SaleType,
-    ServerVersion,
+    AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryDelta, InventoryError, InventoryLimits,
+    InventoryNodeId, InventoryNodeKey, InventoryOwner, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions, SaleInfo,
+    SaleType, ServerVersion,
 };
 use proptest::prelude::*;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
@@ -371,12 +371,13 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: 72, ..ProptestConfig::default() })]
 
     #[test]
-    fn sequences_preserve_invariants(operations in prop::collection::vec((0_u8..8, 0_u8..8, 0_u8..8, 0_u8..8), 0..72)) {
+    fn sequences_preserve_invariants(operations in prop::collection::vec((0_u8..9, 0_u8..8, 0_u8..8, 0_u8..8), 0..72)) {
         let owner = owner(14);
         let limits = InventoryLimits { max_categories: 4, max_items: 3, max_folder_fetch_children: 4 };
         let mut inventory = inventory_with_limits(owner, limits);
         for id in 1..=3 {
-            inventory.upsert_category(category(owner, 100 + id, Some(1), "capacity-category")).expect("fill category capacity");
+            let parent = if id == 2 { 101 } else { 1 };
+            inventory.upsert_category(category(owner, 100 + id, Some(parent), "capacity-category")).expect("fill category capacity");
             prop_assert_eq!(invariant(&inventory.snapshot()), None);
             inventory
                 .upsert_item(item(owner, 200 + id, 1, AssetType::Notecard, 300 + id))
@@ -398,6 +399,18 @@ proptest! {
             Err(InventoryError::TooManyItems)
         );
         prop_assert_eq!(inventory.revision(), item_revision);
+        prop_assert_eq!(invariant(&inventory.snapshot()), None);
+        let root = inventory.snapshot().roots().personal();
+        let a_key = CategoryKey::new(owner, FolderId::new(uuid(101)));
+        let b_key = CategoryKey::new(owner, FolderId::new(uuid(102)));
+        let snapshot = inventory.snapshot();
+        let mut moved_a = snapshot.category(a_key).expect("A exists").clone();
+        let mut moved_b = snapshot.category(b_key).expect("B exists").clone();
+        moved_a.parent = Some(b_key);
+        moved_b.parent = Some(root);
+        inventory
+            .apply_delta(InventoryDelta { updated_categories: vec![moved_a, moved_b], ..InventoryDelta::default() })
+            .expect("property sequence starts with the valid root-B-A move");
         prop_assert_eq!(invariant(&inventory.snapshot()), None);
         for (operation, a, b, c) in operations {
             let before = inventory.snapshot();
@@ -446,7 +459,28 @@ proptest! {
                         ],
                     )
                 }
-                _ => inventory.set_version(CategoryKey::new(owner, FolderId::new(uuid(category_id))), ServerVersion::UNKNOWN),
+                6 | 7 => inventory.set_version(CategoryKey::new(owner, FolderId::new(uuid(category_id))), ServerVersion::UNKNOWN),
+                8 => {
+                    let snapshot = inventory.snapshot();
+                    let a_key = CategoryKey::new(owner, FolderId::new(uuid(101)));
+                    let b_key = CategoryKey::new(owner, FolderId::new(uuid(102)));
+                    match (snapshot.category(a_key), snapshot.category(b_key)) {
+                        (Some(a), Some(b)) => {
+                            let mut a = a.clone();
+                            let mut b = b.clone();
+                            if a.parent == Some(b_key) && b.parent == Some(snapshot.roots().personal()) {
+                                a.parent = Some(snapshot.roots().personal());
+                                b.parent = Some(a_key);
+                            } else {
+                                a.parent = Some(b_key);
+                                b.parent = Some(snapshot.roots().personal());
+                            }
+                            inventory.apply_delta(InventoryDelta { updated_categories: vec![a, b], ..InventoryDelta::default() })
+                        }
+                        _ => inventory.apply_delta(InventoryDelta::default()),
+                    }
+                }
+                _ => inventory.apply_delta(InventoryDelta::default()),
             };
             match result {
                 Ok(changes) => prop_assert_eq!(changes.revision, inventory.revision()),

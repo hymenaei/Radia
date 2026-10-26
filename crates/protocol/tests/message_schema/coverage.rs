@@ -2,12 +2,14 @@ use protocol::lludp::{AllocationStrategy, Message, MessageId};
 use protocol::schema::{
     BlockMode,
     ids::{
-        AGENT_MOVEMENT_COMPLETE, AGENT_THROTTLE, AGENT_UPDATE, AVATAR_APPEARANCE, AVATAR_SIT_RESPONSE, CHAT_FROM_SIMULATOR,
-        CHAT_FROM_VIEWER, COMPLETE_AGENT_MOVEMENT, COMPLETE_PING_CHECK, CONFIRM_ENABLE_SIMULATOR, DISABLE_SIMULATOR, ENABLE_SIMULATOR,
-        GENERIC_MESSAGE, GENERIC_STREAMING_MESSAGE, IMPROVED_TERSE_OBJECT_UPDATE, KILL_OBJECT, LAYER_DATA, LOGOUT_REPLY, LOGOUT_REQUEST,
-        MAP_BLOCK_REPLY, MAP_BLOCK_REQUEST, OBJECT_EXTRA_PARAMS, OBJECT_UPDATE, OBJECT_UPDATE_CACHED, OBJECT_UPDATE_COMPRESSED, PACKET_ACK,
-        PARCEL_PROPERTIES, REGION_HANDLE_REQUEST, REGION_HANDSHAKE, REGION_HANDSHAKE_REPLY, REGION_ID_AND_HANDLE_REPLY, REGION_INFO,
-        REQUEST_MULTIPLE_OBJECTS, START_PING_CHECK, TELEPORT_CANCEL, TELEPORT_FAILED, TELEPORT_FINISH, USE_CIRCUIT_CODE,
+        AGENT_MOVEMENT_COMPLETE, AGENT_THROTTLE, AGENT_UPDATE, AVATAR_APPEARANCE, AVATAR_SIT_RESPONSE, BULK_UPDATE_INVENTORY,
+        CHAT_FROM_SIMULATOR, CHAT_FROM_VIEWER, COMPLETE_AGENT_MOVEMENT, COMPLETE_PING_CHECK, CONFIRM_ENABLE_SIMULATOR, DISABLE_SIMULATOR,
+        ENABLE_SIMULATOR, GENERIC_MESSAGE, GENERIC_STREAMING_MESSAGE, IMPROVED_TERSE_OBJECT_UPDATE, KILL_OBJECT, LAYER_DATA, LOGOUT_REPLY,
+        LOGOUT_REQUEST, MAP_BLOCK_REPLY, MAP_BLOCK_REQUEST, MOVE_INVENTORY_ITEM, OBJECT_EXTRA_PARAMS, OBJECT_UPDATE, OBJECT_UPDATE_CACHED,
+        OBJECT_UPDATE_COMPRESSED, PACKET_ACK, PARCEL_PROPERTIES, REGION_HANDLE_REQUEST, REGION_HANDSHAKE, REGION_HANDSHAKE_REPLY,
+        REGION_ID_AND_HANDLE_REPLY, REGION_INFO, REMOVE_INVENTORY_FOLDER, REMOVE_INVENTORY_ITEM, REMOVE_INVENTORY_OBJECTS,
+        REQUEST_MULTIPLE_OBJECTS, SAVE_ASSET_INTO_INVENTORY, START_PING_CHECK, TELEPORT_CANCEL, TELEPORT_FAILED, TELEPORT_FINISH,
+        UPDATE_CREATE_INVENTORY_ITEM, USE_CIRCUIT_CODE,
     },
 };
 use test_support::lludp::vectors;
@@ -245,5 +247,42 @@ typed_message_coverage! {
         SchemaDerived, SchemaConforming, [
         ("LayerID", BlockMode::Single, "Type"),
         ("LayerData", BlockMode::Single, "Data"),
+    ];
+    "UpdateCreateInventoryItem" => UpdateCreateInventoryItem, UPDATE_CREATE_INVENTORY_ITEM, "",
+        SchemaDerived, SchemaConforming, [
+        ("AgentData", BlockMode::Single, "AgentID SimApproved TransactionID"),
+        ("InventoryData", BlockMode::Variable, "ItemID FolderID CallbackID CreatorID OwnerID GroupID BaseMask OwnerMask GroupMask EveryoneMask NextOwnerMask GroupOwned AssetID Type InvType Flags SaleType SalePrice Name Description CreationDate CRC"),
+    ];
+    "RemoveInventoryItem" => RemoveInventoryItem, REMOVE_INVENTORY_ITEM, "",
+        SchemaDerived, SchemaConforming, [
+        ("AgentData", BlockMode::Single, "AgentID SessionID"),
+        ("InventoryData", BlockMode::Variable, "ItemID"),
+    ];
+    "RemoveInventoryFolder" => RemoveInventoryFolder, REMOVE_INVENTORY_FOLDER, "",
+        SchemaDerived, SchemaConforming, [
+        ("AgentData", BlockMode::Single, "AgentID SessionID"),
+        ("FolderData", BlockMode::Variable, "FolderID"),
+    ];
+    "RemoveInventoryObjects" => RemoveInventoryObjects, REMOVE_INVENTORY_OBJECTS, "",
+        SchemaDerived, SchemaConforming, [
+        ("AgentData", BlockMode::Single, "AgentID SessionID"),
+        ("FolderData", BlockMode::Variable, "FolderID"),
+        ("ItemData", BlockMode::Variable, "ItemID"),
+    ];
+    "SaveAssetIntoInventory" => SaveAssetIntoInventory, SAVE_ASSET_INTO_INVENTORY, "",
+        NoAlloc, SchemaConforming, [
+        ("AgentData", BlockMode::Single, "AgentID"),
+        ("InventoryData", BlockMode::Single, "ItemID NewAssetID"),
+    ];
+    "BulkUpdateInventory" => BulkUpdateInventory, BULK_UPDATE_INVENTORY, "",
+        SchemaDerived, SchemaConforming, [
+        ("AgentData", BlockMode::Single, "AgentID TransactionID"),
+        ("FolderData", BlockMode::Variable, "FolderID ParentID Type Name"),
+        ("ItemData", BlockMode::Variable, "ItemID CallbackID FolderID CreatorID OwnerID GroupID BaseMask OwnerMask GroupMask EveryoneMask NextOwnerMask GroupOwned AssetID Type InvType Flags SaleType SalePrice Name Description CreationDate CRC"),
+    ];
+    "MoveInventoryItem" => MoveInventoryItem, MOVE_INVENTORY_ITEM, "",
+        SchemaDerived, SchemaConforming, [
+        ("AgentData", BlockMode::Single, "AgentID SessionID Stamp"),
+        ("InventoryData", BlockMode::Variable, "ItemID FolderID NewName"),
     ];
 }

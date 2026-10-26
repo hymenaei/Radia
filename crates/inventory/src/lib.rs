@@ -1,3 +1,4 @@
+mod delta;
 mod mutation;
 mod snapshot;
 mod state;
@@ -9,8 +10,9 @@ pub use mutation::{InventoryChild, MAX_FOLDER_FETCH_CHILDREN};
 pub use snapshot::InventorySnapshot;
 pub use state::{Inventory, InventoryLimits, InventoryRoots};
 pub use types::{
-    AssetType, Category, CategoryKey, ChangeSet, FolderType, InventoryChange, InventoryNodeId, InventoryNodeKey, InventoryOwner,
-    InventoryRevision, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
+    AssetType, Category, CategoryKey, ChangeSet, FolderType, InventoryChange, InventoryDelta, InventoryNodeId, InventoryNodeKey,
+    InventoryOwner, InventoryRevision, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions, SaleInfo, SaleType,
+    ServerVersion,
 };
 
 pub const MAX_INVENTORY_CATEGORIES: usize = 131_074;
@@ -36,6 +38,7 @@ pub enum InventoryError {
     DuplicateFetchChild,
     TooManyCategories,
     TooManyItems,
+    TooManyDeltaOperations,
     TooManyFolderChildren,
     NameTooLong,
     DescriptionTooLong,
@@ -62,6 +65,7 @@ impl fmt::Display for InventoryError {
             Self::DuplicateFetchChild => "folder fetch contains a duplicate child ID",
             Self::TooManyCategories => "inventory category limit exceeded",
             Self::TooManyItems => "inventory item limit exceeded",
+            Self::TooManyDeltaOperations => "inventory delta operation limit exceeded",
             Self::TooManyFolderChildren => "folder fetch child limit exceeded",
             Self::NameTooLong => "inventory name exceeds its byte limit",
             Self::DescriptionTooLong => "inventory description exceeds its byte limit",

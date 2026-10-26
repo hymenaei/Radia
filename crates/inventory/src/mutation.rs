@@ -115,6 +115,10 @@ impl Inventory {
         if !self.state.categories.contains_key(&folder) {
             return Err(InventoryError::MissingCategory);
         }
+        let current_version = self.state.categories.get(&folder).ok_or(InventoryError::InconsistentIndex)?.server_version;
+        if current_version.is_known() && version.is_known() && version.raw() < current_version.raw() {
+            return self.publish(self.state.as_ref().clone(), Vec::new());
+        }
         let mut incoming = HashSet::with_capacity(children.len());
         let mut new_categories = 0usize;
         let mut new_items = 0usize;
@@ -218,7 +222,11 @@ impl Inventory {
     }
 }
 
-fn upsert_category_state(state: &mut InventoryState, category: Category, changes: &mut Vec<InventoryChange>) -> Result<(), InventoryError> {
+pub(crate) fn upsert_category_state(
+    state: &mut InventoryState,
+    category: Category,
+    changes: &mut Vec<InventoryChange>,
+) -> Result<(), InventoryError> {
     validate_category(&category)?;
     let key = category.key;
     if state.roots.contains(key) {
@@ -258,7 +266,7 @@ fn upsert_category_state(state: &mut InventoryState, category: Category, changes
     Ok(())
 }
 
-fn upsert_item_state(state: &mut InventoryState, item: Item, changes: &mut Vec<InventoryChange>) -> Result<(), InventoryError> {
+pub(crate) fn upsert_item_state(state: &mut InventoryState, item: Item, changes: &mut Vec<InventoryChange>) -> Result<(), InventoryError> {
     validate_item(&item)?;
     if !state.categories.contains_key(&item.parent) {
         return Err(InventoryError::MissingParent);
@@ -301,7 +309,7 @@ fn ensure_no_cycle(state: &InventoryState, key: CategoryKey, mut parent: Categor
     }
 }
 
-fn remove_item(state: &mut InventoryState, key: ItemKey, changes: &mut Vec<InventoryChange>) -> Result<(), InventoryError> {
+pub(crate) fn remove_item(state: &mut InventoryState, key: ItemKey, changes: &mut Vec<InventoryChange>) -> Result<(), InventoryError> {
     let Some(item) = state.items.get(&key).cloned() else { return Ok(()) };
     remove_child(state, item.parent, InventoryNodeId::Item(key.id()))?;
     state.items.remove(&key);
@@ -309,7 +317,7 @@ fn remove_item(state: &mut InventoryState, key: ItemKey, changes: &mut Vec<Inven
     Ok(())
 }
 
-fn remove_category_subtree(
+pub(crate) fn remove_category_subtree(
     state: &mut InventoryState,
     root: CategoryKey,
     changes: &mut Vec<InventoryChange>,

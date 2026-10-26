@@ -27,17 +27,24 @@ struct AppLifecycle {
 
 impl Global for AppLifecycle {}
 
-struct ServiceRuntime(Handle);
+struct ServiceRuntime {
+    runtime: Handle,
+    asset_cache: Option<Arc<assets::cache::AssetCache>>,
+}
 
 impl Global for ServiceRuntime {}
 
 pub(crate) fn service_runtime(cx: &App) -> Handle {
-    cx.global::<ServiceRuntime>().0.clone()
+    cx.global::<ServiceRuntime>().runtime.clone()
 }
 
-pub fn init(cx: &mut App, services: Handle) {
+pub(crate) fn asset_cache(cx: &App) -> Option<Arc<assets::cache::AssetCache>> {
+    cx.global::<ServiceRuntime>().asset_cache.clone()
+}
+
+pub fn init(cx: &mut App, services: Handle, asset_cache: Option<Arc<assets::cache::AssetCache>>) {
     let shutdown_session: Arc<Mutex<Option<network::SessionHandle>>> = Arc::new(Mutex::new(None));
-    cx.set_global(ServiceRuntime(services));
+    cx.set_global(ServiceRuntime { runtime: services, asset_cache });
     cx.set_quit_mode(QuitMode::Explicit);
 
     gpui_component::init(cx);

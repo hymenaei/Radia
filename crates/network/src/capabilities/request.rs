@@ -141,7 +141,7 @@ pub(super) async fn post_capability(
 
 pub(super) async fn get_capability_bytes(client: &http::Client, url: &Url, max_response_bytes: usize) -> Result<Response, http::Error> {
     let response = client.get("capability_get", url, max_response_bytes).await?;
-    if !response.status.is_success() {
+    if !response.status.is_success() || response.status == reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(http::Error::http_status(
             response.status,
             response.elapsed,

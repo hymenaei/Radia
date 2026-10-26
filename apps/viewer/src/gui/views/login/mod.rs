@@ -432,6 +432,7 @@ impl LoginScreen {
         self.chat_screen.update(cx, |chat, cx| chat.set_session_handle(session_handle.clone(), cx));
 
         let background = crate::gui::service_runtime(cx);
+        let asset_cache = crate::gui::asset_cache(cx);
         let credential_write_lock = self.credential_write_lock.clone();
         let grid = self.grid;
 
@@ -467,6 +468,7 @@ impl LoginScreen {
                 remember_login,
                 write_lock: credential_write_lock,
             },
+            asset_cache,
         )));
 
         cx.notify();

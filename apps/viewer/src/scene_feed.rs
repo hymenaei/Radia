@@ -510,7 +510,7 @@ mod tests {
         );
         let _ = world.observe_object(object).unwrap();
         let mut reads = WorldReadHost::new(&world, Handle::current());
-        let assets = AssetCoordinator::new(Handle::current(), pending());
+        let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
         let mut feed = SceneFeed::start(
             SceneSources { reader: reads.reader(), environments, assets: assets.handle() },
@@ -566,7 +566,7 @@ mod tests {
             .unwrap();
         let mut service = WorldReadHost::new(&world, Handle::current());
         let reader = service.reader();
-        let assets = AssetCoordinator::new(Handle::current(), pending());
+        let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (pushes, environments) = crate::session::EnvironmentInbox::channel();
         let mut feed = SceneFeed::start(
             SceneSources { reader: reader.clone(), environments, assets: assets.handle() },

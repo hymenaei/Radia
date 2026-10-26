@@ -9,7 +9,9 @@ use std::{
 };
 
 use assets::{
-    AdmissionError, Budget, DecodeInput, Demand, Failure, FetchJob, Kind, LoadCompletion, LoadJob, MemoryStats, Priority, Route, Store,
+    AdmissionError, Budget, CacheReadCompletion, DecodeInput, Demand, Failure, FetchJob, Kind, LoadCompletion, LoadJob, MemoryStats,
+    Priority, Route, Store,
+    cache::{AssetCache, AssetCacheStats, CacheWrite},
     legacy_request,
 };
 use futures::{FutureExt, StreamExt, channel::oneshot, pin_mut, stream::FuturesUnordered};
@@ -96,6 +98,7 @@ pub struct AssetHandle {
     budget: Budget,
     textures: assets::TextureEvents,
     routes: watch::Receiver<()>,
+    cache: Option<Arc<AssetCache>>,
 }
 
 impl AssetHandle {
@@ -144,6 +147,10 @@ impl AssetHandle {
     pub fn memory_stats(&self) -> MemoryStats {
         self.budget.stats()
     }
+
+    pub fn cache_stats(&self) -> Option<AssetCacheStats> {
+        self.cache.as_ref().map(|cache| cache.stats())
+    }
 }
 
 pub(crate) struct AssetCoordinator {
@@ -153,18 +160,35 @@ pub(crate) struct AssetCoordinator {
 }
 
 impl AssetCoordinator {
-    pub(crate) fn new(runtime: Handle, cancelled: impl Future<Output = ()> + Send + 'static) -> Self {
+    pub(crate) fn new(runtime: Handle, cancelled: impl Future<Output = ()> + Send + 'static, cache: Option<Arc<AssetCache>>) -> Self {
         static MEMORY: OnceLock<Budget> = OnceLock::new();
         let budget = MEMORY.get_or_init(Budget::default).clone();
-        Self::with_budget(runtime, cancelled, budget)
+        Self::build(runtime, cancelled, budget, cache, Box::new(spawn_cache_writes), Box::new(|| {}))
     }
 
-    fn with_budget(runtime: Handle, cancelled: impl Future<Output = ()> + Send + 'static, budget: Budget) -> Self {
+    #[cfg(test)]
+    fn with_budget(
+        runtime: Handle,
+        cancelled: impl Future<Output = ()> + Send + 'static,
+        budget: Budget,
+        cache: Option<Arc<AssetCache>>,
+    ) -> Self {
+        Self::build(runtime, cancelled, budget, cache, Box::new(spawn_cache_writes), Box::new(|| {}))
+    }
+
+    fn build(
+        runtime: Handle,
+        cancelled: impl Future<Output = ()> + Send + 'static,
+        budget: Budget,
+        cache: Option<Arc<AssetCache>>,
+        write_spawner: Box<CacheWriteSpawner>,
+        shutdown_drain_hook: Box<dyn FnOnce() + Send>,
+    ) -> Self {
         let (requests, receiver) = mpsc::channel(COMMANDS);
         let (controls, control_receiver) = mpsc::channel(COMMANDS);
         let (routes, route_events) = watch::channel(());
         let active = Arc::new(AtomicBool::new(true));
-        let store = Store::new(budget.clone());
+        let store = cache.as_ref().map_or_else(|| Store::new(budget.clone()), |cache| Store::with_cache(budget.clone(), Arc::clone(cache)));
         let handle = AssetHandle {
             requests,
             active: Arc::clone(&active),
@@ -172,8 +196,12 @@ impl AssetCoordinator {
             budget,
             textures: store.texture_events(),
             routes: route_events,
+            cache,
         };
-        let worker = runtime.clone().spawn(run(store, receiver, control_receiver, routes, active, runtime, cancelled).in_current_span());
+        let worker = runtime.clone().spawn(
+            run(store, receiver, control_receiver, routes, active, runtime, cancelled, write_spawner, shutdown_drain_hook)
+                .in_current_span(),
+        );
         Self { handle, controls, worker }
     }
 
@@ -208,7 +236,11 @@ impl AssetCoordinator {
 enum WorkerResult {
     Input(DecodeInput),
     Complete(LoadCompletion),
+    CacheRead(CacheReadCompletion),
+    CacheWritten,
 }
+
+type CacheWriteSpawner = dyn for<'a, 'b> FnMut(Vec<CacheWrite>, &'a Handle, &'b mut FuturesUnordered<JoinHandle<WorkerResult>>) + Send;
 
 fn classify_network_error(error: Error) -> Failure {
     match error {
@@ -240,6 +272,8 @@ async fn run(
     active: Arc<AtomicBool>,
     runtime: Handle,
     cancelled: impl Future<Output = ()>,
+    mut write_spawner: Box<CacheWriteSpawner>,
+    shutdown_drain_hook: Box<dyn FnOnce() + Send>,
 ) {
     let cancelled = cancelled.fuse();
     pin_mut!(cancelled);
@@ -248,49 +282,30 @@ async fn run(
     let mut transports = HashMap::<Route, CapabilityTransport>::new();
     let mut jobs = FuturesUnordered::<JoinHandle<WorkerResult>>::new();
     let mut waiting = VecDeque::<DecodeInput>::new();
+    let mut fetches = VecDeque::<FetchJob>::new();
     loop {
         if !active.load(Ordering::Acquire) {
             break;
         }
         let now = Instant::now();
         store.maintain(now);
+        while let Some(job) = fetches.pop_front() {
+            spawn_fetch(job, &transports, &runtime, &mut jobs);
+        }
         while let Some(job) = store.next_job(now) {
-            let job = match job {
+            match job {
                 LoadJob::Decode(input) => {
                     waiting.push_back(input);
                     continue;
                 }
-                LoadJob::Fetch(job) => job,
-            };
-            let transport = transports.get(&job.route()).cloned();
-            let span = tracing::debug_span!("assets.fetch", asset = ?job.resource().id, kind = ?job.resource().kind, route = ?job.route());
-            jobs.push(
-                runtime.spawn(
-                    async move {
-                        let result = match transport {
-                            Some(transport) => {
-                                let fetched = transport.fetch(&job).fuse();
-                                let cancelled = job.cancelled().fuse();
-                                pin_mut!(fetched, cancelled);
-
-                                futures::select_biased! {
-                                    _ = cancelled => Err(Failure::Cancelled),
-                                    result = fetched => result,
-                                }
-                            }
-                            None => Err(Failure::RouteClosed),
-                        };
-                        if let Err(failure) = &result {
-                            tracing::debug!(?failure, "asset fetch did not complete");
-                        }
-                        match job.complete(result) {
-                            Ok(input) => WorkerResult::Input(input),
-                            Err(failure) => WorkerResult::Complete(failure.into()),
-                        }
-                    }
-                    .instrument(span),
-                ),
-            );
+                LoadJob::Fetch(job) => fetches.push_back(job),
+                LoadJob::ReadCache(job) => {
+                    jobs.push(runtime.spawn_blocking(move || WorkerResult::CacheRead(job.run())));
+                }
+            }
+        }
+        while let Some(job) = fetches.pop_front() {
+            spawn_fetch(job, &transports, &runtime, &mut jobs);
         }
         waiting.make_contiguous().sort_by_key(|input| std::cmp::Reverse(store.priority(input)));
         for _ in 0..waiting.len() {
@@ -385,7 +400,16 @@ async fn run(
                 }
             }
             Input::Job(Ok(WorkerResult::Input(input))) => waiting.push_back(input),
-            Input::Job(Ok(WorkerResult::Complete(completion))) => store.complete(completion, Instant::now()),
+            Input::Job(Ok(WorkerResult::Complete(completion))) => {
+                write_spawner(store.complete(completion, Instant::now()), &runtime, &mut jobs);
+            }
+            Input::Job(Ok(WorkerResult::CacheRead(completion))) => match store.complete_cache_read(completion, Instant::now()) {
+                Some(LoadJob::Decode(input)) => waiting.push_back(input),
+                Some(LoadJob::Fetch(job)) => fetches.push_back(job),
+                Some(LoadJob::ReadCache(_)) => unreachable!("cache reads cannot schedule another cache read"),
+                None => {}
+            },
+            Input::Job(Ok(WorkerResult::CacheWritten)) => {}
         }
     }
     active.store(false, Ordering::Release);
@@ -394,6 +418,7 @@ async fn run(
     drop(waiting);
     requests.close();
     controls.close();
+    shutdown_drain_hook();
     while let Some(result) = jobs.next().await {
         if let Err(error) = result {
             tracing::error!(%error, "retiring asset worker stopped unexpectedly");
@@ -401,16 +426,65 @@ async fn run(
     }
 }
 
+fn spawn_fetch(
+    job: FetchJob,
+    transports: &HashMap<Route, CapabilityTransport>,
+    runtime: &Handle,
+    jobs: &mut FuturesUnordered<JoinHandle<WorkerResult>>,
+) {
+    let transport = transports.get(&job.route()).cloned();
+    let span = tracing::debug_span!("assets.fetch", asset = ?job.resource().id, kind = ?job.resource().kind, route = ?job.route());
+    jobs.push(
+        runtime.spawn(
+            async move {
+                let result = match transport {
+                    Some(transport) => {
+                        let fetched = transport.fetch(&job).fuse();
+                        let cancelled = job.cancelled().fuse();
+                        pin_mut!(fetched, cancelled);
+
+                        futures::select_biased! {
+                            _ = cancelled => Err(Failure::Cancelled),
+                            result = fetched => result,
+                        }
+                    }
+                    None => Err(Failure::RouteClosed),
+                };
+                if let Err(failure) = &result {
+                    tracing::debug!(?failure, "asset fetch did not complete");
+                }
+                match job.complete(result) {
+                    Ok(input) => WorkerResult::Input(input),
+                    Err(failure) => WorkerResult::Complete(failure.into()),
+                }
+            }
+            .instrument(span),
+        ),
+    );
+}
+
+fn spawn_cache_writes(writes: Vec<CacheWrite>, runtime: &Handle, jobs: &mut FuturesUnordered<JoinHandle<WorkerResult>>) {
+    for write in writes {
+        jobs.push(runtime.spawn_blocking(move || {
+            write.run();
+            WorkerResult::CacheWritten
+        }));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
+        assert_matches,
         io::{Read, Write},
         net::{TcpListener, TcpStream},
+        sync::Arc,
         thread,
     };
 
     use assets::Priority;
     use llsd::{Value, binary, xml};
+    use tempfile::tempdir;
     use test_support::texture::{RGBA_J2C, RGBA_RAW};
     use url::Url;
     use utils::AssetId;
@@ -541,6 +615,220 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_second_session_decodes_a_seen_texture_without_http() {
+        let directory = tempdir().unwrap();
+        let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
+        let first_peer = Peer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
+        let (cancel_first, cancelled_first) = oneshot::channel();
+        let first_service = AssetCoordinator::with_budget(
+            Handle::current(),
+            async move {
+                let _ = cancelled_first.await;
+            },
+            Budget::default(),
+            Some(Arc::clone(&cache)),
+        );
+        let region = Region::new(1);
+        first_service.register(region, Client::new(first_peer.url.join("seed").unwrap()).unwrap());
+        let first_handle = first_service.handle();
+        let mut first_demand =
+            first_handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+        let first_texture = loop {
+            match first_demand.status() {
+                assets::Status::Ready(assets::Content::Texture(texture)) => break texture,
+                assets::Status::Failed { failure, .. } => panic!("unexpected texture failure: {failure:?}"),
+                _ => {
+                    first_demand.changed().await;
+                }
+            }
+        };
+        assert_eq!(first_texture.image().unwrap().pixels(), RGBA_RAW);
+        cancel_first.send(()).unwrap();
+        first_service.stop().await;
+        assert_eq!(first_peer.finish().len(), 2);
+        assert_eq!(cache.stats().bytes_written, u64::try_from(RGBA_J2C.len() + 20 + 16).unwrap());
+        drop(first_texture);
+        drop(first_demand);
+        drop(first_handle);
+
+        let second_peer = Peer::new(0, |_, _, _| panic!("warm cache must not make HTTP requests"));
+        let (cancel_second, cancelled_second) = oneshot::channel();
+        let second_service = AssetCoordinator::with_budget(
+            Handle::current(),
+            async move {
+                let _ = cancelled_second.await;
+            },
+            Budget::default(),
+            Some(Arc::clone(&cache)),
+        );
+        second_service.register(region, Client::new(second_peer.url.join("seed").unwrap()).unwrap());
+        let second_handle = second_service.handle();
+        let mut second_demand =
+            second_handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+        let second_texture = loop {
+            match second_demand.status() {
+                assets::Status::Ready(assets::Content::Texture(texture)) => break texture,
+                assets::Status::Failed { failure, .. } => panic!("unexpected warm texture failure: {failure:?}"),
+                _ => {
+                    second_demand.changed().await;
+                }
+            }
+        };
+        assert_eq!(second_texture.image().unwrap().pixels(), RGBA_RAW);
+        cancel_second.send(()).unwrap();
+        second_service.stop().await;
+        assert!(second_peer.finish().is_empty());
+        assert_eq!(second_handle.cache_stats().unwrap().hits, 1);
+        drop(second_texture);
+        drop(second_demand);
+        drop(second_handle);
+        Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handle released")).shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_semantically_corrupt_texture_is_refetched_and_replaced() {
+        let directory = tempdir().unwrap();
+        let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
+        cache.put_extent(resource(Kind::Texture), assets::cache::ValidatedExtent::from_validated(3, 0, b"bad".to_vec())).unwrap();
+        let peer = Peer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
+        let (cancel, cancelled) = oneshot::channel();
+        let service = AssetCoordinator::with_budget(
+            Handle::current(),
+            async move {
+                let _ = cancelled.await;
+            },
+            Budget::default(),
+            Some(Arc::clone(&cache)),
+        );
+        let region = Region::new(1);
+        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let handle = service.handle();
+        let mut demand = handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+        let texture = loop {
+            match demand.status() {
+                assets::Status::Ready(assets::Content::Texture(texture)) => break texture,
+                assets::Status::Failed { failure, .. } => panic!("unexpected refetch failure: {failure:?}"),
+                _ => {
+                    demand.changed().await;
+                }
+            }
+        };
+        assert_eq!(texture.image().unwrap().pixels(), RGBA_RAW);
+        cancel.send(()).unwrap();
+        service.stop().await;
+        assert_eq!(peer.finish().len(), 2);
+        assert_eq!(handle.cache_stats().unwrap().corrupt_entries, 1);
+        let assets::cache::AssetLookup::Hit(asset) = cache.lookup(resource(Kind::Texture)) else {
+            panic!("validated network content replaced the corrupt entry")
+        };
+        assert_eq!(asset.extents.first().map(|extent| extent.bytes.as_slice()), Some(RGBA_J2C));
+        drop(texture);
+        drop(demand);
+        drop(handle);
+        Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handle released")).shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn partial_disk_texture_falls_through_to_a_full_fetch() {
+        let directory = tempdir().unwrap();
+        let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
+        let prefix = RGBA_J2C.len() / 2;
+        cache
+            .put_extent(
+                resource(Kind::Texture),
+                assets::cache::ValidatedExtent::from_validated(
+                    u64::try_from(RGBA_J2C.len()).unwrap(),
+                    0,
+                    RGBA_J2C.get(..prefix).unwrap().to_vec(),
+                ),
+            )
+            .unwrap();
+        let peer = Peer::new(2, move |index, request, base| {
+            if index == 0 {
+                return (200, grants(base));
+            }
+            let request = String::from_utf8_lossy(request);
+            assert!(request.starts_with("GET /content/?texture_id="));
+            assert!(!request.lines().any(|line| line.split_once(':').is_some_and(|(name, _)| name.eq_ignore_ascii_case("range"))));
+            (200, RGBA_J2C.to_vec())
+        });
+        let (cancel, cancelled) = oneshot::channel();
+        let service = AssetCoordinator::with_budget(
+            Handle::current(),
+            async move {
+                let _ = cancelled.await;
+            },
+            Budget::default(),
+            Some(Arc::clone(&cache)),
+        );
+        let region = Region::new(1);
+        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let handle = service.handle();
+        let mut demand = handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+        let texture = loop {
+            match demand.status() {
+                assets::Status::Ready(assets::Content::Texture(texture)) => break texture,
+                assets::Status::Failed { failure, .. } => panic!("unexpected full texture fetch failure: {failure:?}"),
+                _ => {
+                    demand.changed().await;
+                }
+            }
+        };
+        assert_eq!(texture.image().unwrap().pixels(), RGBA_RAW);
+        cancel.send(()).unwrap();
+        service.stop().await;
+        assert_eq!(peer.finish().len(), 2);
+        drop(texture);
+        drop(demand);
+        drop(handle);
+        Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handle released")).shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_failures_and_partial_full_responses_are_not_cached() {
+        for (response_status, body) in [(503, Vec::new()), (206, RGBA_J2C.to_vec())] {
+            let directory = tempdir().unwrap();
+            let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
+            let peer = Peer::new(2, move |index, _, base| if index == 0 { (200, grants(base)) } else { (response_status, body.clone()) });
+            let (cancel, cancelled) = oneshot::channel();
+            let service = AssetCoordinator::with_budget(
+                Handle::current(),
+                async move {
+                    let _ = cancelled.await;
+                },
+                Budget::default(),
+                Some(Arc::clone(&cache)),
+            );
+            let region = Region::new(1);
+            service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+            let handle = service.handle();
+            let mut demand = handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+            let failure = loop {
+                match demand.status() {
+                    assets::Status::Failed { failure, .. } => break failure,
+                    _ => {
+                        demand.changed().await;
+                    }
+                }
+            };
+            if response_status == 503 {
+                assert_matches!(failure, Failure::Transient { .. });
+            } else {
+                assert_eq!(failure, Failure::Malformed);
+            }
+            cancel.send(()).unwrap();
+            service.stop().await;
+            assert_eq!(peer.finish().len(), 2);
+            assert_eq!(cache.stats().bytes_written, 0);
+            assert_eq!(cache.stats().dropped_writes, 0);
+            assert_eq!(cache.lookup(resource(Kind::Texture)), assets::cache::AssetLookup::Miss);
+            drop(demand);
+            drop(handle);
+            Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handle released")).shutdown().unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn missing_grants_and_discovery_retry() {
         let peer = Peer::new(2, |index, _, _| if index == 0 { (503, Vec::new()) } else { (200, b"<llsd><map/></llsd>".to_vec()) });
         let transport = CapabilityTransport::new(Client::new(peer.url.join("seed").unwrap()).unwrap());
@@ -591,6 +879,7 @@ mod tests {
                 let _ = cancelled.await;
             },
             budget.clone(),
+            None,
         );
         let region = Region::new(1);
         let handle = service.handle();
@@ -623,7 +912,7 @@ mod tests {
 
     #[tokio::test]
     async fn pending_route_closes_with_session() {
-        let service = AssetCoordinator::with_budget(Handle::current(), pending(), Budget::default());
+        let service = AssetCoordinator::with_budget(Handle::current(), pending(), Budget::default(), None);
         let handle = service.handle();
         let region = Region::new(1);
         let request = assets::Request::new(resource(Kind::Texture));
@@ -658,6 +947,7 @@ mod tests {
                 let _ = cancelled.await;
             },
             budget.clone(),
+            None,
         );
         let region = Region::new(1);
         service.register(region, client);
@@ -714,6 +1004,7 @@ mod tests {
                 let _ = cancelled.await;
             },
             budget.clone(),
+            None,
         );
         let region = Region::new(1);
         service.register(region, client);
@@ -726,5 +1017,86 @@ mod tests {
         assert_eq!(budget.stats().charged_bytes, 0);
         release.send(()).unwrap();
         assert_eq!(peer.finish().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_blocked_cache_write() {
+        let directory = tempdir().unwrap();
+        let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
+        let peer = Peer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
+        let (write_started, write_started_receive) = oneshot::channel();
+        let mut write_started = Some(write_started);
+        let (write_finished, write_finished_receive) = oneshot::channel();
+        let mut write_finished = Some(write_finished);
+        let (release_write, hold_write) = std::sync::mpsc::sync_channel(0);
+        let mut hold_write = Some(hold_write);
+        let (shutdown_drain_started, shutdown_drain_started_receive) = oneshot::channel();
+        let service = AssetCoordinator::build(
+            Handle::current(),
+            pending(),
+            Budget::default(),
+            Some(Arc::clone(&cache)),
+            Box::new(move |writes, runtime, jobs| {
+                for write in writes {
+                    let write_started = write_started.take().expect("one cache write starts");
+                    let write_finished = write_finished.take().expect("one cache write finishes");
+                    let hold_write = hold_write.take().expect("one cache write gate");
+                    jobs.push(runtime.spawn_blocking(move || {
+                        write_started.send(()).expect("signal cache write started");
+                        hold_write.recv_timeout(Duration::from_secs(5)).expect("release cache write");
+                        write.run();
+                        write_finished.send(()).expect("signal cache write finished");
+                        WorkerResult::CacheWritten
+                    }));
+                }
+            }),
+            Box::new(move || shutdown_drain_started.send(()).expect("signal cache write drain started")),
+        );
+        let region = Region::new(1);
+        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let handle = service.handle();
+        let mut demand = handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match demand.status() {
+                    assets::Status::Ready(_) => break,
+                    assets::Status::Failed { failure, .. } => panic!("unexpected texture failure: {failure:?}"),
+                    _ => {
+                        demand.changed().await;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("texture decode completes");
+        tokio::time::timeout(Duration::from_secs(5), write_started_receive).await.expect("cache write starts").unwrap();
+
+        let stop = service.stop();
+        tokio::pin!(stop);
+        assert_matches!(futures::poll!(stop.as_mut()), std::task::Poll::Pending);
+        tokio::time::timeout(Duration::from_secs(5), shutdown_drain_started_receive)
+            .await
+            .expect("coordinator entered cache write drain")
+            .unwrap();
+        let stop_state = futures::poll!(stop.as_mut());
+        if let std::task::Poll::Ready(()) = stop_state {
+            release_write.send(()).expect("release cache write after early shutdown");
+            write_finished_receive.await.expect("cache write finishes after early shutdown");
+            panic!("coordinator completed while cache write remained blocked");
+        }
+        assert_matches!(stop_state, std::task::Poll::Pending);
+        release_write.send(()).expect("resume cache write");
+        tokio::time::timeout(Duration::from_secs(5), stop.as_mut()).await.expect("coordinator drains cache write");
+        write_finished_receive.await.unwrap();
+        assert_eq!(handle.cache_stats().unwrap().dropped_writes, 0);
+        assert!(handle.cache_stats().unwrap().bytes_written > 0);
+        assert_eq!(peer.finish().len(), 2);
+        drop(demand);
+        drop(handle);
+        Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().unwrap();
+
+        let reopened = AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap();
+        assert_matches!(reopened.lookup(resource(Kind::Texture)), assets::cache::AssetLookup::Hit(_));
+        reopened.shutdown().unwrap();
     }
 }

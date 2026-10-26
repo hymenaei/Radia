@@ -1,4 +1,4 @@
-use std::{future::pending, ops::ControlFlow};
+use std::{future::pending, ops::ControlFlow, sync::Arc};
 
 use futures::{
     FutureExt,
@@ -84,6 +84,7 @@ impl SessionDriver {
         mailbox: PresentationMailbox,
         cancellation: oneshot::Receiver<()>,
         credentials: CredentialPersistence,
+        cache: Option<Arc<assets::cache::AssetCache>>,
     ) -> Self {
         let cancellation = async move {
             let _ = cancellation.await;
@@ -96,7 +97,7 @@ impl SessionDriver {
         let environments = EnvironmentIntake::new(runtime.clone());
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         let (environment_pushes, environment_inbox) = EnvironmentInbox::channel();
-        let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone());
+        let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone(), cache);
         let camera = CameraUplink::new();
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
@@ -600,6 +601,7 @@ pub(crate) async fn drain_session(
     mailbox: PresentationMailbox,
     cancellation: oneshot::Receiver<()>,
     credentials: CredentialPersistence,
+    cache: Option<Arc<assets::cache::AssetCache>>,
 ) {
-    SessionDriver::new(session, session_handle, runtime, mailbox, cancellation, credentials).run().await;
+    SessionDriver::new(session, session_handle, runtime, mailbox, cancellation, credentials, cache).run().await;
 }

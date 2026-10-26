@@ -98,16 +98,22 @@ enum Data {
 }
 
 pub(crate) struct Prepared {
+    kind: Kind,
     data: Data,
     source: Option<Vec<u8>>,
 }
 
 impl Prepared {
-    pub(crate) fn finish(self, mut reservation: Reservation) -> Result<(Finished, Option<Blob>), Failure> {
-        let source = self
-            .source
-            .map(|bytes| reservation.split(bytes.capacity()).and_then(|part| part.finish(bytes)).map_err(|_| Failure::TooLarge))
-            .transpose()?;
+    pub(crate) fn finish(self, mut reservation: Reservation, persist: bool) -> Result<(Finished, Option<Blob>, Option<Blob>), Failure> {
+        let (source, persisted) = match self.source {
+            Some(bytes) if self.kind == Kind::Texture || persist => {
+                let blob = reservation.split(bytes.capacity()).and_then(|part| part.finish(bytes)).map_err(|_| Failure::TooLarge)?;
+                let source = (self.kind == Kind::Texture).then(|| blob.clone());
+                let persisted = persist.then_some(blob);
+                (source, persisted)
+            }
+            _ => (None, None),
+        };
         let content = match self.data {
             Data::Texture(image) => image.finish(reservation).map(Finished::Texture),
             Data::Material(description) => {
@@ -123,7 +129,7 @@ impl Prepared {
                 })))))
             }
         }?;
-        Ok((content, source))
+        Ok((content, source, persisted))
     }
 }
 
@@ -137,19 +143,40 @@ pub(crate) fn prepare_cancellable(
         return Err(Failure::Cancelled);
     }
     let bytes = envelope::extract(resource, bytes)?;
-    let data = match resource.kind {
-        Kind::Texture => Data::Texture(texture::decode(&bytes, size, &cancelled)?),
-        Kind::PbrMaterial => Data::Material(material::pbr::decode(&bytes)?),
-        Kind::LegacyMaterial => Data::Material(material::legacy::decode(&bytes)?),
-        Kind::Environment => Data::Environment(environment::decode(&bytes)?),
-    };
+    let data = decode_payload(resource, size, &bytes, &cancelled)?;
     if cancelled() {
         return Err(Failure::Cancelled);
     }
-    Ok(Prepared { data, source: (resource.kind == Kind::Texture).then_some(bytes) })
+    Ok(Prepared { kind: resource.kind, data, source: Some(bytes) })
 }
 
 pub(crate) fn prepare_cached(size: TextureSize, source: &Blob, cancelled: impl Fn() -> bool) -> Result<Prepared, Failure> {
     let data = Data::Texture(texture::decode(source, size, cancelled)?);
-    Ok(Prepared { data, source: None })
+    Ok(Prepared { kind: Kind::Texture, data, source: None })
+}
+
+pub(crate) fn prepare_disk(
+    resource: Resource,
+    size: TextureSize,
+    bytes: Vec<u8>,
+    cancelled: impl Fn() -> bool,
+) -> Result<Prepared, Failure> {
+    if cancelled() {
+        return Err(Failure::Cancelled);
+    }
+    let data = decode_payload(resource, size, &bytes, &cancelled)?;
+    if cancelled() {
+        return Err(Failure::Cancelled);
+    }
+    let source = (resource.kind == Kind::Texture).then_some(bytes);
+    Ok(Prepared { kind: resource.kind, data, source })
+}
+
+fn decode_payload(resource: Resource, size: TextureSize, bytes: &[u8], cancelled: &impl Fn() -> bool) -> Result<Data, Failure> {
+    match resource.kind {
+        Kind::Texture => texture::decode(bytes, size, cancelled).map(Data::Texture),
+        Kind::PbrMaterial => material::pbr::decode(bytes).map(Data::Material),
+        Kind::LegacyMaterial => material::legacy::decode(bytes).map(Data::Material),
+        Kind::Environment => environment::decode(bytes).map(Data::Environment),
+    }
 }

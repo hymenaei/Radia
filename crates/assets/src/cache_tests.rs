@@ -9,6 +9,8 @@ use tempfile::tempdir;
 use utils::AssetId;
 use uuid::Uuid;
 
+use crate::{Budget, budget::ASSET_WORK_BYTES};
+
 use super::*;
 
 fn resource(id: u128, kind: Kind) -> Resource {
@@ -17,6 +19,15 @@ fn resource(id: u128, kind: Kind) -> Resource {
 
 fn validated_extent(total_size: u64, offset: u64, bytes: Vec<u8>) -> ValidatedExtent {
     ValidatedExtent::from_validated(total_size, offset, bytes)
+}
+
+fn charged_blob(budget: &Budget, bytes: &[u8]) -> (Blob, usize) {
+    let mut bytes_owned = Vec::new();
+    bytes_owned.try_reserve_exact(bytes.len()).expect("reserve blob bytes");
+    bytes_owned.extend_from_slice(bytes);
+    let capacity = bytes_owned.capacity();
+    let blob = budget.reserve(capacity).expect("reserve blob budget").finish(bytes_owned).expect("finish blob");
+    (blob, capacity)
 }
 
 #[test]
@@ -133,6 +144,34 @@ fn malformed_asset_payload_is_reported_and_removed() {
     let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("reopen cache");
     assert_eq!(cache.lookup(resource), AssetLookup::Miss);
     cache.shutdown().expect("close reopened cache");
+}
+
+#[test]
+fn write_requires_record_budget() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let resource = resource(6, Kind::Texture);
+    let budget = Budget::default();
+    let (payload, _) = charged_blob(&budget, b"payload");
+    let work = budget.reserve(ASSET_WORK_BYTES).expect("occupy asset work budget");
+
+    assert!(cache.queue_write(resource, payload, &budget).is_none());
+    assert_eq!(cache.stats().dropped_writes, 1);
+    assert_eq!(budget.stats().charged_bytes, ASSET_WORK_BYTES);
+    assert_eq!(cache.lookup(resource), AssetLookup::Miss);
+
+    drop(work);
+    assert_eq!(budget.stats().charged_bytes, 0);
+    let (payload, blob_charge) = charged_blob(&budget, b"payload");
+    let record_charge = complete_record_size(payload.len()).expect("encoded record size");
+    let write = cache.queue_write(resource, payload, &budget).expect("released write slot admits a later write");
+    assert_eq!(budget.stats().charged_bytes, blob_charge + record_charge);
+    write.run();
+    assert_eq!(cache.stats().dropped_writes, 1);
+    assert_eq!(cache.stats().bytes_written, u64::try_from(record_charge).expect("record size fits stats"));
+    std::assert_matches!(cache.lookup(resource), AssetLookup::Hit(_));
+    assert_eq!(budget.stats().charged_bytes, 0);
+    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handle released")).shutdown().expect("close cache");
 }
 
 proptest! {

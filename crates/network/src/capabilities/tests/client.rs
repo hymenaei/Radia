@@ -281,6 +281,19 @@ async fn raw_body_limits_apply_to_declared_and_unknown_lengths() {
     assert!(requests[2].starts_with(b"POST /raw HTTP/1.1"));
 }
 
+#[tokio::test]
+async fn full_capability_get_rejects_partial_content() {
+    let server = LocalServer::start(vec![response(206, "Partial Content", "application/octet-stream", None, "partial")]);
+    let client = Client::new(server.url("/seed")).unwrap();
+    let url = CapabilityUrl::parse(server.url("/resource").as_str()).unwrap();
+
+    std::assert_matches!(
+        client.get_bytes_with_response_limit(&url, MAX_CAPABILITY_RESPONSE_BYTES).await,
+        Err(CapabilityHttp(http::Error { kind: http::ErrorKind::HttpStatus, status: Some(StatusCode::PARTIAL_CONTENT), .. }))
+    );
+    assert_eq!(server.finish().len(), 1);
+}
+
 #[test]
 fn asset_directory_urls_preserve_opaque_path_and_query() {
     let url = CapabilityUrl::parse("https://example.test/cap%2Ftoken?grant=opaque")

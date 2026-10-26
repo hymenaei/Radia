@@ -1,8 +1,49 @@
-use protocol::{BlockInstance, BlockValues, FieldValue, lludp::Message};
+use protocol::{
+    BlockInstance, BlockValues, FieldValue,
+    lludp::Message,
+    messages::{InventoryItemBlock, MoveInventoryItemBlock},
+};
 
 pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockValues>> {
     let one = |fields| BlockValues::single(fields);
     let many = |instances: Vec<Vec<FieldValue>>| BlockValues::new(instances.into_iter().map(BlockInstance::new).collect());
+    let ll_string = |value: &str| {
+        let mut bytes = value.as_bytes().to_vec();
+        bytes.push(0);
+        FieldValue::Bytes(bytes)
+    };
+    let item_fields = |item: &InventoryItemBlock, bulk: bool| {
+        let mut fields = vec![FieldValue::Uuid(item.item_id)];
+        if bulk {
+            fields.push(FieldValue::U32(item.callback_id));
+            fields.push(FieldValue::Uuid(item.folder_id));
+        } else {
+            fields.push(FieldValue::Uuid(item.folder_id));
+            fields.push(FieldValue::U32(item.callback_id));
+        }
+        fields.extend([
+            FieldValue::Uuid(item.creator_id),
+            FieldValue::Uuid(item.owner_id),
+            FieldValue::Uuid(item.group_id),
+            FieldValue::U32(item.base_mask),
+            FieldValue::U32(item.owner_mask),
+            FieldValue::U32(item.group_mask),
+            FieldValue::U32(item.everyone_mask),
+            FieldValue::U32(item.next_owner_mask),
+            FieldValue::Bool(item.group_owned),
+            FieldValue::Uuid(item.asset_id),
+            FieldValue::S8(item.asset_type),
+            FieldValue::S8(item.inventory_type),
+            FieldValue::U32(item.flags),
+            FieldValue::U8(item.sale_type),
+            FieldValue::S32(item.sale_price),
+            ll_string(&item.name),
+            ll_string(&item.description),
+            FieldValue::S32(item.creation_date),
+            FieldValue::U32(item.crc),
+        ]);
+        fields
+    };
 
     match message {
         Message::UseCircuitCode(message) => Some(vec![one(vec![
@@ -331,6 +372,57 @@ pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockVal
         Message::LayerData(message) => {
             Some(vec![one(vec![FieldValue::U8(message.layer_type)]), one(vec![FieldValue::Bytes(message.data.clone())])])
         }
+        Message::UpdateCreateInventoryItem(message) => Some(vec![
+            one(vec![FieldValue::Uuid(message.agent_id), FieldValue::Bool(message.sim_approved), FieldValue::Uuid(message.transaction_id)]),
+            many(message.inventory_data.iter().map(|item| item_fields(item, false)).collect()),
+        ]),
+        Message::RemoveInventoryItem(message) => Some(vec![
+            one(vec![FieldValue::Uuid(message.agent_id), FieldValue::Uuid(message.session_id)]),
+            many(message.inventory_data.iter().map(|item| vec![FieldValue::Uuid(*item)]).collect()),
+        ]),
+        Message::RemoveInventoryFolder(message) => Some(vec![
+            one(vec![FieldValue::Uuid(message.agent_id), FieldValue::Uuid(message.session_id)]),
+            many(message.folder_data.iter().map(|folder| vec![FieldValue::Uuid(*folder)]).collect()),
+        ]),
+        Message::RemoveInventoryObjects(message) => Some(vec![
+            one(vec![FieldValue::Uuid(message.agent_id), FieldValue::Uuid(message.session_id)]),
+            many(message.folder_data.iter().map(|folder| vec![FieldValue::Uuid(*folder)]).collect()),
+            many(message.item_data.iter().map(|item| vec![FieldValue::Uuid(*item)]).collect()),
+        ]),
+        Message::SaveAssetIntoInventory(message) => Some(vec![
+            one(vec![FieldValue::Uuid(message.agent_id)]),
+            one(vec![FieldValue::Uuid(message.item_id), FieldValue::Uuid(message.new_asset_id)]),
+        ]),
+        Message::BulkUpdateInventory(message) => Some(vec![
+            one(vec![FieldValue::Uuid(message.agent_id), FieldValue::Uuid(message.transaction_id)]),
+            many(
+                message
+                    .folder_data
+                    .iter()
+                    .map(|folder| {
+                        vec![
+                            FieldValue::Uuid(folder.folder_id),
+                            FieldValue::Uuid(folder.parent_id),
+                            FieldValue::S8(folder.folder_type),
+                            ll_string(&folder.name),
+                        ]
+                    })
+                    .collect(),
+            ),
+            many(message.item_data.iter().map(|item| item_fields(item, true)).collect()),
+        ]),
+        Message::MoveInventoryItem(message) => Some(vec![
+            one(vec![FieldValue::Uuid(message.agent_id), FieldValue::Uuid(message.session_id), FieldValue::Bool(message.stamp)]),
+            many(
+                message
+                    .inventory_data
+                    .iter()
+                    .map(|MoveInventoryItemBlock { item_id, folder_id, new_name }| {
+                        vec![FieldValue::Uuid(*item_id), FieldValue::Uuid(*folder_id), ll_string(new_name)]
+                    })
+                    .collect(),
+            ),
+        ]),
         Message::Schema(_) | Message::Unknown { .. } => None,
     }
 }

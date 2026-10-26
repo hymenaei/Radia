@@ -32,6 +32,16 @@ pub(crate) fn generated_schema_blocks(message_schema: &MessageSchema, seed: u64)
                             generated_field_value(field.kind, field.name, field_seed)
                         })
                         .collect::<Vec<_>>();
+                    if matches!(message_schema.name, "UpdateCreateInventoryItem" | "BulkUpdateInventory" | "MoveInventoryItem") {
+                        for (field, value) in block_schema.fields.iter().zip(&mut fields) {
+                            if matches!(field.kind, FieldKind::Variable(1))
+                                && matches!(field.name, "Name" | "Description" | "NewName")
+                                && let FieldValue::Bytes(bytes) = value
+                            {
+                                bytes.push(0);
+                            }
+                        }
+                    }
                     if message_schema.name == "ObjectExtraParams" && block_schema.name == "ObjectData" {
                         let size_index = block_schema.fields.iter().position(|field| field.name == "ParamSize").expect("ParamSize field");
                         let data_index = block_schema.fields.iter().position(|field| field.name == "ParamData").expect("ParamData field");

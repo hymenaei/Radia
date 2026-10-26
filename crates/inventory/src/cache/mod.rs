@@ -134,19 +134,34 @@ impl InventoryCacheLoad {
             if excluded.contains(&key) {
                 continue;
             }
-            let Some(login_category) = skeleton.category(key) else { continue };
-            if !login_category.server_version.is_known() || login_category.server_version != folder.category.server_version {
+            let Some(login_category) = matching_skeleton_category(&folder, skeleton) else {
                 continue;
-            }
-            if candidate.snapshot().category(key).map(|category| category.server_version) != Some(login_category.server_version) {
-                continue;
-            }
-            candidate.apply_folder_fetch(key, folder.category.server_version, folder.category.server_descendent_count, folder.children)?;
+            };
+            let children = restore_children(folder.children, key, skeleton);
+            candidate.apply_folder_fetch(key, login_category.server_version, folder.category.server_descendent_count, children)?;
             applied = applied.saturating_add(1);
         }
         *inventory = candidate;
         Ok(applied)
     }
+}
+
+fn matching_skeleton_category<'a>(folder: &CachedFolder, skeleton: &'a InventorySnapshot) -> Option<&'a Category> {
+    skeleton
+        .category(folder.category.key)
+        .filter(|category| category.server_version.is_known() && category.server_version == folder.category.server_version)
+}
+
+fn restore_children(children: Vec<InventoryChild>, parent: CategoryKey, skeleton: &InventorySnapshot) -> Vec<InventoryChild> {
+    children
+        .into_iter()
+        .filter_map(|child| match child {
+            InventoryChild::Category(category) => {
+                skeleton.category(category.key).filter(|category| category.parent == Some(parent)).cloned().map(InventoryChild::Category)
+            }
+            item => Some(item),
+        })
+        .collect()
 }
 
 pub(super) struct CachedFolder {

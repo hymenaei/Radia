@@ -167,12 +167,16 @@ fn upsert_categories(transaction: &Transaction<'_>, categories: Vec<Category>) -
             preferred_type=excluded.preferred_type,
             name=excluded.name,
             server_version=excluded.server_version,
-            server_descendent_count=excluded.server_descendent_count,
+            server_descendent_count=CASE WHEN categories.server_version=excluded.server_version
+                                              AND excluded.server_descendent_count IS NULL
+                                         THEN categories.server_descendent_count ELSE excluded.server_descendent_count END,
             complete=CASE WHEN categories.server_version=excluded.server_version
-                               AND categories.server_descendent_count IS excluded.server_descendent_count
+                               AND (excluded.server_descendent_count IS NULL
+                                    OR categories.server_descendent_count IS excluded.server_descendent_count)
                           THEN categories.complete ELSE 0 END,
             complete_generation=CASE WHEN categories.server_version=excluded.server_version
-                                          AND categories.server_descendent_count IS excluded.server_descendent_count
+                                          AND (excluded.server_descendent_count IS NULL
+                                               OR categories.server_descendent_count IS excluded.server_descendent_count)
                                      THEN categories.complete_generation ELSE 0 END",
     )?;
     for category in categories {

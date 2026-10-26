@@ -19,6 +19,15 @@ struct Fixture {
     item: Item,
 }
 
+struct NestedFixture {
+    inventory: Inventory,
+    agent: Uuid,
+    root: CategoryKey,
+    parent: CategoryKey,
+    child: CategoryKey,
+    new_item: Item,
+}
+
 fn fixture(folder_version: i32) -> Result<Fixture, Box<dyn Error>> {
     let agent = Uuid::from_u128(100);
     let owner = InventoryOwner::new(agent);
@@ -28,7 +37,7 @@ fn fixture(folder_version: i32) -> Result<Fixture, Box<dyn Error>> {
         preferred_folder_type: FolderType::RootInventory,
         name: Arc::from("Inventory"),
         server_version: ServerVersion::from_raw(1),
-        server_descendent_count: Some(1),
+        server_descendent_count: None,
     };
     let folder = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(2)));
     let child_folder = Category {
@@ -37,17 +46,61 @@ fn fixture(folder_version: i32) -> Result<Fixture, Box<dyn Error>> {
         preferred_folder_type: FolderType::Object,
         name: Arc::from("Objects"),
         server_version: ServerVersion::from_raw(folder_version),
-        server_descendent_count: Some(1),
+        server_descendent_count: None,
     };
-    let item = Item {
-        key: ItemKey::new(owner, ItemId::new(Uuid::from_u128(3))),
-        parent: folder,
-        asset_id: AssetId::new(Uuid::from_u128(4)),
+    let item = item(owner, agent, folder, 3, 4, "Object", "Cached object");
+    let mut inventory = Inventory::new(root.clone(), None, InventoryLimits::default())?;
+    inventory.apply_folder_fetch(
+        root.key,
+        root.server_version,
+        root.server_descendent_count,
+        vec![InventoryChild::Category(child_folder)],
+    )?;
+    Ok(Fixture { inventory, agent, folder, item })
+}
+
+fn nested_fixture(parent_version: i32, child_version: i32) -> Result<NestedFixture, Box<dyn Error>> {
+    let agent = Uuid::from_u128(200);
+    let owner = InventoryOwner::new(agent);
+    let root = Category {
+        key: CategoryKey::new(owner, FolderId::new(Uuid::from_u128(20))),
+        parent: None,
+        preferred_folder_type: FolderType::RootInventory,
+        name: Arc::from("Inventory"),
+        server_version: ServerVersion::from_raw(1),
+        server_descendent_count: None,
+    };
+    let parent = Category {
+        key: CategoryKey::new(owner, FolderId::new(Uuid::from_u128(21))),
+        parent: Some(root.key),
+        preferred_folder_type: FolderType::Object,
+        name: Arc::from("Parent"),
+        server_version: ServerVersion::from_raw(parent_version),
+        server_descendent_count: None,
+    };
+    let child = Category {
+        key: CategoryKey::new(owner, FolderId::new(Uuid::from_u128(22))),
+        parent: Some(parent.key),
+        preferred_folder_type: FolderType::Clothing,
+        name: Arc::from(format!("Child v{child_version}")),
+        server_version: ServerVersion::from_raw(child_version),
+        server_descendent_count: None,
+    };
+    let new_item = item(owner, agent, child.key, 24, 34, "New item", "Fetched child item");
+    let inventory = Inventory::from_categories(root.clone(), None, vec![parent.clone(), child.clone()], InventoryLimits::default())?;
+    Ok(NestedFixture { inventory, agent, root: root.key, parent: parent.key, child: child.key, new_item })
+}
+
+fn item(owner: InventoryOwner, agent: Uuid, parent: CategoryKey, item_id: u128, asset_id: u128, name: &str, description: &str) -> Item {
+    Item {
+        key: ItemKey::new(owner, ItemId::new(Uuid::from_u128(item_id))),
+        parent,
+        asset_id: AssetId::new(Uuid::from_u128(asset_id)),
         asset_type: AssetType::Object,
         inventory_type: InventoryType::Object,
         flags: 0,
-        name: Arc::from("Object"),
-        description: Arc::from("Cached object"),
+        name: Arc::from(name),
+        description: Arc::from(description),
         created_at: 1,
         permissions: Permissions {
             creator: AvatarId::new(agent),
@@ -61,15 +114,7 @@ fn fixture(folder_version: i32) -> Result<Fixture, Box<dyn Error>> {
             next_owner: PermissionMask::new(u32::MAX),
         },
         sale: SaleInfo { sale_type: SaleType::NotForSale, price: 0 },
-    };
-    let mut inventory = Inventory::new(root.clone(), None, InventoryLimits::default())?;
-    inventory.apply_folder_fetch(
-        root.key,
-        root.server_version,
-        root.server_descendent_count,
-        vec![InventoryChild::Category(child_folder)],
-    )?;
-    Ok(Fixture { inventory, agent, folder, item })
+    }
 }
 
 fn seed_cache(root: &std::path::Path, folder_version: i32) -> Result<(), Box<dyn Error>> {
@@ -85,6 +130,42 @@ fn seed_cache(root: &std::path::Path, folder_version: i32) -> Result<(), Box<dyn
     )?;
     let after = fixture.inventory.snapshot();
     block_on(cache.submit_changeset(&changes, &before, &after)?.wait())?;
+    block_on(cache.close())?;
+    Ok(())
+}
+
+fn persist_fetch(
+    cache: &InventoryCache,
+    inventory: &mut Inventory,
+    folder: CategoryKey,
+    version: ServerVersion,
+    descendent_count: u32,
+    children: Vec<InventoryChild>,
+) -> Result<(), Box<dyn Error>> {
+    let before = inventory.snapshot();
+    let changes = inventory.apply_folder_fetch(folder, version, Some(descendent_count), children)?;
+    let after = inventory.snapshot();
+    block_on(cache.submit_changeset(&changes, &before, &after)?.wait())?;
+    Ok(())
+}
+
+fn seed_nested_cache(root: &std::path::Path, parent_version: i32, child_version: i32) -> Result<(), Box<dyn Error>> {
+    let mut fixture = nested_fixture(parent_version, child_version)?;
+    let (cache, _) = InventoryCache::open_at_root(root, "agni", fixture.agent, None)?;
+    block_on(cache.submit_bootstrap(&fixture.inventory.snapshot())?.wait())?;
+    let snapshot = fixture.inventory.snapshot();
+    let parent = snapshot.category(fixture.parent).ok_or("missing parent folder")?.clone();
+    let child = snapshot.category(fixture.child).ok_or("missing child folder")?.clone();
+    persist_fetch(&cache, &mut fixture.inventory, fixture.root, ServerVersion::from_raw(1), 1, vec![InventoryChild::Category(parent)])?;
+    persist_fetch(
+        &cache,
+        &mut fixture.inventory,
+        fixture.parent,
+        ServerVersion::from_raw(parent_version),
+        1,
+        vec![InventoryChild::Category(child)],
+    )?;
+    persist_fetch(&cache, &mut fixture.inventory, fixture.child, ServerVersion::from_raw(child_version), 0, Vec::new())?;
     block_on(cache.close())?;
     Ok(())
 }
@@ -120,6 +201,94 @@ fn mismatched_version_misses_folder() -> Result<(), Box<dyn Error>> {
     assert_eq!(applied, 0);
     assert_eq!(current.inventory.snapshot().item(current.item.key), None);
     block_on(cache.close())?;
+    Ok(())
+}
+
+#[test]
+fn unchanged_parent_does_not_restore_a_changed_child() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    seed_nested_cache(directory.path(), 10, 20)?;
+    let mut current = nested_fixture(10, 21)?;
+    let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", current.agent, None)?;
+    let load = block_on(cache.load(&current.inventory))?;
+    let skeleton = current.inventory.snapshot();
+    let bootstrap = cache.submit_bootstrap(&skeleton)?;
+
+    assert_eq!(load.apply_to(&mut current.inventory, &skeleton, &HashSet::new())?, 2);
+    let restored = current.inventory.snapshot();
+    assert!(restored.is_complete(current.root));
+    assert!(restored.is_complete(current.parent));
+    assert!(!restored.is_complete(current.child));
+    let child = restored.category(current.child).ok_or("missing restored child")?;
+    assert_eq!(child.server_version, ServerVersion::from_raw(21));
+    assert_eq!(child.server_descendent_count, None);
+    assert_eq!(child.name.as_ref(), "Child v21");
+    assert_eq!(restored.item(current.new_item.key), None);
+
+    let before = current.inventory.snapshot();
+    let changes = current.inventory.apply_folder_fetch(
+        current.child,
+        ServerVersion::from_raw(21),
+        Some(1),
+        vec![InventoryChild::Item(current.new_item.clone())],
+    )?;
+    let fetched = current.inventory.snapshot();
+    assert!(fetched.is_complete(current.child));
+    assert_eq!(fetched.item(current.new_item.key), Some(&current.new_item));
+    block_on(bootstrap.wait())?;
+    block_on(cache.submit_changeset(&changes, &before, &fetched)?.wait())?;
+    block_on(cache.close())?;
+
+    let mut next_login = nested_fixture(10, 21)?;
+    let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", next_login.agent, None)?;
+    let load = block_on(cache.load(&next_login.inventory))?;
+    let skeleton = next_login.inventory.snapshot();
+    assert_eq!(load.apply_to(&mut next_login.inventory, &skeleton, &HashSet::new())?, 3);
+    let restored = next_login.inventory.snapshot();
+    assert!(restored.is_complete(next_login.parent));
+    assert!(restored.is_complete(next_login.child));
+    assert_eq!(restored.item(next_login.new_item.key), Some(&next_login.new_item));
+    block_on(cache.close())?;
+    Ok(())
+}
+
+#[test]
+fn unchanged_parent_and_child_restore_as_complete() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    seed_nested_cache(directory.path(), 10, 20)?;
+    let mut current = nested_fixture(10, 20)?;
+    let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", current.agent, None)?;
+    let load = block_on(cache.load(&current.inventory))?;
+    let skeleton = current.inventory.snapshot();
+
+    assert_eq!(load.apply_to(&mut current.inventory, &skeleton, &HashSet::new())?, 3);
+    let restored = current.inventory.snapshot();
+    assert!(restored.is_complete(current.root));
+    assert!(restored.is_complete(current.parent));
+    assert!(restored.is_complete(current.child));
+    assert_eq!(restored.item(current.new_item.key), None);
+    block_on(cache.close())?;
+    Ok(())
+}
+
+#[test]
+fn bootstrap_preserves_matching_cache_completeness_across_logins() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    seed_cache(directory.path(), 7)?;
+
+    for _ in 0..2 {
+        let mut current = fixture(7)?;
+        let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", current.agent, None)?;
+        let load = block_on(cache.load(&current.inventory))?;
+        let skeleton = current.inventory.snapshot();
+        let bootstrap = cache.submit_bootstrap(&skeleton)?;
+
+        assert_eq!(load.apply_to(&mut current.inventory, &skeleton, &HashSet::new())?, 1);
+        assert!(current.inventory.snapshot().is_complete(current.folder));
+        assert_eq!(current.inventory.snapshot().item(current.item.key), Some(&current.item));
+        block_on(bootstrap.wait())?;
+        block_on(cache.close())?;
+    }
     Ok(())
 }
 

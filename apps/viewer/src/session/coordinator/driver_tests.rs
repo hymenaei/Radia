@@ -1,13 +1,14 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use ::inventory::{
-    AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryLimits, InventoryOwner, InventoryType, Item, ItemKey,
-    PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
+    AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryLimits, InventoryNodeId, InventoryNodeKey,
+    InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
 };
+use tokio::sync::oneshot;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
-use super::{FolderFetch, apply_inventory_fetch};
+use super::{FolderFetch, MoveExpectation, apply_inventory_fetch, cache_restore_move_changes, resolve_pending_inventory_moves};
 
 fn category(key: CategoryKey, parent: Option<CategoryKey>, version: ServerVersion, descendent_count: Option<u32>) -> Category {
     Category {
@@ -134,4 +135,72 @@ fn older_parent_result_preserves_newer_child_version() {
     assert_eq!(child_category.server_descendent_count, Some(1));
     assert!(snapshot.is_complete(child));
     assert!(snapshot.item(item_key).is_some());
+}
+
+#[tokio::test]
+async fn folder_fetch_move_resolves_pending_inventory_edit() {
+    let owner = InventoryOwner::new(Uuid::from_u128(21));
+    let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(22)));
+    let first = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(23)));
+    let second = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(24)));
+    let folder = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(25)));
+    let mut inventory =
+        Inventory::new(category(root, None, ServerVersion::UNKNOWN, None), None, InventoryLimits::default()).expect("valid inventory root");
+    inventory.upsert_category(category(first, Some(root), ServerVersion::UNKNOWN, None)).expect("add first folder");
+    inventory.upsert_category(category(second, Some(root), ServerVersion::UNKNOWN, None)).expect("add second folder");
+    inventory.upsert_category(category(folder, Some(first), ServerVersion::UNKNOWN, None)).expect("add moved folder");
+
+    let node = InventoryNodeKey::new(owner, InventoryNodeId::Category(folder.id()));
+    let expectation = MoveExpectation { node, from: first, to: second };
+    let (confirmed, confirmation) = oneshot::channel();
+    let mut pending = HashMap::from([(node, (expectation, confirmed))]);
+    let changes = apply_inventory_fetch(
+        &mut inventory,
+        FolderFetch {
+            folder: second,
+            version: ServerVersion::UNKNOWN,
+            descendent_count: Some(1),
+            children: vec![InventoryChild::Category(category(folder, Some(second), ServerVersion::UNKNOWN, Some(0)))],
+        },
+    )
+    .expect("apply destination fetch")
+    .expect("destination fetch changes inventory");
+    let selected = changes
+        .changes
+        .iter()
+        .find(|change| matches!(change, ::inventory::InventoryChange::NodeMoved { node: changed, .. } if *changed == node));
+    std::assert_matches!(
+        selected,
+        Some(::inventory::InventoryChange::NodeMoved { node: changed, from, to })
+            if *changed == node && *from == first && *to == second
+    );
+    resolve_pending_inventory_moves(&mut pending, &changes);
+    confirmation.await.expect("fetch change set confirms pending edit");
+    assert!(pending.is_empty());
+}
+
+#[tokio::test]
+async fn cache_restore_move_resolves_pending_inventory_edit() {
+    let owner = InventoryOwner::new(Uuid::from_u128(31));
+    let root = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(32)));
+    let first = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(33)));
+    let second = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(34)));
+    let folder = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(35)));
+    let mut inventory =
+        Inventory::new(category(root, None, ServerVersion::UNKNOWN, None), None, InventoryLimits::default()).expect("valid inventory root");
+    inventory.upsert_category(category(first, Some(root), ServerVersion::UNKNOWN, None)).expect("add first folder");
+    inventory.upsert_category(category(second, Some(root), ServerVersion::UNKNOWN, None)).expect("add second folder");
+    inventory.upsert_category(category(folder, Some(first), ServerVersion::UNKNOWN, None)).expect("add cached moved folder");
+
+    let before = inventory.snapshot();
+    inventory.move_node(InventoryNodeKey::new(owner, InventoryNodeId::Category(folder.id())), second).expect("restore cached folder move");
+    let after = inventory.snapshot();
+    let node = InventoryNodeKey::new(owner, InventoryNodeId::Category(folder.id()));
+    let expectation = MoveExpectation { node, from: first, to: second };
+    let (confirmed, confirmation) = oneshot::channel();
+    let mut pending = HashMap::from([(node, (expectation, confirmed))]);
+    let changes = cache_restore_move_changes(&pending, &before, &after);
+    resolve_pending_inventory_moves(&mut pending, &changes);
+    confirmation.await.expect("cache restore change set confirms pending edit");
+    assert!(pending.is_empty());
 }

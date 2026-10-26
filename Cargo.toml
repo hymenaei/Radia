@@ -12,6 +12,7 @@ members = [
     "crates/render",
     "crates/storage",
     "crates/assets",
+    "crates/inventory",
 ]
 default-members = ["apps/viewer"]
 
@@ -22,6 +23,8 @@ license = "LGPL-2.1-only"
 
 [workspace.dependencies]
 assets = { path = "crates/assets" }
+inventory = { path = "crates/inventory" }
+imbl = { version = "7.0.2", default-features = false }
 llsd = { path = "crates/llsd" }
 math = { path = "crates/math" }
 network = { path = "crates/network" }

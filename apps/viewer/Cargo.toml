@@ -31,6 +31,7 @@ llsd.workspace = true
 uuid.workspace = true
 utils.workspace = true
 assets.workspace = true
+inventory.workspace = true
 render.workspace = true
 math.workspace = true
 network.workspace = true

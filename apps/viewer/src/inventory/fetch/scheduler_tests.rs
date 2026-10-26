@@ -686,7 +686,8 @@ async fn missing_folder_keeps_walk_retryable() {
     assert!(!inventory.snapshot().is_complete(missing));
 
     let (_status_sender, status) = watch::channel(InventoryLoadingStatus::default());
-    let handle = InventoryFetchHandle { requests: requests.clone(), status };
+    let handle =
+        InventoryFetchHandle { requests: requests.clone(), status, edits: crate::inventory::InventoryEditController::new().handle() };
     for _ in 0..2 {
         let completion = handle.request_folder(missing).expect("queue folder retry");
         let retry = peer.next().await;

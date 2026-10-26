@@ -442,12 +442,12 @@ fn string(fields: &llsd::Map, names: &[&str], default: &str) -> Result<String, D
     }
 }
 
-fn inventory_type(fields: &llsd::Map, names: &[&str], named: fn(&str) -> Option<i32>) -> Result<Option<i32>, DecodeError> {
+fn inventory_type(fields: &llsd::Map, names: &[&str], named: fn(&str) -> i32) -> Result<Option<i32>, DecodeError> {
     match get(fields, names) {
         None => Ok(None),
         Some(Value::Integer(value)) => Ok(Some(*value)),
-        Some(Value::String(value)) => named(value).map(Some).ok_or(DecodeError::InvalidResponse),
-        _ => Err(DecodeError::InvalidResponse),
+        Some(Value::String(value)) => Ok(Some(named(value))),
+        Some(_) => Ok(Some(255)),
     }
 }
 
@@ -512,11 +512,11 @@ fn string_or_uri(value: &Value) -> Option<&str> {
     }
 }
 
-fn named_asset_type(value: &str) -> Option<i32> {
-    Some(match value {
+fn named_asset_type(value: &str) -> i32 {
+    match value {
         "texture" => 0,
         "sound" => 1,
-        "callingcard" => 2,
+        "callcard" | "callingcard" => 2,
         "landmark" => 3,
         "script" => 4,
         "clothing" => 5,
@@ -524,30 +524,43 @@ fn named_asset_type(value: &str) -> Option<i32> {
         "notecard" => 7,
         "category" => 8,
         "lsltext" => 10,
+        "lslbyte" => 11,
+        "txtr_tga" => 12,
+        "bodypart" => 13,
+        "snd_wav" => 17,
+        "img_tga" => 18,
+        "jpeg" => 19,
+        "animatn" => 20,
+        "gesture" => 21,
+        "simstate" => 22,
         "link" => 24,
         "link_f" => 25,
+        "widget" => 40,
+        "person" => 45,
         "mesh" => 49,
         "settings" => 56,
         "material" => 57,
         "gltf" => 58,
-        "gltf_binary" => 59,
-        _ => return None,
-    })
+        "glbin" | "gltf_binary" => 59,
+        "invalid" => 255,
+        "-1" => -1,
+        _ => 255,
+    }
 }
 
-fn named_inventory_type(value: &str) -> Option<i32> {
-    Some(match value {
+fn named_inventory_type(value: &str) -> i32 {
+    match value {
         "texture" => 0,
         "sound" => 1,
-        "callingcard" => 2,
+        "callcard" | "callingcard" => 2,
         "landmark" => 3,
         "object" => 6,
         "notecard" => 7,
         "category" => 8,
-        "root_category" => 9,
-        "lsl" => 10,
+        "root" | "root_category" => 9,
+        "script" | "lsl" => 10,
         "snapshot" => 15,
-        "attachment" => 17,
+        "attach" | "attachment" => 17,
         "wearable" => 18,
         "animation" => 19,
         "gesture" => 20,
@@ -557,9 +570,10 @@ fn named_inventory_type(value: &str) -> Option<i32> {
         "settings" => 25,
         "material" => 26,
         "gltf" => 27,
-        "gltf_binary" => 28,
-        _ => return None,
-    })
+        "glbin" | "gltf_binary" => 28,
+        "-1" => -1,
+        _ => 255,
+    }
 }
 
 #[cfg(test)]
@@ -612,6 +626,17 @@ mod tests {
         ]))
     }
 
+    fn item_with_types(id: Uuid, parent: Uuid, owner: Uuid, asset_type: Value, inventory_type: Value) -> Value {
+        Value::Map(Map::from([
+            ("item_id".into(), Value::Uuid(id)),
+            ("owner_id".into(), Value::Uuid(owner)),
+            ("parent_id".into(), Value::Uuid(parent)),
+            ("name".into(), Value::String("item".into())),
+            ("type".into(), asset_type),
+            ("inv_type".into(), inventory_type),
+        ]))
+    }
+
     fn encode(value: &Value) -> Vec<u8> {
         xml::to_vec(value).expect("LLSD fixture encodes")
     }
@@ -636,6 +661,114 @@ mod tests {
         assert_eq!(nested_children.len(), 1);
         let Child::Item(parsed_item) = &nested_children[0] else { panic!("expected nested item") };
         assert_eq!(parsed_item.id, Uuid::from_u128(4));
+    }
+
+    #[test]
+    fn official_type_names_decode_without_rejecting_folder() {
+        let owner = Uuid::from_u128(1);
+        let folder = Uuid::from_u128(2);
+        let asset_types = [
+            ("texture", 0),
+            ("sound", 1),
+            ("callcard", 2),
+            ("landmark", 3),
+            ("script", 4),
+            ("clothing", 5),
+            ("object", 6),
+            ("notecard", 7),
+            ("category", 8),
+            ("lsltext", 10),
+            ("lslbyte", 11),
+            ("txtr_tga", 12),
+            ("bodypart", 13),
+            ("snd_wav", 17),
+            ("img_tga", 18),
+            ("jpeg", 19),
+            ("animatn", 20),
+            ("gesture", 21),
+            ("simstate", 22),
+            ("link", 24),
+            ("link_f", 25),
+            ("widget", 40),
+            ("person", 45),
+            ("mesh", 49),
+            ("settings", 56),
+            ("material", 57),
+            ("gltf", 58),
+            ("glbin", 59),
+            ("invalid", 255),
+            ("-1", -1),
+        ];
+        let inventory_types = [
+            ("texture", 0),
+            ("sound", 1),
+            ("callcard", 2),
+            ("landmark", 3),
+            ("object", 6),
+            ("notecard", 7),
+            ("category", 8),
+            ("root", 9),
+            ("script", 10),
+            ("snapshot", 15),
+            ("attach", 17),
+            ("wearable", 18),
+            ("animation", 19),
+            ("gesture", 20),
+            ("mesh", 22),
+            ("widget", 23),
+            ("person", 24),
+            ("settings", 25),
+            ("material", 26),
+            ("gltf", 27),
+            ("glbin", 28),
+        ];
+        let mut expected = Vec::new();
+        let mut items = Vec::new();
+        for (index, (name, raw)) in asset_types.into_iter().enumerate() {
+            expected.push((raw, 10));
+            items.push(item_with_types(
+                Uuid::from_u128(100 + index as u128),
+                folder,
+                owner,
+                Value::String(name.into()),
+                Value::String("script".into()),
+            ));
+        }
+        for (index, (name, raw)) in inventory_types.into_iter().enumerate() {
+            expected.push((0, raw));
+            items.push(item_with_types(
+                Uuid::from_u128(200 + index as u128),
+                folder,
+                owner,
+                Value::String("texture".into()),
+                Value::String(name.into()),
+            ));
+        }
+        items.push(item_with_types(
+            Uuid::from_u128(300),
+            folder,
+            owner,
+            Value::String("future_asset".into()),
+            Value::String("future_inventory_type".into()),
+        ));
+        expected.push((255, 255));
+        items.push(item_with_types(Uuid::from_u128(301), folder, owner, Value::Integer(7), Value::Boolean(true)));
+        expected.push((7, 255));
+
+        let mut fields = match category(folder, None, Vec::new(), false) {
+            Value::Map(fields) => fields,
+            _ => unreachable!(),
+        };
+        fields.insert("descendents".into(), Value::Integer(items.len() as i32));
+        fields.insert("_embedded".into(), map_value([("items".into(), Value::Array(items))]));
+        let decoded = decode_ais_children(&encode(&Value::Map(fields)), folder, owner).expect("one unknown field does not reject a folder");
+        let children = decoded.children.expect("folder items are present");
+        assert_eq!(children.len(), expected.len());
+        for (child, (asset_type, inventory_type)) in children.iter().zip(expected) {
+            let Child::Item(item) = child else { panic!("expected item") };
+            assert_eq!(item.asset_type, Some(asset_type));
+            assert_eq!(item.inventory_type, Some(inventory_type));
+        }
     }
 
     #[test]

@@ -1,17 +1,16 @@
 use std::{
     assert_matches,
-    collections::BTreeMap,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     str::from_utf8,
+    sync::Arc,
     thread,
     time::Duration,
 };
 
+use inventory::{Category, CategoryKey, FolderType, Inventory, InventoryLimits, InventoryOwner, ServerVersion};
 use llsd::{Value, xml};
 use network::capabilities::Client;
-use protocol::login;
-use protocol::login::ResponseData;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener as AsyncTcpListener,
@@ -20,6 +19,7 @@ use tokio::{
     time::timeout,
 };
 use url::Url;
+use utils::FolderId;
 use uuid::Uuid;
 use viewer::inventory::favorites::{FavoritesError, LandmarkDestination, favorite_folder_id, fetch_favorite_landmarks};
 
@@ -29,22 +29,31 @@ const MAX_CONCURRENT_FETCHES: usize = 3;
 const SERVER_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[test]
-fn folder_uses_login_data() {
-    let login_data = ResponseData::from_fields(BTreeMap::from([(
-        "inventory-skeleton".into(),
-        login::Value::Array(vec![
-            login::Value::Struct(BTreeMap::from([
-                ("folder_id".into(), login::Value::String("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into())),
-                ("name".into(), login::Value::String("My Inventory".into())),
-            ])),
-            login::Value::Struct(BTreeMap::from([
-                ("folder_id".into(), login::Value::String(FAVORITES_FOLDER_ID.into())),
-                ("name".into(), login::Value::String("Favorites".into())),
-            ])),
-        ]),
-    )]));
+fn folder_uses_preferred_type() {
+    let owner_id = Uuid::parse_str(AGENT_ID).expect("valid agent fixture UUID");
+    let root_id = Uuid::from_u128(42);
+    let owner = InventoryOwner::new(owner_id);
+    let root = Category {
+        key: CategoryKey::new(owner, FolderId::new(root_id)),
+        parent: None,
+        preferred_folder_type: FolderType::RootInventory,
+        name: Arc::from("My Inventory"),
+        server_version: ServerVersion::UNKNOWN,
+        server_descendent_count: None,
+    };
+    let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("valid personal inventory root");
+    inventory
+        .upsert_category(Category {
+            key: CategoryKey::new(owner, FolderId::new(Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid folder fixture UUID"))),
+            parent: Some(CategoryKey::new(owner, FolderId::new(root_id))),
+            preferred_folder_type: FolderType::Favorite,
+            name: Arc::from("Renamed Folder"),
+            server_version: ServerVersion::UNKNOWN,
+            server_descendent_count: None,
+        })
+        .expect("add category from skeleton");
 
-    assert_eq!(favorite_folder_id(&login_data).expect("favorites folder should parse").to_string(), FAVORITES_FOLDER_ID);
+    assert_eq!(favorite_folder_id(&inventory.snapshot()).expect("favorite type should resolve").to_string(), FAVORITES_FOLDER_ID);
 }
 
 #[test]

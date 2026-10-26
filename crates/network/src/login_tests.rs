@@ -126,6 +126,9 @@ async fn local_login_succeeds() {
     assert!(body.contains("<name>last</name>"));
     assert!(body.contains("<name>passwd</name>"));
     assert!(body.contains("<name>token</name>"));
+    for option in ["inventory-root", "inventory-skeleton", "inventory-lib-root", "inventory-lib-owner", "inventory-skel-lib"] {
+        assert!(body.contains(option), "login request must include {option}");
+    }
     assert!(body.contains("123456"));
     assert!(body.contains("saved-mfa"));
     assert!(!body.contains(&credentials.password));

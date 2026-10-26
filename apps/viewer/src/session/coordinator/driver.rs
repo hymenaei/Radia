@@ -1,5 +1,6 @@
 use std::{future::pending, ops::ControlFlow, sync::Arc};
 
+use ::inventory::{Inventory, InventorySnapshot};
 use futures::{
     FutureExt,
     channel::oneshot,
@@ -9,7 +10,7 @@ use futures::{
 };
 use network::{AgentSession, CoverageLoss, CoverageSource, Event, Grid, PacketOrder, SimulatorId, capabilities::Client};
 use protocol::{lludp::Message, login::ResponseData, messages::RequestAgentData};
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, sync::watch};
 use tracing::Instrument;
 use world::UpdateSource;
 
@@ -17,6 +18,7 @@ use super::{
     WriteLock,
     events::{SimulatorScope, WorldHandoff, handle_simulator_message, order_evidence, route_recovery_targets},
     input::{Input, select_drain_input},
+    inventory_bootstrap::build_inventory,
     media::ObjectMediaIntake,
     presentation::{AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, SessionReadyUpdate, ViewerUpdate},
 };
@@ -70,6 +72,8 @@ struct SessionDriver {
     handoff: WorldHandoff,
     active_session: Option<AgentSession>,
     active_login_data: Option<ResponseData>,
+    inventory: Option<Inventory>,
+    inventory_changes: watch::Sender<Option<InventorySnapshot>>,
     camera: CameraUplink,
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
@@ -101,6 +105,7 @@ impl SessionDriver {
         let camera = CameraUplink::new();
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
+        let (inventory_changes, _) = watch::channel(None);
 
         Self {
             session,
@@ -123,6 +128,8 @@ impl SessionDriver {
             handoff: WorldHandoff::default(),
             active_session: None,
             active_login_data: None,
+            inventory: None,
+            inventory_changes,
             camera,
             region_lookup: None,
             media,
@@ -248,6 +255,25 @@ impl SessionDriver {
             }
             SessionReady { simulator_id, session, capabilities, login_data } => {
                 self.handoff.session_ready(&mut self.session_world, simulator_id, session.agent_id);
+                if self.inventory.is_none() {
+                    match login_data.inventory_bootstrap() {
+                        Ok(bootstrap) => match build_inventory(session.agent_id, bootstrap) {
+                            Ok((inventory, report)) => {
+                                if report.rejected_personal_entries > 0 || report.rejected_library_entries > 0 {
+                                    tracing::warn!(
+                                        personal_rejected = report.rejected_personal_entries,
+                                        library_rejected = report.rejected_library_entries,
+                                        "login inventory skeleton contained rejected folders"
+                                    );
+                                }
+                                self.inventory_changes.send_replace(Some(inventory.snapshot()));
+                                self.inventory = Some(inventory);
+                            }
+                            Err(error) => tracing::warn!(%error, "login inventory could not be initialized"),
+                        },
+                        Err(error) => tracing::warn!(%error, "login inventory fields could not be parsed"),
+                    }
+                }
                 self.environments.session_ready(&mut self.session_world, simulator_id, &capabilities, self.primary_simulator);
                 if let Some(region) = self.session_world.region_for(simulator_id) {
                     self.assets.register(region, capabilities.clone());
@@ -495,22 +521,30 @@ impl SessionDriver {
             assets: self.assets.handle(),
             session: session.clone(),
             region_name: self.session_world.region_name(simulator_id).map(str::to_owned),
+            inventory_updates: self.inventory_changes.subscribe(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             world_reader: self.reads.reader(),
         }));
-        if let Some(login_data) = login_data {
-            self.spawn_favorites_load(session, capabilities, lookup, login_data);
+        if login_data.is_some() {
+            let inventory = self.inventory.as_ref().map(Inventory::snapshot);
+            self.spawn_favorites_load(session, capabilities, lookup, inventory);
         }
     }
 
-    fn spawn_favorites_load(&self, session: AgentSession, capabilities: Client, lookup: RegionLookup, login_data: ResponseData) {
+    fn spawn_favorites_load(
+        &self,
+        session: AgentSession,
+        capabilities: Client,
+        lookup: RegionLookup,
+        inventory: Option<InventorySnapshot>,
+    ) {
         let mailbox = self.mailbox.clone();
         let username = self.credentials.username.clone();
         let cancelled = self.cancellation.clone();
         drop(
             self.runtime.spawn(
                 async move {
-                    let load = load_favorites(&capabilities, &lookup, &session, &login_data).fuse();
+                    let load = load_favorites(&capabilities, &lookup, &session, inventory.as_ref()).fuse();
                     pin_mut!(load);
                     let cancelled = cancelled.fuse();
                     pin_mut!(cancelled);

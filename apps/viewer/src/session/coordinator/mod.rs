@@ -1,6 +1,7 @@
 mod driver;
 mod events;
 mod input;
+mod inventory_bootstrap;
 mod media;
 mod persistence;
 mod presentation;

@@ -278,7 +278,7 @@ async fn login_request(
         read_critical: "",
         token: mfa_token,
         mfa_hash,
-        options: &["inventory-skeleton"],
+        options: &["inventory-root", "inventory-skeleton", "inventory-lib-root", "inventory-lib-owner", "inventory-skel-lib"],
     }
     .to_xml()
     .map_err(|error| LoginError::request(error.to_string(), error))?;

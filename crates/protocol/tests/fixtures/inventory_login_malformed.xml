@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<methodResponse><params><param><value><struct>
+<member><name>login</name><value><boolean>1</boolean></value></member>
+<member><name>sim_ip</name><value><string>127.0.0.1</string></value></member>
+<member><name>sim_port</name><value><int>13000</int></value></member>
+<member><name>circuit_code</name><value><int>1</int></value></member>
+<member><name>agent_id</name><value><string>aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa</string></value></member>
+<member><name>session_id</name><value><string>11111111-1111-1111-1111-111111111111</string></value></member>
+<member><name>seed_capability</name><value><string>https://example.test/seed</string></value></member>
+<member><name>inventory-root</name><value><array><data><value><struct><member><name>folder_id</name><value><string>aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa</string></value></member></struct></value></data></array></value></member>
+<member><name>inventory-skeleton</name><value><array><data>
+<value><struct><member><name>folder_id</name><value><string>aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa</string></value></member><member><name>parent_id</name><value><string>00000000-0000-0000-0000-000000000000</string></value></member><member><name>name</name><value><string>My Inventory</string></value></member><member><name>version</name><value><int>-1</int></value></member></struct></value>
+<value><struct><member><name>folder_id</name><value><string>bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb</string></value></member><member><name>parent_id</name><value><string>aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa</string></value></member><member><name>name</name><value><string>Broken Folder</string></value></member></struct></value>
+<value><string>not a folder map</string></value>
+</data></array></value></member>
+</struct></value></param></params></methodResponse>

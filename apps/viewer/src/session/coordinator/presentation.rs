@@ -4,11 +4,11 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
+use ::inventory::InventorySnapshot;
 use futures::{channel::mpsc, stream::StreamExt};
 use network::{AgentSession, Grid, MfaChallenge};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use render::scene::Camera;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -145,6 +145,7 @@ pub(crate) struct SessionReadyUpdate {
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,
     pub(crate) region_name: Option<String>,
+    pub(crate) inventory_updates: watch::Receiver<Option<InventorySnapshot>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) world_reader: WorldReader,
 }

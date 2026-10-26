@@ -95,6 +95,148 @@ impl ResponseData {
     pub fn get(&self, name: &str) -> Option<&Value> {
         self.fields.get(name)
     }
+
+    pub fn inventory_bootstrap(&self) -> Result<InventoryBootstrap, InventoryBootstrapError> {
+        let personal_root = option_uuid(&self.fields, "inventory-root", "folder_id", InventoryBootstrapError::InvalidPersonalRoot)?;
+        let library_root = option_uuid(&self.fields, "inventory-lib-root", "folder_id", InventoryBootstrapError::InvalidLibraryRoot)?;
+        let library_owner = option_uuid(&self.fields, "inventory-lib-owner", "agent_id", InventoryBootstrapError::InvalidLibraryOwner)?;
+        let personal_skeleton = skeleton(
+            &self.fields,
+            "inventory-skeleton",
+            InventoryBootstrapError::InvalidPersonalSkeleton,
+            InventoryBootstrapError::TooManyPersonalFolders,
+        )?;
+        let library_skeleton = skeleton(
+            &self.fields,
+            "inventory-skel-lib",
+            InventoryBootstrapError::InvalidLibrarySkeleton,
+            InventoryBootstrapError::TooManyLibraryFolders,
+        )?;
+        Ok(InventoryBootstrap { personal_root, personal_skeleton, library_root, library_owner, library_skeleton })
+    }
+}
+
+pub const MAX_LOGIN_INVENTORY_FOLDERS: usize = 65_536;
+pub const MAX_INVENTORY_FOLDER_NAME_BYTES: usize = 1_024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InventorySkeletonFolder {
+    pub folder_id: Uuid,
+    pub parent_id: Uuid,
+    pub name: String,
+    pub version: i32,
+    pub type_default: Option<i32>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InventorySkeleton {
+    pub folders: Vec<InventorySkeletonFolder>,
+    pub rejected_entries: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InventoryBootstrap {
+    pub personal_root: Option<Uuid>,
+    pub personal_skeleton: InventorySkeleton,
+    pub library_root: Option<Uuid>,
+    pub library_owner: Option<Uuid>,
+    pub library_skeleton: InventorySkeleton,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InventoryBootstrapError {
+    InvalidPersonalRoot,
+    InvalidLibraryRoot,
+    InvalidLibraryOwner,
+    InvalidPersonalSkeleton,
+    InvalidLibrarySkeleton,
+    TooManyPersonalFolders,
+    TooManyLibraryFolders,
+}
+
+impl fmt::Display for InventoryBootstrapError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidPersonalRoot => "login response has an invalid personal inventory root",
+            Self::InvalidLibraryRoot => "login response has an invalid Library root",
+            Self::InvalidLibraryOwner => "login response has an invalid Library owner",
+            Self::InvalidPersonalSkeleton => "login response has an invalid personal inventory skeleton",
+            Self::InvalidLibrarySkeleton => "login response has an invalid Library skeleton",
+            Self::TooManyPersonalFolders => "login response has too many personal inventory folders",
+            Self::TooManyLibraryFolders => "login response has too many Library folders",
+        })
+    }
+}
+
+impl error::Error for InventoryBootstrapError {}
+
+fn option_uuid(
+    fields: &BTreeMap<String, Value>,
+    field: &str,
+    id_field: &str,
+    error: InventoryBootstrapError,
+) -> Result<Option<Uuid>, InventoryBootstrapError> {
+    let Some(value) = fields.get(field) else { return Ok(None) };
+    let Value::Array(entries) = value else { return Err(error) };
+    let entry = match entries.first() {
+        None => return Ok(None),
+        Some(Value::Struct(entry)) => entry,
+        Some(_) => return Err(error),
+    };
+    let Some(Value::String(value)) = entry.get(id_field) else { return Err(error) };
+    let id = Uuid::parse_str(value).map_err(|_| error)?;
+    if id.is_nil() {
+        return Err(error);
+    }
+    Ok(Some(id))
+}
+
+fn skeleton(
+    fields: &BTreeMap<String, Value>,
+    field: &str,
+    invalid: InventoryBootstrapError,
+    too_many: InventoryBootstrapError,
+) -> Result<InventorySkeleton, InventoryBootstrapError> {
+    let Some(value) = fields.get(field) else { return Ok(InventorySkeleton::default()) };
+    let Value::Array(entries) = value else { return Err(invalid) };
+    if entries.len() > MAX_LOGIN_INVENTORY_FOLDERS {
+        return Err(too_many);
+    }
+    let mut parsed = InventorySkeleton { folders: Vec::with_capacity(entries.len()), rejected_entries: 0 };
+    for entry in entries {
+        match skeleton_folder(entry) {
+            Some(folder) => parsed.folders.push(folder),
+            None => parsed.rejected_entries = parsed.rejected_entries.saturating_add(1),
+        }
+    }
+    Ok(parsed)
+}
+
+fn skeleton_folder(value: &Value) -> Option<InventorySkeletonFolder> {
+    let Value::Struct(fields) = value else { return None };
+    let Value::String(folder_id) = fields.get("folder_id")? else { return None };
+    let folder_id = Uuid::parse_str(folder_id).ok().filter(|id| !id.is_nil())?;
+    let Value::String(parent_id) = fields.get("parent_id")? else { return None };
+    let parent_id = Uuid::parse_str(parent_id).ok()?;
+    let Value::String(name) = fields.get("name")? else { return None };
+    if name.len() > MAX_INVENTORY_FOLDER_NAME_BYTES {
+        return None;
+    }
+    let version = fields.get("version").and_then(inventory_i32)?;
+    let type_default = match fields.get("type_default") {
+        Some(value) => Some(inventory_i32(value)?),
+        None => None,
+    };
+    Some(InventorySkeletonFolder { folder_id, parent_id, name: name.clone(), version, type_default })
+}
+
+fn inventory_i32(value: &Value) -> Option<i32> {
+    match value {
+        Value::Integer(value) => Some(*value),
+        Value::Long(value) => i32::try_from(*value).ok(),
+        Value::String(value) => value.parse().ok(),
+        _ => None,
+    }
 }
 
 impl fmt::Debug for ResponseData {

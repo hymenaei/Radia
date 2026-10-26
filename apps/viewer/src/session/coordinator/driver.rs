@@ -26,7 +26,8 @@ use super::{
 use crate::{
     asset_coordinator::AssetCoordinator,
     inventory::{
-        FolderFetch, InventoryFetchController, InventoryFetchError, InventoryFetchEvent, InventoryLoadingStatus, favorites::load_favorites,
+        FolderApplyOutcome, FolderFetch, InventoryFetchController, InventoryFetchError, InventoryFetchEvent, InventoryLoadingStatus,
+        favorites::load_favorites,
     },
     remembered_login::{self, RememberedLogin},
     session::{
@@ -704,26 +705,41 @@ impl SessionDriver {
 
     fn handle_inventory_fetch(&mut self, event: InventoryFetchEvent) {
         match event {
-            InventoryFetchEvent::Folder(fetch) => {
-                let Some(inventory) = self.inventory.as_mut() else { return };
+            InventoryFetchEvent::Folder { fetch, applied } => {
                 let folder = fetch.folder;
-                match apply_inventory_fetch(inventory, fetch) {
-                    Ok(Some(changes)) => {
-                        let snapshot = inventory.snapshot();
-                        self.track_inventory_changes(&changes, &snapshot);
-                        if snapshot.is_complete(folder) {
-                            self.inventory_complete.insert(folder);
-                        } else {
-                            self.inventory_complete.remove(&folder);
+                let result = self.inventory.as_mut().map(|inventory| apply_inventory_fetch(inventory, fetch));
+                let snapshot = self.inventory.as_ref().map(Inventory::snapshot);
+                let mut rejected = false;
+                match result {
+                    Some(Ok(Some(changes))) => {
+                        if let Some(snapshot) = snapshot.as_ref() {
+                            self.track_inventory_changes(&changes, snapshot);
+                            if snapshot.is_complete(folder) {
+                                self.inventory_complete.insert(folder);
+                            } else {
+                                self.inventory_complete.remove(&folder);
+                            }
+                            self.inventory_failed.remove(&folder);
+                            if self.inventory_last_failure.as_ref().is_some_and(|(failed, _)| *failed == folder) {
+                                self.inventory_last_failure = None;
+                            }
+                            self.inventory_changes.send_replace(Some(snapshot.clone()));
                         }
-                        self.inventory_failed.remove(&folder);
-                        if self.inventory_last_failure.as_ref().is_some_and(|(failed, _)| *failed == folder) {
-                            self.inventory_last_failure = None;
-                        }
-                        self.inventory_changes.send_replace(Some(snapshot));
                     }
-                    Ok(None) => {}
-                    Err(error) => self.record_inventory_failure(folder, InventoryFetchError::Model(error)),
+                    Some(Ok(None)) => {}
+                    Some(Err(error)) => {
+                        rejected = true;
+                        self.record_inventory_failure(folder, InventoryFetchError::Model(error));
+                    }
+                    None => rejected = true,
+                }
+                let outcome = snapshot
+                    .as_ref()
+                    .map(|snapshot| FolderApplyOutcome::from_snapshot(snapshot, folder, rejected))
+                    .unwrap_or_else(FolderApplyOutcome::rejected_without_snapshot);
+                if let Err(outcome) = applied.send(outcome) {
+                    tracing::debug!(folder = %folder.id().uuid(), "inventory fetch worker stopped before apply acknowledgement");
+                    drop(outcome);
                 }
                 self.publish_inventory_status();
             }

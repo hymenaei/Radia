@@ -27,7 +27,7 @@ use url::Url;
 use utils::FolderId;
 use uuid::Uuid;
 
-use super::super::{FolderFetch, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais};
+use super::super::{FolderApplyOutcome, FolderFetch, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais};
 use super::{BACKGROUND_CONCURRENCY, MAX_AIS_DEPTH, REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, run_scheduler};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(45);
@@ -290,12 +290,27 @@ async fn next_event(events: &mut mpsc::Receiver<InventoryFetchEvent>) -> Invento
 
 fn assert_folder_event(event: InventoryFetchEvent, expected: CategoryKey) -> FolderFetch {
     match event {
-        InventoryFetchEvent::Folder(folder) => {
-            assert_eq!(folder.folder, expected);
-            folder
+        InventoryFetchEvent::Folder { fetch, applied } => {
+            assert_eq!(fetch.folder, expected);
+            acknowledge_fetch(fetch, applied)
         }
         event => panic!("expected folder response, received {event:?}"),
     }
+}
+
+fn acknowledge_fetch(fetch: FolderFetch, applied: oneshot::Sender<FolderApplyOutcome>) -> FolderFetch {
+    let categories = fetch
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            ::inventory::InventoryChild::Category(category) => Some(category.key),
+            ::inventory::InventoryChild::Item(_) => None,
+        })
+        .collect();
+    let complete =
+        fetch.version.is_known() && fetch.descendent_count.and_then(|count| usize::try_from(count).ok()) == Some(fetch.children.len());
+    applied.send(FolderApplyOutcome { complete, categories, rejected: false }).expect("scheduler waits for folder apply outcome");
+    fetch
 }
 
 #[tokio::test]
@@ -433,7 +448,8 @@ async fn fallback_uses_personal_and_library_descendents_capabilities() {
     let mut applied = HashSet::new();
     loop {
         match next_event(&mut events).await {
-            InventoryFetchEvent::Folder(fetch) => {
+            InventoryFetchEvent::Folder { fetch, applied: response } => {
+                let fetch = acknowledge_fetch(fetch, response);
                 applied.insert(fetch.folder);
             }
             InventoryFetchEvent::BackgroundDone => break,
@@ -494,7 +510,8 @@ async fn fallback_batches_no_more_than_ten_folders_per_request() {
     let mut completed = HashSet::new();
     loop {
         match next_event(&mut events).await {
-            InventoryFetchEvent::Folder(fetch) => {
+            InventoryFetchEvent::Folder { fetch, applied: response } => {
+                let fetch = acknowledge_fetch(fetch, response);
                 completed.insert(fetch.folder);
             }
             InventoryFetchEvent::BackgroundDone => break,
@@ -573,6 +590,55 @@ async fn transient_http_failure_retries_and_succeeds() {
     let fetched = fetch_ais(&client, &capability, root, 0).await.expect("retry should recover");
     responder.await.expect("peer responder");
     assert_eq!(fetched.len(), 1);
+}
+
+#[tokio::test]
+async fn rejected_folder_can_be_requested_again() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let owner = InventoryOwner::new(Uuid::from_u128(1));
+    let root = key(owner, 45);
+    let child = key(owner, 46);
+    let mut inventory = Inventory::new(category(root, None), None, InventoryLimits::default()).expect("valid inventory root");
+    let (requests, mut events, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    peer.grant(&[("InventoryAPIv3", "/ais")]).await;
+
+    let first = peer.next().await;
+    first.respond(200, root_response(root, &[child, child], 0)).await;
+    let InventoryFetchEvent::Folder { fetch, applied } = next_event(&mut events).await else {
+        panic!("expected first folder result");
+    };
+    std::assert_matches!(
+        inventory.apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children),
+        Err(::inventory::InventoryError::DuplicateFetchChild)
+    );
+    applied.send(FolderApplyOutcome::from_snapshot(&inventory.snapshot(), root, true)).expect("scheduler waits for rejected apply outcome");
+    assert!(!inventory.snapshot().is_complete(root));
+
+    requests.send(root).await.expect("queue retry after rejected model apply");
+    let retry = peer.next().await;
+    assert_eq!(retry.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
+    retry.respond(200, empty_folder_response(root, 2)).await;
+    let fetch = loop {
+        match next_event(&mut events).await {
+            InventoryFetchEvent::Folder { fetch, applied } => break (fetch, applied),
+            InventoryFetchEvent::BackgroundDone => {}
+            InventoryFetchEvent::Failed { folder, error } => panic!("retry failed for {folder:?}: {error}"),
+        }
+    };
+    let (fetch, applied) = fetch;
+    assert_eq!(fetch.folder, root);
+    inventory
+        .apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children)
+        .expect("retry applies clean response");
+    assert!(inventory.snapshot().is_complete(root));
+    applied
+        .send(FolderApplyOutcome::from_snapshot(&inventory.snapshot(), root, false))
+        .expect("scheduler waits for successful model outcome");
+
+    drop(requests);
+    stop.send(()).expect("stop scheduler after retry");
+    task.await.expect("scheduler stopped");
 }
 
 #[tokio::test]
@@ -667,8 +733,8 @@ async fn one_hundred_thousand_items_load_with_bounded_responses_and_concurrency(
 
     let mut applied_folders = HashSet::new();
     while applied_folders.len() < 2 {
-        let fetch = match next_event(&mut events).await {
-            InventoryFetchEvent::Folder(fetch) => fetch,
+        let (fetch, applied) = match next_event(&mut events).await {
+            InventoryFetchEvent::Folder { fetch, applied } => (fetch, applied),
             event => panic!("expected large folder response, received {event:?}"),
         };
         assert!(fetch.folder == first || fetch.folder == second);
@@ -676,6 +742,7 @@ async fn one_hundred_thousand_items_load_with_bounded_responses_and_concurrency(
         inventory
             .apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children)
             .expect("apply large folder response");
+        applied.send(FolderApplyOutcome::from_snapshot(&inventory.snapshot(), folder, false)).expect("scheduler waits for model outcome");
         applied_folders.insert(folder);
     }
     assert!(matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone));

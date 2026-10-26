@@ -616,38 +616,40 @@ async fn process_completion(
             return true;
         }
     };
-    let mut stale = HashSet::new();
     for folder in folders {
-        if stale.contains(&folder.folder) || tree.is_stale(folder.folder, folder.version) {
-            stale.insert(folder.folder);
-            for child in &folder.children {
-                if let ::inventory::InventoryChild::Category(category) = child {
-                    stale.insert(category.key);
-                }
-            }
-            continue;
+        let folder_key = folder.folder;
+        let (applied, outcome) = oneshot::channel();
+        if !emit(events, InventoryFetchEvent::Folder { fetch: folder, applied }, cancellation, stop).await {
+            return false;
         }
-        let stale_children = tree.apply(&folder);
-        stale.extend(stale_children);
-        for child in &folder.children {
-            if let ::inventory::InventoryChild::Category(category) = child {
-                let was_queued = queued.contains(&category.key);
-                enqueue_background(BackgroundRequest { folder: category.key, depth: 0 }, tree, in_flight, failed, background, queued);
-                if !was_queued && queued.contains(&category.key) {
-                    *background_done = false;
-                }
-            }
-        }
-        if !tree.is_complete(folder.folder) && completion.job.depth > 0 {
-            let was_queued = queued.contains(&folder.folder);
-            enqueue_background(BackgroundRequest { folder: folder.folder, depth: 0 }, tree, in_flight, failed, background, queued);
-            if !was_queued && queued.contains(&folder.folder) {
+        let outcome = tokio::select! {
+            biased;
+            _ = cancellation.clone() => return false,
+            _ = &mut *stop => return false,
+            result = outcome => match result {
+                Ok(outcome) => outcome,
+                Err(_) => return false,
+            },
+        };
+        tree.record(folder_key, outcome.complete);
+        for category in outcome.categories {
+            let was_queued = queued.contains(&category);
+            enqueue_background(BackgroundRequest { folder: category, depth: 0 }, tree, in_flight, failed, background, queued);
+            if !was_queued && queued.contains(&category) {
                 *background_done = false;
             }
         }
-        failed.remove(&folder.folder);
-        if !emit(events, InventoryFetchEvent::Folder(folder), cancellation, stop).await {
-            return false;
+        if outcome.rejected {
+            failed.insert(folder_key);
+        } else {
+            failed.remove(&folder_key);
+            if !outcome.complete && completion.job.depth > 0 {
+                let was_queued = queued.contains(&folder_key);
+                enqueue_background(BackgroundRequest { folder: folder_key, depth: 0 }, tree, in_flight, failed, background, queued);
+                if !was_queued && queued.contains(&folder_key) {
+                    *background_done = false;
+                }
+            }
         }
     }
     true

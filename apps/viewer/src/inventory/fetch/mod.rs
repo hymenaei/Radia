@@ -6,7 +6,8 @@ mod state;
 
 use std::{fmt, time::Duration};
 
-use ::inventory::{CategoryKey, InventoryChild, InventoryError, ServerVersion};
+use ::inventory::{CategoryKey, InventoryChild, InventoryError, InventoryNodeId, InventorySnapshot, ServerVersion};
+use tokio::sync::oneshot;
 
 pub(crate) use scheduler::InventoryFetchController;
 pub use scheduler::{InventoryFetchHandle, InventoryFetchRequestError, InventoryLoadingStatus};
@@ -83,9 +84,33 @@ pub(crate) struct FolderFetch {
     pub(crate) children: Vec<InventoryChild>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
+pub(crate) struct FolderApplyOutcome {
+    pub(crate) complete: bool,
+    pub(crate) categories: Vec<CategoryKey>,
+    pub(crate) rejected: bool,
+}
+
+impl FolderApplyOutcome {
+    pub(crate) fn from_snapshot(snapshot: &InventorySnapshot, folder: CategoryKey, rejected: bool) -> Self {
+        let categories = snapshot
+            .children(folder)
+            .filter_map(|node| match node.id() {
+                InventoryNodeId::Category(id) => Some(CategoryKey::new(folder.owner(), id)),
+                InventoryNodeId::Item(_) => None,
+            })
+            .collect();
+        Self { complete: snapshot.is_complete(folder), categories, rejected }
+    }
+
+    pub(crate) fn rejected_without_snapshot() -> Self {
+        Self { complete: false, categories: Vec::new(), rejected: true }
+    }
+}
+
+#[derive(Debug)]
 pub(crate) enum InventoryFetchEvent {
-    Folder(FolderFetch),
+    Folder { fetch: FolderFetch, applied: oneshot::Sender<FolderApplyOutcome> },
     Failed { folder: CategoryKey, error: InventoryFetchError },
     BackgroundDone,
 }

@@ -3,12 +3,11 @@ use std::{
     sync::Arc,
 };
 
-use ::inventory::{Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryLimits, InventoryOwner, ServerVersion};
+use ::inventory::{Category, CategoryKey, FolderType, Inventory, InventoryLimits, InventoryOwner, ServerVersion};
 use utils::FolderId;
 use uuid::Uuid;
 
 use super::{BackgroundRequest, SourceKind, TreeKnowledge, enqueue_background, next_background_job};
-use crate::inventory::fetch::FolderFetch;
 
 fn key(owner: InventoryOwner, id: u128) -> CategoryKey {
     CategoryKey::new(owner, FolderId::new(Uuid::from_u128(id)))
@@ -56,8 +55,7 @@ fn selection_skips_complete_in_flight_and_failed() {
     let (inventory, root, children) = snapshot_with_children(3);
     let snapshot = inventory.snapshot();
     let mut tree = TreeKnowledge::new(&snapshot);
-    let root_children = children.iter().map(|child| InventoryChild::Category(category(*child, Some(root)))).collect();
-    tree.apply(&FolderFetch { folder: root, version: ServerVersion::from_raw(4), descendent_count: Some(3), children: root_children });
+    tree.record(root, true);
     let requests = [root, children[0], children[1], children[2]];
     let mut background = requests.iter().map(|folder| BackgroundRequest { folder: *folder, depth: 0 }).collect::<VecDeque<_>>();
     let mut queued = requests.into_iter().collect::<HashSet<_>>();
@@ -72,17 +70,16 @@ fn selection_skips_complete_in_flight_and_failed() {
 }
 
 #[test]
-fn complete_version_marks_older_fetch_stale() {
+fn rejected_apply_keeps_folder_fetchable() {
     let (inventory, root, _) = snapshot_with_children(0);
     let mut tree = TreeKnowledge::new(&inventory.snapshot());
-    tree.apply(&FolderFetch { folder: root, version: ServerVersion::from_raw(8), descendent_count: Some(0), children: Vec::new() });
-
+    tree.record(root, true);
     assert!(tree.is_complete(root));
-    assert!(tree.is_stale(root, ServerVersion::from_raw(7)));
-    assert!(!tree.is_stale(root, ServerVersion::from_raw(9)));
+    tree.record(root, false);
+    assert!(!tree.is_complete(root));
 
     let mut background = VecDeque::new();
     let mut queued = HashSet::new();
     enqueue_background(BackgroundRequest { folder: root, depth: 0 }, &tree, &HashSet::new(), &HashSet::new(), &mut background, &mut queued);
-    assert!(background.is_empty());
+    assert_eq!(background.pop_front(), Some(BackgroundRequest { folder: root, depth: 0 }));
 }

@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
-use ::inventory::{CategoryKey, InventoryNodeId, InventorySnapshot, ServerVersion};
+use ::inventory::{CategoryKey, InventorySnapshot};
 
-use super::{FolderFetch, MAX_FALLBACK_FOLDERS};
+use super::MAX_FALLBACK_FOLDERS;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct BackgroundRequest {
@@ -22,93 +22,27 @@ pub(super) struct BackgroundPlan {
     pub(super) depth: u8,
 }
 
-struct FolderState {
-    version: ServerVersion,
-    descendent_count: Option<u32>,
-    child_count: usize,
-    categories: HashSet<CategoryKey>,
-}
-
-impl FolderState {
-    fn is_complete(&self) -> bool {
-        self.version.is_known() && self.descendent_count.and_then(|count| usize::try_from(count).ok()) == Some(self.child_count)
-    }
-}
-
 pub(super) struct TreeKnowledge {
-    folders: HashMap<CategoryKey, FolderState>,
+    complete: HashSet<CategoryKey>,
 }
 
 impl TreeKnowledge {
     pub(super) fn new(snapshot: &InventorySnapshot) -> Self {
-        let mut folders = HashMap::new();
-        for category in snapshot.categories() {
-            let key = category.key;
-            let categories = snapshot
-                .children(key)
-                .filter_map(|node| match node.id() {
-                    InventoryNodeId::Category(id) => Some(CategoryKey::new(key.owner(), id)),
-                    InventoryNodeId::Item(_) => None,
-                })
-                .collect();
-            folders.insert(
-                key,
-                FolderState {
-                    version: category.server_version,
-                    descendent_count: category.server_descendent_count,
-                    child_count: snapshot.child_count(key),
-                    categories,
-                },
-            );
+        Self {
+            complete: snapshot.categories().filter(|category| snapshot.is_complete(category.key)).map(|category| category.key).collect(),
         }
-        Self { folders }
     }
 
     pub(super) fn is_complete(&self, key: CategoryKey) -> bool {
-        self.folders.get(&key).is_some_and(FolderState::is_complete)
+        self.complete.contains(&key)
     }
 
-    pub(super) fn is_stale(&self, key: CategoryKey, version: ServerVersion) -> bool {
-        self.folders.get(&key).is_some_and(|current| current.is_complete() && version.is_known() && current.version.raw() > version.raw())
-    }
-
-    pub(super) fn apply(&mut self, fetch: &FolderFetch) -> HashSet<CategoryKey> {
-        let mut stale_children = HashSet::new();
-        let mut category_children = HashSet::new();
-        for child in &fetch.children {
-            let ::inventory::InventoryChild::Category(category) = child else { continue };
-            let key = category.key;
-            category_children.insert(key);
-            if let Some(current) = self.folders.get(&key)
-                && current.is_complete()
-                && category.server_version.is_known()
-                && current.version.raw() > category.server_version.raw()
-            {
-                stale_children.insert(key);
-                continue;
-            }
-            let existing_child_count = self.folders.get(&key).map_or(0, |state| state.child_count);
-            let existing_categories = self.folders.get(&key).map_or_else(HashSet::new, |state| state.categories.clone());
-            self.folders.insert(
-                key,
-                FolderState {
-                    version: category.server_version,
-                    descendent_count: category.server_descendent_count,
-                    child_count: existing_child_count,
-                    categories: existing_categories,
-                },
-            );
+    pub(super) fn record(&mut self, key: CategoryKey, complete: bool) {
+        if complete {
+            self.complete.insert(key);
+        } else {
+            self.complete.remove(&key);
         }
-        self.folders.insert(
-            fetch.folder,
-            FolderState {
-                version: fetch.version,
-                descendent_count: fetch.descendent_count,
-                child_count: fetch.children.len(),
-                categories: category_children,
-            },
-        );
-        stale_children
     }
 }
 

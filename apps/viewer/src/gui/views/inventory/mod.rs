@@ -354,7 +354,7 @@ impl InventoryScreen {
         self.snapshots = Some(snapshot);
         if let Some(snapshot) = &self.snapshots {
             self.expanded.retain(|key| snapshot.category(*key).is_some());
-            self.folder_requests.retain_snapshot(&snapshot);
+            self.folder_requests.retain_snapshot(snapshot);
         }
         if self.search_active() {
             if let Some(revision) = self.search_refresh.snapshot_changed(revision) {

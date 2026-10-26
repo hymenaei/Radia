@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod favorite_store;
 pub mod favorites;
 mod fetch;

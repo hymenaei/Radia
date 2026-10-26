@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::state::InventoryState;
 use crate::{
-    Category, CategoryKey, FolderType, InventoryNodeId, InventoryNodeKey, InventoryOwner, InventoryRevision, Item, ItemKey, LinkResolution,
+    AssetType, Category, CategoryKey, FolderType, InventoryNodeId, InventoryNodeKey, InventoryOwner, InventoryRevision, Item, ItemKey,
+    LinkResolution,
 };
 
 #[derive(Clone)]
@@ -36,6 +37,10 @@ impl InventorySnapshot {
 
     pub fn items(&self) -> impl Iterator<Item = &Item> {
         self.state.items.values().map(Arc::as_ref)
+    }
+
+    pub fn items_of_asset_type(&self, asset_type: AssetType) -> impl Iterator<Item = &Item> {
+        self.items().filter(move |item| item.asset_type == asset_type)
     }
 
     pub fn categories_for(&self, owner: InventoryOwner) -> impl Iterator<Item = &Category> {

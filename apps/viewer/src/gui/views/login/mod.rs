@@ -182,6 +182,11 @@ impl ActiveSession {
 }
 
 impl LoginScreen {
+    pub(crate) fn inventory_window_data(&self) -> Option<(watch::Receiver<Option<InventorySnapshot>>, InventoryFetchHandle)> {
+        let ready = self.active_session.as_ref()?.ready()?;
+        Some((ready.inventory_updates.clone(), ready.inventory_fetch.clone()?))
+    }
+
     pub fn request_inventory_folder(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
         let handle = self
             .active_session

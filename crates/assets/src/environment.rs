@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use llsd::{Limits, Map, Value, binary, notation, xml};
+use llsd::{Limits, Map, Value, notation};
 use utils::AssetId;
 use uuid::Uuid;
 
@@ -198,16 +198,7 @@ impl Water {
 
 pub(crate) fn decode(bytes: &[u8]) -> Result<EnvironmentDescription, Failure> {
     let limits = limits(2 * 1024 * 1024);
-    let start = bytes.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(bytes.len());
-    let input = bytes.get(start..).ok_or(Failure::Malformed)?;
-    let value = if input.starts_with(b"<?llsd/binary") {
-        binary::from_slice_with_limits(input, limits)
-    } else if input.starts_with(b"<") && !input.starts_with(b"<?llsd/notation") {
-        xml::from_slice_with_limits(input, limits)
-    } else {
-        notation::from_slice_with_limits(input, limits)
-    }
-    .map_err(|_| Failure::Malformed)?;
+    let value: Value = llsd::from_slice_with_limits(bytes, limits).map_err(|_| Failure::Malformed)?;
     let fields = object(&value)?;
     let name = match fields.get("name") {
         Some(Value::String(name)) => name.clone(),
@@ -482,10 +473,12 @@ fn track<T>(value: Option<&Value>, frames: &BTreeMap<&str, Arc<T>>) -> Result<Ve
 mod tests {
     use std::time::Instant;
 
+    use llsd::{binary, xml};
+
     use super::*;
     use crate::{Budget, Content, LoadJob, Priority, Request, Status, Store};
 
-    const SKY: &[u8] = br#"<?llsd/notation?>
+    const SKY: &[u8] = br#"<? llsd/notation ?>
     {'type':'sky','name':'Authored sky','flags':i3,
      'sun_rotation':[r0,r0,r0,r2],'moon_rotation':[r0,r0,r1,r0],
      'sunlight_color':[r0.7342,r0.7815,r0.8999,r0],

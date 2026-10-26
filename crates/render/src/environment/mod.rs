@@ -67,6 +67,13 @@ pub struct Sources<'a> {
     pub experience_water: Option<&'a EnvironmentDescription>,
     pub sky_override: Option<&'a Sky>,
     pub water_override: Option<&'a Water>,
+    pub local: Option<Local<'a>>,
+}
+
+pub enum Local<'a> {
+    Sky { sky: &'a Sky, water: &'a WaterState },
+    Water { water: &'a Water, sky: &'a SkyState },
+    DayCycle(&'a DayCycle),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -158,18 +165,47 @@ pub fn evaluate(sources: &Sources<'_>, utc_seconds: f64, altitude: f64) -> Evalu
     let inherited = sources.experience_day.or(sources.base);
     let sky_source = sources.experience_sky.or(inherited);
     let water_source = sources.experience_water.or(inherited);
-    let (sky, sky_track, sky_cycles) = sky_source
+    let (mut sky, mut sky_track, mut sky_cycles) = sky_source
         .and_then(|source| sample_sky(source, day_position, altitude, schedule.altitudes))
         .unwrap_or_else(|| (sky_defaults(0.0), None, false));
-    let (water, water_cycles) =
+    let (mut water, mut water_cycles) =
         water_source.and_then(|source| sample_water(source, day_position)).unwrap_or_else(|| (water_defaults(0.0), false));
-    let mut sky = sky;
-    let mut water = water;
     if let Some(override_sky) = sources.sky_override {
         overlay(&mut sky, override_sky);
     }
     if let Some(override_water) = sources.water_override {
         overlay_water(&mut water, override_water);
+    }
+    if let Some(local) = &sources.local {
+        match local {
+            Local::Sky { sky: source, water: retained_water } => {
+                sky = sky_state(source, 0.0);
+                water = (*retained_water).clone();
+                sky_track = None;
+                sky_cycles = false;
+                water_cycles = false;
+            }
+            Local::Water { water: source, sky: retained_sky } => {
+                sky = (*retained_sky).clone();
+                water = water_state(source, 0.0);
+                sky_track = None;
+                sky_cycles = false;
+                water_cycles = false;
+            }
+            Local::DayCycle(day) => {
+                if let Some((track_number, track)) = selected_sky_track(day, selected_track(altitude, schedule.altitudes))
+                    && let Some(local_sky) = sample_sky_track(track, day_position as f32)
+                {
+                    sky = local_sky;
+                    sky_track = Some(track_number);
+                    sky_cycles = track.len() > 1;
+                }
+                if let Some(local_water) = sample_water_track(day.water(), day_position as f32) {
+                    water = local_water;
+                    water_cycles = day.water().len() > 1;
+                }
+            }
+        }
     }
     Evaluated { sky, water, sky_track, day_position, cycle_length: (sky_cycles || water_cycles).then_some(schedule.day_length) }
 }

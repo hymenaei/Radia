@@ -441,6 +441,7 @@ mod tests {
             experience_water: None,
             sky_override: None,
             water_override: None,
+            local: None,
         };
         let mut environment = evaluate(&sources, 0.0, 0.0);
         assert_eq!(environment_values(Some(&environment)), (1.0, 1.0, 0.0));

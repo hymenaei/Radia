@@ -438,7 +438,13 @@ async fn pending_asset_preserves_scene() {
     let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
     let mut feed = SceneFeed::start(
-        SceneSources { reader: reads.reader(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
+        SceneSources {
+            reader: reads.reader(),
+            environments,
+            assets: assets.handle(),
+            motion_circuits: watch::channel(Vec::new()).1,
+            inventory_updates: watch::channel(None).1,
+        },
         Uuid::from_u128(2),
         watch::channel(None).0,
         watch::channel(None).0,
@@ -497,7 +503,13 @@ async fn stalled_publication_preserves_intake() {
     let (pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
     let mut feed = SceneFeed::start(
-        SceneSources { reader: reader.clone(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
+        SceneSources {
+            reader: reader.clone(),
+            environments,
+            assets: assets.handle(),
+            motion_circuits: watch::channel(Vec::new()).1,
+            inventory_updates: watch::channel(None).1,
+        },
         Uuid::from_u128(1),
         watch::channel(None).0,
         watch::channel(None).0,

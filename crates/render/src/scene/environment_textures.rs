@@ -41,6 +41,9 @@ impl EnvironmentTextures {
             for setting in [viewer.day(), viewer.sky(), viewer.water()].into_iter().flatten() {
                 extend_desired(&mut desired, description_textures(setting.environment()), setting.region());
             }
+            if let Some(local) = viewer.local() {
+                extend_desired(&mut desired, description_textures(local.environment()), local.region());
+            }
             if let Some(sky) = viewer.sky_overrides()
                 && let Some(region) = property_region(viewer.sky_properties())
             {

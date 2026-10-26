@@ -1,7 +1,7 @@
 use protocol::{
     BlockInstance, BlockValues, FieldValue,
     lludp::Message,
-    messages::{InventoryItemBlock, MoveInventoryItemBlock},
+    messages::{InventoryItemBlock, MoveInventoryFolderBlock, MoveInventoryItemBlock},
 };
 
 pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockValues>> {
@@ -419,6 +419,18 @@ pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockVal
                     .iter()
                     .map(|MoveInventoryItemBlock { item_id, folder_id, new_name }| {
                         vec![FieldValue::Uuid(*item_id), FieldValue::Uuid(*folder_id), ll_string(new_name)]
+                    })
+                    .collect(),
+            ),
+        ]),
+        Message::MoveInventoryFolder(message) => Some(vec![
+            one(vec![FieldValue::Uuid(message.agent_id), FieldValue::Uuid(message.session_id), FieldValue::Bool(message.stamp)]),
+            many(
+                message
+                    .inventory_data
+                    .iter()
+                    .map(|MoveInventoryFolderBlock { folder_id, parent_id }| {
+                        vec![FieldValue::Uuid(*folder_id), FieldValue::Uuid(*parent_id)]
                     })
                     .collect(),
             ),

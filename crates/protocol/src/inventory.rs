@@ -1,4 +1,4 @@
-use std::{error, fmt};
+use std::{collections::BTreeMap, error, fmt};
 
 use llsd::{Limits, Value, xml};
 use uuid::Uuid;
@@ -104,6 +104,29 @@ pub struct RequestedFolder {
     pub owner_id: Uuid,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AisEditResponse {
+    pub category: Option<Category>,
+    pub item: Option<Item>,
+    pub created_categories: Vec<Uuid>,
+    pub created_items: Vec<Uuid>,
+    pub updated_categories: Vec<Uuid>,
+    pub updated_items: Vec<Uuid>,
+    pub removed_items: Vec<Uuid>,
+    pub categories_removed: Vec<Uuid>,
+    pub category_items_removed: Vec<Uuid>,
+    pub broken_links_removed: Vec<Uuid>,
+    pub updated_category_versions: BTreeMap<Uuid, i32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreatedCategoryResponse {
+    pub id: Uuid,
+    pub parent_id: Uuid,
+    pub preferred_folder_type: i32,
+    pub name: String,
+}
+
 #[derive(Default)]
 struct ParseCounts {
     categories: usize,
@@ -128,6 +151,46 @@ pub fn decode_ais_item(bytes: &[u8], expected_item: Uuid, expected_owner: Uuid) 
         return Err(DecodeError::InvalidResponse);
     }
     Ok(item)
+}
+
+pub fn decode_ais_edit_response(bytes: &[u8], expected_owner: Uuid) -> Result<AisEditResponse, DecodeError> {
+    let response = decode_llsd(bytes)?;
+    let fields = map(&response)?;
+    let has_category = fields.contains_key("category_id")
+        || fields.contains_key("folder_id")
+        || (fields.contains_key("uuid") && fields.contains_key("type_default"));
+    let has_item = fields.contains_key("item_id") || (fields.contains_key("uuid") && fields.contains_key("inv_type"));
+    if has_category && has_item {
+        return Err(DecodeError::InvalidResponse);
+    }
+    let category = has_category.then(|| parse_category(&response, expected_owner, None, 0, &mut ParseCounts::default())).transpose()?;
+    let item = has_item.then(|| parse_item(&response, expected_owner, None, false)).transpose()?;
+    Ok(AisEditResponse {
+        category,
+        item,
+        created_categories: metadata_ids(fields, "_created_categories", MAX_CATEGORIES)?,
+        created_items: metadata_ids(fields, "_created_items", MAX_ITEMS)?,
+        updated_categories: metadata_ids(fields, "_updated_categories", MAX_CATEGORIES)?,
+        updated_items: metadata_ids(fields, "_updated_items", MAX_ITEMS)?,
+        removed_items: metadata_ids(fields, "_removed_items", MAX_ITEMS)?,
+        categories_removed: metadata_ids(fields, "_categories_removed", MAX_CATEGORIES)?,
+        category_items_removed: metadata_ids(fields, "_category_items_removed", MAX_ITEMS)?,
+        broken_links_removed: metadata_ids(fields, "_broken_links_removed", MAX_ITEMS)?,
+        updated_category_versions: metadata_versions(fields, "_updated_category_versions")?,
+    })
+}
+
+pub fn decode_created_category_response(bytes: &[u8]) -> Result<CreatedCategoryResponse, DecodeError> {
+    let response = decode_llsd(bytes)?;
+    let fields = map(&response)?;
+    let id = uuid_field(fields, &["folder_id"])?.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
+    let parent_id = uuid_field(fields, &["parent_id"])?.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
+    let preferred_folder_type = integer(fields, &["type"])?.ok_or(DecodeError::InvalidResponse)?;
+    let name = string(fields, &["name"], "")?;
+    if name.len() > MAX_NAME_BYTES {
+        return Err(DecodeError::InvalidResponse);
+    }
+    Ok(CreatedCategoryResponse { id, parent_id, preferred_folder_type, name })
 }
 
 pub fn decode_fetch_inventory_descendents2(bytes: &[u8], requested: &[RequestedFolder]) -> Result<Vec<FolderDescendents>, DecodeError> {
@@ -352,6 +415,47 @@ fn array(value: Option<&Value>) -> Result<&[Value], DecodeError> {
         Some(Value::Array(values)) => Ok(values),
         _ => Err(DecodeError::InvalidResponse),
     }
+}
+
+fn metadata_ids(fields: &llsd::Map, name: &str, limit: usize) -> Result<Vec<Uuid>, DecodeError> {
+    let Some(value) = fields.get(name) else { return Ok(Vec::new()) };
+    let values = array(Some(value))?;
+    if values.len() > limit {
+        return Err(DecodeError::TooLarge);
+    }
+    let mut ids = Vec::with_capacity(values.len());
+    let mut unique = std::collections::HashSet::with_capacity(values.len());
+    for value in values {
+        let id = match value {
+            Value::Uuid(id) => *id,
+            Value::String(value) => Uuid::parse_str(value).map_err(|_| DecodeError::InvalidResponse)?,
+            _ => return Err(DecodeError::InvalidResponse),
+        };
+        if id.is_nil() || !unique.insert(id) {
+            return Err(DecodeError::InvalidResponse);
+        }
+        ids.push(id);
+    }
+    Ok(ids)
+}
+
+fn metadata_versions(fields: &llsd::Map, name: &str) -> Result<BTreeMap<Uuid, i32>, DecodeError> {
+    let Some(value) = fields.get(name) else { return Ok(BTreeMap::new()) };
+    let values = map(value)?;
+    if values.len() > MAX_CATEGORIES {
+        return Err(DecodeError::TooLarge);
+    }
+    values
+        .iter()
+        .map(|(id, version)| {
+            let id = Uuid::parse_str(id).map_err(|_| DecodeError::InvalidResponse)?;
+            if id.is_nil() {
+                return Err(DecodeError::InvalidResponse);
+            }
+            let version = version.as_integer().ok_or(DecodeError::InvalidResponse)?;
+            Ok((id, version))
+        })
+        .collect()
 }
 
 fn optional_array<'a>(fields: &'a llsd::Map, name: &str, descendent_count: u32) -> Result<&'a [Value], DecodeError> {
@@ -639,6 +743,34 @@ mod tests {
 
     fn encode(value: &Value) -> Vec<u8> {
         xml::to_vec(value).expect("LLSD fixture encodes")
+    }
+
+    #[test]
+    fn ais_edit_response_decodes_all_change_metadata() {
+        let ids = (1..=9).map(Uuid::from_u128).collect::<Vec<_>>();
+        let metadata = Value::Map(Map::from([
+            ("_created_categories".into(), Value::Array(vec![Value::Uuid(ids[0])])),
+            ("_created_items".into(), Value::Array(vec![Value::Uuid(ids[1])])),
+            ("_updated_items".into(), Value::Array(vec![Value::Uuid(ids[2])])),
+            ("_updated_categories".into(), Value::Array(vec![Value::Uuid(ids[3])])),
+            ("_removed_items".into(), Value::Array(vec![Value::Uuid(ids[4])])),
+            ("_categories_removed".into(), Value::Array(vec![Value::Uuid(ids[5])])),
+            ("_category_items_removed".into(), Value::Array(vec![Value::Uuid(ids[6])])),
+            ("_broken_links_removed".into(), Value::Array(vec![Value::Uuid(ids[7])])),
+            ("_updated_category_versions".into(), Value::Map(Map::from([(ids[8].to_string(), Value::Integer(12))]))),
+        ]));
+
+        let response = decode_ais_edit_response(&encode(&metadata), Uuid::from_u128(99)).expect("valid AIS metadata");
+
+        assert_eq!(response.created_categories, vec![ids[0]]);
+        assert_eq!(response.created_items, vec![ids[1]]);
+        assert_eq!(response.updated_items, vec![ids[2]]);
+        assert_eq!(response.updated_categories, vec![ids[3]]);
+        assert_eq!(response.removed_items, vec![ids[4]]);
+        assert_eq!(response.categories_removed, vec![ids[5]]);
+        assert_eq!(response.category_items_removed, vec![ids[6]]);
+        assert_eq!(response.broken_links_removed, vec![ids[7]]);
+        assert_eq!(response.updated_category_versions, BTreeMap::from([(ids[8], 12)]));
     }
 
     #[test]

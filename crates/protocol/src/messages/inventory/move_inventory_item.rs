@@ -27,7 +27,7 @@ pub struct MoveInventoryItem {
 impl TypedMessage for MoveInventoryItem {
     const ID: MessageId = MOVE_INVENTORY_ITEM;
     const ALLOCATION: AllocationStrategy = AllocationStrategy::SchemaDerived;
-    const INBOUND_ONLY: bool = true;
+    const INBOUND_ONLY: bool = false;
 
     fn decode(reader: &mut Reader<'_>) -> Result<Self, LLUdpError> {
         let agent_id = reader.uuid()?;

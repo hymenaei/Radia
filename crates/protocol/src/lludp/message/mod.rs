@@ -189,6 +189,7 @@ messages! {
     SaveAssetIntoInventory(crate::messages::SaveAssetIntoInventory),
     BulkUpdateInventory(crate::messages::BulkUpdateInventory),
     MoveInventoryItem(crate::messages::MoveInventoryItem),
+    MoveInventoryFolder(crate::messages::MoveInventoryFolder),
     ParcelProperties(crate::messages::ParcelProperties),
     GenericMessage(crate::messages::GenericMessage),
     LayerData(crate::messages::LayerData),

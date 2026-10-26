@@ -1,5 +1,6 @@
 mod blocks;
 mod bulk_update_inventory;
+mod move_inventory_folder;
 mod move_inventory_item;
 mod remove_inventory_folder;
 mod remove_inventory_item;
@@ -7,8 +8,9 @@ mod remove_inventory_objects;
 mod save_asset_into_inventory;
 mod update_create_inventory_item;
 
-pub use self::blocks::{InventoryFolderBlock, InventoryItemBlock, MoveInventoryItemBlock};
+pub use self::blocks::{InventoryFolderBlock, InventoryItemBlock, MoveInventoryFolderBlock, MoveInventoryItemBlock};
 pub use self::bulk_update_inventory::BulkUpdateInventory;
+pub use self::move_inventory_folder::MoveInventoryFolder;
 pub use self::move_inventory_item::MoveInventoryItem;
 pub use self::remove_inventory_folder::RemoveInventoryFolder;
 pub use self::remove_inventory_item::RemoveInventoryItem;

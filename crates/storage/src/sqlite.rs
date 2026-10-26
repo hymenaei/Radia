@@ -581,8 +581,8 @@ fn worker_loop(path: &Path, migrate: Arc<Migration>, queue: &WorkQueue, failed_w
             } else if write && result.is_err() {
                 failed_writes.store(true, Ordering::Relaxed);
             }
-            completion(result);
             queue.complete(bytes, rows, control);
+            completion(result);
         }
     }
     drop(database.connection.take());

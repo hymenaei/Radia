@@ -163,11 +163,13 @@ Start with the affected package when investigating a test gap. Workspace missing
 # Build the single benchmark target for these crates
 cargo bench -p network -p protocol --no-run
 cargo bench -p inventory@0.0.1 --no-run
+cargo bench -p viewer --no-run
 
 # Smoke run each crate's benchmarks
 cargo bench -p network -- --test
 cargo bench -p protocol -- --test
 cargo bench -p inventory@0.0.1 -- --test
+cargo bench -p viewer -- --test
 
 # Quick
 cargo bench -p <crate> -- <filter> --sample-size 30 --warm-up-time 1 --measurement-time 3 --noplot
@@ -177,6 +179,8 @@ cargo bench -p <crate> -- <filter> --sample-size 200 --warm-up-time 5 --measurem
 ```
 
 Each crate has one `main` benchmark target. Replace the package and Criterion filter as needed. The inventory package name is version-qualified because a dependency also uses `inventory`. For example, `cargo bench -p render -- reconcile` selects reconciliation benchmarks. The protocol receive benchmark is `cargo bench -p protocol -- receive_pipeline`. It reports packets per second for mixed packet framing, preflight, and decode. It does not include circuit deduplication or ack bookkeeping. The inventory benchmarks build 100,000 direct items, measure snapshot reads and one-item delta application, and print retained model memory plus delta allocation counts and peak bytes. `inventory/cache_warm_read_apply_100k` reports first and warm cache read/apply times and the database file size; compare it with `inventory/build_100k_items_and_snapshot` for the from-scratch path.
+
+The viewer benchmark `cargo bench -p viewer -- inventory_browser` measures search over 100,000 items and visible-row construction when expanding a folder with 10,000 children. It prints median and p99 latency for both operations in addition to Criterion's samples.
 
 - `cargo perf` runs workspace benchmarks with 200 samples, a 5-second warm-up, and a 15-second measurement. `cargo perf-quick` uses 30 samples, a 1-second warm-up, a 3-second measurement, and no plot. Use `cargo bench -p <crate> -- <filter> ...` for a focused run.
 - `cargo profile`: viewer profiling build with Tracy.

@@ -270,6 +270,40 @@ async fn get_and_post_return_llsd_values_for_consumer_conversion() {
 }
 
 #[tokio::test]
+async fn patch_and_delete_send_bounded_llsd_requests_and_preserve_gone_status() {
+    #[derive(Serialize)]
+    struct Rename {
+        name: &'static str,
+    }
+
+    let server = LocalServer::start(vec![
+        response(200, "OK", "application/llsd+xml", None, "<llsd><map/></llsd>"),
+        response(200, "OK", "application/llsd+xml", None, "<llsd><map/></llsd>"),
+        response(410, "Gone", "application/llsd+xml", None, "<llsd><map/></llsd>"),
+    ]);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let url = CapabilityUrl::parse(server.url("/inventory").as_str()).expect("valid capability URL");
+
+    let patched = client.patch_bytes_with_response_limit(&url, &Rename { name: "renamed" }, 1024).await.expect("PATCH response body");
+    assert_eq!(patched, b"<llsd><map/></llsd>");
+    let deleted = client.delete_bytes_with_response_limit(&url, 1024).await.expect("DELETE response body");
+    assert_eq!(deleted, b"<llsd><map/></llsd>");
+    std::assert_matches!(
+        client.delete_bytes_with_response_limit(&url, 1024).await,
+        Err(CapabilityHttp(error)) if error.status == Some(StatusCode::GONE)
+    );
+
+    let requests = server.finish();
+    let patch = str::from_utf8(&requests[0]).expect("PATCH request is UTF-8");
+    assert!(patch.starts_with("PATCH /inventory HTTP/1.1"));
+    let (_, body) = patch.split_once("\r\n\r\n").expect("PATCH has a body");
+    let payload: Value = xml::from_str(body).expect("PATCH body is valid LLSD XML");
+    assert_eq!(payload.as_map().and_then(|map| map.get("name")), Some(&Value::String("renamed".into())));
+    assert!(str::from_utf8(&requests[1]).expect("DELETE request is UTF-8").starts_with("DELETE /inventory HTTP/1.1"));
+    assert!(str::from_utf8(&requests[2]).expect("DELETE request is UTF-8").starts_with("DELETE /inventory HTTP/1.1"));
+}
+
+#[tokio::test]
 async fn raw_body_limits_apply_to_declared_and_unknown_lengths() {
     let server = LocalServer::start(vec![
         response(200, "OK", "application/octet-stream", None, "12345"),

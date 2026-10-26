@@ -139,6 +139,28 @@ pub(super) async fn post_capability(
     Ok(response)
 }
 
+pub(super) async fn patch_capability(
+    client: &http::Client,
+    url: &Url,
+    body: Vec<u8>,
+    max_response_bytes: usize,
+) -> Result<Response, http::Error> {
+    let response =
+        client.patch("capability_patch", url, "application/llsd+xml", Some("application/llsd+xml"), body, max_response_bytes).await?;
+    if !response.status.is_success() {
+        return Err(http::Error::http_status(response.status, response.elapsed, response.retry_after(), "Capability request failed"));
+    }
+    Ok(response)
+}
+
+pub(super) async fn delete_capability(client: &http::Client, url: &Url, max_response_bytes: usize) -> Result<Response, http::Error> {
+    let response = client.delete("capability_delete", url, Some("application/llsd+xml"), max_response_bytes).await?;
+    if !response.status.is_success() {
+        return Err(http::Error::http_status(response.status, response.elapsed, response.retry_after(), "Capability request failed"));
+    }
+    Ok(response)
+}
+
 pub(super) async fn get_capability_bytes(
     client: &http::Client,
     url: &Url,

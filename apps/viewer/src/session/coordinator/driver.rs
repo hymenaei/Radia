@@ -19,6 +19,7 @@ use super::{
     events::{SimulatorScope, WorldHandoff, handle_simulator_message, order_evidence, route_recovery_targets},
     input::{Input, select_drain_input},
     inventory_bootstrap::build_inventory,
+    inventory_intake::{self, InventoryIntakeError, InventoryIntakeOutcome},
     media::ObjectMediaIntake,
     presentation::{AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, SessionReadyUpdate, ViewerUpdate},
 };
@@ -74,6 +75,7 @@ struct SessionDriver {
     active_login_data: Option<ResponseData>,
     inventory: Option<Inventory>,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
+    rejected_inventory_blocks: u64,
     camera: CameraUplink,
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
@@ -130,6 +132,7 @@ impl SessionDriver {
             active_login_data: None,
             inventory: None,
             inventory_changes,
+            rejected_inventory_blocks: 0,
             camera,
             region_lookup: None,
             media,
@@ -314,6 +317,7 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             SimulatorMessage { simulator_id, sequence, packet_order, source, message } => {
+                self.handle_inventory_udp(&message);
                 self.handle_simulator_message(simulator_id, sequence, packet_order, source, message).await;
                 ControlFlow::Continue(())
             }
@@ -346,10 +350,14 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             CapabilityEvent { simulator_id, message, body, .. } => {
+                self.handle_inventory_event_queue(&message, &body);
                 self.environments.capability(&mut self.session_world, simulator_id, &message, &body, self.primary_simulator);
                 ControlFlow::Continue(())
             }
             CapabilityEventBatch { simulator_id, events, .. } => {
+                for event in &events {
+                    self.handle_inventory_event_queue(&event.message, &event.body);
+                }
                 self.environments.capability_batch(
                     &mut self.session_world,
                     simulator_id,
@@ -495,6 +503,49 @@ impl SessionDriver {
             region_name,
             &self.mailbox,
         );
+    }
+
+    fn handle_inventory_udp(&mut self, message: &Message) {
+        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
+        let Some(inventory) = self.inventory.as_mut() else { return };
+        let result = inventory_intake::apply_udp(inventory, agent_id, message);
+        self.apply_inventory_intake_result(result);
+    }
+
+    fn handle_inventory_event_queue(&mut self, name: &str, body: &llsd::Value) {
+        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
+        let Some(inventory) = self.inventory.as_mut() else { return };
+        let result = inventory_intake::apply_event_queue(inventory, agent_id, name, body);
+        self.apply_inventory_intake_result(result);
+    }
+
+    fn apply_inventory_intake_result(&mut self, result: Result<Option<InventoryIntakeOutcome>, InventoryIntakeError>) {
+        match result {
+            Ok(Some(outcome)) => {
+                self.note_rejected_inventory_blocks(outcome.rejected_blocks);
+                if !outcome.changes.is_empty()
+                    && let Some(inventory) = &self.inventory
+                {
+                    self.inventory_changes.send_replace(Some(inventory.snapshot()));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => self.note_rejected_inventory_blocks_with_error(error),
+        }
+    }
+
+    fn note_rejected_inventory_blocks(&mut self, count: usize) {
+        self.rejected_inventory_blocks = self.rejected_inventory_blocks.saturating_add(count as u64);
+        if count > 0 && self.rejected_inventory_blocks / 64 != (self.rejected_inventory_blocks - count as u64) / 64 {
+            tracing::warn!(rejected_blocks = self.rejected_inventory_blocks, "inventory updates contain rejected blocks");
+        }
+    }
+
+    fn note_rejected_inventory_blocks_with_error(&mut self, error: InventoryIntakeError) {
+        self.rejected_inventory_blocks = self.rejected_inventory_blocks.saturating_add(1);
+        if self.rejected_inventory_blocks.is_multiple_of(64) {
+            tracing::warn!(rejected_blocks = self.rejected_inventory_blocks, %error, "inventory updates were rejected");
+        }
     }
 
     fn on_primary_changed(

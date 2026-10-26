@@ -2,6 +2,7 @@ mod driver;
 mod events;
 mod input;
 mod inventory_bootstrap;
+mod inventory_cache;
 mod inventory_intake;
 mod media;
 mod persistence;

@@ -1,11 +1,18 @@
-use std::{hint::black_box, mem::size_of, sync::Arc};
+use std::{
+    hint::black_box,
+    mem::size_of,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use ::inventory as inventory_model;
 use criterion::{BatchSize, Criterion};
+use futures::executor::block_on;
 use inventory_model::{
-    AssetType, Category, CategoryKey, Inventory, InventoryChild, InventoryDelta, InventoryLimits, InventoryOwner, InventoryType, Item,
-    ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
+    AssetType, Category, CategoryKey, Inventory, InventoryCache, InventoryChild, InventoryDelta, InventoryLimits, InventoryOwner,
+    InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
 };
+use tempfile::tempdir;
 use test_support::allocation;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
@@ -16,6 +23,7 @@ const ROOT_ID: u128 = 1;
 
 pub(super) fn bench(criterion: &mut Criterion) {
     report_memory();
+    bench_cache(criterion);
     criterion.bench_function("inventory/build_100k_items_and_snapshot", |bench| {
         bench.iter_batched(
             item_children,
@@ -47,6 +55,88 @@ pub(super) fn bench(criterion: &mut Criterion) {
         );
     });
     report_delta_allocations();
+}
+
+fn bench_cache(criterion: &mut Criterion) {
+    let directory = tempdir().expect("benchmark cache directory");
+    let path = populate_cache(directory.path());
+    report_cache_load_times(directory.path(), &path);
+    let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", owner().id(), None).expect("benchmark cache open");
+    criterion.bench_function("inventory/cache_warm_read_apply_100k", |bench| {
+        bench.iter(|| {
+            let mut inventory = cache_skeleton();
+            let skeleton = inventory.snapshot();
+            let load = block_on(cache.load(&inventory)).expect("benchmark cache read");
+            let applied = load.apply_to(&mut inventory, &skeleton, &std::collections::HashSet::new()).expect("benchmark cache apply");
+            black_box((inventory, applied));
+        });
+    });
+    block_on(cache.close()).expect("benchmark cache close");
+    black_box(path);
+}
+
+fn populate_cache(root: &std::path::Path) -> std::path::PathBuf {
+    let mut inventory = root_inventory();
+    let before = inventory.snapshot();
+    let changes = inventory
+        .apply_folder_fetch(inventory.roots().personal(), ServerVersion::from_raw(1), Some(ENTRY_COUNT as u32), item_children())
+        .expect("benchmark cache fixture should apply");
+    let after = inventory.snapshot();
+    let (cache, _) = InventoryCache::open_at_root(root, "agni", owner().id(), None).expect("benchmark cache create");
+    block_on(cache.submit_bootstrap(&before).expect("benchmark cache bootstrap").wait()).expect("benchmark bootstrap write");
+    block_on(cache.submit_changeset(&changes, &before, &after).expect("benchmark cache batch").wait()).expect("benchmark cache write");
+    let path = cache.path().to_path_buf();
+    block_on(cache.close()).expect("benchmark initial cache close");
+    path
+}
+
+fn report_cache_load_times(root: &std::path::Path, path: &std::path::Path) {
+    let (cache, _) = InventoryCache::open_at_root(root, "agni", owner().id(), None).expect("benchmark first cache open");
+    let mut cold_inventory = cache_skeleton();
+    let cold_skeleton = cold_inventory.snapshot();
+    let started = Instant::now();
+    let cold_load = block_on(cache.load(&cold_inventory)).expect("benchmark first cache read");
+    let cold_applied =
+        cold_load.apply_to(&mut cold_inventory, &cold_skeleton, &std::collections::HashSet::new()).expect("benchmark first cache apply");
+    let cold = started.elapsed();
+    block_on(cache.close()).expect("benchmark first cache close");
+
+    let (cache, _) = InventoryCache::open_at_root(root, "agni", owner().id(), None).expect("benchmark warm cache open");
+    let mut warm_times = Vec::new();
+    for _ in 0..5 {
+        let mut inventory = cache_skeleton();
+        let skeleton = inventory.snapshot();
+        let started = Instant::now();
+        let load = block_on(cache.load(&inventory)).expect("benchmark warm cache read");
+        let applied = load.apply_to(&mut inventory, &skeleton, &std::collections::HashSet::new()).expect("benchmark warm cache apply");
+        assert_eq!(applied, 1);
+        warm_times.push(started.elapsed());
+    }
+    warm_times.sort_unstable();
+    let warm = warm_times[warm_times.len() / 2];
+    block_on(cache.close()).expect("benchmark warm cache close");
+    eprintln!(
+        "inventory cache at {ENTRY_COUNT} items: file={} bytes, first read/apply={} ms ({cold_applied} folders), warm median read/apply={} ms",
+        std::fs::metadata(path).expect("benchmark database metadata").len(),
+        duration_millis(cold),
+        duration_millis(warm),
+    );
+}
+
+fn duration_millis(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
+fn cache_skeleton() -> Inventory {
+    let root = Category {
+        key: category_key(ROOT_ID),
+        parent: None,
+        preferred_folder_type: inventory_model::FolderType::RootInventory,
+        name: Arc::from("root"),
+        server_version: ServerVersion::from_raw(1),
+        server_descendent_count: Some(ENTRY_COUNT as u32),
+    };
+    Inventory::new(root, None, InventoryLimits::default()).expect("benchmark skeleton should be valid")
 }
 
 fn report_memory() {

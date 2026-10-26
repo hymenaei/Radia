@@ -55,6 +55,7 @@ pub(crate) struct InventoryState {
     pub(crate) preferred_category_by_type: HashMap<(InventoryOwner, FolderType), CategoryKey>,
 }
 
+#[derive(Clone)]
 pub struct Inventory {
     pub(crate) state: Arc<InventoryState>,
     pub(crate) limits: InventoryLimits,
@@ -120,6 +121,10 @@ impl Inventory {
 
     pub fn snapshot(&self) -> crate::InventorySnapshot {
         crate::InventorySnapshot { state: Arc::clone(&self.state) }
+    }
+
+    pub(crate) fn limits(&self) -> InventoryLimits {
+        self.limits
     }
 
     pub(crate) fn publish(

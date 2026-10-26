@@ -142,6 +142,110 @@ fn namespace_recovery_remaps_keys_and_sweeps_removed_namespaces() {
 }
 
 #[test]
+fn namespace_table_change_rewrites_before_new_journal_entries() {
+    const OLD_NAMESPACES: [Namespace; 3] =
+        [Namespace::new("kept/one", "bin"), Namespace::new("removed/items", "bin"), Namespace::new("kept/shared", "bin")];
+    const NEW_NAMESPACES: [Namespace; 3] =
+        [Namespace::new("added/items", "bin"), Namespace::new("kept/shared", "bin"), Namespace::new("kept/one", "bin")];
+    let directory = tempdir().expect("cache directory");
+    let old_table = NamespaceTable::new(&OLD_NAMESPACES).expect("old namespace table");
+    let one_name = [11; 16];
+    let removed_name = [22; 16];
+    let shared_name = [33; 16];
+    let one_path = old_table.path(directory.path(), Key::new(NamespaceId::new(0), one_name)).expect("old kept path");
+    let removed_path = old_table.path(directory.path(), Key::new(NamespaceId::new(1), removed_name)).expect("removed path");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &OLD_NAMESPACES).expect("open old namespaces");
+    cache.put(Key::new(NamespaceId::new(0), one_name), b"one before change".to_vec()).expect("store first kept entry");
+    cache.put(Key::new(NamespaceId::new(1), removed_name), b"removed entry".to_vec()).expect("store removed entry");
+    cache.arm_fault(WritePoint::JournalAppended);
+    let error = cache
+        .put(Key::new(NamespaceId::new(2), shared_name), b"shared before change".to_vec())
+        .expect_err("simulate crash after old-table journal append");
+    std::assert_matches!(error, StorageError::Io(error) if error.kind() == io::ErrorKind::Interrupted);
+    cache.simulate_crash().expect("stop after old-table journal append");
+
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NEW_NAMESPACES).expect("open changed namespace table");
+    std::assert_matches!(
+        cache.lookup(Key::new(NamespaceId::new(2), one_name)),
+        Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"one before change"
+    );
+    std::assert_matches!(
+        cache.lookup(Key::new(NamespaceId::new(1), shared_name)),
+        Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"shared before change"
+    );
+    let added_key = Key::new(NamespaceId::new(0), one_name);
+    cache.arm_fault(WritePoint::JournalAppended);
+    let error = cache.put(added_key, b"added after change".to_vec()).expect_err("simulate crash before compaction");
+    std::assert_matches!(error, StorageError::Io(error) if error.kind() == io::ErrorKind::Interrupted);
+    cache.simulate_crash().expect("stop after new-table journal append");
+
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NEW_NAMESPACES).expect("reopen changed namespace table");
+    std::assert_matches!(cache.lookup(added_key), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"added after change");
+    std::assert_matches!(
+        cache.lookup(Key::new(NamespaceId::new(2), one_name)),
+        Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"one before change"
+    );
+    std::assert_matches!(
+        cache.lookup(Key::new(NamespaceId::new(1), shared_name)),
+        Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"shared before change"
+    );
+    cache.flush().expect("sweep removed namespace file");
+    assert!(!removed_path.exists());
+    assert!(one_path.exists());
+    cache.shutdown().expect("close cache after namespace table change");
+}
+
+#[test]
+fn larger_namespace_table_replays_a_valid_smaller_journal() {
+    const OLD_NAMESPACES: [Namespace; 1] = [Namespace::new("kept/items", "bin")];
+    const NEW_NAMESPACES: [Namespace; 4] = [
+        Namespace::new("kept/items", "bin"),
+        Namespace::new("larger/namespace/table/one", "longextension"),
+        Namespace::new("larger/namespace/table/two", "longextension"),
+        Namespace::new("larger/namespace/table/three", "longextension"),
+    ];
+    let directory = tempdir().expect("cache directory");
+    let key = Key::new(NamespaceId::new(0), [44; 16]);
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &OLD_NAMESPACES).expect("open smaller namespace table");
+    cache.arm_fault(WritePoint::JournalAppended);
+    let error = cache.put(key, b"valid old journal record".to_vec()).expect_err("stop after journal append");
+    std::assert_matches!(error, StorageError::Io(error) if error.kind() == io::ErrorKind::Interrupted);
+    cache.simulate_crash().expect("stop before compaction");
+
+    let old_journal_bytes = fs::metadata(directory.path().join(JOURNAL_FILE)).expect("old journal metadata").len();
+    let new_table = NamespaceTable::new(&NEW_NAMESPACES).expect("larger namespace table");
+    let new_header_bytes = journal::journal_header_size(&new_table).expect("new journal header size");
+    assert!(old_journal_bytes < new_header_bytes);
+
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NEW_NAMESPACES).expect("open larger namespace table");
+    std::assert_matches!(cache.lookup(key), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"valid old journal record");
+    cache.shutdown().expect("close larger namespace cache");
+}
+
+#[test]
+fn failed_append_removes_published_files_for_new_keys() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    let new_key = key(45);
+    let path = data_file(directory.path(), new_key);
+    let initial_size = cache.accounted_size();
+    cache.arm_fault(WritePoint::JournalAppendStarted);
+    let error = cache.put(new_key, b"uncommitted payload".to_vec()).expect_err("fail before journal append");
+    std::assert_matches!(error, StorageError::Io(error) if error.kind() == io::ErrorKind::Interrupted);
+    assert!(!path.exists());
+    assert!(!path.parent().is_some_and(Path::exists));
+    assert_eq!(cache.entry_count(), 0);
+    assert_eq!(cache.accounted_size(), initial_size);
+    cache.simulate_crash().expect("stop failed writer");
+
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("reopen after failed append");
+    assert_eq!(cache.lookup(new_key), Lookup::Miss);
+    assert_eq!(cache.entry_count(), 0);
+    assert_eq!(cache.accounted_size(), initial_size);
+    cache.shutdown().expect("close cache after failed append");
+}
+
+#[test]
 fn replacement_writes_raw_bytes_at_one_path() {
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");

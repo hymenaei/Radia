@@ -11,18 +11,18 @@ use crate::cache::journal::{self, FormatError, Operation};
 
 type RecoveredEntries = HashMap<Key, Arc<Entry>>;
 
-pub(super) fn recover(root: &Path, namespaces: &NamespaceTable) -> Result<(RecoveredEntries, u64, u64, u64, bool), StorageError> {
+pub(super) fn recover(root: &Path, namespaces: &NamespaceTable) -> Result<(RecoveredEntries, u64, u64, u64, bool, bool), StorageError> {
     let snapshot_path = root.join(SNAPSHOT_FILE);
     let (snapshot, snapshot_bytes) = match read_bounded(&snapshot_path, journal::MAX_SNAPSHOT_BYTES) {
         Ok(Some(bytes)) => match journal::decode_snapshot(&bytes, namespaces) {
             Ok(snapshot) => (Some(snapshot), u64::try_from(bytes.len()).map_err(|_| StorageError::TooLarge)?),
             Err(FormatError::Allocation) => return Err(StorageError::Unavailable(UnavailableReason::Allocation)),
-            Err(FormatError::Invalid | FormatError::UnsupportedVersion | FormatError::TooLarge) => {
-                return Ok((HashMap::new(), 0, 0, 0, true));
+            Err(FormatError::Invalid | FormatError::UnsupportedVersion | FormatError::TruncatedHeader | FormatError::TooLarge) => {
+                return Ok((HashMap::new(), 0, 0, 0, true, false));
             }
         },
         Ok(None) => (None, 0),
-        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok((HashMap::new(), 0, 0, 0, true)),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok((HashMap::new(), 0, 0, 0, true, false)),
         Err(error) if error.kind() == io::ErrorKind::OutOfMemory => {
             return Err(StorageError::Unavailable(UnavailableReason::Allocation));
         }
@@ -32,53 +32,47 @@ pub(super) fn recover(root: &Path, namespaces: &NamespaceTable) -> Result<(Recov
     let journal_bytes = match read_bounded(&journal_path, journal::MAX_JOURNAL_BYTES) {
         Ok(Some(bytes)) => Some(bytes),
         Ok(None) => None,
-        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok((HashMap::new(), 0, 0, 0, true)),
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok((HashMap::new(), 0, 0, 0, true, false)),
         Err(error) if error.kind() == io::ErrorKind::OutOfMemory => {
             return Err(StorageError::Unavailable(UnavailableReason::Allocation));
         }
         Err(error) => return Err(StorageError::Io(error)),
     };
+    let mut namespace_table_changed = snapshot.as_ref().is_some_and(|snapshot| !snapshot.namespace_table_matches);
     let snapshot_sequence = snapshot.as_ref().map(|snapshot| snapshot.sequence).unwrap_or(0);
     let records = snapshot.map(|snapshot| snapshot.records).unwrap_or_default();
     let mut by_key = HashMap::new();
     by_key.try_reserve(records.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
     for record in records {
         if by_key.insert(record.key, Arc::new(Entry::from_record(record))).is_some() {
-            return Ok((HashMap::new(), 0, 0, 0, true));
+            return Ok((HashMap::new(), 0, 0, 0, true, false));
         }
     }
     let (sequence, journal_len) = match journal_bytes {
-        Some(bytes)
-            if bytes.len()
-                < usize::try_from(journal::journal_header_size(namespaces).ok_or(StorageError::TooLarge)?)
-                    .map_err(|_| StorageError::TooLarge)? =>
-        {
-            (snapshot_sequence, write_journal_header(root, namespaces)?)
-        }
-        Some(bytes) => {
-            match journal::decode_journal(&bytes, snapshot_sequence, namespaces, |_, operation| {
-                apply_operation::<{ journal::MAX_ENTRIES }>(&mut by_key, operation)
-            }) {
-                Ok(replay) => {
-                    let valid = replay.valid_bytes;
-                    if valid < bytes.len() {
-                        OpenOptions::new()
-                            .write(true)
-                            .open(&journal_path)?
-                            .set_len(u64::try_from(valid).map_err(|_| StorageError::TooLarge)?)?;
-                    }
-                    (replay.sequence, u64::try_from(valid).map_err(|_| StorageError::TooLarge)?)
+        Some(bytes) => match journal::decode_journal(&bytes, snapshot_sequence, namespaces, |_, operation| {
+            apply_operation::<{ journal::MAX_ENTRIES }>(&mut by_key, operation)
+        }) {
+            Ok(replay) => {
+                namespace_table_changed |= !replay.namespace_table_matches;
+                let valid = replay.valid_bytes;
+                if valid < bytes.len() {
+                    OpenOptions::new()
+                        .write(true)
+                        .open(&journal_path)?
+                        .set_len(u64::try_from(valid).map_err(|_| StorageError::TooLarge)?)?;
                 }
-                Err(FormatError::Allocation) => return Err(StorageError::Unavailable(UnavailableReason::Allocation)),
-                Err(FormatError::UnsupportedVersion | FormatError::Invalid | FormatError::TooLarge) => {
-                    return Ok((HashMap::new(), 0, 0, 0, true));
-                }
+                (replay.sequence, u64::try_from(valid).map_err(|_| StorageError::TooLarge)?)
             }
-        }
+            Err(FormatError::Allocation) => return Err(StorageError::Unavailable(UnavailableReason::Allocation)),
+            Err(FormatError::TruncatedHeader) => (snapshot_sequence, write_journal_header(root, namespaces)?),
+            Err(FormatError::UnsupportedVersion | FormatError::Invalid | FormatError::TooLarge) => {
+                return Ok((HashMap::new(), 0, 0, 0, true, false));
+            }
+        },
         None => (snapshot_sequence, 0),
     };
     drop_least_recent(&mut by_key, journal::MAX_ENTRIES);
-    Ok((by_key, sequence, snapshot_bytes, journal_len, false))
+    Ok((by_key, sequence, snapshot_bytes, journal_len, false, namespace_table_changed))
 }
 
 fn apply_operation<const ENTRY_LIMIT: usize>(by_key: &mut HashMap<Key, Arc<Entry>>, operation: Operation) -> Result<(), FormatError> {

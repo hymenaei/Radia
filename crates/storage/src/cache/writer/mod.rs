@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs::{self, File, OpenOptions, ReadDir},
     io::{self, Seek, SeekFrom, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock, atomic::Ordering, mpsc::SyncSender},
 };
 
@@ -20,7 +20,7 @@ use std::sync::{
 
 use super::{
     DIRECTORY_OVERHEAD, DirectoryId, ENTRY_INVALID, ENTRY_REPLACING, ENTRY_VALID, Entry, FILE_OVERHEAD, INDEX_OVERHEAD, JOURNAL_FILE, Key,
-    ReadState, StorageError, UnavailableReason, format_error,
+    NamespaceTable, ReadState, StorageError, UnavailableReason, format_error,
     journal::{self, Operation},
 };
 use crate::cache::eviction::Lru;
@@ -34,6 +34,25 @@ pub(in crate::cache) use queue::{Command, WriteQueue, writer_loop};
 const JOURNAL_COMPACT_MIN_BYTES: u64 = 1024 * 1024;
 const QUEUE_SWEEP_CHUNK: usize = 64;
 const MAX_SWEEP_DEPTH: usize = 32;
+
+pub(super) fn rewrite_namespace_table(
+    root: &Path,
+    entries: &HashMap<Key, Arc<Entry>>,
+    sequence: u64,
+    namespaces: &NamespaceTable,
+    hooks: &FaultHooks,
+) -> Result<(u64, u64), StorageError> {
+    let mut records = Vec::new();
+    records.try_reserve_exact(entries.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+    records.extend(entries.values().map(|entry| entry.record()));
+    records.sort_unstable_by_key(|record| record.key);
+    let snapshot = journal::encode_snapshot(sequence, &records, namespaces).map_err(format_error)?;
+    let snapshot_bytes = u64::try_from(snapshot.len()).map_err(|_| StorageError::TooLarge)?;
+    write_snapshot_atomic(root, &snapshot, hooks, || {})?;
+    reset_journal_atomic(root, namespaces, hooks, || {})?;
+    let journal_bytes = journal::journal_header_size(namespaces).ok_or(StorageError::TooLarge)?;
+    Ok((snapshot_bytes, journal_bytes))
+}
 
 #[repr(usize)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -485,6 +504,7 @@ impl WorkerState {
         let mut renamed = HashSet::new();
         renamed.try_reserve(staged.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
         let replacing = self.begin_replacements(&changes)?;
+        let mut journal_appended = false;
         let publish_result = (|| {
             for data in staged {
                 let destination = self.read_state.namespaces.path(&self.root, data.entry.key).ok_or(StorageError::UnknownNamespace)?;
@@ -492,10 +512,12 @@ impl WorkerState {
                 renamed.insert(data.entry.key);
                 self.hooks.check(WritePoint::DataRenamed).map_err(StorageError::Io)?;
             }
-            self.append(&plan.encoded)
+            self.append(&plan.encoded)?;
+            journal_appended = true;
+            self.check_journal_appended()
         })();
         if let Err(error) = publish_result {
-            self.finish_failed_replacements(replacing, &renamed);
+            self.finish_failed_replacements(replacing, &renamed, &changes, journal_appended);
             return Err(error);
         }
         self.commit_plan(plan, changes);
@@ -551,7 +573,13 @@ impl WorkerState {
         Ok(replacing)
     }
 
-    fn finish_failed_replacements(&self, replacing: Vec<Arc<Entry>>, renamed: &HashSet<Key>) {
+    fn finish_failed_replacements(
+        &self,
+        replacing: Vec<Arc<Entry>>,
+        renamed: &HashSet<Key>,
+        changes: &[PlannedChange],
+        journal_appended: bool,
+    ) {
         let mut invalid = lock(&self.read_state.invalid);
         for entry in replacing {
             if renamed.contains(&entry.key) {
@@ -559,6 +587,14 @@ impl WorkerState {
                 invalid.insert(entry.key, entry);
             } else {
                 entry.state.store(ENTRY_VALID, Ordering::Release);
+            }
+        }
+        drop(invalid);
+        if !journal_appended {
+            for change in changes {
+                if change.previous.is_none() && change.next.is_some() && renamed.contains(&change.key) {
+                    delete_data(&self.root, &self.read_state.namespaces, &change.key);
+                }
             }
         }
     }
@@ -590,10 +626,21 @@ impl WorkerState {
             file.seek(SeekFrom::End(0))?;
             return Err(StorageError::Io(error));
         }
-        self.hooks.check(WritePoint::JournalAppended).map_err(StorageError::Io)?;
         self.journal_bytes =
             start.checked_add(u64::try_from(encoded.len()).map_err(|_| StorageError::TooLarge)?).ok_or(StorageError::TooLarge)?;
         Ok(())
+    }
+
+    fn check_journal_appended(&self) -> Result<(), StorageError> {
+        self.hooks.check(WritePoint::JournalAppended).map_err(StorageError::Io)
+    }
+
+    fn append_and_check(&mut self, encoded: &[u8]) -> Result<(), StorageError> {
+        if encoded.is_empty() {
+            return Ok(());
+        }
+        self.append(encoded)?;
+        self.check_journal_appended()
     }
 
     fn commit_plan(&mut self, plan: &mut Plan, changes: Vec<PlannedChange>) {
@@ -649,7 +696,7 @@ impl WorkerState {
         let mut encoded = Vec::new();
         let mut sequence = self.sequence;
         append_operation(&mut sequence, Operation::Remove(key), &mut encoded)?;
-        self.append(&encoded)?;
+        self.append_and_check(&encoded)?;
         self.sequence = sequence;
         self.remove_published(&key, &entry);
         self.maybe_compact()?;
@@ -664,7 +711,7 @@ impl WorkerState {
         let mut encoded = Vec::new();
         let mut sequence = self.sequence;
         append_operation(&mut sequence, Operation::Remove(key), &mut encoded)?;
-        self.append(&encoded)?;
+        self.append_and_check(&encoded)?;
         self.sequence = sequence;
         self.remove_published(&key, &target);
         self.maybe_compact()?;
@@ -718,7 +765,7 @@ impl WorkerState {
         let mut encoded = Vec::new();
         let mut sequence = self.sequence;
         append_operation(&mut sequence, Operation::Clear, &mut encoded)?;
-        self.append(&encoded)?;
+        self.append_and_check(&encoded)?;
         self.sequence = sequence;
         let old = {
             let mut entries = write_map(&self.read_state.entries);
@@ -790,7 +837,7 @@ impl WorkerState {
         drop(base_order);
         drop(entries);
         if !encoded.is_empty() {
-            self.append(&encoded)?;
+            self.append_and_check(&encoded)?;
             self.sequence = sequence;
             for (key, _) in changes {
                 let Some(old) = prior.get(&key).and_then(Option::as_ref) else {

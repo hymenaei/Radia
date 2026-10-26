@@ -36,6 +36,7 @@ pub(super) enum Operation {
 pub(super) enum FormatError {
     Invalid,
     UnsupportedVersion,
+    TruncatedHeader,
     TooLarge,
     Allocation,
 }
@@ -43,11 +44,13 @@ pub(super) enum FormatError {
 pub(super) struct Snapshot {
     pub sequence: u64,
     pub records: Vec<Record>,
+    pub namespace_table_matches: bool,
 }
 
 pub(super) struct Replay {
     pub valid_bytes: usize,
     pub sequence: u64,
+    pub namespace_table_matches: bool,
 }
 
 pub(super) fn snapshot_header_size(namespaces: &NamespaceTable) -> Option<u64> {
@@ -122,7 +125,8 @@ pub(super) fn decode_snapshot(bytes: &[u8], namespaces: &NamespaceTable) -> Resu
     if count > MAX_ENTRIES {
         return Err(FormatError::TooLarge);
     }
-    let namespace_map = read_namespace_map(&mut input, namespaces)?;
+    let (namespace_map, namespace_table_matches) = read_namespace_map(&mut input, namespaces)
+        .map_err(|error| if error == FormatError::TruncatedHeader { FormatError::Invalid } else { error })?;
     let mut records = Vec::new();
     records.try_reserve_exact(count).map_err(|_| FormatError::Allocation)?;
     let mut keys = std::collections::HashSet::new();
@@ -149,7 +153,7 @@ pub(super) fn decode_snapshot(bytes: &[u8], namespaces: &NamespaceTable) -> Resu
     if input.position() != u64::try_from(content.len()).map_err(|_| FormatError::TooLarge)? {
         return Err(FormatError::Invalid);
     }
-    Ok(Snapshot { sequence, records })
+    Ok(Snapshot { sequence, records, namespace_table_matches })
 }
 
 pub(super) fn encode_journal_header(output: &mut Vec<u8>, namespaces: &NamespaceTable) -> Result<(), FormatError> {
@@ -171,14 +175,14 @@ pub(super) fn decode_journal(
     }
     let mut input = Cursor::new(bytes);
     let mut magic = [0; 8];
-    input.read_exact(&mut magic).map_err(|_| FormatError::Invalid)?;
+    input.read_exact(&mut magic).map_err(map_truncated_header)?;
     if &magic != JOURNAL_MAGIC {
         return Err(FormatError::Invalid);
     }
-    if read_u32(&mut input).map_err(|_| FormatError::Invalid)? != VERSION {
+    if read_u32(&mut input).map_err(map_truncated_header)? != VERSION {
         return Err(FormatError::UnsupportedVersion);
     }
-    let namespace_map = read_namespace_map(&mut input, namespaces)?;
+    let (namespace_map, namespace_table_matches) = read_namespace_map(&mut input, namespaces)?;
     let mut sequence = snapshot_sequence;
     let mut valid_bytes = usize::try_from(input.position()).map_err(|_| FormatError::TooLarge)?;
     loop {
@@ -230,7 +234,7 @@ pub(super) fn decode_journal(
         valid_bytes = record_end;
         input.set_position(u64::try_from(record_end).map_err(|_| FormatError::TooLarge)?);
     }
-    Ok(Replay { valid_bytes, sequence })
+    Ok(Replay { valid_bytes, sequence, namespace_table_matches })
 }
 
 pub(super) fn encode_operation(sequence: u64, operation: &Operation) -> Result<Vec<u8>, FormatError> {
@@ -292,36 +296,43 @@ fn write_namespace_table(output: &mut Vec<u8>, namespaces: &NamespaceTable) -> i
     Ok(())
 }
 
-fn read_namespace_map(input: &mut Cursor<&[u8]>, current: &NamespaceTable) -> Result<Vec<Option<NamespaceId>>, FormatError> {
-    let count = usize::from(read_u16(input).map_err(|_| FormatError::Invalid)?);
+fn read_namespace_map(input: &mut Cursor<&[u8]>, current: &NamespaceTable) -> Result<(Vec<Option<NamespaceId>>, bool), FormatError> {
+    let count = usize::from(read_u16(input).map_err(map_truncated_header)?);
     if count > usize::from(u8::MAX) + 1 {
         return Err(FormatError::Invalid);
     }
     let mut mapping = Vec::new();
     mapping.try_reserve_exact(count).map_err(|_| FormatError::Allocation)?;
-    for _ in 0..count {
-        let directory_len = usize::from(read_u8(input).map_err(|_| FormatError::Invalid)?);
+    let mut matches_current = count == current.len();
+    for old_index in 0..count {
+        let directory_len = usize::from(read_u8(input).map_err(map_truncated_header)?);
         if directory_len == 0 || directory_len > MAX_NAMESPACE_BYTES {
             return Err(FormatError::Invalid);
         }
         let mut directory = [0; MAX_NAMESPACE_BYTES];
-        input.read_exact(directory.get_mut(..directory_len).ok_or(FormatError::Invalid)?).map_err(|_| FormatError::Invalid)?;
+        input.read_exact(directory.get_mut(..directory_len).ok_or(FormatError::Invalid)?).map_err(map_truncated_header)?;
         let directory =
             std::str::from_utf8(directory.get(..directory_len).ok_or(FormatError::Invalid)?).map_err(|_| FormatError::Invalid)?;
         if !super::valid_namespace(directory) {
             return Err(FormatError::Invalid);
         }
-        let extension_len = usize::from(read_u8(input).map_err(|_| FormatError::Invalid)?);
+        let extension_len = usize::from(read_u8(input).map_err(map_truncated_header)?);
         if extension_len == 0 || extension_len > MAX_EXTENSION_BYTES {
             return Err(FormatError::Invalid);
         }
         let mut extension = [0; MAX_EXTENSION_BYTES];
-        input.read_exact(extension.get_mut(..extension_len).ok_or(FormatError::Invalid)?).map_err(|_| FormatError::Invalid)?;
+        input.read_exact(extension.get_mut(..extension_len).ok_or(FormatError::Invalid)?).map_err(map_truncated_header)?;
         let extension =
             std::str::from_utf8(extension.get(..extension_len).ok_or(FormatError::Invalid)?).map_err(|_| FormatError::Invalid)?;
         if !super::valid_extension(extension) {
             return Err(FormatError::Invalid);
         }
+        let ordered_match = u8::try_from(old_index)
+            .ok()
+            .map(NamespaceId::new)
+            .and_then(|id| current.config(id))
+            .is_some_and(|config| config.directory == directory && config.extension == extension);
+        matches_current &= ordered_match;
         let found = (0..current.len()).find_map(|index| {
             let id = u8::try_from(index).ok().map(NamespaceId::new)?;
             let config = current.config(id)?;
@@ -329,7 +340,11 @@ fn read_namespace_map(input: &mut Cursor<&[u8]>, current: &NamespaceTable) -> Re
         });
         mapping.push(found);
     }
-    Ok(mapping)
+    Ok((mapping, matches_current))
+}
+
+fn map_truncated_header(error: io::Error) -> FormatError {
+    if error.kind() == io::ErrorKind::UnexpectedEof { FormatError::TruncatedHeader } else { FormatError::Invalid }
 }
 
 fn write_key(output: &mut Vec<u8>, key: Key) -> io::Result<()> {

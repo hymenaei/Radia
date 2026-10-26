@@ -646,9 +646,11 @@ impl Cache {
             Err(std::fs::TryLockError::WouldBlock) => return Err(StorageError::InUse),
             Err(std::fs::TryLockError::Error(error)) => return Err(StorageError::Io(error)),
         }
-        let (records, sequence, snapshot_bytes, journal_bytes, reset) = recover(&root, &namespaces)?;
+        let (records, sequence, mut snapshot_bytes, mut journal_bytes, reset, namespace_table_changed) = recover(&root, &namespaces)?;
         if reset {
             discard_index_files(&root)?;
+        } else if namespace_table_changed {
+            (snapshot_bytes, journal_bytes) = writer::rewrite_namespace_table(&root, &records, sequence, &namespaces, hooks.as_ref())?;
         }
         let entries = records;
         let max_tick = entries.values().map(|entry| entry.last_use.load(Ordering::Relaxed)).max().unwrap_or(0);
@@ -784,7 +786,7 @@ fn format_error(error: FormatError) -> StorageError {
     match error {
         FormatError::TooLarge => StorageError::TooLarge,
         FormatError::Allocation => StorageError::Unavailable(UnavailableReason::Allocation),
-        FormatError::Invalid | FormatError::UnsupportedVersion => {
+        FormatError::Invalid | FormatError::UnsupportedVersion | FormatError::TruncatedHeader => {
             StorageError::Io(io::Error::new(io::ErrorKind::InvalidData, "cache index encoding failed"))
         }
     }

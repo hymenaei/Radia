@@ -149,9 +149,9 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::cache::journal::Record;
+    use crate::cache::{Namespace, NamespaceId, journal::Record};
 
-    const TEST_NAMESPACES: [super::super::Namespace; 1] = [super::super::Namespace::new("tests/recovery", "bin")];
+    const TEST_NAMESPACES: [Namespace; 1] = [Namespace::new("tests/recovery", "bin")];
 
     fn namespaces() -> NamespaceTable {
         NamespaceTable::new(&TEST_NAMESPACES).expect("valid namespace table")
@@ -160,7 +160,7 @@ mod tests {
     fn record(value: u16) -> Record {
         let mut name = [0; 16];
         name[..2].copy_from_slice(&value.to_le_bytes());
-        Record { key: Key::new(super::super::NamespaceId::new(0), name), size: 1, hash: [0; 32], last_use: 0, use_count: 0 }
+        Record { key: Key::new(NamespaceId::new(0), name), size: 1, hash: [0; 32], last_use: 0, use_count: 0 }
     }
 
     #[test]

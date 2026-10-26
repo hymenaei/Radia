@@ -480,7 +480,7 @@ mod tests {
             WindowApp { shared: Arc::new(SharedWindowState::default()), events, active: None, retired: Vec::new(), generation: 1 };
         app.events.try_send(ViewportEvent::Ready(1)).unwrap();
         app.request_inventory(1);
-        assert!(matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1))));
+        std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1)));
         app.request_inventory(1);
         std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Inventory(1)), "a rejected request must not suppress a later request");
         app.request_inventory(1);

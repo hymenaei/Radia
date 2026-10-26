@@ -65,6 +65,7 @@ impl Error for ViewportError {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum ViewportEvent {
     Ready(u64),
     Chat(u64),
@@ -465,7 +466,7 @@ mod tests {
             WindowApp { shared: Arc::new(SharedWindowState::default()), events, active: None, retired: Vec::new(), generation: 1 };
         app.events.try_send(ViewportEvent::Ready(1)).unwrap();
         app.request_chat(1);
-        assert!(matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1))));
+        std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1)));
         app.request_chat(1);
         assert!(matches!(incoming.try_recv(), Ok(ViewportEvent::Chat(1))), "a rejected request must not suppress a later request");
         app.request_chat(1);
@@ -481,7 +482,7 @@ mod tests {
         app.request_inventory(1);
         assert!(matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1))));
         app.request_inventory(1);
-        assert!(matches!(incoming.try_recv(), Ok(ViewportEvent::Inventory(1))), "a rejected request must not suppress a later request");
+        std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Inventory(1)), "a rejected request must not suppress a later request");
         app.request_inventory(1);
         assert!(incoming.try_recv().is_err(), "an accepted request must coalesce until received");
     }

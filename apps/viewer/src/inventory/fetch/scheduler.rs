@@ -25,7 +25,7 @@ use super::{
     legacy,
 };
 
-const REQUEST_CAPACITY: usize = 64;
+const REQUEST_CAPACITY: usize = 1024;
 const RESULT_CAPACITY: usize = 2;
 const BACKGROUND_CONCURRENCY: usize = 2;
 const RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
@@ -59,15 +59,29 @@ impl fmt::Display for InventoryFetchRequestError {
 
 impl Error for InventoryFetchRequestError {}
 
+#[derive(Clone, Copy, Debug)]
+enum FetchRequest {
+    Load(CategoryKey),
+    Refetch(CategoryKey),
+}
+
 #[derive(Clone)]
 pub struct InventoryFetchHandle {
-    requests: mpsc::Sender<CategoryKey>,
+    requests: mpsc::Sender<FetchRequest>,
     status: watch::Receiver<InventoryLoadingStatus>,
 }
 
 impl InventoryFetchHandle {
     pub fn request_folder(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
-        self.requests.try_send(folder).map_err(|error| match error {
+        self.send_request(FetchRequest::Load(folder))
+    }
+
+    pub(crate) fn refetch_folder(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
+        self.send_request(FetchRequest::Refetch(folder))
+    }
+
+    fn send_request(&self, request: FetchRequest) -> Result<(), InventoryFetchRequestError> {
+        self.requests.try_send(request).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => InventoryFetchRequestError::QueueFull,
             mpsc::error::TrySendError::Closed(_) => InventoryFetchRequestError::SessionEnded,
         })
@@ -80,7 +94,7 @@ impl InventoryFetchHandle {
 
 pub(crate) struct InventoryFetchController {
     handle: InventoryFetchHandle,
-    requests: Option<mpsc::Receiver<CategoryKey>>,
+    requests: Option<mpsc::Receiver<FetchRequest>>,
     events_tx: mpsc::Sender<InventoryFetchEvent>,
     events_rx: mpsc::Receiver<InventoryFetchEvent>,
     status_tx: watch::Sender<InventoryLoadingStatus>,
@@ -178,7 +192,7 @@ struct JobCompletion {
 async fn run_scheduler(
     client: Client,
     snapshot: InventorySnapshot,
-    mut requests: mpsc::Receiver<CategoryKey>,
+    mut requests: mpsc::Receiver<FetchRequest>,
     events: mpsc::Sender<InventoryFetchEvent>,
     cancellation: Cancellation,
     mut stop: oneshot::Receiver<()>,
@@ -235,10 +249,8 @@ async fn run_scheduler(
     let mut background_done = false;
 
     loop {
-        while let Ok(folder) = requests.try_recv() {
-            if foreground_queued.insert(folder) {
-                foreground.push_back(folder);
-            }
+        while let Ok(request) = requests.try_recv() {
+            queue_foreground_request(request, &mut tree, &mut foreground, &mut foreground_queued);
         }
         if requests.is_closed() {
             requests_open = false;
@@ -293,8 +305,7 @@ async fn run_scheduler(
                     _ = &mut stop => return,
                     request = requests.recv(), if requests_open => {
                         match request {
-                            Some(request) if foreground_queued.insert(request) => foreground.push_back(request),
-                            Some(_) => {}
+                            Some(request) => queue_foreground_request(request, &mut tree, &mut foreground, &mut foreground_queued),
                             None => requests_open = false,
                         }
                     }
@@ -379,8 +390,7 @@ async fn run_scheduler(
             _ = &mut stop => return,
             request = requests.recv(), if requests_open => {
                 match request {
-                    Some(folder) if foreground_queued.insert(folder) => foreground.push_back(folder),
-                    Some(_) => {}
+                    Some(request) => queue_foreground_request(request, &mut tree, &mut foreground, &mut foreground_queued),
                     None => requests_open = false,
                 }
             }
@@ -405,6 +415,24 @@ async fn run_scheduler(
                 }
             }
         }
+    }
+}
+
+fn queue_foreground_request(
+    request: FetchRequest,
+    tree: &mut TreeKnowledge,
+    foreground: &mut VecDeque<CategoryKey>,
+    foreground_queued: &mut HashSet<CategoryKey>,
+) {
+    let folder = match request {
+        FetchRequest::Load(folder) => folder,
+        FetchRequest::Refetch(folder) => {
+            tree.record(folder, false);
+            folder
+        }
+    };
+    if foreground_queued.insert(folder) {
+        foreground.push_back(folder);
     }
 }
 

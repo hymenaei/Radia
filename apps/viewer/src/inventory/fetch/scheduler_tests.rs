@@ -28,11 +28,14 @@ use utils::FolderId;
 use uuid::Uuid;
 
 use super::super::{FolderApplyOutcome, FolderFetch, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais};
-use super::{BACKGROUND_CONCURRENCY, MAX_AIS_DEPTH, REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, run_scheduler};
+use super::{
+    BACKGROUND_CONCURRENCY, FetchRequest, InventoryFetchHandle, InventoryLoadingStatus, MAX_AIS_DEPTH, REQUEST_CAPACITY, RESULT_CAPACITY,
+    fetch_ais, run_scheduler,
+};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(45);
 type SchedulerTask =
-    (mpsc::Sender<CategoryKey>, mpsc::Receiver<InventoryFetchEvent>, JoinHandle<()>, oneshot::Sender<()>, oneshot::Sender<()>);
+    (mpsc::Sender<FetchRequest>, mpsc::Receiver<InventoryFetchEvent>, JoinHandle<()>, oneshot::Sender<()>, oneshot::Sender<()>);
 
 struct PeerRequest {
     method: String,
@@ -625,7 +628,7 @@ async fn rejected_folder_can_be_requested_again() {
     applied.send(FolderApplyOutcome::from_snapshot(&inventory.snapshot(), root, true)).expect("scheduler waits for rejected apply outcome");
     assert!(!inventory.snapshot().is_complete(root));
 
-    requests.send(root).await.expect("queue retry after rejected model apply");
+    requests.send(FetchRequest::Load(root)).await.expect("queue retry after rejected model apply");
     let retry = peer.next().await;
     assert_eq!(retry.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
     retry.respond(200, empty_folder_response(root, 2)).await;
@@ -652,6 +655,40 @@ async fn rejected_folder_can_be_requested_again() {
 }
 
 #[tokio::test]
+async fn refetch_signal_fetches_a_folder_the_scheduler_knows_as_complete() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let owner = InventoryOwner::new(Uuid::from_u128(1));
+    let root = key(owner, 47);
+    let mut root_category = category(root, None);
+    root_category.server_version = ServerVersion::from_raw(1);
+    root_category.server_descendent_count = Some(0);
+    let inventory = Inventory::new(root_category, None, InventoryLimits::default()).expect("valid complete inventory root");
+    assert!(inventory.snapshot().is_complete(root));
+
+    let (requests, mut events, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    peer.grant(&[("InventoryAPIv3", "/ais")]).await;
+    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+
+    let (_status, status_receiver) = tokio::sync::watch::channel(InventoryLoadingStatus::default());
+    let handle = InventoryFetchHandle { requests: requests.clone(), status: status_receiver };
+    handle.refetch_folder(root).expect("queue live-update refetch");
+    let request = peer.next().await;
+    assert_eq!(request.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
+    request.respond(200, empty_folder_response(root, 2)).await;
+
+    let InventoryFetchEvent::Folder { fetch, applied } = next_event(&mut events).await else {
+        panic!("expected folder fetch after refetch signal");
+    };
+    assert_eq!(fetch.folder, root);
+    acknowledge_fetch(fetch, applied);
+
+    drop(requests);
+    stop.send(()).expect("stop scheduler");
+    task.await.expect("scheduler stopped");
+}
+
+#[tokio::test]
 async fn foreground_request_preempts_in_flight_background_folders() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
@@ -672,7 +709,7 @@ async fn foreground_request_preempts_in_flight_background_folders() {
     let second_path = format!("/ais/category/{}/children?depth=0", second.id().uuid());
     assert_eq!(background_paths, HashSet::from([first_path.as_str(), second_path.as_str()]));
 
-    requests.send(first).await.expect("enqueue foreground folder");
+    requests.send(FetchRequest::Load(first)).await.expect("enqueue foreground folder");
     tokio::join!(background_one.wait_for_close(), background_two.wait_for_close());
     let foreground = peer.next().await;
     assert_eq!(foreground.path, first_path);

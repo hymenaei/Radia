@@ -548,10 +548,13 @@ impl SessionDriver {
         match result {
             Ok(Some(outcome)) => {
                 self.note_rejected_inventory_blocks(outcome.rejected_blocks);
-                if !outcome.changes.is_empty()
-                    && let Some(inventory) = &self.inventory
+                if let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot)
+                    && !outcome.changes.is_empty()
                 {
-                    self.inventory_changes.send_replace(Some(inventory.snapshot()));
+                    self.track_inventory_changes(&outcome.changes, &snapshot);
+                    self.request_inventory_refetches(&outcome.changes, &snapshot);
+                    self.inventory_changes.send_replace(Some(snapshot));
+                    self.publish_inventory_status();
                 }
             }
             Ok(None) => {}
@@ -772,6 +775,25 @@ impl SessionDriver {
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn request_inventory_refetches(&mut self, changes: &ChangeSet, snapshot: &InventorySnapshot) {
+        let handle = self.inventory_fetch.handle();
+        let mut queue_failures = 0usize;
+        for folder in &changes.refetch_categories {
+            if snapshot.category(*folder).is_none() {
+                continue;
+            }
+            self.inventory_complete.remove(folder);
+            if handle.refetch_folder(*folder).is_err() {
+                self.inventory_failed.insert(*folder);
+                self.inventory_last_failure = Some((*folder, InventoryFetchError::RequestFailed));
+                queue_failures = queue_failures.saturating_add(1);
+            }
+        }
+        if queue_failures > 0 {
+            tracing::warn!(queue_failures, "could not queue inventory folder refetches");
         }
     }
 

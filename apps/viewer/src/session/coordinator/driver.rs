@@ -1,6 +1,6 @@
 use std::{collections::HashSet, future::pending, ops::ControlFlow, sync::Arc};
 
-use ::inventory::{CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryError, InventorySnapshot};
+use ::inventory::{CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryChild, InventoryError, InventorySnapshot};
 use futures::{
     FutureExt,
     channel::oneshot,
@@ -789,7 +789,7 @@ impl SessionDriver {
     }
 }
 
-fn apply_inventory_fetch(inventory: &mut Inventory, fetch: FolderFetch) -> Result<Option<ChangeSet>, InventoryError> {
+fn apply_inventory_fetch(inventory: &mut Inventory, mut fetch: FolderFetch) -> Result<Option<ChangeSet>, InventoryError> {
     let current = inventory.snapshot();
     let stale = current.is_complete(fetch.folder)
         && current.category(fetch.folder).is_some_and(|category| {
@@ -797,6 +797,18 @@ fn apply_inventory_fetch(inventory: &mut Inventory, fetch: FolderFetch) -> Resul
         });
     if stale {
         return Ok(None);
+    }
+    for child in &mut fetch.children {
+        let InventoryChild::Category(incoming) = child else { continue };
+        let Some(existing) = current.category(incoming.key) else { continue };
+        if current.is_complete(incoming.key)
+            && existing.server_version.is_known()
+            && incoming.server_version.is_known()
+            && existing.server_version.raw() > incoming.server_version.raw()
+        {
+            incoming.server_version = existing.server_version;
+            incoming.server_descendent_count = existing.server_descendent_count;
+        }
     }
     inventory.apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children).map(Some)
 }

@@ -52,6 +52,17 @@ impl CapabilityUrl {
         Self { url }
     }
 
+    pub fn with_path_segments(&self, segments: &[&str]) -> Result<Self, Error> {
+        let mut url = self.url.clone();
+        let Ok(mut path) = url.path_segments_mut() else {
+            return Err(Error::Capability("Capability URL cannot contain path segments.".into()));
+        };
+        path.pop_if_empty();
+        path.extend(segments.iter().copied());
+        drop(path);
+        Ok(Self { url })
+    }
+
     pub fn with_trailing_slash(&self) -> Self {
         let mut url = self.url.clone();
         if !url.path().ends_with('/') {
@@ -218,6 +229,14 @@ impl Client {
     }
 
     pub async fn get_bytes_with_response_limit(&self, url: &CapabilityUrl, max_response_bytes: usize) -> Result<Vec<u8>, Error> {
+        self.get_bytes_inner(url, None, max_response_bytes).await
+    }
+
+    pub async fn get_bytes_with_accept(&self, url: &CapabilityUrl, accept: &str, max_response_bytes: usize) -> Result<Vec<u8>, Error> {
+        self.get_bytes_inner(url, Some(accept.to_owned()), max_response_bytes).await
+    }
+
+    async fn get_bytes_inner(&self, url: &CapabilityUrl, accept: Option<String>, max_response_bytes: usize) -> Result<Vec<u8>, Error> {
         validate_response_limit(max_response_bytes)?;
         let deadline = RequestDeadline::new(self.request_timeout);
         let client = self.clone();
@@ -225,7 +244,9 @@ impl Client {
         self.on_runtime(async move {
             let (response, permit) = client
                 .run_with_permit(deadline, |http, permit| async move {
-                    let response = get_capability_bytes(&http, &url.url, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
+                    let response = get_capability_bytes(&http, &url.url, accept.as_deref(), max_response_bytes)
+                        .await
+                        .map_err(Error::CapabilityHttp)?;
                     Ok((response, permit))
                 })
                 .await?;

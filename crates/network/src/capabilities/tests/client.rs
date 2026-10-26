@@ -137,6 +137,23 @@ fn requests_run_outside_tokio() {
 }
 
 #[tokio::test]
+async fn explicit_accept_header_is_sent() {
+    let server = LocalServer::start(vec![response(200, "OK", "application/llsd+xml", None, "body")]);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
+
+    let body =
+        client.get_bytes_with_accept(&url, "application/llsd+xml", MAX_CAPABILITY_RESPONSE_BYTES).await.expect("bounded LLSD response");
+
+    assert_eq!(body, b"body");
+    let requests = server.finish();
+    assert_eq!(requests.len(), 1);
+    let request = str::from_utf8(&requests[0]).expect("request is UTF-8");
+    let (headers, _) = request.split_once("\r\n\r\n").expect("request has headers");
+    assert!(headers.to_ascii_lowercase().contains("accept: application/llsd+xml"));
+}
+
+#[tokio::test]
 async fn capability_clients_share_the_session_http_connection_pool() {
     let listener = net::TcpListener::bind("127.0.0.1:0").await.expect("bind local HTTP listener");
     let address = listener.local_addr().expect("read listener address");
@@ -302,6 +319,16 @@ fn asset_directory_urls_preserve_opaque_path_and_query() {
         .with_query_pair("texture_id", "content");
     assert_eq!(url.url.as_str(), "https://example.test/cap%2Ftoken/?grant=opaque&texture_id=content");
     assert!(!format!("{url:?}").contains("token"));
+}
+
+#[test]
+fn capability_path_segments_are_appended_and_encoded() {
+    let url = CapabilityUrl::parse("https://example.test/cap%2Ftoken?grant=opaque")
+        .expect("valid capability URL")
+        .with_path_segments(&["category", "id/with slash", "children"])
+        .expect("hierarchical capability URL");
+
+    assert_eq!(url.url.as_str(), "https://example.test/cap%2Ftoken/category/id%2Fwith%20slash/children?grant=opaque");
 }
 
 #[tokio::test]

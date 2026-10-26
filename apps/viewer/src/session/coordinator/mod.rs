@@ -93,9 +93,18 @@ mod tests {
         while processed < events.len() {
             reads.publish(world.world());
             let event = simulator_message(simulator, processed as u32 + 1, events[processed].clone());
-            let input =
-                super::select_drain_input(&mut reads, ready(Some(event)), pending(), pending(), pending(), pending(), pending(), pending())
-                    .await;
+            let input = super::select_drain_input(
+                &mut reads,
+                ready(Some(event)),
+                pending(),
+                pending(),
+                pending(),
+                pending(),
+                pending(),
+                pending(),
+                pending(),
+            )
+            .await;
             match input {
                 Input::Event(Some(event)) => {
                     apply_world_cooperatively(&mut world, &mut handoff, &event).await;
@@ -146,9 +155,18 @@ mod tests {
         let world = SessionWorld::new(viewer_world_limits());
         let mut reads = WorldReadHost::new(world.world(), Handle::current());
 
-        let result =
-            super::select_drain_input(&mut reads, pending(), pending(), pending(), pending(), pending(), camera_tick.tick(), pending())
-                .await;
+        let result = super::select_drain_input(
+            &mut reads,
+            pending(),
+            pending(),
+            pending(),
+            pending(),
+            pending(),
+            camera_tick.tick(),
+            pending(),
+            pending(),
+        )
+        .await;
 
         let Input::CameraTick = result else { panic!("ready camera tick was not selected") };
     }

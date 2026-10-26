@@ -65,9 +65,11 @@ impl Error for ViewportError {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum ViewportEvent {
     Ready(u64),
     Chat(u64),
+    Inventory(u64),
     Closed(u64),
     Failed(u64, ViewportError),
 }
@@ -109,6 +111,7 @@ struct SharedWindowState {
     proxy: Mutex<Option<EventLoopProxy<()>>>,
     wake_pending: AtomicBool,
     chat_pending: AtomicBool,
+    inventory_pending: AtomicBool,
     stop: AtomicBool,
 }
 
@@ -184,6 +187,10 @@ impl Viewport {
 
     pub(crate) fn chat_received(&self) {
         self.shared.chat_pending.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn inventory_received(&self) {
+        self.shared.inventory_pending.store(false, Ordering::Release);
     }
 
     pub(crate) fn connect_world(
@@ -303,6 +310,19 @@ impl WindowApp {
         }
     }
 
+    fn request_inventory(&mut self, generation: u64) {
+        if !self.shared.inventory_pending.swap(true, Ordering::AcqRel)
+            && let Err(error) = self.events.try_send(ViewportEvent::Inventory(generation))
+        {
+            self.shared.inventory_pending.store(false, Ordering::Release);
+            if error.is_disconnected() {
+                tracing::trace!(%error, "inventory request receiver was closed");
+            } else {
+                tracing::warn!(%error, "inventory request queue is full");
+            }
+        }
+    }
+
     fn redraw_active(&mut self, event_loop: &ActiveEventLoop) {
         let Some(active) = &mut self.active else {
             return;
@@ -315,6 +335,9 @@ impl WindowApp {
                 }
                 if actions.request_chat {
                     self.request_chat(generation);
+                }
+                if actions.request_inventory {
+                    self.request_inventory(generation);
                 }
             }
             Err(error) => {
@@ -409,6 +432,13 @@ impl ApplicationHandler for WindowApp {
                     self.request_chat(generation);
                 }
             }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed && !event.repeat && event.logical_key == Key::Named(NamedKey::F7) =>
+            {
+                if let Some(generation) = self.active.as_ref().map(SceneWindow::generation) {
+                    self.request_inventory(generation);
+                }
+            }
             WindowEvent::RedrawRequested => self.redraw_active(event_loop),
             _ => {}
         }
@@ -436,10 +466,24 @@ mod tests {
             WindowApp { shared: Arc::new(SharedWindowState::default()), events, active: None, retired: Vec::new(), generation: 1 };
         app.events.try_send(ViewportEvent::Ready(1)).unwrap();
         app.request_chat(1);
-        assert!(matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1))));
+        std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1)));
         app.request_chat(1);
         assert!(matches!(incoming.try_recv(), Ok(ViewportEvent::Chat(1))), "a rejected request must not suppress a later request");
         app.request_chat(1);
+        assert!(incoming.try_recv().is_err(), "an accepted request must coalesce until received");
+    }
+
+    #[test]
+    fn rejected_inventory_requests_can_retry() {
+        let (events, mut incoming) = channel(0);
+        let mut app =
+            WindowApp { shared: Arc::new(SharedWindowState::default()), events, active: None, retired: Vec::new(), generation: 1 };
+        app.events.try_send(ViewportEvent::Ready(1)).unwrap();
+        app.request_inventory(1);
+        std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Ready(1)));
+        app.request_inventory(1);
+        std::assert_matches!(incoming.try_recv(), Ok(ViewportEvent::Inventory(1)), "a rejected request must not suppress a later request");
+        app.request_inventory(1);
         assert!(incoming.try_recv().is_err(), "an accepted request must coalesce until received");
     }
 

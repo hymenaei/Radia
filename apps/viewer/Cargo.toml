@@ -3,6 +3,7 @@ name = "viewer"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autobenches = false
 
 [lints]
 workspace = true
@@ -10,11 +11,13 @@ workspace = true
 [lib]
 name = "viewer"
 path = "src/lib.rs"
+bench = false
 
 [[bin]]
 name = "viewer"
 path = "src/main.rs"
 doc = false
+bench = false
 
 [features]
 tracy = ["dep:tracing-tracy"]
@@ -65,6 +68,7 @@ keyring = { workspace = true, features = ["windows-native"] }
 keyring = { workspace = true, features = ["apple-native"] }
 
 [dev-dependencies]
+criterion.workspace = true
 time.workspace = true
 url.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
@@ -72,3 +76,7 @@ gpui = { workspace = true, features = ["test-support"] }
 test-support.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "main"
+harness = false

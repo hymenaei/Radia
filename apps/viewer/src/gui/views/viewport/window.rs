@@ -55,11 +55,13 @@ impl Error for SceneWindowError {
 pub(super) struct DrawActions {
     pub(super) first_frame: bool,
     pub(super) request_chat: bool,
+    pub(super) request_inventory: bool,
 }
 
 struct DebugUiFrame {
     overlay: Overlay,
     request_chat: bool,
+    request_inventory: bool,
     recreate_renderer: bool,
 }
 
@@ -377,6 +379,7 @@ impl SceneWindow {
         self.dpi = self.window.scale_factor();
         let input = self.platform.take_egui_input(&self.window);
         let mut request_chat = false;
+        let mut request_inventory = false;
         let mut recreate_renderer = false;
         let output = self.egui.run_ui(input, |root| {
             egui::Window::new("Rendering").default_width(400.0).show(root.ctx(), |ui| {
@@ -436,6 +439,7 @@ impl SceneWindow {
                     recreate_renderer = ui.button("Recreate GPU resources").clicked();
                 });
                 request_chat = ui.button("Nearby chat (F6)").clicked();
+                request_inventory = ui.button("Inventory (F7)").clicked();
             });
         });
         self.next_ui = output.viewport_output.get(&ViewportId::ROOT).and_then(|viewport| now.checked_add(viewport.repaint_delay));
@@ -450,6 +454,7 @@ impl SceneWindow {
                 pixels_per_point: output.pixels_per_point,
             },
             request_chat,
+            request_inventory,
             recreate_renderer,
         }
     }
@@ -481,13 +486,13 @@ impl SceneWindow {
                     self.retire_renderer();
                     self.schedule_recovery(now);
                 }
-                DrawActions { first_frame, request_chat: ui.request_chat }
+                DrawActions { first_frame, request_chat: ui.request_chat, request_inventory: ui.request_inventory }
             }
             Err(error) => {
                 tracing::warn!(%error, "scene presentation failed; scheduling GPU recovery");
                 self.retire_renderer();
                 self.schedule_recovery(now);
-                DrawActions { first_frame: false, request_chat: ui.request_chat }
+                DrawActions { first_frame: false, request_chat: ui.request_chat, request_inventory: ui.request_inventory }
             }
         }
     }

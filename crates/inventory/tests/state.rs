@@ -342,6 +342,42 @@ fn folder_types_preserve_unknowns() {
 }
 
 #[test]
+fn asset_type_query_spans_roots() {
+    let personal_owner = owner(21);
+    let library_owner = owner(22);
+    let personal_root = category(personal_owner, 1, None, "personal");
+    let library_root = category(library_owner, 2, None, "library");
+    let mut inventory = Inventory::new(personal_root, Some(library_root), InventoryLimits::default()).expect("valid roots");
+    let personal_texture = item(personal_owner, 3, 1, AssetType::Texture, 30);
+    let library_texture = item(library_owner, 4, 2, AssetType::Texture, 40);
+    let other_type = item(personal_owner, 5, 1, AssetType::Sound, 50);
+    let personal_key = personal_texture.key;
+    let library_key = library_texture.key;
+
+    inventory
+        .apply_folder_fetch(
+            inventory.snapshot().roots().personal(),
+            ServerVersion::from_raw(1),
+            Some(2),
+            vec![InventoryChild::Item(personal_texture), InventoryChild::Item(other_type)],
+        )
+        .expect("personal children");
+    inventory
+        .apply_folder_fetch(
+            inventory.snapshot().roots().library().expect("Library root"),
+            ServerVersion::from_raw(1),
+            Some(1),
+            vec![InventoryChild::Item(library_texture)],
+        )
+        .expect("Library children");
+
+    let mut matching = inventory.snapshot().items_of_asset_type(AssetType::Texture).map(|item| item.key).collect::<Vec<_>>();
+    matching.sort_unstable();
+
+    assert_eq!(matching, [personal_key, library_key]);
+}
+
+#[test]
 fn preferred_folder_type_index_tracks_updates_removal_and_id_reuse() {
     let owner = owner(15);
     let mut inventory = inventory(owner);

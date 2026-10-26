@@ -10,7 +10,7 @@ use ::inventory::{CategoryKey, InventoryChild, InventoryError, ServerVersion};
 use tokio::sync::oneshot;
 
 pub(crate) use scheduler::InventoryFetchController;
-pub use scheduler::{InventoryFetchHandle, InventoryFetchRequestError, InventoryLoadingStatus};
+pub use scheduler::{InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequestError, InventoryLoadingStatus};
 pub(super) use scheduler::{fetch_single_folder, fetch_single_items};
 
 const MAX_FETCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;

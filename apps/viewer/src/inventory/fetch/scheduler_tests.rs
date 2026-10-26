@@ -28,14 +28,14 @@ use utils::FolderId;
 use uuid::Uuid;
 
 use super::{
-    BACKGROUND_CONCURRENCY, InventoryFetchHandle, InventoryLoadingStatus, MAX_AIS_DEPTH, REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais,
-    run_scheduler,
+    BACKGROUND_CONCURRENCY, ForegroundRequest, InventoryFetchHandle, InventoryFetchOutcome, InventoryLoadingStatus, MAX_AIS_DEPTH,
+    REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais, run_scheduler,
 };
 use crate::inventory::fetch::{FolderApplyOutcome, FolderFetch, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(45);
 type SchedulerTask = (
-    mpsc::Sender<CategoryKey>,
+    mpsc::Sender<ForegroundRequest>,
     mpsc::Receiver<InventoryFetchEvent>,
     watch::Sender<Option<::inventory::InventorySnapshot>>,
     JoinHandle<()>,
@@ -685,12 +685,30 @@ async fn missing_folder_keeps_walk_retryable() {
     assert!(inventory.snapshot().is_complete(valid));
     assert!(!inventory.snapshot().is_complete(missing));
 
-    requests.send(missing).await.expect("retry missing folder on request");
+    let (_status_sender, status) = watch::channel(InventoryLoadingStatus::default());
+    let handle = InventoryFetchHandle { requests: requests.clone(), status };
+    for _ in 0..2 {
+        let completion = handle.request_folder(missing).expect("queue folder retry");
+        let retry = peer.next().await;
+        assert_eq!(retry.path, missing_path);
+        retry.respond(404, "").await;
+        match next_event(&mut events).await {
+            InventoryFetchEvent::Failed { folder, error } => {
+                assert_eq!(folder, missing);
+                std::assert_matches!(error, InventoryFetchError::RequestFailed);
+            }
+            event => panic!("expected failed folder retry, received {event:?}"),
+        }
+        assert_eq!(completion.await.expect("fetch outcome delivered"), InventoryFetchOutcome::Failed);
+    }
+
+    let completion = handle.request_folder(missing).expect("queue successful folder retry");
     let retry = peer.next().await;
     assert_eq!(retry.path, missing_path);
     retry.respond(200, empty_folder_response(missing, 2)).await;
     let (fetch, applied) = take_folder_event(next_event(&mut events).await, missing);
     apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply retried folder response");
+    assert_eq!(completion.await.expect("fetch outcome delivered"), InventoryFetchOutcome::Succeeded);
     assert!(inventory.snapshot().is_complete(missing));
 
     drop(requests);
@@ -721,7 +739,7 @@ async fn rejected_folder_can_be_requested_again() {
     applied.send(FolderApplyOutcome { rejected: true }).expect("scheduler waits for rejected apply outcome");
     assert!(!inventory.snapshot().is_complete(root));
 
-    requests.send(root).await.expect("queue retry after rejected model apply");
+    requests.send(ForegroundRequest::background(root)).await.expect("queue retry after rejected model apply");
     let retry = peer.next().await;
     assert_eq!(retry.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
     retry.respond(200, empty_folder_response(root, 2)).await;
@@ -845,7 +863,7 @@ async fn foreground_request_preempts_in_flight_background_folders() {
     let second_path = format!("/ais/category/{}/children?depth=0", second.id().uuid());
     assert_eq!(background_paths, HashSet::from([first_path.as_str(), second_path.as_str()]));
 
-    requests.send(first).await.expect("enqueue foreground folder");
+    requests.send(ForegroundRequest::background(first)).await.expect("enqueue foreground folder");
     tokio::join!(background_one.wait_for_close(), background_two.wait_for_close());
     let foreground = peer.next().await;
     assert_eq!(foreground.path, first_path);

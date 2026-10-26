@@ -1,260 +1,162 @@
-use std::{
-    sync::{Arc, Barrier, mpsc},
-    thread,
-    time::Duration,
-};
+use std::sync::Arc;
 
-use proptest::prelude::*;
 use tempfile::tempdir;
-use utils::AssetId;
 use uuid::Uuid;
 
-use crate::{Budget, budget::ASSET_WORK_BYTES};
-
 use super::*;
+use crate::budget::Blob;
+use utils::AssetId;
 
 fn resource(id: u128, kind: Kind) -> Resource {
     Resource { id: AssetId::new(Uuid::from_u128(id)), kind }
 }
 
-fn validated_extent(total_size: u64, offset: u64, bytes: Vec<u8>) -> ValidatedExtent {
-    ValidatedExtent::from_validated(total_size, offset, bytes)
-}
-
-fn charged_blob(budget: &Budget, bytes: &[u8]) -> (Blob, usize) {
-    let mut bytes_owned = Vec::new();
-    bytes_owned.try_reserve_exact(bytes.len()).expect("reserve blob bytes");
-    bytes_owned.extend_from_slice(bytes);
-    let capacity = bytes_owned.capacity();
-    let blob = budget.reserve(capacity).expect("reserve blob budget").finish(bytes_owned).expect("finish blob");
-    (blob, capacity)
+fn charged_blob(budget: &Budget, bytes: &[u8]) -> Blob {
+    let mut owned = Vec::new();
+    owned.try_reserve_exact(bytes.len()).expect("reserve payload");
+    owned.extend_from_slice(bytes);
+    budget.reserve(owned.capacity()).expect("reserve budget").finish(owned).expect("create blob")
 }
 
 #[test]
-fn adjacent_and_matching_extents_merge() {
+fn texture_payload_uses_sharded_raw_path() {
     let directory = tempdir().expect("cache directory");
     let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
-    let resource = resource(1, Kind::Texture);
-    cache.put_extent(resource, validated_extent(9, 3, b"def".to_vec())).expect("store second range");
-    cache.put_extent(resource, validated_extent(9, 0, b"abc".to_vec())).expect("store first range");
-    cache.put_extent(resource, validated_extent(9, 2, b"cdefg".to_vec())).expect("store agreeing overlap");
+    let resource = Resource {
+        id: AssetId::new(Uuid::parse_str("abcdef01-2345-6789-abcd-ef0123456789").expect("valid fixture UUID")),
+        kind: Kind::Texture,
+    };
+    let bytes = b"normalized texture payload".to_vec();
+    cache.put_complete(resource, bytes.clone()).expect("store raw payload");
 
-    let AssetLookup::Partial(asset) = cache.lookup(resource) else {
-        panic!("merged asset is available");
-    };
-    assert_eq!(asset.total_size, 9);
-    assert_eq!(asset.extents, vec![Extent { offset: 0, bytes: b"abcdefg".to_vec() }]);
-    assert!(!asset.is_complete());
-    cache.put_extent(resource, validated_extent(9, 7, b"hi".to_vec())).expect("complete asset");
-    let AssetLookup::Hit(asset) = cache.lookup(resource) else {
-        panic!("complete asset is available");
-    };
-    assert!(asset.is_complete());
+    let path = directory.path().join("assets/textures/ab/abcdef01-2345-6789-abcd-ef0123456789.j2c");
+    assert_eq!(std::fs::read(&path).expect("read texture file"), bytes);
+    std::assert_matches!(cache.lookup(resource), AssetLookup::Hit(CacheValue { bytes: cached, .. }) if cached == bytes);
+    assert_eq!(cache.stats().bytes_read, u64::try_from(bytes.len()).expect("payload length"));
+    assert_eq!(cache.stats().bytes_written, u64::try_from(bytes.len()).expect("payload length"));
+    cache.shutdown().expect("close cache");
+    assert!(directory.path().join("assets/snapshot").exists());
+    assert!(directory.path().join("assets/journal").exists());
+    assert!(directory.path().join("assets/lock").exists());
+}
+
+#[test]
+fn open_discards_the_previous_cache_root_and_sweeps_old_assets() {
+    let directory = tempdir().expect("cache directory");
+    std::fs::write(directory.path().join("snapshot"), b"old snapshot").expect("write old snapshot");
+    std::fs::write(directory.path().join("journal"), b"old journal").expect("write old journal");
+    let old_data = directory.path().join("data/old.bin");
+    std::fs::create_dir_all(old_data.parent().expect("old data directory")).expect("create old data directory");
+    std::fs::write(&old_data, b"old flat payload").expect("write old flat payload");
+    let old_asset = directory.path().join("assets/textures/ab/abcdef01-2345-6789-abcd-ef0123456789.j2c");
+    std::fs::create_dir_all(old_asset.parent().expect("old asset shard")).expect("create old asset shard");
+    std::fs::write(&old_asset, b"old sharded payload").expect("write old sharded payload");
+
+    let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
+    assert!(!directory.path().join("snapshot").exists());
+    assert!(!directory.path().join("journal").exists());
+    assert!(!directory.path().join("data").exists());
+    cache.shutdown().expect("sweep old asset files");
+    assert!(!old_asset.exists());
+    assert!(directory.path().join("assets/snapshot").exists());
+}
+
+#[test]
+fn llsd_kinds_use_distinct_paths() {
+    let directory = tempdir().expect("cache directory");
+    let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
+    let pbr = resource(0xabcdef0123456789abcdef0123456789, Kind::PbrMaterial);
+    let legacy = resource(0xabcdef0123456789abcdef0123456789, Kind::LegacyMaterial);
+    let environment = resource(0xabcdef0123456789abcdef0123456789, Kind::Environment);
+    cache.put_complete(pbr, b"pbr llsd".to_vec()).expect("store PBR material");
+    cache.put_complete(legacy, b"legacy llsd".to_vec()).expect("store legacy material");
+    cache.put_complete(environment, b"environment llsd".to_vec()).expect("store environment");
+
+    let name = "abcdef01-2345-6789-abcd-ef0123456789";
+    assert_eq!(std::fs::read(directory.path().join(format!("assets/materials/pbr/ab/{name}.llsd"))).expect("read PBR file"), b"pbr llsd");
+    assert_eq!(
+        std::fs::read(directory.path().join(format!("assets/materials/legacy/ab/{name}.llsd"))).expect("read legacy file"),
+        b"legacy llsd"
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join(format!("assets/environments/ab/{name}.llsd"))).expect("read environment file"),
+        b"environment llsd"
+    );
+    assert!(!directory.path().join("assets/animations").exists());
     cache.shutdown().expect("close cache");
 }
 
 #[test]
-fn conflicting_overlap_preserves_existing_extent() {
-    let directory = tempdir().expect("cache directory");
-    let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
-    let resource = resource(2, Kind::Texture);
-    cache.put_extent(resource, validated_extent(8, 0, b"abcd".to_vec())).expect("store initial range");
-
-    std::assert_matches!(cache.put_extent(resource, validated_extent(8, 2, b"ZZ".to_vec())), Err(AssetCacheError::ConflictingOverlap));
-    let AssetLookup::Partial(asset) = cache.lookup(resource) else {
-        panic!("initial extent remains available");
-    };
-    assert_eq!(asset.extents, vec![Extent { offset: 0, bytes: b"abcd".to_vec() }]);
-    cache.shutdown().expect("close cache");
-}
-
-#[test]
-fn unrelated_assets_use_independent_merge_locks() {
-    let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
-    let first = resource(1, Kind::Texture);
-    let first_stripe = stripe_index(first).expect("first stripe");
-    let second = (2..10_000u128)
-        .map(|id| resource(id, Kind::Texture))
-        .find(|resource| stripe_index(*resource).is_ok_and(|stripe| stripe != first_stripe))
-        .expect("resource on another stripe");
-    let held = cache.write_guard(first).expect("lock first asset");
-    let (sender, receiver) = mpsc::sync_channel(1);
-
-    thread::scope(|scope| {
-        let cache_ref = &cache;
-        scope.spawn(move || {
-            let result = cache_ref.put_extent(second, validated_extent(4, 0, b"data".to_vec()));
-            sender.send(result).expect("send unrelated write result");
-        });
-        receiver.recv_timeout(Duration::from_secs(3)).expect("unrelated asset write completes").expect("store unrelated asset");
-    });
-
-    drop(held);
-    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handle released")).shutdown().expect("close cache");
-}
-
-#[test]
-fn concurrent_extents_for_one_asset_both_survive() {
+fn lookup_rejects_payload_over_kind_bound() {
     let directory = tempdir().expect("cache directory");
     let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
     let resource = resource(4, Kind::Texture);
-    let barrier = Arc::new(Barrier::new(2));
-
-    thread::scope(|scope| {
-        for (offset, bytes) in [(0, b"abc".to_vec()), (3, b"def".to_vec())] {
-            let cache = &cache;
-            let barrier = Arc::clone(&barrier);
-            scope.spawn(move || {
-                barrier.wait();
-                cache.put_extent(resource, validated_extent(6, offset, bytes))
-            });
-        }
-    });
-
-    let AssetLookup::Hit(asset) = cache.lookup(resource) else {
-        panic!("concurrent asset extents form a complete payload");
-    };
-    assert_eq!(asset.extents, vec![Extent { offset: 0, bytes: b"abcdef".to_vec() }]);
-    cache.shutdown().expect("close cache");
-}
-
-#[test]
-fn mismatched_size_and_invalid_ranges_are_rejected() {
-    let directory = tempdir().expect("cache directory");
-    let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
-    let resource = resource(3, Kind::PbrMaterial);
-    cache.put_extent(resource, validated_extent(12, 0, b"abc".to_vec())).expect("store extent");
-
-    std::assert_matches!(cache.put_extent(resource, validated_extent(13, 3, b"def".to_vec())), Err(AssetCacheError::SizeMismatch));
-    std::assert_matches!(cache.put_extent(resource, validated_extent(12, 11, b"xy".to_vec())), Err(AssetCacheError::InvalidExtent));
-    std::assert_matches!(cache.put_extent(resource, validated_extent(12, 0, Vec::new())), Err(AssetCacheError::InvalidExtent));
-    cache.shutdown().expect("close cache");
-}
-
-#[test]
-fn malformed_asset_payload_is_reported_and_removed() {
-    let directory = tempdir().expect("cache directory");
-    let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
-    let resource = resource(4, Kind::Environment);
-    cache.storage.put(storage_key(resource), b"not an extent record".to_vec()).expect("write malformed record");
-
+    let key = storage_key(resource);
+    cache.storage.put(key, vec![0; cache_limit(resource.kind) + 1]).expect("write over-bound storage entry");
     assert_eq!(cache.lookup(resource), AssetLookup::Corrupt);
-    cache.shutdown().expect("close cache after removal");
-    let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("reopen cache");
-    assert_eq!(cache.lookup(resource), AssetLookup::Miss);
-    cache.shutdown().expect("close reopened cache");
+    assert_eq!(cache.stats().corrupt_entries, 1);
+    cache.shutdown().expect("close cache");
 }
 
 #[test]
-fn write_requires_record_budget() {
+fn write_admission_charges_raw_copy_and_bounds_in_flight() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
-    let resource = resource(6, Kind::Texture);
     let budget = Budget::default();
-    let (payload, _) = charged_blob(&budget, b"payload");
-    let work = budget.reserve(ASSET_WORK_BYTES).expect("occupy asset work budget");
-
-    assert!(cache.queue_write(resource, payload, &budget).is_none());
+    let payload = b"raw payload";
+    let writes = (0..MAX_IN_FLIGHT_WRITES)
+        .map(|index| {
+            cache
+                .queue_write(resource(10 + u128::try_from(index).expect("index"), Kind::Texture), charged_blob(&budget, payload), &budget)
+                .expect("admit write")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(budget.stats().charged_bytes, payload.len() * MAX_IN_FLIGHT_WRITES * 2);
+    assert!(cache.queue_write(resource(20, Kind::Texture), charged_blob(&budget, payload), &budget).is_none());
     assert_eq!(cache.stats().dropped_writes, 1);
-    assert_eq!(budget.stats().charged_bytes, ASSET_WORK_BYTES);
-    assert_eq!(cache.lookup(resource), AssetLookup::Miss);
-
-    drop(work);
+    drop(writes);
     assert_eq!(budget.stats().charged_bytes, 0);
-    let (payload, blob_charge) = charged_blob(&budget, b"payload");
-    let record_charge = complete_record_size(payload.len()).expect("encoded record size");
-    let write = cache.queue_write(resource, payload, &budget).expect("released write slot admits a later write");
-    assert_eq!(budget.stats().charged_bytes, blob_charge + record_charge);
-    write.run();
-    assert_eq!(cache.stats().dropped_writes, 1);
-    assert_eq!(cache.stats().bytes_written, u64::try_from(record_charge).expect("record size fits stats"));
-    std::assert_matches!(cache.lookup(resource), AssetLookup::Hit(_));
-    assert_eq!(budget.stats().charged_bytes, 0);
-    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handle released")).shutdown().expect("close cache");
+    assert_eq!(cache.stats().dropped_writes, 3);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(16))]
+#[test]
+fn writes_record_raw_byte_counts() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let budget = Budget::default();
+    let resource = resource(30, Kind::Environment);
+    let write = cache.queue_write(resource, charged_blob(&budget, b"settings"), &budget).expect("admit write");
+    write.run();
+    assert_eq!(cache.stats().bytes_written, 8);
+    assert_eq!(budget.stats().charged_bytes, 0);
+    std::assert_matches!(cache.lookup(resource), AssetLookup::Hit(CacheValue { bytes, .. }) if bytes == b"settings");
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
 
-    #[test]
-    fn extent_sequences_match_byte_model(
-        operations in proptest::collection::vec((0u8..5, 0u8..32, proptest::collection::vec(any::<u8>(), 1..9)), 1..30)
-    ) {
-        let directory = tempdir().expect("cache directory");
-        let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
-        let resource = resource(5, Kind::Texture);
-        let mut model = [None; 32];
-        let mut present = false;
+#[test]
+fn unused_asset_cache_write_releases_admission() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let budget = Budget::default();
+    let resource = resource(40, Kind::Texture);
+    let write = cache.queue_write(resource, charged_blob(&budget, b"not written"), &budget).expect("admit write");
+    assert_eq!(budget.stats().charged_bytes, 22);
+    drop(write);
+    assert_eq!(budget.stats().charged_bytes, 0);
+    assert_eq!(cache.stats().dropped_writes, 1);
+    assert_eq!(cache.lookup(resource), AssetLookup::Miss);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
 
-        for (action, offset, bytes) in operations {
-            match action {
-                0 | 1 => {
-                    let start = usize::from(offset);
-                    let allowed = 32usize.saturating_sub(start);
-                    let count = bytes.len().min(allowed);
-                    let input = bytes.get(..count).expect("bounded extent bytes").to_vec();
-                    let conflict = input.iter().enumerate().any(|(index, byte)| {
-                        model.get(start + index).is_some_and(|old| old.is_some_and(|old_byte| old_byte != *byte))
-                    });
-                    let result = cache.put_extent(resource, validated_extent(32, u64::from(offset), input.clone()));
-                    if conflict {
-                        match result {
-                            Err(AssetCacheError::ConflictingOverlap) => {}
-                            actual => prop_assert!(false, "expected conflicting overlap, got {actual:?}"),
-                        }
-                    } else {
-                        prop_assert!(result.is_ok());
-                        for (index, byte) in input.into_iter().enumerate() {
-                            if let Some(slot) = model.get_mut(start + index) {
-                                *slot = Some(byte);
-                            }
-                        }
-                        present = true;
-                    }
-                }
-                2 => {
-                    cache.clear().expect("clear cache");
-                    model.fill(None);
-                    present = false;
-                }
-                3 => {
-                    cache.set_size_limit(storage::MIN_SIZE_LIMIT).expect("evict all entries");
-                    model.fill(None);
-                    present = false;
-                    cache.set_size_limit(storage::DEFAULT_SIZE_LIMIT).expect("restore size limit");
-                }
-                _ => {
-                    cache.set_size_limit(storage::DEFAULT_SIZE_LIMIT).expect("raise size limit");
-                }
-            }
-
-            prop_assert!(cache.accounted_size() <= cache.size_limit());
-            let complete = model.iter().all(Option::is_some);
-            match (present, complete, cache.lookup(resource)) {
-                (false, _, AssetLookup::Miss) => {}
-                (true, true, AssetLookup::Hit(asset)) | (true, false, AssetLookup::Partial(asset)) => {
-                    let mut expected = Vec::new();
-                    let mut cursor = 0usize;
-                    while cursor < model.len() {
-                        if model.get(cursor).copied().flatten().is_none() {
-                            cursor += 1;
-                            continue;
-                        }
-                        let start = cursor;
-                        let mut bytes = Vec::new();
-                        while let Some(Some(byte)) = model.get(cursor) {
-                            bytes.push(*byte);
-                            cursor += 1;
-                        }
-                        expected.push(Extent { offset: u64::try_from(start).expect("model offset"), bytes });
-                    }
-                    prop_assert_eq!(asset.total_size, 32);
-                    prop_assert_eq!(asset.extents, expected);
-                }
-                (expected, _, actual) => prop_assert!(false, "expected present={expected}, got {actual:?}"),
-            }
-        }
-        cache.shutdown().expect("close cache");
-    }
+#[test]
+fn cache_open_uses_its_assets_root_index() {
+    let directory = tempdir().expect("cache directory");
+    let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
+    assert_eq!(cache.lookup(resource(50, Kind::Texture)), AssetLookup::Miss);
+    cache.storage.flush().expect("flush index");
+    assert!(directory.path().join("assets/snapshot").exists());
+    assert!(directory.path().join("assets/journal").exists());
+    assert!(!directory.path().join("snapshot").exists());
+    cache.shutdown().expect("close cache");
 }

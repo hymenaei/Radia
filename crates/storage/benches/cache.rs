@@ -6,18 +6,19 @@ use std::{
 };
 
 use criterion::{BenchmarkId, Criterion, Throughput};
-use storage::{Cache, DEFAULT_SIZE_LIMIT, Key, StorageError, UnavailableReason};
+use storage::{Cache, DEFAULT_SIZE_LIMIT, Key, Namespace, NamespaceId, StorageError, UnavailableReason};
 use tempfile::tempdir;
 
 const EXISTING_ENTRIES: u64 = 50_000;
 const BURST_WRITES: usize = 16;
 const SETUP_WRITERS: usize = 32;
 const PAYLOAD_BYTES: usize = 64;
+const NAMESPACES: [Namespace; 1] = [Namespace::new("bench", "bin")];
 
 fn key(value: u64) -> Key {
-    let mut bytes = [0; 32];
-    bytes[..8].copy_from_slice(&value.to_le_bytes());
-    Key::new(bytes)
+    let mut name = [0; 16];
+    name[..8].copy_from_slice(&value.to_le_bytes());
+    Key::new(NamespaceId::new(0), name)
 }
 
 fn put_until_accepted(cache: &Cache, key: Key) {
@@ -48,7 +49,7 @@ fn populate(cache: &Cache) {
 
 pub(crate) fn bench(c: &mut Criterion) {
     let directory = tempdir().expect("create benchmark directory");
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open benchmark cache");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NAMESPACES).expect("open benchmark cache");
     populate(&cache);
     assert_eq!(cache.entry_count(), usize::try_from(EXISTING_ENTRIES).expect("entry count fits"));
 
@@ -100,7 +101,7 @@ pub(crate) fn bench(c: &mut Criterion) {
             let mut measured = Duration::ZERO;
             for _ in 0..iterations {
                 let start = Instant::now();
-                let opened = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open replay fixture");
+                let opened = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NAMESPACES).expect("open replay fixture");
                 measured += start.elapsed();
                 opened.shutdown().expect("close replay fixture");
             }

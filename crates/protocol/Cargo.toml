@@ -17,6 +17,7 @@ utils.workspace = true
 dxr = { workspace = true, features = ["i8"] }
 md-5.workspace = true
 quick-xml.workspace = true
+llsd.workspace = true
 math.workspace = true
 
 [build-dependencies]

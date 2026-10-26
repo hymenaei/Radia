@@ -1,3 +1,4 @@
+pub mod inventory;
 pub mod lludp;
 pub mod login;
 pub mod messages;

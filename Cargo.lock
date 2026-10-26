@@ -6149,6 +6149,7 @@ version = "0.0.1"
 dependencies = [
  "criterion",
  "dxr",
+ "llsd",
  "math",
  "md-5 0.11.0",
  "proptest",

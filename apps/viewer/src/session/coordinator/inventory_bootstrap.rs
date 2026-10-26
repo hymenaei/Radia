@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use ::inventory::{Category, CategoryKey, FolderType, Inventory, InventoryError, InventoryOwner, ServerVersion};
+use ::inventory::{Category, CategoryKey, FolderType, Inventory, InventoryError, InventoryLimits, InventoryOwner, ServerVersion};
 use protocol::login::{InventoryBootstrap as LoginInventoryBootstrap, InventorySkeleton, InventorySkeletonFolder};
 use utils::FolderId;
 use uuid::Uuid;
@@ -82,7 +82,7 @@ pub(crate) fn build_inventory(
         categories.extend(scope.categories);
         scope.root
     });
-    let inventory = Inventory::from_categories(personal_root, library_root, categories)?;
+    let inventory = Inventory::from_categories(personal_root, library_root, categories, InventoryLimits::default())?;
     Ok((
         inventory,
         InventoryBootstrapReport { personal_categories, library_categories, rejected_personal_entries, rejected_library_entries },

@@ -7,7 +7,7 @@ use std::{error::Error, fmt};
 
 pub use mutation::{InventoryChild, MAX_FOLDER_FETCH_CHILDREN};
 pub use snapshot::InventorySnapshot;
-pub use state::{Inventory, InventoryRoots};
+pub use state::{Inventory, InventoryLimits, InventoryRoots};
 pub use types::{
     AssetType, Category, CategoryKey, ChangeSet, FolderType, InventoryChange, InventoryNodeId, InventoryNodeKey, InventoryOwner,
     InventoryRevision, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,

@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use inventory::{Category, CategoryKey, FolderType, Inventory, InventoryOwner, ServerVersion};
+use inventory::{Category, CategoryKey, FolderType, Inventory, InventoryLimits, InventoryOwner, ServerVersion};
 use llsd::{Value, xml};
 use network::capabilities::Client;
 use tokio::{
@@ -41,7 +41,7 @@ fn folder_uses_preferred_type() {
         server_version: ServerVersion::UNKNOWN,
         server_descendent_count: None,
     };
-    let mut inventory = Inventory::new(root, None).expect("valid personal inventory root");
+    let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("valid personal inventory root");
     inventory
         .upsert_category(Category {
             key: CategoryKey::new(owner, FolderId::new(Uuid::parse_str(FAVORITES_FOLDER_ID).expect("valid folder fixture UUID"))),

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     Category, CategoryKey, FolderType, InventoryError, InventoryNodeId, InventoryOwner, InventoryRevision, Item, ItemKey,
-    MAX_INVENTORY_CATEGORIES, MAX_INVENTORY_DESCRIPTION_BYTES, MAX_INVENTORY_NAME_BYTES,
+    MAX_FOLDER_FETCH_CHILDREN, MAX_INVENTORY_CATEGORIES, MAX_INVENTORY_DESCRIPTION_BYTES, MAX_INVENTORY_ITEMS, MAX_INVENTORY_NAME_BYTES,
 };
 use imbl::{HashMap, OrdSet};
 
@@ -10,6 +10,23 @@ use imbl::{HashMap, OrdSet};
 pub struct InventoryRoots {
     personal: CategoryKey,
     library: Option<CategoryKey>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InventoryLimits {
+    pub max_categories: usize,
+    pub max_items: usize,
+    pub max_folder_fetch_children: usize,
+}
+
+impl Default for InventoryLimits {
+    fn default() -> Self {
+        Self {
+            max_categories: MAX_INVENTORY_CATEGORIES,
+            max_items: MAX_INVENTORY_ITEMS,
+            max_folder_fetch_children: MAX_FOLDER_FETCH_CHILDREN,
+        }
+    }
 }
 
 impl InventoryRoots {
@@ -40,10 +57,11 @@ pub(crate) struct InventoryState {
 
 pub struct Inventory {
     pub(crate) state: Arc<InventoryState>,
+    pub(crate) limits: InventoryLimits,
 }
 
 impl Inventory {
-    pub fn new(personal_root: Category, library_root: Option<Category>) -> Result<Self, InventoryError> {
+    pub fn new(personal_root: Category, library_root: Option<Category>, limits: InventoryLimits) -> Result<Self, InventoryError> {
         validate_category(&personal_root)?;
         if personal_root.parent.is_some() {
             return Err(InventoryError::InvalidRoot);
@@ -60,6 +78,9 @@ impl Inventory {
                 return Err(InventoryError::SharedRootOwner);
             }
         }
+        if limits.max_categories == 0 || (library_root.is_some() && limits.max_categories < 2) {
+            return Err(InventoryError::TooManyCategories);
+        }
         let roots = InventoryRoots { personal: personal_root.key, library: library_root.as_ref().map(|root| root.key) };
         let mut state = InventoryState {
             revision: InventoryRevision(0),
@@ -75,15 +96,16 @@ impl Inventory {
         if let Some(root) = library_root {
             insert_category_record(&mut state, root)?;
         }
-        Ok(Self { state: Arc::new(state) })
+        Ok(Self { state: Arc::new(state), limits })
     }
 
     pub fn from_categories(
         personal_root: Category,
         library_root: Option<Category>,
         categories: Vec<Category>,
+        limits: InventoryLimits,
     ) -> Result<Self, InventoryError> {
-        let mut inventory = Self::new(personal_root, library_root)?;
+        let mut inventory = Self::new(personal_root, library_root, limits)?;
         inventory.install_categories(categories)?;
         Ok(inventory)
     }
@@ -122,7 +144,7 @@ impl Inventory {
             if next.categories.contains_key(&category.key) {
                 return Err(InventoryError::DuplicateCategory);
             }
-            if next.categories.len() >= MAX_INVENTORY_CATEGORIES {
+            if next.categories.len() >= self.limits.max_categories {
                 return Err(InventoryError::TooManyCategories);
             }
             let Some(parent) = category.parent else {

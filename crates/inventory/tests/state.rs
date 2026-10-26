@@ -4,8 +4,9 @@ use std::{
 };
 
 use inventory::{
-    AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryError, InventoryNodeId, InventoryNodeKey,
-    InventoryOwner, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
+    AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryError, InventoryLimits, InventoryNodeId,
+    InventoryNodeKey, InventoryOwner, InventoryType, Item, ItemKey, LinkResolution, PermissionMask, Permissions, SaleInfo, SaleType,
+    ServerVersion,
 };
 use proptest::prelude::*;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
@@ -57,7 +58,11 @@ fn item(owner: InventoryOwner, id: u128, parent: u128, asset_type: AssetType, as
 }
 
 fn inventory(owner: InventoryOwner) -> Inventory {
-    Inventory::new(category(owner, 1, None, "root"), None).expect("valid root")
+    Inventory::new(category(owner, 1, None, "root"), None, InventoryLimits::default()).expect("valid root")
+}
+
+fn inventory_with_limits(owner: InventoryOwner, limits: InventoryLimits) -> Inventory {
+    Inventory::new(category(owner, 1, None, "root"), None, limits).expect("valid root")
 }
 
 fn invariant(snapshot: &inventory::InventorySnapshot) -> Option<&'static str> {
@@ -218,6 +223,82 @@ fn fetch_replaces_direct_children() {
 }
 
 #[test]
+fn fetch_replaces_items_at_capacity() {
+    let owner = owner(16);
+    let limits = InventoryLimits { max_categories: 2, max_items: 1, max_folder_fetch_children: 1 };
+    let mut inventory = inventory_with_limits(owner, limits);
+    let folder = CategoryKey::new(owner, FolderId::new(uuid(2)));
+    inventory.upsert_category(category(owner, 2, Some(1), "folder")).expect("add folder");
+    inventory
+        .apply_folder_fetch(folder, ServerVersion::UNKNOWN, Some(1), vec![InventoryChild::Item(item(owner, 3, 2, AssetType::Notecard, 30))])
+        .expect("fill item capacity");
+
+    inventory
+        .apply_folder_fetch(
+            folder,
+            ServerVersion::from_raw(1),
+            Some(1),
+            vec![InventoryChild::Item(item(owner, 5, 2, AssetType::Notecard, 50))],
+        )
+        .expect("replace item at capacity");
+    let snapshot = inventory.snapshot();
+    assert_eq!(snapshot.items().count(), limits.max_items);
+    assert!(snapshot.item(ItemKey::new(owner, ItemId::new(uuid(3)))).is_none());
+    assert!(snapshot.item(ItemKey::new(owner, ItemId::new(uuid(5)))).is_some());
+    assert!(snapshot.is_complete(folder));
+    assert_eq!(invariant(&snapshot), None);
+}
+
+#[test]
+fn fetch_replaces_categories_at_capacity() {
+    let owner = owner(17);
+    let limits = InventoryLimits { max_categories: 2, max_items: 0, max_folder_fetch_children: 1 };
+    let mut inventory = inventory_with_limits(owner, limits);
+    let root = inventory.roots().personal();
+    inventory
+        .apply_folder_fetch(root, ServerVersion::UNKNOWN, Some(1), vec![InventoryChild::Category(category(owner, 2, Some(1), "old"))])
+        .expect("fill category capacity");
+
+    inventory
+        .apply_folder_fetch(root, ServerVersion::from_raw(1), Some(1), vec![InventoryChild::Category(category(owner, 3, Some(1), "new"))])
+        .expect("replace category at capacity");
+    let snapshot = inventory.snapshot();
+    assert_eq!(snapshot.categories().count(), limits.max_categories);
+    assert!(snapshot.category(CategoryKey::new(owner, FolderId::new(uuid(2)))).is_none());
+    assert!(snapshot.category(CategoryKey::new(owner, FolderId::new(uuid(3)))).is_some());
+    assert!(snapshot.is_complete(root));
+    assert_eq!(invariant(&snapshot), None);
+}
+
+#[test]
+fn fetch_keeps_incoming_category_moved_out_of_stale_subtree() {
+    let owner = owner(18);
+    let mut inventory = inventory(owner);
+    let target = CategoryKey::new(owner, FolderId::new(uuid(2)));
+    let moved = CategoryKey::new(owner, FolderId::new(uuid(4)));
+    let retained_item = ItemKey::new(owner, ItemId::new(uuid(5)));
+    inventory.upsert_category(category(owner, 2, Some(1), "target")).expect("add target folder");
+    inventory.upsert_category(category(owner, 3, Some(2), "stale")).expect("add stale folder");
+    inventory.upsert_category(category(owner, 4, Some(3), "moved")).expect("add nested incoming folder");
+    inventory.upsert_item(item(owner, 5, 4, AssetType::Notecard, 50)).expect("add descendant item");
+
+    inventory
+        .apply_folder_fetch(
+            target,
+            ServerVersion::from_raw(1),
+            Some(1),
+            vec![InventoryChild::Category(category(owner, 4, Some(2), "moved"))],
+        )
+        .expect("move incoming folder out before removing the stale subtree");
+
+    let snapshot = inventory.snapshot();
+    assert!(snapshot.category(CategoryKey::new(owner, FolderId::new(uuid(3)))).is_none());
+    assert_eq!(snapshot.category(moved).and_then(|category| category.parent), Some(target));
+    assert_eq!(snapshot.item(retained_item).map(|item| item.parent), Some(moved));
+    assert_eq!(invariant(&snapshot), None);
+}
+
+#[test]
 fn snapshots_keep_prior_state() {
     let owner = owner(12);
     let mut inventory = inventory(owner);
@@ -292,7 +373,32 @@ proptest! {
     #[test]
     fn sequences_preserve_invariants(operations in prop::collection::vec((0_u8..8, 0_u8..8, 0_u8..8, 0_u8..8), 0..72)) {
         let owner = owner(14);
-        let mut inventory = inventory(owner);
+        let limits = InventoryLimits { max_categories: 4, max_items: 3, max_folder_fetch_children: 4 };
+        let mut inventory = inventory_with_limits(owner, limits);
+        for id in 1..=3 {
+            inventory.upsert_category(category(owner, 100 + id, Some(1), "capacity-category")).expect("fill category capacity");
+            prop_assert_eq!(invariant(&inventory.snapshot()), None);
+            inventory
+                .upsert_item(item(owner, 200 + id, 1, AssetType::Notecard, 300 + id))
+                .expect("fill item capacity");
+            prop_assert_eq!(invariant(&inventory.snapshot()), None);
+        }
+        prop_assert_eq!(inventory.snapshot().categories().count(), limits.max_categories);
+        prop_assert_eq!(inventory.snapshot().items().count(), limits.max_items);
+        let category_revision = inventory.revision();
+        prop_assert_eq!(
+            inventory.upsert_category(category(owner, 999, Some(1), "over capacity")),
+            Err(InventoryError::TooManyCategories)
+        );
+        prop_assert_eq!(inventory.revision(), category_revision);
+        prop_assert_eq!(invariant(&inventory.snapshot()), None);
+        let item_revision = inventory.revision();
+        prop_assert_eq!(
+            inventory.upsert_item(item(owner, 999, 1, AssetType::Notecard, 999)),
+            Err(InventoryError::TooManyItems)
+        );
+        prop_assert_eq!(inventory.revision(), item_revision);
+        prop_assert_eq!(invariant(&inventory.snapshot()), None);
         for (operation, a, b, c) in operations {
             let before = inventory.snapshot();
             let before_revision = before.revision();

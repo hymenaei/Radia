@@ -7,8 +7,8 @@ use crate::state::{
     InventoryState, insert_child, remove_category_record, remove_child, replace_category_record, validate_category, validate_item,
 };
 use crate::{
-    Category, CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryError, InventoryNodeId, InventoryNodeKey, InventoryOwner, Item,
-    ItemKey, ServerVersion,
+    Category, CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryError, InventoryLimits, InventoryNodeId, InventoryNodeKey,
+    InventoryOwner, Item, ItemKey, ServerVersion,
 };
 
 pub const MAX_FOLDER_FETCH_CHILDREN: usize = 100_000;
@@ -41,6 +41,9 @@ impl Inventory {
         let mut next = self.state.as_ref().clone();
         let mut changes = Vec::new();
         upsert_category_state(&mut next, category, &mut changes)?;
+        if next.categories.len() > self.limits.max_categories {
+            return Err(InventoryError::TooManyCategories);
+        }
         self.publish(next, changes)
     }
 
@@ -49,6 +52,9 @@ impl Inventory {
         let mut next = self.state.as_ref().clone();
         let mut changes = Vec::new();
         upsert_item_state(&mut next, item, &mut changes)?;
+        if next.items.len() > self.limits.max_items {
+            return Err(InventoryError::TooManyItems);
+        }
         self.publish(next, changes)
     }
 
@@ -103,13 +109,15 @@ impl Inventory {
         descendent_count: Option<u32>,
         children: Vec<InventoryChild>,
     ) -> Result<ChangeSet, InventoryError> {
-        if children.len() > MAX_FOLDER_FETCH_CHILDREN {
+        if children.len() > self.limits.max_folder_fetch_children {
             return Err(InventoryError::TooManyFolderChildren);
         }
         if !self.state.categories.contains_key(&folder) {
             return Err(InventoryError::MissingCategory);
         }
         let mut incoming = HashSet::with_capacity(children.len());
+        let mut new_categories = 0usize;
+        let mut new_items = 0usize;
         for child in &children {
             if child.node_key().owner() != folder.owner() || child.parent() != folder {
                 return Err(InventoryError::InvalidParent);
@@ -126,17 +134,19 @@ impl Inventory {
                 }
                 InventoryChild::Item(item) => validate_item(item)?,
             }
+            match child {
+                InventoryChild::Category(category) if !self.state.categories.contains_key(&category.key) => {
+                    new_categories = new_categories.checked_add(1).ok_or(InventoryError::TooManyCategories)?;
+                }
+                InventoryChild::Item(item) if !self.state.items.contains_key(&item.key) => {
+                    new_items = new_items.checked_add(1).ok_or(InventoryError::TooManyItems)?;
+                }
+                _ => {}
+            }
         }
 
         let old_children = self.state.children.get(&folder).cloned().ok_or(InventoryError::InconsistentIndex)?;
-        let mut next = self.state.as_ref().clone();
-        let mut changes = Vec::new();
-        for child in children {
-            match child {
-                InventoryChild::Category(category) => upsert_category_state(&mut next, category, &mut changes)?,
-                InventoryChild::Item(item) => upsert_item_state(&mut next, item, &mut changes)?,
-            }
-        }
+        let mut removal = SubtreeRemoval::default();
         for stale in old_children.iter().copied() {
             let key = InventoryNodeKey::new(folder.owner(), stale);
             if incoming.contains(&key) {
@@ -144,11 +154,37 @@ impl Inventory {
             }
             match stale {
                 InventoryNodeId::Category(id) => {
-                    remove_category_subtree(&mut next, CategoryKey::new(folder.owner(), id), &mut changes)?;
+                    removal.collect_category(&self.state, CategoryKey::new(folder.owner(), id), &incoming)?;
                 }
                 InventoryNodeId::Item(id) => {
-                    remove_item(&mut next, ItemKey::new(folder.owner(), id), &mut changes)?;
+                    removal.collect_item(&self.state, ItemKey::new(folder.owner(), id), folder, &incoming)?;
                 }
+            }
+        }
+        check_final_capacity(&self.state, &removal, new_categories, new_items, self.limits)?;
+
+        let mut next = self.state.as_ref().clone();
+        let mut changes = Vec::new();
+        let preserved = std::mem::take(&mut removal.preserved);
+        if !preserved.is_empty() {
+            for child in &children {
+                if !preserved.contains(&child.node_key()) {
+                    continue;
+                }
+                match child {
+                    InventoryChild::Category(category) => upsert_category_state(&mut next, category.clone(), &mut changes)?,
+                    InventoryChild::Item(item) => upsert_item_state(&mut next, item.clone(), &mut changes)?,
+                }
+            }
+        }
+        removal.apply(&mut next, &mut changes)?;
+        for child in children {
+            if preserved.contains(&child.node_key()) {
+                continue;
+            }
+            match child {
+                InventoryChild::Category(category) => upsert_category_state(&mut next, category, &mut changes)?,
+                InventoryChild::Item(item) => upsert_item_state(&mut next, item, &mut changes)?,
             }
         }
 
@@ -200,9 +236,6 @@ fn upsert_category_state(state: &mut InventoryState, category: Category, changes
     if previous.as_deref() == Some(&category) {
         return Ok(());
     }
-    if previous.is_none() && state.categories.len() >= crate::MAX_INVENTORY_CATEGORIES {
-        return Err(InventoryError::TooManyCategories);
-    }
     let parent_changed = previous.as_ref().is_some_and(|previous| previous.parent != category.parent);
     if parent_changed && let Some(old_parent) = previous.as_ref().and_then(|previous| previous.parent) {
         remove_child(state, old_parent, InventoryNodeId::Category(key.id()))?;
@@ -234,9 +267,6 @@ fn upsert_item_state(state: &mut InventoryState, item: Item, changes: &mut Vec<I
     let previous = state.items.get(&key).cloned();
     if previous.as_deref() == Some(&item) {
         return Ok(());
-    }
-    if previous.is_none() && state.items.len() >= crate::MAX_INVENTORY_ITEMS {
-        return Err(InventoryError::TooManyItems);
     }
     if let Some(previous) = &previous
         && previous.parent != item.parent
@@ -284,48 +314,121 @@ fn remove_category_subtree(
     root: CategoryKey,
     changes: &mut Vec<InventoryChange>,
 ) -> Result<(), InventoryError> {
-    if state.roots.contains(root) {
-        return Err(InventoryError::FixedRoot);
+    let mut removal = SubtreeRemoval::default();
+    removal.collect_category(state, root, &HashSet::new())?;
+    removal.apply(state, changes)
+}
+
+#[derive(Default)]
+struct SubtreeRemoval {
+    categories: Vec<CategoryKey>,
+    items: Vec<ItemKey>,
+    visited: HashSet<InventoryNodeId>,
+    preserved: HashSet<InventoryNodeKey>,
+}
+
+impl SubtreeRemoval {
+    fn collect_category(
+        &mut self,
+        state: &InventoryState,
+        root: CategoryKey,
+        preserved: &HashSet<InventoryNodeKey>,
+    ) -> Result<(), InventoryError> {
+        if state.roots.contains(root) {
+            return Err(InventoryError::FixedRoot);
+        }
+        let category = state.categories.get(&root).ok_or(InventoryError::InconsistentIndex)?;
+        let parent = category.parent.ok_or(InventoryError::InvalidRoot)?;
+        let mut pending = vec![(InventoryNodeId::Category(root.id()), parent)];
+        while let Some((node, expected_parent)) = pending.pop() {
+            if !self.visited.insert(node) {
+                return Err(InventoryError::Cycle);
+            }
+            let node_key = InventoryNodeKey::new(root.owner(), node);
+            if preserved.contains(&node_key) {
+                self.preserved.insert(node_key);
+                continue;
+            }
+            match node {
+                InventoryNodeId::Category(id) => {
+                    let key = CategoryKey::new(root.owner(), id);
+                    let category = state.categories.get(&key).ok_or(InventoryError::InconsistentIndex)?;
+                    if category.parent != Some(expected_parent) {
+                        return Err(InventoryError::InconsistentIndex);
+                    }
+                    self.categories.push(key);
+                    let children = state.children.get(&key).ok_or(InventoryError::InconsistentIndex)?;
+                    pending.extend(children.iter().map(|child| (*child, key)));
+                }
+                InventoryNodeId::Item(id) => {
+                    let key = ItemKey::new(root.owner(), id);
+                    let item = state.items.get(&key).ok_or(InventoryError::InconsistentIndex)?;
+                    if item.parent != expected_parent {
+                        return Err(InventoryError::InconsistentIndex);
+                    }
+                    self.items.push(key);
+                }
+            }
+        }
+        Ok(())
     }
-    let Some(category) = state.categories.get(&root) else { return Ok(()) };
-    category.parent.ok_or(InventoryError::InvalidRoot)?;
-    let mut category_order = Vec::new();
-    let mut item_keys = Vec::new();
-    let mut pending = vec![InventoryNodeId::Category(root.id())];
-    let mut visited = HashSet::new();
-    while let Some(node) = pending.pop() {
-        if !visited.insert(node) {
+
+    fn collect_item(
+        &mut self,
+        state: &InventoryState,
+        key: ItemKey,
+        parent: CategoryKey,
+        preserved: &HashSet<InventoryNodeKey>,
+    ) -> Result<(), InventoryError> {
+        let node = InventoryNodeId::Item(key.id());
+        if !self.visited.insert(node) {
             return Err(InventoryError::Cycle);
         }
-        match node {
-            InventoryNodeId::Category(id) => {
-                let key = CategoryKey::new(root.owner(), id);
-                if !state.categories.contains_key(&key) {
-                    return Err(InventoryError::InconsistentIndex);
-                }
-                category_order.push(key);
-                let children = state.children.get(&key).ok_or(InventoryError::InconsistentIndex)?;
-                pending.extend(children.iter().copied());
-            }
-            InventoryNodeId::Item(id) => {
-                let key = ItemKey::new(root.owner(), id);
-                if !state.items.contains_key(&key) {
-                    return Err(InventoryError::InconsistentIndex);
-                }
-                item_keys.push(key);
-            }
+        let node_key = InventoryNodeKey::new(key.owner(), node);
+        if preserved.contains(&node_key) {
+            self.preserved.insert(node_key);
+            return Ok(());
         }
-    }
-    for key in item_keys {
-        remove_item(state, key, changes)?;
-    }
-    for key in category_order.into_iter().rev() {
-        let category = state.categories.get(&key).cloned().ok_or(InventoryError::InconsistentIndex)?;
-        if let Some(parent) = category.parent {
-            remove_child(state, parent, InventoryNodeId::Category(key.id()))?;
+        let item = state.items.get(&key).ok_or(InventoryError::InconsistentIndex)?;
+        if item.parent != parent {
+            return Err(InventoryError::InconsistentIndex);
         }
-        remove_category_record(state, key)?;
-        changes.push(InventoryChange::CategoryRemoved(key));
+        self.items.push(key);
+        Ok(())
+    }
+
+    fn apply(self, state: &mut InventoryState, changes: &mut Vec<InventoryChange>) -> Result<(), InventoryError> {
+        for key in self.items {
+            remove_item(state, key, changes)?;
+        }
+        for key in self.categories.into_iter().rev() {
+            let category = state.categories.get(&key).cloned().ok_or(InventoryError::InconsistentIndex)?;
+            if let Some(parent) = category.parent {
+                remove_child(state, parent, InventoryNodeId::Category(key.id()))?;
+            }
+            remove_category_record(state, key)?;
+            changes.push(InventoryChange::CategoryRemoved(key));
+        }
+        Ok(())
+    }
+}
+
+fn check_final_capacity(
+    state: &InventoryState,
+    removal: &SubtreeRemoval,
+    new_categories: usize,
+    new_items: usize,
+    limits: InventoryLimits,
+) -> Result<(), InventoryError> {
+    let categories_after_removal = state.categories.len().checked_sub(removal.categories.len()).ok_or(InventoryError::InconsistentIndex)?;
+    let items_after_removal = state.items.len().checked_sub(removal.items.len()).ok_or(InventoryError::InconsistentIndex)?;
+    let category_count = categories_after_removal.checked_add(new_categories).ok_or(InventoryError::TooManyCategories)?;
+    let item_count = items_after_removal.checked_add(new_items).ok_or(InventoryError::TooManyItems)?;
+    if category_count > limits.max_categories {
+        return Err(InventoryError::TooManyCategories);
+    }
+    if item_count > limits.max_items {
+        return Err(InventoryError::TooManyItems);
     }
     Ok(())
 }

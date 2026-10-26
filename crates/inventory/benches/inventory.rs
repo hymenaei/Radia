@@ -3,8 +3,8 @@ use std::{hint::black_box, mem::size_of, sync::Arc};
 use ::inventory as inventory_model;
 use criterion::{BatchSize, Criterion};
 use inventory_model::{
-    AssetType, Category, CategoryKey, Inventory, InventoryChild, InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions,
-    SaleInfo, SaleType, ServerVersion,
+    AssetType, Category, CategoryKey, Inventory, InventoryChild, InventoryLimits, InventoryOwner, InventoryType, Item, ItemKey,
+    PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
 };
 use test_support::allocation;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
@@ -71,7 +71,7 @@ fn root_inventory() -> Inventory {
         server_version: ServerVersion::UNKNOWN,
         server_descendent_count: None,
     };
-    Inventory::new(root, None).expect("benchmark root should be valid")
+    Inventory::new(root, None, InventoryLimits::default()).expect("benchmark root should be valid")
 }
 
 fn item_inventory() -> Inventory {

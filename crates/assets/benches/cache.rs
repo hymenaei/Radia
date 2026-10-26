@@ -1,9 +1,6 @@
 use std::{hint::black_box, sync::Arc, time::Instant};
 
-use assets::{
-    Budget, Kind, LoadJob, Priority, Request, Resource, Route, Store,
-    cache::{AssetCache, ValidatedExtent},
-};
+use assets::{Budget, Kind, LoadJob, Priority, Request, Resource, Route, Store, cache::AssetCache};
 use criterion::Criterion;
 use tempfile::tempdir;
 use test_support::texture::RGBA_J2C;
@@ -39,12 +36,7 @@ fn warm_disk_decode(cache: &Arc<AssetCache>) {
 pub fn bench(c: &mut Criterion) {
     let directory = tempdir().expect("benchmark cache directory");
     let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).expect("open benchmark cache"));
-    cache
-        .put_extent(
-            resource(),
-            ValidatedExtent::from_validated(u64::try_from(RGBA_J2C.len()).expect("fixture length"), 0, RGBA_J2C.to_vec()),
-        )
-        .expect("seed benchmark cache");
+    cache.put_complete(resource(), RGBA_J2C.to_vec()).expect("seed benchmark cache");
     let mut group = c.benchmark_group("asset_cache_texture");
     group.bench_function("cold_fetch_decode", |b| b.iter(cold_fetch_decode));
     group.bench_function("warm_disk_read_decode", |b| b.iter(|| warm_disk_decode(&cache)));

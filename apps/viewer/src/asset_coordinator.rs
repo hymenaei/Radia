@@ -646,7 +646,7 @@ mod tests {
         cancel_first.send(()).unwrap();
         first_service.stop().await;
         assert_eq!(first_peer.finish().len(), 2);
-        assert_eq!(cache.stats().bytes_written, u64::try_from(RGBA_J2C.len() + 20 + 16).unwrap());
+        assert_eq!(cache.stats().bytes_written, u64::try_from(RGBA_J2C.len()).unwrap());
         drop(first_texture);
         drop(first_demand);
         drop(first_handle);
@@ -689,7 +689,7 @@ mod tests {
     async fn a_semantically_corrupt_texture_is_refetched_and_replaced() {
         let directory = tempdir().unwrap();
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        cache.put_extent(resource(Kind::Texture), assets::cache::ValidatedExtent::from_validated(3, 0, b"bad".to_vec())).unwrap();
+        cache.put_complete(resource(Kind::Texture), b"bad".to_vec()).unwrap();
         let peer = Peer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
         let (cancel, cancelled) = oneshot::channel();
         let service = AssetCoordinator::with_budget(
@@ -721,63 +721,7 @@ mod tests {
         let assets::cache::AssetLookup::Hit(asset) = cache.lookup(resource(Kind::Texture)) else {
             panic!("validated network content replaced the corrupt entry")
         };
-        assert_eq!(asset.extents.first().map(|extent| extent.bytes.as_slice()), Some(RGBA_J2C));
-        drop(texture);
-        drop(demand);
-        drop(handle);
-        Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handle released")).shutdown().unwrap();
-    }
-
-    #[tokio::test]
-    async fn partial_disk_texture_falls_through_to_a_full_fetch() {
-        let directory = tempdir().unwrap();
-        let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        let prefix = RGBA_J2C.len() / 2;
-        cache
-            .put_extent(
-                resource(Kind::Texture),
-                assets::cache::ValidatedExtent::from_validated(
-                    u64::try_from(RGBA_J2C.len()).unwrap(),
-                    0,
-                    RGBA_J2C.get(..prefix).unwrap().to_vec(),
-                ),
-            )
-            .unwrap();
-        let peer = Peer::new(2, move |index, request, base| {
-            if index == 0 {
-                return (200, grants(base));
-            }
-            let request = String::from_utf8_lossy(request);
-            assert!(request.starts_with("GET /content/?texture_id="));
-            assert!(!request.lines().any(|line| line.split_once(':').is_some_and(|(name, _)| name.eq_ignore_ascii_case("range"))));
-            (200, RGBA_J2C.to_vec())
-        });
-        let (cancel, cancelled) = oneshot::channel();
-        let service = AssetCoordinator::with_budget(
-            Handle::current(),
-            async move {
-                let _ = cancelled.await;
-            },
-            Budget::default(),
-            Some(Arc::clone(&cache)),
-        );
-        let region = Region::new(1);
-        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
-        let handle = service.handle();
-        let mut demand = handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
-        let texture = loop {
-            match demand.status() {
-                assets::Status::Ready(assets::Content::Texture(texture)) => break texture,
-                assets::Status::Failed { failure, .. } => panic!("unexpected full texture fetch failure: {failure:?}"),
-                _ => {
-                    demand.changed().await;
-                }
-            }
-        };
-        assert_eq!(texture.image().unwrap().pixels(), RGBA_RAW);
-        cancel.send(()).unwrap();
-        service.stop().await;
-        assert_eq!(peer.finish().len(), 2);
+        assert_eq!(asset.bytes, RGBA_J2C);
         drop(texture);
         drop(demand);
         drop(handle);

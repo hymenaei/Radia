@@ -943,15 +943,12 @@ impl Store {
             entry.cache_checked = true;
         }
         match result {
-            Ok(AssetLookup::Hit(asset)) if asset.is_complete() => {
-                let Some(extent) = asset.extents.into_iter().next() else {
-                    return Self::cache_read_fallback(entry, job, now);
-                };
-                job.reservation.shrink_to_at_most(extent.bytes.capacity());
+            Ok(AssetLookup::Hit(asset)) => {
+                job.reservation.shrink_to_at_most(asset.bytes.capacity());
                 if let LoadPhase::Running { stage, .. } = &mut entry.phase {
                     *stage = Stage::Fetching;
                 }
-                Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Disk(extent.bytes), job }))
+                Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Disk(asset.bytes), job }))
             }
             _ => Self::cache_read_fallback(entry, job, now),
         }

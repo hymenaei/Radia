@@ -75,12 +75,7 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(11);
-    cache
-        .put_extent(
-            resource,
-            crate::cache::ValidatedExtent::from_validated(u64::try_from(RGBA_J2C.len()).expect("fixture size"), 0, RGBA_J2C.to_vec()),
-        )
-        .expect("seed validated texture bytes");
+    cache.put_complete(resource, RGBA_J2C.to_vec()).expect("seed validated texture bytes");
     let budget = Budget::default();
     let mut store = Store::with_cache(budget.clone(), Arc::clone(&cache));
     let now = Instant::now();
@@ -90,7 +85,7 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
     assert_eq!(
         budget.stats().charged_bytes,
         read_work_bytes(Kind::Texture).expect("bounded cache read reservation"),
-        "disk reads reserve for the stored record and decoded extents",
+        "disk reads reserve for the raw payload and decoded asset",
     );
     let input = store.complete_cache_read(read.run(), now).expect("cache hit supplies input");
     let LoadJob::Decode(input) = input else { panic!("cache hit follows decode admission") };
@@ -99,7 +94,7 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
     assert!(store.complete(decode.run(), now).is_empty());
     assert_matches!(demand.status(), Status::Ready(Content::Texture(_)));
     assert_eq!(cache.stats().hits, 1);
-    assert_eq!(cache.stats().bytes_read, u64::try_from(RGBA_J2C.len() + 20 + 16).expect("encoded fixture size"));
+    assert_eq!(cache.stats().bytes_read, u64::try_from(RGBA_J2C.len()).expect("raw fixture size"));
     assert_eq!(budget.stats().charged_bytes, RGBA_J2C.len() + RGBA_RAW.len());
     drop(demand);
     store.close();
@@ -112,12 +107,7 @@ fn retired_route_discards_a_completed_disk_read() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(12);
-    cache
-        .put_extent(
-            resource,
-            crate::cache::ValidatedExtent::from_validated(u64::try_from(RGBA_J2C.len()).expect("fixture size"), 0, RGBA_J2C.to_vec()),
-        )
-        .expect("seed validated texture bytes");
+    cache.put_complete(resource, RGBA_J2C.to_vec()).expect("seed validated texture bytes");
     let budget = Budget::default();
     let mut store = Store::with_cache(budget.clone(), Arc::clone(&cache));
     let now = Instant::now();
@@ -156,12 +146,7 @@ fn cancelled_read_allows_retry() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(14);
-    cache
-        .put_extent(
-            resource,
-            crate::cache::ValidatedExtent::from_validated(u64::try_from(RGBA_J2C.len()).expect("fixture size"), 0, RGBA_J2C.to_vec()),
-        )
-        .expect("seed validated texture bytes");
+    cache.put_complete(resource, RGBA_J2C.to_vec()).expect("seed validated texture bytes");
     let budget = Budget::default();
     let mut store = Store::with_cache(budget.clone(), Arc::clone(&cache));
     let now = Instant::now();
@@ -207,9 +192,7 @@ fn malformed_disk_payload_is_discarded_without_failing_demand_attempts() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(13);
-    cache
-        .put_extent(resource, crate::cache::ValidatedExtent::from_validated(3, 0, b"bad".to_vec()))
-        .expect("seed semantically malformed payload");
+    cache.put_complete(resource, b"bad".to_vec()).expect("seed semantically malformed payload");
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
     let now = Instant::now();
     let route = store.register_route().expect("register route");
@@ -230,7 +213,7 @@ fn malformed_disk_payload_is_discarded_without_failing_demand_attempts() {
         write.run();
     }
     let crate::cache::AssetLookup::Hit(asset) = cache.lookup(resource) else { panic!("valid network bytes replace corrupt cache data") };
-    assert_eq!(asset.extents.first().map(|extent| extent.bytes.as_slice()), Some(RGBA_J2C));
+    assert_eq!(asset.bytes, RGBA_J2C);
     drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 }

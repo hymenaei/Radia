@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, mpsc},
     thread,
     time::Duration,
 };
@@ -13,21 +13,17 @@ use tempfile::tempdir;
 
 use super::*;
 
+const TEST_NAMESPACES: [Namespace; 2] = [Namespace::new("tests/storage", "bin"), Namespace::new("assets/textures", "j2c")];
+const TEST_NAMESPACE: NamespaceId = NamespaceId::new(0);
+
 fn key(value: u16) -> Key {
-    let mut bytes = [0; 32];
-    bytes[..2].copy_from_slice(&value.to_le_bytes());
-    Key::new(bytes)
+    let mut name = [0; 16];
+    name[..2].copy_from_slice(&value.to_le_bytes());
+    Key::new(TEST_NAMESPACE, name)
 }
 
-fn data_files(directory: &Path) -> Vec<PathBuf> {
-    fs::read_dir(directory.join(DATA_DIRECTORY))
-        .expect("read cache data directory")
-        .filter_map(Result::ok)
-        .map(|item| item.path())
-        .filter(|path| {
-            path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("data-") && name.to_string_lossy().ends_with(".bin"))
-        })
-        .collect()
+fn data_file(directory: &Path, key: Key) -> PathBuf {
+    NamespaceTable::new(&TEST_NAMESPACES).expect("valid test namespaces").path(directory, key).expect("valid test key")
 }
 
 fn crash_points() -> [WritePoint; 7] {
@@ -58,7 +54,7 @@ fn compact_points() -> [WritePoint; 8] {
 #[test]
 fn lock_is_exclusive_across_processes() {
     let directory = tempdir().expect("cache directory");
-    let first = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open first cache");
+    let first = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open first cache");
 
     let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
         .arg("--exact")
@@ -68,10 +64,12 @@ fn lock_is_exclusive_across_processes() {
         .status()
         .expect("start child test process");
     assert!(status.success());
-    assert!(directory.path().join("child-lock-checked").exists());
+    let marker = directory.path().with_extension("lock-checked");
+    assert!(marker.exists());
+    fs::remove_file(marker).expect("remove lock check marker");
 
     first.shutdown().expect("close first cache");
-    let second = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("reopen cache");
+    let second = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("reopen cache");
     second.shutdown().expect("close reopened cache");
 }
 
@@ -81,8 +79,8 @@ fn lock_helper() {
         return;
     };
     let directory = PathBuf::from(directory);
-    std::assert_matches!(Cache::open(&directory, DEFAULT_SIZE_LIMIT), Err(StorageError::InUse));
-    fs::write(directory.join("child-lock-checked"), []).expect("record child lock check");
+    std::assert_matches!(Cache::open(&directory, DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES), Err(StorageError::InUse));
+    fs::write(directory.with_extension("lock-checked"), []).expect("record child lock check");
 }
 
 #[test]
@@ -93,18 +91,99 @@ fn usage_metadata_does_not_wrap() {
 }
 
 #[test]
+fn key_paths_are_sharded_and_validated() {
+    let name = [0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89];
+    let key = Key::new(NamespaceId::new(1), name);
+    assert_eq!(data_file(Path::new("cache"), key), PathBuf::from("cache/assets/textures/ab/abcdef01-2345-6789-abcd-ef0123456789.j2c"));
+    let directory = tempdir().expect("invalid namespace cache root");
+    std::assert_matches!(
+        Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &[Namespace::new("assets/../outside", "j2c")]),
+        Err(StorageError::InvalidNamespaces)
+    );
+    std::assert_matches!(
+        Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &[Namespace::new("assets\\textures", "j2c")]),
+        Err(StorageError::InvalidNamespaces)
+    );
+    std::assert_matches!(
+        Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &[Namespace::new("assets/textures", "LLSD")]),
+        Err(StorageError::InvalidNamespaces)
+    );
+}
+
+#[test]
+fn namespace_recovery_remaps_keys_and_sweeps_removed_namespaces() {
+    const OLD_NAMESPACES: [Namespace; 2] = [Namespace::new("removed/items", "bin"), Namespace::new("retained/items", "bin")];
+    const NEW_NAMESPACES: [Namespace; 1] = [Namespace::new("retained/items", "bin")];
+    let unknown_key = Key::new(NamespaceId::new(0), [1; 16]);
+    let stored_key = Key::new(NamespaceId::new(1), [2; 16]);
+
+    for compacted in [false, true] {
+        let directory = tempdir().expect("cache directory");
+        let old_table = NamespaceTable::new(&OLD_NAMESPACES).expect("old namespace table");
+        let unknown_path = old_table.path(directory.path(), unknown_key).expect("removed key path");
+        let stored_path = old_table.path(directory.path(), stored_key).expect("retained key path");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &OLD_NAMESPACES).expect("open old namespaces");
+        cache.put(unknown_key, b"removed namespace".to_vec()).expect("store removed key");
+        cache.put(stored_key, b"retained namespace".to_vec()).expect("store retained key");
+        if compacted {
+            cache.flush().expect("compact old namespaces");
+        }
+        cache.simulate_crash().expect("stop before reconfiguration");
+
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NEW_NAMESPACES).expect("open new namespaces");
+        let remapped_key = Key::new(NamespaceId::new(0), stored_key.name());
+        std::assert_matches!(cache.lookup(remapped_key), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"retained namespace");
+        std::assert_matches!(cache.put(Key::new(NamespaceId::new(1), [3; 16]), vec![0]), Err(StorageError::UnknownNamespace));
+        cache.flush().expect("sweep removed namespace files");
+        assert!(!unknown_path.exists());
+        assert!(stored_path.exists());
+        cache.shutdown().expect("close cache with remapped namespaces");
+    }
+}
+
+#[test]
+fn replacement_writes_raw_bytes_at_one_path() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    let path = data_file(directory.path(), key(5));
+    cache.put(key(5), b"first payload".to_vec()).expect("store first payload");
+    assert_eq!(fs::read(&path).expect("read fixed path"), b"first payload");
+    cache.put(key(5), b"replacement payload".to_vec()).expect("replace fixed path");
+    assert_eq!(fs::read(&path).expect("read replaced path"), b"replacement payload");
+    std::assert_matches!(cache.lookup(key(5)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"replacement payload");
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
+fn shard_directories_are_accounted_once() {
+    let same_shard = tempdir().expect("same shard cache");
+    let cache = Cache::open(same_shard.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open same shard cache");
+    cache.put(key(10), vec![1; 8]).expect("store first same-shard value");
+    cache.put(key(266), vec![2; 8]).expect("store second same-shard value");
+    let same_shard_size = cache.accounted_size();
+    cache.shutdown().expect("close same shard cache");
+
+    let split_shards = tempdir().expect("split shard cache");
+    let cache = Cache::open(split_shards.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open split shard cache");
+    cache.put(key(10), vec![1; 8]).expect("store first split-shard value");
+    cache.put(key(11), vec![2; 8]).expect("store second split-shard value");
+    assert_eq!(cache.accounted_size(), same_shard_size + DIRECTORY_OVERHEAD);
+    cache.shutdown().expect("close split shard cache");
+}
+
+#[test]
 fn lookup_checks_hash_and_removes_corruption() {
     let directory = tempdir().expect("cache directory");
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.put(key(1), b"payload bytes".to_vec()).expect("store payload");
     cache.shutdown().expect("close cache");
-    let file = data_files(directory.path()).into_iter().next().expect("payload file");
+    let file = data_file(directory.path(), key(1));
     let mut bytes = fs::read(&file).expect("read payload file");
     let byte = bytes.get_mut(0).expect("first payload byte");
     *byte ^= 0xff;
     fs::write(file, bytes).expect("flip payload byte");
 
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("reopen cache");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("reopen cache");
     assert_eq!(cache.lookup(key(1)), Lookup::Corrupt);
     cache.flush().expect("remove corrupted entry");
     assert_eq!(cache.lookup(key(1)), Lookup::Miss);
@@ -114,7 +193,7 @@ fn lookup_checks_hash_and_removes_corruption() {
 #[test]
 fn bounded_lookup_discards_entries_larger_than_the_bound() {
     let directory = tempdir().expect("cache directory");
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.put(key(3), b"payload bytes".to_vec()).expect("store payload");
 
     assert_eq!(cache.lookup_bounded(key(3), 4), Lookup::Corrupt);
@@ -128,10 +207,10 @@ fn bounded_lookup_discards_entries_larger_than_the_bound() {
 fn lookup_detects_truncated_and_missing_data() {
     for missing in [false, true] {
         let directory = tempdir().expect("cache directory");
-        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
         cache.put(key(2), b"payload bytes".to_vec()).expect("store payload");
         cache.shutdown().expect("close cache");
-        let file = data_files(directory.path()).into_iter().next().expect("payload file");
+        let file = data_file(directory.path(), key(2));
         if missing {
             fs::remove_file(&file).expect("remove payload");
         } else {
@@ -140,7 +219,7 @@ fn lookup_detects_truncated_and_missing_data() {
             fs::write(&file, truncated).expect("truncate payload");
         }
 
-        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open without data rescan");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open without data rescan");
         assert_eq!(cache.entry_count(), 1, "startup leaves payload validation to lookup");
         assert_eq!(cache.lookup(key(2)), Lookup::Corrupt);
         cache.flush().expect("remove damaged entry");
@@ -152,12 +231,12 @@ fn lookup_detects_truncated_and_missing_data() {
 #[test]
 fn recovered_entry_accepts_replacement() {
     let directory = tempdir().expect("cache directory");
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.arm_fault(WritePoint::JournalAppended);
     assert!(cache.put(key(3), b"recovered payload".to_vec()).is_err());
     cache.simulate_crash().expect("simulate process crash");
 
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("recover cache");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("recover cache");
     cache.put(key(3), b"replacement payload".to_vec()).expect("replace recovered entry");
     std::assert_matches!(cache.lookup(key(3)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"replacement payload");
     cache.shutdown().expect("close cache");
@@ -166,14 +245,20 @@ fn recovered_entry_accepts_replacement() {
 #[test]
 fn recovery_discards_extra_files() {
     let directory = tempdir().expect("cache directory");
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.shutdown().expect("close cache");
-    let extra = directory.path().join(DATA_DIRECTORY).join("stray.bin");
+    let extra = directory.path().join("data").join("stray.bin");
+    let temporary = directory.path().join("assets/textures/ab/.data-tmp-stray");
+    fs::create_dir_all(extra.parent().expect("legacy data parent")).expect("create legacy data directory");
+    fs::create_dir_all(temporary.parent().expect("shard parent")).expect("create shard directory");
     fs::write(&extra, b"unindexed").expect("create extra file");
+    fs::write(&temporary, b"unfinished write").expect("create temporary file");
 
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache with extra file");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache with extra file");
     cache.flush().expect("sweep unreferenced file");
     assert!(!extra.exists());
+    assert!(!temporary.exists());
+    assert!(!temporary.parent().expect("shard parent").exists());
     assert_eq!(cache.entry_count(), 0);
     cache.shutdown().expect("close cache");
 }
@@ -182,9 +267,12 @@ fn recovery_discards_extra_files() {
 fn recovery_discards_unreadable_and_incompatible_snapshots() {
     for incompatible in [false, true] {
         let directory = tempdir().expect("cache directory");
-        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
         cache.put(key(4), b"payload".to_vec()).expect("store payload");
         cache.shutdown().expect("close cache");
+        let legacy_data = directory.path().join("data").join("old.bin");
+        fs::create_dir_all(legacy_data.parent().expect("legacy data parent")).expect("create old data directory");
+        fs::write(&legacy_data, b"old layout").expect("create old cache payload");
         let snapshot_path = directory.path().join(SNAPSHOT_FILE);
         if incompatible {
             let mut snapshot = fs::read(&snapshot_path).expect("read snapshot");
@@ -198,10 +286,11 @@ fn recovery_discards_unreadable_and_incompatible_snapshots() {
             fs::write(&snapshot_path, b"short").expect("truncate snapshot");
         }
 
-        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("discard unreadable cache");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("discard unreadable cache");
         assert_eq!(cache.entry_count(), 0);
         cache.flush().expect("sweep discarded data");
-        assert!(data_files(directory.path()).is_empty());
+        assert!(!data_file(directory.path(), key(4)).exists());
+        assert!(!directory.path().join("data").exists());
         cache.shutdown().expect("close repaired cache");
     }
 }
@@ -209,14 +298,14 @@ fn recovery_discards_unreadable_and_incompatible_snapshots() {
 #[test]
 fn size_limit_evicts_least_recently_used() {
     let single = tempdir().expect("single cache directory");
-    let single_cache = Cache::open(single.path(), DEFAULT_SIZE_LIMIT).expect("open single cache");
+    let single_cache = Cache::open(single.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open single cache");
     single_cache.put(key(10), vec![1; 64]).expect("store sample entry");
     single_cache.flush().expect("compact sample entry");
     let one_entry_limit = single_cache.accounted_size();
     single_cache.shutdown().expect("close single cache");
 
     let directory = tempdir().expect("cache directory");
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     for id in [11, 12, 13] {
         cache.put(key(id), vec![1; 64]).expect("store entry");
     }
@@ -237,9 +326,28 @@ fn size_limit_evicts_least_recently_used() {
 }
 
 #[test]
+fn evicted_fixed_path_can_be_reused_after_lru_changes() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    cache.put(key(60), vec![1; 64]).expect("store first entry");
+    cache.flush().expect("compact first entry");
+    let one_entry_limit = cache.accounted_size() + 1024;
+    cache.put(key(61), vec![2; 64]).expect("store second entry");
+    cache.set_size_limit(one_entry_limit).expect("evict first entry");
+    assert_eq!(cache.lookup(key(60)), Lookup::Miss);
+    assert!(!data_file(directory.path(), key(60)).exists());
+    std::assert_matches!(cache.lookup(key(61)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == vec![2; 64]);
+
+    cache.put(key(60), vec![3; 64]).expect("reuse evicted path");
+    assert_eq!(cache.lookup(key(61)), Lookup::Miss);
+    std::assert_matches!(cache.lookup(key(60)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == vec![3; 64]);
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
 fn lookup_does_not_wait_for_a_slow_write() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
     let (started, resume) = cache.pause_at(WritePoint::DataWritten);
 
     thread::scope(|scope| {
@@ -259,7 +367,7 @@ fn lookup_does_not_wait_for_a_slow_write() {
 #[test]
 fn lookup_retries_after_replacement_deletes_old_file() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
     cache.put(key(21), b"old payload".to_vec()).expect("store old payload");
     let (started, resume) = cache.pause_at(WritePoint::LookupEntrySelected);
 
@@ -276,9 +384,98 @@ fn lookup_retries_after_replacement_deletes_old_file() {
 }
 
 #[test]
+fn lookup_retries_during_replace() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
+    cache.put(key(22), b"old payload".to_vec()).expect("store old payload");
+    let (selected, resume_reader) = cache.pause_at(WritePoint::LookupEntrySelected);
+
+    thread::scope(|scope| {
+        let reading_cache = Arc::clone(&cache);
+        let reader = scope.spawn(move || reading_cache.lookup(key(22)));
+        selected.recv_timeout(Duration::from_secs(3)).expect("reader selected old entry");
+        let (reader_selected, reader_resume) = cache.pause_at(WritePoint::LookupHashMismatch);
+
+        let (renamed, resume_writer) = cache.pause_at(WritePoint::DataRenamed);
+        let writing_cache = Arc::clone(&cache);
+        let writer = scope.spawn(move || writing_cache.put(key(22), b"replacement payload".to_vec()));
+        renamed.recv_timeout(Duration::from_secs(3)).expect("writer replaced fixed path");
+
+        resume_reader.send(()).expect("resume old read");
+        reader_selected.recv_timeout(Duration::from_secs(3)).expect("reader detected replaced bytes");
+        resume_writer.send(()).expect("commit replacement");
+        writer.join().expect("writer completes").expect("put replacement");
+        reader_resume.send(()).expect("retry read after index update");
+        std::assert_matches!(reader.join().expect("reader completes"), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"replacement payload");
+    });
+
+    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().expect("close cache");
+}
+
+#[test]
+fn lookup_does_not_wait_for_replace_journal_write() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
+    cache.put(key(24), b"old payload".to_vec()).expect("store old payload");
+    let (journal_started, resume_writer) = cache.pause_at(WritePoint::JournalAppendStarted);
+
+    thread::scope(|scope| {
+        let writing_cache = Arc::clone(&cache);
+        let writer = scope.spawn(move || writing_cache.put(key(24), b"replacement payload".to_vec()));
+        journal_started.recv_timeout(Duration::from_secs(3)).expect("writer reached journal append");
+
+        let reading_cache = Arc::clone(&cache);
+        let (result_sender, result_receiver) = mpsc::channel();
+        let reader = scope.spawn(move || {
+            let result = reading_cache.lookup(key(24));
+            result_sender.send(result).expect("send lookup result");
+        });
+        let before_release = result_receiver.recv_timeout(Duration::from_secs(3));
+        resume_writer.send(()).expect("release writer");
+        writer.join().expect("writer completes").expect("put replacement");
+        reader.join().expect("reader completes");
+        std::assert_matches!(
+            before_release.expect("lookup completed before journal write resumed"),
+            Lookup::Unavailable(UnavailableReason::Io)
+        );
+    });
+
+    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().expect("close cache");
+}
+
+#[test]
+fn replacement_crashes_never_return_unchecked_bytes() {
+    for point in crash_points() {
+        let directory = tempdir().expect("cache directory");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+        cache.put(key(23), b"old payload".to_vec()).expect("store old payload");
+        cache.arm_fault(point);
+        assert!(cache.put(key(23), b"replacement payload".to_vec()).is_err(), "{point:?}");
+        cache.simulate_crash().expect("simulate replacement crash");
+
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("recover fixed path");
+        match point {
+            WritePoint::DataTempCreated | WritePoint::DataWritePartial | WritePoint::DataWritten => {
+                std::assert_matches!(cache.lookup(key(23)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"old payload", "{point:?}");
+            }
+            WritePoint::DataRenamed | WritePoint::JournalAppendStarted | WritePoint::JournalAppendPartial => {
+                assert_eq!(cache.lookup(key(23)), Lookup::Corrupt, "{point:?}");
+                cache.flush().expect("remove unrecoverable replaced record");
+                assert_eq!(cache.lookup(key(23)), Lookup::Miss, "{point:?}");
+            }
+            WritePoint::JournalAppended => {
+                std::assert_matches!(cache.lookup(key(23)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"replacement payload", "{point:?}");
+            }
+            _ => unreachable!(),
+        }
+        cache.shutdown().expect("close recovered cache");
+    }
+}
+
+#[test]
 fn write_failure_is_nonfatal() {
     let directory = tempdir().expect("cache directory");
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.put(key(40), b"existing payload".to_vec()).expect("store existing payload");
     cache.arm_fault(WritePoint::DataWriteFailure);
     std::assert_matches!(cache.put(key(41), b"disk full payload".to_vec()), Err(StorageError::Io(error)) if error.kind() == io::ErrorKind::StorageFull);
@@ -290,14 +487,17 @@ fn write_failure_is_nonfatal() {
 #[test]
 fn torn_journal_tail_is_truncated() {
     let directory = tempdir().expect("cache directory");
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.arm_fault(WritePoint::JournalAppendPartial);
     assert!(cache.put(key(42), b"torn record".to_vec()).is_err());
     cache.simulate_crash().expect("simulate process crash");
 
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("truncate torn journal");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("truncate torn journal");
     assert_eq!(cache.lookup(key(42)), Lookup::Miss);
-    assert_eq!(fs::metadata(directory.path().join(JOURNAL_FILE)).expect("journal metadata").len(), journal::JOURNAL_HEADER_BYTES);
+    assert_eq!(
+        fs::metadata(directory.path().join(JOURNAL_FILE)).expect("journal metadata").len(),
+        journal::journal_header_size(&cache.read_state.namespaces).expect("journal header size")
+    );
     cache.shutdown().expect("close recovered cache");
 }
 
@@ -305,12 +505,12 @@ fn torn_journal_tail_is_truncated() {
 fn crashes_recover_each_journal_and_compaction_step() {
     for point in crash_points() {
         let directory = tempdir().expect("cache directory");
-        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
         cache.arm_fault(point);
         assert!(cache.put(key(43), b"recovery payload".to_vec()).is_err(), "{point:?}");
         cache.simulate_crash().expect("stop writer at simulated crash");
 
-        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("recover cache");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("recover cache");
         let result = cache.lookup(key(43));
         if point == WritePoint::JournalAppended {
             let entries = match cache.read_state.entries.read() {
@@ -318,7 +518,7 @@ fn crashes_recover_each_journal_and_compaction_step() {
                 Err(poisoned) => poisoned.into_inner(),
             };
             let entry = entries.get(&key(43)).expect("journal entry exists");
-            let path = entry.path(&cache.read_state.data_dir);
+            let path = cache.read_state.namespaces.path(&cache.read_state.root, entry.key).expect("entry path");
             assert!(path.exists(), "{point:?}: {path:?}");
             let bytes = fs::read(&path).expect("read recovered payload");
             assert_eq!(u64::try_from(bytes.len()).ok(), Some(entry.size));
@@ -333,13 +533,13 @@ fn crashes_recover_each_journal_and_compaction_step() {
 
     for point in compact_points() {
         let directory = tempdir().expect("cache directory");
-        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
         cache.put(key(44), b"compacted payload".to_vec()).expect("write before compaction");
         cache.arm_fault(point);
         assert!(cache.flush().is_err(), "{point:?}");
         cache.simulate_crash().expect("stop writer during compaction");
 
-        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("recover compacted cache");
+        let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("recover compacted cache");
         match cache.lookup(key(44)) {
             Lookup::Hit(value) => assert_eq!(value.bytes, b"compacted payload", "{point:?}"),
             actual => panic!("{point:?}: {actual:?}"),
@@ -357,7 +557,7 @@ proptest! {
         operations in proptest::collection::vec((0u8..9, 0u16..12, proptest::collection::vec(any::<u8>(), 0..33), 0u8..14), 1..24)
     ) {
         let directory = tempdir().expect("cache directory");
-        let mut cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+        let mut cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
         let mut model = HashMap::<u16, Vec<u8>>::new();
 
         for (action, id, bytes, fault) in operations {
@@ -388,7 +588,16 @@ proptest! {
                     if selected == WritePoint::JournalAppended {
                         model.insert(id, bytes);
                     }
-                    cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("recover after journal crash");
+                    cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("recover after journal crash");
+                    if matches!(selected, WritePoint::DataRenamed | WritePoint::JournalAppendStarted | WritePoint::JournalAppendPartial) {
+                        let existed = model.remove(&id).is_some();
+                        match (existed, cache.lookup(key(id))) {
+                            (true, Lookup::Corrupt) | (false, Lookup::Miss) => {}
+                            (true, actual) => prop_assert!(false, "replaced prior value must be corrupt, got {actual:?}"),
+                            (false, actual) => prop_assert!(false, "uncommitted new value must be absent, got {actual:?}"),
+                        }
+                        cache.flush().expect("remove unrecoverable replacement");
+                    }
                 }
                 6 => {
                     let points = compact_points();
@@ -396,7 +605,7 @@ proptest! {
                     cache.arm_fault(selected);
                     prop_assert!(cache.flush().is_err(), "injected compaction failure is observed");
                     cache.simulate_crash().expect("simulate compaction crash");
-                    cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("recover after compaction crash");
+                    cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("recover after compaction crash");
                 }
                 7 => {
                     let removed = cache.remove(key(id)).expect("remove entry");
@@ -409,13 +618,13 @@ proptest! {
             prop_assert_eq!(cache.entry_count(), model.len());
             check_model(&cache, &model)?;
             cache.shutdown().expect("close cache after operation");
-            cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("reopen cache after operation");
+            cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("reopen cache after operation");
             prop_assert!(cache.accounted_size() <= cache.size_limit());
             prop_assert_eq!(cache.entry_count(), model.len());
             check_model(&cache, &model)?;
         }
 
-        let small_limit = MIN_SIZE_LIMIT + 4096;
+        let small_limit = MIN_SIZE_LIMIT + 8192;
         cache.set_size_limit(small_limit).expect("lower cache limit");
         reconcile_after_eviction(&cache, &mut model)?;
         for _ in 0..160 {
@@ -431,7 +640,7 @@ proptest! {
             std::assert_matches!(error, StorageError::Io(error) if error.kind() == io::ErrorKind::Interrupted);
             cache.simulate_crash().expect("simulate replacement crash");
             model.insert(0, bytes);
-            cache = Cache::open(directory.path(), small_limit).expect("reopen small cache after replacement");
+            cache = Cache::open(directory.path(), small_limit, &TEST_NAMESPACES).expect("reopen small cache after replacement");
             prop_assert!(cache.accounted_size() <= small_limit);
             check_model(&cache, &model)?;
         }

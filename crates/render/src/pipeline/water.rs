@@ -103,6 +103,7 @@ mod tests {
                 experience_water: None,
                 sky_override: None,
                 water_override: None,
+                local: None,
             },
             0.0,
             0.0,

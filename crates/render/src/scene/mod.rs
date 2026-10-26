@@ -19,7 +19,8 @@ pub use asset_demand::{AssetChange, AssetRequest, AssetTicket};
 pub use budget::{Budget, MEMORY_BYTES};
 pub use camera::{Camera, CameraError};
 pub use environment::{
-    EnvironmentProperty, EnvironmentPush, EnvironmentPushError, ExperienceProperty, ExperienceSetting, ViewerEnvironment,
+    EnvironmentChoice, EnvironmentPreset, EnvironmentProperty, EnvironmentPush, EnvironmentPushError, ExperienceProperty,
+    ExperienceSetting, LocalChoice, LocalEnvironment, ViewerEnvironment,
 };
 pub use mesh::{Detail, MeshBuildError, MeshId, SharedMesh};
 pub use mesh_cache::SculptMeshKey;

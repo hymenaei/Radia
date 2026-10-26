@@ -17,8 +17,8 @@ use world::{
 };
 
 use crate::scene::{
-    AssetChange, AssetTicket, Batch, Budget, Camera, EnvironmentPush, EnvironmentPushError, MeshCompletion, MeshJob, Object, Patch,
-    RecoveryReason, RegionData, SceneView, Status, SurfaceKind,
+    AssetChange, AssetTicket, Batch, Budget, Camera, EnvironmentChoice, EnvironmentPush, EnvironmentPushError, MeshCompletion, MeshJob,
+    Object, Patch, RecoveryReason, RegionData, SceneView, Status, SurfaceKind,
     asset_demand::AssetDemand,
     budget::Lease,
     dependencies::{Dependencies, DependencyTraversal},
@@ -200,6 +200,18 @@ impl Reconciler {
         Ok(())
     }
 
+    pub fn set_local_environment(&mut self, choice: EnvironmentChoice, agent_region: Region) -> Result<(), EnvironmentPushError> {
+        if !self.session.is_active() {
+            return Err(EnvironmentPushError::Invalid);
+        }
+        let version = self.viewer.version();
+        self.viewer.set_local(choice, agent_region)?;
+        if version != self.viewer.version() {
+            self.sync_environment_textures();
+        }
+        Ok(())
+    }
+
     pub fn complete_asset(&mut self, ticket: AssetTicket, status: assets::Status) {
         match self.preparation.environments.complete_asset(ticket, &status) {
             Resolution::Unhandled => {}
@@ -248,7 +260,7 @@ impl Reconciler {
 
     pub fn close(&mut self) {
         self.session.close();
-        self.viewer = ViewerEnvironments::new(self.budget.clone());
+        self.viewer.close();
         self.reset();
         self.recovery.status = Status::Closed;
     }

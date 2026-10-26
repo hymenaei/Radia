@@ -5,11 +5,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ::inventory::{InventoryOwner, ItemKey};
 use egui::{Context, DragValue, Slider, ViewportId};
 use futures::executor::block_on;
 use render::scene;
 use render::{CompressionQuality, FrameInput, Overlay, Renderer, Retirement, TextureCompletion};
 use tracing::Instrument;
+use utils::ItemId;
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -488,6 +490,74 @@ impl SceneWindow {
                     }
                 }
                 ui.label(format!("Camera: {} (V)", self.camera_mode.label()));
+                let current_environment = self.feed.as_ref().map_or_else(scene::EnvironmentChoice::default, SceneFeed::environment_choice);
+                let mut selected_environment = current_environment.clone();
+                let selected_text = match &selected_environment {
+                    scene::EnvironmentChoice::Shared => "Shared environment".to_owned(),
+                    scene::EnvironmentChoice::Local(scene::LocalChoice::Preset(preset)) => preset.label().to_owned(),
+                    scene::EnvironmentChoice::Local(scene::LocalChoice::Inventory { owner_id, item_id, .. }) => self
+                        .feed
+                        .as_ref()
+                        .and_then(|feed| {
+                            let crate::inventory::environments::EnvironmentItems::Ready(items) = feed.environment_items() else {
+                                return None;
+                            };
+                            let key = ItemKey::new(InventoryOwner::new(*owner_id), ItemId::new(*item_id));
+                            items
+                                .item(key)
+                                .map(|item| crate::inventory::environments::environment_setting_label(item, items.library_owner()))
+                        })
+                        .unwrap_or_else(|| "Saved environment".into()),
+                };
+                let environment_items = self.feed.as_ref().map(SceneFeed::environment_items);
+                let can_select_environment = self.feed.as_ref().is_some_and(|feed| feed.agent().is_some());
+                ui.add_enabled_ui(can_select_environment, |ui| {
+                    egui::ComboBox::from_label("Environment").selected_text(selected_text).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected_environment, scene::EnvironmentChoice::Shared, "Shared environment");
+                        for preset in scene::EnvironmentPreset::ALL {
+                            ui.selectable_value(
+                                &mut selected_environment,
+                                scene::EnvironmentChoice::Local(scene::LocalChoice::Preset(preset)),
+                                preset.label(),
+                            );
+                        }
+                        ui.separator();
+                        match environment_items {
+                            Some(crate::inventory::environments::EnvironmentItems::Ready(items)) => {
+                                for item in items.items() {
+                                    let choice = scene::EnvironmentChoice::Local(scene::LocalChoice::Inventory {
+                                        owner_id: item.key.owner().id(),
+                                        item_id: item.key.id().uuid(),
+                                        asset_id: item.asset_id,
+                                    });
+                                    let label = crate::inventory::environments::environment_setting_label(item, items.library_owner());
+                                    ui.add_enabled_ui(!item.asset_id.uuid().is_nil(), |ui| {
+                                        ui.selectable_value(&mut selected_environment, choice, label);
+                                    });
+                                }
+                                if items.items().next().is_none() {
+                                    ui.label("No saved environments");
+                                }
+                            }
+                            Some(crate::inventory::environments::EnvironmentItems::Failed) => {
+                                ui.label("Saved environments unavailable");
+                            }
+                            Some(crate::inventory::environments::EnvironmentItems::Loading) | None => {
+                                ui.label("Loading saved environments…");
+                            }
+                        }
+                    });
+                });
+                if selected_environment != current_environment
+                    && let Some(feed) = &self.feed
+                {
+                    feed.set_environment_choice(selected_environment);
+                }
+                if let Some(failure) =
+                    self.feed.as_ref().and_then(|feed| feed.view.viewer_environment()).and_then(|environment| environment.local_error())
+                {
+                    ui.colored_label(egui::Color32::LIGHT_RED, local_environment_failure(failure));
+                }
                 ui.label(format!("CPU frame: {:.2} ms", self.frame_work.as_secs_f64() * 1000.0));
                 ui.label(format!("Draws: {}, instances: {}", stats.draw_calls, stats.instances));
                 ui.collapsing("Diagnostics", |ui| {
@@ -725,6 +795,24 @@ fn deadline_passed(deadline: Option<Instant>, now: Instant) -> bool {
     deadline.is_some_and(|deadline| now >= deadline)
 }
 
+fn local_environment_failure(failure: assets::Failure) -> String {
+    match failure {
+        assets::Failure::MissingCapability => "The environment asset capability is unavailable.".into(),
+        assets::Failure::NotFound => "The environment asset was not found.".into(),
+        assets::Failure::Denied => "Access to the environment asset was denied.".into(),
+        assets::Failure::HttpStatus { status } => format!("The environment request failed with HTTP status {status}."),
+        assets::Failure::Network => "The environment server could not be reached.".into(),
+        assets::Failure::TooLarge => "The environment asset is too large.".into(),
+        assets::Failure::Malformed => "The environment settings could not be decoded.".into(),
+        assets::Failure::Unsupported => "The environment settings type is unsupported.".into(),
+        assets::Failure::RouteClosed | assets::Failure::SessionClosed | assets::Failure::Cancelled => {
+            "The environment request ended before it completed.".into()
+        }
+        assets::Failure::Deadline => "The environment request timed out.".into(),
+        assets::Failure::Transient { .. } => "The environment request failed temporarily.".into(),
+    }
+}
+
 fn sky_frame_deadline(camera: Option<scene::Camera>, animating: bool, now: Instant) -> Option<Instant> {
     let visible = camera.is_some_and(camera_sees_sky);
     (visible && animating).then(|| now + FRAME_INTERVAL)
@@ -833,7 +921,7 @@ mod tests {
     };
 
     use super::{PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError};
-    use super::{deadline_passed, sky_frame_deadline, water_frame_deadline};
+    use super::{deadline_passed, local_environment_failure, sky_frame_deadline, water_frame_deadline};
     use math::{DVec3, Vec3};
     use render::scene::Camera;
 
@@ -869,6 +957,15 @@ mod tests {
     #[test]
     fn recovery_error_keeps_user_message() {
         assert_eq!(SceneWindowError::RecoveryExhausted.to_string(), "The scene GPU could not recover after three attempts.");
+    }
+
+    #[test]
+    fn local_environment_failure_shows_http_status_and_network_errors() {
+        assert_eq!(
+            local_environment_failure(assets::Failure::HttpStatus { status: 503 }),
+            "The environment request failed with HTTP status 503."
+        );
+        assert_eq!(local_environment_failure(assets::Failure::Network), "The environment server could not be reached.");
     }
 
     #[test]

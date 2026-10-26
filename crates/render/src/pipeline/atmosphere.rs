@@ -73,6 +73,7 @@ mod tests {
             experience_water: None,
             sky_override: None,
             water_override: None,
+            local: None,
         };
         let environment = evaluate(&sources, 0.0, 0.0);
         let values = atmosphere_values(Some(&environment));
@@ -97,6 +98,7 @@ mod tests {
             experience_water: None,
             sky_override: None,
             water_override: None,
+            local: None,
         };
         let legacy = evaluate(&sources, 0.0, 0.0);
         assert_eq!(atmosphere_values(Some(&legacy))[23], 0.0);

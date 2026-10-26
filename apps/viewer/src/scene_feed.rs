@@ -1,10 +1,11 @@
 use std::{
     collections::HashMap,
     future::Future,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
 
+use ::inventory::InventorySnapshot;
 use futures::{
     FutureExt, StreamExt,
     channel::oneshot,
@@ -14,28 +15,37 @@ use futures::{
 };
 use render::environment::{ActiveEnvironment, Evaluated};
 use render::scene::{
-    ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, Object, ReadFailure, ReadJob, ReadQuery, ReadReply,
-    ReconcileStep, Reconciler, SceneView,
+    ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, EnvironmentChoice, Object, ReadFailure, ReadJob, ReadQuery,
+    ReadReply, ReconcileStep, Reconciler, SceneView,
 };
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 use uuid::Uuid;
 use world::{
-    Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, WorldTransformState,
+    Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, Region,
+    WorldTransformState,
 };
 
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::{AssetHandle, RequestError},
+    inventory::environments::{self, EnvironmentItems},
     session::EnvironmentInbox,
     world_reader::{ReadError, WorldReader},
 };
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EnvironmentSelection {
+    choice: EnvironmentChoice,
+    agent_region: Option<Region>,
+}
 
 pub(crate) struct SceneSources {
     pub(crate) reader: WorldReader,
     pub(crate) assets: AssetHandle,
     pub(crate) environments: EnvironmentInbox,
+    pub(crate) inventory_updates: watch::Receiver<Option<InventorySnapshot>>,
 }
 
 pub(crate) struct SceneFeed {
@@ -49,6 +59,8 @@ pub(crate) struct SceneFeed {
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
     last_movement: Option<MovementObservation>,
+    environment_selection: watch::Sender<EnvironmentSelection>,
+    environment_items: watch::Receiver<EnvironmentItems>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
 }
@@ -66,9 +78,25 @@ impl SceneFeed {
         let budget = MEMORY.get_or_init(Budget::default).clone();
         let (scene, view) = Reconciler::new(budget.clone());
         let (sender, incoming) = mpsc::channel(1);
+        let (environment, selected_environment) =
+            watch::channel(EnvironmentSelection { choice: EnvironmentChoice::default(), agent_region: None });
+        let (environment_items_sender, environment_items) = watch::channel(EnvironmentItems::Loading);
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+        drop(runtime.clone().spawn(update_environment_items(
+            sources.inventory_updates.clone(),
+            environment_items_sender,
+            runtime.clone(),
+            Arc::clone(&wake),
+        )));
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
-        drop(runtime.clone().spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, wake).in_current_span()));
+        let run_wake = Arc::clone(&wake);
+        drop(
+            runtime.clone().spawn(
+                run(scene, sources, sender, selected_environment, runtime.clone(), cancelled, observations, move || run_wake())
+                    .in_current_span(),
+            ),
+        );
         Self {
             runtime,
             view,
@@ -80,6 +108,8 @@ impl SceneFeed {
             camera,
             movement,
             last_movement: None,
+            environment_selection: environment,
+            environment_items,
             incoming,
             _cancel: cancel,
         }
@@ -122,6 +152,27 @@ impl SceneFeed {
 
     pub(crate) fn evaluated(&self) -> Option<&Evaluated> {
         self.environment.evaluated()
+    }
+
+    pub(crate) fn environment_choice(&self) -> EnvironmentChoice {
+        self.view.viewer_environment().map_or_else(EnvironmentChoice::default, |environment| environment.selected().clone())
+    }
+
+    pub(crate) fn set_environment_choice(&self, choice: EnvironmentChoice) {
+        let Some(agent_region) = self.agent().map(|agent| agent.detail().summary.address.region()) else { return };
+        let published = self.environment_choice();
+        self.environment_selection.send_if_modified(|selected| {
+            if selected.choice == choice && selected.agent_region == Some(agent_region) && published == choice {
+                false
+            } else {
+                *selected = EnvironmentSelection { choice, agent_region: Some(agent_region) };
+                true
+            }
+        });
+    }
+
+    pub(crate) fn environment_items(&self) -> EnvironmentItems {
+        self.environment_items.borrow().clone()
     }
 
     pub(crate) fn next_environment(&self) -> Option<Instant> {
@@ -176,6 +227,16 @@ impl SceneFeed {
                 .or_else(|| self.view.objects().find(|object| object.detail().summary.id == self.agent_id));
             self.agent = agent.map(|object| object.detail().summary.entity);
             self.water_height = agent.and_then(|agent| water_height(&self.view, agent));
+            if let Some(region) = agent.map(|agent| agent.detail().summary.address.region()) {
+                self.environment_selection.send_if_modified(|selection| {
+                    if selection.agent_region == Some(region) {
+                        false
+                    } else {
+                        selection.agent_region = Some(region);
+                        true
+                    }
+                });
+            }
             if self.view.status() != before {
                 tracing::info!(status = ?self.view.status(), objects = self.view.object_count(), regions = self.view.region_count(), patches = self.view.patch_count(), revision = self.view.revision().map(|r| r.get()), "scene reconciliation status changed");
             }
@@ -308,17 +369,58 @@ async fn execute_world_read(reader: &WorldReader, job: &ReadJob) -> Result<ReadR
     })
 }
 
+async fn update_environment_items(
+    mut snapshots: watch::Receiver<Option<InventorySnapshot>>,
+    output: watch::Sender<EnvironmentItems>,
+    runtime: Handle,
+    wake: Arc<dyn Fn() + Send + Sync>,
+) {
+    let mut snapshot = snapshots.borrow_and_update().clone();
+    loop {
+        let Some(current) = snapshot else {
+            output.send_replace(EnvironmentItems::Loading);
+            tokio::select! {
+                _ = output.closed() => return,
+                changed = snapshots.changed() => if changed.is_err() { return },
+            }
+            snapshot = snapshots.borrow_and_update().clone();
+            continue;
+        };
+        let revision = current.revision();
+        let result = runtime.spawn_blocking(move || environments::environment_items(current)).await;
+        let latest = snapshots.borrow().clone();
+        if latest.as_ref().is_some_and(|latest| latest.revision() == revision) {
+            match result {
+                Ok(menu) => {
+                    output.send_replace(EnvironmentItems::Ready(menu));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "environment inventory query failed");
+                    output.send_replace(EnvironmentItems::Failed);
+                }
+            }
+            wake();
+            tokio::select! {
+                _ = output.closed() => return,
+                changed = snapshots.changed() => if changed.is_err() { return },
+            }
+        }
+        snapshot = snapshots.borrow_and_update().clone();
+    }
+}
+
 #[tracing::instrument(name = "scene.feed", level = "debug", skip_all)]
 async fn run(
     mut scene: Reconciler,
     sources: SceneSources,
     sender: mpsc::Sender<Batch>,
+    mut environment: watch::Receiver<EnvironmentSelection>,
     runtime: Handle,
     cancelled: oneshot::Receiver<()>,
     mut camera: watch::Receiver<Option<Camera>>,
     wake: impl Fn(),
 ) {
-    let SceneSources { mut reader, assets, environments } = sources;
+    let SceneSources { mut reader, assets, environments, .. } = sources;
     let mut environments = environments.take();
     let mut textures = assets.texture_events();
     let mut assets = AssetSubscriptions::new(assets);
@@ -365,7 +467,7 @@ async fn run(
             ReconcileStep::Wait(until) => Some(until),
             ReconcileStep::Closed => break,
         };
-        let asset_event = {
+        let (asset_event, environment_changed) = {
             let reading = async { if reads.is_empty() { pending().await } else { reads.next().await.expect("nonempty reads") } }.fuse();
             let building =
                 async { if meshes.is_empty() { pending().await } else { meshes.next().await.expect("nonempty mesh jobs") } }.fuse();
@@ -380,6 +482,7 @@ async fn run(
             let moved = camera.changed().fuse();
             let available = assets.next().fuse();
             let released = textures.changed().fuse();
+            let selected = environment.changed().fuse();
             let timer = async {
                 match until {
                     Some(until) if until <= Instant::now() => tokio::task::yield_now().await,
@@ -388,13 +491,18 @@ async fn run(
                 }
             }
             .fuse();
-            pin_mut!(reading, building, changed, moved, available, released, timer, pushed);
+            pin_mut!(reading, building, changed, moved, available, released, timer, pushed, selected);
             let mut asset_event = None;
+            let mut environment_changed = false;
             futures::select_biased! {
                 _ = cancelled => break,
                 command = pushed => match command {
                     Some(command) => if let Err(error) = scene.push_environment(command.region, command.push) { tracing::warn!(region = command.region.get(), ?error, "experience environment push rejected"); },
                     None => break,
+                },
+                result = selected => {
+                    if result.is_err() { break; }
+                    environment_changed = true;
                 },
                 (job, reply) = reading => {
                     if let Err(failure) = &reply && !matches!(failure, ReadFailure::Busy) {
@@ -416,8 +524,16 @@ async fn run(
                 result = changed => { if result.is_err() { break; } scene.notify_world_change(); }
                 _ = timer => {}
             }
-            asset_event
+            (asset_event, environment_changed)
         };
+        if environment_changed {
+            let selection = environment.borrow_and_update().clone();
+            if let Some(region) = selection.agent_region
+                && let Err(error) = scene.set_local_environment(selection.choice.clone(), region)
+            {
+                tracing::warn!(choice = ?selection.choice, ?error, "local environment selection rejected");
+            }
+        }
         if let Some((ticket, status)) = asset_event {
             scene.complete_asset(ticket, status);
         }
@@ -510,6 +626,9 @@ mod tests {
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, _) = oneshot::channel();
         let (camera, _) = watch::channel(None);
+        let (environment_selection, selected_environment) =
+            watch::channel(EnvironmentSelection { choice: EnvironmentChoice::default(), agent_region: None });
+        let choice = EnvironmentChoice::Local(render::scene::LocalChoice::Preset(render::scene::EnvironmentPreset::Midday));
         let mut feed = SceneFeed {
             runtime: Handle::current(),
             view,
@@ -521,9 +640,12 @@ mod tests {
             camera,
             movement: watch::channel(None).0,
             last_movement: None,
+            environment_selection,
+            environment_items: watch::channel(EnvironmentItems::Loading).1,
             incoming,
             _cancel: cancel,
         };
+        let mut selected_local = false;
         let mut hydrate = |world: &World| {
             scene.notify_world_change();
             let now = Instant::now();
@@ -547,7 +669,13 @@ mod tests {
                     }
                     ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
                     ReconcileStep::Continue => {}
-                    ReconcileStep::Idle => return (feed.water_height, feed.agent().map(|object| object.detail().summary.entity)),
+                    ReconcileStep::Idle => {
+                        if !selected_local && feed.agent().is_some() {
+                            feed.set_environment_choice(choice.clone());
+                            selected_local = true;
+                        }
+                        return (feed.water_height, feed.agent().map(|object| object.detail().summary.entity));
+                    }
                     _ => panic!("expected scene reconciliation"),
                 }
             }
@@ -555,6 +683,8 @@ mod tests {
         };
         let (height, original) = hydrate(&world);
         assert_eq!(height, None, "another region's water must not supply the water height");
+        assert_eq!(selected_environment.borrow().agent_region, Some(Region::new(1)));
+        assert_eq!(selected_environment.borrow().choice, choice);
         let original = original.expect("the observed avatar is available before its water height");
         let _ = world.observe_water_height(UpdateSource::new(Region::new(1), 2, Ordered(2), 0), 17.0).unwrap();
         assert_eq!(hydrate(&world), (Some(24.0), Some(original)));
@@ -572,6 +702,8 @@ mod tests {
         let (height, replacement) = hydrate(&world);
         assert_eq!(height, Some(38.0), "the new avatar region supplies its own observed height");
         assert_ne!(replacement.expect("the replacement avatar is available"), original, "a retired entity must not remain cached");
+        assert_eq!(selected_environment.borrow().choice, choice);
+        assert_eq!(selected_environment.borrow().agent_region, Some(Region::new(2)));
     }
 
     #[tokio::test]
@@ -602,8 +734,9 @@ mod tests {
         let mut reads = WorldReadHost::new(&world, Handle::current());
         let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
+        let (_inventory_updates_sender, inventory_updates) = watch::channel(None);
         let mut feed = SceneFeed::start(
-            SceneSources { reader: reads.reader(), environments, assets: assets.handle() },
+            SceneSources { reader: reads.reader(), environments, assets: assets.handle(), inventory_updates },
             Uuid::from_u128(2),
             watch::channel(None).0,
             watch::channel(None).0,
@@ -659,8 +792,9 @@ mod tests {
         let reader = service.reader();
         let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (pushes, environments) = crate::session::EnvironmentInbox::channel();
+        let (_inventory_updates_sender, inventory_updates) = watch::channel(None);
         let mut feed = SceneFeed::start(
-            SceneSources { reader: reader.clone(), environments, assets: assets.handle() },
+            SceneSources { reader: reader.clone(), environments, assets: assets.handle(), inventory_updates },
             Uuid::from_u128(1),
             watch::channel(None).0,
             watch::channel(None).0,

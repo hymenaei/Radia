@@ -697,6 +697,7 @@ mod tests {
             ("gltf", 58),
             ("glbin", 59),
             ("invalid", 255),
+            ("llassettype_bad_lookup", 255),
             ("-1", -1),
         ];
         let inventory_types = [
@@ -721,6 +722,7 @@ mod tests {
             ("material", 26),
             ("gltf", 27),
             ("glbin", 28),
+            ("", 255),
         ];
         let mut expected = Vec::new();
         let mut items = Vec::new();

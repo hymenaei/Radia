@@ -67,6 +67,16 @@ impl PeerRequest {
         stream.write_all(response.as_bytes()).await.expect("write peer response headers");
         stream.write_all(body).await.expect("write peer response body");
     }
+
+    async fn wait_for_close(mut self) {
+        let mut byte = [0_u8; 1];
+        let result = timeout(TEST_TIMEOUT, self.stream.read(&mut byte)).await.expect("peer close timeout");
+        match result {
+            Ok(0) => {}
+            Err(error) if matches!(error.kind(), io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe) => {}
+            result => panic!("expected client to close the in-flight request, received {result:?}"),
+        }
+    }
 }
 
 struct LoopbackPeer {
@@ -663,8 +673,7 @@ async fn foreground_request_preempts_in_flight_background_folders() {
     assert_eq!(background_paths, HashSet::from([first_path.as_str(), second_path.as_str()]));
 
     requests.send(first).await.expect("enqueue foreground folder");
-    drop(background_one);
-    drop(background_two);
+    tokio::join!(background_one.wait_for_close(), background_two.wait_for_close());
     let foreground = peer.next().await;
     assert_eq!(foreground.path, first_path);
     foreground.respond(200, empty_folder_response(first, 2)).await;
@@ -692,8 +701,8 @@ async fn session_cancellation_stops_an_in_flight_folder_request() {
     peer.grant(&[("InventoryAPIv3", "/ais")]).await;
     let request = peer.next().await;
     assert_eq!(request.path, format!("/ais/category/{}/children?depth=16", root.id().uuid()));
-    drop(request);
     cancel.send(()).expect("cancel session");
+    request.wait_for_close().await;
     timeout(TEST_TIMEOUT, task).await.expect("cancelled scheduler timeout").expect("scheduler task");
 }
 

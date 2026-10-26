@@ -782,7 +782,11 @@ async fn refetch_signal_fetches_a_folder_the_scheduler_knows_as_complete() {
     assert_eq!(changes.refetch_categories, [root]);
     model.send_replace(Some(inventory.snapshot()));
     let (_status, status_receiver) = tokio::sync::watch::channel(InventoryLoadingStatus::default());
-    let handle = InventoryFetchHandle { requests: requests.clone(), status: status_receiver };
+    let handle = InventoryFetchHandle {
+        requests: requests.clone(),
+        status: status_receiver,
+        edits: crate::inventory::InventoryEditController::new().handle(),
+    };
     handle.refetch_folder(root).expect("queue live-update refetch");
     let request = peer.next().await;
     assert_eq!(request.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));

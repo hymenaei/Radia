@@ -13,8 +13,9 @@ use llsd::{Map, Value};
 use protocol::{
     lludp::Message,
     messages::{
-        BulkUpdateInventory, InventoryFolderBlock, InventoryItemBlock, MoveInventoryItem, MoveInventoryItemBlock, RemoveInventoryFolder,
-        RemoveInventoryItem, RemoveInventoryObjects, SaveAssetIntoInventory, UpdateCreateInventoryItem,
+        BulkUpdateInventory, InventoryFolderBlock, InventoryItemBlock, MoveInventoryFolder, MoveInventoryFolderBlock, MoveInventoryItem,
+        MoveInventoryItemBlock, RemoveInventoryFolder, RemoveInventoryItem, RemoveInventoryObjects, SaveAssetIntoInventory,
+        UpdateCreateInventoryItem,
     },
 };
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
@@ -95,6 +96,7 @@ fn message_agent(message: &Message) -> Option<(Uuid, usize)> {
         Message::RemoveInventoryObjects(message) => Some((message.agent_id, message.invalid_blocks)),
         Message::SaveAssetIntoInventory(message) => Some((message.agent_id, 0)),
         Message::BulkUpdateInventory(message) => Some((message.agent_id, message.invalid_blocks)),
+        Message::MoveInventoryFolder(message) => Some((message.agent_id, message.invalid_blocks)),
         Message::MoveInventoryItem(message) => Some((message.agent_id, message.invalid_blocks)),
         _ => None,
     }
@@ -137,6 +139,9 @@ fn delta_from_message(message: &Message, owner: InventoryOwner, snapshot: &Inven
         }
         Message::MoveInventoryItem(message) => {
             add_item_moves(snapshot, owner, &message.inventory_data, &mut delta, &mut rejected_blocks);
+        }
+        Message::MoveInventoryFolder(message) => {
+            add_folder_moves(snapshot, owner, &message.inventory_data, &mut delta, &mut rejected_blocks);
         }
         _ => return None,
     }
@@ -326,6 +331,77 @@ fn add_item_moves(
     }
 }
 
+fn add_folder_moves(
+    snapshot: &InventorySnapshot,
+    owner: InventoryOwner,
+    blocks: &[MoveInventoryFolderBlock],
+    delta: &mut InventoryDelta,
+    rejected_blocks: &mut usize,
+) {
+    let mut candidates = HashMap::<CategoryKey, Category>::with_capacity(blocks.len());
+    let mut ordered_keys = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let key = CategoryKey::new(owner, FolderId::new(block.folder_id));
+        let destination = CategoryKey::new(owner, FolderId::new(block.parent_id));
+        let Some(current) = snapshot.category(key) else {
+            if snapshot.category(destination).is_some() {
+                delta.updated_category_versions.push((destination, ::inventory::ServerVersion::UNKNOWN));
+            }
+            *rejected_blocks = rejected_blocks.saturating_add(1);
+            continue;
+        };
+        if snapshot.roots().contains(key) || candidates.contains_key(&key) || snapshot.category(destination).is_none() {
+            if let Some(parent) = current.parent {
+                delta.updated_category_versions.push((parent, ::inventory::ServerVersion::UNKNOWN));
+            }
+            if snapshot.category(destination).is_some() {
+                delta.updated_category_versions.push((destination, ::inventory::ServerVersion::UNKNOWN));
+            }
+            *rejected_blocks = rejected_blocks.saturating_add(1);
+            continue;
+        }
+        let mut moved = current.clone();
+        moved.parent = Some(destination);
+        candidates.insert(key, moved);
+        ordered_keys.push(key);
+    }
+
+    for key in ordered_keys {
+        let Some(category) = candidates.get(&key) else { continue };
+        if folder_move_creates_cycle(key, category.parent, &candidates, snapshot) {
+            if let Some(parent) = snapshot.category(key).and_then(|category| category.parent) {
+                delta.updated_category_versions.push((parent, ::inventory::ServerVersion::UNKNOWN));
+            }
+            if let Some(parent) = category.parent {
+                delta.updated_category_versions.push((parent, ::inventory::ServerVersion::UNKNOWN));
+            }
+            *rejected_blocks = rejected_blocks.saturating_add(1);
+        } else {
+            delta.updated_categories.push(category.clone());
+        }
+    }
+}
+
+fn folder_move_creates_cycle(
+    folder: CategoryKey,
+    destination: Option<CategoryKey>,
+    candidates: &HashMap<CategoryKey, Category>,
+    snapshot: &InventorySnapshot,
+) -> bool {
+    let mut current = destination;
+    let mut visited = HashSet::new();
+    while let Some(key) = current {
+        if key == folder || !visited.insert(key) {
+            return true;
+        }
+        current = candidates
+            .get(&key)
+            .map(|category| category.parent)
+            .unwrap_or_else(|| snapshot.category(key).and_then(|category| category.parent));
+    }
+    false
+}
+
 fn parse_event_message(name: &str, body: &Value, expected_agent: Uuid) -> Result<Option<Message>, InventoryIntakeError> {
     if !matches!(
         name,
@@ -335,6 +411,7 @@ fn parse_event_message(name: &str, body: &Value, expected_agent: Uuid) -> Result
             | "RemoveInventoryObjects"
             | "SaveAssetIntoInventory"
             | "BulkUpdateInventory"
+            | "MoveInventoryFolder"
             | "MoveInventoryItem"
     ) {
         return Ok(None);
@@ -408,6 +485,16 @@ fn parse_event_message(name: &str, body: &Value, expected_agent: Uuid) -> Result
         "MoveInventoryItem" => {
             let (inventory_data, invalid_blocks) = event_blocks(body, "InventoryData", parse_move_block)?;
             Message::MoveInventoryItem(MoveInventoryItem {
+                agent_id,
+                session_id: uuid_field(agent, "SessionID").ok_or(InventoryIntakeError::MalformedEvent)?,
+                stamp: bool_field(agent, "Stamp").ok_or(InventoryIntakeError::MalformedEvent)?,
+                inventory_data,
+                invalid_blocks,
+            })
+        }
+        "MoveInventoryFolder" => {
+            let (inventory_data, invalid_blocks) = event_blocks(body, "InventoryData", parse_move_folder_block)?;
+            Message::MoveInventoryFolder(MoveInventoryFolder {
                 agent_id,
                 session_id: uuid_field(agent, "SessionID").ok_or(InventoryIntakeError::MalformedEvent)?,
                 stamp: bool_field(agent, "Stamp").ok_or(InventoryIntakeError::MalformedEvent)?,
@@ -492,6 +579,10 @@ fn parse_move_block(block: &Map) -> Option<MoveInventoryItemBlock> {
         folder_id: non_nil_uuid(block, "FolderID")?,
         new_name: bounded_string(block, "NewName")?,
     })
+}
+
+fn parse_move_folder_block(block: &Map) -> Option<MoveInventoryFolderBlock> {
+    Some(MoveInventoryFolderBlock { folder_id: non_nil_uuid(block, "FolderID")?, parent_id: non_nil_uuid(block, "ParentID")? })
 }
 
 fn uuid_field(block: &Map, name: &str) -> Option<Uuid> {

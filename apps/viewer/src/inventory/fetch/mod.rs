@@ -9,6 +9,7 @@ use std::{fmt, time::Duration};
 use ::inventory::{CategoryKey, InventoryChild, InventoryError, ServerVersion};
 use tokio::sync::oneshot;
 
+pub(crate) use decode::{to_category as category_from_wire, to_item as item_from_wire};
 pub(crate) use scheduler::InventoryFetchController;
 pub use scheduler::{InventoryFetchHandle, InventoryFetchOutcome, InventoryFetchRequestError, InventoryLoadingStatus};
 pub(super) use scheduler::{fetch_single_folder, fetch_single_items};

@@ -7,8 +7,8 @@ use std::{
 };
 
 use ::inventory::{
-    Category, CategoryKey, FolderType, Inventory, InventoryLimits, InventoryOwner, MAX_FOLDER_FETCH_CHILDREN, MAX_INVENTORY_ITEMS,
-    ServerVersion,
+    Category, CategoryKey, FolderType, Inventory, InventoryDelta, InventoryLimits, InventoryOwner, MAX_FOLDER_FETCH_CHILDREN,
+    MAX_INVENTORY_ITEMS, ServerVersion,
 };
 use futures::{
     FutureExt,
@@ -19,7 +19,7 @@ use network::capabilities::{CapabilityUrl, Client};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::timeout,
 };
@@ -27,15 +27,21 @@ use url::Url;
 use utils::FolderId;
 use uuid::Uuid;
 
-use super::super::{FolderApplyOutcome, FolderFetch, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais};
 use super::{
-    BACKGROUND_CONCURRENCY, FetchRequest, InventoryFetchHandle, InventoryLoadingStatus, MAX_AIS_DEPTH, REQUEST_CAPACITY, RESULT_CAPACITY,
-    fetch_ais, run_scheduler,
+    BACKGROUND_CONCURRENCY, InventoryFetchHandle, InventoryLoadingStatus, MAX_AIS_DEPTH, REQUEST_CAPACITY, RESULT_CAPACITY, fetch_ais,
+    run_scheduler,
 };
+use crate::inventory::fetch::{FolderApplyOutcome, FolderFetch, InventoryFetchError, InventoryFetchEvent, MAX_FETCH_RESPONSE_BYTES, ais};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(45);
-type SchedulerTask =
-    (mpsc::Sender<FetchRequest>, mpsc::Receiver<InventoryFetchEvent>, JoinHandle<()>, oneshot::Sender<()>, oneshot::Sender<()>);
+type SchedulerTask = (
+    mpsc::Sender<CategoryKey>,
+    mpsc::Receiver<InventoryFetchEvent>,
+    watch::Sender<Option<::inventory::InventorySnapshot>>,
+    JoinHandle<()>,
+    oneshot::Sender<()>,
+    oneshot::Sender<()>,
+);
 
 struct PeerRequest {
     method: String,
@@ -219,6 +225,24 @@ fn root_response(root: CategoryKey, children: &[CategoryKey], child_count: u32) 
     xml::to_vec(&response).expect("encode root response")
 }
 
+fn root_response_with_child_version(root: CategoryKey, child: CategoryKey, version: i32, child_count: u32) -> Vec<u8> {
+    let child = Value::Map(Map::from([
+        ("category_id".into(), Value::Uuid(child.id().uuid())),
+        ("name".into(), Value::String(format!("folder-{}", child.id().uuid().as_u128()))),
+        ("parent_id".into(), Value::Uuid(root.id().uuid())),
+        ("version".into(), Value::Integer(version)),
+        ("descendents".into(), Value::Integer(child_count as i32)),
+    ]));
+    let response = Value::Map(Map::from([
+        ("category_id".into(), Value::Uuid(root.id().uuid())),
+        ("name".into(), Value::String(format!("folder-{}", root.id().uuid().as_u128()))),
+        ("version".into(), Value::Integer(2)),
+        ("descendents".into(), Value::Integer(1)),
+        ("_embedded".into(), Value::Map(Map::from([("categories".into(), Value::Array(vec![child]))]))),
+    ]));
+    xml::to_vec(&response).expect("encode parent response with updated child metadata")
+}
+
 fn empty_folder_response(folder: CategoryKey, version: i32) -> Vec<u8> {
     let response = Value::Map(Map::from([
         ("category_id".into(), Value::Uuid(folder.id().uuid())),
@@ -286,6 +310,7 @@ fn llsd_category(folder: CategoryKey, parent: CategoryKey) -> Value {
 fn scheduler(client: Client, snapshot: ::inventory::InventorySnapshot) -> SchedulerTask {
     let (requests_tx, requests_rx) = mpsc::channel(REQUEST_CAPACITY);
     let (events_tx, events_rx) = mpsc::channel(RESULT_CAPACITY);
+    let (model_tx, model_rx) = watch::channel(Some(snapshot.clone()));
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let cancellation: Shared<BoxFuture<'static, ()>> = async move {
         drop(cancel_rx.await);
@@ -293,37 +318,36 @@ fn scheduler(client: Client, snapshot: ::inventory::InventorySnapshot) -> Schedu
     .boxed()
     .shared();
     let (stop_tx, stop_rx) = oneshot::channel();
-    let task = tokio::spawn(run_scheduler(client, snapshot, requests_rx, events_tx, cancellation, stop_rx));
-    (requests_tx, events_rx, task, cancel_tx, stop_tx)
+    let task = tokio::spawn(run_scheduler(client, snapshot, model_rx, requests_rx, events_tx, cancellation, stop_rx));
+    (requests_tx, events_rx, model_tx, task, cancel_tx, stop_tx)
 }
 
 async fn next_event(events: &mut mpsc::Receiver<InventoryFetchEvent>) -> InventoryFetchEvent {
     timeout(TEST_TIMEOUT, events.recv()).await.expect("fetch event timeout").expect("fetch event channel closed")
 }
 
-fn assert_folder_event(event: InventoryFetchEvent, expected: CategoryKey) -> FolderFetch {
+fn take_folder_event(event: InventoryFetchEvent, expected: CategoryKey) -> (FolderFetch, oneshot::Sender<FolderApplyOutcome>) {
     match event {
         InventoryFetchEvent::Folder { fetch, applied } => {
             assert_eq!(fetch.folder, expected);
-            acknowledge_fetch(fetch, applied)
+            (fetch, applied)
         }
         event => panic!("expected folder response, received {event:?}"),
     }
 }
 
-fn acknowledge_fetch(fetch: FolderFetch, applied: oneshot::Sender<FolderApplyOutcome>) -> FolderFetch {
-    let categories = fetch
-        .children
-        .iter()
-        .filter_map(|child| match child {
-            ::inventory::InventoryChild::Category(category) => Some(category.key),
-            ::inventory::InventoryChild::Item(_) => None,
-        })
-        .collect();
-    let complete =
-        fetch.version.is_known() && fetch.descendent_count.and_then(|count| usize::try_from(count).ok()) == Some(fetch.children.len());
-    applied.send(FolderApplyOutcome { complete, categories, rejected: false }).expect("scheduler waits for folder apply outcome");
-    fetch
+fn apply_and_acknowledge(
+    inventory: &mut Inventory,
+    model: &watch::Sender<Option<::inventory::InventorySnapshot>>,
+    fetch: FolderFetch,
+    applied: oneshot::Sender<FolderApplyOutcome>,
+) -> Result<(), ::inventory::InventoryError> {
+    let result = inventory.apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children);
+    if result.is_ok() {
+        model.send_replace(Some(inventory.snapshot()));
+    }
+    applied.send(FolderApplyOutcome { rejected: result.is_err() }).expect("scheduler waits for folder apply outcome");
+    result.map(|_| ())
 }
 
 #[tokio::test]
@@ -433,9 +457,9 @@ async fn fallback_uses_personal_and_library_descendents_capabilities() {
     let library_owner = InventoryOwner::new(Uuid::from_u128(2));
     let personal_root = key(personal_owner, 10);
     let library_root = key(library_owner, 20);
-    let inventory = Inventory::new(category(personal_root, None), Some(category(library_root, None)), InventoryLimits::default())
+    let mut inventory = Inventory::new(category(personal_root, None), Some(category(library_root, None)), InventoryLimits::default())
         .expect("valid inventory roots");
-    let (requests, mut events, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
     peer.grant(&[("FetchInventoryDescendents2", "/personal"), ("FetchLibDescendents2", "/library")]).await;
 
     let first = peer.next().await;
@@ -462,8 +486,9 @@ async fn fallback_uses_personal_and_library_descendents_capabilities() {
     loop {
         match next_event(&mut events).await {
             InventoryFetchEvent::Folder { fetch, applied: response } => {
-                let fetch = acknowledge_fetch(fetch, response);
-                applied.insert(fetch.folder);
+                let folder = fetch.folder;
+                apply_and_acknowledge(&mut inventory, &model, fetch, response).expect("apply fallback folder response");
+                applied.insert(folder);
             }
             InventoryFetchEvent::BackgroundDone => break,
             InventoryFetchEvent::Failed { folder, error } => panic!("fallback failed for {folder:?}: {error}"),
@@ -489,7 +514,7 @@ async fn fallback_batches_no_more_than_ten_folders_per_request() {
     for child in &children {
         inventory.upsert_category(category(*child, Some(root))).expect("add fallback child");
     }
-    let (requests, mut events, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
     peer.grant(&[("FetchInventoryDescendents2", "/personal")]).await;
 
     let first_batch = peer.next().await;
@@ -524,8 +549,9 @@ async fn fallback_batches_no_more_than_ten_folders_per_request() {
     loop {
         match next_event(&mut events).await {
             InventoryFetchEvent::Folder { fetch, applied: response } => {
-                let fetch = acknowledge_fetch(fetch, response);
-                completed.insert(fetch.folder);
+                let folder = fetch.folder;
+                apply_and_acknowledge(&mut inventory, &model, fetch, response).expect("apply fallback batch folder response");
+                completed.insert(folder);
             }
             InventoryFetchEvent::BackgroundDone => break,
             InventoryFetchEvent::Failed { folder, error } => panic!("fallback failed for {folder:?}: {error}"),
@@ -613,7 +639,7 @@ async fn rejected_folder_can_be_requested_again() {
     let root = key(owner, 45);
     let child = key(owner, 46);
     let mut inventory = Inventory::new(category(root, None), None, InventoryLimits::default()).expect("valid inventory root");
-    let (requests, mut events, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
     peer.grant(&[("InventoryAPIv3", "/ais")]).await;
 
     let first = peer.next().await;
@@ -625,10 +651,10 @@ async fn rejected_folder_can_be_requested_again() {
         inventory.apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children),
         Err(::inventory::InventoryError::DuplicateFetchChild)
     );
-    applied.send(FolderApplyOutcome::from_snapshot(&inventory.snapshot(), root, true)).expect("scheduler waits for rejected apply outcome");
+    applied.send(FolderApplyOutcome { rejected: true }).expect("scheduler waits for rejected apply outcome");
     assert!(!inventory.snapshot().is_complete(root));
 
-    requests.send(FetchRequest::Load(root)).await.expect("queue retry after rejected model apply");
+    requests.send(root).await.expect("queue retry after rejected model apply");
     let retry = peer.next().await;
     assert_eq!(retry.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
     retry.respond(200, empty_folder_response(root, 2)).await;
@@ -641,13 +667,8 @@ async fn rejected_folder_can_be_requested_again() {
     };
     let (fetch, applied) = fetch;
     assert_eq!(fetch.folder, root);
-    inventory
-        .apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children)
-        .expect("retry applies clean response");
+    apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("retry applies clean response");
     assert!(inventory.snapshot().is_complete(root));
-    applied
-        .send(FolderApplyOutcome::from_snapshot(&inventory.snapshot(), root, false))
-        .expect("scheduler waits for successful model outcome");
 
     drop(requests);
     stop.send(()).expect("stop scheduler after retry");
@@ -663,13 +684,18 @@ async fn refetch_signal_fetches_a_folder_the_scheduler_knows_as_complete() {
     let mut root_category = category(root, None);
     root_category.server_version = ServerVersion::from_raw(1);
     root_category.server_descendent_count = Some(0);
-    let inventory = Inventory::new(root_category, None, InventoryLimits::default()).expect("valid complete inventory root");
+    let mut inventory = Inventory::new(root_category, None, InventoryLimits::default()).expect("valid complete inventory root");
     assert!(inventory.snapshot().is_complete(root));
 
-    let (requests, mut events, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
     peer.grant(&[("InventoryAPIv3", "/ais")]).await;
     std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
 
+    let changes = inventory
+        .apply_delta(InventoryDelta { updated_category_versions: vec![(root, ServerVersion::from_raw(0))], ..InventoryDelta::default() })
+        .expect("older live version requests a refetch");
+    assert_eq!(changes.refetch_categories, [root]);
+    model.send_replace(Some(inventory.snapshot()));
     let (_status, status_receiver) = tokio::sync::watch::channel(InventoryLoadingStatus::default());
     let handle = InventoryFetchHandle { requests: requests.clone(), status: status_receiver };
     handle.refetch_folder(root).expect("queue live-update refetch");
@@ -681,7 +707,7 @@ async fn refetch_signal_fetches_a_folder_the_scheduler_knows_as_complete() {
         panic!("expected folder fetch after refetch signal");
     };
     assert_eq!(fetch.folder, root);
-    acknowledge_fetch(fetch, applied);
+    apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply live-update refetch response");
 
     drop(requests);
     stop.send(()).expect("stop scheduler");
@@ -689,18 +715,61 @@ async fn refetch_signal_fetches_a_folder_the_scheduler_knows_as_complete() {
 }
 
 #[tokio::test]
+async fn parent_response_requeues_a_completed_child_when_its_new_count_is_unknown() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let owner = InventoryOwner::new(Uuid::from_u128(1));
+    let root = key(owner, 48);
+    let child = key(owner, 49);
+    let mut inventory = Inventory::new(category(root, None), None, InventoryLimits::default()).expect("valid inventory root");
+    inventory.upsert_category(category(child, Some(root))).expect("valid child folder");
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    peer.grant(&[("InventoryAPIv3", "/ais")]).await;
+
+    let first = peer.next().await;
+    let second = peer.next().await;
+    let (root_request, child_request) =
+        if first.path.ends_with(&format!("{}/children?depth=16", root.id().uuid())) { (first, second) } else { (second, first) };
+    assert_eq!(root_request.path, format!("/ais/category/{}/children?depth=16", root.id().uuid()));
+    assert_eq!(child_request.path, format!("/ais/category/{}/children?depth=0", child.id().uuid()));
+
+    child_request.respond(200, empty_folder_response(child, 10)).await;
+    let (child_fetch, child_applied) = take_folder_event(next_event(&mut events).await, child);
+    apply_and_acknowledge(&mut inventory, &model, child_fetch, child_applied).expect("apply first child response");
+    assert!(inventory.snapshot().is_complete(child));
+
+    root_request.respond(200, root_response_with_child_version(root, child, 11, 1)).await;
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
+    apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply parent response");
+    assert!(!inventory.snapshot().is_complete(child));
+
+    let child_retry = peer.next().await;
+    assert_eq!(child_retry.path, format!("/ais/category/{}/children?depth=0", child.id().uuid()));
+    child_retry.respond(200, empty_folder_response(child, 12)).await;
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, child);
+    apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply child retry");
+    assert!(inventory.snapshot().is_complete(child));
+    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
+
+    drop(requests);
+    stop.send(()).expect("stop scheduler after child retry");
+    task.await.expect("scheduler stopped");
+}
+
+#[tokio::test]
 async fn foreground_request_preempts_in_flight_background_folders() {
     let mut peer = LoopbackPeer::start().await;
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
-    let (inventory, root, first, second) = inventory_with_children();
-    let (requests, mut events, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    let (mut inventory, root, first, second) = inventory_with_children();
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
     peer.grant(&[("InventoryAPIv3", "/ais")]).await;
 
     let root_request = peer.next().await;
     assert_eq!(root_request.path, format!("/ais/category/{}/children?depth=16", root.id().uuid()));
     root_request.respond(200, root_response(root, &[first, second], 1)).await;
-    let root_fetch = assert_folder_event(next_event(&mut events).await, root);
+    let (root_fetch, root_applied) = take_folder_event(next_event(&mut events).await, root);
     assert!(root_fetch.children.len() == 2);
+    apply_and_acknowledge(&mut inventory, &model, root_fetch, root_applied).expect("apply root response");
 
     let background_one = peer.next().await;
     let background_two = peer.next().await;
@@ -709,18 +778,21 @@ async fn foreground_request_preempts_in_flight_background_folders() {
     let second_path = format!("/ais/category/{}/children?depth=0", second.id().uuid());
     assert_eq!(background_paths, HashSet::from([first_path.as_str(), second_path.as_str()]));
 
-    requests.send(FetchRequest::Load(first)).await.expect("enqueue foreground folder");
+    requests.send(first).await.expect("enqueue foreground folder");
     tokio::join!(background_one.wait_for_close(), background_two.wait_for_close());
     let foreground = peer.next().await;
     assert_eq!(foreground.path, first_path);
     foreground.respond(200, empty_folder_response(first, 2)).await;
-    assert_eq!(assert_folder_event(next_event(&mut events).await, first).version.raw(), 2);
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, first);
+    assert_eq!(fetch.version.raw(), 2);
+    apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply foreground response");
 
     let resumed_background = peer.next().await;
     assert_eq!(resumed_background.path, second_path);
     resumed_background.respond(200, empty_folder_response(second, 2)).await;
-    assert_folder_event(next_event(&mut events).await, second);
-    assert!(matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone));
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, second);
+    apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply resumed background response");
+    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
 
     drop(requests);
     stop.send(()).expect("stop foreground scheduler");
@@ -734,7 +806,7 @@ async fn session_cancellation_stops_an_in_flight_folder_request() {
     let owner = InventoryOwner::new(Uuid::from_u128(1));
     let root = key(owner, 50);
     let inventory = Inventory::new(category(root, None), None, InventoryLimits::default()).expect("valid inventory root");
-    let (_requests, _events, task, cancel, _stop) = scheduler(client, inventory.snapshot());
+    let (_requests, _events, _model, task, cancel, _stop) = scheduler(client, inventory.snapshot());
     peer.grant(&[("InventoryAPIv3", "/ais")]).await;
     let request = peer.next().await;
     assert_eq!(request.path, format!("/ais/category/{}/children?depth=16", root.id().uuid()));
@@ -751,15 +823,13 @@ async fn one_hundred_thousand_items_load_with_bounded_responses_and_concurrency(
     let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
     let (mut inventory, root, first, second) = inventory_with_children();
     let started = Instant::now();
-    let (requests, mut events, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
     peer.grant(&[("InventoryAPIv3", "/ais")]).await;
 
     let root_request = peer.next().await;
     root_request.respond(200, root_response(root, &[first, second], ITEMS_PER_FOLDER as u32)).await;
-    let root_fetch = assert_folder_event(next_event(&mut events).await, root);
-    inventory
-        .apply_folder_fetch(root_fetch.folder, root_fetch.version, root_fetch.descendent_count, root_fetch.children)
-        .expect("apply root response");
+    let (root_fetch, root_applied) = take_folder_event(next_event(&mut events).await, root);
+    apply_and_acknowledge(&mut inventory, &model, root_fetch, root_applied).expect("apply root response");
 
     let first_request = peer.next().await;
     let second_request = peer.next().await;
@@ -785,13 +855,10 @@ async fn one_hundred_thousand_items_load_with_bounded_responses_and_concurrency(
         };
         assert!(fetch.folder == first || fetch.folder == second);
         let folder = fetch.folder;
-        inventory
-            .apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children)
-            .expect("apply large folder response");
-        applied.send(FolderApplyOutcome::from_snapshot(&inventory.snapshot(), folder, false)).expect("scheduler waits for model outcome");
+        apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply large folder response");
         applied_folders.insert(folder);
     }
-    assert!(matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone));
+    std::assert_matches!(next_event(&mut events).await, InventoryFetchEvent::BackgroundDone);
     let snapshot = inventory.snapshot();
     assert_eq!(snapshot.items().count(), ITEMS_PER_FOLDER * 2);
     assert_eq!(snapshot.categories().count(), 3);

@@ -552,8 +552,8 @@ impl SessionDriver {
                     && !outcome.changes.is_empty()
                 {
                     self.track_inventory_changes(&outcome.changes, &snapshot);
+                    self.inventory_changes.send_replace(Some(snapshot.clone()));
                     self.request_inventory_refetches(&outcome.changes, &snapshot);
-                    self.inventory_changes.send_replace(Some(snapshot));
                     self.publish_inventory_status();
                 }
             }
@@ -697,13 +697,15 @@ impl SessionDriver {
     fn start_inventory_fetch(&mut self, capabilities: Client) {
         let Some(inventory) = &self.inventory else { return };
         let snapshot = inventory.snapshot();
+        self.inventory_changes.send_replace(Some(snapshot.clone()));
         self.inventory_known = snapshot.categories().map(|category| category.key).collect();
         self.inventory_complete = self.inventory_known.iter().copied().filter(|key| snapshot.is_complete(*key)).collect();
         self.inventory_failed.clear();
         self.inventory_background_done = false;
         self.inventory_last_failure = None;
         self.publish_inventory_status();
-        self.inventory_fetch.start(&self.runtime, capabilities, snapshot, self.cancellation.clone());
+        let model = self.inventory_changes.subscribe();
+        self.inventory_fetch.start(&self.runtime, capabilities, snapshot, model, self.cancellation.clone());
     }
 
     fn handle_inventory_fetch(&mut self, event: InventoryFetchEvent) {
@@ -736,13 +738,9 @@ impl SessionDriver {
                     }
                     None => rejected = true,
                 }
-                let outcome = snapshot
-                    .as_ref()
-                    .map(|snapshot| FolderApplyOutcome::from_snapshot(snapshot, folder, rejected))
-                    .unwrap_or_else(FolderApplyOutcome::rejected_without_snapshot);
-                if let Err(outcome) = applied.send(outcome) {
+                let outcome = FolderApplyOutcome { rejected };
+                if applied.send(outcome).is_err() {
                     tracing::debug!(folder = %folder.id().uuid(), "inventory fetch worker stopped before apply acknowledgement");
-                    drop(outcome);
                 }
                 self.publish_inventory_status();
             }

@@ -22,57 +22,49 @@ pub(super) struct BackgroundPlan {
     pub(super) depth: u8,
 }
 
-pub(super) struct TreeKnowledge {
-    complete: HashSet<CategoryKey>,
-}
-
-impl TreeKnowledge {
-    pub(super) fn new(snapshot: &InventorySnapshot) -> Self {
-        Self {
-            complete: snapshot.categories().filter(|category| snapshot.is_complete(category.key)).map(|category| category.key).collect(),
-        }
-    }
-
-    pub(super) fn is_complete(&self, key: CategoryKey) -> bool {
-        self.complete.contains(&key)
-    }
-
-    pub(super) fn record(&mut self, key: CategoryKey, complete: bool) {
-        if complete {
-            self.complete.insert(key);
-        } else {
-            self.complete.remove(&key);
-        }
-    }
-}
-
 pub(super) fn next_background_job(
     background: &mut VecDeque<BackgroundRequest>,
     queued: &mut HashSet<CategoryKey>,
-    tree: &TreeKnowledge,
+    snapshot: &InventorySnapshot,
     in_flight: &HashSet<CategoryKey>,
     failed: &HashSet<CategoryKey>,
     source_kind: impl Fn(::inventory::InventoryOwner) -> SourceKind,
 ) -> Option<BackgroundPlan> {
-    while let Some(request) = background.pop_front() {
-        queued.remove(&request.folder);
-        if tree.is_complete(request.folder) || in_flight.contains(&request.folder) || failed.contains(&request.folder) {
+    let mut index = 0;
+    while index < background.len() {
+        let request = background[index];
+        if snapshot.is_complete(request.folder) || failed.contains(&request.folder) {
+            background.remove(index);
+            queued.remove(&request.folder);
             continue;
         }
+        if in_flight.contains(&request.folder) {
+            index += 1;
+            continue;
+        }
+        let request = background.remove(index)?;
+        queued.remove(&request.folder);
         match source_kind(request.folder.owner()) {
             SourceKind::Ais => return Some(BackgroundPlan { folders: vec![request.folder], depth: request.depth }),
             SourceKind::Legacy => {
                 let mut folders = vec![request.folder];
+                let mut next_index = index;
                 while folders.len() < MAX_FALLBACK_FOLDERS {
-                    let Some(next) = background.front().copied() else { break };
+                    let Some(next) = background.get(next_index).copied() else { break };
                     if next.folder.owner() != request.folder.owner() {
                         break;
                     }
-                    background.pop_front();
-                    queued.remove(&next.folder);
-                    if tree.is_complete(next.folder) || in_flight.contains(&next.folder) || failed.contains(&next.folder) {
+                    if snapshot.is_complete(next.folder) || failed.contains(&next.folder) {
+                        background.remove(next_index);
+                        queued.remove(&next.folder);
                         continue;
                     }
+                    if in_flight.contains(&next.folder) {
+                        next_index += 1;
+                        continue;
+                    }
+                    background.remove(next_index);
+                    queued.remove(&next.folder);
                     folders.push(next.folder);
                 }
                 return Some(BackgroundPlan { folders, depth: 0 });
@@ -85,17 +77,12 @@ pub(super) fn next_background_job(
 
 pub(super) fn enqueue_background(
     request: BackgroundRequest,
-    tree: &TreeKnowledge,
-    in_flight: &HashSet<CategoryKey>,
+    snapshot: &InventorySnapshot,
     failed: &HashSet<CategoryKey>,
     background: &mut VecDeque<BackgroundRequest>,
     queued: &mut HashSet<CategoryKey>,
 ) {
-    if tree.is_complete(request.folder)
-        || in_flight.contains(&request.folder)
-        || failed.contains(&request.folder)
-        || !queued.insert(request.folder)
-    {
+    if snapshot.is_complete(request.folder) || failed.contains(&request.folder) || !queued.insert(request.folder) {
         return;
     }
     background.push_back(request);

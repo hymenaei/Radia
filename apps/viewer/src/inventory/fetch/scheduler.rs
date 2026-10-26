@@ -19,7 +19,7 @@ use tokio::{
     time,
 };
 
-use super::state::{BackgroundRequest, SourceKind, TreeKnowledge, enqueue_background, next_background_job};
+use super::state::{BackgroundRequest, SourceKind, enqueue_background, next_background_job};
 use super::{
     FolderFetch, InventoryFetchError, InventoryFetchEvent, MAX_AIS_DEPTH, MAX_FETCH_RETRIES, RequestFailure, ais, classify_request_error,
     legacy,
@@ -59,29 +59,23 @@ impl fmt::Display for InventoryFetchRequestError {
 
 impl Error for InventoryFetchRequestError {}
 
-#[derive(Clone, Copy, Debug)]
-enum FetchRequest {
-    Load(CategoryKey),
-    Refetch(CategoryKey),
-}
-
 #[derive(Clone)]
 pub struct InventoryFetchHandle {
-    requests: mpsc::Sender<FetchRequest>,
+    requests: mpsc::Sender<CategoryKey>,
     status: watch::Receiver<InventoryLoadingStatus>,
 }
 
 impl InventoryFetchHandle {
     pub fn request_folder(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
-        self.send_request(FetchRequest::Load(folder))
+        self.send_request(folder)
     }
 
     pub(crate) fn refetch_folder(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
-        self.send_request(FetchRequest::Refetch(folder))
+        self.send_request(folder)
     }
 
-    fn send_request(&self, request: FetchRequest) -> Result<(), InventoryFetchRequestError> {
-        self.requests.try_send(request).map_err(|error| match error {
+    fn send_request(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
+        self.requests.try_send(folder).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => InventoryFetchRequestError::QueueFull,
             mpsc::error::TrySendError::Closed(_) => InventoryFetchRequestError::SessionEnded,
         })
@@ -94,7 +88,7 @@ impl InventoryFetchHandle {
 
 pub(crate) struct InventoryFetchController {
     handle: InventoryFetchHandle,
-    requests: Option<mpsc::Receiver<FetchRequest>>,
+    requests: Option<mpsc::Receiver<CategoryKey>>,
     events_tx: mpsc::Sender<InventoryFetchEvent>,
     events_rx: mpsc::Receiver<InventoryFetchEvent>,
     status_tx: watch::Sender<InventoryLoadingStatus>,
@@ -126,14 +120,21 @@ impl InventoryFetchController {
         self.status_tx.send_replace(status);
     }
 
-    pub(crate) fn start(&mut self, runtime: &Handle, client: Client, snapshot: InventorySnapshot, cancellation: Cancellation) {
+    pub(crate) fn start(
+        &mut self,
+        runtime: &Handle,
+        client: Client,
+        snapshot: InventorySnapshot,
+        model: watch::Receiver<Option<InventorySnapshot>>,
+        cancellation: Cancellation,
+    ) {
         if self.task.is_some() {
             return;
         }
         let Some(requests) = self.requests.take() else { return };
         let (stop_tx, stop_rx) = oneshot::channel();
         self.stop_tx = Some(stop_tx);
-        self.task = Some(runtime.spawn(run_scheduler(client, snapshot, requests, self.events_tx.clone(), cancellation, stop_rx)));
+        self.task = Some(runtime.spawn(run_scheduler(client, snapshot, model, requests, self.events_tx.clone(), cancellation, stop_rx)));
     }
 
     pub(crate) async fn next_event(&mut self) -> Option<InventoryFetchEvent> {
@@ -192,7 +193,8 @@ struct JobCompletion {
 async fn run_scheduler(
     client: Client,
     snapshot: InventorySnapshot,
-    mut requests: mpsc::Receiver<FetchRequest>,
+    model: watch::Receiver<Option<InventorySnapshot>>,
+    mut requests: mpsc::Receiver<CategoryKey>,
     events: mpsc::Sender<InventoryFetchEvent>,
     cancellation: Cancellation,
     mut stop: oneshot::Receiver<()>,
@@ -210,7 +212,6 @@ async fn run_scheduler(
         return;
     };
     let capabilities = make_capabilities(&snapshot, discovered);
-    let mut tree = TreeKnowledge::new(&snapshot);
     let personal_root = snapshot.roots().personal();
     let library_root = snapshot.roots().library();
     let mut background = VecDeque::new();
@@ -219,28 +220,15 @@ async fn run_scheduler(
     let mut foreground_queued = HashSet::new();
     let mut in_flight = HashSet::new();
     let mut failed = HashSet::new();
-    enqueue_background(
-        BackgroundRequest { folder: personal_root, depth: MAX_AIS_DEPTH },
-        &tree,
-        &in_flight,
-        &failed,
-        &mut background,
-        &mut queued,
-    );
+    let current = latest_snapshot(&model, &snapshot);
+    enqueue_background(BackgroundRequest { folder: personal_root, depth: MAX_AIS_DEPTH }, &current, &failed, &mut background, &mut queued);
     if let Some(root) = library_root {
-        enqueue_background(
-            BackgroundRequest { folder: root, depth: MAX_AIS_DEPTH },
-            &tree,
-            &in_flight,
-            &failed,
-            &mut background,
-            &mut queued,
-        );
+        enqueue_background(BackgroundRequest { folder: root, depth: MAX_AIS_DEPTH }, &current, &failed, &mut background, &mut queued);
     }
     let mut initial_folders = snapshot.categories().map(|category| category.key).collect::<Vec<_>>();
     initial_folders.sort_unstable();
     for folder in initial_folders {
-        enqueue_background(BackgroundRequest { folder, depth: 0 }, &tree, &in_flight, &failed, &mut background, &mut queued);
+        enqueue_background(BackgroundRequest { folder, depth: 0 }, &current, &failed, &mut background, &mut queued);
     }
     let mut jobs = FuturesUnordered::<BoxFuture<'static, JobCompletion>>::new();
     let mut active = HashMap::<u64, BackgroundJob>::new();
@@ -250,7 +238,7 @@ async fn run_scheduler(
 
     loop {
         while let Ok(request) = requests.try_recv() {
-            queue_foreground_request(request, &mut tree, &mut foreground, &mut foreground_queued);
+            queue_foreground_request(request, &mut foreground, &mut foreground_queued);
         }
         if requests.is_closed() {
             requests_open = false;
@@ -259,13 +247,13 @@ async fn run_scheduler(
         if let Some(folder) = foreground.pop_front() {
             foreground_queued.remove(&folder);
             if !active.is_empty() {
+                let current = latest_snapshot(&model, &snapshot);
                 for job in active.values() {
                     for key in &job.folders {
                         in_flight.remove(key);
                         enqueue_background(
                             BackgroundRequest { folder: *key, depth: job.depth },
-                            &tree,
-                            &in_flight,
+                            &current,
                             &failed,
                             &mut background,
                             &mut queued,
@@ -290,7 +278,7 @@ async fn run_scheduler(
                 }
                 continue;
             };
-            if tree.is_complete(folder) {
+            if latest_snapshot(&model, &snapshot).is_complete(folder) {
                 continue;
             }
             in_flight.insert(folder);
@@ -305,7 +293,7 @@ async fn run_scheduler(
                     _ = &mut stop => return,
                     request = requests.recv(), if requests_open => {
                         match request {
-                            Some(request) => queue_foreground_request(request, &mut tree, &mut foreground, &mut foreground_queued),
+                            Some(request) => queue_foreground_request(request, &mut foreground, &mut foreground_queued),
                             None => requests_open = false,
                         }
                     }
@@ -316,10 +304,10 @@ async fn run_scheduler(
             let completion = JobCompletion { job, result };
             if !process_completion(
                 completion,
-                &mut tree,
+                &model,
+                &snapshot,
                 &mut background,
                 &mut queued,
-                &in_flight,
                 &mut failed,
                 &events,
                 &cancellation,
@@ -334,13 +322,14 @@ async fn run_scheduler(
         }
 
         while active.len() < BACKGROUND_CONCURRENCY {
-            let Some(plan) =
-                next_background_job(&mut background, &mut queued, &tree, &in_flight, &failed, |owner| match capabilities.source(owner) {
+            let current = latest_snapshot(&model, &snapshot);
+            let Some(plan) = next_background_job(&mut background, &mut queued, &current, &in_flight, &failed, |owner| {
+                match capabilities.source(owner) {
                     Some(source) if source.ais.is_some() => SourceKind::Ais,
                     Some(source) if source.legacy.is_some() => SourceKind::Legacy,
                     _ => SourceKind::Unavailable,
-                })
-            else {
+                }
+            }) else {
                 break;
             };
             let job = BackgroundJob { id: next_job_id, folders: plan.folders, depth: plan.depth };
@@ -390,7 +379,7 @@ async fn run_scheduler(
             _ = &mut stop => return,
             request = requests.recv(), if requests_open => {
                 match request {
-                    Some(request) => queue_foreground_request(request, &mut tree, &mut foreground, &mut foreground_queued),
+                    Some(request) => queue_foreground_request(request, &mut foreground, &mut foreground_queued),
                     None => requests_open = false,
                 }
             }
@@ -401,10 +390,10 @@ async fn run_scheduler(
                 }
                 if !process_completion(
                     completion,
-                    &mut tree,
+                    &model,
+                    &snapshot,
                     &mut background,
                     &mut queued,
-                    &in_flight,
                     &mut failed,
                     &events,
                     &cancellation,
@@ -418,22 +407,14 @@ async fn run_scheduler(
     }
 }
 
-fn queue_foreground_request(
-    request: FetchRequest,
-    tree: &mut TreeKnowledge,
-    foreground: &mut VecDeque<CategoryKey>,
-    foreground_queued: &mut HashSet<CategoryKey>,
-) {
-    let folder = match request {
-        FetchRequest::Load(folder) => folder,
-        FetchRequest::Refetch(folder) => {
-            tree.record(folder, false);
-            folder
-        }
-    };
+fn queue_foreground_request(folder: CategoryKey, foreground: &mut VecDeque<CategoryKey>, foreground_queued: &mut HashSet<CategoryKey>) {
     if foreground_queued.insert(folder) {
         foreground.push_back(folder);
     }
+}
+
+fn latest_snapshot(model: &watch::Receiver<Option<InventorySnapshot>>, initial: &InventorySnapshot) -> InventorySnapshot {
+    model.borrow().clone().unwrap_or_else(|| initial.clone())
 }
 
 fn make_capabilities(snapshot: &InventorySnapshot, grants: HashMap<String, CapabilityUrl>) -> Capabilities {
@@ -622,10 +603,10 @@ fn retry_delay(retries: u32, retry_after: Option<Duration>) -> Duration {
 
 async fn process_completion(
     completion: JobCompletion,
-    tree: &mut TreeKnowledge,
+    model: &watch::Receiver<Option<InventorySnapshot>>,
+    initial: &InventorySnapshot,
     background: &mut VecDeque<BackgroundRequest>,
     queued: &mut HashSet<CategoryKey>,
-    in_flight: &HashSet<CategoryKey>,
     failed: &mut HashSet<CategoryKey>,
     events: &mpsc::Sender<InventoryFetchEvent>,
     cancellation: &Cancellation,
@@ -659,24 +640,27 @@ async fn process_completion(
                 Err(_) => return false,
             },
         };
-        tree.record(folder_key, outcome.complete);
-        for category in outcome.categories {
+        if outcome.rejected {
+            failed.insert(folder_key);
+            continue;
+        }
+        failed.remove(&folder_key);
+        let current = latest_snapshot(model, initial);
+        for category in current.children(folder_key).filter_map(|node| match node.id() {
+            ::inventory::InventoryNodeId::Category(id) => Some(CategoryKey::new(folder_key.owner(), id)),
+            ::inventory::InventoryNodeId::Item(_) => None,
+        }) {
             let was_queued = queued.contains(&category);
-            enqueue_background(BackgroundRequest { folder: category, depth: 0 }, tree, in_flight, failed, background, queued);
+            enqueue_background(BackgroundRequest { folder: category, depth: 0 }, &current, failed, background, queued);
             if !was_queued && queued.contains(&category) {
                 *background_done = false;
             }
         }
-        if outcome.rejected {
-            failed.insert(folder_key);
-        } else {
-            failed.remove(&folder_key);
-            if !outcome.complete && completion.job.depth > 0 {
-                let was_queued = queued.contains(&folder_key);
-                enqueue_background(BackgroundRequest { folder: folder_key, depth: 0 }, tree, in_flight, failed, background, queued);
-                if !was_queued && queued.contains(&folder_key) {
-                    *background_done = false;
-                }
+        if !current.is_complete(folder_key) && completion.job.depth > 0 {
+            let was_queued = queued.contains(&folder_key);
+            enqueue_background(BackgroundRequest { folder: folder_key, depth: 0 }, &current, failed, background, queued);
+            if !was_queued && queued.contains(&folder_key) {
+                *background_done = false;
             }
         }
     }

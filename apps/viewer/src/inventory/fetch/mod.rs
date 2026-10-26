@@ -6,7 +6,7 @@ mod state;
 
 use std::{fmt, time::Duration};
 
-use ::inventory::{CategoryKey, InventoryChild, InventoryError, InventoryNodeId, InventorySnapshot, ServerVersion};
+use ::inventory::{CategoryKey, InventoryChild, InventoryError, ServerVersion};
 use tokio::sync::oneshot;
 
 pub(crate) use scheduler::InventoryFetchController;
@@ -86,26 +86,7 @@ pub(crate) struct FolderFetch {
 
 #[derive(Debug)]
 pub(crate) struct FolderApplyOutcome {
-    pub(crate) complete: bool,
-    pub(crate) categories: Vec<CategoryKey>,
     pub(crate) rejected: bool,
-}
-
-impl FolderApplyOutcome {
-    pub(crate) fn from_snapshot(snapshot: &InventorySnapshot, folder: CategoryKey, rejected: bool) -> Self {
-        let categories = snapshot
-            .children(folder)
-            .filter_map(|node| match node.id() {
-                InventoryNodeId::Category(id) => Some(CategoryKey::new(folder.owner(), id)),
-                InventoryNodeId::Item(_) => None,
-            })
-            .collect();
-        Self { complete: snapshot.is_complete(folder), categories, rejected }
-    }
-
-    pub(crate) fn rejected_without_snapshot() -> Self {
-        Self { complete: false, categories: Vec::new(), rejected: true }
-    }
 }
 
 #[derive(Debug)]

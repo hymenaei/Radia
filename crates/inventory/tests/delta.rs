@@ -98,6 +98,37 @@ fn applies_categories_before_items_and_uses_returned_versions() {
 }
 
 #[test]
+fn category_moves_validate_the_final_parent_plan() {
+    let owner = owner();
+    let root = category(owner, 10, None, 4, Some(0));
+    let root_key = root.key;
+    let a = category(owner, 11, Some(10), -1, None);
+    let a_key = a.key;
+    let b = category(owner, 12, Some(11), -1, None);
+    let b_key = b.key;
+    let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("root is valid");
+    inventory
+        .apply_delta(InventoryDelta { created_categories: vec![a, b], ..InventoryDelta::default() })
+        .expect("initial root-A-B hierarchy applies");
+
+    let snapshot = inventory.snapshot();
+    let mut moved_a = snapshot.category(a_key).expect("A exists").clone();
+    moved_a.parent = Some(b_key);
+    let mut moved_b = snapshot.category(b_key).expect("B exists").clone();
+    moved_b.parent = Some(root_key);
+    inventory
+        .apply_delta(InventoryDelta { updated_categories: vec![moved_a, moved_b], ..InventoryDelta::default() })
+        .expect("valid final root-B-A hierarchy applies atomically");
+
+    let snapshot = inventory.snapshot();
+    assert_eq!(snapshot.category(a_key).and_then(|category| category.parent), Some(b_key));
+    assert_eq!(snapshot.category(b_key).and_then(|category| category.parent), Some(root_key));
+    assert_eq!(snapshot.child_count(root_key), 1);
+    assert_eq!(snapshot.child_count(b_key), 1);
+    assert_eq!(snapshot.child_count(a_key), 0);
+}
+
+#[test]
 fn returned_version_can_complete_a_new_folder_after_its_items_are_applied() {
     let owner = owner();
     let root = category(owner, 10, None, 4, Some(0));

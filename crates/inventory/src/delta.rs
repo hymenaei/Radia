@@ -1,9 +1,13 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    sync::Arc,
+};
 
-use crate::state::{InventoryState, replace_category_record};
+use crate::state::{InventoryState, insert_child, remove_child, replace_category_record};
 use crate::{
-    Category, CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryDelta, InventoryError, ServerVersion,
-    mutation::{remove_category_subtree, remove_item, upsert_category_state, upsert_item_state},
+    Category, CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryDelta, InventoryError, InventoryNodeId, InventoryNodeKey,
+    ServerVersion,
+    mutation::{remove_category_subtree, remove_item, upsert_item_state},
     state::validate_category,
 };
 
@@ -41,8 +45,7 @@ impl Inventory {
             .map(|category| category.key)
             .filter(|folder| !previous.categories.contains_key(folder))
             .collect::<BTreeSet<_>>();
-        apply_categories(&mut next, &delta.created_categories, &mut changes)?;
-        apply_categories(&mut next, &delta.updated_categories, &mut changes)?;
+        apply_categories(&mut next, &delta.created_categories, &delta.updated_categories, &mut changes)?;
         for item in delta.created_items.iter().chain(&delta.updated_items) {
             upsert_item_state(&mut next, item.clone(), &mut changes)?;
         }
@@ -100,54 +103,103 @@ fn validate_delta_size(delta: &InventoryDelta, max_categories: usize, max_items:
     Ok(())
 }
 
-fn apply_categories(state: &mut InventoryState, categories: &[Category], changes: &mut Vec<InventoryChange>) -> Result<(), InventoryError> {
-    let mut pending = categories.to_vec();
-    while !pending.is_empty() {
-        let mut deferred = Vec::new();
-        let mut applied = 0usize;
-        for mut category in pending {
-            validate_category(&category)?;
-            if !state.roots.contains(category.key) {
-                let parent = category.parent.ok_or(InventoryError::InvalidParent)?;
-                if !state.categories.contains_key(&parent) {
-                    deferred.push(category);
-                    continue;
-                }
-            }
-            if let Some(current) = state.categories.get(&category.key) {
-                category.server_version = current.server_version;
-                category.server_descendent_count = current.server_descendent_count;
-            }
-            upsert_category_state(state, category, changes)?;
-            applied += 1;
+fn apply_categories(
+    state: &mut InventoryState,
+    created: &[Category],
+    updated: &[Category],
+    changes: &mut Vec<InventoryChange>,
+) -> Result<(), InventoryError> {
+    let mut categories = HashMap::with_capacity(created.len().saturating_add(updated.len()));
+    let mut ordered_keys = Vec::with_capacity(created.len().saturating_add(updated.len()));
+    for input in created.iter().chain(updated) {
+        validate_category(input)?;
+        let mut category = input.clone();
+        if let Some(current) = state.categories.get(&category.key) {
+            category.server_version = current.server_version;
+            category.server_descendent_count = current.server_descendent_count;
         }
-        if deferred.is_empty() {
-            break;
+        if !categories.contains_key(&category.key) {
+            ordered_keys.push(category.key);
         }
-        if applied == 0 {
-            if categories_have_cycle(&deferred) {
+        categories.insert(category.key, category);
+    }
+
+    for key in &ordered_keys {
+        let category = categories.get(key).ok_or(InventoryError::InconsistentIndex)?;
+        if state.roots.contains(category.key) {
+            if category.parent.is_some() {
+                return Err(InventoryError::InvalidRoot);
+            }
+        } else {
+            let parent = category.parent.ok_or(InventoryError::InvalidParent)?;
+            if !categories.contains_key(&parent) && !state.categories.contains_key(&parent) {
+                return Err(InventoryError::MissingParent);
+            }
+        }
+    }
+
+    for key in &ordered_keys {
+        let mut current = *key;
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current) {
                 return Err(InventoryError::Cycle);
             }
-            return Err(InventoryError::MissingParent);
+            let category = categories
+                .get(&current)
+                .or_else(|| state.categories.get(&current).map(Arc::as_ref))
+                .ok_or(InventoryError::MissingParent)?;
+            match category.parent {
+                Some(parent) => current = parent,
+                None if state.roots.contains(current) => break,
+                None => return Err(InventoryError::InvalidParent),
+            }
         }
-        pending = deferred;
+    }
+
+    let categories = ordered_keys
+        .into_iter()
+        .map(|key| categories.remove(&key).ok_or(InventoryError::InconsistentIndex))
+        .collect::<Result<Vec<_>, _>>()?;
+    let previous = categories.iter().map(|category| (category.clone(), state.categories.get(&category.key).cloned())).collect::<Vec<_>>();
+
+    for (category, current) in &previous {
+        if let Some(current) = current
+            && current.parent != category.parent
+            && let Some(parent) = current.parent
+        {
+            remove_child(state, parent, InventoryNodeId::Category(category.key.id()))?;
+        }
+    }
+    for (category, current) in &previous {
+        if current.as_deref() != Some(category) {
+            replace_category_record(state, category.clone())?;
+        }
+    }
+    for (category, current) in &previous {
+        if current.as_ref().is_none_or(|current| current.parent != category.parent)
+            && let Some(parent) = category.parent
+        {
+            insert_child(state, parent, InventoryNodeId::Category(category.key.id()))?;
+        }
+    }
+    for (category, current) in previous {
+        if let Some(from) = current.as_ref().and_then(|current| current.parent)
+            && current.as_ref().is_some_and(|current| current.parent != category.parent)
+            && let Some(to) = category.parent
+        {
+            changes.push(InventoryChange::NodeMoved {
+                node: InventoryNodeKey::new(category.key.owner(), InventoryNodeId::Category(category.key.id())),
+                from,
+                to,
+            });
+        }
+        if current.as_deref() != Some(&category) {
+            let category = state.categories.get(&category.key).cloned().ok_or(InventoryError::InconsistentIndex)?;
+            changes.push(InventoryChange::CategoryUpserted(category));
+        }
     }
     Ok(())
-}
-
-fn categories_have_cycle(categories: &[Category]) -> bool {
-    let parents = categories.iter().filter_map(|category| category.parent.map(|parent| (category.key, parent))).collect::<HashMap<_, _>>();
-    for start in parents.keys().copied() {
-        let mut current = start;
-        let mut visited = HashSet::new();
-        while let Some(parent) = parents.get(&current).copied() {
-            if !visited.insert(current) {
-                return true;
-            }
-            current = parent;
-        }
-    }
-    false
 }
 
 fn touched_parents(previous: &InventoryState, next: &InventoryState, delta: &InventoryDelta) -> BTreeSet<CategoryKey> {

@@ -7,7 +7,7 @@ use ::inventory::{
 use llsd::Value;
 use protocol::{
     lludp::Message,
-    messages::{BulkUpdateInventory, InventoryFolderBlock, InventoryItemBlock, UpdateCreateInventoryItem},
+    messages::{BulkUpdateInventory, InventoryFolderBlock, InventoryItemBlock, SaveAssetIntoInventory, UpdateCreateInventoryItem},
 };
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
@@ -127,6 +127,19 @@ fn bulk_event_body(agent: Uuid, folders: Vec<Value>, items: Vec<Value>) -> Value
     ])
 }
 
+fn save_asset_event_body(agent: Uuid, item_id: Uuid, new_asset_id: Uuid) -> Value {
+    value_map([
+        ("AgentData".to_owned(), Value::Array(vec![value_map([("AgentID".to_owned(), Value::Uuid(agent))])])),
+        (
+            "InventoryData".to_owned(),
+            Value::Array(vec![value_map([
+                ("ItemID".to_owned(), Value::Uuid(item_id)),
+                ("NewAssetID".to_owned(), Value::Uuid(new_asset_id)),
+            ])]),
+        ),
+    ])
+}
+
 fn folder_child_items(inventory: &Inventory, folder: CategoryKey) -> Vec<InventoryChild> {
     let snapshot = inventory.snapshot();
     snapshot
@@ -182,6 +195,36 @@ fn udp_and_event_queue_bulk_updates_reach_the_session_inventory() {
     assert!(!result.changes.is_empty());
     assert!(inventory.snapshot().category(CategoryKey::new(owner, FolderId::new(uuid(12)))).is_some());
     assert!(inventory.snapshot().item(ItemKey::new(owner, ItemId::new(uuid(22)))).is_some());
+}
+
+#[test]
+fn save_asset_updates_loaded_items_for_udp_and_event_queue() {
+    let agent = uuid(1);
+    let owner = InventoryOwner::new(agent);
+    let root = category(owner, 10, None, 4, Some(0));
+    let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("valid root");
+    let saved_item = item(owner, 20, 10, "saved");
+    let item_key = saved_item.key;
+    inventory.upsert_item(saved_item).expect("item exists");
+
+    let udp_asset = uuid(220);
+    let udp =
+        Message::SaveAssetIntoInventory(SaveAssetIntoInventory { agent_id: agent, item_id: item_key.id().uuid(), new_asset_id: udp_asset });
+    apply_udp(&mut inventory, agent, &udp).expect("UDP save asset applies").expect("message is handled");
+    assert_eq!(inventory.snapshot().item(item_key).map(|item| item.asset_id), Some(AssetId::new(udp_asset)));
+
+    let event_asset = uuid(121);
+    let body = save_asset_event_body(agent, item_key.id().uuid(), event_asset);
+    apply_event_queue(&mut inventory, agent, "SaveAssetIntoInventory", &body)
+        .expect("EventQueue save asset applies")
+        .expect("message is handled");
+    assert_eq!(inventory.snapshot().item(item_key).map(|item| item.asset_id), Some(AssetId::new(event_asset)));
+
+    let revision = inventory.revision();
+    let missing = Message::SaveAssetIntoInventory(SaveAssetIntoInventory { agent_id: agent, item_id: uuid(99), new_asset_id: uuid(199) });
+    let outcome = apply_udp(&mut inventory, agent, &missing).expect("missing item is ignored").expect("message is handled");
+    assert!(outcome.changes.is_empty());
+    assert_eq!(inventory.revision(), revision);
 }
 
 #[test]

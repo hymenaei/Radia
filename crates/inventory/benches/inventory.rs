@@ -34,10 +34,14 @@ pub(super) fn bench(criterion: &mut Criterion) {
     let inventory = item_inventory();
     criterion.bench_function("inventory/snapshot_100k_items", |bench| bench.iter(|| black_box(inventory.snapshot())));
 
-    let (mut inventory, delta) = one_item_delta();
+    let (mut inventory, delta_a, delta_b) = one_item_deltas();
+    let mut use_a = false;
     criterion.bench_function("inventory/apply_one_item_delta_100k", |bench| {
         bench.iter_batched(
-            || delta.clone(),
+            || {
+                use_a = !use_a;
+                if use_a { delta_a.clone() } else { delta_b.clone() }
+            },
             |delta| black_box(inventory.apply_delta(delta).expect("single item delta should apply")),
             BatchSize::SmallInput,
         );
@@ -73,8 +77,8 @@ fn report_memory() {
 }
 
 fn report_delta_allocations() {
-    let (mut inventory, delta) = one_item_delta();
-    let (changes, allocations) = allocation::measure(|| inventory.apply_delta(delta).expect("single item delta should apply"));
+    let (mut inventory, delta_a, _) = one_item_deltas();
+    let (changes, allocations) = allocation::measure(|| inventory.apply_delta(delta_a).expect("single item delta should apply"));
     eprintln!(
         "inventory apply_one_item_delta_100k allocations: alloc_calls={}, realloc_calls={}, live={} B, peak={} B",
         allocations.allocation_calls, allocations.reallocation_calls, allocations.live_bytes, allocations.peak_bytes,
@@ -82,11 +86,18 @@ fn report_delta_allocations() {
     black_box((inventory, changes));
 }
 
-fn one_item_delta() -> (Inventory, InventoryDelta) {
+fn one_item_deltas() -> (Inventory, InventoryDelta, InventoryDelta) {
     let inventory = item_inventory();
-    let mut changed = inventory.snapshot().item(item(0).key).expect("benchmark item should exist").clone();
-    changed.name = Arc::from("delta-updated");
-    (inventory, InventoryDelta { updated_items: vec![changed], ..InventoryDelta::default() })
+    let original = inventory.snapshot().item(item(0).key).expect("benchmark item should exist").clone();
+    let mut changed_a = original.clone();
+    changed_a.name = Arc::from("delta-a");
+    let mut changed_b = original;
+    changed_b.name = Arc::from("delta-b");
+    (
+        inventory,
+        InventoryDelta { updated_items: vec![changed_a], ..InventoryDelta::default() },
+        InventoryDelta { updated_items: vec![changed_b], ..InventoryDelta::default() },
+    )
 }
 
 fn root_inventory() -> Inventory {

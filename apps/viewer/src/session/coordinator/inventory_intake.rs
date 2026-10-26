@@ -117,11 +117,23 @@ fn delta_from_message(message: &Message, owner: InventoryOwner, snapshot: &Inven
             add_folder_removals(snapshot, owner, &message.folder_data, &mut delta, &mut rejected_blocks);
             delta.removed_items.extend(message.item_data.iter().map(|id| ItemKey::new(owner, ItemId::new(*id))));
         }
-        Message::SaveAssetIntoInventory(_) => {}
+        Message::SaveAssetIntoInventory(message) => {
+            let key = ItemKey::new(owner, ItemId::new(message.item_id));
+            if let Some(mut item) = snapshot.item(key).cloned() {
+                item.asset_id = AssetId::new(message.new_asset_id);
+                delta.updated_items.push(item);
+            }
+        }
         Message::BulkUpdateInventory(message) => {
             let accepted_categories = add_category_updates(snapshot, owner, &message.folder_data, &mut delta, &mut rejected_blocks);
-            let available_categories = snapshot.categories().map(|category| category.key).chain(accepted_categories).collect();
-            add_item_updates_for_categories(snapshot, owner, &available_categories, &message.item_data, &mut delta, &mut rejected_blocks);
+            add_item_updates_for_categories(
+                snapshot,
+                owner,
+                Some(&accepted_categories),
+                &message.item_data,
+                &mut delta,
+                &mut rejected_blocks,
+            );
         }
         Message::MoveInventoryItem(message) => {
             add_item_moves(snapshot, owner, &message.inventory_data, &mut delta, &mut rejected_blocks);
@@ -209,21 +221,20 @@ fn add_item_updates(
     delta: &mut InventoryDelta,
     rejected_blocks: &mut usize,
 ) {
-    let available_categories = snapshot.categories().map(|category| category.key).collect();
-    add_item_updates_for_categories(snapshot, owner, &available_categories, blocks, delta, rejected_blocks);
+    add_item_updates_for_categories(snapshot, owner, None, blocks, delta, rejected_blocks);
 }
 
 fn add_item_updates_for_categories(
     snapshot: &InventorySnapshot,
     owner: InventoryOwner,
-    available_categories: &HashSet<CategoryKey>,
+    additional_categories: Option<&HashSet<CategoryKey>>,
     blocks: &[InventoryItemBlock],
     delta: &mut InventoryDelta,
     rejected_blocks: &mut usize,
 ) {
     for block in blocks {
         let parent = CategoryKey::new(owner, FolderId::new(block.folder_id));
-        if !available_categories.contains(&parent) {
+        if snapshot.category(parent).is_none() && !additional_categories.is_some_and(|categories| categories.contains(&parent)) {
             *rejected_blocks = rejected_blocks.saturating_add(1);
             continue;
         }

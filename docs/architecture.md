@@ -4,6 +4,8 @@ Radia separates simulator observations, accepted world state, derived scene data
 
 Simulator traffic enters through LLUDP circuits and HTTP capabilities. `network` manages delivery and connection lifecycles; `protocol` supplies wire representations and codecs. The viewer's session intake translates messages into domain observations, preserving source identity, ordering evidence, partial updates, and coverage loss. `world` validates and applies those observations. Local requests become authoritative simulator state only when confirmed by observations.
 
+Login returns the personal inventory and Library roots and folder skeletons. `protocol` parses those bounded wire values; the viewer session translates them into normalized categories and owns the single mutable inventory model. The model exposes immutable snapshots and revisions, while the session owns a watch channel of snapshots for GUI readers. Favorites lookup uses the personal folder type. Future inventory fetches and edits enter through the same model mutation API.
+
 Render's scene reconciliation reads bounded World pages and change journals through the viewer's `WorldReader` bridge. It combines accepted object, terrain, and environment state with available assets, then publishes batches for the viewport's `SceneView`. GPU drawing borrows that view; it does not read network messages or mutate World.
 
 Transport coverage loss and scene recovery are separate concerns. Session intake tracks where simulator observations may be incomplete and requests recovery where supported. Scene reconciliation can rebuild its derived state after history loss, rejected reads, or capacity pressure, but cannot recover observations that World never received. Neither successful rendering nor a populated scene proves complete simulator state.
@@ -29,6 +31,10 @@ Decodes textures, materials, and environments and owns their values plus the bou
 ### `crates/llsd`
 
 Owns LLSD values, Serde integration, and XML, binary, and notation codecs. Decode limits bound document size, nesting, value counts, and scalar or container sizes; callers can tighten them for their own admission budgets. Simulator messages and domain semantics belong to higher layers.
+
+### `crates/inventory`
+
+Owns normalized personal inventory and Library categories, items, parent and child indexes, link resolution, folder completeness, and validated mutation planning. The viewer session translates login data, owns the mutable model and its snapshot notification channel, and applies model updates; GUI readers receive immutable snapshots. `protocol` owns login wire parsing and `network` owns transport; `inventory` has no dependency on either boundary.
 
 ### `crates/math`
 

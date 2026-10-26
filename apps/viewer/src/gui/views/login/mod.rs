@@ -9,6 +9,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
+use ::inventory::InventorySnapshot;
 use gpui::{AppContext, Context, Window};
 use gpui_component::{
     IndexPath,
@@ -16,6 +17,7 @@ use gpui_component::{
     select::{SelectEvent, SelectState},
 };
 use network::{AgentSession, Grid, LoginCredentials, MfaChallenge, SessionHandle, StartLocation};
+use tokio::sync::watch;
 
 use self::{
     favorites::Favorites,
@@ -165,6 +167,7 @@ struct ActiveSession {
 
 struct ReadySession {
     session: AgentSession,
+    inventory_updates: watch::Receiver<Option<InventorySnapshot>>,
 }
 
 impl ActiveSession {
@@ -534,6 +537,7 @@ impl LoginScreen {
     fn apply_session_ready(&mut self, ready: SessionReadyUpdate, cx: &mut Context<Self>) {
         let session = ready.session;
         let region_name = ready.region_name;
+        let inventory_updates = ready.inventory_updates;
         let Some(active) = self.active_session.as_ref() else { return };
         let mailbox = active.presentation_mailbox.clone();
         self.login_phase = LoginPhase::Idle;
@@ -544,7 +548,7 @@ impl LoginScreen {
         let username = self.username.read(cx).value();
         self.favorites.prepare_session(session.grid, session.agent_id, &username, Some(mailbox), cx);
         if let Some(active) = &mut self.active_session {
-            active.ready = Some(ReadySession { session: session.clone() });
+            active.ready = Some(ReadySession { session: session.clone(), inventory_updates });
         }
         self.chat_screen.update(cx, |chat, cx| {
             chat.set_session(session.clone(), cx);
@@ -583,7 +587,11 @@ impl LoginScreen {
         let Some(active) = self.active_session.as_ref() else { return };
         if !active.ready().is_some_and(|ready| {
             let session = &ready.session;
-            session.agent_id == update.agent_id && session.session_id == update.session_id && session.grid == update.grid
+            let inventory_owner = ready.inventory_updates.borrow().as_ref().map(|snapshot| snapshot.roots().personal().owner().id());
+            session.agent_id == update.agent_id
+                && session.session_id == update.session_id
+                && session.grid == update.grid
+                && inventory_owner.is_none_or(|owner| owner == update.agent_id)
         }) {
             return;
         }

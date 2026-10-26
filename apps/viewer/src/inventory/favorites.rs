@@ -4,13 +4,13 @@ use std::{
     str::from_utf8,
 };
 
+use ::inventory::{FolderType, InventorySnapshot};
 use futures::{StreamExt, TryStreamExt, stream};
 use llsd::{Map, Value};
 use network::{
     AgentSession,
     capabilities::{CapabilityUrl, Client},
 };
-use protocol::login::{self, ResponseData};
 use serde::{Deserialize, Serialize};
 use utils::RegionId;
 use uuid::Uuid;
@@ -64,7 +64,6 @@ pub enum LandmarkDestination {
 #[derive(Clone, Debug)]
 pub enum FavoritesError {
     MissingFavoritesFolder,
-    InvalidFavoritesFolderId,
     RequestCapabilities(String),
     CapabilityUnavailable(String),
     FetchFavoritesFolder(String),
@@ -84,8 +83,7 @@ pub enum FavoritesError {
 impl Display for FavoritesError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingFavoritesFolder => formatter.write_str("Second Life did not include the Favorites folder in the login response."),
-            Self::InvalidFavoritesFolderId => formatter.write_str("Second Life returned an invalid Favorites folder ID."),
+            Self::MissingFavoritesFolder => formatter.write_str("The personal inventory does not include a Favorites folder."),
             Self::RequestCapabilities(detail) => write!(formatter, "Could not request inventory capabilities: {detail}"),
             Self::CapabilityUnavailable(name) => write!(formatter, "Second Life did not provide the {name} capability."),
             Self::FetchFavoritesFolder(detail) => write!(formatter, "Could not fetch the Favorites folder: {detail}"),
@@ -146,9 +144,9 @@ pub(crate) async fn load_favorites(
     capabilities: &Client,
     region_lookup: &RegionLookup,
     session: &AgentSession,
-    login_data: &ResponseData,
+    inventory: Option<&InventorySnapshot>,
 ) -> Result<Vec<FavoriteLocation>, FavoritesError> {
-    let folder_id = favorite_folder_id(login_data)?;
+    let folder_id = favorite_folder_id(inventory.ok_or(FavoritesError::MissingFavoritesFolder)?)?;
     let landmarks = fetch_favorite_landmarks(capabilities, session.agent_id, folder_id).await?;
     let resolved = stream::iter(landmarks.into_iter().map(|landmark| async move {
         let (region_name, position) = match landmark.destination {
@@ -181,29 +179,12 @@ pub(crate) async fn load_favorites(
     Ok(locations)
 }
 
-pub fn favorite_folder_id(login_data: &ResponseData) -> Result<Uuid, FavoritesError> {
-    let Some(login::Value::Array(folders)) = login_data.get("inventory-skeleton") else {
-        return Err(FavoritesError::MissingFavoritesFolder);
-    };
-
-    for folder in folders {
-        let login::Value::Struct(fields) = folder else {
-            continue;
-        };
-        let Some(login::Value::String(name)) = fields.get("name") else {
-            continue;
-        };
-        if !name.eq_ignore_ascii_case("favorites") {
-            continue;
-        }
-
-        let Some(login::Value::String(folder_id)) = fields.get("folder_id") else {
-            return Err(FavoritesError::InvalidFavoritesFolderId);
-        };
-        return Uuid::parse_str(folder_id).map_err(|_| FavoritesError::InvalidFavoritesFolderId);
-    }
-
-    Err(FavoritesError::MissingFavoritesFolder)
+pub fn favorite_folder_id(inventory: &InventorySnapshot) -> Result<Uuid, FavoritesError> {
+    let owner = inventory.roots().personal().owner();
+    inventory
+        .category_with_type(owner, FolderType::Favorite)
+        .map(|category| category.key.id().uuid())
+        .ok_or(FavoritesError::MissingFavoritesFolder)
 }
 
 pub async fn fetch_favorite_landmarks(

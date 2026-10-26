@@ -13,12 +13,17 @@ workspace = true
 
 [dependencies]
 imbl.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
+storage.workspace = true
 uuid.workspace = true
 utils.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+futures.workspace = true
 proptest.workspace = true
+tempfile.workspace = true
 test-support.workspace = true
 
 [[bench]]

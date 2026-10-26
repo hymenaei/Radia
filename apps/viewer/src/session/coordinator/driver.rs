@@ -19,6 +19,7 @@ use super::{
     events::{SimulatorScope, WorldHandoff, handle_simulator_message, order_evidence, route_recovery_targets},
     input::{Input, select_drain_input},
     inventory_bootstrap::build_inventory,
+    inventory_cache::{InventoryCacheEvent, InventoryCacheSession},
     inventory_intake::{self, InventoryIntakeError, InventoryIntakeOutcome},
     media::ObjectMediaIntake,
     presentation::{AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, SessionReadyUpdate, ViewerUpdate},
@@ -46,6 +47,11 @@ use crate::{
 use crate::session::experience_environment::{EnvironmentInbox, EnvironmentSender};
 
 type Cancellation = Shared<BoxFuture<'static, ()>>;
+
+enum DriverInput {
+    Session(Input),
+    InventoryCache(Option<InventoryCacheEvent>),
+}
 
 pub(crate) struct CredentialPersistence {
     pub(crate) grid: Grid,
@@ -77,6 +83,8 @@ struct SessionDriver {
     active_session: Option<AgentSession>,
     active_login_data: Option<ResponseData>,
     inventory: Option<Inventory>,
+    inventory_cache: InventoryCacheSession,
+    inventory_fetch_capabilities: Option<Client>,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
     rejected_inventory_blocks: u64,
     inventory_fetch: InventoryFetchController,
@@ -143,6 +151,8 @@ impl SessionDriver {
             active_session: None,
             active_login_data: None,
             inventory: None,
+            inventory_cache: InventoryCacheSession::new(),
+            inventory_fetch_capabilities: None,
             inventory_changes,
             rejected_inventory_blocks: 0,
             inventory_fetch,
@@ -164,50 +174,69 @@ impl SessionDriver {
             self.media.flush(&self.session_world);
             let terrain_full = self.terrain.is_full();
             let event = async { if terrain_full { pending::<Option<Event>>().await } else { self.session.recv_event().await } };
-            let input = select_drain_input(
-                &mut self.reads,
-                event,
-                self.media.next_result(),
-                self.terrain.next_completion(),
-                self.environments.next_completion(),
-                self.cancellation.clone(),
-                self.camera.next_tick(),
-                self.recovery.next_completion(),
-                self.inventory_fetch.next_event(),
-            )
-            .await;
+            let input = tokio::select! {
+                input = select_drain_input(
+                    &mut self.reads,
+                    event,
+                    self.media.next_result(),
+                    self.terrain.next_completion(),
+                    self.environments.next_completion(),
+                    self.cancellation.clone(),
+                    self.camera.next_tick(),
+                    self.recovery.next_completion(),
+                    self.inventory_fetch.next_event(),
+                ) => DriverInput::Session(input),
+                cache_event = self.inventory_cache.next_event() => DriverInput::InventoryCache(cache_event),
+            };
             let flow = match input {
-                Input::Cancelled => ControlFlow::Break(()),
-                Input::Event(event) => self.handle_network_event(event).await,
-                Input::Media(result) => {
-                    self.handle_media_result(result);
+                DriverInput::InventoryCache(Some(event)) => {
+                    if let Some(inventory) = &mut self.inventory {
+                        let outcome = self.inventory_cache.handle_event(&self.runtime, event, inventory);
+                        if let Some(snapshot) = outcome.snapshot {
+                            self.inventory_changes.send_replace(Some(snapshot));
+                        }
+                        if outcome.startup_complete
+                            && let Some(capabilities) = self.inventory_fetch_capabilities.take()
+                        {
+                            self.start_inventory_fetch(capabilities);
+                        }
+                    }
                     ControlFlow::Continue(())
                 }
-                Input::Terrain(decoded) => {
-                    self.handle_terrain_completion(decoded);
-                    ControlFlow::Continue(())
-                }
-                Input::Environment(completion) => {
-                    self.handle_environment_completion(completion);
-                    ControlFlow::Continue(())
-                }
-                Input::WorldRead(request) => {
-                    self.handle_world_read(request);
-                    ControlFlow::Continue(())
-                }
-                Input::CameraTick => {
-                    self.handle_camera_tick();
-                    ControlFlow::Continue(())
-                }
-                Input::Recovery(completion) => {
-                    self.handle_recovery_completion(completion);
-                    ControlFlow::Continue(())
-                }
-                Input::InventoryFetch(Some(event)) => {
-                    self.handle_inventory_fetch(event);
-                    ControlFlow::Continue(())
-                }
-                Input::InventoryFetch(None) => ControlFlow::Continue(()),
+                DriverInput::InventoryCache(None) => ControlFlow::Continue(()),
+                DriverInput::Session(input) => match input {
+                    Input::Cancelled => ControlFlow::Break(()),
+                    Input::Event(event) => self.handle_network_event(event).await,
+                    Input::InventoryFetch(Some(event)) => {
+                        self.handle_inventory_fetch(event);
+                        ControlFlow::Continue(())
+                    }
+                    Input::InventoryFetch(None) => ControlFlow::Continue(()),
+                    Input::Media(result) => {
+                        self.handle_media_result(result);
+                        ControlFlow::Continue(())
+                    }
+                    Input::Terrain(decoded) => {
+                        self.handle_terrain_completion(decoded);
+                        ControlFlow::Continue(())
+                    }
+                    Input::Environment(completion) => {
+                        self.handle_environment_completion(completion);
+                        ControlFlow::Continue(())
+                    }
+                    Input::WorldRead(request) => {
+                        self.handle_world_read(request);
+                        ControlFlow::Continue(())
+                    }
+                    Input::CameraTick => {
+                        self.handle_camera_tick();
+                        ControlFlow::Continue(())
+                    }
+                    Input::Recovery(completion) => {
+                        self.handle_recovery_completion(completion);
+                        ControlFlow::Continue(())
+                    }
+                },
             };
             if flow.is_break() {
                 break;
@@ -295,12 +324,16 @@ impl SessionDriver {
                                 }
                                 self.inventory_changes.send_replace(Some(inventory.snapshot()));
                                 self.inventory = Some(inventory);
-                                self.start_inventory_fetch(capabilities.clone());
+                                self.inventory_fetch_capabilities = Some(capabilities.clone());
                             }
                             Err(error) => tracing::warn!(%error, "login inventory could not be initialized"),
                         },
                         Err(error) => tracing::warn!(%error, "login inventory fields could not be parsed"),
                     }
+                }
+                if let Some(inventory) = &self.inventory {
+                    let library_owner = inventory.roots().library().map(|root| root.owner().id());
+                    self.inventory_cache.start(&self.runtime, self.credentials.grid, session.agent_id, library_owner, inventory);
                 }
                 self.environments.session_ready(&mut self.session_world, simulator_id, &capabilities, self.primary_simulator);
                 if let Some(region) = self.session_world.region_for(simulator_id) {
@@ -532,29 +565,36 @@ impl SessionDriver {
 
     fn handle_inventory_udp(&mut self, message: &Message) {
         let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
+        let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else { return };
         let Some(inventory) = self.inventory.as_mut() else { return };
         let result = inventory_intake::apply_udp(inventory, agent_id, message);
-        self.apply_inventory_intake_result(result);
+        self.apply_inventory_intake_result(result, before);
     }
 
     fn handle_inventory_event_queue(&mut self, name: &str, body: &llsd::Value) {
         let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
+        let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else { return };
         let Some(inventory) = self.inventory.as_mut() else { return };
         let result = inventory_intake::apply_event_queue(inventory, agent_id, name, body);
-        self.apply_inventory_intake_result(result);
+        self.apply_inventory_intake_result(result, before);
     }
 
-    fn apply_inventory_intake_result(&mut self, result: Result<Option<InventoryIntakeOutcome>, InventoryIntakeError>) {
+    fn apply_inventory_intake_result(
+        &mut self,
+        result: Result<Option<InventoryIntakeOutcome>, InventoryIntakeError>,
+        before: InventorySnapshot,
+    ) {
         match result {
             Ok(Some(outcome)) => {
                 self.note_rejected_inventory_blocks(outcome.rejected_blocks);
-                if let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot)
-                    && !outcome.changes.is_empty()
+                if !outcome.changes.is_empty()
+                    && let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot)
                 {
                     self.track_inventory_changes(&outcome.changes, &snapshot);
                     self.inventory_changes.send_replace(Some(snapshot.clone()));
                     self.request_inventory_refetches(&outcome.changes, &snapshot);
                     self.publish_inventory_status();
+                    self.inventory_cache.record_change(&self.runtime, outcome.changes, before, snapshot);
                 }
             }
             Ok(None) => {}
@@ -712,6 +752,7 @@ impl SessionDriver {
         match event {
             InventoryFetchEvent::Folder { fetch, applied } => {
                 let folder = fetch.folder;
+                let before = self.inventory.as_ref().map(Inventory::snapshot);
                 let result = self.inventory.as_mut().map(|inventory| apply_inventory_fetch(inventory, fetch));
                 let snapshot = self.inventory.as_ref().map(Inventory::snapshot);
                 let mut rejected = false;
@@ -729,6 +770,9 @@ impl SessionDriver {
                                 self.inventory_last_failure = None;
                             }
                             self.inventory_changes.send_replace(Some(snapshot.clone()));
+                            if let Some(before) = before {
+                                self.inventory_cache.record_change(&self.runtime, changes, before, snapshot.clone());
+                            }
                         }
                     }
                     Some(Ok(None)) => {}
@@ -818,6 +862,7 @@ impl SessionDriver {
         drop(self.environments);
         drop(self.terrain);
         self.assets.stop().await;
+        self.inventory_cache.close().await;
         for (simulator_id, error) in self.session_world.retire_all() {
             let region = self.session_world.region_for(simulator_id).map(|region| region.get());
             tracing::warn!(simulator = simulator_id.get(), region, %error, "could not retire simulator world region on session shutdown");

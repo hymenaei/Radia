@@ -21,6 +21,7 @@ const MAX_FETCH_RETRIES: u32 = 3;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestFailure {
     Forbidden,
+    Missing,
     FolderTooLarge,
     Transient(Option<Duration>),
     InvalidResponse,
@@ -30,6 +31,9 @@ enum RequestFailure {
 fn classify_request_error(error: network::Error) -> RequestFailure {
     match error {
         network::Error::CapabilityHttp(error) if error.status.is_some_and(|status| status.as_u16() == 403) => RequestFailure::Forbidden,
+        network::Error::CapabilityHttp(error) if error.status.is_some_and(|status| matches!(status.as_u16(), 404 | 410)) => {
+            RequestFailure::Missing
+        }
         network::Error::CapabilityHttp(error)
             if error.kind == network::capabilities::HttpErrorKind::Transport
                 || error.kind == network::capabilities::HttpErrorKind::Timeout

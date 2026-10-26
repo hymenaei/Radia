@@ -453,6 +453,7 @@ async fn discover(
                     wait_retry(retries, retry_after, cancellation.clone(), stop).await?;
                     retries += 1;
                 }
+                RequestFailure::Missing => return Err(InventoryFetchError::RequestFailed),
                 RequestFailure::InvalidResponse => return Err(InventoryFetchError::InvalidResponse),
                 _ => return Err(InventoryFetchError::RetryExhausted),
             },
@@ -514,6 +515,7 @@ pub(crate) async fn fetch_single_items(
                         retries += 1;
                     }
                     Err(RequestFailure::Transient(_)) => return Err(InventoryFetchError::RetryExhausted),
+                    Err(RequestFailure::Missing) => break,
                     Err(RequestFailure::FolderTooLarge) => return Err(InventoryFetchError::FolderTooLarge),
                     Err(RequestFailure::InvalidResponse) => return Err(InventoryFetchError::InvalidResponse),
                     Err(RequestFailure::Forbidden | RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
@@ -550,7 +552,7 @@ async fn fetch_ais(
             }
             Err(RequestFailure::Transient(_)) => return Err(InventoryFetchError::RetryExhausted),
             Err(RequestFailure::InvalidResponse) => return Err(InventoryFetchError::InvalidResponse),
-            Err(RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
+            Err(RequestFailure::Missing | RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
         }
     }
 }
@@ -571,7 +573,9 @@ async fn fetch_legacy(
             Err(RequestFailure::Transient(_)) => return Err(InventoryFetchError::RetryExhausted),
             Err(RequestFailure::FolderTooLarge) => return Err(InventoryFetchError::FolderTooLarge),
             Err(RequestFailure::InvalidResponse) => return Err(InventoryFetchError::InvalidResponse),
-            Err(RequestFailure::Forbidden | RequestFailure::Failed) => return Err(InventoryFetchError::RequestFailed),
+            Err(RequestFailure::Forbidden | RequestFailure::Missing | RequestFailure::Failed) => {
+                return Err(InventoryFetchError::RequestFailed);
+            }
         }
     }
 }

@@ -108,6 +108,6 @@ fn map_request_error(error: network::Error) -> InventoryFetchError {
         RequestFailure::FolderTooLarge => InventoryFetchError::FolderTooLarge,
         RequestFailure::InvalidResponse => InventoryFetchError::InvalidResponse,
         RequestFailure::Transient(_) => InventoryFetchError::RetryExhausted,
-        RequestFailure::Forbidden | RequestFailure::Failed => InventoryFetchError::RequestFailed,
+        RequestFailure::Forbidden | RequestFailure::Missing | RequestFailure::Failed => InventoryFetchError::RequestFailed,
     }
 }

@@ -359,12 +359,21 @@ fn parse_region_handle(value: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
+    use std::{assert_matches, sync::Arc, time::Duration};
 
     use ::inventory::{
         AssetType, CategoryKey, InventoryChild, InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo,
         SaleType,
     };
+    use llsd::{Map, Value, xml};
+    use network::capabilities::{CapabilityUrl, Client};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+        time::timeout,
+    };
+    use url::Url;
     use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId, RegionId};
     use uuid::Uuid;
     use world::RegionHandle;
@@ -373,7 +382,7 @@ mod tests {
 
     use super::{
         FavoritesError, LandmarkDestination, RegionGridCell, favorite_folder_items, global_position, is_link, parse_landmark_asset,
-        parse_position,
+        parse_position, resolve_favorite_items,
     };
 
     fn inventory_item(inventory_type: InventoryType, asset_type: AssetType) -> Item {
@@ -401,6 +410,74 @@ mod tests {
             },
             sale: SaleInfo { sale_type: SaleType::NotForSale, price: 0 },
         }
+    }
+
+    fn ais_landmark_response(item: Uuid, parent: CategoryKey, owner: InventoryOwner, asset: Uuid) -> Vec<u8> {
+        xml::to_vec(&Value::Map(Map::from([
+            ("item_id".into(), Value::Uuid(item)),
+            ("parent_id".into(), Value::Uuid(parent.id().uuid())),
+            ("owner_id".into(), Value::Uuid(owner.id())),
+            ("name".into(), Value::String("resolved landmark".into())),
+            ("asset_id".into(), Value::Uuid(asset)),
+            ("type".into(), Value::Integer(3)),
+            ("inv_type".into(), Value::Integer(3)),
+        ])))
+        .expect("encode AIS landmark item")
+    }
+
+    fn favorite_link(owner: InventoryOwner, parent: CategoryKey, link_id: Uuid, target: Uuid, name: &str) -> Item {
+        let mut item = inventory_item(InventoryType::Landmark, AssetType::Link);
+        item.key = ItemKey::new(owner, ItemId::new(link_id));
+        item.parent = parent;
+        item.asset_id = AssetId::new(target);
+        item.name = Arc::from(name);
+        item
+    }
+
+    async fn ais_item_peer(
+        missing: Uuid,
+        missing_status: u16,
+        valid_item: Vec<u8>,
+        request_count: usize,
+    ) -> (Url, CapabilityUrl, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind favorites loopback peer");
+        let address = listener.local_addr().expect("read favorites peer address");
+        let base = Url::parse(&format!("http://{address}")).expect("build favorites peer URL");
+        let seed = base.join("/seed").expect("build seed URL");
+        let ais = CapabilityUrl::parse(base.join("/ais").expect("build AIS URL").as_str()).expect("valid AIS capability");
+        let missing_path = format!("/ais/item/{missing}");
+        let task = tokio::spawn(async move {
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().await.expect("accept item request");
+                let mut request = Vec::new();
+                let mut buffer = [0; 2048];
+                loop {
+                    let read = stream.read(&mut buffer).await.expect("read item request");
+                    assert_ne!(read, 0, "item request ended before its headers");
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(request).expect("HTTP request is UTF-8");
+                let path = request.lines().next().and_then(|line| line.split_whitespace().nth(1)).expect("request target");
+                let (status, reason, body) = if path == missing_path {
+                    let reason = match missing_status {
+                        403 => "Forbidden",
+                        404 => "Not Found",
+                        410 => "Gone",
+                        _ => panic!("unexpected missing status {missing_status}"),
+                    };
+                    (missing_status, reason, &[][..])
+                } else {
+                    (200, "OK", valid_item.as_slice())
+                };
+                let response = format!("HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                stream.write_all(response.as_bytes()).await.expect("write response headers");
+                stream.write_all(body).await.expect("write item response");
+            }
+        });
+        (seed, ais, task)
     }
 
     #[test]
@@ -473,5 +550,43 @@ mod tests {
         let error = favorite_folder_items(children).unwrap_err();
 
         assert_matches!(error, FavoritesError::TooManyFolderItems);
+    }
+
+    #[tokio::test]
+    async fn missing_ais_target_is_skipped() {
+        for missing_status in [404, 410] {
+            let owner = InventoryOwner::new(Uuid::from_u128(11));
+            let parent = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(12)));
+            let valid_target = Uuid::from_u128(13);
+            let missing_target = Uuid::from_u128(14);
+            let landmark_asset = Uuid::from_u128(15);
+            let (seed, ais, peer) =
+                ais_item_peer(missing_target, missing_status, ais_landmark_response(valid_target, parent, owner, landmark_asset), 2).await;
+            let client = Client::new(seed).expect("active Tokio runtime");
+            let favorites = vec![
+                favorite_link(owner, parent, Uuid::from_u128(16), valid_target, "Valid"),
+                favorite_link(owner, parent, Uuid::from_u128(17), missing_target, "Deleted"),
+            ];
+
+            let candidates = resolve_favorite_items(&client, Some(&ais), None, owner, favorites)
+                .await
+                .expect("missing AIS item is absent while valid favorite resolves");
+
+            timeout(Duration::from_secs(5), peer).await.expect("favorites peer completion").expect("favorites peer task");
+            assert_eq!(candidates, vec![("Valid".to_owned(), landmark_asset)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn other_ais_item_failure_propagates() {
+        let owner = InventoryOwner::new(Uuid::from_u128(21));
+        let item_id = Uuid::from_u128(22);
+        let (seed, ais, peer) = ais_item_peer(item_id, 403, Vec::new(), 1).await;
+        let client = Client::new(seed).expect("active Tokio runtime");
+
+        let result = super::fetch_single_items(&client, Some(&ais), None, owner, &[item_id]).await;
+
+        std::assert_matches!(result, Err(crate::inventory::fetch::InventoryFetchError::RequestFailed));
+        timeout(Duration::from_secs(5), peer).await.expect("favorites peer completion").expect("favorites peer task");
     }
 }

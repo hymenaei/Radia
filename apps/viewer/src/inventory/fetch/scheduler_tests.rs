@@ -61,6 +61,8 @@ impl PeerRequest {
         let reason = match status {
             200 => "OK",
             403 => "Forbidden",
+            404 => "Not Found",
+            410 => "Gone",
             503 => "Service Unavailable",
             _ => "Response",
         };
@@ -629,6 +631,71 @@ async fn transient_http_failure_retries_and_succeeds() {
     let fetched = fetch_ais(&client, &capability, root, 0).await.expect("retry should recover");
     responder.await.expect("peer responder");
     assert_eq!(fetched.len(), 1);
+}
+
+#[tokio::test]
+async fn missing_folder_keeps_walk_retryable() {
+    let mut peer = LoopbackPeer::start().await;
+    let client = Client::new(peer.url("/seed")).expect("active Tokio runtime");
+    let owner = InventoryOwner::new(Uuid::from_u128(1));
+    let root = key(owner, 41);
+    let missing = key(owner, 42);
+    let valid = key(owner, 43);
+    let inventory = Inventory::new(category(root, None), None, InventoryLimits::default()).expect("valid inventory root");
+    let (requests, mut events, model, task, _cancel, stop) = scheduler(client, inventory.snapshot());
+    peer.grant(&[("InventoryAPIv3", "/ais")]).await;
+
+    let root_request = peer.next().await;
+    assert_eq!(root_request.path, format!("/ais/category/{}/children?depth=16", root.id().uuid()));
+    root_request.respond(200, root_response(root, &[missing, valid], 1)).await;
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
+    let mut inventory = inventory;
+    apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply root response");
+
+    let first_request = peer.next().await;
+    let second_request = peer.next().await;
+    let missing_path = format!("/ais/category/{}/children?depth=0", missing.id().uuid());
+    let valid_path = format!("/ais/category/{}/children?depth=0", valid.id().uuid());
+    let (missing_request, valid_request) =
+        if first_request.path == missing_path { (first_request, second_request) } else { (second_request, first_request) };
+    assert_eq!(missing_request.path, missing_path);
+    assert_eq!(valid_request.path, valid_path);
+    missing_request.respond(404, "").await;
+    valid_request.respond(200, empty_folder_response(valid, 2)).await;
+
+    let mut missing_reported = false;
+    let mut valid_applied = false;
+    loop {
+        match next_event(&mut events).await {
+            InventoryFetchEvent::Failed { folder, error } => {
+                assert_eq!(folder, missing);
+                std::assert_matches!(error, InventoryFetchError::RequestFailed);
+                missing_reported = true;
+            }
+            InventoryFetchEvent::Folder { fetch, applied } => {
+                assert_eq!(fetch.folder, valid);
+                apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply surviving folder response");
+                valid_applied = true;
+            }
+            InventoryFetchEvent::BackgroundDone => break,
+        }
+    }
+    assert!(missing_reported);
+    assert!(valid_applied);
+    assert!(inventory.snapshot().is_complete(valid));
+    assert!(!inventory.snapshot().is_complete(missing));
+
+    requests.send(missing).await.expect("retry missing folder on request");
+    let retry = peer.next().await;
+    assert_eq!(retry.path, missing_path);
+    retry.respond(200, empty_folder_response(missing, 2)).await;
+    let (fetch, applied) = take_folder_event(next_event(&mut events).await, missing);
+    apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply retried folder response");
+    assert!(inventory.snapshot().is_complete(missing));
+
+    drop(requests);
+    stop.send(()).expect("stop scheduler after folder retry");
+    task.await.expect("scheduler stopped");
 }
 
 #[tokio::test]

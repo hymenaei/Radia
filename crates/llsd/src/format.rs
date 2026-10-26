@@ -1,8 +1,11 @@
 use serde::de::DeserializeOwned;
 
-use crate::{Limits, Result, binary, encoding::strip_header, notation, xml};
+use crate::{Error, Limits, Result, binary, encoding::strip_header, notation, xml};
 
 pub fn from_slice_with_limits<T: DeserializeOwned>(input: &[u8], limits: Limits) -> Result<T> {
+    if input.len() > limits.max_bytes {
+        return Err(Error::LimitExceeded("input bytes"));
+    }
     let input = input.trim_ascii_start();
     if strip_header(input, b"llsd/binary").is_some() {
         binary::from_slice_with_limits(input, limits)
@@ -39,6 +42,14 @@ mod tests {
         ] {
             assert_eq!(decode(input), expected, "{}", String::from_utf8_lossy(input));
         }
+    }
+
+    #[test]
+    fn byte_limit_counts_header_and_leading_whitespace() {
+        let input = b"  <? LLSD/XML ?>
+<llsd><string>sky</string></llsd>";
+        let limits = Limits { max_bytes: input.len() - 1, ..Limits::default() };
+        std::assert_matches!(from_slice_with_limits::<Value>(input, limits), Err(Error::LimitExceeded("input bytes")));
     }
 
     #[test]

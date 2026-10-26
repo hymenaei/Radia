@@ -41,6 +41,7 @@ const DIRECTORY_OVERHEAD: u64 = 4096;
 const FILE_OVERHEAD: u64 = 512;
 const INDEX_OVERHEAD: u64 = 3;
 const MIN_SIZE_LIMIT_INTERNAL: u64 = DIRECTORY_OVERHEAD + FILE_OVERHEAD * 4 + journal::SNAPSHOT_HEADER_BYTES;
+const LOOKUP_MAX_ATTEMPTS: usize = 3;
 const DATA_DIRECTORY: &str = "data";
 const SNAPSHOT_FILE: &str = "snapshot";
 const JOURNAL_FILE: &str = "journal";
@@ -166,6 +167,11 @@ impl Entry {
     }
 }
 
+enum EntryReadFailure {
+    Corrupt,
+    Unavailable(UnavailableReason),
+}
+
 struct ReadState {
     data_dir: PathBuf,
     entries: Arc<RwLock<HashMap<Key, Arc<Entry>>>>,
@@ -225,69 +231,55 @@ impl Cache {
         let Some(_permit) = ReadPermit::acquire(&self.read_state.active_reads) else {
             return Lookup::Unavailable(UnavailableReason::ReadLimit);
         };
-        let entry = {
-            let entries = match self.read_state.entries.read() {
-                Ok(entries) => entries,
+        for _ in 0..LOOKUP_MAX_ATTEMPTS {
+            let entry = {
+                let entries = match self.read_state.entries.read() {
+                    Ok(entries) => entries,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                let Some(entry) = entries.get(&key).cloned() else {
+                    return Lookup::Miss;
+                };
+                entry
+            };
+            #[cfg(test)]
+            if self.read_state.hooks.check(WritePoint::LookupEntrySelected).is_err() {
+                return Lookup::Unavailable(UnavailableReason::Io);
+            }
+            if entry.invalid.load(Ordering::Acquire) {
+                if self.entry_is_current(key, &entry) {
+                    return Lookup::Corrupt;
+                }
+                continue;
+            }
+            let bytes = match read_entry(&self.read_state.data_dir, &entry) {
+                Ok(bytes) => bytes,
+                Err(EntryReadFailure::Corrupt) => {
+                    if self.mark_invalid(key, Arc::clone(&entry)) {
+                        return Lookup::Corrupt;
+                    }
+                    continue;
+                }
+                Err(EntryReadFailure::Unavailable(reason)) => {
+                    if self.entry_is_current(key, &entry) {
+                        return Lookup::Unavailable(reason);
+                    }
+                    continue;
+                }
+            };
+            let stamp = saturating_increment(&self.read_state.usage_clock);
+            entry.last_use.fetch_max(stamp, Ordering::Relaxed);
+            let use_count = saturating_increment(&entry.use_count);
+            let mut touches = match self.read_state.touches.lock() {
+                Ok(touches) => touches,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let Some(entry) = entries.get(&key).cloned() else {
-                return Lookup::Miss;
-            };
-            entry
-        };
-        if entry.invalid.load(Ordering::Acquire) {
-            return Lookup::Corrupt;
-        }
-        let file = match File::open(entry.path(&self.read_state.data_dir)) {
-            Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                self.mark_invalid(key, entry);
-                return Lookup::Corrupt;
+            if touches.try_reserve(1).is_ok() {
+                touches.insert(key, Arc::clone(&entry));
             }
-            Err(_) => return Lookup::Unavailable(UnavailableReason::Io),
-        };
-        let metadata = match file.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => return Lookup::Unavailable(UnavailableReason::Io),
-        };
-        if !metadata.is_file() || metadata.len() != entry.size {
-            self.mark_invalid(key, entry);
-            return Lookup::Corrupt;
+            return Lookup::Hit(CacheValue { bytes, last_use: stamp, use_count });
         }
-        let capacity = match usize::try_from(entry.size) {
-            Ok(capacity) => capacity,
-            Err(_) => {
-                self.mark_invalid(key, entry);
-                return Lookup::Corrupt;
-            }
-        };
-        let mut bytes = Vec::new();
-        if bytes.try_reserve_exact(capacity).is_err() {
-            return Lookup::Unavailable(UnavailableReason::Allocation);
-        }
-        match file.take(entry.size.saturating_add(1)).read_to_end(&mut bytes) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                self.mark_invalid(key, entry);
-                return Lookup::Corrupt;
-            }
-            Err(_) => return Lookup::Unavailable(UnavailableReason::Io),
-        }
-        if u64::try_from(bytes.len()).ok() != Some(entry.size) || Sha256::digest(&bytes).as_slice() != entry.hash {
-            self.mark_invalid(key, entry);
-            return Lookup::Corrupt;
-        }
-        let stamp = saturating_increment(&self.read_state.usage_clock);
-        entry.last_use.fetch_max(stamp, Ordering::Relaxed);
-        let use_count = saturating_increment(&entry.use_count);
-        let mut touches = match self.read_state.touches.lock() {
-            Ok(touches) => touches,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if touches.try_reserve(1).is_ok() {
-            touches.insert(key, Arc::clone(&entry));
-        }
-        Lookup::Hit(CacheValue { bytes, last_use: stamp, use_count })
+        Lookup::Miss
     }
 
     pub fn put(&self, key: Key, bytes: Vec<u8>) -> Result<(), StorageError> {
@@ -435,14 +427,22 @@ impl Cache {
         Ok(cache)
     }
 
-    fn mark_invalid(&self, key: Key, entry: Arc<Entry>) {
+    fn entry_is_current(&self, key: Key, entry: &Arc<Entry>) -> bool {
+        let entries = match self.read_state.entries.read() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        entries.get(&key).is_some_and(|current| Arc::ptr_eq(current, entry))
+    }
+
+    fn mark_invalid(&self, key: Key, entry: Arc<Entry>) -> bool {
         let entries = match self.read_state.entries.read() {
             Ok(entries) => entries,
             Err(poisoned) => poisoned.into_inner(),
         };
         let matches = entries.get(&key).is_some_and(|current| Arc::ptr_eq(current, &entry));
         if !matches {
-            return;
+            return false;
         }
         entry.invalid.store(true, Ordering::Release);
         drop(entries);
@@ -451,9 +451,10 @@ impl Cache {
             Err(poisoned) => poisoned.into_inner(),
         };
         if invalid.try_reserve(1).is_err() {
-            return;
+            return true;
         }
         invalid.insert(key, entry);
+        true
     }
 
     #[cfg(test)]
@@ -471,6 +472,34 @@ impl Drop for Cache {
     fn drop(&mut self) {
         self.queue.close();
     }
+}
+
+fn read_entry(data_dir: &Path, entry: &Entry) -> Result<Vec<u8>, EntryReadFailure> {
+    let file = File::open(entry.path(data_dir)).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            EntryReadFailure::Corrupt
+        } else {
+            EntryReadFailure::Unavailable(UnavailableReason::Io)
+        }
+    })?;
+    let metadata = file.metadata().map_err(|_| EntryReadFailure::Unavailable(UnavailableReason::Io))?;
+    if !metadata.is_file() || metadata.len() != entry.size {
+        return Err(EntryReadFailure::Corrupt);
+    }
+    let capacity = usize::try_from(entry.size).map_err(|_| EntryReadFailure::Corrupt)?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(capacity).map_err(|_| EntryReadFailure::Unavailable(UnavailableReason::Allocation))?;
+    file.take(entry.size.saturating_add(1)).read_to_end(&mut bytes).map_err(|error| {
+        if error.kind() == io::ErrorKind::UnexpectedEof {
+            EntryReadFailure::Corrupt
+        } else {
+            EntryReadFailure::Unavailable(UnavailableReason::Io)
+        }
+    })?;
+    if u64::try_from(bytes.len()).ok() != Some(entry.size) || Sha256::digest(&bytes).as_slice() != entry.hash {
+        return Err(EntryReadFailure::Corrupt);
+    }
+    Ok(bytes)
 }
 
 fn saturating_increment(value: &AtomicU64) -> u64 {

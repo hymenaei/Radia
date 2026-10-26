@@ -25,8 +25,8 @@ use super::{
 };
 use crate::cache::eviction::Lru;
 use disk::{
-    DATA_TEMP_PREFIX, JOURNAL_TEMP_PREFIX, SNAPSHOT_TEMP_PREFIX, delete_data, ensure_journal, fail_temporary, final_data_name,
-    persist_with_retry, remove_path, reset_journal_atomic, write_snapshot_atomic,
+    DATA_TEMP_PREFIX, JOURNAL_TEMP_PREFIX, SNAPSHOT_TEMP_PREFIX, delete_data, ensure_journal, fail_temporary, persist_data_with_retry,
+    remove_path, reset_journal_atomic, write_snapshot_atomic,
 };
 
 pub(in crate::cache) use queue::{Command, WriteQueue, writer_loop};
@@ -54,6 +54,8 @@ pub(super) enum WritePoint {
     JournalResetWritten,
     JournalResetSynced,
     JournalResetRenamed,
+    #[cfg(test)]
+    LookupEntrySelected,
 }
 
 #[cfg(test)]
@@ -83,7 +85,7 @@ impl FaultHooks {
         file.write_all(bytes)
     }
 
-    fn check(&self, point: WritePoint) -> io::Result<()> {
+    pub(super) fn check(&self, point: WritePoint) -> io::Result<()> {
         #[cfg(test)]
         {
             let mut pause_guard = match self.pause.lock() {
@@ -182,9 +184,6 @@ impl WorkerState {
                 .checked_add(journal::entry_size(&entry.record()).ok_or(StorageError::TooLarge)?)
                 .ok_or(StorageError::TooLarge)?;
         }
-        if snapshot_bytes == 0 {
-            live_index_bytes = journal::SNAPSHOT_HEADER_BYTES + 32;
-        }
         let entry_count = entries.len();
         drop(entries);
         let journal_bytes = ensure_journal(&root, journal_bytes)?;
@@ -258,7 +257,7 @@ impl WorkerState {
             return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
         }
         self.drain_touches();
-        let mut plan = match self.plan_puts(&staged) {
+        let mut plan = match self.plan_puts_with_compaction(&staged) {
             Ok(plan) => plan,
             Err(error) => {
                 for entry in &staged {
@@ -298,6 +297,18 @@ impl WorkerState {
             }
         }
         results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect()
+    }
+
+    fn plan_puts_with_compaction(&mut self, staged: &[Arc<Entry>]) -> Result<Plan, StorageError> {
+        match self.plan_puts(staged) {
+            Err(StorageError::TooLarge)
+                if self.journal_bytes > journal::JOURNAL_HEADER_BYTES || self.snapshot_bytes != self.live_index_bytes =>
+            {
+                self.compact()?;
+                self.plan_puts(staged)
+            }
+            result => result,
+        }
     }
 
     fn plan_puts(&self, staged: &[Arc<Entry>]) -> Result<Plan, StorageError> {
@@ -361,7 +372,6 @@ impl WorkerState {
 
     fn write_data(&self, key: Key, bytes: &[u8]) -> Result<Arc<Entry>, StorageError> {
         let mut temp = Builder::new().prefix(DATA_TEMP_PREFIX).tempfile_in(&self.data_dir)?;
-        let file_name = final_data_name(&temp)?;
         if let Err(error) = self.hooks.check(WritePoint::DataTempCreated) {
             return Err(fail_temporary(temp, error));
         }
@@ -372,7 +382,7 @@ impl WorkerState {
         if let Err(error) = self.hooks.check(WritePoint::DataWritten) {
             return Err(fail_temporary(temp, error));
         }
-        persist_with_retry(temp, &self.data_dir.join(&file_name)).map_err(StorageError::Io)?;
+        let file_name = persist_data_with_retry(temp, &self.data_dir)?;
         self.hooks.check(WritePoint::DataRenamed).map_err(StorageError::Io)?;
         let stamp = super::saturating_increment(&self.read_state.usage_clock);
         let size = u64::try_from(bytes.len()).map_err(|_| StorageError::TooLarge)?;
@@ -626,8 +636,11 @@ impl WorkerState {
     }
 
     fn maybe_compact(&mut self) -> Result<(), StorageError> {
-        let threshold = JOURNAL_COMPACT_MIN_BYTES.max(self.live_index_bytes / 2);
-        if self.journal_bytes > threshold {
+        let compacted_size = account_size(self.live_index_bytes, journal::JOURNAL_HEADER_BYTES, self.data_bytes, self.entry_count, 0)
+            .ok_or(StorageError::TooLarge)?;
+        let headroom = self.size_limit.saturating_sub(compacted_size);
+        let threshold = JOURNAL_COMPACT_MIN_BYTES.max(self.live_index_bytes / 2).min(headroom);
+        if self.journal_bytes.saturating_sub(journal::JOURNAL_HEADER_BYTES) > threshold {
             self.compact()?;
         }
         Ok(())

@@ -90,6 +90,30 @@ pub(super) fn persist_with_retry(mut temp: NamedTempFile, destination: &Path) ->
     Err(io::Error::other("temporary file replacement failed"))
 }
 
+pub(super) fn persist_data_with_retry(mut temp: NamedTempFile, directory: &Path) -> Result<String, StorageError> {
+    let mut file_name = final_data_name(&temp)?;
+    for attempt in 0..TEMP_RETRIES {
+        let destination = directory.join(&file_name);
+        match temp.persist_noclobber(destination) {
+            Ok(file) => {
+                drop(file);
+                return Ok(file_name);
+            }
+            Err(failure) => {
+                let error = failure.error;
+                if error.kind() != io::ErrorKind::AlreadyExists || attempt + 1 == TEMP_RETRIES {
+                    return Err(StorageError::Io(error));
+                }
+                temp = failure.file;
+                let candidate = Builder::new().prefix(DATA_TEMP_PREFIX).tempfile_in(directory)?;
+                file_name = final_data_name(&candidate)?;
+                drop(candidate);
+            }
+        }
+    }
+    Err(StorageError::Io(io::Error::other("temporary data publication failed")))
+}
+
 pub(super) fn fail_temporary(temp: NamedTempFile, error: io::Error) -> StorageError {
     if error.kind() == io::ErrorKind::Interrupted {
         match temp.keep() {
@@ -122,4 +146,25 @@ pub(super) fn delete_data(directory: &Path, file_name: &str) {
 pub(super) fn remove_path(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_dir() { fs::remove_dir_all(path) } else { fs::remove_file(path) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_publication_preserves_existing_destination() {
+        let directory = tempfile::tempdir().expect("cache directory");
+        let mut temp = Builder::new().prefix(DATA_TEMP_PREFIX).tempfile_in(directory.path()).expect("temporary data file");
+        let collision_name = final_data_name(&temp).expect("data file name");
+        let destination = directory.path().join(&collision_name);
+        fs::write(&destination, b"existing value").expect("create colliding destination");
+        temp.write_all(b"new value").expect("write temporary data");
+
+        let file_name = persist_data_with_retry(temp, directory.path()).expect("publish data file");
+
+        assert_eq!(fs::read(destination).expect("read existing data"), b"existing value");
+        assert_ne!(file_name, collision_name);
+        assert_eq!(fs::read(directory.path().join(file_name)).expect("read published data"), b"new value");
+    }
 }

@@ -50,7 +50,9 @@ pub(super) fn recover(root: &Path) -> Result<(Vec<Record>, u64, u64, u64, bool),
             (snapshot_sequence, write_journal_header(root)?)
         }
         Some(bytes) => {
-            match journal::decode_journal(&bytes, snapshot_sequence, |_, operation| apply_operation(&mut by_key, &mut names, operation)) {
+            match journal::decode_journal(&bytes, snapshot_sequence, |_, operation| {
+                apply_operation::<{ journal::MAX_ENTRIES }>(&mut by_key, &mut names, operation)
+            }) {
                 Ok(replay) => {
                     let valid = replay.valid_bytes;
                     if valid < bytes.len() {
@@ -72,23 +74,28 @@ pub(super) fn recover(root: &Path) -> Result<(Vec<Record>, u64, u64, u64, bool),
     let mut records = Vec::new();
     records.try_reserve_exact(by_key.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
     records.extend(by_key.into_values());
-    if records.len() > journal::MAX_ENTRIES {
-        return Ok((Vec::new(), 0, 0, 0, true));
-    }
+    drop_least_recent(&mut records, journal::MAX_ENTRIES);
     Ok((records, sequence, snapshot_bytes, journal_len, false))
 }
 
-fn apply_operation(by_key: &mut HashMap<Key, Record>, names: &mut HashSet<String>, operation: Operation) -> Result<(), FormatError> {
+fn apply_operation<const ENTRY_LIMIT: usize>(
+    by_key: &mut HashMap<Key, Record>,
+    names: &mut HashSet<String>,
+    operation: Operation,
+) -> Result<(), FormatError> {
     match operation {
         Operation::Put(record) => {
-            if let Some(old) = by_key.remove(&record.key) {
-                names.remove(&old.file_name);
-            }
-            if names.contains(&record.file_name) || by_key.len() >= journal::MAX_ENTRIES {
+            let old_name = by_key.get(&record.key).map(|old| old.file_name.as_str());
+            if (names.contains(&record.file_name) && old_name != Some(record.file_name.as_str()))
+                || (old_name.is_none() && by_key.len() > ENTRY_LIMIT)
+            {
                 return Err(FormatError::Invalid);
             }
             names.try_reserve(1).map_err(|_| FormatError::Allocation)?;
             by_key.try_reserve(1).map_err(|_| FormatError::Allocation)?;
+            if let Some(old) = by_key.remove(&record.key) {
+                names.remove(&old.file_name);
+            }
             names.insert(record.file_name.clone());
             by_key.insert(record.key, record);
         }
@@ -103,6 +110,15 @@ fn apply_operation(by_key: &mut HashMap<Key, Record>, names: &mut HashSet<String
         }
     }
     Ok(())
+}
+
+fn drop_least_recent(records: &mut Vec<Record>, limit: usize) {
+    while records.len() > limit {
+        let Some(oldest) = records.iter().enumerate().min_by_key(|(_, record)| record.last_use).map(|(index, _)| index) else {
+            return;
+        };
+        records.swap_remove(oldest);
+    }
 }
 
 fn write_journal_header(root: &Path) -> Result<u64, StorageError> {
@@ -144,4 +160,57 @@ fn read_bounded(path: &Path, limit: usize) -> io::Result<Option<Vec<u8>>> {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "cache index exceeds its format bound"));
     }
     Ok(Some(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    fn record(value: u16) -> Record {
+        let mut key = [0; 32];
+        key[..2].copy_from_slice(&value.to_le_bytes());
+        Record { key: Key::new(key), file_name: format!("data-{value}.bin"), size: 1, hash: [0; 32], last_use: 0, use_count: 0 }
+    }
+
+    #[test]
+    fn eviction_replay_allows_one_transient_entry() {
+        let mut bytes = Vec::new();
+        journal::encode_journal_header(&mut bytes).expect("journal header");
+        for (sequence, operation) in
+            [Operation::Put(record(1)), Operation::Put(record(2)), Operation::Put(record(3)), Operation::Remove(record(1).key)]
+                .into_iter()
+                .enumerate()
+        {
+            let sequence = u64::try_from(sequence).expect("sequence") + 1;
+            bytes.extend(journal::encode_operation(sequence, &operation).expect("journal operation"));
+        }
+
+        let mut by_key = HashMap::new();
+        let mut names = HashSet::new();
+        let replay = journal::decode_journal(&bytes, 0, |_, operation| apply_operation::<2>(&mut by_key, &mut names, operation))
+            .expect("replay eviction");
+
+        assert_eq!(replay.sequence, 4);
+        assert_eq!(by_key.len(), 2);
+        assert!(by_key.contains_key(&record(2).key));
+        assert!(by_key.contains_key(&record(3).key));
+        std::assert_matches!(apply_operation::<2>(&mut by_key, &mut names, Operation::Put(record(4))), Ok(()));
+        std::assert_matches!(apply_operation::<2>(&mut by_key, &mut names, Operation::Put(record(5))), Err(FormatError::Invalid));
+        assert_eq!(by_key.len(), 3);
+    }
+
+    #[test]
+    fn torn_eviction_drops_least_recent_entry() {
+        let mut records = vec![record(1), record(2), record(3)];
+        records[0].last_use = 5;
+        records[1].last_use = 9;
+
+        drop_least_recent(&mut records, 2);
+
+        let mut kept = records.iter().map(|record| record.file_name.as_str()).collect::<Vec<_>>();
+        kept.sort_unstable();
+        assert_eq!(kept, ["data-1.bin", "data-2.bin"]);
+    }
 }

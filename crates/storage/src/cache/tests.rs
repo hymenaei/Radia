@@ -137,6 +137,20 @@ fn lookup_detects_truncated_and_missing_data() {
 }
 
 #[test]
+fn recovered_entry_accepts_replacement() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+    cache.arm_fault(WritePoint::JournalAppended);
+    assert!(cache.put(key(3), b"recovered payload".to_vec()).is_err());
+    cache.simulate_crash().expect("simulate process crash");
+
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("recover cache");
+    cache.put(key(3), b"replacement payload".to_vec()).expect("replace recovered entry");
+    std::assert_matches!(cache.lookup(key(3)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"replacement payload");
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
 fn recovery_discards_extra_files() {
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
@@ -224,6 +238,25 @@ fn lookup_does_not_wait_for_a_slow_write() {
         assert_eq!(reader.join().expect("reader completes"), Lookup::Miss);
         resume.send(()).expect("release writer");
         writer.join().expect("writer completes").expect("put payload");
+    });
+
+    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().expect("close cache");
+}
+
+#[test]
+fn lookup_retries_after_replacement_deletes_old_file() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache"));
+    cache.put(key(21), b"old payload".to_vec()).expect("store old payload");
+    let (started, resume) = cache.pause_at(WritePoint::LookupEntrySelected);
+
+    thread::scope(|scope| {
+        let reading_cache = Arc::clone(&cache);
+        let reader = scope.spawn(move || reading_cache.lookup(key(21)));
+        started.recv_timeout(Duration::from_secs(3)).expect("reader selected old entry");
+        cache.put(key(21), b"replacement payload".to_vec()).expect("replace entry");
+        resume.send(()).expect("resume reader");
+        std::assert_matches!(reader.join().expect("reader completes"), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"replacement payload");
     });
 
     Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().expect("close cache");
@@ -366,6 +399,27 @@ proptest! {
             cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("reopen cache after operation");
             prop_assert!(cache.accounted_size() <= cache.size_limit());
             prop_assert_eq!(cache.entry_count(), model.len());
+            check_model(&cache, &model)?;
+        }
+
+        let small_limit = MIN_SIZE_LIMIT + 4096;
+        cache.set_size_limit(small_limit).expect("lower cache limit");
+        reconcile_after_eviction(&cache, &mut model)?;
+        for _ in 0..160 {
+            cache.clear().expect("clear small cache");
+            model.clear();
+            prop_assert!(cache.accounted_size() <= small_limit);
+            prop_assert_eq!(cache.entry_count(), model.len());
+        }
+        for revision in 0..80u8 {
+            let bytes = vec![revision; 32];
+            cache.arm_fault(WritePoint::JournalAppended);
+            let error = cache.put(key(0), bytes.clone()).expect_err("simulated crash after journal append");
+            std::assert_matches!(error, StorageError::Io(error) if error.kind() == io::ErrorKind::Interrupted);
+            cache.simulate_crash().expect("simulate replacement crash");
+            model.insert(0, bytes);
+            cache = Cache::open(directory.path(), small_limit).expect("reopen small cache after replacement");
+            prop_assert!(cache.accounted_size() <= small_limit);
             check_model(&cache, &model)?;
         }
         cache.shutdown().expect("close final cache");

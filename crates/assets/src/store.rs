@@ -1008,7 +1008,7 @@ impl Store {
             Ok((content, source, persisted)) => {
                 entry.used = now;
                 if let (Some(cache), Some(payload)) = (&self.cache, persisted)
-                    && let Some(write) = cache.queue_write(job.resource, move || payload.to_vec())
+                    && let Some(write) = cache.queue_write(job.resource, payload, &self.budget)
                 {
                     writes.push(write);
                 }

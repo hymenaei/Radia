@@ -11,7 +11,7 @@ use std::{
 
 use storage::{Cache as StorageCache, CacheValue, Key as StorageKey, Lookup as StorageLookup, StorageError, UnavailableReason};
 
-use crate::{Kind, Resource};
+use crate::{Blob, Budget, Kind, Resource, budget::Reservation};
 
 const MAGIC: &[u8; 8] = b"RADEXT01";
 const HEADER_BYTES: usize = 20;
@@ -128,6 +128,10 @@ fn encoded_limit(kind: Kind) -> usize {
     kind.max_cache_bytes().saturating_add(MAX_ENCODED_OVERHEAD).min(storage::MAX_VALUE_BYTES)
 }
 
+fn complete_record_size(payload_size: usize) -> Option<usize> {
+    HEADER_BYTES.checked_add(16)?.checked_add(payload_size).filter(|size| *size <= storage::MAX_VALUE_BYTES)
+}
+
 pub struct AssetCache {
     storage: StorageCache,
     write_locks: [Mutex<()>; WRITE_STRIPES],
@@ -137,7 +141,8 @@ pub struct AssetCache {
 pub struct CacheWrite {
     cache: Arc<AssetCache>,
     resource: Resource,
-    payload: Option<Box<dyn FnOnce() -> Vec<u8> + Send>>,
+    payload: Blob,
+    _reservation: Reservation,
     finished: bool,
 }
 
@@ -217,7 +222,7 @@ impl AssetCache {
         };
         let mut next = old_extents;
         merge_extent(&mut next, Extent { offset, bytes })?;
-        let payload = encode(total_size, &next, resource.kind)?;
+        let payload = encode(total_size, next.iter().map(|extent| (extent.offset, extent.bytes.as_slice())), resource.kind)?;
         self.storage.put(key, payload).map_err(map_storage_error)
     }
 
@@ -230,10 +235,11 @@ impl AssetCache {
         self.discard(resource);
     }
 
-    pub(crate) fn queue_write<F>(self: &Arc<Self>, resource: Resource, payload: F) -> Option<CacheWrite>
-    where
-        F: FnOnce() -> Vec<u8> + Send + 'static,
-    {
+    pub(crate) fn queue_write(self: &Arc<Self>, resource: Resource, payload: Blob, budget: &Budget) -> Option<CacheWrite> {
+        let Some(record_size) = complete_record_size(payload.len()) else {
+            self.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
         if self
             .counters
             .in_flight_writes
@@ -243,7 +249,12 @@ impl AssetCache {
             self.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        Some(CacheWrite { cache: Arc::clone(self), resource, payload: Some(Box::new(payload)), finished: false })
+        let Some(reservation) = budget.reserve(record_size) else {
+            self.counters.in_flight_writes.fetch_sub(1, Ordering::AcqRel);
+            self.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        Some(CacheWrite { cache: Arc::clone(self), resource, payload, _reservation: reservation, finished: false })
     }
 
     pub fn stats(&self) -> AssetCacheStats {
@@ -286,11 +297,11 @@ impl AssetCache {
         })
     }
 
-    fn put_complete(&self, resource: Resource, bytes: Vec<u8>) -> Result<u64, AssetCacheError> {
+    fn put_complete(&self, resource: Resource, bytes: &[u8]) -> Result<u64, AssetCacheError> {
         let total_size = u64::try_from(bytes.len()).map_err(|_| AssetCacheError::TooLarge)?;
-        validate_extent(resource.kind, total_size, 0, &bytes)?;
+        validate_extent(resource.kind, total_size, 0, bytes)?;
         let _guard = self.write_guard(resource)?;
-        let payload = encode(total_size, &[Extent { offset: 0, bytes }], resource.kind)?;
+        let payload = encode(total_size, std::iter::once((0, bytes)), resource.kind)?;
         let stored_size = u64::try_from(payload.len()).map_err(|_| AssetCacheError::TooLarge)?;
         self.storage.put(storage_key(resource), payload).map_err(map_storage_error)?;
         Ok(stored_size)
@@ -299,8 +310,7 @@ impl AssetCache {
 
 impl CacheWrite {
     pub fn run(mut self) {
-        let Some(payload) = self.payload.take() else { return };
-        match self.cache.put_complete(self.resource, payload()) {
+        match self.cache.put_complete(self.resource, &self.payload) {
             Ok(bytes) => {
                 self.cache.counters.bytes_written.fetch_add(bytes, Ordering::Relaxed);
             }
@@ -427,14 +437,19 @@ fn merge_extent(extents: &mut Vec<Extent>, incoming: Extent) -> Result<(), Asset
     Ok(())
 }
 
-fn encode(total_size: u64, extents: &[Extent], kind: Kind) -> Result<Vec<u8>, AssetCacheError> {
-    if extents.is_empty() || extents.len() > MAX_EXTENTS {
+fn encode<'a>(
+    total_size: u64,
+    extents: impl ExactSizeIterator<Item = (u64, &'a [u8])> + Clone,
+    kind: Kind,
+) -> Result<Vec<u8>, AssetCacheError> {
+    let count = extents.len();
+    if count == 0 || count > MAX_EXTENTS {
         return Err(AssetCacheError::InvalidExtent);
     }
     let mut size = HEADER_BYTES;
-    for extent in extents {
-        validate_extent(kind, total_size, extent.offset, &extent.bytes)?;
-        size = size.checked_add(16).and_then(|size| size.checked_add(extent.bytes.len())).ok_or(AssetCacheError::TooLarge)?;
+    for (offset, bytes) in extents.clone() {
+        validate_extent(kind, total_size, offset, bytes)?;
+        size = size.checked_add(16).and_then(|size| size.checked_add(bytes.len())).ok_or(AssetCacheError::TooLarge)?;
     }
     if size > storage::MAX_VALUE_BYTES {
         return Err(AssetCacheError::TooLarge);
@@ -443,11 +458,11 @@ fn encode(total_size: u64, extents: &[Extent], kind: Kind) -> Result<Vec<u8>, As
     output.try_reserve_exact(size).map_err(|_| AssetCacheError::TooLarge)?;
     output.write_all(MAGIC).map_err(|_| AssetCacheError::TooLarge)?;
     write_u64(&mut output, total_size)?;
-    write_u32(&mut output, u32::try_from(extents.len()).map_err(|_| AssetCacheError::TooLarge)?)?;
-    for extent in extents {
-        write_u64(&mut output, extent.offset)?;
-        write_u64(&mut output, u64::try_from(extent.bytes.len()).map_err(|_| AssetCacheError::TooLarge)?)?;
-        output.write_all(&extent.bytes).map_err(|_| AssetCacheError::TooLarge)?;
+    write_u32(&mut output, u32::try_from(count).map_err(|_| AssetCacheError::TooLarge)?)?;
+    for (offset, bytes) in extents {
+        write_u64(&mut output, offset)?;
+        write_u64(&mut output, u64::try_from(bytes.len()).map_err(|_| AssetCacheError::TooLarge)?)?;
+        output.write_all(bytes).map_err(|_| AssetCacheError::TooLarge)?;
     }
     Ok(output)
 }

@@ -163,7 +163,7 @@ impl AssetCoordinator {
     pub(crate) fn new(runtime: Handle, cancelled: impl Future<Output = ()> + Send + 'static, cache: Option<Arc<AssetCache>>) -> Self {
         static MEMORY: OnceLock<Budget> = OnceLock::new();
         let budget = MEMORY.get_or_init(Budget::default).clone();
-        Self::build(runtime, cancelled, budget, cache, Box::new(spawn_cache_writes))
+        Self::build(runtime, cancelled, budget, cache, Box::new(spawn_cache_writes), Box::new(|| {}))
     }
 
     #[cfg(test)]
@@ -173,7 +173,7 @@ impl AssetCoordinator {
         budget: Budget,
         cache: Option<Arc<AssetCache>>,
     ) -> Self {
-        Self::build(runtime, cancelled, budget, cache, Box::new(spawn_cache_writes))
+        Self::build(runtime, cancelled, budget, cache, Box::new(spawn_cache_writes), Box::new(|| {}))
     }
 
     fn build(
@@ -182,6 +182,7 @@ impl AssetCoordinator {
         budget: Budget,
         cache: Option<Arc<AssetCache>>,
         write_spawner: Box<CacheWriteSpawner>,
+        shutdown_drain_hook: Box<dyn FnOnce() + Send>,
     ) -> Self {
         let (requests, receiver) = mpsc::channel(COMMANDS);
         let (controls, control_receiver) = mpsc::channel(COMMANDS);
@@ -197,9 +198,10 @@ impl AssetCoordinator {
             routes: route_events,
             cache,
         };
-        let worker = runtime
-            .clone()
-            .spawn(run(store, receiver, control_receiver, routes, active, runtime, cancelled, write_spawner).in_current_span());
+        let worker = runtime.clone().spawn(
+            run(store, receiver, control_receiver, routes, active, runtime, cancelled, write_spawner, shutdown_drain_hook)
+                .in_current_span(),
+        );
         Self { handle, controls, worker }
     }
 
@@ -271,6 +273,7 @@ async fn run(
     runtime: Handle,
     cancelled: impl Future<Output = ()>,
     mut write_spawner: Box<CacheWriteSpawner>,
+    shutdown_drain_hook: Box<dyn FnOnce() + Send>,
 ) {
     let cancelled = cancelled.fuse();
     pin_mut!(cancelled);
@@ -415,6 +418,7 @@ async fn run(
     drop(waiting);
     requests.close();
     controls.close();
+    shutdown_drain_hook();
     while let Some(result) = jobs.next().await {
         if let Err(error) = result {
             tracing::error!(%error, "retiring asset worker stopped unexpectedly");
@@ -1026,6 +1030,7 @@ mod tests {
         let mut write_finished = Some(write_finished);
         let (release_write, hold_write) = std::sync::mpsc::sync_channel(0);
         let mut hold_write = Some(hold_write);
+        let (shutdown_drain_started, shutdown_drain_started_receive) = oneshot::channel();
         let service = AssetCoordinator::build(
             Handle::current(),
             pending(),
@@ -1045,6 +1050,7 @@ mod tests {
                     }));
                 }
             }),
+            Box::new(move || shutdown_drain_started.send(()).expect("signal cache write drain started")),
         );
         let region = Region::new(1);
         service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
@@ -1067,11 +1073,21 @@ mod tests {
 
         let stop = service.stop();
         tokio::pin!(stop);
-        let stop_waited_for_write = futures::poll!(stop.as_mut()).is_pending();
+        assert_matches!(futures::poll!(stop.as_mut()), std::task::Poll::Pending);
+        tokio::time::timeout(Duration::from_secs(5), shutdown_drain_started_receive)
+            .await
+            .expect("coordinator entered cache write drain")
+            .unwrap();
+        let stop_state = futures::poll!(stop.as_mut());
+        if let std::task::Poll::Ready(()) = stop_state {
+            release_write.send(()).expect("release cache write after early shutdown");
+            write_finished_receive.await.expect("cache write finishes after early shutdown");
+            panic!("coordinator completed while cache write remained blocked");
+        }
+        assert_matches!(stop_state, std::task::Poll::Pending);
         release_write.send(()).expect("resume cache write");
         tokio::time::timeout(Duration::from_secs(5), stop.as_mut()).await.expect("coordinator drains cache write");
         write_finished_receive.await.unwrap();
-        assert!(stop_waited_for_write, "coordinator shutdown must wait for its cache write job");
         assert_eq!(handle.cache_stats().unwrap().dropped_writes, 0);
         assert!(handle.cache_stats().unwrap().bytes_written > 0);
         assert_eq!(peer.finish().len(), 2);

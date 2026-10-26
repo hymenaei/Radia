@@ -41,6 +41,14 @@ impl StoreHarness {
 fn resource(id: u128) -> Resource {
     Resource { id: AssetId::new(Uuid::from_u128(id)), kind: Kind::Texture }
 }
+
+fn charged_blob(budget: &Budget, bytes: &[u8]) -> crate::Blob {
+    let mut bytes_owned = Vec::new();
+    bytes_owned.try_reserve_exact(bytes.len()).expect("reserve blob bytes");
+    bytes_owned.extend_from_slice(bytes);
+    budget.reserve(bytes_owned.capacity()).expect("reserve blob budget").finish(bytes_owned).expect("finish blob")
+}
+
 fn ready(demand: &Demand) -> Image {
     let Status::Ready(Content::Texture(blob)) = demand.status() else { panic!("expected ready asset") };
     blob.image().unwrap()
@@ -231,8 +239,11 @@ fn malformed_disk_payload_is_discarded_without_failing_demand_attempts() {
 fn full_write_admission_does_not_hold_network_fetch_admission() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
-    let writes = (0..2u128).map(|id| cache.queue_write(resource(20 + id), || b"payload".to_vec()).expect("write slot")).collect::<Vec<_>>();
-    assert!(cache.queue_write(resource(22), || b"dropped".to_vec()).is_none());
+    let write_budget = Budget::default();
+    let writes = (0..2u128)
+        .map(|id| cache.queue_write(resource(20 + id), charged_blob(&write_budget, b"payload"), &write_budget).expect("write slot"))
+        .collect::<Vec<_>>();
+    assert!(cache.queue_write(resource(22), charged_blob(&write_budget, b"dropped"), &write_budget).is_none());
     assert_eq!(cache.stats().dropped_writes, 1);
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
     let now = Instant::now();
@@ -250,6 +261,7 @@ fn full_write_admission_does_not_hold_network_fetch_admission() {
     assert!(store.next_job(now).is_none(), "running fetch limit remains enforced under cache write pressure");
     drop(fetches);
     drop(writes);
+    assert_eq!(write_budget.stats().charged_bytes, 0);
     drop(demands);
     drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");

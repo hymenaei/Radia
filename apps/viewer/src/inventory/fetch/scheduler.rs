@@ -59,23 +59,42 @@ impl fmt::Display for InventoryFetchRequestError {
 
 impl Error for InventoryFetchRequestError {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InventoryFetchOutcome {
+    Succeeded,
+    Failed,
+}
+
+struct ForegroundRequest {
+    folder: CategoryKey,
+    completion: Option<oneshot::Sender<InventoryFetchOutcome>>,
+}
+
+impl ForegroundRequest {
+    fn background(folder: CategoryKey) -> Self {
+        Self { folder, completion: None }
+    }
+}
+
 #[derive(Clone)]
 pub struct InventoryFetchHandle {
-    requests: mpsc::Sender<CategoryKey>,
+    requests: mpsc::Sender<ForegroundRequest>,
     status: watch::Receiver<InventoryLoadingStatus>,
 }
 
 impl InventoryFetchHandle {
-    pub fn request_folder(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
-        self.send_request(folder)
+    pub fn request_folder(&self, folder: CategoryKey) -> Result<oneshot::Receiver<InventoryFetchOutcome>, InventoryFetchRequestError> {
+        let (completion, result) = oneshot::channel();
+        self.send_request(ForegroundRequest { folder, completion: Some(completion) })?;
+        Ok(result)
     }
 
     pub(crate) fn refetch_folder(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
-        self.send_request(folder)
+        self.send_request(ForegroundRequest::background(folder))
     }
 
-    fn send_request(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
-        self.requests.try_send(folder).map_err(|error| match error {
+    fn send_request(&self, request: ForegroundRequest) -> Result<(), InventoryFetchRequestError> {
+        self.requests.try_send(request).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => InventoryFetchRequestError::QueueFull,
             mpsc::error::TrySendError::Closed(_) => InventoryFetchRequestError::SessionEnded,
         })
@@ -88,7 +107,7 @@ impl InventoryFetchHandle {
 
 pub(crate) struct InventoryFetchController {
     handle: InventoryFetchHandle,
-    requests: Option<mpsc::Receiver<CategoryKey>>,
+    requests: Option<mpsc::Receiver<ForegroundRequest>>,
     events_tx: mpsc::Sender<InventoryFetchEvent>,
     events_rx: mpsc::Receiver<InventoryFetchEvent>,
     status_tx: watch::Sender<InventoryLoadingStatus>,
@@ -194,7 +213,7 @@ async fn run_scheduler(
     client: Client,
     snapshot: InventorySnapshot,
     model: watch::Receiver<Option<InventorySnapshot>>,
-    mut requests: mpsc::Receiver<CategoryKey>,
+    mut requests: mpsc::Receiver<ForegroundRequest>,
     events: mpsc::Sender<InventoryFetchEvent>,
     cancellation: Cancellation,
     mut stop: oneshot::Receiver<()>,
@@ -218,6 +237,7 @@ async fn run_scheduler(
     let mut queued = HashSet::new();
     let mut foreground = VecDeque::new();
     let mut foreground_queued = HashSet::new();
+    let mut foreground_completions = HashMap::<CategoryKey, Vec<oneshot::Sender<InventoryFetchOutcome>>>::new();
     let mut in_flight = HashSet::new();
     let mut failed = HashSet::new();
     let current = latest_snapshot(&model, &snapshot);
@@ -238,7 +258,7 @@ async fn run_scheduler(
 
     loop {
         while let Ok(request) = requests.try_recv() {
-            queue_foreground_request(request, &mut foreground, &mut foreground_queued);
+            queue_foreground_request(request, &mut foreground, &mut foreground_queued, &mut foreground_completions);
         }
         if requests.is_closed() {
             requests_open = false;
@@ -246,6 +266,7 @@ async fn run_scheduler(
 
         if let Some(folder) = foreground.pop_front() {
             foreground_queued.remove(&folder);
+            let completions = foreground_completions.remove(&folder).unwrap_or_default();
             if !active.is_empty() {
                 let current = latest_snapshot(&model, &snapshot);
                 for job in active.values() {
@@ -276,9 +297,11 @@ async fn run_scheduler(
                 {
                     return;
                 }
+                finish_foreground_request(completions, InventoryFetchOutcome::Failed);
                 continue;
             };
             if latest_snapshot(&model, &snapshot).is_complete(folder) {
+                finish_foreground_request(completions, InventoryFetchOutcome::Succeeded);
                 continue;
             }
             in_flight.insert(folder);
@@ -293,7 +316,12 @@ async fn run_scheduler(
                     _ = &mut stop => return,
                     request = requests.recv(), if requests_open => {
                         match request {
-                            Some(request) => queue_foreground_request(request, &mut foreground, &mut foreground_queued),
+                        Some(request) => queue_foreground_request(
+                            request,
+                            &mut foreground,
+                            &mut foreground_queued,
+                            &mut foreground_completions,
+                        ),
                             None => requests_open = false,
                         }
                     }
@@ -313,6 +341,7 @@ async fn run_scheduler(
                 &cancellation,
                 &mut stop,
                 &mut background_done,
+                Some((folder, completions)),
             )
             .await
             {
@@ -379,7 +408,12 @@ async fn run_scheduler(
             _ = &mut stop => return,
             request = requests.recv(), if requests_open => {
                 match request {
-                    Some(request) => queue_foreground_request(request, &mut foreground, &mut foreground_queued),
+                    Some(request) => queue_foreground_request(
+                        request,
+                        &mut foreground,
+                        &mut foreground_queued,
+                        &mut foreground_completions,
+                    ),
                     None => requests_open = false,
                 }
             }
@@ -399,6 +433,7 @@ async fn run_scheduler(
                     &cancellation,
                     &mut stop,
                 &mut background_done,
+                    None,
                 ).await {
                     return;
                 }
@@ -407,9 +442,25 @@ async fn run_scheduler(
     }
 }
 
-fn queue_foreground_request(folder: CategoryKey, foreground: &mut VecDeque<CategoryKey>, foreground_queued: &mut HashSet<CategoryKey>) {
-    if foreground_queued.insert(folder) {
-        foreground.push_back(folder);
+fn queue_foreground_request(
+    request: ForegroundRequest,
+    foreground: &mut VecDeque<CategoryKey>,
+    foreground_queued: &mut HashSet<CategoryKey>,
+    completions: &mut HashMap<CategoryKey, Vec<oneshot::Sender<InventoryFetchOutcome>>>,
+) {
+    if foreground_queued.insert(request.folder) {
+        foreground.push_back(request.folder);
+    }
+    if let Some(completion) = request.completion {
+        completions.entry(request.folder).or_default().push(completion);
+    }
+}
+
+fn finish_foreground_request(completions: Vec<oneshot::Sender<InventoryFetchOutcome>>, outcome: InventoryFetchOutcome) {
+    for completion in completions {
+        if completion.send(outcome).is_err() {
+            tracing::trace!("inventory folder request completed after its consumer stopped waiting");
+        }
     }
 }
 
@@ -616,7 +667,9 @@ async fn process_completion(
     cancellation: &Cancellation,
     stop: &mut oneshot::Receiver<()>,
     background_done: &mut bool,
+    foreground_request: Option<(CategoryKey, Vec<oneshot::Sender<InventoryFetchOutcome>>)>,
 ) -> bool {
+    let foreground_folder = foreground_request.as_ref().map(|(folder, _)| *folder);
     let folders = match completion.result {
         Ok(folders) => folders,
         Err(error) => {
@@ -626,9 +679,13 @@ async fn process_completion(
                     return false;
                 }
             }
+            if let Some((_, completions)) = foreground_request {
+                finish_foreground_request(completions, InventoryFetchOutcome::Failed);
+            }
             return true;
         }
     };
+    let mut foreground_outcome = None;
     for folder in folders {
         let folder_key = folder.folder;
         let (applied, outcome) = oneshot::channel();
@@ -646,7 +703,13 @@ async fn process_completion(
         };
         if outcome.rejected {
             failed.insert(folder_key);
+            if foreground_folder == Some(folder_key) {
+                foreground_outcome = Some(InventoryFetchOutcome::Failed);
+            }
             continue;
+        }
+        if foreground_folder == Some(folder_key) {
+            foreground_outcome = Some(InventoryFetchOutcome::Succeeded);
         }
         failed.remove(&folder_key);
         let current = latest_snapshot(model, initial);
@@ -667,6 +730,9 @@ async fn process_completion(
                 *background_done = false;
             }
         }
+    }
+    if let Some((_, completions)) = foreground_request {
+        finish_foreground_request(completions, foreground_outcome.unwrap_or(InventoryFetchOutcome::Failed));
     }
     true
 }

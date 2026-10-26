@@ -8,6 +8,7 @@ use std::{
 };
 
 use ::inventory::{AssetType, CategoryKey, InventoryNodeId, InventorySnapshot, InventoryType};
+use futures::{StreamExt, stream::FuturesUnordered};
 use gpui::{Context, Entity, IntoElement, Render, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list};
 use gpui_component::{
     IndexPath, Theme,
@@ -15,16 +16,19 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     select::{Select, SelectEvent, SelectItem, SelectState},
 };
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::inventory::{
-    InventoryFetchError, InventoryFetchHandle, InventoryLoadingStatus,
+    InventoryFetchHandle, InventoryFetchOutcome, InventoryLoadingStatus,
     browser::{self, SearchResults, SearchTypeFilter, TreeRows},
 };
 
 const TREE_ROW_HEIGHT: f32 = 28.0;
 const SEARCH_ROW_HEIGHT: f32 = 48.0;
 const INDENT_WIDTH: f32 = 16.0;
+const REQUEST_COMPLETION_CAPACITY: usize = 1024;
+
+type RequestCompletion = (CategoryKey, u64, oneshot::Receiver<InventoryFetchOutcome>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TreeKind {
@@ -50,6 +54,88 @@ impl SelectItem for TypeOption {
     }
 }
 
+#[derive(Default)]
+struct FolderRequestState {
+    next_ticket: u64,
+    pending: HashMap<CategoryKey, u64>,
+    failed: HashSet<CategoryKey>,
+}
+
+impl FolderRequestState {
+    fn begin(&mut self, folder: CategoryKey) -> u64 {
+        self.next_ticket = self.next_ticket.wrapping_add(1);
+        let ticket = self.next_ticket;
+        self.pending.insert(folder, ticket);
+        self.failed.remove(&folder);
+        ticket
+    }
+
+    fn finish(&mut self, folder: CategoryKey, ticket: u64, outcome: InventoryFetchOutcome) -> bool {
+        if self.pending.get(&folder) != Some(&ticket) {
+            return false;
+        }
+        self.pending.remove(&folder);
+        match outcome {
+            InventoryFetchOutcome::Succeeded => {
+                self.failed.remove(&folder);
+            }
+            InventoryFetchOutcome::Failed => {
+                self.failed.insert(folder);
+            }
+        }
+        true
+    }
+
+    fn retain_snapshot(&mut self, snapshot: &InventorySnapshot) {
+        self.pending.retain(|folder, _| snapshot.category(*folder).is_some() && !snapshot.is_complete(*folder));
+        self.failed.retain(|folder| snapshot.category(*folder).is_some() && !snapshot.is_complete(*folder));
+    }
+
+    fn is_pending(&self, folder: CategoryKey) -> bool {
+        self.pending.contains_key(&folder)
+    }
+
+    fn is_failed(&self, folder: CategoryKey) -> bool {
+        self.failed.contains(&folder)
+    }
+
+    fn mark_failed(&mut self, folder: CategoryKey) {
+        self.failed.insert(folder);
+    }
+}
+
+#[derive(Default)]
+struct SearchRefresh {
+    latest_revision: Option<u64>,
+    running_revision: Option<u64>,
+}
+
+impl SearchRefresh {
+    fn snapshot_changed(&mut self, revision: u64) -> Option<u64> {
+        self.latest_revision = Some(revision);
+        if self.running_revision.is_some() {
+            return None;
+        }
+        self.running_revision = Some(revision);
+        Some(revision)
+    }
+
+    fn finished(&mut self, revision: u64) -> Option<u64> {
+        if self.running_revision != Some(revision) {
+            return None;
+        }
+        self.running_revision = None;
+        let latest = self.latest_revision.filter(|latest| *latest != revision)?;
+        self.running_revision = Some(latest);
+        Some(latest)
+    }
+
+    fn reset(&mut self) {
+        self.latest_revision = None;
+        self.running_revision = None;
+    }
+}
+
 pub(crate) struct InventoryScreen {
     snapshots: Option<InventorySnapshot>,
     fetch: InventoryFetchHandle,
@@ -66,14 +152,15 @@ pub(crate) struct InventoryScreen {
     search_cancel: Option<Arc<AtomicBool>>,
     row_generation: u64,
     search_generation: u64,
+    search_refresh: SearchRefresh,
+    request_completions: mpsc::Sender<RequestCompletion>,
     rows: TreeRows,
     results: SearchResults,
     rows_building: bool,
     searching: bool,
     active_tree: TreeKind,
     expanded: HashSet<CategoryKey>,
-    pending: HashSet<CategoryKey>,
-    failed: HashMap<CategoryKey, InventoryFetchError>,
+    folder_requests: FolderRequestState,
     request_error: Option<String>,
     loading_status: InventoryLoadingStatus,
     tree_scroll: UniformListScrollHandle,
@@ -105,6 +192,7 @@ impl InventoryScreen {
         let snapshot = snapshots.borrow_and_update().clone();
         let mut status_updates = fetch.status();
         let loading_status = status_updates.borrow_and_update().clone();
+        let (request_completions, mut request_completion_events) = mpsc::channel(REQUEST_COMPLETION_CAPACITY);
         let mut screen = Self {
             snapshots: snapshot,
             fetch,
@@ -121,14 +209,15 @@ impl InventoryScreen {
             search_cancel: None,
             row_generation: 0,
             search_generation: 0,
+            search_refresh: SearchRefresh::default(),
+            request_completions,
             rows: TreeRows::default(),
             results: SearchResults { items: Vec::new(), truncated: false },
             rows_building: false,
             searching: false,
             active_tree: TreeKind::Personal,
             expanded: HashSet::new(),
-            pending: HashSet::new(),
-            failed: HashMap::new(),
+            folder_requests: FolderRequestState::default(),
             request_error: None,
             loading_status,
             tree_scroll: UniformListScrollHandle::default(),
@@ -155,13 +244,29 @@ impl InventoryScreen {
         }));
 
         screen.status_task = Some(cx.spawn(async move |this, cx| {
+            let mut completions = FuturesUnordered::new();
             loop {
-                if status_updates.changed().await.is_err() {
-                    break;
-                }
-                let status = status_updates.borrow_and_update().clone();
-                if this.update(cx, |screen, cx| screen.apply_status(status, cx)).is_err() {
-                    break;
+                tokio::select! {
+                    changed = status_updates.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        let status = status_updates.borrow_and_update().clone();
+                        if this.update(cx, |screen, cx| screen.apply_status(status, cx)).is_err() {
+                            break;
+                        }
+                    }
+                    Some((folder, ticket, completion)) = request_completion_events.recv() => {
+                        completions.push(async move {
+                            (folder, ticket, completion.await.unwrap_or(InventoryFetchOutcome::Failed))
+                        });
+                    }
+                    Some((folder, ticket, outcome)) = completions.next(), if !completions.is_empty() => {
+                        if this.update(cx, |screen, cx| screen.apply_request_outcome(folder, ticket, outcome, cx)).is_err() {
+                            break;
+                        }
+                    }
+                    else => break,
                 }
             }
         }));
@@ -187,6 +292,7 @@ impl InventoryScreen {
         }
         self.search_task.take();
         self.search_generation = self.search_generation.wrapping_add(1);
+        self.search_refresh.reset();
         self.results = SearchResults { items: Vec::new(), truncated: false };
         self.searching = self.search_active();
 
@@ -195,11 +301,17 @@ impl InventoryScreen {
             cx.notify();
             return;
         }
-        let Some(snapshot) = self.snapshots.clone() else {
+        let Some(revision) = self.snapshots.as_ref().map(|snapshot| snapshot.revision().get()) else {
             cx.notify();
             return;
         };
+        if let Some(revision) = self.search_refresh.snapshot_changed(revision) {
+            self.start_search(revision, cx);
+        }
+    }
 
+    fn start_search(&mut self, revision: u64, cx: &mut Context<Self>) {
+        let Some(snapshot) = self.snapshots.clone() else { return };
         let query = self.search_query.clone();
         let filter = self.type_filter_value;
         let generation = self.search_generation;
@@ -207,18 +319,23 @@ impl InventoryScreen {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
         self.search_cancel = Some(cancel);
+        self.searching = true;
         self.search_task = Some(cx.spawn(async move |this, cx| {
             let results =
                 background.spawn(async move { browser::search(&snapshot, &query, filter, || worker_cancel.load(Ordering::Acquire)) }).await;
             if this
                 .update(cx, |screen, cx| {
-                    if screen.search_generation == generation
-                        && let Some(results) = results
-                    {
-                        screen.results = results;
-                        screen.searching = false;
+                    if screen.search_generation == generation {
+                        if let Some(results) = results {
+                            screen.results = results;
+                        }
                         screen.search_cancel = None;
-                        cx.notify();
+                        if let Some(next_revision) = screen.search_refresh.finished(revision) {
+                            screen.start_search(next_revision, cx);
+                        } else {
+                            screen.searching = false;
+                            cx.notify();
+                        }
                     }
                 })
                 .is_err()
@@ -233,14 +350,16 @@ impl InventoryScreen {
         if self.snapshots.as_ref().is_some_and(|current| current.revision() == snapshot.revision()) {
             return;
         }
+        let revision = snapshot.revision().get();
         self.snapshots = Some(snapshot);
         if let Some(snapshot) = &self.snapshots {
             self.expanded.retain(|key| snapshot.category(*key).is_some());
-            self.pending.retain(|key| snapshot.category(*key).is_some() && !snapshot.is_complete(*key));
-            self.failed.retain(|key, _| snapshot.category(*key).is_some() && !snapshot.is_complete(*key));
+            self.folder_requests.retain_snapshot(&snapshot);
         }
         if self.search_active() {
-            self.search_changed(cx);
+            if let Some(revision) = self.search_refresh.snapshot_changed(revision) {
+                self.start_search(revision, cx);
+            }
         } else {
             self.rebuild_rows(cx);
         }
@@ -248,14 +367,17 @@ impl InventoryScreen {
     }
 
     fn apply_status(&mut self, status: InventoryLoadingStatus, cx: &mut Context<Self>) {
-        if self.loading_status.last_failure != status.last_failure
-            && let Some((folder, error)) = &status.last_failure
-            && self.pending.remove(folder)
-        {
-            self.failed.insert(*folder, error.clone());
+        if let Some((folder, _)) = &status.last_failure {
+            self.folder_requests.mark_failed(*folder);
         }
         self.loading_status = status;
         cx.notify();
+    }
+
+    fn apply_request_outcome(&mut self, folder: CategoryKey, ticket: u64, outcome: InventoryFetchOutcome, cx: &mut Context<Self>) {
+        if self.folder_requests.finish(folder, ticket, outcome) {
+            cx.notify();
+        }
     }
 
     fn set_tree(&mut self, tree: TreeKind, cx: &mut Context<Self>) {
@@ -282,14 +404,17 @@ impl InventoryScreen {
     }
 
     fn request_folder(&mut self, folder: CategoryKey) {
-        if self.snapshots.as_ref().is_none_or(|snapshot| snapshot.is_complete(folder)) || self.pending.contains(&folder) {
+        if self.snapshots.as_ref().is_none_or(|snapshot| snapshot.is_complete(folder)) || self.folder_requests.is_pending(folder) {
             return;
         }
         match self.fetch.request_folder(folder) {
-            Ok(()) => {
-                self.pending.insert(folder);
-                self.failed.remove(&folder);
+            Ok(completion) => {
+                let ticket = self.folder_requests.begin(folder);
                 self.request_error = None;
+                if self.request_completions.try_send((folder, ticket, completion)).is_err() {
+                    self.folder_requests.finish(folder, ticket, InventoryFetchOutcome::Failed);
+                    self.request_error = Some("Could not track folder fetch completion".into());
+                }
             }
             Err(error) => {
                 self.request_error = Some(error.to_string());
@@ -369,9 +494,9 @@ impl InventoryScreen {
         let child_count = snapshot.child_count(key);
         let has_disclosure = child_count > 0 || !complete;
         let disclosure = if has_disclosure { if expanded { "▾" } else { "▸" } } else { "" };
-        let state = if self.pending.contains(&key) {
+        let state = if self.folder_requests.is_pending(key) {
             "Loading…"
-        } else if self.failed.contains_key(&key) {
+        } else if self.folder_requests.is_failed(key) {
             "Fetch failed"
         } else if !complete {
             "Incomplete"
@@ -439,10 +564,10 @@ impl InventoryScreen {
             return "Building folder list…".into();
         }
         if let Some(root) = self.active_root() {
-            if self.pending.contains(&root) {
+            if self.folder_requests.is_pending(root) {
                 return "Loading inventory folders…".into();
             }
-            if self.failed.contains_key(&root) {
+            if self.folder_requests.is_failed(root) {
                 return "The inventory root could not be loaded".into();
             }
             if self.snapshots.as_ref().is_some_and(|snapshot| !snapshot.is_complete(root)) {
@@ -677,4 +802,51 @@ fn clip_text(text: &str, max_chars: usize) -> String {
     let mut chars = text.chars();
     let prefix = chars.by_ref().take(max_chars).collect::<String>();
     if chars.next().is_some() { format!("{prefix}…") } else { prefix }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::inventory::InventoryOwner;
+    use utils::FolderId;
+    use uuid::Uuid;
+
+    #[test]
+    fn repeated_fetch_failures_clear_their_request_and_allow_successful_retry() {
+        let folder = CategoryKey::new(InventoryOwner::new(Uuid::from_u128(1)), FolderId::new(Uuid::from_u128(2)));
+        let mut requests = FolderRequestState::default();
+
+        let first = requests.begin(folder);
+        assert!(requests.finish(folder, first, InventoryFetchOutcome::Failed));
+        assert!(!requests.is_pending(folder));
+        assert!(requests.is_failed(folder));
+
+        let second = requests.begin(folder);
+        assert_ne!(first, second);
+        assert!(requests.finish(folder, second, InventoryFetchOutcome::Failed));
+        assert!(!requests.is_pending(folder));
+        assert!(requests.is_failed(folder));
+
+        let third = requests.begin(folder);
+        assert_ne!(second, third);
+        assert!(requests.finish(folder, third, InventoryFetchOutcome::Succeeded));
+        assert!(!requests.is_pending(folder));
+        assert!(!requests.is_failed(folder));
+    }
+
+    #[test]
+    fn inventory_revisions_coalesce_while_search_runs() {
+        let mut refresh = SearchRefresh::default();
+
+        assert_eq!(refresh.snapshot_changed(10), Some(10));
+        assert_eq!(refresh.snapshot_changed(11), None);
+        assert_eq!(refresh.snapshot_changed(12), None);
+        assert_eq!(refresh.snapshot_changed(13), None);
+        assert_eq!(refresh.running_revision, Some(10));
+
+        assert_eq!(refresh.finished(10), Some(13));
+        assert_eq!(refresh.running_revision, Some(13));
+        assert_eq!(refresh.finished(13), None);
+        assert_eq!(refresh.running_revision, None);
+    }
 }

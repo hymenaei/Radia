@@ -194,7 +194,7 @@ impl LoginScreen {
             .and_then(ActiveSession::ready)
             .and_then(|ready| ready.inventory_fetch.as_ref())
             .ok_or(InventoryFetchRequestError::SessionEnded)?;
-        handle.request_folder(folder)
+        handle.refetch_folder(folder)
     }
 
     #[allow(dead_code)]

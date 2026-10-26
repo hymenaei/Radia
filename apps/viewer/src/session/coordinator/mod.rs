@@ -8,9 +8,13 @@ mod media;
 mod persistence;
 mod presentation;
 
+#[cfg(test)]
+pub(crate) use self::driver::resolve_pending_inventory_moves;
 pub(crate) use self::driver::{CredentialPersistence, drain_session};
 #[cfg(test)]
 use self::input::select_drain_input;
+#[cfg(test)]
+pub(crate) use self::inventory_intake::apply_udp as apply_inventory_udp;
 pub(crate) use self::persistence::{WriteLock, save_favorite_store, write_lock};
 pub(crate) use self::presentation::{
     AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionReadyUpdate, ViewerUpdate,

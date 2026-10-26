@@ -5,14 +5,42 @@ use protocol::inventory::{AisEditResponse, Category as WireCategory, Child, Deco
 use utils::{FolderId, ItemId};
 use uuid::Uuid;
 
-use super::{
-    super::fetch::{category_from_wire, item_from_wire},
-    types::EditOperation,
-};
+use crate::inventory::fetch::{category_from_wire, item_from_wire};
 
-pub(super) struct AisDelta {
+use super::types::EditOperation;
+
+pub(crate) struct AisDelta {
     pub(super) delta: InventoryDelta,
     pub(super) created: Option<CategoryKey>,
+    confirmed_name: Option<ConfirmedName>,
+}
+
+enum ConfirmedName {
+    Category { key: CategoryKey, name: String },
+    Item { key: ItemKey, name: String },
+}
+
+impl AisDelta {
+    pub(crate) fn into_delta(mut self, current: &InventorySnapshot) -> InventoryDelta {
+        match self.confirmed_name {
+            Some(ConfirmedName::Category { key, name }) => {
+                if let Some(category) = current.category(key) {
+                    let mut category = category.clone();
+                    category.name = name.into();
+                    self.delta.updated_categories.push(category);
+                }
+            }
+            Some(ConfirmedName::Item { key, name }) => {
+                if let Some(item) = current.item(key) {
+                    let mut item = item.clone();
+                    item.name = name.into();
+                    self.delta.updated_items.push(item);
+                }
+            }
+            None => {}
+        }
+        self.delta
+    }
 }
 
 pub(super) fn delta_from_ais_response(
@@ -81,6 +109,7 @@ pub(super) fn delta_from_ais_response(
         }
     }
 
+    let mut confirmed_name = None;
     let created = match operation {
         EditOperation::CreateFolder { parent, name, preferred_type } => {
             let created_id = created_category.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
@@ -102,37 +131,31 @@ pub(super) fn delta_from_ais_response(
             Some(key)
         }
         EditOperation::RenameCategory { category, name } => {
+            if created_categories.contains(&category.id().uuid()) {
+                return Err(DecodeError::InvalidResponse);
+            }
             if !response.updated_categories.contains(&category.id().uuid())
                 && response.category.as_ref().is_none_or(|entry| entry.id != category.id().uuid())
             {
                 return Err(DecodeError::InvalidResponse);
             }
-            let current = snapshot.category(*category).ok_or(DecodeError::InvalidResponse)?;
-            if let Some(updated) = delta.updated_categories.iter_mut().find(|entry| entry.key == *category) {
-                updated.name = name.clone().into();
-            } else if let Some(updated) = delta.created_categories.iter_mut().find(|entry| entry.key == *category) {
-                updated.name = name.clone().into();
-            } else {
-                let mut updated = current.clone();
-                updated.name = name.clone().into();
-                delta.updated_categories.push(updated);
-            }
+            delta.created_categories.retain(|entry| entry.key != *category);
+            delta.updated_categories.retain(|entry| entry.key != *category);
+            confirmed_name = Some(ConfirmedName::Category { key: *category, name: name.clone() });
             None
         }
         EditOperation::RenameItem { item, name } => {
+            if created_items.contains(&item.id().uuid()) {
+                return Err(DecodeError::InvalidResponse);
+            }
             if !response.updated_items.contains(&item.id().uuid())
                 && response.item.as_ref().is_none_or(|entry| entry.id != item.id().uuid())
             {
                 return Err(DecodeError::InvalidResponse);
             }
-            let current = snapshot.item(*item).ok_or(DecodeError::InvalidResponse)?;
-            if let Some(updated) = delta.updated_items.iter_mut().find(|entry| entry.key == *item) {
-                updated.name = name.clone().into();
-            } else {
-                let mut updated = current.clone();
-                updated.name = name.clone().into();
-                delta.updated_items.push(updated);
-            }
+            delta.created_items.retain(|entry| entry.key != *item);
+            delta.updated_items.retain(|entry| entry.key != *item);
+            confirmed_name = Some(ConfirmedName::Item { key: *item, name: name.clone() });
             None
         }
         EditOperation::MoveItem { .. }
@@ -154,6 +177,9 @@ pub(super) fn delta_from_ais_response(
 
     for id in &response.updated_categories {
         let key = CategoryKey::new(owner, FolderId::new(*id));
+        if matches!(&confirmed_name, Some(ConfirmedName::Category { key: target, .. }) if *target == key) {
+            continue;
+        }
         if !delta.created_categories.iter().any(|category| category.key == key)
             && !delta.updated_categories.iter().any(|category| category.key == key)
         {
@@ -163,6 +189,9 @@ pub(super) fn delta_from_ais_response(
     }
     for id in &response.updated_items {
         let key = ItemKey::new(owner, ItemId::new(*id));
+        if matches!(&confirmed_name, Some(ConfirmedName::Item { key: target, .. }) if *target == key) {
+            continue;
+        }
         if !delta.created_items.iter().any(|item| item.key == key) && !delta.updated_items.iter().any(|item| item.key == key) {
             let item = snapshot.item(key).ok_or(DecodeError::InvalidResponse)?;
             delta.updated_items.push(item.clone());
@@ -182,7 +211,7 @@ pub(super) fn delta_from_ais_response(
             .map(|(id, version)| (CategoryKey::new(owner, FolderId::new(*id)), ServerVersion::from_raw(*version))),
     );
 
-    Ok(AisDelta { delta, created })
+    Ok(AisDelta { delta, created, confirmed_name })
 }
 
 fn append_category(
@@ -272,7 +301,11 @@ pub(super) fn trash_folder(snapshot: &InventorySnapshot, owner: InventoryOwner) 
 mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
-    use ::inventory::{Inventory, InventoryLimits};
+    use ::inventory::{
+        AssetType, Inventory, InventoryLimits, InventoryNodeId, InventoryNodeKey, InventoryType, PermissionMask, Permissions, SaleInfo,
+        SaleType,
+    };
+    use utils::{AssetId, AvatarId, GroupId};
 
     use super::*;
 
@@ -342,12 +375,106 @@ mod tests {
         assert_eq!(converted.delta.removed_items.len(), 3);
         assert_eq!(converted.delta.removed_categories, vec![removed_folder]);
         assert_eq!(converted.delta.updated_category_versions, vec![(root, ServerVersion::from_raw(12))]);
-        inventory.apply_delta(converted.delta).expect("apply converted confirmation");
+        let current = inventory.snapshot();
+        inventory.apply_delta(converted.into_delta(&current)).expect("apply converted confirmation");
 
         let snapshot = inventory.snapshot();
         assert_eq!(snapshot.category(folder).map(|category| category.name.as_ref()), Some("after"));
         assert!(snapshot.category(key(owner, 5)).is_some());
         assert!(snapshot.category(key(owner, 6)).is_some());
         assert!(snapshot.category(removed_folder).is_none());
+    }
+
+    #[test]
+    fn rename_confirmation_changes_only_the_current_record_name() {
+        let owner = InventoryOwner::new(Uuid::from_u128(11));
+        let root = key(owner, 12);
+        let first = key(owner, 13);
+        let second = key(owner, 14);
+        let folder = key(owner, 15);
+        let item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(16)));
+        let mut inventory = Inventory::new(category(root, None, "root"), None, InventoryLimits::default()).expect("valid root");
+        inventory.upsert_category(category(first, Some(root), "first")).expect("add first folder");
+        inventory.upsert_category(category(second, Some(root), "second")).expect("add second folder");
+        inventory.upsert_category(category(folder, Some(first), "before folder")).expect("add renamed folder");
+        inventory
+            .upsert_item(Item {
+                key: item,
+                parent: first,
+                asset_id: AssetId::new(Uuid::from_u128(17)),
+                asset_type: AssetType::Notecard,
+                inventory_type: InventoryType::Notecard,
+                flags: 0,
+                name: Arc::from("before item"),
+                description: Arc::from(""),
+                created_at: 0,
+                permissions: Permissions {
+                    creator: AvatarId::new(Uuid::nil()),
+                    owner: AvatarId::new(owner.id()),
+                    group: GroupId::new(Uuid::nil()),
+                    last_owner: AvatarId::new(Uuid::nil()),
+                    base: PermissionMask::new(0),
+                    owner_mask: PermissionMask::new(0),
+                    group_mask: PermissionMask::new(0),
+                    everyone: PermissionMask::new(0),
+                    next_owner: PermissionMask::new(0),
+                },
+                sale: SaleInfo { sale_type: SaleType::NotForSale, price: 0 },
+            })
+            .expect("add renamed item");
+
+        let initial = inventory.snapshot();
+        let category_operation = EditOperation::RenameCategory { category: folder, name: "after folder".to_owned() };
+        let category_response = AisEditResponse {
+            category: None,
+            item: None,
+            created_categories: Vec::new(),
+            created_items: Vec::new(),
+            updated_categories: vec![folder.id().uuid()],
+            updated_items: Vec::new(),
+            removed_items: Vec::new(),
+            categories_removed: Vec::new(),
+            category_items_removed: Vec::new(),
+            broken_links_removed: Vec::new(),
+            updated_category_versions: BTreeMap::new(),
+        };
+        let category_confirmation =
+            delta_from_ais_response(&category_response, &category_operation, &initial, owner).expect("convert category rename metadata");
+        inventory
+            .move_node(InventoryNodeKey::new(owner, InventoryNodeId::Category(folder.id())), second)
+            .expect("apply newer category move");
+        let category_delta = category_confirmation.into_delta(&inventory.snapshot());
+        inventory.apply_delta(category_delta).expect("apply category name confirmation");
+
+        let item_operation = EditOperation::RenameItem { item, name: "after item".to_owned() };
+        let item_response = AisEditResponse {
+            category: None,
+            item: None,
+            created_categories: Vec::new(),
+            created_items: Vec::new(),
+            updated_categories: Vec::new(),
+            updated_items: vec![item.id().uuid()],
+            removed_items: Vec::new(),
+            categories_removed: Vec::new(),
+            category_items_removed: Vec::new(),
+            broken_links_removed: Vec::new(),
+            updated_category_versions: BTreeMap::new(),
+        };
+        let item_confirmation =
+            delta_from_ais_response(&item_response, &item_operation, &initial, owner).expect("convert item rename metadata");
+        inventory.move_node(InventoryNodeKey::new(owner, InventoryNodeId::Item(item.id())), second).expect("apply newer item move");
+        let item_delta = item_confirmation.into_delta(&inventory.snapshot());
+        inventory.apply_delta(item_delta).expect("apply item name confirmation");
+
+        let snapshot = inventory.snapshot();
+        assert_eq!(snapshot.category(folder).map(|entry| (entry.parent, entry.name.as_ref())), Some((Some(second), "after folder")));
+        assert_eq!(snapshot.item(item).map(|entry| (entry.parent, entry.name.as_ref())), Some((second, "after item")));
+
+        let missing_confirmation =
+            delta_from_ais_response(&item_response, &item_operation, &snapshot, owner).expect("convert another item rename confirmation");
+        inventory.apply_delta(InventoryDelta { removed_items: vec![item], ..InventoryDelta::default() }).expect("apply newer item removal");
+        let current = inventory.snapshot();
+        inventory.apply_delta(missing_confirmation.into_delta(&current)).expect("apply stale name confirmation");
+        assert!(inventory.snapshot().item(item).is_none());
     }
 }

@@ -25,13 +25,13 @@ const MAX_BLOCKS: usize = u8::MAX as usize;
 const MAX_STRING_BYTES: usize = u8::MAX as usize - 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct InventoryIntakeOutcome {
-    pub(super) changes: ChangeSet,
-    pub(super) rejected_blocks: usize,
+pub(crate) struct InventoryIntakeOutcome {
+    pub(crate) changes: ChangeSet,
+    pub(crate) rejected_blocks: usize,
 }
 
 #[derive(Debug)]
-pub(super) enum InventoryIntakeError {
+pub(crate) enum InventoryIntakeError {
     MalformedEvent,
     Model(InventoryError),
 }
@@ -53,7 +53,7 @@ impl From<InventoryError> for InventoryIntakeError {
     }
 }
 
-pub(super) fn apply_udp(
+pub(crate) fn apply_udp(
     inventory: &mut Inventory,
     expected_agent: Uuid,
     message: &Message,

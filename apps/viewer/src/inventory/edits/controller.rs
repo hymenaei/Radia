@@ -1,8 +1,7 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use ::inventory::{
-    CategoryKey, FolderType, InventoryDelta, InventoryNodeId, InventoryNodeKey, InventoryOwner, InventorySnapshot, ItemKey,
-    MAX_INVENTORY_NAME_BYTES,
+    CategoryKey, FolderType, InventoryNodeId, InventoryNodeKey, InventoryOwner, InventorySnapshot, ItemKey, MAX_INVENTORY_NAME_BYTES,
 };
 use futures::future::{BoxFuture, Shared};
 use llsd::{Map, Value};
@@ -14,7 +13,6 @@ use protocol::{
     inventory::{self, AisEditResponse},
     messages::{MoveInventoryFolder, MoveInventoryFolderBlock, MoveInventoryItem, MoveInventoryItemBlock},
 };
-use std::sync::Arc;
 use tokio::{
     runtime::Handle,
     sync::{mpsc, oneshot, watch},
@@ -24,7 +22,7 @@ use tokio::{
 use uuid::Uuid;
 
 use super::{
-    delta::{delta_from_ais_response, trash_folder},
+    delta::{AisDelta, delta_from_ais_response, trash_folder},
     handle::InventoryEditHandle,
     types::{EditOperation, EditRequest, InventoryEditOutcome, InventoryEditRejection, MoveExpectation},
 };
@@ -37,7 +35,7 @@ pub(super) const MOVE_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(5);
 type Cancellation = Shared<BoxFuture<'static, ()>>;
 
 pub(crate) enum InventoryEditEvent {
-    Apply { delta: InventoryDelta, applied: oneshot::Sender<bool> },
+    Apply { confirmation: AisDelta, applied: oneshot::Sender<bool> },
     RefreshGone { folder: CategoryKey, refreshed: oneshot::Sender<bool> },
     MoveStarted { expectation: MoveExpectation, confirmed: oneshot::Sender<()>, registered: oneshot::Sender<()> },
     MoveAborted { expectation: MoveExpectation, removed: oneshot::Sender<()> },
@@ -133,8 +131,10 @@ impl InventoryEditController {
     }
 
     pub(crate) async fn stop(&mut self) {
-        if let Some(stop) = self.stop_tx.take() {
-            let _ = stop.send(());
+        if let Some(stop) = self.stop_tx.take()
+            && stop.send(()).is_err()
+        {
+            tracing::trace!("inventory edit worker stopped before shutdown signal");
         }
         if let Some(task) = self.task.take()
             && let Err(error) = task.await
@@ -185,7 +185,9 @@ async fn run_edits(
             _ = cancellation.clone() => break,
             outcome = &mut process => outcome,
         };
-        let _ = request.response.send(outcome);
+        if request.response.send(outcome).is_err() {
+            tracing::trace!("inventory edit caller stopped before receiving its outcome");
+        }
     }
 }
 
@@ -417,7 +419,7 @@ async fn execute_edit(
                 Err(_) => return InventoryEditOutcome::ServerError,
             };
             let outcome = confirmation.created.map_or(InventoryEditOutcome::ServerError, InventoryEditOutcome::Created);
-            apply_confirmation(events, confirmation.delta, outcome).await
+            apply_confirmation(events, confirmation, outcome).await
         }
         PreparedEdit::RenameCategory { category, name } => {
             let capabilities = match require_ais(client, capabilities).await {
@@ -440,7 +442,7 @@ async fn execute_edit(
                 Ok(confirmation) => confirmation,
                 Err(_) => return InventoryEditOutcome::ServerError,
             };
-            apply_confirmation(events, confirmation.delta, InventoryEditOutcome::Applied).await
+            apply_confirmation(events, confirmation, InventoryEditOutcome::Applied).await
         }
         PreparedEdit::RenameItem { item, name } => {
             let capabilities = match require_ais(client, capabilities).await {
@@ -463,7 +465,7 @@ async fn execute_edit(
                 Ok(confirmation) => confirmation,
                 Err(_) => return InventoryEditOutcome::ServerError,
             };
-            apply_confirmation(events, confirmation.delta, InventoryEditOutcome::Applied).await
+            apply_confirmation(events, confirmation, InventoryEditOutcome::Applied).await
         }
         PreparedEdit::EmptyTrash(trash) => {
             let capabilities = match require_ais(client, capabilities).await {
@@ -491,7 +493,7 @@ async fn execute_edit(
                 Ok(confirmation) => confirmation,
                 Err(_) => return InventoryEditOutcome::ServerError,
             };
-            apply_confirmation(events, confirmation.delta, InventoryEditOutcome::Applied).await
+            apply_confirmation(events, confirmation, InventoryEditOutcome::Applied).await
         }
         PreparedEdit::Noop => InventoryEditOutcome::Applied,
     }
@@ -537,11 +539,11 @@ fn rename_body(name: &str) -> Value {
 
 async fn apply_confirmation(
     events: &mpsc::Sender<InventoryEditEvent>,
-    delta: InventoryDelta,
+    confirmation: AisDelta,
     outcome: InventoryEditOutcome,
 ) -> InventoryEditOutcome {
     let (applied, result) = oneshot::channel();
-    if events.send(InventoryEditEvent::Apply { delta, applied }).await.is_err() {
+    if events.send(InventoryEditEvent::Apply { confirmation, applied }).await.is_err() {
         return InventoryEditOutcome::ServerError;
     }
     match result.await {
@@ -591,8 +593,8 @@ async fn execute_move(
     };
     if transport.send(movement).is_err() {
         let (removed, result) = oneshot::channel();
-        if events.send(InventoryEditEvent::MoveAborted { expectation, removed }).await.is_ok() {
-            let _ = result.await;
+        if events.send(InventoryEditEvent::MoveAborted { expectation, removed }).await.is_ok() && result.await.is_err() {
+            tracing::trace!("inventory edit worker stopped before move abort acknowledgement");
         }
         return InventoryEditOutcome::ServerError;
     }

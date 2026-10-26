@@ -6,7 +6,7 @@ use std::{
 };
 
 use ::inventory::{
-    CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryChild, InventoryDelta, InventoryError, InventoryNodeKey,
+    CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryChild, InventoryDelta, InventoryError, InventoryNodeId, InventoryNodeKey,
     InventorySnapshot, ServerVersion,
 };
 use futures::{
@@ -35,8 +35,8 @@ use super::{
 use crate::{
     asset_coordinator::AssetCoordinator,
     inventory::{
-        FolderApplyOutcome, FolderFetch, InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError,
-        InventoryFetchEvent, InventoryLoadingStatus, MoveExpectation, favorites::load_favorites,
+        AisDelta, FolderApplyOutcome, FolderFetch, InventoryEditController, InventoryEditEvent, InventoryFetchController,
+        InventoryFetchError, InventoryFetchEvent, InventoryLoadingStatus, MoveExpectation, favorites::load_favorites,
     },
     remembered_login::{self, RememberedLogin},
     session::{
@@ -205,9 +205,15 @@ impl SessionDriver {
             };
             let flow = match input {
                 DriverInput::InventoryCache(Some(event)) => {
-                    if let Some(inventory) = &mut self.inventory {
-                        let outcome = self.inventory_cache.handle_event(&self.runtime, event, inventory);
+                    let before = self.inventory.as_ref().map(Inventory::snapshot);
+                    let outcome =
+                        self.inventory.as_mut().map(|inventory| self.inventory_cache.handle_event(&self.runtime, event, inventory));
+                    if let Some(outcome) = outcome {
                         if let Some(snapshot) = outcome.snapshot {
+                            if let Some(before) = before {
+                                let changes = cache_restore_move_changes(&self.inventory_pending_moves, &before, &snapshot);
+                                self.process_inventory_changes(&changes, &snapshot);
+                            }
                             self.inventory_changes.send_replace(Some(snapshot));
                         }
                         if outcome.startup_complete
@@ -611,8 +617,7 @@ impl SessionDriver {
                 if !outcome.changes.is_empty()
                     && let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot)
                 {
-                    self.resolve_inventory_moves(&outcome.changes);
-                    self.track_inventory_changes(&outcome.changes, &snapshot);
+                    self.process_inventory_changes(&outcome.changes, &snapshot);
                     self.inventory_changes.send_replace(Some(snapshot.clone()));
                     self.request_inventory_refetches(&outcome.changes, &snapshot);
                     self.publish_inventory_status();
@@ -781,43 +786,50 @@ impl SessionDriver {
 
     fn handle_inventory_edit_event(&mut self, event: InventoryEditEvent) {
         match event {
-            InventoryEditEvent::Apply { delta, applied } => {
-                let result = self.apply_inventory_edit_delta(delta);
-                let _ = applied.send(result);
+            InventoryEditEvent::Apply { confirmation, applied } => {
+                let result = self.apply_inventory_confirmation(confirmation);
+                if applied.send(result).is_err() {
+                    tracing::trace!("inventory edit worker stopped before apply acknowledgement");
+                }
             }
             InventoryEditEvent::RefreshGone { folder, refreshed } => {
-                let queued = self.inventory_fetch.handle().refetch_folder(folder).is_ok();
-                if !queued {
+                let refreshed_inventory = self.mark_inventory_folders_incomplete([folder]);
+                if !refreshed_inventory {
                     tracing::debug!(folder = %folder.id().uuid(), "inventory folder refresh could not be queued after a gone response");
                 }
-                let _ = refreshed.send(queued);
+                if refreshed.send(refreshed_inventory).is_err() {
+                    tracing::trace!("inventory edit worker stopped before gone refresh acknowledgement");
+                }
             }
             InventoryEditEvent::MoveStarted { expectation, confirmed, registered } => {
                 self.inventory_pending_moves.insert(expectation.node, (expectation, confirmed));
-                let _ = registered.send(());
+                if registered.send(()).is_err() {
+                    tracing::trace!("inventory edit worker stopped before move registration acknowledgement");
+                }
             }
             InventoryEditEvent::MoveAborted { expectation, removed } => {
                 if self.inventory_pending_moves.get(&expectation.node).is_some_and(|(current, _)| *current == expectation) {
                     self.inventory_pending_moves.remove(&expectation.node);
                 }
-                let _ = removed.send(());
+                if removed.send(()).is_err() {
+                    tracing::trace!("inventory edit worker stopped before move abort acknowledgement");
+                }
             }
             InventoryEditEvent::MoveTimedOut { expectation, refreshed } => {
                 if self.inventory_pending_moves.get(&expectation.node).is_some_and(|(current, _)| *current == expectation) {
                     self.inventory_pending_moves.remove(&expectation.node);
                 }
-                let mut delta = InventoryDelta::default();
-                delta.updated_category_versions.extend(
-                    [expectation.from, expectation.to]
-                        .into_iter()
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .map(|folder| (folder, ServerVersion::UNKNOWN)),
-                );
-                let applied = self.apply_inventory_edit_delta(delta);
-                let _ = refreshed.send(applied);
+                let applied = self.mark_inventory_folders_incomplete([expectation.from, expectation.to]);
+                if refreshed.send(applied).is_err() {
+                    tracing::trace!("inventory edit worker stopped before move timeout acknowledgement");
+                }
             }
         }
+    }
+
+    fn apply_inventory_confirmation(&mut self, confirmation: AisDelta) -> bool {
+        let Some(current) = self.inventory.as_ref().map(Inventory::snapshot) else { return false };
+        self.apply_inventory_edit_delta(confirmation.into_delta(&current))
     }
 
     fn apply_inventory_edit_delta(&mut self, delta: InventoryDelta) -> bool {
@@ -834,7 +846,7 @@ impl SessionDriver {
             return true;
         }
         let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot) else { return false };
-        self.track_inventory_changes(&changes, &snapshot);
+        self.process_inventory_changes(&changes, &snapshot);
         self.inventory_changes.send_replace(Some(snapshot.clone()));
         self.request_inventory_refetches(&changes, &snapshot);
         self.publish_inventory_status();
@@ -842,17 +854,22 @@ impl SessionDriver {
         true
     }
 
-    fn resolve_inventory_moves(&mut self, changes: &ChangeSet) {
-        for change in &changes.changes {
-            let InventoryChange::NodeMoved { node, from, to } = change else { continue };
-            let Some((expectation, _)) = self.inventory_pending_moves.get(node) else { continue };
-            if expectation.from == *from
-                && expectation.to == *to
-                && let Some((_, confirmed)) = self.inventory_pending_moves.remove(node)
-            {
-                let _ = confirmed.send(());
-            }
+    fn process_inventory_changes(&mut self, changes: &ChangeSet, snapshot: &InventorySnapshot) {
+        resolve_pending_inventory_moves(&mut self.inventory_pending_moves, changes);
+        self.track_inventory_changes(changes, snapshot);
+    }
+
+    fn mark_inventory_folders_incomplete(&mut self, folders: impl IntoIterator<Item = CategoryKey>) -> bool {
+        let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot) else { return false };
+        let folders = folders.into_iter().filter(|folder| snapshot.category(*folder).is_some()).collect::<HashSet<_>>();
+        if folders.is_empty() {
+            return false;
         }
+        let delta = InventoryDelta {
+            updated_category_versions: folders.into_iter().map(|folder| (folder, ServerVersion::UNKNOWN)).collect(),
+            ..InventoryDelta::default()
+        };
+        self.apply_inventory_edit_delta(delta)
     }
 
     fn handle_inventory_fetch(&mut self, event: InventoryFetchEvent) {
@@ -866,7 +883,7 @@ impl SessionDriver {
                 match result {
                     Some(Ok(Some(changes))) => {
                         if let Some(snapshot) = snapshot.as_ref() {
-                            self.track_inventory_changes(&changes, snapshot);
+                            self.process_inventory_changes(&changes, snapshot);
                             if snapshot.is_complete(folder) {
                                 self.inventory_complete.insert(folder);
                             } else {
@@ -976,6 +993,45 @@ impl SessionDriver {
             let region = self.session_world.region_for(simulator_id).map(|region| region.get());
             tracing::warn!(simulator = simulator_id.get(), region, %error, "could not retire simulator world region on session shutdown");
         }
+    }
+}
+
+pub(crate) fn resolve_pending_inventory_moves(
+    pending: &mut HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
+    changes: &ChangeSet,
+) {
+    for change in &changes.changes {
+        let InventoryChange::NodeMoved { node, from, to } = change else { continue };
+        let Some((expectation, _)) = pending.get(node) else { continue };
+        if expectation.from == *from
+            && expectation.to == *to
+            && let Some((_, confirmed)) = pending.remove(node)
+            && confirmed.send(()).is_err()
+        {
+            tracing::trace!("inventory edit worker stopped before receiving move confirmation");
+        }
+    }
+}
+
+fn cache_restore_move_changes(
+    pending: &HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
+    before: &InventorySnapshot,
+    after: &InventorySnapshot,
+) -> ChangeSet {
+    let changes = pending
+        .iter()
+        .filter_map(|(node, (expectation, _))| {
+            (inventory_node_parent(before, *node) == Some(expectation.from) && inventory_node_parent(after, *node) == Some(expectation.to))
+                .then_some(InventoryChange::NodeMoved { node: *node, from: expectation.from, to: expectation.to })
+        })
+        .collect();
+    ChangeSet { revision: after.revision(), changes, refetch_categories: Vec::new() }
+}
+
+fn inventory_node_parent(snapshot: &InventorySnapshot, node: InventoryNodeKey) -> Option<CategoryKey> {
+    match node.id() {
+        InventoryNodeId::Category(id) => snapshot.category(CategoryKey::new(node.owner(), id)).and_then(|category| category.parent),
+        InventoryNodeId::Item(id) => snapshot.item(::inventory::ItemKey::new(node.owner(), id)).map(|item| item.parent),
     }
 }
 

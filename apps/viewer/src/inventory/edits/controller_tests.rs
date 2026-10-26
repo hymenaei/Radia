@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use ::inventory::{
     AssetType, Category, CategoryKey, FolderType, Inventory, InventoryDelta, InventoryLimits, InventoryNodeId, InventoryOwner,
@@ -74,8 +74,10 @@ impl LoopbackPeer {
             while let Ok((stream, _)) = listener.accept().await {
                 let sender = sender.clone();
                 tokio::spawn(async move {
-                    if let Ok(request) = read_request(stream).await {
-                        let _ = sender.send(request).await;
+                    if let Ok(request) = read_request(stream).await
+                        && let Err(send_error) = sender.send(request).await
+                    {
+                        drop(send_error);
                     }
                 });
             }
@@ -209,10 +211,11 @@ async fn apply_confirmation(
     inventory: &mut Inventory,
     model: &watch::Sender<Option<InventorySnapshot>>,
 ) {
-    let Some(InventoryEditEvent::Apply { delta, applied }) = controller.next_event().await else {
+    let Some(InventoryEditEvent::Apply { confirmation, applied }) = controller.next_event().await else {
         panic!("expected AIS confirmation event");
     };
-    let result = inventory.apply_delta(delta).is_ok();
+    let current = inventory.snapshot();
+    let result = inventory.apply_delta(confirmation.into_delta(&current)).is_ok();
     model.send_replace(Some(inventory.snapshot()));
     applied.send(result).expect("worker waits for confirmation result");
 }
@@ -228,13 +231,15 @@ async fn confirm_udp_move(
     let Some(InventoryEditEvent::MoveStarted { expectation, confirmed, registered }) = controller.next_event().await else {
         panic!("expected UDP move registration event");
     };
+    let mut pending = HashMap::from([(expectation.node, (expectation, confirmed))]);
     registered.send(()).expect("move worker waits for registration");
     let mut bytes = [0; 4096];
     let received = timeout(TEST_TIMEOUT, socket.recv_from(&mut bytes)).await.expect("outbound move packet timeout");
     let (size, _) = received.expect("read outbound move packet");
     let packet = Packet::decode(&bytes[..size]).expect("decode outbound move packet");
     assert!(packet.is_reliable());
-    match (expectation.node.id(), packet.into_message()) {
+    let message = packet.into_message();
+    match (expectation.node.id(), &message) {
         (InventoryNodeId::Item(id), Message::MoveInventoryItem(message)) => {
             assert_eq!(message.agent_id, owner.id());
             assert_eq!(message.session_id, session_id);
@@ -249,14 +254,23 @@ async fn confirm_udp_move(
         }
         (_, message) => panic!("unexpected outbound move: {message:?}"),
     }
-    let changes = inventory.move_node(expectation.node, expectation.to).expect("apply server move update");
-    assert!(changes.changes.iter().any(|change| matches!(
-        change,
-        ::inventory::InventoryChange::NodeMoved { node, from, to }
+    let update = crate::session::apply_inventory_udp(inventory, owner.id(), &message)
+        .expect("intake inbound UDP move update")
+        .expect("move update belongs to the active owner");
+    assert_eq!(update.rejected_blocks, 0);
+    let selected = update
+        .changes
+        .changes
+        .iter()
+        .find(|change| matches!(change, ::inventory::InventoryChange::NodeMoved { node, .. } if *node == expectation.node));
+    std::assert_matches!(
+        selected,
+        Some(::inventory::InventoryChange::NodeMoved { node, from, to })
             if *node == expectation.node && *from == expectation.from && *to == expectation.to
-    )));
+    );
+    crate::session::resolve_pending_inventory_moves(&mut pending, &update.changes);
+    assert!(pending.is_empty());
     model.send_replace(Some(inventory.snapshot()));
-    confirmed.send(()).expect("worker waits for matching move update");
 }
 
 fn metadata(name: &str, ids: &[Uuid]) -> Vec<u8> {
@@ -542,6 +556,6 @@ async fn move_confirmation_timeout_invalidates_both_folders_for_refetch() {
     assert!(changes.refetch_categories.contains(&second));
     model.send_replace(Some(inventory.snapshot()));
     refreshed.send(true).expect("move worker waits for refetch scheduling");
-    assert_eq!(move_item.await.expect("timed out move result"), InventoryEditOutcome::TimedOut);
+    std::assert_matches!(move_item.await.expect("timed out move result"), InventoryEditOutcome::TimedOut);
     controller.stop().await;
 }

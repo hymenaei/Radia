@@ -15,6 +15,7 @@ use utils::AssetId;
 use crate::{
     Blob, Budget, Content, TextureEvents, TextureHandle, TextureSize, WeakTexture,
     budget::{Reservation, TEXTURE_WORK_BYTES, WORK_BYTES},
+    cache::{AssetCache, AssetLookup, CacheWrite, read_work_bytes},
     content::{Finished, Prepared, StoredContent},
 };
 
@@ -46,6 +47,13 @@ impl Kind {
         match self {
             Self::Texture => 32 * 1024 * 1024,
             Self::PbrMaterial | Self::LegacyMaterial | Self::Environment => 2 * 1024 * 1024,
+        }
+    }
+
+    pub(crate) const fn max_cache_bytes(self) -> usize {
+        match self {
+            Self::LegacyMaterial => 4 * 1024 * 1024,
+            _ => self.max_response_bytes(),
         }
     }
 }
@@ -286,6 +294,7 @@ enum LoadPhase {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Stage {
+    ReadingCache,
     Fetching,
     Decoding,
 }
@@ -298,6 +307,7 @@ struct AssetEntry {
     texture: Option<WeakTexture>,
     target: Option<TextureSize>,
     priority: Priority,
+    cache_checked: bool,
 }
 
 impl AssetEntry {
@@ -363,7 +373,7 @@ impl Job {
 
     fn fail(self, failure: Failure) -> LoadCompletion {
         let failure = if self.is_cancelled() { Failure::Cancelled } else { failure };
-        LoadCompletion { job: self, result: Err(failure) }
+        LoadCompletion { job: self, result: Err(failure), origin: DecodeOrigin::Network }
     }
 }
 
@@ -386,37 +396,38 @@ impl FetchFailure {
 
 impl From<FetchFailure> for LoadCompletion {
     fn from(fetch: FetchFailure) -> Self {
-        Self { job: fetch.job, result: Err(fetch.failure) }
+        Self { job: fetch.job, result: Err(fetch.failure), origin: DecodeOrigin::Network }
     }
 }
 
 #[derive(Debug)]
-pub struct FetchJob(Job);
+pub struct FetchJob {
+    job: Job,
+}
 
 impl FetchJob {
     pub fn resource(&self) -> Resource {
-        self.0.resource
+        self.job.resource
     }
     pub fn route(&self) -> Route {
-        self.0.route
+        self.job.route
     }
     pub fn is_cancelled(&self) -> bool {
-        self.0.is_cancelled()
+        self.job.is_cancelled()
     }
     pub fn cancelled(&self) -> impl Future<Output = ()> + Send + use<> {
-        self.0.cancelled()
+        self.job.cancelled()
     }
-
     pub fn complete(self, response: Result<Vec<u8>, Failure>) -> Result<DecodeInput, FetchFailure> {
+        let Self { mut job } = self;
         let bytes = match response {
-            Ok(bytes) if !self.0.is_cancelled() => bytes,
-            Ok(_) => return Err(FetchFailure::new(self.0, Failure::Cancelled)),
-            Err(failure) => return Err(FetchFailure::new(self.0, failure)),
+            Ok(bytes) if !job.is_cancelled() => bytes,
+            Ok(_) => return Err(FetchFailure::new(job, Failure::Cancelled)),
+            Err(failure) => return Err(FetchFailure::new(job, failure)),
         };
-        if bytes.capacity() > self.0.resource.kind.max_response_bytes() {
-            return Err(FetchFailure::new(self.0, Failure::TooLarge));
+        if bytes.capacity() > job.resource.kind.max_response_bytes() {
+            return Err(FetchFailure::new(job, Failure::TooLarge));
         }
-        let mut job = self.0;
         if !job.reservation.resize(bytes.capacity()) {
             return Err(FetchFailure::new(job, Failure::TooLarge));
         }
@@ -425,22 +436,52 @@ impl FetchJob {
 }
 
 #[derive(Debug)]
+pub struct CacheReadJob {
+    job: Job,
+    cache: Arc<AssetCache>,
+}
+
+pub struct CacheReadCompletion {
+    job: Job,
+    result: Result<AssetLookup, Failure>,
+}
+
+impl CacheReadJob {
+    pub fn run(self) -> CacheReadCompletion {
+        self.run_lookup(|cache, resource| cache.lookup(resource))
+    }
+
+    fn run_lookup(self, lookup: impl FnOnce(&AssetCache, Resource) -> AssetLookup) -> CacheReadCompletion {
+        let result = if self.job.is_cancelled() {
+            Err(Failure::Cancelled)
+        } else {
+            let lookup = lookup(&self.cache, self.job.resource);
+            if self.job.is_cancelled() { Err(Failure::Cancelled) } else { Ok(lookup) }
+        };
+        CacheReadCompletion { job: self.job, result }
+    }
+}
+
+#[derive(Debug)]
 pub enum LoadJob {
     Fetch(FetchJob),
     Decode(DecodeInput),
+    ReadCache(CacheReadJob),
 }
 
 impl LoadJob {
     pub fn fail(self, failure: Failure) -> LoadCompletion {
         match self {
-            Self::Fetch(job) => job.0.fail(failure),
+            Self::Fetch(job) => job.job.fail(failure),
             Self::Decode(input) => input.fail(failure),
+            Self::ReadCache(job) => LoadCompletion { job: job.job, result: Err(failure), origin: DecodeOrigin::Disk },
         }
     }
 }
 
 enum DecodeSource {
     Response(Vec<u8>),
+    Disk(Vec<u8>),
     Cached(Blob),
 }
 
@@ -453,6 +494,7 @@ impl fmt::Debug for DecodeInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let source = match &self.source {
             DecodeSource::Response(_) => "response",
+            DecodeSource::Disk(_) => "disk",
             DecodeSource::Cached(_) => "cached",
         };
         f.debug_struct("DecodeInput")
@@ -464,6 +506,14 @@ impl fmt::Debug for DecodeInput {
 }
 
 impl DecodeInput {
+    fn origin(&self) -> DecodeOrigin {
+        match &self.source {
+            DecodeSource::Response(_) => DecodeOrigin::Network,
+            DecodeSource::Disk(_) => DecodeOrigin::Disk,
+            DecodeSource::Cached(_) => DecodeOrigin::Memory,
+        }
+    }
+
     pub fn resource(&self) -> Resource {
         self.job.resource
     }
@@ -471,7 +521,9 @@ impl DecodeInput {
         self.job.is_cancelled()
     }
     pub fn fail(self, failure: Failure) -> LoadCompletion {
-        self.job.fail(failure)
+        let failure = if self.job.is_cancelled() { Failure::Cancelled } else { failure };
+        let origin = self.origin();
+        LoadCompletion { job: self.job, result: Err(failure), origin }
     }
 }
 
@@ -484,12 +536,19 @@ impl DecodeJob {
     }
 
     pub fn run(self) -> LoadCompletion {
-        let DecodeInput { job, source } = self.0;
-        let result = match source {
-            DecodeSource::Response(bytes) => crate::content::prepare_cancellable(job.resource, job.size, bytes, || job.is_cancelled()),
-            DecodeSource::Cached(source) => crate::content::prepare_cached(job.size, &source, || job.is_cancelled()),
+        let DecodeInput { job, source, .. } = self.0;
+        let (result, origin) = match source {
+            DecodeSource::Response(bytes) => {
+                (crate::content::prepare_cancellable(job.resource, job.size, bytes, || job.is_cancelled()), DecodeOrigin::Network)
+            }
+            DecodeSource::Disk(bytes) => {
+                (crate::content::prepare_disk(job.resource, job.size, bytes, || job.is_cancelled()), DecodeOrigin::Disk)
+            }
+            DecodeSource::Cached(source) => {
+                (crate::content::prepare_cached(job.size, &source, || job.is_cancelled()), DecodeOrigin::Memory)
+            }
         };
-        LoadCompletion { job, result }
+        LoadCompletion { job, result, origin }
     }
 
     pub fn resource(&self) -> Resource {
@@ -504,6 +563,14 @@ impl DecodeJob {
 pub struct LoadCompletion {
     result: Result<Prepared, Failure>,
     job: Job,
+    origin: DecodeOrigin,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DecodeOrigin {
+    Network,
+    Disk,
+    Memory,
 }
 
 impl fmt::Debug for LoadCompletion {
@@ -537,6 +604,7 @@ pub struct Store {
     running_fetches: usize,
     running_decodes: usize,
     textures: TextureEvents,
+    cache: Option<Arc<AssetCache>>,
 }
 
 impl Drop for Store {
@@ -568,7 +636,14 @@ impl Store {
             running_fetches: 0,
             running_decodes: 0,
             textures: TextureEvents::default(),
+            cache: None,
         }
+    }
+
+    pub fn with_cache(budget: Budget, cache: Arc<AssetCache>) -> Self {
+        let mut store = Self::new(budget);
+        store.cache = Some(cache);
+        store
     }
 
     pub fn wake(&self) -> watch::Receiver<()> {
@@ -626,6 +701,7 @@ impl Store {
             texture: None,
             target: None,
             priority,
+            cache_checked: false,
         });
         entry.used = now;
         let texture = if resource.kind == Kind::Texture {
@@ -663,7 +739,7 @@ impl Store {
         let status = match &entry.phase {
             LoadPhase::Idle => ready.as_ref().map_or(Status::Queued, |content| Status::Ready(content.clone())),
             LoadPhase::Running { stage: Stage::Decoding, .. } => Status::Decoding,
-            LoadPhase::Running { stage: Stage::Fetching, .. } => Status::Fetching,
+            LoadPhase::Running { stage: Stage::ReadingCache | Stage::Fetching, .. } => Status::Fetching,
             LoadPhase::Queued => view.queued_status(),
         };
         view.publish_status(status.retaining(ready.as_ref()));
@@ -735,7 +811,7 @@ impl Store {
                     let stage = *stage;
                     entry.phase = LoadPhase::Queued;
                     match stage {
-                        Stage::Fetching => self.running_fetches -= 1,
+                        Stage::ReadingCache | Stage::Fetching => self.running_fetches -= 1,
                         Stage::Decoding => self.running_decodes -= 1,
                     }
                 }
@@ -771,7 +847,12 @@ impl Store {
         }
         self.build_candidates(now);
         let (_, _, _, resource, route) = self.candidates.last().copied()?;
-        let bytes = resource.kind.max_response_bytes();
+        let cache_read = self.cache.is_some()
+            && self
+                .entries
+                .get(&resource)
+                .is_some_and(|entry| !entry.cache_checked && entry.texture().and_then(|texture| texture.source()).is_none());
+        let bytes = if cache_read { read_work_bytes(resource.kind)? } else { resource.kind.max_response_bytes() };
         let headroom = if self.running_decodes > 0 { 0 } else { TEXTURE_WORK_BYTES.saturating_sub(bytes) };
         let reservation = self.budget.reserve_with_headroom(bytes, headroom)?;
         self.sequence = self.sequence.checked_add(1)?;
@@ -780,20 +861,38 @@ impl Store {
         let life = Arc::new(WorkLife { maintenance: Arc::clone(&self.maintenance_dirty) });
         let (cancelled, receiver) = watch::channel(false);
         let entry = self.entries.get_mut(&resource).expect("selected demanded entry");
+        let source = entry.texture().and_then(|texture| texture.source());
+        let job =
+            Job { resource, route, generation, reservation, _life: life, cancelled: receiver, size: entry.target.unwrap_or_default() };
+        if let Some(source) = source {
+            if entry.priority == Priority::Background {
+                entry.views.get_mut(&route).expect("selected route").deadline = now + DEMAND_DEADLINE;
+            }
+            entry.views.get_mut(&route).expect("selected route").attempts += 1;
+            entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
+            self.running_fetches += 1;
+            entry.broadcast_status(Status::Fetching);
+            return Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Cached(source), job }));
+        }
+        if let Some(cache) = &self.cache
+            && !entry.cache_checked
+        {
+            if entry.priority == Priority::Background {
+                entry.views.get_mut(&route).expect("selected route").deadline = now + DEMAND_DEADLINE;
+            }
+            entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::ReadingCache };
+            self.running_fetches += 1;
+            entry.broadcast_status(Status::Fetching);
+            return Some(LoadJob::ReadCache(CacheReadJob { job, cache: Arc::clone(cache) }));
+        }
         if entry.priority == Priority::Background {
             entry.views.get_mut(&route).expect("selected route").deadline = now + DEMAND_DEADLINE;
         }
         entry.views.get_mut(&route).expect("selected route").attempts += 1;
-        entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&life), cancelled, stage: Stage::Fetching };
+        entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
         self.running_fetches += 1;
         entry.broadcast_status(Status::Fetching);
-        let source = entry.texture().and_then(|texture| texture.source());
-        let job =
-            Job { resource, route, generation, reservation, _life: life, cancelled: receiver, size: entry.target.unwrap_or_default() };
-        Some(match source {
-            Some(source) => LoadJob::Decode(DecodeInput { source: DecodeSource::Cached(source), job }),
-            None => LoadJob::Fetch(FetchJob(job)),
-        })
+        Some(LoadJob::Fetch(FetchJob { job }))
     }
 
     pub fn start_decode(&mut self, mut input: DecodeInput) -> Result<DecodeJob, DecodeInput> {
@@ -821,18 +920,72 @@ impl Store {
         Ok(DecodeJob(input))
     }
 
-    pub fn complete(&mut self, completion: LoadCompletion, now: Instant) {
-        let LoadCompletion { job, result } = completion;
+    pub fn complete_cache_read(&mut self, completion: CacheReadCompletion, now: Instant) -> Option<LoadJob> {
+        let CacheReadCompletion { mut job, result } = completion;
         if self.closed || job.route.store != self.id {
-            return;
+            return None;
         }
-        let Some(entry) = self.entries.get_mut(&job.resource) else { return };
+        let entry = self.entries.get_mut(&job.resource)?;
+        if !matches!(entry.phase, LoadPhase::Running { generation, stage: Stage::ReadingCache, .. } if generation == job.generation) {
+            return None;
+        }
+        self.maintenance_dirty.store(true, Ordering::Release);
+        if !self.routes.contains(&job.route)
+            || job.is_cancelled()
+            || !entry.has_active_demand()
+            || entry.views.get(&job.route).is_none_or(|view| now >= view.deadline)
+        {
+            self.running_fetches -= 1;
+            entry.phase = LoadPhase::Queued;
+            return None;
+        }
+        if !matches!(&result, Err(Failure::Cancelled)) {
+            entry.cache_checked = true;
+        }
+        match result {
+            Ok(AssetLookup::Hit(asset)) if asset.is_complete() => {
+                let Some(extent) = asset.extents.into_iter().next() else {
+                    return Self::cache_read_fallback(entry, job, now);
+                };
+                job.reservation.shrink_to_at_most(extent.bytes.capacity());
+                if let LoadPhase::Running { stage, .. } = &mut entry.phase {
+                    *stage = Stage::Fetching;
+                }
+                Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Disk(extent.bytes), job }))
+            }
+            _ => Self::cache_read_fallback(entry, job, now),
+        }
+    }
+
+    fn cache_read_fallback(entry: &mut AssetEntry, mut job: Job, now: Instant) -> Option<LoadJob> {
+        job.reservation.shrink_to_at_most(job.resource.kind.max_response_bytes());
+        if entry.priority == Priority::Background
+            && let Some(view) = entry.views.get_mut(&job.route)
+        {
+            view.deadline = now + DEMAND_DEADLINE;
+        }
+        if let Some(view) = entry.views.get_mut(&job.route) {
+            view.attempts = view.attempts.saturating_add(1);
+        }
+        if let LoadPhase::Running { stage, .. } = &mut entry.phase {
+            *stage = Stage::Fetching;
+        }
+        Some(LoadJob::Fetch(FetchJob { job }))
+    }
+
+    pub fn complete(&mut self, completion: LoadCompletion, now: Instant) -> Vec<CacheWrite> {
+        let LoadCompletion { job, result, origin } = completion;
+        let mut writes = Vec::new();
+        if self.closed || job.route.store != self.id {
+            return writes;
+        }
+        let Some(entry) = self.entries.get_mut(&job.resource) else { return writes };
         let stage = match &entry.phase {
             LoadPhase::Running { generation, stage, .. } if *generation == job.generation => *stage,
-            _ => return,
+            _ => return writes,
         };
         match stage {
-            Stage::Fetching => self.running_fetches -= 1,
+            Stage::ReadingCache | Stage::Fetching => self.running_fetches -= 1,
             Stage::Decoding => self.running_decodes -= 1,
         }
         entry.phase = LoadPhase::Queued;
@@ -842,21 +995,33 @@ impl Store {
             || !entry.has_active_demand()
             || entry.views.get(&job.route).is_none_or(|view| now >= view.deadline)
         {
-            return;
+            return writes;
         }
-        match result.and_then(|prepared| prepared.finish(job.reservation)) {
-            Ok((content, source)) => {
+        if origin == DecodeOrigin::Disk && result.is_err() && !job.is_cancelled() {
+            if let Some(cache) = &self.cache {
+                cache.discard_corrupt(job.resource);
+            }
+            return writes;
+        }
+        let persist = self.cache.is_some() && origin == DecodeOrigin::Network;
+        match result.and_then(|prepared| prepared.finish(job.reservation, persist)) {
+            Ok((content, source, persisted)) => {
                 entry.used = now;
+                if let (Some(cache), Some(payload)) = (&self.cache, persisted)
+                    && let Some(write) = cache.queue_write(job.resource, move || payload.to_vec())
+                {
+                    writes.push(write);
+                }
                 if job.resource.kind == Kind::Texture
                     && entry.requested_size().is_some_and(|size| size != job.size)
                     && let Some(ready) = entry.ready()
                 {
                     entry.broadcast_status(Status::Ready(ready));
-                    return;
+                    return writes;
                 }
                 let content = match content {
                     Finished::Texture(image) => {
-                        let Some(texture) = entry.texture() else { return };
+                        let Some(texture) = entry.texture() else { return writes };
                         texture.install(image, source);
                         Content::Texture(texture)
                     }
@@ -871,7 +1036,7 @@ impl Store {
             }
             Err(failure) => {
                 if job.resource.kind == Kind::Texture && entry.requested_size().is_some_and(|size| size != job.size) {
-                    return;
+                    return writes;
                 }
                 let ready = entry.ready();
                 let view = entry.views.get_mut(&job.route).expect("active job route");
@@ -895,6 +1060,7 @@ impl Store {
                 }
             }
         }
+        writes
     }
 
     pub fn next_deadline(&self, now: Instant) -> Option<Instant> {

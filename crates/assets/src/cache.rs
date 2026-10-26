@@ -5,7 +5,8 @@ use std::{
     hash::{Hash, Hasher},
     io::{self, Cursor, Read, Write},
     path::Path,
-    sync::{Mutex, MutexGuard},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use storage::{Cache as StorageCache, CacheValue, Key as StorageKey, Lookup as StorageLookup, StorageError, UnavailableReason};
@@ -15,7 +16,9 @@ use crate::{Kind, Resource};
 const MAGIC: &[u8; 8] = b"RADEXT01";
 const HEADER_BYTES: usize = 20;
 const MAX_EXTENTS: usize = 4096;
+const MAX_ENCODED_OVERHEAD: usize = HEADER_BYTES + MAX_EXTENTS * 16;
 const WRITE_STRIPES: usize = 64;
+const MAX_IN_FLIGHT_WRITES: usize = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Extent {
@@ -62,6 +65,27 @@ pub enum AssetLookup {
     Unavailable(UnavailableReason),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AssetCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub corrupt_entries: u64,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
+    pub dropped_writes: u64,
+}
+
+#[derive(Default)]
+struct Counters {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    corrupt_entries: AtomicU64,
+    bytes_read: AtomicU64,
+    bytes_written: AtomicU64,
+    dropped_writes: AtomicU64,
+    in_flight_writes: AtomicUsize,
+}
+
 #[derive(Debug)]
 pub enum AssetCacheError {
     Unavailable(UnavailableReason),
@@ -96,9 +120,25 @@ impl Error for AssetCacheError {
     }
 }
 
+pub(crate) fn read_work_bytes(kind: Kind) -> Option<usize> {
+    encoded_limit(kind).checked_add(kind.max_cache_bytes())
+}
+
+fn encoded_limit(kind: Kind) -> usize {
+    kind.max_cache_bytes().saturating_add(MAX_ENCODED_OVERHEAD).min(storage::MAX_VALUE_BYTES)
+}
+
 pub struct AssetCache {
     storage: StorageCache,
     write_locks: [Mutex<()>; WRITE_STRIPES],
+    counters: Counters,
+}
+
+pub struct CacheWrite {
+    cache: Arc<AssetCache>,
+    resource: Resource,
+    payload: Option<Box<dyn FnOnce() -> Vec<u8> + Send>>,
+    finished: bool,
 }
 
 impl fmt::Debug for AssetCache {
@@ -110,29 +150,47 @@ impl fmt::Debug for AssetCache {
 impl AssetCache {
     pub fn open(directory: impl AsRef<Path>, size_limit: u64) -> Result<Self, AssetCacheError> {
         let storage = StorageCache::open(directory, size_limit).map_err(AssetCacheError::Storage)?;
-        Ok(Self { storage, write_locks: std::array::from_fn(|_| Mutex::new(())) })
+        Ok(Self { storage, write_locks: std::array::from_fn(|_| Mutex::new(())), counters: Counters::default() })
     }
 
-    pub fn open_default(size_limit: u64) -> Result<Self, AssetCacheError> {
+    pub fn open_default() -> Result<Self, AssetCacheError> {
         let directory = storage::default_cache_dir().map_err(AssetCacheError::Storage)?.join("assets");
-        Self::open(directory, size_limit)
+        Self::open(directory, storage::DEFAULT_SIZE_LIMIT)
     }
 
     pub fn lookup(&self, resource: Resource) -> AssetLookup {
         let key = storage_key(resource);
-        match self.storage.lookup(key) {
-            StorageLookup::Hit(value) => match decode(resource.kind, value) {
-                Ok(asset) if asset.is_complete() => AssetLookup::Hit(asset),
-                Ok(asset) => AssetLookup::Partial(asset),
-                Err(()) => {
-                    self.storage.discard(key);
-                    AssetLookup::Corrupt
+        let mut bytes_read = 0u64;
+        let result = match self.storage.lookup_bounded(key, encoded_limit(resource.kind)) {
+            StorageLookup::Hit(value) => {
+                bytes_read = u64::try_from(value.bytes.len()).unwrap_or(u64::MAX);
+                match decode(resource.kind, value) {
+                    Ok(asset) if asset.is_complete() => AssetLookup::Hit(asset),
+                    Ok(asset) => AssetLookup::Partial(asset),
+                    Err(()) => {
+                        self.storage.discard(key);
+                        AssetLookup::Corrupt
+                    }
                 }
-            },
+            }
             StorageLookup::Miss => AssetLookup::Miss,
             StorageLookup::Corrupt => AssetLookup::Corrupt,
             StorageLookup::Unavailable(reason) => AssetLookup::Unavailable(reason),
+        };
+        self.counters.bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
+        match &result {
+            AssetLookup::Hit(_) => {
+                self.counters.hits.fetch_add(1, Ordering::Relaxed);
+            }
+            AssetLookup::Miss | AssetLookup::Partial(_) => {
+                self.counters.misses.fetch_add(1, Ordering::Relaxed);
+            }
+            AssetLookup::Corrupt => {
+                self.counters.corrupt_entries.fetch_add(1, Ordering::Relaxed);
+            }
+            AssetLookup::Unavailable(_) => {}
         }
+        result
     }
 
     pub fn put_extent(&self, resource: Resource, extent: ValidatedExtent) -> Result<(), AssetCacheError> {
@@ -140,7 +198,7 @@ impl AssetCache {
         validate_extent(resource.kind, total_size, offset, &bytes)?;
         let _guard = self.write_guard(resource)?;
         let key = storage_key(resource);
-        let existing = match self.storage.lookup(key) {
+        let existing = match self.storage.lookup_bounded(key, encoded_limit(resource.kind)) {
             StorageLookup::Hit(value) => match decode(resource.kind, value) {
                 Ok(asset) => Some(asset),
                 Err(()) => {
@@ -161,6 +219,42 @@ impl AssetCache {
         merge_extent(&mut next, Extent { offset, bytes })?;
         let payload = encode(total_size, &next, resource.kind)?;
         self.storage.put(key, payload).map_err(map_storage_error)
+    }
+
+    pub(crate) fn discard(&self, resource: Resource) {
+        self.storage.discard(storage_key(resource));
+    }
+
+    pub(crate) fn discard_corrupt(&self, resource: Resource) {
+        self.counters.corrupt_entries.fetch_add(1, Ordering::Relaxed);
+        self.discard(resource);
+    }
+
+    pub(crate) fn queue_write<F>(self: &Arc<Self>, resource: Resource, payload: F) -> Option<CacheWrite>
+    where
+        F: FnOnce() -> Vec<u8> + Send + 'static,
+    {
+        if self
+            .counters
+            .in_flight_writes
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| (current < MAX_IN_FLIGHT_WRITES).then_some(current + 1))
+            .is_err()
+        {
+            self.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        Some(CacheWrite { cache: Arc::clone(self), resource, payload: Some(Box::new(payload)), finished: false })
+    }
+
+    pub fn stats(&self) -> AssetCacheStats {
+        AssetCacheStats {
+            hits: self.counters.hits.load(Ordering::Relaxed),
+            misses: self.counters.misses.load(Ordering::Relaxed),
+            corrupt_entries: self.counters.corrupt_entries.load(Ordering::Relaxed),
+            bytes_read: self.counters.bytes_read.load(Ordering::Relaxed),
+            bytes_written: self.counters.bytes_written.load(Ordering::Relaxed),
+            dropped_writes: self.counters.dropped_writes.load(Ordering::Relaxed),
+        }
     }
 
     pub fn clear(&self) -> Result<(), AssetCacheError> {
@@ -190,6 +284,40 @@ impl AssetCache {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         })
+    }
+
+    fn put_complete(&self, resource: Resource, bytes: Vec<u8>) -> Result<u64, AssetCacheError> {
+        let total_size = u64::try_from(bytes.len()).map_err(|_| AssetCacheError::TooLarge)?;
+        validate_extent(resource.kind, total_size, 0, &bytes)?;
+        let _guard = self.write_guard(resource)?;
+        let payload = encode(total_size, &[Extent { offset: 0, bytes }], resource.kind)?;
+        let stored_size = u64::try_from(payload.len()).map_err(|_| AssetCacheError::TooLarge)?;
+        self.storage.put(storage_key(resource), payload).map_err(map_storage_error)?;
+        Ok(stored_size)
+    }
+}
+
+impl CacheWrite {
+    pub fn run(mut self) {
+        let Some(payload) = self.payload.take() else { return };
+        match self.cache.put_complete(self.resource, payload()) {
+            Ok(bytes) => {
+                self.cache.counters.bytes_written.fetch_add(bytes, Ordering::Relaxed);
+            }
+            Err(_) => {
+                self.cache.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.finished = true;
+    }
+}
+
+impl Drop for CacheWrite {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.cache.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
+        }
+        self.cache.counters.in_flight_writes.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -232,7 +360,7 @@ fn validate_extent(kind: Kind, total_size: u64, offset: u64, bytes: &[u8]) -> Re
     if total_size == 0 || bytes.is_empty() || end > total_size {
         return Err(AssetCacheError::InvalidExtent);
     }
-    if total_size > u64::try_from(kind.max_response_bytes()).map_err(|_| AssetCacheError::TooLarge)? {
+    if total_size > u64::try_from(kind.max_cache_bytes()).map_err(|_| AssetCacheError::TooLarge)? {
         return Err(AssetCacheError::TooLarge);
     }
     Ok(())
@@ -335,7 +463,7 @@ fn decode(kind: Kind, value: CacheValue) -> Result<CachedAsset, ()> {
         return Err(());
     }
     let total_size = read_u64(&mut input).map_err(|_| ())?;
-    if total_size == 0 || total_size > u64::try_from(kind.max_response_bytes()).map_err(|_| ())? {
+    if total_size == 0 || total_size > u64::try_from(kind.max_cache_bytes()).map_err(|_| ())? {
         return Err(());
     }
     let count = usize::try_from(read_u32(&mut input).map_err(|_| ())?).map_err(|_| ())?;

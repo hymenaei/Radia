@@ -228,6 +228,10 @@ impl Cache {
     }
 
     pub fn lookup(&self, key: Key) -> Lookup {
+        self.lookup_bounded(key, MAX_VALUE_BYTES)
+    }
+
+    pub fn lookup_bounded(&self, key: Key, max_bytes: usize) -> Lookup {
         let Some(_permit) = ReadPermit::acquire(&self.read_state.active_reads) else {
             return Lookup::Unavailable(UnavailableReason::ReadLimit);
         };
@@ -248,6 +252,12 @@ impl Cache {
             }
             if entry.invalid.load(Ordering::Acquire) {
                 if self.entry_is_current(key, &entry) {
+                    return Lookup::Corrupt;
+                }
+                continue;
+            }
+            if usize::try_from(entry.size).map_or(true, |size| size > max_bytes.min(MAX_VALUE_BYTES)) {
+                if self.mark_invalid(key, Arc::clone(&entry)) {
                     return Lookup::Corrupt;
                 }
                 continue;

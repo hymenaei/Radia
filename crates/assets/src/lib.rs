@@ -20,8 +20,8 @@ pub use material::{
     TextureMapping, TextureRef, Wrap,
 };
 pub use store::{
-    AdmissionError, DecodeInput, DecodeJob, Demand, Failure, FetchFailure, FetchJob, Kind, LoadCompletion, LoadJob, MAX_ASSET_DECODES,
-    MAX_ASSET_FETCHES, MAX_ASSET_ROUTES, Priority, Request, Resource, Route, Status, Store,
+    AdmissionError, CacheReadCompletion, CacheReadJob, DecodeInput, DecodeJob, Demand, Failure, FetchFailure, FetchJob, Kind,
+    LoadCompletion, LoadJob, MAX_ASSET_DECODES, MAX_ASSET_FETCHES, MAX_ASSET_ROUTES, Priority, Request, Resource, Route, Status, Store,
 };
 pub use texture::{
     ColorSpace, Image, ImageInfo, MAX_SOURCE_EDGE, MAX_TEXTURE_EDGE, PixelAlpha, PixelFormat, TextureDecodeJob, TextureEvents,

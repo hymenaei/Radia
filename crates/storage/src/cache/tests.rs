@@ -112,6 +112,19 @@ fn lookup_checks_hash_and_removes_corruption() {
 }
 
 #[test]
+fn bounded_lookup_discards_entries_larger_than_the_bound() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT).expect("open cache");
+    cache.put(key(3), b"payload bytes".to_vec()).expect("store payload");
+
+    assert_eq!(cache.lookup_bounded(key(3), 4), Lookup::Corrupt);
+    assert_eq!(cache.entry_count(), 0);
+    cache.flush().expect("discard oversized entry");
+    assert_eq!(cache.lookup(key(3)), Lookup::Miss);
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
 fn lookup_detects_truncated_and_missing_data() {
     for missing in [false, true] {
         let directory = tempdir().expect("cache directory");

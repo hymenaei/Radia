@@ -88,6 +88,17 @@ impl Drop for Reservation {
 }
 
 impl Reservation {
+    pub(crate) fn shrink_to_at_most(&mut self, max_bytes: usize) {
+        let bytes = self.bytes.min(max_bytes);
+        let released = self.bytes - bytes;
+        self.budget.0.charged.fetch_sub(released, Ordering::AcqRel);
+        self.budget.0.working.fetch_sub(released, Ordering::AcqRel);
+        if released > 0 {
+            self.budget.0.wake.send_replace(());
+        }
+        self.bytes = bytes;
+    }
+
     pub(crate) fn resize(&mut self, bytes: usize) -> bool {
         if bytes > self.bytes {
             let Some(mut extra) = self.budget.reserve(bytes - self.bytes) else { return false };

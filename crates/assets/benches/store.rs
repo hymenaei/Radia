@@ -93,11 +93,12 @@ pub(crate) fn bench(c: &mut Criterion) {
                     let completed = jobs.len();
                     for job in jobs {
                         match job {
-                            LoadJob::Fetch(fetch) => store.complete(LoadJob::Fetch(fetch).fail(Failure::NotFound), *now),
+                            LoadJob::Fetch(fetch) => drop(store.complete(LoadJob::Fetch(fetch).fail(Failure::NotFound), *now)),
                             LoadJob::Decode(input) => {
                                 let decode = store.start_decode(input).expect("benchmark decode admission");
-                                store.complete(decode.fail(Failure::NotFound), *now);
+                                drop(store.complete(decode.fail(Failure::NotFound), *now));
                             }
+                            LoadJob::ReadCache(_) => unreachable!("benchmark Store has no persistent cache"),
                         }
                     }
                     black_box((completed, demands.len()));

@@ -1,6 +1,6 @@
-use std::{future::pending, ops::ControlFlow, sync::Arc};
+use std::{collections::HashSet, future::pending, ops::ControlFlow, sync::Arc};
 
-use ::inventory::{Inventory, InventorySnapshot};
+use ::inventory::{CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryChild, InventoryError, InventorySnapshot};
 use futures::{
     FutureExt,
     channel::oneshot,
@@ -25,7 +25,10 @@ use super::{
 };
 use crate::{
     asset_coordinator::AssetCoordinator,
-    inventory::favorites::load_favorites,
+    inventory::{
+        FolderApplyOutcome, FolderFetch, InventoryFetchController, InventoryFetchError, InventoryFetchEvent, InventoryLoadingStatus,
+        favorites::load_favorites,
+    },
     remembered_login::{self, RememberedLogin},
     session::{
         CameraUplink, RegionLookup, Session, SessionHandle,
@@ -76,6 +79,12 @@ struct SessionDriver {
     inventory: Option<Inventory>,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
     rejected_inventory_blocks: u64,
+    inventory_fetch: InventoryFetchController,
+    inventory_known: HashSet<CategoryKey>,
+    inventory_complete: HashSet<CategoryKey>,
+    inventory_failed: HashSet<CategoryKey>,
+    inventory_background_done: bool,
+    inventory_last_failure: Option<(CategoryKey, InventoryFetchError)>,
     camera: CameraUplink,
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
@@ -93,7 +102,9 @@ impl SessionDriver {
         cache: Option<Arc<assets::cache::AssetCache>>,
     ) -> Self {
         let cancellation = async move {
-            let _ = cancellation.await;
+            match cancellation.await {
+                Ok(()) | Err(_) => {}
+            }
         }
         .boxed()
         .shared();
@@ -108,6 +119,7 @@ impl SessionDriver {
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
         let (inventory_changes, _) = watch::channel(None);
+        let inventory_fetch = InventoryFetchController::new();
 
         Self {
             session,
@@ -133,6 +145,12 @@ impl SessionDriver {
             inventory: None,
             inventory_changes,
             rejected_inventory_blocks: 0,
+            inventory_fetch,
+            inventory_known: HashSet::new(),
+            inventory_complete: HashSet::new(),
+            inventory_failed: HashSet::new(),
+            inventory_background_done: false,
+            inventory_last_failure: None,
             camera,
             region_lookup: None,
             media,
@@ -155,6 +173,7 @@ impl SessionDriver {
                 self.cancellation.clone(),
                 self.camera.next_tick(),
                 self.recovery.next_completion(),
+                self.inventory_fetch.next_event(),
             )
             .await;
             let flow = match input {
@@ -184,6 +203,11 @@ impl SessionDriver {
                     self.handle_recovery_completion(completion);
                     ControlFlow::Continue(())
                 }
+                Input::InventoryFetch(Some(event)) => {
+                    self.handle_inventory_fetch(event);
+                    ControlFlow::Continue(())
+                }
+                Input::InventoryFetch(None) => ControlFlow::Continue(()),
             };
             if flow.is_break() {
                 break;
@@ -271,6 +295,7 @@ impl SessionDriver {
                                 }
                                 self.inventory_changes.send_replace(Some(inventory.snapshot()));
                                 self.inventory = Some(inventory);
+                                self.start_inventory_fetch(capabilities.clone());
                             }
                             Err(error) => tracing::warn!(%error, "login inventory could not be initialized"),
                         },
@@ -523,10 +548,13 @@ impl SessionDriver {
         match result {
             Ok(Some(outcome)) => {
                 self.note_rejected_inventory_blocks(outcome.rejected_blocks);
-                if !outcome.changes.is_empty()
-                    && let Some(inventory) = &self.inventory
+                if let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot)
+                    && !outcome.changes.is_empty()
                 {
-                    self.inventory_changes.send_replace(Some(inventory.snapshot()));
+                    self.track_inventory_changes(&outcome.changes, &snapshot);
+                    self.inventory_changes.send_replace(Some(snapshot.clone()));
+                    self.request_inventory_refetches(&outcome.changes, &snapshot);
+                    self.publish_inventory_status();
                 }
             }
             Ok(None) => {}
@@ -573,6 +601,7 @@ impl SessionDriver {
             session: session.clone(),
             region_name: self.session_world.region_name(simulator_id).map(str::to_owned),
             inventory_updates: self.inventory_changes.subscribe(),
+            inventory_fetch: self.inventory.as_ref().map(|_| self.inventory_fetch.handle()),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             world_reader: self.reads.reader(),
         }));
@@ -665,7 +694,125 @@ impl SessionDriver {
         }
     }
 
+    fn start_inventory_fetch(&mut self, capabilities: Client) {
+        let Some(inventory) = &self.inventory else { return };
+        let snapshot = inventory.snapshot();
+        self.inventory_changes.send_replace(Some(snapshot.clone()));
+        self.inventory_known = snapshot.categories().map(|category| category.key).collect();
+        self.inventory_complete = self.inventory_known.iter().copied().filter(|key| snapshot.is_complete(*key)).collect();
+        self.inventory_failed.clear();
+        self.inventory_background_done = false;
+        self.inventory_last_failure = None;
+        self.publish_inventory_status();
+        let model = self.inventory_changes.subscribe();
+        self.inventory_fetch.start(&self.runtime, capabilities, snapshot, model, self.cancellation.clone());
+    }
+
+    fn handle_inventory_fetch(&mut self, event: InventoryFetchEvent) {
+        match event {
+            InventoryFetchEvent::Folder { fetch, applied } => {
+                let folder = fetch.folder;
+                let result = self.inventory.as_mut().map(|inventory| apply_inventory_fetch(inventory, fetch));
+                let snapshot = self.inventory.as_ref().map(Inventory::snapshot);
+                let mut rejected = false;
+                match result {
+                    Some(Ok(Some(changes))) => {
+                        if let Some(snapshot) = snapshot.as_ref() {
+                            self.track_inventory_changes(&changes, snapshot);
+                            if snapshot.is_complete(folder) {
+                                self.inventory_complete.insert(folder);
+                            } else {
+                                self.inventory_complete.remove(&folder);
+                            }
+                            self.inventory_failed.remove(&folder);
+                            if self.inventory_last_failure.as_ref().is_some_and(|(failed, _)| *failed == folder) {
+                                self.inventory_last_failure = None;
+                            }
+                            self.inventory_changes.send_replace(Some(snapshot.clone()));
+                        }
+                    }
+                    Some(Ok(None)) => {}
+                    Some(Err(error)) => {
+                        rejected = true;
+                        self.record_inventory_failure(folder, InventoryFetchError::Model(error));
+                    }
+                    None => rejected = true,
+                }
+                let outcome = FolderApplyOutcome { rejected };
+                if applied.send(outcome).is_err() {
+                    tracing::debug!(folder = %folder.id().uuid(), "inventory fetch worker stopped before apply acknowledgement");
+                }
+                self.publish_inventory_status();
+            }
+            InventoryFetchEvent::Failed { folder, error } => {
+                self.record_inventory_failure(folder, error);
+                self.publish_inventory_status();
+            }
+            InventoryFetchEvent::BackgroundDone => {
+                self.inventory_background_done = true;
+                self.publish_inventory_status();
+            }
+        }
+    }
+
+    fn track_inventory_changes(&mut self, changes: &ChangeSet, snapshot: &InventorySnapshot) {
+        for change in &changes.changes {
+            match change {
+                InventoryChange::CategoryUpserted(category) => {
+                    self.inventory_known.insert(category.key);
+                    if snapshot.is_complete(category.key) {
+                        self.inventory_complete.insert(category.key);
+                    } else {
+                        self.inventory_complete.remove(&category.key);
+                    }
+                }
+                InventoryChange::CategoryRemoved(key) => {
+                    self.inventory_known.remove(key);
+                    self.inventory_complete.remove(key);
+                    self.inventory_failed.remove(key);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn request_inventory_refetches(&mut self, changes: &ChangeSet, snapshot: &InventorySnapshot) {
+        let handle = self.inventory_fetch.handle();
+        let mut queue_failures = 0usize;
+        for folder in &changes.refetch_categories {
+            if snapshot.category(*folder).is_none() {
+                continue;
+            }
+            self.inventory_complete.remove(folder);
+            if handle.refetch_folder(*folder).is_err() {
+                self.inventory_failed.insert(*folder);
+                self.inventory_last_failure = Some((*folder, InventoryFetchError::RequestFailed));
+                queue_failures = queue_failures.saturating_add(1);
+            }
+        }
+        if queue_failures > 0 {
+            tracing::warn!(queue_failures, "could not queue inventory folder refetches");
+        }
+    }
+
+    fn record_inventory_failure(&mut self, folder: CategoryKey, error: InventoryFetchError) {
+        self.inventory_failed.insert(folder);
+        self.inventory_last_failure = Some((folder, error.clone()));
+        tracing::warn!(owner = %folder.owner().id(), folder = %folder.id().uuid(), %error, "inventory folder fetch failed");
+    }
+
+    fn publish_inventory_status(&self) {
+        self.inventory_fetch.publish(InventoryLoadingStatus {
+            folders_known: self.inventory_known.len(),
+            folders_complete: self.inventory_complete.len(),
+            folders_failed: self.inventory_failed.len(),
+            background_done: self.inventory_background_done,
+            last_failure: self.inventory_last_failure.clone(),
+        });
+    }
+
     async fn finish(mut self) {
+        self.inventory_fetch.stop().await;
         self.recovery.cancel();
         self.reads.finish();
         drop(self.environments);
@@ -676,6 +823,30 @@ impl SessionDriver {
             tracing::warn!(simulator = simulator_id.get(), region, %error, "could not retire simulator world region on session shutdown");
         }
     }
+}
+
+fn apply_inventory_fetch(inventory: &mut Inventory, mut fetch: FolderFetch) -> Result<Option<ChangeSet>, InventoryError> {
+    let current = inventory.snapshot();
+    let stale = current.is_complete(fetch.folder)
+        && current.category(fetch.folder).is_some_and(|category| {
+            category.server_version.is_known() && fetch.version.is_known() && category.server_version.raw() > fetch.version.raw()
+        });
+    if stale {
+        return Ok(None);
+    }
+    for child in &mut fetch.children {
+        let InventoryChild::Category(incoming) = child else { continue };
+        let Some(existing) = current.category(incoming.key) else { continue };
+        if current.is_complete(incoming.key)
+            && existing.server_version.is_known()
+            && incoming.server_version.is_known()
+            && existing.server_version.raw() > incoming.server_version.raw()
+        {
+            incoming.server_version = existing.server_version;
+            incoming.server_descendent_count = existing.server_descendent_count;
+        }
+    }
+    inventory.apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children).map(Some)
 }
 
 #[tracing::instrument(name = "viewer.session", level = "info", skip_all)]
@@ -690,3 +861,7 @@ pub(crate) async fn drain_session(
 ) {
     SessionDriver::new(session, session_handle, runtime, mailbox, cancellation, credentials, cache).run().await;
 }
+
+#[cfg(test)]
+#[path = "driver_tests.rs"]
+mod tests;

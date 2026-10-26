@@ -15,7 +15,7 @@ use uuid::Uuid;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::{asset_coordinator::AssetHandle, session::experience_environment::EnvironmentInbox, world_reader::WorldReader};
 use crate::{
-    inventory::{FavoriteLocation, favorite_store::FavoriteStoreError, favorites::FavoritesError},
+    inventory::{FavoriteLocation, InventoryFetchHandle, favorite_store::FavoriteStoreError, favorites::FavoritesError},
     remembered_login::{CredentialStoreError, RememberedLogin},
     session::ChatMessage,
 };
@@ -146,6 +146,7 @@ pub(crate) struct SessionReadyUpdate {
     pub(crate) session: AgentSession,
     pub(crate) region_name: Option<String>,
     pub(crate) inventory_updates: watch::Receiver<Option<InventorySnapshot>>,
+    pub(crate) inventory_fetch: Option<InventoryFetchHandle>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) world_reader: WorldReader,
 }

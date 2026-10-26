@@ -40,6 +40,17 @@ impl Client {
         self.execute(operation, self.client.get(url.clone()), max_response_bytes).await
     }
 
+    pub(crate) async fn get_with_accept(
+        &self,
+        operation: &str,
+        url: &Url,
+        accept: &str,
+        max_response_bytes: usize,
+    ) -> Result<Response, Error> {
+        validate_http_url(url)?;
+        self.execute(operation, self.client.get(url.clone()).header(ACCEPT, accept), max_response_bytes).await
+    }
+
     pub(crate) async fn post(
         &self,
         operation: &str,

@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use ::inventory::InventorySnapshot;
+use ::inventory::{CategoryKey, FolderType, InventorySnapshot};
 use gpui::{AppContext, Context, Window};
 use gpui_component::{
     IndexPath,
@@ -24,7 +24,7 @@ use self::{
     spawn::{SpawnChoice, SpawnOption, spawn_options},
 };
 use crate::gui::views::chat::ChatScreen;
-use crate::inventory::{FavoriteLocation, favorite_store};
+use crate::inventory::{FavoriteLocation, InventoryFetchHandle, InventoryFetchRequestError, InventoryLoadingStatus, favorite_store};
 use crate::{
     gui::window_geometry::observe,
     remembered_login::{self, CredentialStoreError, RememberedLogin},
@@ -168,6 +168,7 @@ struct ActiveSession {
 struct ReadySession {
     session: AgentSession,
     inventory_updates: watch::Receiver<Option<InventorySnapshot>>,
+    inventory_fetch: Option<InventoryFetchHandle>,
 }
 
 impl ActiveSession {
@@ -181,6 +182,25 @@ impl ActiveSession {
 }
 
 impl LoginScreen {
+    pub fn request_inventory_folder(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
+        let handle = self
+            .active_session
+            .as_ref()
+            .and_then(ActiveSession::ready)
+            .and_then(|ready| ready.inventory_fetch.as_ref())
+            .ok_or(InventoryFetchRequestError::SessionEnded)?;
+        handle.request_folder(folder)
+    }
+
+    #[allow(dead_code)]
+    pub fn inventory_loading_status(&self) -> Option<watch::Receiver<InventoryLoadingStatus>> {
+        self.active_session
+            .as_ref()
+            .and_then(ActiveSession::ready)
+            .and_then(|ready| ready.inventory_fetch.as_ref())
+            .map(InventoryFetchHandle::status)
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>, shutdown_session: Arc<Mutex<Option<SessionHandle>>>) -> Self {
         let grid = Grid::default();
         let favorite_locations = Vec::new();
@@ -538,6 +558,14 @@ impl LoginScreen {
         let session = ready.session;
         let region_name = ready.region_name;
         let inventory_updates = ready.inventory_updates;
+        let inventory_fetch = ready.inventory_fetch;
+        let favorite_folder = {
+            let snapshot = inventory_updates.borrow();
+            snapshot.as_ref().and_then(|snapshot| {
+                let folder = snapshot.category_with_type(snapshot.roots().personal().owner(), FolderType::Favorite)?;
+                (!snapshot.is_complete(folder.key)).then_some(folder.key)
+            })
+        };
         let Some(active) = self.active_session.as_ref() else { return };
         let mailbox = active.presentation_mailbox.clone();
         self.login_phase = LoginPhase::Idle;
@@ -548,7 +576,12 @@ impl LoginScreen {
         let username = self.username.read(cx).value();
         self.favorites.prepare_session(session.grid, session.agent_id, &username, Some(mailbox), cx);
         if let Some(active) = &mut self.active_session {
-            active.ready = Some(ReadySession { session: session.clone(), inventory_updates });
+            active.ready = Some(ReadySession { session: session.clone(), inventory_updates, inventory_fetch });
+        }
+        if let Some(folder) = favorite_folder
+            && let Err(error) = self.request_inventory_folder(folder)
+        {
+            tracing::debug!(%error, "favorites folder fetch could not be prioritized");
         }
         self.chat_screen.update(cx, |chat, cx| {
             chat.set_session(session.clone(), cx);

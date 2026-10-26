@@ -139,8 +139,16 @@ pub(super) async fn post_capability(
     Ok(response)
 }
 
-pub(super) async fn get_capability_bytes(client: &http::Client, url: &Url, max_response_bytes: usize) -> Result<Response, http::Error> {
-    let response = client.get("capability_get", url, max_response_bytes).await?;
+pub(super) async fn get_capability_bytes(
+    client: &http::Client,
+    url: &Url,
+    accept: Option<&str>,
+    max_response_bytes: usize,
+) -> Result<Response, http::Error> {
+    let response = match accept {
+        Some(accept) => client.get_with_accept("capability_get", url, accept, max_response_bytes).await?,
+        None => client.get("capability_get", url, max_response_bytes).await?,
+    };
     if !response.status.is_success() || response.status == reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(http::Error::http_status(
             response.status,

@@ -4,27 +4,24 @@ use std::{
     str::from_utf8,
 };
 
-use ::inventory::{FolderType, InventorySnapshot};
+use ::inventory::{AssetType, CategoryKey, FolderType, InventoryChild, InventoryOwner, InventorySnapshot, InventoryType, Item};
 use futures::{StreamExt, TryStreamExt, stream};
-use llsd::{Map, Value};
 use network::{
     AgentSession,
     capabilities::{CapabilityUrl, Client},
 };
 use serde::{Deserialize, Serialize};
-use utils::RegionId;
+use utils::{FolderId, RegionId};
 use uuid::Uuid;
 use world::RegionHandle;
 
-use super::favorite_store::MAX_FAVORITES_PER_AGENT;
+use super::{
+    favorite_store::MAX_FAVORITES_PER_AGENT,
+    fetch::{fetch_single_folder, fetch_single_items},
+};
 use crate::session::{RegionGridCell, RegionLookup, RegionLookupError, map_request_coordinates};
 
-const REQUESTED_CAPABILITIES: [&str; 3] = ["FetchInventoryDescendents2", "FetchInventory2", "ViewerAsset"];
-const ASSET_TYPE_LINK: i32 = 24;
-const ASSET_TYPE_LINK_FOLDER: i32 = 25;
-const ASSET_TYPE_LANDMARK: i32 = 3;
-const INVENTORY_TYPE_LANDMARK: i32 = 3;
-const INVENTORY_TYPE_PERSON: i32 = 24;
+const REQUESTED_CAPABILITIES: [&str; 4] = ["InventoryAPIv3", "FetchInventoryDescendents2", "FetchInventory2", "ViewerAsset"];
 const REGION_LOOKUP_CONCURRENCY: usize = 4;
 const LANDMARK_FETCH_CONCURRENCY: usize = 3;
 const MAX_LANDMARK_ASSET_BYTES: usize = 16 * 1024;
@@ -67,13 +64,9 @@ pub enum FavoritesError {
     RequestCapabilities(String),
     CapabilityUnavailable(String),
     FetchFavoritesFolder(String),
-    InvalidFolderResponse,
-    FavoritesFolderNotReturned,
-    InvalidFavoritesFolder,
     InvalidFavoritesItemList,
     TooManyFolderItems,
     ResolveFavoriteItems(String),
-    InvalidLinkedItemsResponse,
     TooManyLinkedItems,
     FetchLandmarkAsset { name: String, detail: String },
     NoReadableFavoriteLandmarks,
@@ -87,15 +80,11 @@ impl Display for FavoritesError {
             Self::RequestCapabilities(detail) => write!(formatter, "Could not request inventory capabilities: {detail}"),
             Self::CapabilityUnavailable(name) => write!(formatter, "Second Life did not provide the {name} capability."),
             Self::FetchFavoritesFolder(detail) => write!(formatter, "Could not fetch the Favorites folder: {detail}"),
-            Self::InvalidFolderResponse => formatter.write_str("Second Life returned an invalid Favorites folder response."),
-            Self::FavoritesFolderNotReturned => formatter.write_str("Second Life did not return the Favorites folder."),
-            Self::InvalidFavoritesFolder => formatter.write_str("Second Life returned an invalid Favorites folder."),
             Self::InvalidFavoritesItemList => formatter.write_str("Second Life returned an invalid Favorites item list."),
             Self::TooManyFolderItems => {
                 write!(formatter, "Second Life returned more than {MAX_FAVORITES_PER_AGENT} items in the Favorites folder.")
             }
             Self::ResolveFavoriteItems(detail) => write!(formatter, "Could not resolve favorite landmarks: {detail}"),
-            Self::InvalidLinkedItemsResponse => formatter.write_str("Second Life returned an invalid linked-item response."),
             Self::TooManyLinkedItems => {
                 write!(formatter, "Second Life returned more than {MAX_FAVORITES_PER_AGENT} linked favorite items.")
             }
@@ -109,36 +98,6 @@ impl Display for FavoritesError {
 }
 
 impl std::error::Error for FavoritesError {}
-
-#[derive(Clone, Debug)]
-struct InventoryItem {
-    item_id: Option<Uuid>,
-    asset_id: Option<Uuid>,
-    inventory_type: Option<i32>,
-    asset_type: Option<i32>,
-    name: Option<String>,
-}
-
-impl InventoryItem {
-    fn from_llsd(value: &Value) -> Option<Self> {
-        let fields = value.as_map()?;
-        Some(Self {
-            item_id: uuid_field(fields.get("item_id")?),
-            asset_id: fields.get("asset_id").and_then(uuid_field),
-            inventory_type: fields.get("inv_type").and_then(inventory_type_field),
-            asset_type: fields.get("type").and_then(asset_type_field),
-            name: fields.get("name").and_then(string_field),
-        })
-    }
-
-    fn is_link(&self) -> bool {
-        self.asset_type == Some(ASSET_TYPE_LINK)
-    }
-
-    fn is_landmark(&self) -> bool {
-        self.asset_type == Some(ASSET_TYPE_LANDMARK) || self.inventory_type == Some(INVENTORY_TYPE_LANDMARK)
-    }
-}
 
 pub(crate) async fn load_favorites(
     capabilities: &Client,
@@ -196,16 +155,21 @@ pub async fn fetch_favorite_landmarks(
         .request_capabilities(&REQUESTED_CAPABILITIES)
         .await
         .map_err(|error| FavoritesError::RequestCapabilities(error.to_string()))?;
-    let descendents = capability(&capability_urls, "FetchInventoryDescendents2")?;
-    let fetch_items = capability(&capability_urls, "FetchInventory2")?;
+    let ais = capability_urls.get("InventoryAPIv3");
+    let descendents = capability_urls.get("FetchInventoryDescendents2");
+    if ais.is_none() && descendents.is_none() {
+        return Err(FavoritesError::CapabilityUnavailable("InventoryAPIv3 or FetchInventoryDescendents2".into()));
+    }
+    let fetch_items = capability_urls.get("FetchInventory2");
     let viewer_asset = capability(&capability_urls, "ViewerAsset")?;
-
-    let folder_response = capabilities
-        .post(&descendents, &folder_request(agent_id, favorite_folder_id))
-        .await
-        .map_err(|error| FavoritesError::FetchFavoritesFolder(error.to_string()))?;
-    let items = favorite_folder_items(&folder_response, favorite_folder_id)?;
-    let candidates = resolve_favorite_items(capabilities, &fetch_items, items).await?;
+    let owner = InventoryOwner::new(agent_id);
+    let folder = CategoryKey::new(owner, FolderId::new(favorite_folder_id));
+    let folder_response = fetch_single_folder(capabilities, ais, descendents, folder).await.map_err(|error| match error {
+        super::fetch::InventoryFetchError::InvalidResponse => FavoritesError::InvalidFavoritesItemList,
+        error => FavoritesError::FetchFavoritesFolder(error.to_string()),
+    })?;
+    let items = favorite_folder_items(folder_response.children)?;
+    let candidates = resolve_favorite_items(capabilities, ais, fetch_items, owner, items).await?;
     let candidate_count = candidates.len();
 
     let landmarks = stream::iter(candidates.into_iter().map(|(name, asset_id)| {
@@ -229,72 +193,36 @@ fn capability(capabilities: &HashMap<String, CapabilityUrl>, name: &str) -> Resu
     capabilities.get(name).cloned().ok_or_else(|| FavoritesError::CapabilityUnavailable(name.to_owned()))
 }
 
-fn folder_request(agent_id: Uuid, folder_id: Uuid) -> Value {
-    Value::Map(Map::from([(
-        "folders".into(),
-        Value::Array(vec![Value::Map(Map::from([
-            ("folder_id".into(), Value::Uuid(folder_id)),
-            ("owner_id".into(), Value::Uuid(agent_id)),
-            ("sort_order".into(), Value::Integer(0)),
-            ("fetch_folders".into(), Value::Boolean(true)),
-            ("fetch_items".into(), Value::Boolean(true)),
-        ]))]),
-    )]))
-}
-
-fn item_request(item_ids: &[Uuid]) -> Value {
-    Value::Map(Map::from([(
-        "items".into(),
-        Value::Array(item_ids.iter().copied().map(|item_id| Value::Map(Map::from([("item_id".into(), Value::Uuid(item_id))]))).collect()),
-    )]))
-}
-
-fn favorite_folder_items(response: &Value, requested_folder_id: Uuid) -> Result<Vec<InventoryItem>, FavoritesError> {
-    let folders = response
-        .as_map()
-        .and_then(|fields| fields.get("folders"))
-        .and_then(Value::as_array)
-        .ok_or(FavoritesError::InvalidFolderResponse)?;
-    let folder = folders
-        .iter()
-        .find(|folder| folder.as_map().and_then(|fields| fields.get("folder_id")).and_then(uuid_field) == Some(requested_folder_id))
-        .ok_or(FavoritesError::FavoritesFolderNotReturned)?;
-    let folder_fields = folder.as_map().ok_or(FavoritesError::InvalidFavoritesFolder)?;
-    let entries = match folder_fields.get("items").and_then(Value::as_array) {
-        Some(entries) => entries,
-        None if folder_fields.get("descendents").and_then(integer_field) == Some(0)
-            && matches!(
-                folder_fields.get("categories"),
-                Some(Value::Array(categories)) if categories.is_empty()
-            ) =>
-        {
-            return Ok(Vec::new());
+fn favorite_folder_items(children: Vec<InventoryChild>) -> Result<Vec<Item>, FavoritesError> {
+    let items = children.into_iter().filter_map(|child| match child {
+        InventoryChild::Item(item) => Some(item),
+        InventoryChild::Category(_) => None,
+    });
+    let mut output = Vec::new();
+    for item in items {
+        if output.len() >= MAX_FAVORITES_PER_AGENT {
+            return Err(FavoritesError::TooManyFolderItems);
         }
-        None => {
-            return Err(FavoritesError::InvalidFavoritesItemList);
-        }
-    };
-    if entries.len() > MAX_FAVORITES_PER_AGENT {
-        return Err(FavoritesError::TooManyFolderItems);
+        output.push(item);
     }
-
-    Ok(entries.iter().filter_map(InventoryItem::from_llsd).collect())
+    Ok(output)
 }
 
 async fn resolve_favorite_items(
     capabilities: &Client,
-    fetch_items: &CapabilityUrl,
-    items: Vec<InventoryItem>,
+    ais: Option<&CapabilityUrl>,
+    fetch_items: Option<&CapabilityUrl>,
+    owner: InventoryOwner,
+    items: Vec<Item>,
 ) -> Result<Vec<(String, Uuid)>, FavoritesError> {
-    let items_by_id: HashMap<Uuid, InventoryItem> = items.iter().filter_map(|item| item.item_id.map(|id| (id, item.clone()))).collect();
+    let items_by_id: HashMap<Uuid, Item> = items.iter().map(|item| (item.key.id().uuid(), item.clone())).collect();
     let mut links = Vec::new();
     let mut linked_item_ids = HashSet::new();
     for item in &items {
-        if item.is_link()
-            && let (Some(target_id), Some(name)) = (item.asset_id, item.name.as_ref())
-        {
+        if is_link(item) && !item.asset_id.uuid().is_nil() && !item.name.is_empty() {
+            let target_id = item.asset_id.uuid();
             linked_item_ids.insert(target_id);
-            links.push((name.clone(), target_id));
+            links.push((item.name.to_string(), target_id));
         }
     }
 
@@ -308,46 +236,46 @@ async fn resolve_favorite_items(
     let fetched_items = if unresolved_ids.is_empty() {
         Vec::new()
     } else {
-        let response = capabilities
-            .post(fetch_items, &item_request(&unresolved_ids))
+        let items = fetch_single_items(capabilities, ais, fetch_items, owner, &unresolved_ids)
             .await
             .map_err(|error| FavoritesError::ResolveFavoriteItems(error.to_string()))?;
-        let entries = response
-            .as_map()
-            .and_then(|fields| fields.get("items"))
-            .and_then(Value::as_array)
-            .ok_or(FavoritesError::InvalidLinkedItemsResponse)?;
-        if entries.len() > MAX_FAVORITES_PER_AGENT {
+        if items.len() > MAX_FAVORITES_PER_AGENT {
             return Err(FavoritesError::TooManyLinkedItems);
         }
-        entries.iter().filter_map(InventoryItem::from_llsd).collect()
+        items
     };
     let mut all_items = items_by_id;
-    all_items.extend(fetched_items.into_iter().filter_map(|item| item.item_id.map(|id| (id, item))));
+    all_items.extend(fetched_items.into_iter().map(|item| (item.key.id().uuid(), item)));
 
     let mut candidates = Vec::new();
     for item in items {
-        if item.is_link() || item.item_id.is_some_and(|id| linked_item_ids.contains(&id)) {
+        if is_link(&item) || linked_item_ids.contains(&item.key.id().uuid()) {
             continue;
         }
-        if item.is_landmark()
-            && let (Some(name), Some(asset_id)) = (item.name, item.asset_id)
-        {
-            candidates.push((name, asset_id));
+        if is_landmark(&item) && !item.asset_id.uuid().is_nil() {
+            candidates.push((item.name.to_string(), item.asset_id.uuid()));
         }
     }
     for (link_name, target_id) in links {
         if let Some(target) = all_items.get(&target_id)
-            && target.is_landmark()
-            && let Some(asset_id) = target.asset_id
+            && is_landmark(target)
+            && !target.asset_id.uuid().is_nil()
         {
-            candidates.push((link_name, asset_id));
+            candidates.push((link_name, target.asset_id.uuid()));
         }
     }
 
     let mut seen = HashSet::new();
     candidates.retain(|(name, asset_id)| seen.insert((name.clone(), *asset_id)));
     Ok(candidates)
+}
+
+fn is_link(item: &Item) -> bool {
+    item.asset_type == AssetType::Link
+}
+
+fn is_landmark(item: &Item) -> bool {
+    item.asset_type == AssetType::Landmark || item.inventory_type == InventoryType::Landmark
 }
 
 async fn fetch_landmark(capabilities: &Client, asset_url: CapabilityUrl, name: String) -> Result<Option<FavoriteLandmark>, FavoritesError> {
@@ -429,90 +357,142 @@ fn parse_region_handle(value: &str) -> Option<u64> {
     value.parse().ok().or_else(|| value.strip_prefix("0x").and_then(|hex| u64::from_str_radix(hex, 16).ok()))
 }
 
-fn uuid_field(value: &Value) -> Option<Uuid> {
-    match value {
-        Value::Uuid(uuid) => Some(*uuid),
-        Value::String(value) => Uuid::parse_str(value).ok(),
-        _ => None,
-    }
-}
-
-fn integer_field(value: &Value) -> Option<i32> {
-    match value {
-        Value::Integer(value) => Some(*value),
-        _ => None,
-    }
-}
-
-fn inventory_type_field(value: &Value) -> Option<i32> {
-    match value {
-        Value::String(value) => match value.as_str() {
-            "landmark" => Some(INVENTORY_TYPE_LANDMARK),
-            "person" => Some(INVENTORY_TYPE_PERSON),
-            _ => None,
-        },
-        _ => integer_field(value),
-    }
-}
-
-fn asset_type_field(value: &Value) -> Option<i32> {
-    match value {
-        Value::String(value) => match value.as_str() {
-            "landmark" => Some(ASSET_TYPE_LANDMARK),
-            "link" => Some(ASSET_TYPE_LINK),
-            "link_f" => Some(ASSET_TYPE_LINK_FOLDER),
-            _ => None,
-        },
-        _ => integer_field(value),
-    }
-}
-
-fn string_field(value: &Value) -> Option<String> {
-    match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Uri(value) => Some(value.as_str().to_owned()),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::assert_matches;
+    use std::{assert_matches, sync::Arc, time::Duration};
 
-    use llsd::{Map, Value};
-    use utils::RegionId;
+    use ::inventory::{
+        AssetType, CategoryKey, InventoryChild, InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo,
+        SaleType,
+    };
+    use llsd::{Map, Value, xml};
+    use network::capabilities::{CapabilityUrl, Client};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+        time::timeout,
+    };
+    use url::Url;
+    use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId, RegionId};
     use uuid::Uuid;
     use world::RegionHandle;
 
     use crate::inventory::favorite_store::MAX_FAVORITES_PER_AGENT;
 
     use super::{
-        FavoritesError, InventoryItem, LandmarkDestination, RegionGridCell, favorite_folder_items, global_position, parse_landmark_asset,
-        parse_position,
+        FavoritesError, LandmarkDestination, RegionGridCell, favorite_folder_items, global_position, is_link, parse_landmark_asset,
+        parse_position, resolve_favorite_items,
     };
 
-    fn inventory_item(inventory_type: Value, asset_type: Value) -> InventoryItem {
-        let value = Value::Map(Map::from([
-            ("item_id".into(), Value::Uuid(Uuid::nil())),
-            ("inv_type".into(), inventory_type),
-            ("type".into(), asset_type),
-        ]));
-        InventoryItem::from_llsd(&value).expect("inventory item fields")
+    fn inventory_item(inventory_type: InventoryType, asset_type: AssetType) -> Item {
+        let owner = InventoryOwner::new(Uuid::from_u128(1));
+        Item {
+            key: ItemKey::new(owner, ItemId::new(Uuid::from_u128(2))),
+            parent: CategoryKey::new(owner, FolderId::new(Uuid::from_u128(3))),
+            asset_id: AssetId::new(Uuid::nil()),
+            asset_type,
+            inventory_type,
+            flags: 0,
+            name: "favorite".into(),
+            description: "".into(),
+            created_at: 0,
+            permissions: Permissions {
+                creator: AvatarId::new(Uuid::nil()),
+                owner: AvatarId::new(Uuid::nil()),
+                group: GroupId::new(Uuid::nil()),
+                last_owner: AvatarId::new(Uuid::nil()),
+                base: PermissionMask::new(0),
+                owner_mask: PermissionMask::new(0),
+                group_mask: PermissionMask::new(0),
+                everyone: PermissionMask::new(0),
+                next_owner: PermissionMask::new(0),
+            },
+            sale: SaleInfo { sale_type: SaleType::NotForSale, price: 0 },
+        }
+    }
+
+    fn ais_landmark_response(item: Uuid, parent: CategoryKey, owner: InventoryOwner, asset: Uuid) -> Vec<u8> {
+        xml::to_vec(&Value::Map(Map::from([
+            ("item_id".into(), Value::Uuid(item)),
+            ("parent_id".into(), Value::Uuid(parent.id().uuid())),
+            ("owner_id".into(), Value::Uuid(owner.id())),
+            ("name".into(), Value::String("resolved landmark".into())),
+            ("asset_id".into(), Value::Uuid(asset)),
+            ("type".into(), Value::Integer(3)),
+            ("inv_type".into(), Value::Integer(3)),
+        ])))
+        .expect("encode AIS landmark item")
+    }
+
+    fn favorite_link(owner: InventoryOwner, parent: CategoryKey, link_id: Uuid, target: Uuid, name: &str) -> Item {
+        let mut item = inventory_item(InventoryType::Landmark, AssetType::Link);
+        item.key = ItemKey::new(owner, ItemId::new(link_id));
+        item.parent = parent;
+        item.asset_id = AssetId::new(target);
+        item.name = Arc::from(name);
+        item
+    }
+
+    async fn ais_item_peer(
+        missing: Uuid,
+        missing_status: u16,
+        valid_item: Vec<u8>,
+        request_count: usize,
+    ) -> (Url, CapabilityUrl, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind favorites loopback peer");
+        let address = listener.local_addr().expect("read favorites peer address");
+        let base = Url::parse(&format!("http://{address}")).expect("build favorites peer URL");
+        let seed = base.join("/seed").expect("build seed URL");
+        let ais = CapabilityUrl::parse(base.join("/ais").expect("build AIS URL").as_str()).expect("valid AIS capability");
+        let missing_path = format!("/ais/item/{missing}");
+        let task = tokio::spawn(async move {
+            for _ in 0..request_count {
+                let (mut stream, _) = listener.accept().await.expect("accept item request");
+                let mut request = Vec::new();
+                let mut buffer = [0; 2048];
+                loop {
+                    let read = stream.read(&mut buffer).await.expect("read item request");
+                    assert_ne!(read, 0, "item request ended before its headers");
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8(request).expect("HTTP request is UTF-8");
+                let path = request.lines().next().and_then(|line| line.split_whitespace().nth(1)).expect("request target");
+                let (status, reason, body) = if path == missing_path {
+                    let reason = match missing_status {
+                        403 => "Forbidden",
+                        404 => "Not Found",
+                        410 => "Gone",
+                        _ => panic!("unexpected missing status {missing_status}"),
+                    };
+                    (missing_status, reason, &[][..])
+                } else {
+                    (200, "OK", valid_item.as_slice())
+                };
+                let response = format!("HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                stream.write_all(response.as_bytes()).await.expect("write response headers");
+                stream.write_all(body).await.expect("write item response");
+            }
+        });
+        (seed, ais, task)
     }
 
     #[test]
     fn identifies_links_by_asset_type_not_inventory_type() {
-        let link = inventory_item(Value::String("landmark".into()), Value::String("link".into()));
-        let person = inventory_item(Value::String("person".into()), Value::String("person".into()));
-        let folder_link = inventory_item(Value::String("category".into()), Value::String("link_f".into()));
-        let landmark = inventory_item(Value::Integer(3), Value::Integer(3));
-        let numeric_link = inventory_item(Value::Integer(3), Value::Integer(24));
+        let link = inventory_item(InventoryType::Landmark, AssetType::Link);
+        let person = inventory_item(InventoryType::Person, AssetType::Person);
+        let folder_link = inventory_item(InventoryType::Category, AssetType::LinkFolder);
+        let landmark = inventory_item(InventoryType::Landmark, AssetType::Landmark);
+        let numeric_link = inventory_item(InventoryType::Landmark, AssetType::Link);
 
-        assert!(link.is_link());
-        assert!(!person.is_link());
-        assert!(!folder_link.is_link());
-        assert!(!landmark.is_link());
-        assert!(numeric_link.is_link());
+        assert!(is_link(&link));
+        assert!(!is_link(&person));
+        assert!(!is_link(&folder_link));
+        assert!(!is_link(&landmark));
+        assert!(is_link(&numeric_link));
     }
 
     #[test]
@@ -564,18 +544,49 @@ mod tests {
 
     #[test]
     fn oversized_favorites_folder_is_rejected_before_item_parsing() {
-        let folder_id = Uuid::from_u128(42);
-        let entries = vec![Value::Integer(0); MAX_FAVORITES_PER_AGENT + 1];
-        let response = Value::Map(Map::from([(
-            "folders".into(),
-            Value::Array(vec![Value::Map(Map::from([
-                ("folder_id".into(), Value::Uuid(folder_id)),
-                ("items".into(), Value::Array(entries)),
-            ]))]),
-        )]));
+        let item = inventory_item(InventoryType::Landmark, AssetType::Landmark);
+        let children = vec![InventoryChild::Item(item); MAX_FAVORITES_PER_AGENT + 1];
 
-        let error = favorite_folder_items(&response, folder_id).unwrap_err();
+        let error = favorite_folder_items(children).unwrap_err();
 
         assert_matches!(error, FavoritesError::TooManyFolderItems);
+    }
+
+    #[tokio::test]
+    async fn missing_ais_target_is_skipped() {
+        for missing_status in [404, 410] {
+            let owner = InventoryOwner::new(Uuid::from_u128(11));
+            let parent = CategoryKey::new(owner, FolderId::new(Uuid::from_u128(12)));
+            let valid_target = Uuid::from_u128(13);
+            let missing_target = Uuid::from_u128(14);
+            let landmark_asset = Uuid::from_u128(15);
+            let (seed, ais, peer) =
+                ais_item_peer(missing_target, missing_status, ais_landmark_response(valid_target, parent, owner, landmark_asset), 2).await;
+            let client = Client::new(seed).expect("active Tokio runtime");
+            let favorites = vec![
+                favorite_link(owner, parent, Uuid::from_u128(16), valid_target, "Valid"),
+                favorite_link(owner, parent, Uuid::from_u128(17), missing_target, "Deleted"),
+            ];
+
+            let candidates = resolve_favorite_items(&client, Some(&ais), None, owner, favorites)
+                .await
+                .expect("missing AIS item is absent while valid favorite resolves");
+
+            timeout(Duration::from_secs(5), peer).await.expect("favorites peer completion").expect("favorites peer task");
+            assert_eq!(candidates, vec![("Valid".to_owned(), landmark_asset)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn other_ais_item_failure_propagates() {
+        let owner = InventoryOwner::new(Uuid::from_u128(21));
+        let item_id = Uuid::from_u128(22);
+        let (seed, ais, peer) = ais_item_peer(item_id, 403, Vec::new(), 1).await;
+        let client = Client::new(seed).expect("active Tokio runtime");
+
+        let result = super::fetch_single_items(&client, Some(&ais), None, owner, &[item_id]).await;
+
+        std::assert_matches!(result, Err(crate::inventory::fetch::InventoryFetchError::RequestFailed));
+        timeout(Duration::from_secs(5), peer).await.expect("favorites peer completion").expect("favorites peer task");
     }
 }

@@ -5,6 +5,7 @@ use super::support::{
     Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, RecoveryReason, Region, RegionInfo, Shape,
     Status, Uuid, Vec3, add, camera, ids, move_root, positions, reply, settle, source, world,
 };
+use world::{FaceAppearance, SurfaceAppearance, TextureMapping};
 
 #[test]
 fn versions_fence_sessions_and_close() {
@@ -368,8 +369,11 @@ fn own_signed_dimensions() {
     let _ = world.patch_object(root).unwrap();
     let mut child = ObjectPatch::new(source(1, 4), NonZeroU32::new(2).unwrap());
     child.scale = Some(Vec3::new(-2.0, 3.0, 4.0));
+    child.surface_appearance =
+        Some(SurfaceAppearance::new(FaceAppearance { mapping: TextureMapping::Planar, ..Default::default() }, Vec::new()).unwrap());
     let _ = world.patch_object(child).unwrap();
     let (mut scene, mut view) = Reconciler::new(Budget::default());
+    scene.set_camera(camera(0.0));
     let mut now = Instant::now();
     settle(&mut scene, &mut view, &world, &mut now);
     let child = view.objects().find(|obj| obj.detail().summary.id == Uuid::from_u128(2)).unwrap();
@@ -378,6 +382,11 @@ fn own_signed_dimensions() {
     };
     assert_eq!(transform.pose.position.x, 12.0);
     assert_eq!(transform.scale, Vec3::new(-2.0, 3.0, 4.0));
+    let face = &child.materials().expect("scene keeps the authored planar mapping")[0];
+    assert_matches!(
+        &face.material,
+        assets::MaterialDescription::Legacy(material) if material.mapping == assets::TextureMapping::Planar
+    );
     let mut zero = ObjectPatch::new(source(1, 5), NonZeroU32::new(2).unwrap());
     zero.scale = Some(Vec3::new(0.0, 3.0, 4.0));
     let _ = world.patch_object(zero).unwrap();

@@ -55,6 +55,8 @@ mod tests {
 
     use super::*;
     use crate::geometry::{Instance, ShadingMode, fixtures};
+    use crate::material::{AlphaBehavior, FaceMaterial};
+    use assets::{LegacyMaterial, MaterialDescription, TextureMapping};
 
     #[test]
     fn instance_attributes_match_shader() {
@@ -75,12 +77,12 @@ mod tests {
     }
 
     #[test]
-    fn nonuniform_normals_upload() {
+    fn mirrored_normals_upload() {
         let (_scene, view, _) = fixtures::scene(255);
         let object = view.objects().next().expect("fixture object");
         let (_, mesh) = object.mesh().expect("fixture mesh");
         let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
-        let scale = Vec3::new(2.0, 3.0, 4.0);
+        let scale = Vec3::new(-2.0, 3.0, 4.0);
         let instance = Instance {
             mesh: mesh.clone(),
             position: DVec3::ZERO,
@@ -100,7 +102,7 @@ mod tests {
             )
         };
         let normal = Mat3::from_cols(column(0), column(1), column(2));
-        assert!(normal.x_axis.distance(Vec3::Y) < 1e-6);
+        assert!(normal.x_axis.distance(-Vec3::Y) < 1e-6);
         assert!(normal.y_axis.distance(Vec3::new(-2.0 / 3.0, 0.0, 0.0)) < 1e-6);
         assert!(normal.z_axis.distance(Vec3::Z * 0.5) < 1e-6);
         let local_normal = Vec3::new(1.0, 1.0, 0.0).normalize();
@@ -108,5 +110,37 @@ mod tests {
         let world_normal = normal * local_normal;
         let world_tangent = rotation * (scale * local_tangent);
         assert!(world_normal.dot(world_tangent).abs() < 1e-5);
+        let first_edge = rotation * (scale * Vec3::X);
+        let second_edge = rotation * (scale * Vec3::Y);
+        assert!((normal * Vec3::Z).dot(first_edge.cross(second_edge)) < 0.0, "mirroring reverses triangle winding, not outward normals");
+    }
+
+    #[test]
+    fn planar_instance_preserves_signed_scale() {
+        let (_scene, view, _) = fixtures::scene(255);
+        let object = view.objects().next().expect("fixture object");
+        let (_, mesh) = object.mesh().expect("fixture mesh");
+        let instance = Instance {
+            mesh: mesh.clone(),
+            position: DVec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::new(-2.0, 3.0, 4.0),
+            pickable: true,
+            faces: Vec::new(),
+            shading: ShadingMode::Studio,
+        };
+        let face = FaceMaterial {
+            slot: 0,
+            material: MaterialDescription::Legacy(LegacyMaterial { mapping: TextureMapping::Planar, ..LegacyMaterial::default() }),
+            legacy_state: None,
+            pbr_state: None,
+            alpha: AlphaBehavior::Opaque,
+            base_color_texture: None,
+        };
+        let params = FaceParams::new(Some(&face));
+        let bytes = packed_instance(&instance_base(&instance, DVec3::ZERO), &params, instance.scale);
+        let attributes: Vec<_> = bytes[112..].as_chunks::<4>().0.iter().map(|word| f32::from_le_bytes(*word)).collect();
+        assert_eq!(&attributes[12..16], &[0.0, 0.0, 0.0, 1.0], "planar mode reaches the shader");
+        assert_eq!(&attributes[16..20], &[-2.0, 3.0, 4.0, 0.0], "signed dimensions reach planar projection");
     }
 }

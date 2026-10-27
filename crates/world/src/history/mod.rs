@@ -65,6 +65,7 @@ pub enum WorldChange {
     RegionAdopted(Region),
     RegionUpdated(Region),
     EnvironmentUpdated(Region),
+    ParcelUpdated(Region),
     TerrainPatchUpdated { region: Region, patch: TerrainPatchId },
     WaterHeightUpdated(Region),
     RegionRetired { region: Region, entities_removed: usize },

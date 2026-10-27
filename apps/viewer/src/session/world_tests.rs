@@ -674,3 +674,17 @@ fn parent_reintroduction_cancels_child_retry() {
     let parent = state.entity_at(parent_address).expect("parent reintroduced");
     assert_eq!(child.parent(), Parent::Resolved(parent));
 }
+
+#[test]
+fn parcel_rejection_diagnostics_report_in_batches() {
+    let mut world = SessionWorld::new(viewer_world_limits());
+
+    for _ in 0..63 {
+        assert_eq!(world.record_parcel_rejection(), None);
+    }
+    assert_eq!(world.record_parcel_rejection(), Some(64));
+    for _ in 0..63 {
+        assert_eq!(world.record_parcel_rejection(), None);
+    }
+    assert_eq!(world.record_parcel_rejection(), Some(128));
+}

@@ -15,6 +15,8 @@ After login, the session reads the shared `inventory.sqlite` cache and validates
 
 Render's scene reconciliation reads bounded World pages and change journals through the viewer's `WorldReader` bridge. It combines accepted object, terrain, and environment state with available assets, then publishes batches for the viewport's `SceneView`. GPU drawing borrows that view; it does not read network messages or mutate World.
 
+The session intake converts LLUDP and EventQueue `ParcelProperties` into World observations, while LLUDP `ParcelOverlay` and region flag messages retain packet order. Parcel sequence IDs advance the current parcel across transports, so stale, selected, and collision replies cannot replace it. Only the primary simulator updates the agent's current parcel; overlays and region flags belong to every active region. World keeps parcel properties and the completed overlay beside the environment parcel selection. Overlay parts stay private until a complete grid can be published, so readers keep seeing the previous grid while a replacement is incomplete. A bounded `WorldReader` snapshot exposes the current parcel, overlay, and effective restrictions. Region retirement drops that region's parcel state.
+
 Transport coverage loss and scene recovery are separate concerns. Session intake tracks where simulator observations may be incomplete and requests recovery where supported. Scene reconciliation can rebuild its derived state after history loss, rejected reads, or capacity pressure, but cannot recover observations that World never received. Neither successful rendering nor a populated scene proves complete simulator state.
 
 ## State and execution
@@ -29,7 +31,7 @@ Each entry identifies a crate's responsibility, its important boundaries, and co
 
 ### `apps/viewer`
 
-Composes startup, GUI screens and primitives, persistence, and subsystem coordinators. Session intake is the sole owner of World and inventory, translating protocol messages into domain observations and deltas in source order and applying inventory fetches and edits. The inventory worker composes capability discovery and bounded network requests with protocol's AIS and legacy LLSD decoders; it owns retries and foreground priority, then returns bounded folder results to the session owner instead of mutating the model. The asset coordinator runs network fetches on service workers and reserved cache reads, decodes, and writes on blocking workers. Successful network decodes enqueue bounded cache writes; session shutdown drains work already in flight. The viewer opens one cache at the local default location and shares raw cached payloads across sessions, while each session keeps its own Store and route state. The scene feed schedules reconciliation and delivers sequenced batches to the viewport.
+Composes startup, GUI screens and primitives, persistence, and subsystem coordinators. Session intake is the sole owner of World and inventory, translating protocol messages into domain observations and deltas in source order and applying inventory fetches and edits. Parcel properties update World only for the primary simulator; overlays and region flags update the corresponding active region. The inventory worker composes capability discovery and bounded network requests with protocol's AIS and legacy LLSD decoders; it owns retries and foreground priority, then returns bounded folder results to the session owner instead of mutating the model. The asset coordinator runs network fetches on service workers and reserved cache reads, decodes, and writes on blocking workers. Successful network decodes enqueue bounded cache writes; session shutdown drains work already in flight. The viewer opens one cache at the local default location and shares raw cached payloads across sessions, while each session keeps its own Store and route state. The scene feed schedules reconciliation and delivers sequenced batches to the viewport.
 
 ### `crates/assets`
 
@@ -55,7 +57,7 @@ Owns login, session lifecycle, simulator links, and capability traffic. A sessio
 
 ### `crates/protocol`
 
-Owns Second Life wire types, LLUDP framing and field codecs, and typed messages grouped by protocol area. Each typed message owns its codec and allocation preflight; a declarative list generates message variants and ID dispatch. Build-generated schema metadata comes from a vendored, SHA-256-verified template and remains the fallback for untyped messages. External message spellings and layouts stay exact. Framing and allocation validation belong here, while domain acceptance belongs to World.
+Owns Second Life wire types, LLUDP framing and field codecs, and typed messages grouped by protocol area, including `ParcelOverlay` and `ParcelProperties`. Each typed message owns its codec and allocation preflight; a declarative list generates message variants and ID dispatch. Build-generated schema metadata comes from a vendored, SHA-256-verified template and remains the fallback for untyped messages. External message spellings and layouts stay exact. Framing and allocation validation belong here, while domain acceptance belongs to World.
 
 ### `crates/render`
 
@@ -85,7 +87,7 @@ Provides shared domain ID newtypes and small general-purpose helpers such as ato
 
 ### `crates/world`
 
-Owns accepted simulator state for regions, objects, relationships, poses, appearances, terrain, media, and environment. Mutations validate and plan before committing state and indexes. Full observations and partial patches share one field pipeline for validation, authority, and freshness; separate update clocks preserve untouched fields. PBR assignments remain distinct from face overrides. Agent handoff is an observation from the destination region that may move the self agent.
+Owns accepted simulator state for regions, objects, relationships, poses, appearances, terrain, media, environment, and parcel observations. Each active region owns its current parcel properties, complete parcel overlay, region flags, and effective restrictions alongside its environment selection. Parcel overlays publish atomically after all parts arrive, and stale property replies cannot replace the newer current parcel. Region retirement releases these observations with the region. Mutations validate and plan before committing state and indexes. Full observations and partial patches share one field pipeline for validation, authority, and freshness; separate update clocks preserve untouched fields. PBR assignments remain distinct from face overrides. Agent handoff is an observation from the destination region that may move the self agent.
 
 Bounded reads and change history expose current state, unresolved relationships, and whether more data is available. Consumers resynchronize when journal history has been evicted.
 

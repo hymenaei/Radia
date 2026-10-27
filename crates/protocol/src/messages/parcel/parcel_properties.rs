@@ -1,3 +1,5 @@
+use std::fmt;
+
 use math::Vec3;
 use uuid::Uuid;
 
@@ -19,7 +21,7 @@ pub struct ParcelProperties {
     pub parcel_environment_block: ParcelEnvironmentBlock,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct ParcelData {
     pub request_result: Option<i32>,
     pub sequence_id: Option<i32>,
@@ -70,6 +72,26 @@ pub struct ParcelData {
     pub region_deny_anonymous: Option<bool>,
     pub region_deny_identified: Option<bool>,
     pub region_deny_transacted: Option<bool>,
+}
+
+impl fmt::Debug for ParcelData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ParcelData")
+            .field("request_result", &self.request_result)
+            .field("sequence_id", &self.sequence_id)
+            .field("local_id", &self.local_id)
+            .field("owner_id", &self.owner_id)
+            .field("area", &self.area)
+            .field("parcel_flags", &self.parcel_flags)
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("music_url", &self.music_url.as_ref().map(|_| "<redacted>"))
+            .field("media_url", &self.media_url.as_ref().map(|_| "<redacted>"))
+            .field("group_id", &self.group_id)
+            .field("user_location", &self.user_location)
+            .field("user_look_at", &self.user_look_at)
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

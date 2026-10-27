@@ -137,6 +137,14 @@ impl Environments {
         [&self.region, &self.parcel].into_iter().flatten().map(|observed| observed.assignment.source_bytes()).sum()
     }
 
+    pub(crate) fn selected_parcel(&self) -> Option<ParcelLocalId> {
+        self.selected_parcel.map(|(parcel, _)| parcel)
+    }
+
+    pub(crate) fn parcel_fence(&self) -> Option<FieldStamp> {
+        self.parcel_fence
+    }
+
     fn assignment(&self, scope: EnvironmentScope) -> &Option<Observed> {
         match scope {
             EnvironmentScope::Region => &self.region,
@@ -180,21 +188,46 @@ impl World {
         let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
         let environment = &self.regions[&region].environment;
-        if !newer_field(fence, environment.parcel_fence) {
+        if !newer_field(fence, environment.parcel_fence()) {
             return Ok(RegionApplied::unchanged());
         }
-        if environment.selected_parcel.map(|(parcel, _)| parcel) == parcel {
+        if environment.selected_parcel() == parcel {
             self.regions.get_mut(&region).expect("active region").environment.parcel_fence = Some(fence);
             return Ok(RegionApplied::unchanged());
         }
         self.ensure_revision_available()?;
         let revision = WorldRevision(self.revision().get() + 1);
+        self.update_agent_parcel_selection_at_revision(region, parcel, Some(fence), false, revision);
+        Ok(self.publish_region_patch(WorldChange::EnvironmentUpdated(region)))
+    }
+
+    pub(crate) fn update_agent_parcel_selection_at_revision(
+        &mut self,
+        region: Region,
+        parcel: Option<ParcelLocalId>,
+        fence: Option<FieldStamp>,
+        supersedes_fence: bool,
+        revision: WorldRevision,
+    ) -> bool {
+        let environment = &self.regions[&region].environment;
+        let current_fence = environment.parcel_fence();
+        if fence.is_some_and(|fence| !supersedes_fence && !newer_field(fence, current_fence)) {
+            return false;
+        }
+        if environment.selected_parcel() == parcel {
+            if let Some(fence) = fence.filter(|fence| newer_field(*fence, current_fence)) {
+                self.regions.get_mut(&region).expect("active region").environment.parcel_fence = Some(fence);
+            }
+            return false;
+        }
         let environment = &mut self.regions.get_mut(&region).expect("active region").environment;
         self.environment_bytes -= environment.parcel.as_ref().map_or(0, |observed| observed.assignment.source_bytes());
         environment.parcel = None;
         environment.selected_parcel = parcel.map(|parcel| (parcel, revision));
-        environment.parcel_fence = Some(fence);
-        Ok(self.publish_region_patch(WorldChange::EnvironmentUpdated(region)))
+        if let Some(fence) = fence.filter(|fence| newer_field(*fence, current_fence)) {
+            environment.parcel_fence = Some(fence);
+        }
+        true
     }
 
     pub fn observe_environment(

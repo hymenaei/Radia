@@ -495,19 +495,22 @@ mod tests {
                     }
                     ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
                     ReconcileStep::Continue => {}
-                    ReconcileStep::Idle => return (feed.water_height, feed.agent().map(|object| object.detail().summary.entity)),
+                    ReconcileStep::Idle => {
+                        return (feed.water_height, feed.agent().map(|object| object.detail().summary.entity), feed.view.object_count());
+                    }
                     _ => panic!("expected scene reconciliation"),
                 }
             }
             panic!("scene did not settle");
         };
-        let (height, original) = hydrate(&world);
+        let (height, original, object_count) = hydrate(&world);
         assert_eq!(height, None, "another region's water must not supply the water height");
         let original = original.expect("the observed avatar is available before its water height");
+        assert_eq!(object_count, 1);
         let _ = world.observe_water_height(UpdateSource::new(Region::new(1), 2, Ordered(2), 0), 17.0).unwrap();
-        assert_eq!(hydrate(&world), (Some(24.0), Some(original)));
+        assert_eq!(hydrate(&world), (Some(24.0), Some(original), 1));
         let _ = world.retire_region(Region::new(1)).unwrap();
-        assert_eq!(hydrate(&world), (None, None), "retirement must remove both the avatar and previous water height");
+        assert_eq!(hydrate(&world), (None, None, 0), "retirement must remove the avatar from the scene and clear water height");
         let _ = world
             .observe_object(ObjectObservation::new(
                 UpdateSource::new(Region::new(2), 3, Ordered(3), 0),
@@ -517,7 +520,7 @@ mod tests {
                 ParentUpdate::Root,
             ))
             .unwrap();
-        let (height, replacement) = hydrate(&world);
+        let (height, replacement, _) = hydrate(&world);
         assert_eq!(height, Some(38.0), "the new avatar region supplies its own observed height");
         assert_ne!(replacement.expect("the replacement avatar is available"), original, "a retired entity must not remain cached");
     }

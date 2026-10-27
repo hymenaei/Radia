@@ -16,7 +16,7 @@ use world::{
     Applied,
     ApplyOutcome::{Deferred, Introduced, TombstoneRecorded, Unchanged},
     DeferredReason::AmbiguousOrder,
-    LocalAddress, ObjectObservation, Parent, Pose, Region, RegionHandle, UpdateSource,
+    LocalAddress, ObjectObservation, OrderEvidence, Parent, Pose, Region, RegionHandle, UpdateSource,
 };
 
 use crate::session::coordinator::events::{PendingWorldHandoff, WorldHandoff};
@@ -105,6 +105,65 @@ fn region_connection_lifecycle() {
     assert!(intake.region_for(simulator_id).is_none());
     assert!(intake.world().region(region).is_none());
     assert!(apply_world_event(&mut intake, &simulator_message(simulator_id, 1, region_handshake("late"))).is_none());
+}
+
+#[test]
+fn local_teleport_changes_only_the_authenticated_agents_position() {
+    let simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x1234);
+    let handle = RegionHandle::new(0x1111_0000_0000_0001);
+    let mut world = SessionWorld::new(viewer_world_limits());
+    world.set_self_agent(simulator, agent_id);
+    let region = world.register_simulator(simulator, Some(handle)).expect("register primary region");
+    assert!(apply_world_event(&mut world, &simulator_message(simulator, 1, agent_update(agent_id, 10, handle.get()))).is_some());
+
+    let entity = world.world().entity(agent_id).expect("self avatar is present");
+    let before = world.world().object(entity).expect("self avatar object").local_transform().expect("avatar transform");
+    let position = Vec3::new(34.0, 56.0, 78.0);
+    let source = UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0);
+    assert!(world.apply_teleport_local(simulator, agent_id, source, position).expect("self avatar address").is_ok());
+
+    let after = world.world().object(entity).expect("self avatar remains present").local_transform().expect("updated avatar transform");
+    assert_eq!(after.position, position);
+    assert_eq!(after.rotation, before.rotation);
+}
+
+#[test]
+fn teleport_retirement_removes_old_primary_and_neighbor_world_state() {
+    let primary = simulator_id();
+    let neighbor = simulator_id();
+    let destination = simulator_id();
+    let agent_id = Uuid::from_u128(0x1234);
+    let primary_handle = RegionHandle::new(0x1111_0000_0000_0001);
+    let neighbor_handle = RegionHandle::new(0x2222_0000_0000_0002);
+    let destination_handle = RegionHandle::new(0x3333_0000_0000_0003);
+    let mut world = SessionWorld::new(viewer_world_limits());
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut world, primary, agent_id);
+    world.register_simulator(neighbor, Some(neighbor_handle)).expect("register neighbor region");
+    world.register_simulator(destination, Some(destination_handle)).expect("register destination region");
+    let neighbor_object = Uuid::from_u128(0x2222);
+    let destination_object = Uuid::from_u128(0x3333);
+    assert!(apply_world_event(&mut world, &simulator_message(primary, 1, agent_update(agent_id, 10, primary_handle.get()))).is_some());
+    assert!(
+        apply_world_event(&mut world, &simulator_message(neighbor, 2, agent_update(neighbor_object, 20, neighbor_handle.get()))).is_some()
+    );
+    assert!(
+        apply_world_event(&mut world, &simulator_message(destination, 3, agent_update(destination_object, 30, destination_handle.get())))
+            .is_some()
+    );
+    assert!(world.world().entity(agent_id).is_some());
+    assert!(world.world().entity(neighbor_object).is_some());
+    assert!(world.world().entity(destination_object).is_some());
+
+    handoff.teleport_completed(&mut world, destination);
+
+    assert!(world.region_for(primary).is_none());
+    assert!(world.region_for(neighbor).is_none());
+    assert!(world.region_for(destination).is_some());
+    assert!(world.world().entity(agent_id).is_none());
+    assert!(world.world().entity(neighbor_object).is_none());
+    assert!(world.world().entity(destination_object).is_some());
 }
 
 #[test]

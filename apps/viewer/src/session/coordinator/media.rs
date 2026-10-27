@@ -318,6 +318,7 @@ mod tests {
             pending(),
             pending(),
             pending(),
+            pending(),
         )
         .await;
         let input::Input::Event(Some(event)) = input else { panic!("network intake continues after media failure") };
@@ -334,6 +335,7 @@ mod tests {
             ready(tokio::time::Instant::now()),
             pending(),
             pending(),
+            pending(),
         )
         .await;
         let input::Input::CameraTick = input else { panic!("ready camera tick was not selected") };
@@ -344,6 +346,7 @@ mod tests {
             pending(),
             pending(),
             ready(()),
+            pending(),
             pending(),
             pending(),
             pending(),
@@ -419,6 +422,7 @@ mod tests {
                     &mut reads,
                     std::future::ready(Some(Event::SimulatorConnected { simulator_id, region_handle: None, endpoint })),
                     media.next(),
+                    std::future::pending(),
                     std::future::pending(),
                     std::future::pending(),
                     std::future::pending(),

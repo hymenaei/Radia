@@ -6,8 +6,8 @@ use world::{
     Appearance, Applied, ApplyError,
     ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded},
     EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
-    OrderEvidence, ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesObservation, Region, RegionApplied, RegionHandle, RegionInfo,
-    RegionOutcome, TerrainSettings, UpdateSource, World, WorldLimits,
+    OrderEvidence, ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesObservation, Pose, Region, RegionApplied, RegionHandle,
+    RegionInfo, RegionOutcome, TerrainSettings, UpdateSource, World, WorldLimits,
 };
 
 use super::{
@@ -329,6 +329,10 @@ impl SessionWorld {
         self.regions.iter().find_map(|(simulator_id, known)| (*known == region).then_some(*simulator_id))
     }
 
+    pub(super) fn simulator_ids(&self) -> impl Iterator<Item = SimulatorId> + '_ {
+        self.regions.keys().copied()
+    }
+
     pub(super) fn update_region_metadata(&mut self, region: Region, info: RegionInfo) -> Result<(), ApplyError> {
         self.world.patch_region(region, info).map(|_| ())
     }
@@ -558,6 +562,22 @@ impl SessionWorld {
         self.world.object(entity).filter(|object| object.address().region() == region).map(|object| object.address())
     }
 
+    pub(super) fn apply_teleport_local(
+        &mut self,
+        simulator_id: SimulatorId,
+        agent_id: Uuid,
+        source: UpdateSource,
+        position: math::Vec3,
+    ) -> Option<Result<(), ApplyError>> {
+        let address = self.object_address(simulator_id, agent_id)?;
+        if source.region() != address.region() || !position.is_finite() {
+            return Some(Err(ApplyError::InvalidValue { field: "teleport_position" }));
+        }
+        let mut patch = ObjectPatch::new(source, address.local_id());
+        patch.pose = Some(Pose { position: Some(position), rotation: None });
+        Some(self.world.patch_object(patch).map(|_| ()))
+    }
+
     pub(super) fn complete_agent_handoff(
         &mut self,
         from_simulator: SimulatorId,
@@ -607,6 +627,17 @@ impl SessionWorld {
 
     pub(super) fn retire_all(&mut self) -> Vec<(SimulatorId, ApplyError)> {
         let simulator_ids = self.regions.keys().copied().collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for simulator_id in simulator_ids {
+            if let Err(error) = self.retire_simulator(simulator_id) {
+                failures.push((simulator_id, error));
+            }
+        }
+        failures
+    }
+
+    pub(super) fn retire_all_except(&mut self, keep: SimulatorId) -> Vec<(SimulatorId, ApplyError)> {
+        let simulator_ids = self.regions.keys().copied().filter(|simulator_id| *simulator_id != keep).collect::<Vec<_>>();
         let mut failures = Vec::new();
         for simulator_id in simulator_ids {
             if let Err(error) = self.retire_simulator(simulator_id) {

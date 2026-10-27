@@ -194,6 +194,16 @@ impl WorldHandoff {
         }
     }
 
+    pub(super) fn teleport_completed(&mut self, world: &mut SessionWorld, simulator_id: SimulatorId) {
+        self.observations.retain(|known, _| *known == simulator_id);
+        self.promoted_target = None;
+        self.world_primary = Some(simulator_id);
+        for (retired, error) in world.retire_all_except(simulator_id) {
+            let region = world.region_for(retired).map(|region| region.get());
+            tracing::warn!(simulator = retired.get(), region, %error, "could not retire region after teleport");
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn apply_event(
         &mut self,

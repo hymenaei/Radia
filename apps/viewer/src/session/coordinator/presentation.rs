@@ -12,6 +12,7 @@ use render::scene::Camera;
 use tokio::sync::watch;
 use uuid::Uuid;
 
+use crate::teleport::TeleportHandle;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::{
     agent_movement::MovementObservation, asset_coordinator::AssetHandle, session::experience_environment::EnvironmentInbox,
@@ -149,6 +150,8 @@ pub(crate) struct SessionReadyUpdate {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,
+    #[allow(dead_code)]
+    pub(crate) teleport: TeleportHandle,
     pub(crate) region_name: Option<String>,
     pub(crate) inventory_updates: watch::Receiver<Option<InventorySnapshot>>,
     pub(crate) inventory_fetch: Option<InventoryFetchHandle>,

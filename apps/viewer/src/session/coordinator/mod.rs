@@ -108,6 +108,7 @@ mod tests {
                 pending(),
                 pending(),
                 pending(),
+                pending(),
             )
             .await;
             match input {
@@ -168,6 +169,7 @@ mod tests {
             pending(),
             pending(),
             camera_tick.tick(),
+            pending(),
             pending(),
             pending(),
         )

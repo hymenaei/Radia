@@ -23,20 +23,29 @@ pub(in crate::scene) struct EnvironmentTextures {
     tickets: HashMap<AssetTicket, AssetId>,
     events: VecDeque<AssetChange>,
     dirty: BTreeSet<AssetId>,
+    revision: u64,
 }
 
 struct Entry {
     ticket: AssetTicket,
     handle: Option<TextureHandle>,
+    used: u64,
 }
 
 impl EnvironmentTextures {
     pub(in crate::scene) fn new() -> Self {
-        Self { entries: BTreeMap::new(), tickets: HashMap::new(), events: VecDeque::new(), dirty: BTreeSet::new() }
+        Self { entries: BTreeMap::new(), tickets: HashMap::new(), events: VecDeque::new(), dirty: BTreeSet::new(), revision: 0 }
     }
 
-    pub(in crate::scene) fn update(&mut self, environments: &BTreeMap<Region, RegionEnvironment>, viewer: Option<&ViewerEnvironment>) {
+    pub(in crate::scene) fn update(
+        &mut self,
+        environments: &BTreeMap<Region, RegionEnvironment>,
+        viewer: Option<&ViewerEnvironment>,
+        active: &BTreeMap<AssetId, Region>,
+    ) {
+        self.revision = self.revision.checked_add(1).expect("environment texture revision space exhausted");
         let mut desired = BTreeMap::new();
+        desired.extend(active.iter().map(|(id, region)| (*id, *region)));
         if let Some(viewer) = viewer {
             for setting in [viewer.day(), viewer.sky(), viewer.water()].into_iter().flatten() {
                 extend_desired(&mut desired, description_textures(setting.environment()), setting.region());
@@ -64,22 +73,29 @@ impl EnvironmentTextures {
             }
         }
 
-        let released: Vec<_> = self.entries.keys().filter(|id| !desired.contains_key(id)).copied().collect();
-        for id in released {
-            if let Some(entry) = self.entries.remove(&id) {
-                if self.tickets.remove(&entry.ticket).is_some() {
-                    self.events.push_back(AssetChange::Release(entry.ticket));
-                }
-                self.dirty.insert(id);
+        for id in desired.keys() {
+            if let Some(entry) = self.entries.get_mut(id) {
+                entry.used = self.revision;
             }
         }
 
+        let protected = desired.keys().copied().collect::<BTreeSet<_>>();
         for (id, region) in desired {
-            if self.entries.contains_key(&id) || self.entries.len() == MAX_TEXTURES {
+            if self.entries.contains_key(&id) {
                 continue;
             }
+            if self.entries.len() == MAX_TEXTURES {
+                let victim = self
+                    .entries
+                    .iter()
+                    .filter(|(candidate, _)| !protected.contains(*candidate))
+                    .min_by_key(|(candidate, entry)| (entry.used, **candidate))
+                    .map(|(candidate, _)| *candidate);
+                let Some(victim) = victim else { continue };
+                self.release(victim);
+            }
             let ticket = AssetTicket::new();
-            self.entries.insert(id, Entry { ticket, handle: None });
+            self.entries.insert(id, Entry { ticket, handle: None, used: self.revision });
             self.tickets.insert(ticket, id);
             self.events.push_back(AssetChange::Request(AssetRequest {
                 ticket,
@@ -87,6 +103,15 @@ impl EnvironmentTextures {
                 request: Request::Texture { id, size: TextureSize::new(TEXTURE_SIZE) },
                 priority: Priority::Background,
             }));
+        }
+    }
+
+    fn release(&mut self, id: AssetId) {
+        if let Some(entry) = self.entries.remove(&id) {
+            if self.tickets.remove(&entry.ticket).is_some() {
+                self.events.push_back(AssetChange::Release(entry.ticket));
+            }
+            self.dirty.insert(id);
         }
     }
 
@@ -127,11 +152,9 @@ impl EnvironmentTextures {
     }
 
     pub(in crate::scene) fn reset(&mut self) {
-        for (id, entry) in std::mem::take(&mut self.entries) {
-            if self.tickets.remove(&entry.ticket).is_some() {
-                self.events.push_back(AssetChange::Release(entry.ticket));
-            }
-            self.dirty.insert(id);
+        let ids = self.entries.keys().copied().collect::<Vec<_>>();
+        for id in ids {
+            self.release(id);
         }
         self.tickets.clear();
     }
@@ -211,4 +234,53 @@ fn override_water_textures(water: &Water) -> Vec<AssetId> {
 
 fn property_region(properties: &BTreeMap<String, crate::scene::ExperienceProperty>) -> Option<Region> {
     properties.values().next().map(|property| property.region())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn asset(value: u128) -> AssetId {
+        AssetId::new(Uuid::from_u128(value))
+    }
+
+    fn requested(manager: &mut EnvironmentTextures) -> Vec<AssetId> {
+        std::iter::from_fn(|| manager.event())
+            .filter_map(|event| match event {
+                AssetChange::Request(request) => match request.request {
+                    Request::Texture { id, .. } => Some(id),
+                    Request::PbrMaterial(_) | Request::LegacyMaterial(_) | Request::Environment(_) => None,
+                },
+                AssetChange::Release(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn active_cycle_textures_are_requested_before_background_descriptions() {
+        let mut manager = EnvironmentTextures::new();
+        let active = BTreeMap::from([(asset(1), Region::new(1)), (asset(2), Region::new(1))]);
+
+        manager.update(&BTreeMap::new(), None, &active);
+
+        assert_eq!(requested(&mut manager), [asset(1), asset(2)]);
+    }
+
+    #[test]
+    fn stale_textures_stay_resident_until_capacity_is_needed() {
+        let mut manager = EnvironmentTextures::new();
+        let region = Region::new(1);
+        let first = BTreeMap::from([(asset(1), region)]);
+        manager.update(&BTreeMap::new(), None, &first);
+        let old_ticket = manager.entries[&asset(1)].ticket;
+        requested(&mut manager);
+        manager.update(&BTreeMap::new(), None, &BTreeMap::from([(asset(2), region)]));
+
+        assert!(manager.entries.contains_key(&asset(1)));
+        assert!(
+            matches!(manager.event(), Some(AssetChange::Request(AssetRequest { request: Request::Texture { id, .. }, .. })) if id == asset(2))
+        );
+        assert!(manager.events.iter().all(|event| !matches!(event, AssetChange::Release(ticket) if *ticket == old_ticket)));
+    }
 }

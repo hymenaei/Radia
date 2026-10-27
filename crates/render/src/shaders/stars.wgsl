@@ -71,7 +71,7 @@ fn linear_to_srgb(color: vec3<f32>) -> vec3<f32> {
     let sample_next = textureSample(bloom_next_image, bloom_sampler, input.uv);
     let current = vec4<f32>(linear_to_srgb(sample_current.rgb), sample_current.a);
     let next = vec4<f32>(linear_to_srgb(sample_next.rgb), sample_next.a);
-    let bloom = mix(next, current, state.viewport_alpha_blend.w);
+    let bloom = mix(current, next, state.viewport_alpha_blend.w);
     let twinkle = abs(fract(input.screen_position.x + input.screen_position.y));
     let alpha = smoothstep(0.0, 0.9, input.alpha) * 32.0 * twinkle * bloom.a;
     return vec4<f32>(bloom.rgb * input.color, alpha);

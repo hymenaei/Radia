@@ -54,6 +54,11 @@ impl GeometryRenderer {
         }
         let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size);
         let same = self.prepared.as_ref().is_some_and(|prepared| prepared.key == key);
+        if same {
+            for texture in &self.visible_texture_requests {
+                self.textures.request(texture, self.epoch, Priority::Visible);
+            }
+        }
         let texture_progress =
             self.prepared.as_ref().is_some_and(|prepared| prepared.textures != self.textures.state()) || self.textures.uploading();
         if same && texture_progress {
@@ -77,6 +82,7 @@ impl GeometryRenderer {
         }
         self.requested_textures.clear();
         self.visible_textures.clear();
+        self.visible_texture_requests.clear();
         let visibility_started = Instant::now();
         self.stats = Stats::default();
         self.visible.clear();
@@ -145,10 +151,13 @@ impl GeometryRenderer {
         let requests_started = Instant::now();
         let mut request = |face: &FaceMaterial, priority| {
             let Some(texture) = face.base_color_texture.as_ref().and_then(|binding| binding.image()) else { return };
-            if priority == Priority::Visible {
-                self.visible_textures.insert(texture.id());
+            if priority == Priority::Visible && self.visible_textures.insert(texture.id()) {
+                self.visible_texture_requests.push(texture.clone());
             }
             if self.requested_textures.contains(&texture.id()) {
+                if priority == Priority::Visible {
+                    self.textures.request(texture, self.epoch, priority);
+                }
                 return;
             }
             if priority == Priority::Background && !texture.info().is_some_and(|info| info.size.into_iter().all(|edge| edge <= 32)) {

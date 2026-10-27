@@ -177,7 +177,7 @@ fn shade_water(
         water.normal_scale.w,
         punctual_normal,
         -view_eye,
-        transform_water_normal(normal_eye, tangent_eye, bitangent_eye, safe_normalize(light_direction_eye)),
+        safe_normalize(light_direction_eye),
     );
     let atmosphere_terms = object_atmosphere_terms(position_eye, light_direction_eye, light_norm_eye, atmosphere);
     let punctual_color = clamp(punctual.nl * (punctual.diffuse + punctual.specular), vec3<f32>(0.0), vec3<f32>(10.0))

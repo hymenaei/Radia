@@ -45,7 +45,7 @@ fn environment_keyframes_demand_unique_texture_ids_with_per_environment_and_glob
 }
 
 #[test]
-fn replacement_and_region_retirement_release_environment_texture_tickets() {
+fn replacement_and_region_retirement_retain_environment_texture_tickets_until_close() {
     let mut world = world();
     let region = Region::new(1);
     let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
@@ -72,8 +72,8 @@ fn replacement_and_region_retirement_release_environment_texture_tickets() {
     let _ = world.observe_environment(target, source(1, 2), second).unwrap();
     scene.notify_world_change();
     let replacement = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert!(replacement.released.contains(&first_request.ticket));
-    assert!(view.environment_texture(first_id).is_none());
+    assert!(!replacement.released.contains(&first_request.ticket));
+    assert_eq!(view.environment_texture(first_id).map(|texture| texture.asset()), Some(first_id));
     let second_request = replacement
         .environment_requested
         .iter()
@@ -84,8 +84,23 @@ fn replacement_and_region_retirement_release_environment_texture_tickets() {
     let _ = world.retire_region(region).unwrap();
     scene.notify_world_change();
     let retired = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert!(retired.released.contains(&second_request.ticket));
-    assert!(view.environment_texture(second_id).is_none());
+    assert!(!retired.released.contains(&first_request.ticket));
+    assert!(!retired.released.contains(&second_request.ticket));
+    assert_eq!(view.environment_texture(first_id).map(|texture| texture.asset()), Some(first_id));
+
+    scene.close();
+    let mut released = std::collections::HashSet::new();
+    for _ in 0..3 {
+        match scene.poll(now) {
+            ReconcileStep::Asset(AssetChange::Release(ticket)) => {
+                released.insert(ticket);
+            }
+            ReconcileStep::Closed => break,
+            _ => {}
+        }
+    }
+    assert!(released.contains(&first_request.ticket));
+    assert!(released.contains(&second_request.ticket));
 }
 
 #[test]

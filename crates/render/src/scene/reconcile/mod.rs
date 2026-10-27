@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use utils::AssetId;
 use uuid::Uuid;
 use world::{
     Entity, EnvironmentRead, LocalAddress, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_PAGE_ITEMS, ObjectDetailBatch, ObjectListPage,
@@ -137,6 +138,7 @@ pub struct Reconciler {
     publication: PublicationState,
     recovery: RecoveryState,
     viewer: ViewerEnvironments,
+    active_environment_textures: BTreeMap<AssetId, Region>,
     environment_identity: u64,
 }
 
@@ -158,6 +160,7 @@ impl Reconciler {
                 scan: VecDeque::new(),
             },
             viewer: ViewerEnvironments::new(budget.clone()),
+            active_environment_textures: BTreeMap::new(),
             publication: PublicationState {
                 viewer_version: 0,
                 sequence: 0,
@@ -210,6 +213,15 @@ impl Reconciler {
             self.sync_environment_textures();
         }
         Ok(())
+    }
+
+    pub fn set_active_environment_textures(&mut self, region: Option<Region>, textures: BTreeSet<AssetId>) {
+        let desired = region.map_or_else(BTreeMap::new, |region| textures.into_iter().map(|id| (id, region)).collect());
+        if self.active_environment_textures == desired {
+            return;
+        }
+        self.active_environment_textures = desired;
+        self.sync_environment_textures();
     }
 
     pub fn complete_asset(&mut self, ticket: AssetTicket, status: assets::Status) {
@@ -267,6 +279,7 @@ impl Reconciler {
 
     fn reset(&mut self) {
         self.preparation.reset(self.budget.clone());
+        self.active_environment_textures.clear();
         self.world.restart();
         self.state = SceneState::default();
         self.publication.dirty = DirtySet::default();
@@ -286,7 +299,7 @@ impl Reconciler {
 
     fn sync_environment_textures(&mut self) {
         let viewer = self.viewer.current();
-        self.preparation.environment_textures.update(&self.state.mirror.environments, viewer.as_ref());
+        self.preparation.environment_textures.update(&self.state.mirror.environments, viewer.as_ref(), &self.active_environment_textures);
         self.collect_environment_texture_changes();
     }
 

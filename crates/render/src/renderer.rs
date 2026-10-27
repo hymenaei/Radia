@@ -102,7 +102,7 @@ impl Renderer {
         if self.lost.load(Ordering::Acquire) {
             return Err(Error::DeviceLost);
         }
-        Ok(Progress { redraw: self.geometry.needs_frame(), pending: !status.is_queue_empty() })
+        Ok(Progress { redraw: self.geometry.needs_frame() || self.postprocess.needs_frame(), pending: !status.is_queue_empty() })
     }
     pub async fn new(target: impl Into<SurfaceTarget<'static>>, width: u32, height: u32) -> Result<Self, Error> {
         let instance =
@@ -299,6 +299,7 @@ impl Renderer {
         }
         let inverse_view_projection = scene.map_or(math::Mat4::IDENTITY, |(_, camera)| projection(camera, self.size).inverse());
         let camera_position = scene.map(|(_, camera)| camera.position());
+        let scene_version = scene.map_or(0, |(view, _)| view.sequence());
         self.postprocess.render(
             &self.queue,
             &mut encoder,
@@ -308,6 +309,8 @@ impl Renderer {
             camera_position,
             frame_input.water_height,
             inverse_view_projection,
+            scene_version,
+            self.geometry.texture_revision(),
         );
         {
             let pass = encoder.begin_render_pass(&RenderPassDescriptor {

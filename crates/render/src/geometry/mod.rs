@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assets::TextureId;
+use assets::{TextureHandle, TextureId};
 use math::{DVec3, Quat, Vec3, Vec4};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, IndexFormat, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
@@ -200,6 +200,7 @@ pub(crate) struct GeometryRenderer {
     textures: Textures,
     requested_textures: HashSet<TextureId>,
     visible_textures: HashSet<TextureId>,
+    visible_texture_requests: Vec<TextureHandle>,
     region_water_bounds: [Vec4; MAX_REGIONS],
     region_water_ids: [u128; MAX_REGIONS],
     region_water_count: usize,
@@ -227,6 +228,10 @@ impl GeometryRenderer {
             .is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.textures.geometry_state(), self.memory.mesh_state()))
             || self.textures.uploading()
     }
+
+    pub(crate) fn texture_revision(&self) -> u64 {
+        self.textures.state().revision
+    }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
@@ -240,6 +245,7 @@ impl GeometryRenderer {
             textures,
             requested_textures: HashSet::new(),
             visible_textures: HashSet::new(),
+            visible_texture_requests: Vec::new(),
             region_water_bounds: [Vec4::ZERO; MAX_REGIONS],
             region_water_ids: [0; MAX_REGIONS],
             region_water_count: 0,
@@ -321,6 +327,7 @@ impl GeometryRenderer {
         self.textures.set_soft_cap(mib);
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
+        self.sky.draw(pass);
         self.void_water.draw(pass);
         pass.set_vertex_buffer(1, self.instances.slice(..));
         let mut pipeline = None;
@@ -350,7 +357,6 @@ impl GeometryRenderer {
                 draw.first..draw.first + draw.count,
             );
         }
-        self.sky.draw(pass);
     }
 
     pub(crate) fn submitted(&mut self, frame: FrameLease) {

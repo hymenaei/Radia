@@ -1,6 +1,10 @@
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use assets::{EnvironmentDescription, EnvironmentSettings};
+use utils::AssetId;
 use world::Region;
 
 use super::{Evaluated, Local, Schedule, SkyState, Sources, TextureBlend, Transition, WaterState, evaluate, star_brightness};
@@ -132,6 +136,23 @@ impl ActiveEnvironment {
 
     pub fn evaluated(&self) -> Option<&Evaluated> {
         self.evaluated.as_ref()
+    }
+
+    pub fn texture_assets(&self) -> BTreeSet<AssetId> {
+        let Some(environment) = &self.evaluated else { return BTreeSet::new() };
+        let mut assets = BTreeSet::new();
+        for texture in [
+            environment.sky.sun.texture,
+            environment.sky.moon.texture,
+            environment.sky.clouds.texture,
+            environment.sky.bloom,
+            environment.sky.rainbow,
+            environment.sky.halo,
+            environment.water.normal_map,
+        ] {
+            assets.extend([texture.current, texture.next].into_iter().flatten());
+        }
+        assets
     }
 
     pub fn cloud_scroll(&self) -> [f32; 2] {
@@ -305,6 +326,37 @@ mod tests {
             max_region_name_bytes: 64,
             max_recovery_targets: 4,
         })
+    }
+
+    #[test]
+    fn active_environment_texture_demand_includes_current_and_next_assets() {
+        let sources = Sources {
+            base: None,
+            schedule: Schedule::default(),
+            experience_day: None,
+            experience_sky: None,
+            experience_water: None,
+            sky_override: None,
+            water_override: None,
+            local: None,
+        };
+        let mut evaluated = evaluate(&sources, 0.0, 0.0);
+        evaluated.sky.sun.texture = TextureBlend { current: Some(asset(1)), next: Some(asset(2)), factor: 0.25 };
+        evaluated.sky.moon.texture = TextureBlend { current: Some(asset(3)), next: Some(asset(4)), factor: 0.75 };
+        evaluated.sky.clouds.texture = TextureBlend { current: Some(asset(5)), next: None, factor: 0.0 };
+        evaluated.sky.bloom = TextureBlend { current: Some(asset(6)), next: Some(asset(7)), factor: 0.5 };
+        evaluated.sky.rainbow = TextureBlend { current: None, next: Some(asset(8)), factor: 1.0 };
+        evaluated.sky.halo = TextureBlend { current: Some(asset(9)), next: None, factor: 0.0 };
+        evaluated.water.normal_map = TextureBlend { current: Some(asset(10)), next: Some(asset(11)), factor: 0.5 };
+        let mut active = ActiveEnvironment { evaluated: Some(evaluated), ..Default::default() };
+
+        assert_eq!(active.texture_assets(), (1..=11).map(asset).collect());
+        active.evaluated = None;
+        assert!(active.texture_assets().is_empty());
+    }
+
+    fn asset(value: u128) -> AssetId {
+        AssetId::new(Uuid::from_u128(value))
     }
 
     fn settle(scene: &mut Reconciler, view: &mut SceneView, world: &World) {

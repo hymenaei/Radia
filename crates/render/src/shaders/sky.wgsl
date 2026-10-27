@@ -165,8 +165,8 @@ fn body_coordinates(ray_direction: vec3<f32>, body: vec4<f32>, right: vec3<f32>,
         return vec3<f32>(-1.0);
     }
     let enlarge = 1.0 - body_direction.z;
-    let half_width = enlarge * body.w * 1004.0 * 0.1 * radius * (1.0 + enlarge * 0.3);
-    let half_height = enlarge * body.w * 1004.0 * 0.1 * radius * (1.0 + enlarge * 0.2);
+    let half_width = body.w * 1004.0 * 0.1 * radius * (1.0 + enlarge * 0.3);
+    let half_height = body.w * 1004.0 * 0.1 * radius * (1.0 + enlarge * 0.2);
     if half_width <= 0.000001 || half_height <= 0.000001 {
         return vec3<f32>(-1.0);
     }
@@ -193,6 +193,7 @@ fn body_fragment_color(direction: vec3<f32>, body: vec4<f32>, right: vec3<f32>, 
     var next = textureSample(sun_next_image, environment_sampler, uv);
     if !is_sun {
         current = textureSample(moon_image, environment_sampler, uv);
+        next = textureSample(moon_next_image, environment_sampler, uv);
     }
     if is_sun {
         let textured = max(sky.texture_flags.x, sky.texture_flags.y) > 0.5;
@@ -206,7 +207,11 @@ fn body_fragment_color(direction: vec3<f32>, body: vec4<f32>, right: vec3<f32>, 
     if !textured {
         discard;
     }
-    let texture_color = vec4<f32>(linear_to_srgb(current.rgb), current.a);
+    let texture_color = mix(
+        vec4<f32>(linear_to_srgb(current.rgb), current.a),
+        vec4<f32>(linear_to_srgb(next.rgb), next.a),
+        sky.blends.y,
+    );
     if texture_color.a <= 2.0 / 255.0 {
         discard;
     }

@@ -15,7 +15,7 @@ const DECODE_DENSITY_CAP: u128 = 4096;
 const MAX_OBSERVED_DECODE_MICROS: u64 = 30_000_000;
 
 pub(crate) struct DecodeCosts {
-    micros: [AtomicU64; 4],
+    micros: [AtomicU64; 5],
 }
 
 impl Default for DecodeCosts {
@@ -46,6 +46,8 @@ impl DecodeCosts {
             2
         } else if namespace == NamespaceId::new(3) {
             3
+        } else if namespace == NamespaceId::new(4) {
+            4
         } else {
             return 0;
         };
@@ -97,6 +99,7 @@ fn kind_index(kind: Kind) -> usize {
         Kind::PbrMaterial => 1,
         Kind::LegacyMaterial => 2,
         Kind::Environment => 3,
+        Kind::Mesh => 4,
     }
 }
 
@@ -141,6 +144,18 @@ mod tests {
         let entry = candidate(3, 512 * 1024, 900, 2, Kind::Texture);
         let cheap = score_candidate(entry, 1000, 0);
         let expensive = score_candidate(entry, 1000, 120_000);
+
+        assert!(expensive.value > cheap.value);
+    }
+
+    #[test]
+    fn mesh_decode_cost_is_scored() {
+        let costs = Arc::new(DecodeCosts::default());
+        let policy = AssetEvictionPolicy::new(Arc::clone(&costs));
+        let entry = candidate(4, 512 * 1024, 900, 2, Kind::Mesh);
+        let cheap = policy.score(entry, 1000);
+        costs.observe(Kind::Mesh, 120_000);
+        let expensive = policy.score(entry, 1000);
 
         assert!(expensive.value > cheap.value);
     }

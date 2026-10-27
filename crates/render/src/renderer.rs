@@ -12,9 +12,9 @@ use egui_wgpu::{RendererOptions, ScreenDescriptor};
 use math::DVec3;
 use wgpu::{
     AdapterInfo, Backends, Color, CommandEncoderDescriptor, CreateSurfaceError, CurrentSurfaceTexture, Device, DeviceDescriptor,
-    ErrorFilter, InstanceDescriptor, LoadOp, Operations, PollError, PollType, PowerPreference, PresentMode, Queue,
-    RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor, RequestAdapterError, RequestAdapterOptions,
-    RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureViewDescriptor,
+    DisplayAndWindowHandle, ErrorFilter, Instance, InstanceDescriptor, LoadOp, Operations, PollError, PollType, PowerPreference,
+    PresentMode, Queue, RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor, RequestAdapterError,
+    RequestAdapterOptions, RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, TextureViewDescriptor,
 };
 
 use crate::geometry::{GeometryRenderer, PickError, Stats};
@@ -70,11 +70,13 @@ impl error::Error for Error {
 }
 
 pub struct Renderer {
+    instance: Instance,
+    surface_target: Arc<dyn DisplayAndWindowHandle + Send + Sync>,
     surface: Surface<'static>,
     device: Device,
     queue: Queue,
     config: SurfaceConfiguration,
-    size: [u32; 2],
+    surface_state: SurfaceState,
     info: AdapterInfo,
     lost: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<wgpu::Error>>>,
@@ -100,10 +102,10 @@ impl Renderer {
         }
         Ok(Progress { redraw: self.geometry.needs_frame(), pending: !status.is_queue_empty() })
     }
-    pub async fn new(target: impl Into<SurfaceTarget<'static>>, width: u32, height: u32) -> Result<Self, Error> {
+    pub async fn new(surface_target: Arc<dyn DisplayAndWindowHandle + Send + Sync>, width: u32, height: u32) -> Result<Self, Error> {
         let instance =
             wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
-        let surface = instance.create_surface(target).map_err(Error::Surface)?;
+        let surface = instance.create_surface(Arc::clone(&surface_target)).map_err(Error::Surface)?;
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
                 power_preference: PowerPreference::HighPerformance,
@@ -146,7 +148,20 @@ impl Renderer {
         if let Some(error) = scope.pop().await {
             return Err(Error::Gpu(error));
         }
-        let mut renderer = Self { surface, device, queue, config, size: [0, 0], info, lost, failure, overlay, geometry };
+        let mut renderer = Self {
+            instance,
+            surface_target,
+            surface,
+            device,
+            queue,
+            config,
+            surface_state: SurfaceState::default(),
+            info,
+            lost,
+            failure,
+            overlay,
+            geometry,
+        };
         renderer.resize(width, height);
         Ok(renderer)
     }
@@ -177,16 +192,9 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.size = [width, height];
-        if width == 0 || height == 0 || self.lost.load(Ordering::Acquire) {
-            return;
+        if self.surface_state.resize(width, height) == SurfaceResize::Configure {
+            self.configure_surface();
         }
-        if width > self.device.limits().max_texture_dimension_2d || height > self.device.limits().max_texture_dimension_2d {
-            return;
-        }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
     }
 
     pub fn draw(
@@ -195,7 +203,7 @@ impl Renderer {
         scene: Option<(&SceneView, Camera)>,
         water_height: Option<f64>,
         before_present: impl FnOnce(),
-    ) -> Result<bool, Error> {
+    ) -> Result<FrameOutcome, Error> {
         for (id, deltas) in overlay.textures.set.drain() {
             for delta in deltas {
                 self.overlay.update_texture(&self.device, &self.queue, id, &delta);
@@ -214,37 +222,34 @@ impl Renderer {
         scene: Option<(&SceneView, Camera)>,
         water_height: Option<f64>,
         before_present: impl FnOnce(),
-    ) -> Result<bool, Error> {
+    ) -> Result<FrameOutcome, Error> {
         self.poll()?;
-        if self.size.contains(&0) {
-            return Ok(false);
-        }
-        if self.size.into_iter().any(|n| n > self.device.limits().max_texture_dimension_2d) {
+        let Some(size) = self.surface_state.size() else {
+            return Ok(FrameOutcome::Retry);
+        };
+        if size.into_iter().any(|n| n > self.device.limits().max_texture_dimension_2d) {
             return Err(Error::UnsupportedSurfaceSize);
         }
         let Some(admission) = self.geometry.admit() else {
-            return Ok(false);
+            return Ok(FrameOutcome::Retry);
         };
         let (frame, reconfigure) = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) => (frame, false),
             CurrentSurfaceTexture::Suboptimal(frame) => (frame, true),
-            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return Ok(false),
-            CurrentSurfaceTexture::Outdated => {
-                self.resize(self.size[0], self.size[1]);
-                return Ok(false);
-            }
-            CurrentSurfaceTexture::Lost | CurrentSurfaceTexture::Validation => {
-                return Err(Error::SurfaceLost);
-            }
+            CurrentSurfaceTexture::Timeout => return self.surface_failure(SurfaceFailure::Timeout),
+            CurrentSurfaceTexture::Occluded => return self.surface_failure(SurfaceFailure::Occluded),
+            CurrentSurfaceTexture::Outdated => return self.surface_failure(SurfaceFailure::Outdated),
+            CurrentSurfaceTexture::Lost => return self.surface_failure(SurfaceFailure::Lost),
+            CurrentSurfaceTexture::Validation => return self.surface_failure(SurfaceFailure::Validation),
         };
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("Scene frame") });
-        let screen = ScreenDescriptor { size_in_pixels: self.size, pixels_per_point: overlay.pixels_per_point };
+        let screen = ScreenDescriptor { size_in_pixels: size, pixels_per_point: overlay.pixels_per_point };
         let commands = self.overlay.update_buffers(&self.device, &self.queue, &mut encoder, &overlay.primitives, &screen);
         let depth = if let Some((scene, camera)) = scene {
-            let depth = self.geometry.depth(&self.device, self.size);
+            let depth = self.geometry.depth(&self.device, size);
             if depth.is_some() {
-                self.geometry.prepare(&self.device, &mut encoder, scene, camera, self.size, water_height);
+                self.geometry.prepare(&self.device, &mut encoder, scene, camera, size, water_height);
             }
             depth
         } else {
@@ -291,10 +296,141 @@ impl Renderer {
         before_present();
         self.queue.present(frame);
         if reconfigure {
-            self.resize(self.size[0], self.size[1]);
+            self.surface_state.invalidate_configuration();
+            self.configure_surface();
         }
-        Ok(true)
+        Ok(FrameOutcome::Presented)
     }
+
+    fn surface_failure(&mut self, failure: SurfaceFailure) -> Result<FrameOutcome, Error> {
+        let mut surface_state = std::mem::take(&mut self.surface_state);
+        let result = surface_state.recover(failure, self);
+        self.surface_state = surface_state;
+        result
+    }
+
+    fn configure_surface(&mut self) {
+        let mut surface_state = std::mem::take(&mut self.surface_state);
+        surface_state.configure(self);
+        self.surface_state = surface_state;
+    }
+
+    fn configure_surface_size(&mut self, [width, height]: [u32; 2]) -> bool {
+        if self.lost.load(Ordering::Acquire)
+            || width > self.device.limits().max_texture_dimension_2d
+            || height > self.device.limits().max_texture_dimension_2d
+        {
+            return false;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+        true
+    }
+}
+
+impl SurfaceRecoveryTarget for Renderer {
+    fn configure(&mut self, size: [u32; 2]) -> bool {
+        self.configure_surface_size(size)
+    }
+
+    fn recreate(&mut self, size: [u32; 2]) -> Result<bool, Error> {
+        self.surface = self.instance.create_surface(Arc::clone(&self.surface_target)).map_err(Error::Surface)?;
+        Ok(self.configure_surface_size(size))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameOutcome {
+    Presented,
+    Retry,
+    Occluded,
+}
+
+#[derive(Default)]
+struct SurfaceState {
+    size: Option<[u32; 2]>,
+    configured_size: Option<[u32; 2]>,
+}
+
+impl SurfaceState {
+    fn resize(&mut self, width: u32, height: u32) -> SurfaceResize {
+        if width == 0 || height == 0 {
+            self.size = None;
+            self.configured_size = None;
+            SurfaceResize::Minimized
+        } else {
+            self.size = Some([width, height]);
+            self.configured_size = None;
+            SurfaceResize::Configure
+        }
+    }
+
+    fn size(&self) -> Option<[u32; 2]> {
+        self.size
+    }
+
+    fn pending_configuration(&self) -> Option<[u32; 2]> {
+        self.size.filter(|size| self.configured_size != Some(*size))
+    }
+
+    fn mark_configured(&mut self, size: [u32; 2]) {
+        self.configured_size = Some(size);
+    }
+
+    fn invalidate_configuration(&mut self) {
+        self.configured_size = None;
+    }
+
+    fn configure(&mut self, target: &mut impl SurfaceRecoveryTarget) {
+        if let Some(size) = self.pending_configuration()
+            && target.configure(size)
+        {
+            self.mark_configured(size);
+        }
+    }
+
+    fn recover(&mut self, failure: SurfaceFailure, target: &mut impl SurfaceRecoveryTarget) -> Result<FrameOutcome, Error> {
+        match failure {
+            SurfaceFailure::Timeout => Ok(FrameOutcome::Retry),
+            SurfaceFailure::Occluded => Ok(FrameOutcome::Occluded),
+            SurfaceFailure::Outdated => {
+                self.invalidate_configuration();
+                self.configure(target);
+                Ok(FrameOutcome::Retry)
+            }
+            SurfaceFailure::Lost => {
+                self.invalidate_configuration();
+                if let Some(size) = self.size
+                    && target.recreate(size)?
+                {
+                    self.mark_configured(size);
+                }
+                Ok(FrameOutcome::Retry)
+            }
+            SurfaceFailure::Validation => Err(Error::SurfaceLost),
+        }
+    }
+}
+
+trait SurfaceRecoveryTarget {
+    fn configure(&mut self, size: [u32; 2]) -> bool;
+    fn recreate(&mut self, size: [u32; 2]) -> Result<bool, Error>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SurfaceResize {
+    Minimized,
+    Configure,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SurfaceFailure {
+    Timeout,
+    Occluded,
+    Outdated,
+    Lost,
+    Validation,
 }
 
 pub struct Overlay {
@@ -327,10 +463,84 @@ impl Retirement {
 
 #[cfg(test)]
 mod tests {
+    use super::{Error, FrameOutcome, SurfaceFailure, SurfaceRecoveryTarget, SurfaceResize, SurfaceState};
     use wgpu::naga::{
         front::wgsl,
         valid::{Capabilities, ValidationFlags, Validator},
     };
+
+    #[derive(Default)]
+    struct TestSurface {
+        configured_size: Option<[u32; 2]>,
+        recreations: usize,
+    }
+
+    impl SurfaceRecoveryTarget for TestSurface {
+        fn configure(&mut self, size: [u32; 2]) -> bool {
+            self.configured_size = Some(size);
+            true
+        }
+
+        fn recreate(&mut self, size: [u32; 2]) -> Result<bool, Error> {
+            self.recreations += 1;
+            self.configured_size = None;
+            Ok(self.configure(size))
+        }
+    }
+
+    #[test]
+    fn restore_requests_configuration() {
+        let mut state = SurfaceState::default();
+        let mut surface = TestSurface::default();
+        assert_eq!(state.resize(0, 0), SurfaceResize::Minimized);
+        assert_eq!(state.size(), None);
+        assert_eq!(state.resize(1280, 720), SurfaceResize::Configure);
+        state.configure(&mut surface);
+        assert_eq!(surface.configured_size, Some([1280, 720]));
+        assert_eq!(state.pending_configuration(), None);
+    }
+
+    #[test]
+    fn outdated_surface_is_reconfigured() {
+        let (mut state, mut surface) = configured_surface();
+        std::assert_matches!(state.recover(SurfaceFailure::Outdated, &mut surface), Ok(FrameOutcome::Retry));
+        assert_eq!(surface.configured_size, Some([1280, 720]));
+        assert_eq!(surface.recreations, 0);
+        assert_eq!(state.pending_configuration(), None);
+    }
+
+    #[test]
+    fn lost_surface_is_recreated_and_reconfigured() {
+        let (mut state, mut surface) = configured_surface();
+        std::assert_matches!(state.recover(SurfaceFailure::Lost, &mut surface), Ok(FrameOutcome::Retry));
+        assert_eq!(surface.recreations, 1);
+        assert_eq!(surface.configured_size, Some([1280, 720]));
+        assert_eq!(state.pending_configuration(), None);
+    }
+
+    #[test]
+    fn occlusion_waits_for_visibility_and_timeout_retries() {
+        let (mut state, mut surface) = configured_surface();
+        std::assert_matches!(state.recover(SurfaceFailure::Occluded, &mut surface), Ok(FrameOutcome::Occluded));
+        std::assert_matches!(state.recover(SurfaceFailure::Timeout, &mut surface), Ok(FrameOutcome::Retry));
+        assert_eq!(surface.configured_size, Some([1280, 720]));
+        assert_eq!(surface.recreations, 0);
+        assert_eq!(state.pending_configuration(), None);
+    }
+
+    #[test]
+    fn validation_failure_requests_renderer_recovery() {
+        let (mut state, mut surface) = configured_surface();
+        std::assert_matches!(state.recover(SurfaceFailure::Validation, &mut surface), Err(Error::SurfaceLost));
+    }
+
+    fn configured_surface() -> (SurfaceState, TestSurface) {
+        let mut state = SurfaceState::default();
+        state.resize(1280, 720);
+        let mut surface = TestSurface::default();
+        state.configure(&mut surface);
+        (state, surface)
+    }
 
     #[test]
     fn shaders_validate() {

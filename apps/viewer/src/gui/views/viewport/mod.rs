@@ -399,6 +399,11 @@ impl ApplicationHandler for WindowApp {
                     active.resize(size.width, size.height);
                 }
             }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                if let Some(active) = &mut self.active {
+                    active.resize_to_window();
+                }
+            }
             WindowEvent::Occluded(occluded) => {
                 if let Some(active) = &mut self.active {
                     active.set_occluded(occluded);

@@ -8,7 +8,7 @@ use std::{
 use egui::{Context, DragValue, Slider, ViewportId};
 use futures::executor::block_on;
 use render::scene;
-use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
+use render::{CompressionQuality, FrameOutcome, Overlay, Renderer, Retirement, TextureCompletion};
 use tracing::Instrument;
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
@@ -27,6 +27,7 @@ use crate::{
 };
 
 const RECOVERY_DELAY: Duration = Duration::from_millis(500);
+const SURFACE_PROBE_INTERVAL: Duration = Duration::from_millis(250);
 pub(super) const MAX_RECOVERIES: u32 = 3;
 
 #[derive(Debug)]
@@ -70,7 +71,7 @@ struct DebugUiFrame {
 
 pub(super) struct SceneWindow {
     wake: Arc<SharedWindowState>,
-    dirty: bool,
+    presentation: PresentationState,
     retired: Option<Retirement>,
     texture_sender: mpsc::SyncSender<TextureCompletion>,
     texture_receiver: mpsc::Receiver<TextureCompletion>,
@@ -85,7 +86,6 @@ pub(super) struct SceneWindow {
     frame_work: Duration,
     next_frame: Instant,
     dpi: f64,
-    occluded: bool,
     ready: bool,
     recoveries: u32,
     recovery: PresentationRecovery,
@@ -116,7 +116,7 @@ impl SceneWindow {
         let (egui, platform) = debug_ui(&window);
         let dpi = window.scale_factor();
         let size = window.inner_size();
-        let renderer = block_on(Renderer::new(Arc::clone(&window), size.width, size.height)).map_err(SceneWindowError::Renderer)?;
+        let renderer = block_on(Renderer::new(window.clone(), size.width, size.height)).map_err(SceneWindowError::Renderer)?;
         let info = renderer.adapter_info();
         tracing::info!(backend = ?info.backend, gpu = %info.name, driver = %info.driver, driver_info = %info.driver_info, "scene GPU initialized");
         window.set_visible(true);
@@ -125,7 +125,7 @@ impl SceneWindow {
         let (texture_sender, texture_receiver) = mpsc::sync_channel(2);
         Ok(Self {
             wake,
-            dirty: true,
+            presentation: PresentationState::new(size.width, size.height),
             retired: None,
             texture_sender,
             texture_receiver,
@@ -140,7 +140,6 @@ impl SceneWindow {
             frame_work: Duration::ZERO,
             next_frame: now,
             dpi,
-            occluded: false,
             ready: false,
             recoveries: 0,
             recovery: PresentationRecovery::default(),
@@ -161,7 +160,7 @@ impl SceneWindow {
     }
 
     pub(super) fn mark_dirty(&mut self) {
-        self.dirty = true;
+        self.presentation.invalidate();
     }
 
     pub(super) fn matches_window(&self, id: WindowId) -> bool {
@@ -186,19 +185,22 @@ impl SceneWindow {
                 let modifiers = modifiers.state();
                 if self.modifiers != modifiers {
                     self.modifiers = modifiers;
-                    self.dirty = true;
+                    self.presentation.invalidate();
                 }
             }
-            WindowEvent::Focused(false) => {
-                self.release_drag(false);
-                self.modifiers = ModifiersState::empty();
-                let rotation = self.body_rotation.update(self.agent_pose().map(|pose| pose.rotation), 0.0, Instant::now());
-                let movement = self.controls.release_and_observe(rotation);
-                self.stop_clear_pending = movement.control_flags & STOP != 0;
-                if let Some(feed) = &mut self.feed {
-                    feed.set_movement(movement);
+            WindowEvent::Focused(focused) => {
+                self.presentation.focus(*focused);
+                if !*focused {
+                    self.release_drag(false);
+                    self.modifiers = ModifiersState::empty();
+                    let rotation = self.body_rotation.update(self.agent_pose().map(|pose| pose.rotation), 0.0, Instant::now());
+                    let movement = self.controls.release_and_observe(rotation);
+                    self.stop_clear_pending = movement.control_flags & STOP != 0;
+                    if let Some(feed) = &mut self.feed {
+                        feed.set_movement(movement);
+                    }
+                    self.presentation.invalidate();
                 }
-                self.dirty = true;
             }
             WindowEvent::CursorMoved { position, .. } => self.cursor = *position,
             WindowEvent::MouseInput { button: MouseButton::Left, state, .. } => {
@@ -232,7 +234,7 @@ impl SceneWindow {
                     if let KeyBinding::Movement(key) = binding
                         && self.controls.set_pressed(key, false)
                     {
-                        self.dirty = true;
+                        self.presentation.invalidate();
                     }
                     return true;
                 }
@@ -257,7 +259,7 @@ impl SceneWindow {
                     }
                     KeyBinding::Stop => self.controls.stop(),
                 }
-                self.dirty = true;
+                self.presentation.invalidate();
             }
             _ => return false,
         }
@@ -265,13 +267,19 @@ impl SceneWindow {
     }
 
     pub(super) fn resize(&mut self, width: u32, height: u32) {
+        self.presentation.resized(width, height);
         if let Some(renderer) = &mut self.renderer {
             renderer.resize(width, height);
         }
     }
 
+    pub(super) fn resize_to_window(&mut self) {
+        let size = self.window.inner_size();
+        self.resize(size.width, size.height);
+    }
+
     pub(super) fn set_occluded(&mut self, occluded: bool) {
-        self.occluded = occluded;
+        self.presentation.set_occluded(occluded);
     }
 
     pub(super) fn update_feed(&mut self, incoming: Option<(u64, SceneFeed)>) -> Result<(), scene::ApplyError> {
@@ -279,12 +287,14 @@ impl SceneWindow {
             && generation == self.generation
         {
             self.feed = Some(feed);
-            self.dirty = true;
+            self.presentation.invalidate();
         }
         if let Some(feed) = &mut self.feed {
             let before = feed.view.version();
             feed.drain()?;
-            self.dirty |= before != feed.view.version();
+            if before != feed.view.version() {
+                self.presentation.invalidate();
+            }
         }
         Ok(())
     }
@@ -353,7 +363,7 @@ impl SceneWindow {
         drag.travel[0] += dx.abs() / self.dpi;
         drag.travel[1] += dy.abs() / self.dpi;
         if drag.travel[0] >= 4.0 || drag.travel[1] >= 4.0 {
-            self.dirty = true;
+            self.presentation.invalidate();
             camera.drag(
                 [dx, if drag.travel[1] >= 4.0 { dy } else { 0.0 }],
                 f64::from(self.window.inner_size().width),
@@ -406,7 +416,7 @@ impl SceneWindow {
         if now < self.next_frame {
             return Ok(DrawActions::default());
         }
-        self.dirty = false;
+        self.presentation.clear_dirty();
         if !self.ensure_renderer(now)? {
             return Ok(DrawActions::default());
         }
@@ -423,13 +433,13 @@ impl SceneWindow {
             RecoveryAttempt::Start => {}
             RecoveryAttempt::WaitUntil(retry_at) => {
                 self.next_frame = retry_at;
-                self.dirty = true;
+                self.presentation.invalidate();
                 return Ok(false);
             }
             RecoveryAttempt::Exhausted => return Err(SceneWindowError::RecoveryExhausted),
         }
         let size = self.window.inner_size();
-        match block_on(Renderer::new(Arc::clone(&self.window), size.width, size.height)) {
+        match block_on(Renderer::new(self.window.clone(), size.width, size.height)) {
             Ok(renderer) => {
                 (self.texture_sender, self.texture_receiver) = mpsc::sync_channel(2);
                 let info = renderer.adapter_info();
@@ -550,17 +560,27 @@ impl SceneWindow {
         self.next_frame = Instant::now();
         self.frame_work = self.next_frame.duration_since(now);
         match result {
-            Ok(presented) => {
+            Ok(outcome) => {
+                let presented = outcome == FrameOutcome::Presented;
+                if !presented {
+                    self.presentation.invalidate();
+                }
+                if outcome == FrameOutcome::Occluded {
+                    self.presentation.surface_occluded(Instant::now());
+                }
                 let active_motion = self.controls.active() || self.stop_clear_pending;
-                self.dirty |= !presented
-                    || active_motion
+                if active_motion
                     || (self.camera_mode == CameraMode::Inspection
-                        && self.camera.as_ref().is_some_and(|camera| camera.moving(Instant::now())));
-                self.dirty |= self.camera_observation(self.agent_pose(), Instant::now()) != observation;
+                        && self.camera.as_ref().is_some_and(|camera| camera.moving(Instant::now())))
+                    || self.camera_observation(self.agent_pose(), Instant::now()) != observation
+                {
+                    self.presentation.invalidate();
+                }
                 if presented {
+                    self.presentation.presented();
                     self.last_camera = observation;
                     self.recovery.presented();
-                    if self.dirty {
+                    if self.presentation.is_dirty() {
                         self.next_frame += FRAME_INTERVAL;
                     }
                 } else {
@@ -618,7 +638,9 @@ impl SceneWindow {
         };
         match renderer.poll() {
             Ok(progress) => {
-                self.dirty |= progress.redraw;
+                if progress.redraw {
+                    self.presentation.invalidate();
+                }
                 progress.pending
             }
             Err(error) => {
@@ -632,24 +654,35 @@ impl SceneWindow {
 
     fn schedule_recovery(&mut self, now: Instant) {
         self.next_frame = self.recovery.schedule_retry(now);
-        self.dirty = true;
+        self.presentation.invalidate();
     }
 
     pub(super) fn schedule_redraw(&mut self, event_loop: &ActiveEventLoop, pending: bool, can_redraw: bool) {
-        if self.occluded || self.window.inner_size().width == 0 || self.window.inner_size().height == 0 {
-            event_loop.set_control_flow(if pending { ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL) } else { ControlFlow::Wait });
+        let now = Instant::now();
+        if !self.presentation.can_redraw() {
+            if can_redraw && self.presentation.surface_probe_due(now) {
+                self.window.request_redraw();
+                event_loop.set_control_flow(ControlFlow::Wait);
+                return;
+            }
+            let probe =
+                can_redraw.then(|| self.presentation.next_surface_probe()).flatten().map(|at| at.max(now + Duration::from_millis(1)));
+            let poll = pending.then_some(now + FRAME_INTERVAL);
+            event_loop.set_control_flow(match probe.into_iter().chain(poll).min() {
+                Some(at) => ControlFlow::WaitUntil(at),
+                None => ControlFlow::Wait,
+            });
             return;
         }
-        let now = Instant::now();
         if self.next_ui.is_some_and(|at| now >= at) {
             self.next_ui = None;
-            self.dirty = true;
+            self.presentation.invalidate();
         }
-        if self.dirty && now >= self.next_frame && can_redraw {
+        if self.presentation.is_dirty() && now >= self.next_frame && can_redraw {
             self.window.request_redraw();
             event_loop.set_control_flow(ControlFlow::Wait);
         } else {
-            let redraw = (self.dirty && can_redraw).then_some(self.next_frame.max(now + Duration::from_millis(1)));
+            let redraw = (self.presentation.is_dirty() && can_redraw).then_some(self.next_frame.max(now + Duration::from_millis(1)));
             let poll = pending.then_some(now + FRAME_INTERVAL);
             event_loop.set_control_flow(match redraw.into_iter().chain(poll).chain(self.next_ui).min() {
                 Some(at) => ControlFlow::WaitUntil(at),
@@ -689,6 +722,89 @@ impl CameraMode {
 struct DragState {
     origin: PhysicalPosition<f64>,
     travel: [f64; 2],
+}
+
+struct PresentationState {
+    dirty: bool,
+    occluded: bool,
+    surface_occluded: bool,
+    minimized: bool,
+    next_surface_probe: Option<Instant>,
+}
+
+impl PresentationState {
+    fn new(width: u32, height: u32) -> Self {
+        Self { dirty: true, occluded: false, surface_occluded: false, minimized: width == 0 || height == 0, next_surface_probe: None }
+    }
+
+    fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    fn clear_dirty(&mut self) {
+        self.dirty = false;
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    fn can_redraw(&self) -> bool {
+        !self.occluded && !self.surface_occluded && !self.minimized
+    }
+
+    fn resized(&mut self, width: u32, height: u32) {
+        self.minimized = width == 0 || height == 0;
+        if !self.minimized {
+            self.surface_occluded = false;
+            self.next_surface_probe = None;
+            self.invalidate();
+        }
+    }
+
+    fn set_occluded(&mut self, occluded: bool) {
+        self.occluded = occluded;
+        if !occluded {
+            self.surface_occluded = false;
+            self.next_surface_probe = None;
+            self.invalidate();
+        }
+    }
+
+    fn focus(&mut self, focused: bool) {
+        if focused {
+            self.occluded = false;
+            self.surface_occluded = false;
+            self.next_surface_probe = None;
+            self.invalidate();
+        }
+    }
+
+    fn surface_occluded(&mut self, now: Instant) {
+        self.surface_occluded = true;
+        self.next_surface_probe = Some(now + SURFACE_PROBE_INTERVAL);
+        self.invalidate();
+    }
+
+    fn next_surface_probe(&self) -> Option<Instant> {
+        (self.surface_occluded && !self.occluded && !self.minimized).then_some(self.next_surface_probe).flatten()
+    }
+
+    fn surface_probe_due(&mut self, now: Instant) -> bool {
+        let Some(at) = self.next_surface_probe() else {
+            return false;
+        };
+        if now < at {
+            return false;
+        }
+        self.next_surface_probe = Some(now + SURFACE_PROBE_INTERVAL);
+        true
+    }
+
+    fn presented(&mut self) {
+        self.surface_occluded = false;
+        self.next_surface_probe = None;
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -745,7 +861,74 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError};
+    use super::{PresentationRecovery, PresentationState, RECOVERY_DELAY, RecoveryAttempt, SURFACE_PROBE_INTERVAL, SceneWindowError};
+
+    #[test]
+    fn visible_after_occlusion_redraws() {
+        let mut state = PresentationState::new(800, 600);
+        state.clear_dirty();
+        state.set_occluded(true);
+        assert!(!state.can_redraw());
+        state.set_occluded(false);
+        assert!(state.can_redraw());
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn focus_loss_keeps_redraw() {
+        let mut state = PresentationState::new(800, 600);
+        state.focus(false);
+        assert!(state.can_redraw());
+    }
+
+    #[test]
+    fn focus_gain_retries_surface() {
+        let mut state = PresentationState::new(800, 600);
+        state.clear_dirty();
+        state.surface_occluded(Instant::now());
+        assert!(!state.can_redraw());
+        state.focus(true);
+        assert!(state.can_redraw());
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn surface_occlusion_probes_without_focus_and_resumes_on_present() {
+        let mut state = PresentationState::new(800, 600);
+        let now = Instant::now();
+        state.clear_dirty();
+        state.surface_occluded(now);
+
+        assert_eq!(state.next_surface_probe(), Some(now + SURFACE_PROBE_INTERVAL));
+        assert!(!state.surface_probe_due(now + SURFACE_PROBE_INTERVAL - Duration::from_nanos(1)));
+        let probe_at = now + SURFACE_PROBE_INTERVAL;
+        assert!(state.surface_probe_due(probe_at));
+        assert_eq!(state.next_surface_probe(), Some(probe_at + SURFACE_PROBE_INTERVAL));
+
+        state.clear_dirty();
+        state.presented();
+        assert!(state.can_redraw());
+        assert_eq!(state.next_surface_probe(), None);
+        state.invalidate();
+        assert!(state.is_dirty());
+    }
+
+    #[test]
+    fn minimized_or_winit_occluded_surface_does_not_probe() {
+        let now = Instant::now();
+        let probe_at = now + SURFACE_PROBE_INTERVAL;
+        let mut minimized = PresentationState::new(800, 600);
+        minimized.surface_occluded(now);
+        minimized.resized(0, 0);
+        assert_eq!(minimized.next_surface_probe(), None);
+        assert!(!minimized.surface_probe_due(probe_at));
+
+        let mut occluded = PresentationState::new(800, 600);
+        occluded.surface_occluded(now);
+        occluded.set_occluded(true);
+        assert_eq!(occluded.next_surface_probe(), None);
+        assert!(!occluded.surface_probe_due(probe_at));
+    }
 
     #[test]
     fn presentation_resets_recovery_limit() {

@@ -190,23 +190,27 @@ fn linear_position(sample: MotionSample, state: MotionState, now: Instant, regio
     let time_dilation = f64::from(sample.time_dilation);
     let effective = effective_elapsed(elapsed, time_dilation);
     let predicted = position_at_effective(sample, effective);
-    let Some(bounds) = regions.iter().copied().find(|bounds| bounds.region == sample.region) else { return predicted };
-    let candidate_region = region_at(predicted, regions);
-    let crossing = first_region_exit(sample, bounds, effective);
-    if candidate_region != Some(sample.region) {
-        let Some((crossing_time, point, direction)) = crossing else { return clamp_to_region(predicted, bounds) };
+    let Some(mut bounds) = regions.iter().copied().find(|bounds| bounds.region == sample.region) else { return predicted };
+    let mut after_effective = 0.0;
+    let mut allowed_effective = effective;
+    let mut last_boundary = start;
+    let max_crossings = regions.len().saturating_mul(8).saturating_add(1);
+    for crossing_index in 0..max_crossings {
+        let Some((crossing_time, point, direction)) = first_region_exit(sample, bounds, after_effective, allowed_effective) else {
+            return if crossing_index == 0 { predicted } else { position_at_effective(sample, allowed_effective) };
+        };
+        last_boundary = point;
         let probe = point + direction * REGION_EDGE_EPSILON;
-        if region_at(probe, regions).is_none() {
-            return point;
+        let Some(next_region) = region_at(probe, regions) else { return point };
+        let Some(next_bounds) = regions.iter().copied().find(|candidate| candidate.region == next_region) else { return point };
+        if crossing_index == 0 {
+            let Some(crossing_elapsed) = raw_elapsed(crossing_time, time_dilation) else { return point };
+            allowed_effective = effective.min(effective_elapsed(crossing_elapsed + MAX_REGION_CROSSING_TIME, time_dilation));
         }
-        let Some(crossing_elapsed) = raw_elapsed(crossing_time, time_dilation) else { return point };
-        if elapsed > crossing_elapsed + MAX_REGION_CROSSING_TIME {
-            let allowed = effective_elapsed(crossing_elapsed + MAX_REGION_CROSSING_TIME, time_dilation);
-            let stopped = position_at_effective(sample, allowed);
-            return if region_at(stopped, regions).is_some() { stopped } else { point };
-        }
+        bounds = next_bounds;
+        after_effective = crossing_time + crossing_time.abs().max(1.0) * f64::EPSILON * 8.0;
     }
-    predicted
+    last_boundary
 }
 
 fn position_at_effective(sample: MotionSample, elapsed: f64) -> DVec3 {
@@ -242,7 +246,7 @@ fn raw_elapsed(effective: f64, time_dilation: f64) -> Option<f64> {
     }
 }
 
-fn first_region_exit(sample: MotionSample, bounds: RegionBounds, max_effective: f64) -> Option<(f64, DVec3, DVec3)> {
+fn first_region_exit(sample: MotionSample, bounds: RegionBounds, after_effective: f64, max_effective: f64) -> Option<(f64, DVec3, DVec3)> {
     let start = sample.transform.pose.position;
     let velocity = sample.velocity.as_dvec3();
     let acceleration = sample.acceleration.as_dvec3();
@@ -255,7 +259,7 @@ fn first_region_exit(sample: MotionSample, bounds: RegionBounds, max_effective: 
     let mut crossing = None;
     for (position, velocity, acceleration, edge, direction, vector) in edges {
         for time in boundary_roots(edge - position, velocity, acceleration) {
-            if !time.is_finite() || time < 0.0 || time > max_effective {
+            if !time.is_finite() || time < after_effective || time < 0.0 || time > max_effective {
                 continue;
             }
             let derivative = velocity + acceleration * (time - 0.5 * PHYSICS_TIMESTEP);
@@ -288,14 +292,6 @@ fn boundary_roots(distance: f64, velocity: f64, acceleration: f64) -> [f64; 2] {
 
 fn region_at(position: DVec3, regions: &[RegionBounds]) -> Option<Region> {
     regions.iter().find(|bounds| bounds.contains(position)).map(|bounds| bounds.region)
-}
-
-fn clamp_to_region(position: DVec3, bounds: RegionBounds) -> DVec3 {
-    DVec3::new(
-        position.x.clamp(bounds.origin.x, bounds.origin.x + REGION_SIZE - REGION_EDGE_EPSILON),
-        position.y.clamp(bounds.origin.y, bounds.origin.y + REGION_SIZE - REGION_EDGE_EPSILON),
-        position.z,
-    )
 }
 
 #[cfg(test)]
@@ -497,6 +493,19 @@ mod tests {
             RegionBounds { region: Region::new(2), origin: DVec3::new(256.0, 0.0, 0.0) },
         ];
         close_vec(linear_position(moving, state, now + Duration::from_millis(1500), &regions), DVec3::new(356.0, 20.0, 0.0));
+    }
+
+    #[test]
+    fn loaded_neighbor_still_clips_at_the_next_missing_region() {
+        let now = Instant::now();
+        let moving = sample(DVec3::new(255.0, 20.0, 0.0), Vec3::X * 300.0, Vec3::ZERO, Vec3::ZERO, false);
+        let state = MotionState::new(now);
+        let regions = [
+            RegionBounds { region: Region::new(1), origin: DVec3::ZERO },
+            RegionBounds { region: Region::new(2), origin: DVec3::new(256.0, 0.0, 0.0) },
+        ];
+
+        close_vec(linear_position(moving, state, now + Duration::from_millis(900), &regions), DVec3::new(512.0, 20.0, 0.0));
     }
 
     #[test]

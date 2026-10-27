@@ -13,6 +13,7 @@ pub const MAX_SURFACE_FACES: usize = 45;
 pub const MAX_PBR_MATERIAL_BINDINGS: usize = MAX_SURFACE_FACES;
 
 const TEXTURE_ANIMATION_BYTES: usize = 16;
+const TEXTURE_ANIMATION_SMOOTH: u8 = 0x10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Appearance {
@@ -32,14 +33,6 @@ pub struct TextureAnimation {
 }
 
 impl TextureAnimation {
-    pub const ON: u8 = 0x01;
-    pub const LOOP: u8 = 0x02;
-    pub const REVERSE: u8 = 0x04;
-    pub const PING_PONG: u8 = 0x08;
-    pub const SMOOTH: u8 = 0x10;
-    pub const ROTATE: u8 = 0x20;
-    pub const SCALE: u8 = 0x40;
-
     pub fn from_wire(bytes: &[u8]) -> Result<Self, TextureAnimationError> {
         if bytes.len() != TEXTURE_ANIMATION_BYTES {
             return Err(TextureAnimationError::InvalidLength);
@@ -51,7 +44,8 @@ impl TextureAnimation {
         }
         let raw_size_x = *bytes.get(2).ok_or(TextureAnimationError::InvalidLength)?;
         let raw_size_y = *bytes.get(3).ok_or(TextureAnimationError::InvalidLength)?;
-        let (size_x, size_y) = if mode & Self::SMOOTH == 0 { (raw_size_x.max(1), raw_size_y.max(1)) } else { (raw_size_x, raw_size_y) };
+        let (size_x, size_y) =
+            if mode & TEXTURE_ANIMATION_SMOOTH == 0 { (raw_size_x.max(1), raw_size_y.max(1)) } else { (raw_size_x, raw_size_y) };
         let value =
             Self { mode, face, size_x, size_y, start: wire_f32(bytes, 4)?, length: wire_f32(bytes, 8)?, rate: wire_f32(bytes, 12)? };
         if ![value.start, value.length, value.rate].into_iter().all(f32::is_finite) {
@@ -87,121 +81,8 @@ impl TextureAnimation {
         self.rate
     }
 
-    pub const fn is_enabled(self) -> bool {
-        self.mode & Self::ON != 0
-    }
-
-    pub const fn is_smooth(self) -> bool {
-        self.mode & Self::SMOOTH != 0
-    }
-
     pub fn targets_face(self, face: u8) -> bool {
         self.face == -1 || u8::try_from(self.face).is_ok_and(|target| target == face)
-    }
-
-    fn num_frames(self) -> f32 {
-        if self.length != 0.0 { self.length } else { (f32::from(self.size_x) * f32::from(self.size_y)).max(1.0) }
-    }
-
-    fn full_length(self) -> f32 {
-        let num_frames = self.num_frames();
-        if self.mode & Self::PING_PONG != 0 {
-            if self.is_smooth() {
-                2.0 * num_frames
-            } else if self.mode & Self::LOOP != 0 {
-                (2.0 * num_frames - 2.0).max(1.0)
-            } else {
-                (2.0 * num_frames - 1.0).max(1.0)
-            }
-        } else {
-            num_frames
-        }
-    }
-
-    pub fn transform_at(self, elapsed_seconds: f64, smooth_frame_offset: f64, base: UvTransform) -> UvTransform {
-        if !self.is_enabled() || !elapsed_seconds.is_finite() || elapsed_seconds < 0.0 || !smooth_frame_offset.is_finite() {
-            return base;
-        }
-
-        let num_frames = self.num_frames();
-        let full_length = self.full_length();
-        if !full_length.is_finite() || full_length <= 0.0 {
-            return base;
-        }
-
-        let elapsed = elapsed_seconds as f32;
-        let frame_offset = if self.is_smooth() { smooth_frame_offset as f32 } else { 0.0 };
-        let mut frame = elapsed * self.rate + frame_offset;
-        if !frame.is_finite() {
-            return base;
-        }
-        if self.mode & Self::LOOP != 0 {
-            frame %= full_length;
-        } else {
-            frame = frame.min(full_length - 1.0);
-        }
-        if !self.is_smooth() {
-            frame = (frame + 0.01).floor().min(full_length - 1.0);
-        }
-        if self.mode & Self::PING_PONG != 0 && frame >= num_frames {
-            frame = if self.is_smooth() { num_frames - (frame - num_frames) } else { (num_frames - 1.99) - (frame - num_frames) };
-        }
-        if self.mode & Self::REVERSE != 0 {
-            frame = if self.is_smooth() { num_frames - frame } else { (num_frames - 0.99) - frame };
-        }
-        frame += self.start;
-        if !self.is_smooth() {
-            frame = (frame + 0.5).floor();
-        }
-        if !frame.is_finite() {
-            return base;
-        }
-
-        let mut result = base;
-        if self.mode & Self::ROTATE != 0 {
-            result.rotation = frame;
-        } else if self.mode & Self::SCALE != 0 {
-            result.scale = [frame; 2];
-        } else if self.size_x != 0 && self.size_y != 0 {
-            let size_x = f32::from(self.size_x);
-            let size_y = f32::from(self.size_y);
-            let scale = [1.0 / size_x, 1.0 / size_y];
-            let x_frame = frame % size_x;
-            let y_frame = (frame / size_x).trunc().clamp(i32::MIN as f32, i32::MAX as f32);
-            result.scale = scale;
-            result.offset = [(-0.5 + 0.5 * scale[0]) + x_frame * scale[0], (0.5 - 0.5 * scale[1]) - y_frame * scale[1]];
-        } else {
-            result.scale = [1.0; 2];
-            result.offset = [-0.5 + 0.5 + frame, 0.0];
-        }
-        if result.is_finite() { result } else { base }
-    }
-
-    pub fn smooth_frame_counter(self, elapsed_seconds: f64, smooth_frame_offset: f64) -> Option<f64> {
-        if !self.is_smooth() || !elapsed_seconds.is_finite() || elapsed_seconds < 0.0 || !smooth_frame_offset.is_finite() {
-            return None;
-        }
-        let frame = elapsed_seconds as f32 * self.rate + smooth_frame_offset as f32;
-        frame.is_finite().then_some(f64::from(frame))
-    }
-
-    pub fn is_changing_at(self, elapsed_seconds: f64, smooth_frame_offset: f64) -> bool {
-        if !self.is_enabled() || self.rate == 0.0 || !elapsed_seconds.is_finite() || elapsed_seconds < 0.0 {
-            return false;
-        }
-        let full_length = self.full_length();
-        if !full_length.is_finite() || full_length <= 0.0 {
-            return false;
-        }
-        if self.mode & Self::LOOP != 0 {
-            return self.is_smooth() || full_length > 1.0;
-        }
-        if self.rate < 0.0 {
-            return true;
-        }
-        let offset = if self.is_smooth() { smooth_frame_offset as f32 } else { 0.0 };
-        let frame = elapsed_seconds as f32 * self.rate + offset;
-        frame.is_finite() && frame < full_length - 1.0
     }
 }
 

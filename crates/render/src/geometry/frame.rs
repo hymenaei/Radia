@@ -15,7 +15,7 @@ use crate::geometry::{
 };
 use crate::material::{FaceMaterial, FaceParams};
 use crate::pipeline::{COLOR, Pipeline};
-use crate::scene::{Camera, Placement, PreparedMesh, SceneView, SurfaceKind};
+use crate::scene::{Camera, Placement, PreparedMesh, SceneView, SurfaceKind, texture_animation};
 
 impl GeometryRenderer {
     pub(crate) fn prepare(
@@ -165,9 +165,11 @@ impl GeometryRenderer {
                 if face.indices.is_empty() {
                     continue;
                 }
-                let animation = animation.filter(|(animation, _, _)| animation.is_enabled() && animation.targets_face(face.slot));
+                let animation =
+                    animation.filter(|(animation, _, _)| texture_animation::is_enabled(*animation) && animation.targets_face(face.slot));
                 let texture_entry_transform = animation.map(|(animation, elapsed, offset)| {
-                    animation.transform_at(
+                    texture_animation::transform_at(
+                        animation,
                         elapsed,
                         offset,
                         appearance
@@ -176,7 +178,8 @@ impl GeometryRenderer {
                             .transform,
                     )
                 });
-                let animate_frame = animation.is_some_and(|(animation, elapsed, offset)| animation.is_changing_at(elapsed, offset));
+                let animate_frame =
+                    animation.is_some_and(|(animation, elapsed, offset)| texture_animation::is_changing_at(animation, elapsed, offset));
                 let mut params = FaceParams::with_texture_entry_transform(
                     faces.and_then(|faces| faces.iter().find(|material| material.slot == face.slot)),
                     texture_entry_transform,

@@ -42,7 +42,7 @@ fn texture_entries_apply_to_volumes_only() {
 
 #[test]
 fn texture_animation_updates_clear_and_preserve_by_path() {
-    let mut wire = vec![TextureAnimation::ON, 0xff, 2, 2];
+    let mut wire = vec![0x01, 0xff, 2, 2];
     wire.extend_from_slice(&0.0_f32.to_le_bytes());
     wire.extend_from_slice(&0.0_f32.to_le_bytes());
     wire.extend_from_slice(&1.0_f32.to_le_bytes());

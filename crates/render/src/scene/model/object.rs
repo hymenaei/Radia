@@ -4,7 +4,7 @@ use math::Vec3;
 use world::{Kind, ObjectDetail, PrimShape, Shape, WorldTransform, WorldTransformState};
 
 use crate::material::FaceMaterial;
-use crate::scene::{MeshKey, PreparedMesh, SharedMesh, asset_demand::Materials, budget::Lease};
+use crate::scene::{MeshKey, PreparedMesh, SharedMesh, asset_demand::Materials, budget::Lease, texture_animation};
 
 #[derive(Clone)]
 pub struct Object {
@@ -49,8 +49,10 @@ impl Object {
             self.animation_clock = old.animation_clock;
             return;
         }
-        let frame_offset = if animation.is_smooth() && previous.is_smooth() {
-            old.animation_timing(now).and_then(|(elapsed, offset)| previous.smooth_frame_counter(elapsed, offset)).unwrap_or(0.0)
+        let frame_offset = if texture_animation::is_smooth(animation) && texture_animation::is_smooth(previous) {
+            old.animation_timing(now)
+                .and_then(|(elapsed, offset)| texture_animation::smooth_frame_counter(previous, elapsed, offset))
+                .unwrap_or(0.0)
         } else {
             0.0
         };

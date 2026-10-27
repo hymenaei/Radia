@@ -1,8 +1,5 @@
-use std::sync::OnceLock;
-
 use assets::{Failure, MAX_TEXTURE_EDGE};
 use intel_tex_2::{RgbaSurface, bc1, bc3, bc7};
-use math::{linear_to_srgb8, srgb8_to_linear};
 use wgpu::TextureFormat;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -44,11 +41,6 @@ pub(crate) struct Level {
 pub(crate) struct Image {
     pub(crate) format: CompressionFormat,
     pub(crate) levels: Vec<Level>,
-}
-
-struct ColorTables {
-    linear: [f32; 256],
-    srgb: [u8; 4096],
 }
 
 pub(crate) fn supported(size: [u32; 2]) -> bool {
@@ -130,14 +122,9 @@ fn pad(source: &[u8], size: [u32; 2], padded: [u32; 2]) -> Vec<u8> {
 }
 
 fn downsample(source: &[u8], size: [u32; 2], cancelled: impl Fn() -> bool) -> Result<Vec<u8>, Failure> {
-    static COLORS: OnceLock<ColorTables> = OnceLock::new();
-    let colors = COLORS.get_or_init(|| ColorTables {
-        linear: std::array::from_fn(|index| srgb8_to_linear(index as u8)),
-        srgb: std::array::from_fn(|index| linear_to_srgb8(index as f32 / 4095.0)),
-    });
     let next = size.map(|edge| (edge / 2).max(1));
     if size.into_iter().all(|edge| edge == 1 || edge.is_multiple_of(2)) {
-        return downsample_even(source, size, next, colors, cancelled);
+        return downsample_even(source, size, next, cancelled);
     }
     let scale = [size[0] as f32 / next[0] as f32, size[1] as f32 / next[1] as f32];
     let mut result = vec![0; next[0] as usize * next[1] as usize * 4];
@@ -153,31 +140,22 @@ fn downsample(source: &[u8], size: [u32; 2], cancelled: impl Fn() -> bool) -> Re
                 for sx in lo[0].floor() as u32..(hi[0].ceil() as u32).min(size[0]) {
                     let weight = (hi[0].min(sx as f32 + 1.0) - lo[0].max(sx as f32)) * (hi[1].min(sy as f32 + 1.0) - lo[1].max(sy as f32));
                     let index = ((sy * size[0] + sx) * 4) as usize;
-                    for channel in 0..3 {
-                        sum[channel] += colors.linear[source[index + channel] as usize] * weight;
+                    for channel in 0..4 {
+                        sum[channel] += f32::from(source[index + channel]) * weight;
                     }
-                    sum[3] += f32::from(source[index + 3]) * weight;
                 }
             }
             let area = scale[0] * scale[1];
             let index = ((y * next[0] + x) * 4) as usize;
-            for channel in 0..3 {
-                let linear = (sum[channel] / area).clamp(0.0, 1.0);
-                result[index + channel] = colors.srgb[((linear * 4095.0 + 0.5) as usize).min(4095)];
+            for channel in 0..4 {
+                result[index + channel] = (sum[channel] / area + 0.5) as u8;
             }
-            result[index + 3] = (sum[3] / area + 0.5) as u8;
         }
     }
     Ok(result)
 }
 
-fn downsample_even(
-    source: &[u8],
-    size: [u32; 2],
-    next: [u32; 2],
-    colors: &ColorTables,
-    cancelled: impl Fn() -> bool,
-) -> Result<Vec<u8>, Failure> {
+fn downsample_even(source: &[u8], size: [u32; 2], next: [u32; 2], cancelled: impl Fn() -> bool) -> Result<Vec<u8>, Failure> {
     let source = source.as_chunks::<4>().0;
     let width = size[0] as usize;
     let mut result = vec![0; next[0] as usize * next[1] as usize * 4];
@@ -193,14 +171,10 @@ fn downsample_even(
             let x0 = if width == 1 { 0 } else { x * 2 };
             let x1 = (x0 + 1).min(width - 1);
             let [a, b, c, d] = [top[x0], top[x1], bottom[x0], bottom[x1]];
-            for channel in 0..3 {
-                let sum = colors.linear[a[channel] as usize]
-                    + colors.linear[b[channel] as usize]
-                    + colors.linear[c[channel] as usize]
-                    + colors.linear[d[channel] as usize];
-                pixel[channel] = colors.srgb[((sum * (4095.0 / 4.0) + 0.5) as usize).min(4095)];
+            for channel in 0..4 {
+                let sum = u16::from(a[channel]) + u16::from(b[channel]) + u16::from(c[channel]) + u16::from(d[channel]);
+                pixel[channel] = ((sum + 2) / 4) as u8;
             }
-            pixel[3] = ((u16::from(a[3]) + u16::from(b[3]) + u16::from(c[3]) + u16::from(d[3]) + 2) / 4) as u8;
         }
     }
     Ok(result)
@@ -266,14 +240,14 @@ mod tests {
     }
 
     #[test]
-    fn mips_average_linear_color() {
+    fn mips_average_channels() {
         let source = [0, 0, 0, 0, 255, 255, 255, 255];
-        assert_eq!(downsample(&source, [2, 1], || false).unwrap(), [188, 188, 188, 128]);
-        assert_eq!(downsample(&source, [1, 2], || false).unwrap(), [188, 188, 188, 128]);
+        assert_eq!(downsample(&source, [2, 1], || false).unwrap(), [128, 128, 128, 128]);
+        assert_eq!(downsample(&source, [1, 2], || false).unwrap(), [128, 128, 128, 128]);
         let colored = [255, 0, 0, 0, 0, 255, 0, 255, 0, 0, 255, 10, 255, 255, 255, 246];
-        assert_eq!(downsample(&colored, [2, 2], || false).unwrap(), [188, 188, 188, 128]);
+        assert_eq!(downsample(&colored, [2, 2], || false).unwrap(), [128, 128, 128, 128]);
         let odd = [0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255];
-        assert_eq!(downsample(&odd, [3, 1], || false).unwrap(), [156, 156, 156, 255], "odd source edges contribute to the area filter");
+        assert_eq!(downsample(&odd, [3, 1], || false).unwrap(), [85, 85, 85, 255], "odd source edges contribute to the area filter");
     }
 
     #[test]

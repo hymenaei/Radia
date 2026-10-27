@@ -35,6 +35,7 @@ const MAX_JOBS: usize = 2;
 const FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const TERRAIN_ALPHA_RAMP_WIDTH: u32 = 256;
 pub(crate) const TERRAIN_ALPHA_RAMP: &[u8; 256] = include_bytes!("../terrain_alpha_ramp.r8");
+const MIP_VIEW_FORMATS: [TextureFormat; 1] = [TextureFormat::Rgba8Unorm];
 
 #[derive(Default)]
 struct Accounting {
@@ -491,7 +492,7 @@ impl Textures {
             }],
         });
         let shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Color mipmaps"),
+            label: Some("Raw channel mipmaps"),
             source: ShaderSource::Wgsl(include_str!("../shaders/mipmap.wgsl").into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -510,7 +511,7 @@ impl Textures {
                 module: &shader,
                 entry_point: Some("fragment"),
                 compilation_options: Default::default(),
-                targets: &[Some(ColorTargetState { format: TextureFormat::Rgba8UnormSrgb, blend: None, write_mask: ColorWrites::ALL })],
+                targets: &[Some(ColorTargetState { format: TextureFormat::Rgba8Unorm, blend: None, write_mask: ColorWrites::ALL })],
             }),
             multiview_mask: None,
             cache: None,

@@ -36,8 +36,7 @@ struct VoidWaterOutput {
     let true_intersection = direction * distance;
     let direction_eye = (void_water.view * vec4<f32>(direction, 0.0)).xyz;
     let view_distance = distance * -direction_eye.z;
-    let point = direction * min(distance, void_water.plane.z / max(-direction_eye.z, 0.000001));
-    let coordinates = water_coordinates(point, void_water.surface);
+    let coordinates = water_coordinates(true_intersection, void_water.surface);
     let big_dx = dpdx(coordinates.big);
     let big_dy = dpdy(coordinates.big);
     let first_dx = dpdx(coordinates.first);
@@ -81,13 +80,13 @@ struct VoidWaterOutput {
         vec3<f32>(0.0, 0.0, 1.0),
         void_water.surface.fresnel.w < 0.5,
     );
-    let position_eye = (void_water.view * vec4<f32>(point, 1.0)).xyz;
+    let position_eye = (void_water.view * vec4<f32>(true_intersection, 1.0)).xyz;
     let light_direction_eye = (void_water.view * vec4<f32>(void_water.atmosphere.light_direction.xyz, 0.0)).xyz;
     let light_norm_eye = (void_water.view * vec4<f32>(void_water.atmosphere.light_norm.xyz, 0.0)).xyz;
     let normal_eye = (void_water.view * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xyz;
     let tangent_eye = (void_water.view * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz;
     let color = shade_water(
-        point,
+        true_intersection,
         position_eye,
         light_direction_eye,
         light_norm_eye,
@@ -101,7 +100,7 @@ struct VoidWaterOutput {
         void_water.atmosphere,
     );
     let finite_depth = void_water.plane.w * (void_water.plane.z / max(view_distance, void_water.plane.w) - 1.0) / (void_water.plane.z - void_water.plane.w);
-    let depth = select(max(finite_depth, 0.00000001), 0.0, view_distance >= void_water.plane.z);
+    let depth = max(finite_depth, 0.00000001);
     var output: VoidWaterOutput;
     output.color = color;
     output.depth = depth;

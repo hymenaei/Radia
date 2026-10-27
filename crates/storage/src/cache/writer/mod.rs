@@ -23,7 +23,10 @@ use super::{
     Key, ReadState, StorageError, UnavailableReason,
     index::{Index, Mutation},
 };
-use crate::{cache::eviction::Lru, sqlite::MAX_BATCH_ROWS};
+use crate::{
+    cache::eviction::Lru,
+    sqlite::{MAX_BATCH_ROWS, SqliteError},
+};
 use disk::{DATA_TEMP_PREFIX, delete_data, fail_temporary, persist_with_retry, remove_path};
 
 pub(in crate::cache) use queue::{Command, WriteQueue, writer_loop};
@@ -442,11 +445,7 @@ impl WorkerState {
                 return Err(error);
             }
             if let Err(error) = self.index.apply(mutations) {
-                let recreated = matches!(error, crate::sqlite::SqliteError::Corrupt | crate::sqlite::SqliteError::SchemaMismatch);
-                let storage_error = super::index::map_sqlite_error(error);
-                if recreated {
-                    self.reset_after_index_recreation(&changes);
-                }
+                let storage_error = self.index_failure(error, &changes);
                 self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, false);
                 return Err(storage_error);
             }
@@ -618,16 +617,20 @@ impl WorkerState {
         for chunk in changes.chunks(MAX_BATCH_ROWS) {
             let mutations = mutations(chunk)?;
             if let Err(error) = self.index.apply(mutations) {
-                let recreated = matches!(error, crate::sqlite::SqliteError::Corrupt | crate::sqlite::SqliteError::SchemaMismatch);
-                let storage_error = super::index::map_sqlite_error(error);
-                if recreated {
-                    self.reset_after_index_recreation(changes);
-                }
-                return Err(storage_error);
+                return Err(self.index_failure(error, changes));
             }
             self.publish_changes(chunk);
         }
         Ok(())
+    }
+
+    fn index_failure(&mut self, error: SqliteError, changes: &[PlannedChange]) -> StorageError {
+        let recreated = matches!(error, SqliteError::Corrupt | SqliteError::SchemaMismatch);
+        let storage_error = super::index::map_sqlite_error(error);
+        if recreated {
+            self.reset_after_index_recreation(changes);
+        }
+        storage_error
     }
 
     fn reset_after_index_recreation(&mut self, changes: &[PlannedChange]) {
@@ -652,12 +655,7 @@ impl WorkerState {
     fn clear(&mut self) -> Result<(), StorageError> {
         self.drain_touches_best_effort();
         if let Err(error) = self.index.clear() {
-            let recreated = matches!(error, crate::sqlite::SqliteError::Corrupt | crate::sqlite::SqliteError::SchemaMismatch);
-            let storage_error = super::index::map_sqlite_error(error);
-            if recreated {
-                self.reset_after_index_recreation(&[]);
-            }
-            return Err(storage_error);
+            return Err(self.index_failure(error, &[]));
         }
         let old = {
             let mut entries = write_map(&self.read_state.entries);
@@ -763,12 +761,7 @@ impl WorkerState {
             batch.try_reserve_exact(chunk.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
             batch.extend_from_slice(chunk);
             if let Err(error) = self.index.touch(batch) {
-                let recreated = matches!(error, crate::sqlite::SqliteError::Corrupt | crate::sqlite::SqliteError::SchemaMismatch);
-                let storage_error = super::index::map_sqlite_error(error);
-                if recreated {
-                    self.reset_after_index_recreation(&[]);
-                }
-                return Err(storage_error);
+                return Err(self.index_failure(error, &[]));
             }
         }
         self.update_accounted_size();

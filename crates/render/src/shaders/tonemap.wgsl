@@ -40,12 +40,14 @@ fn pbr_neutral_tonemap(input: vec3<f32>) -> vec3<f32> {
 @fragment fn fragment(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
     let coordinate = vec2<i32>(pixel.xy);
     let size = textureDimensions(scene_image, 0);
-    var color = textureLoad(scene_image, coordinate, 0).rgb;
+    let scene = textureLoad(scene_image, coordinate, 0);
+    var color = scene.rgb;
     let depth = textureLoad(depth_image, coordinate, 0);
+    let is_water_surface = scene.a < 0.5;
     if depth == 0.0 {
         color = srgb_to_linear(color) * settings.values.z;
     }
-    if settings.fog.color.w > 0.5 {
+    if settings.fog.color.w > 0.5 && !is_water_surface {
         let uv = (pixel.xy + vec2<f32>(0.5)) / vec2<f32>(size);
         let clip = vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, depth, 1.0);
         let projected = settings.inverse_view_projection * clip;

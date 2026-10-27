@@ -43,7 +43,11 @@ const MAX_NAMESPACE_SEGMENTS: usize = 8;
 const MAX_NAMESPACE_SEGMENT_BYTES: usize = 32;
 const MAX_EXTENSION_BYTES: usize = 16;
 const MAX_NAMESPACE_TABLE_BYTES: u64 = 256 * (MAX_NAMESPACE_BYTES as u64 + MAX_EXTENSION_BYTES as u64 + 32);
-const MIN_SIZE_LIMIT_INTERNAL: u64 = DIRECTORY_OVERHEAD * 3 + FILE_OVERHEAD * 4 + index::INDEX_BASE_BYTES + MAX_NAMESPACE_TABLE_BYTES;
+const MIN_SIZE_LIMIT_INTERNAL: u64 = DIRECTORY_OVERHEAD * 3
+    + FILE_OVERHEAD * 4
+    + index::INDEX_BASE_BYTES
+    + index::INDEX_AUXILIARY_RESERVATION_BYTES
+    + MAX_NAMESPACE_TABLE_BYTES;
 const LOOKUP_MAX_ATTEMPTS: usize = 3;
 const SNAPSHOT_FILE: &str = "snapshot";
 const JOURNAL_FILE: &str = "journal";
@@ -637,8 +641,11 @@ impl Cache {
     ) -> Result<Self, StorageError> {
         let root = directory.to_path_buf();
         let namespaces = Arc::new(NamespaceTable::new(namespace_config)?);
-        let minimum_size_limit =
-            DIRECTORY_OVERHEAD * 3 + FILE_OVERHEAD * 4 + index::INDEX_BASE_BYTES + index::namespace_bytes(&namespaces)?;
+        let minimum_size_limit = DIRECTORY_OVERHEAD * 3
+            + FILE_OVERHEAD * 4
+            + index::INDEX_BASE_BYTES
+            + index::INDEX_AUXILIARY_RESERVATION_BYTES
+            + index::namespace_bytes(&namespaces)?;
         if size_limit < minimum_size_limit {
             return Err(StorageError::LimitTooSmall);
         }

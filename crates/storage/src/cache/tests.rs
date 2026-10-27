@@ -103,6 +103,36 @@ fn small_namespace_accepts_lower_limit() {
 }
 
 #[test]
+fn small_size_limit_accounts_for_bounded_wal_and_shm() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let size_limit = MIN_SIZE_LIMIT + 8192;
+    let cache = Cache::open(directory.path(), size_limit, &TEST_NAMESPACES)?;
+
+    for value in 0..40 {
+        cache.put(key(value), vec![value as u8; 128])?;
+        assert!(cache.accounted_size() <= size_limit);
+    }
+    cache.flush()?;
+
+    let wal_bytes = match fs::metadata(directory.path().join("index.sqlite-wal")) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
+    };
+    let shm_bytes = match fs::metadata(directory.path().join("index.sqlite-shm")) {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
+    };
+    assert!(wal_bytes <= index::INDEX_WAL_LIMIT_BYTES);
+    assert!(wal_bytes + shm_bytes <= index::INDEX_AUXILIARY_RESERVATION_BYTES);
+    assert!(cache.accounted_size() <= size_limit);
+
+    cache.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn index_schema_stores_verified_rows() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES)?;

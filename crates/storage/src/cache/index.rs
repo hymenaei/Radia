@@ -13,6 +13,8 @@ const INDEX_VERSION: i64 = 5;
 pub(super) const MAX_ENTRIES: usize = 262_144;
 const ROW_BYTES: u64 = 96;
 pub(super) const INDEX_BASE_BYTES: u64 = 16 * 1024;
+pub(super) const INDEX_WAL_LIMIT_BYTES: u64 = 512 * 1024;
+pub(super) const INDEX_AUXILIARY_RESERVATION_BYTES: u64 = INDEX_WAL_LIMIT_BYTES + 64 * 1024;
 const MUTATION_BYTES: usize = 64;
 
 #[derive(Clone)]
@@ -93,6 +95,7 @@ impl Index {
     pub(super) fn estimated_bytes(&self, entry_count: usize) -> Result<u64, StorageError> {
         INDEX_BASE_BYTES
             .checked_add(self.namespace_bytes)
+            .and_then(|bytes| bytes.checked_add(INDEX_AUXILIARY_RESERVATION_BYTES))
             .and_then(|bytes| bytes.checked_add(u64::try_from(entry_count).ok()?.checked_mul(ROW_BYTES)?))
             .ok_or(StorageError::TooLarge)
     }
@@ -216,6 +219,8 @@ pub(super) fn namespace_bytes(namespaces: &NamespaceTable) -> Result<u64, Storag
 }
 
 fn migrate(connection: &mut Connection, definitions: &[(String, String)]) -> Result<(), MigrationError> {
+    connection.pragma_update(None, "journal_size_limit", INDEX_WAL_LIMIT_BYTES as i64)?;
+    connection.pragma_update(None, "wal_autocheckpoint", 100_i64)?;
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if version == 0 {
         let existing: i64 =

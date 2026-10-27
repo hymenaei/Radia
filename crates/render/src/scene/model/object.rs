@@ -111,8 +111,12 @@ impl Object {
     }
 
     pub(in crate::scene) fn motion_sample(&self) -> Option<MotionSample> {
-        let Placement::Ready(transform) = self.placement() else { return None };
         let detail = self.detail();
+        let transform = match detail.world_transform {
+            Ok(WorldTransformState::Resolved(transform)) => transform,
+            Ok(WorldTransformState::MissingScale(pose)) => WorldTransform { pose, scale: Vec3::ONE },
+            Ok(WorldTransformState::Provisional { .. } | WorldTransformState::Unresolved(_)) | Err(_) => return None,
+        };
         let is_attachment = detail.attachment_point.is_some();
         Some(MotionSample {
             transform,

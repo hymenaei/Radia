@@ -122,12 +122,8 @@ fn placement(
         return None;
     }
     let object = view.object(entity)?;
-    let base = match object.placement() {
-        crate::scene::Placement::Ready(transform) => transform,
-        crate::scene::Placement::Hidden(_) => return None,
-    };
     let sample = object.motion_sample()?;
-    let mut transform = base;
+    let mut transform = sample.transform;
     if sample.is_attachment {
         transform.pose.rotation = object.motion_state().local_rotation(sample, now);
     } else {
@@ -296,8 +292,14 @@ fn region_at(position: DVec3, regions: &[RegionBounds]) -> Option<Region> {
 
 #[cfg(test)]
 mod tests {
+    use std::{num::NonZeroU32, time::Duration};
+
+    use uuid::Uuid;
+    use world::{LinearMotion, ObjectObservation, OrderEvidence, ParentUpdate, Pose, RegionInfo, UpdateSource, World, WorldLimits};
+
+    use crate::scene::{Budget, ReadFailure, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView};
+
     use super::*;
-    use std::time::Duration;
 
     fn sample(position: DVec3, velocity: Vec3, acceleration: Vec3, angular_velocity: Vec3, is_physical: bool) -> MotionSample {
         MotionSample {
@@ -313,6 +315,74 @@ mod tests {
             is_attachment: false,
             source: None,
         }
+    }
+
+    fn child_scene(parent_scale: Option<Vec3>) -> (Reconciler, SceneView) {
+        let limits = WorldLimits {
+            max_region_registrations: 4,
+            max_entities: 16,
+            max_entities_per_region: 16,
+            max_tombstones_per_region: 16,
+            max_tombstones: 16,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(16),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(16),
+            max_journal_entries: 256,
+            max_journal_changes: 512,
+            max_region_name_bytes: 256,
+            max_recovery_targets: 8,
+        };
+        let mut world = World::new(limits);
+        let region = Region::new(1);
+        let _ = world.adopt_region(region).expect("region adoption");
+        let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("region origin");
+        let source = |order| UpdateSource::new(region, order as u32, OrderEvidence::Ordered(order), 0);
+        let mut root =
+            ObjectObservation::new(source(1), Uuid::from_u128(1), NonZeroU32::new(1).unwrap(), world::Kind::Object, ParentUpdate::Root);
+        root.pose = Some(Pose { position: Some(Vec3::new(20.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+        root.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X * 2.0), acceleration: None });
+        root.scale = parent_scale;
+        let _ = world.observe_object(root).expect("root observation");
+        let mut child = ObjectObservation::new(
+            source(2),
+            Uuid::from_u128(2),
+            NonZeroU32::new(2).unwrap(),
+            world::Kind::Object,
+            ParentUpdate::Local(NonZeroU32::new(1).unwrap()),
+        );
+        child.pose = Some(Pose { position: Some(Vec3::X * 3.0), rotation: Some(Quat::IDENTITY) });
+        child.scale = Some(Vec3::ONE);
+        let _ = world.observe_object(child).expect("child observation");
+
+        let (mut scene, mut view) = Reconciler::new(Budget::default());
+        let mut now = Instant::now();
+        for _ in 0..10_000 {
+            match scene.poll(now) {
+                ReconcileStep::Read(job) => {
+                    let result = match job.query() {
+                        ReadQuery::Barrier => Ok(ReadReply::Barrier(world.read_barrier())),
+                        ReadQuery::Objects(cursor) => world.object_list_page(*cursor, 256).map(ReadReply::Objects),
+                        ReadQuery::Regions(cursor) => world.region_page(*cursor, 64).map(ReadReply::Regions),
+                        ReadQuery::Details(entities) => world.object_detail_batch(entities).map(ReadReply::Details),
+                        ReadQuery::Changes(cursor) => world.change_page(*cursor, 256).map(ReadReply::Changes),
+                        ReadQuery::Terrain(region, cursor) => world.terrain_page(*region, *cursor, 8).map(ReadReply::Terrain),
+                        ReadQuery::Environment(region) => Ok(ReadReply::Environment(world.environment(*region))),
+                    }
+                    .map_err(ReadFailure::World);
+                    scene.complete_read(job, result, now);
+                }
+                ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+                ReconcileStep::Publish(batch) => view.apply(batch).expect("scene publication"),
+                ReconcileStep::Continue => {}
+                ReconcileStep::Wait(until) => now = until,
+                ReconcileStep::Idle => {
+                    assert_eq!(view.object_count(), 2, "both linkset objects are published");
+                    return (scene, view);
+                }
+                ReconcileStep::Asset(_) => panic!("motion fixture unexpectedly requests an asset"),
+                ReconcileStep::Closed => panic!("motion fixture scene unexpectedly closes"),
+            }
+        }
+        panic!("scene did not converge: {:?}", scene.status());
     }
 
     fn close_vec(actual: DVec3, expected: DVec3) {
@@ -469,6 +539,25 @@ mod tests {
         let child_transform = child_transform(root_transform, child, MotionState::new(now), child_time);
         close_vec(child_transform.pose.position, DVec3::new(2.0, 2.0, 0.0));
         close_rotation(child_transform.pose.rotation, Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
+    }
+
+    #[test]
+    fn linkset_child_follows_parent_without_drawable_dimensions() {
+        for scale in [None, Some(Vec3::ZERO)] {
+            let (_scene, view) = child_scene(scale);
+            let root = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("root is published");
+            let child = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(2)).expect("child is published");
+            assert!(matches!(root.placement(), crate::scene::Placement::Hidden(_)));
+            let child_entity = child.detail().summary.entity;
+            let at = root.motion_state().sampled_at + Duration::from_millis(500);
+            let mut placements = HashMap::new();
+            let mut regions = Vec::new();
+
+            fill_placements(&view, at, &[child_entity], &mut placements, &mut regions);
+
+            let transform = placements.get(&child_entity).expect("child placement follows its parent");
+            close_vec(transform.pose.position, DVec3::new(24.0, 0.0, 0.0));
+        }
     }
 
     #[test]

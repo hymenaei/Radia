@@ -3,9 +3,11 @@ use std::{error::Error, io, path::Path};
 use futures::executor::block_on;
 use rusqlite::{Connection, Error as RusqliteError, Transaction, TransactionBehavior, params, types::Type};
 
-use crate::sqlite::{MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError};
+use crate::sqlite::{MAX_BATCH_ROWS, MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError};
 
-use super::{Key, MAX_VALUE_BYTES, NamespaceId, NamespaceTable, StorageError, UnavailableReason, valid_extension, valid_namespace};
+use super::{
+    Key, MAX_QUEUED_WRITES, MAX_VALUE_BYTES, NamespaceId, NamespaceTable, StorageError, UnavailableReason, valid_extension, valid_namespace,
+};
 
 const INDEX_VERSION: i64 = 5;
 pub(super) const MAX_ENTRIES: usize = 262_144;
@@ -103,42 +105,90 @@ impl Index {
     }
 
     fn load_records(&self) -> Result<Vec<Record>, SqliteError> {
+        self.load_records_with_limits(MAX_ENTRIES, MAX_QUEUED_WRITES)
+    }
+
+    fn load_records_with_limits(&self, max_entries: usize, max_excess: usize) -> Result<Vec<Record>, SqliteError> {
         for attempt in 0..2 {
-            let count = self.namespace_count;
-            let receipt = self.database()?.read(0, move |transaction| {
-                let mut statement =
-                    transaction.prepare("SELECT namespace, name, size, hash, last_use, use_count FROM entries ORDER BY namespace, name")?;
-                let mut rows = statement.query([])?;
-                let mut records = Vec::new();
-                while let Some(row) = rows.next()? {
-                    if records.len() == MAX_ENTRIES {
-                        return Err(conversion_error(0, Type::Integer));
+            let result = (|| {
+                self.evict_excess(max_entries, max_excess)?;
+                let namespace_count = self.namespace_count;
+                let receipt = self.database()?.read(0, move |transaction| {
+                    let mut statement = transaction
+                        .prepare("SELECT namespace, name, size, hash, last_use, use_count FROM entries ORDER BY namespace, name")?;
+                    let mut rows = statement.query([])?;
+                    let mut records = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        if records.len() == max_entries {
+                            return Err(conversion_error(0, Type::Integer));
+                        }
+                        let namespace: i64 = row.get(0)?;
+                        let name = blob::<16>(row.get(1)?, 1)?;
+                        let size = unsigned(row.get(2)?, 2)?;
+                        if size > MAX_VALUE_BYTES as u64 {
+                            return Err(conversion_error(2, Type::Integer));
+                        }
+                        let hash = blob::<32>(row.get(3)?, 3)?;
+                        let last_use = unsigned(row.get(4)?, 4)?;
+                        let use_count = unsigned(row.get(5)?, 5)?;
+                        let namespace = u8::try_from(namespace).map_err(|_| conversion_error(0, Type::Integer))?;
+                        if usize::from(namespace) >= namespace_count {
+                            return Err(conversion_error(0, Type::Integer));
+                        }
+                        records.try_reserve(1).map_err(|_| allocation_error())?;
+                        records.push(Record { key: Key::new(NamespaceId::new(namespace), name), size, hash, last_use, use_count });
                     }
-                    let namespace: i64 = row.get(0)?;
-                    let name = blob::<16>(row.get(1)?, 1)?;
-                    let size = unsigned(row.get(2)?, 2)?;
-                    if size > MAX_VALUE_BYTES as u64 {
-                        return Err(conversion_error(2, Type::Integer));
-                    }
-                    let hash = blob::<32>(row.get(3)?, 3)?;
-                    let last_use = unsigned(row.get(4)?, 4)?;
-                    let use_count = unsigned(row.get(5)?, 5)?;
-                    let namespace = u8::try_from(namespace).map_err(|_| conversion_error(0, Type::Integer))?;
-                    if usize::from(namespace) >= count {
-                        return Err(conversion_error(0, Type::Integer));
-                    }
-                    records.try_reserve(1).map_err(|_| allocation_error())?;
-                    records.push(Record { key: Key::new(NamespaceId::new(namespace), name), size, hash, last_use, use_count });
-                }
-                Ok(records)
-            })?;
-            match block_on(receipt.wait()) {
+                    Ok(records)
+                })?;
+                block_on(receipt.wait())
+            })();
+            match result {
                 Ok(records) => return Ok(records),
                 Err(SqliteError::Corrupt | SqliteError::SchemaMismatch) if attempt == 0 => {}
                 Err(error) => return Err(error),
             }
         }
         Err(SqliteError::Corrupt)
+    }
+
+    fn evict_excess(&self, max_entries: usize, max_excess: usize) -> Result<(), SqliteError> {
+        let namespace_count = self.namespace_count;
+        let receipt = self.database()?.read(0, move |transaction| {
+            let row_count: i64 = transaction.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?;
+            let row_count = usize::try_from(row_count).map_err(|_| conversion_error(0, Type::Integer))?;
+            let excess = row_count.saturating_sub(max_entries);
+            if excess > max_excess {
+                return Err(conversion_error(0, Type::Integer));
+            }
+            if excess == 0 {
+                return Ok(Vec::new());
+            }
+            let limit = i64::try_from(excess).map_err(|_| conversion_error(0, Type::Integer))?;
+            let mut statement =
+                transaction.prepare("SELECT namespace, name FROM entries ORDER BY last_use ASC, namespace ASC, name ASC LIMIT ?1")?;
+            let mut rows = statement.query([limit])?;
+            let mut keys = Vec::new();
+            keys.try_reserve_exact(excess).map_err(|_| allocation_error())?;
+            while let Some(row) = rows.next()? {
+                let namespace = u8::try_from(row.get::<_, i64>(0)?).map_err(|_| conversion_error(0, Type::Integer))?;
+                if usize::from(namespace) >= namespace_count {
+                    return Err(conversion_error(0, Type::Integer));
+                }
+                keys.push(Key::new(NamespaceId::new(namespace), blob::<16>(row.get(1)?, 1)?));
+            }
+            if keys.len() != excess {
+                return Err(conversion_error(0, Type::Integer));
+            }
+            Ok(keys)
+        })?;
+        let keys = block_on(receipt.wait())?;
+        for chunk in keys.chunks(MAX_BATCH_ROWS) {
+            let mut mutations = Vec::new();
+            mutations.try_reserve_exact(chunk.len()).map_err(|_| SqliteError::Sqlite(allocation_error()))?;
+            mutations.extend(chunk.iter().copied().map(Mutation::Remove));
+            self.apply(mutations)?;
+        }
+        Ok(())
     }
 
     fn database(&self) -> Result<&SqliteDb, SqliteError> {
@@ -374,4 +424,32 @@ fn allocation_error() -> RusqliteError {
         rusqlite::ffi::Error::new(rusqlite::ffi::ErrorCode::OutOfMemory as i32),
         Some("asset cache index allocation failed".to_owned()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::{Namespace, NamespaceTable};
+    use tempfile::tempdir;
+
+    fn record(value: u8, last_use: u64) -> Record {
+        Record { key: Key::new(NamespaceId::new(0), [value; 16]), size: 0, hash: [0; 32], last_use, use_count: 0 }
+    }
+
+    #[test]
+    fn load_records_recovers_an_interrupted_insert_batch() {
+        let directory = tempdir().expect("cache directory");
+        let namespaces = NamespaceTable::new(&[Namespace::new("items", "bin")]).expect("valid namespaces");
+        let (index, records) = Index::open(directory.path().join("index.sqlite"), &namespaces).expect("create index");
+        assert!(records.is_empty());
+        let mutations = (1..=4).map(|value| Mutation::Put(record(value, u64::from(value)))).collect();
+        index.apply(mutations).expect("write partial insertion batch");
+
+        let recovered = index.load_records_with_limits(3, 1).expect("recover one excess row");
+
+        assert_eq!(recovered.len(), 3);
+        assert!(recovered.iter().all(|record| record.key != Key::new(NamespaceId::new(0), [1; 16])));
+        assert!(recovered.iter().any(|record| record.key == Key::new(NamespaceId::new(0), [4; 16])));
+        index.shutdown().expect("close index");
+    }
 }

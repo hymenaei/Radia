@@ -6,6 +6,7 @@ mod environment;
 mod mesh;
 mod mesh_cache;
 mod model;
+pub(crate) mod motion;
 mod planning;
 mod prim;
 mod reconcile;

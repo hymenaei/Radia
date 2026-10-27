@@ -4,7 +4,13 @@ use math::Vec3;
 use world::{Kind, ObjectDetail, PrimShape, Shape, WorldTransform, WorldTransformState};
 
 use crate::material::FaceMaterial;
-use crate::scene::{MeshKey, PreparedMesh, SharedMesh, asset_demand::Materials, budget::Lease, texture_animation};
+use crate::scene::{
+    MeshKey, PreparedMesh, SharedMesh,
+    asset_demand::Materials,
+    budget::Lease,
+    motion::{MotionSample, MotionState},
+    texture_animation,
+};
 
 #[derive(Clone)]
 pub struct Object {
@@ -13,12 +19,21 @@ pub struct Object {
     pub(super) mesh: Option<(MeshKey, SharedMesh)>,
     pub(super) materials: Option<Materials>,
     animation_clock: Option<AnimationClock>,
+    pub(super) motion: MotionState,
 }
 
 impl Object {
     pub(in crate::scene) fn new(source: ObjectDetail, lease: Lease) -> Self {
         let animation_clock = source.texture_animation.map(|_| AnimationClock { started_at: Instant::now(), frame_offset: 0.0 });
-        Self { data: Arc::new(ObjectData { source, _lease: lease }), preparation: None, mesh: None, materials: None, animation_clock }
+        let motion = MotionState::new(Instant::now());
+        Self {
+            data: Arc::new(ObjectData { source, _lease: lease }),
+            preparation: None,
+            mesh: None,
+            materials: None,
+            animation_clock,
+            motion,
+        }
     }
 
     pub fn detail(&self) -> &ObjectDetail {
@@ -93,6 +108,41 @@ impl Object {
             return Placement::Hidden(HiddenReason::InvalidDimensions);
         }
         Placement::Ready(transform)
+    }
+
+    pub(in crate::scene) fn motion_sample(&self) -> Option<MotionSample> {
+        let Placement::Ready(transform) = self.placement() else { return None };
+        let detail = self.detail();
+        let is_attachment = detail.attachment_point.is_some();
+        Some(MotionSample {
+            transform,
+            region: detail.summary.address.region(),
+            local_position: if is_attachment { Vec3::ZERO } else { detail.summary.local_transform.position().unwrap_or_default() },
+            local_rotation: if is_attachment {
+                transform.pose.rotation
+            } else {
+                detail.summary.local_transform.rotation().unwrap_or(transform.pose.rotation)
+            },
+            velocity: detail.linear_motion.velocity.unwrap_or_default(),
+            acceleration: detail.linear_motion.acceleration.unwrap_or_default(),
+            angular_velocity: detail.angular_velocity.unwrap_or_default(),
+            is_physical: detail.is_physical,
+            time_dilation: detail.time_dilation,
+            is_attachment,
+            source: detail.motion_source,
+        })
+    }
+
+    pub(in crate::scene) fn motion_state(&self) -> MotionState {
+        self.motion
+    }
+
+    pub(super) fn update_motion_from(&mut self, previous: &Self, at: Instant) {
+        let (Some(previous_sample), Some(next_sample)) = (previous.motion_sample(), self.motion_sample()) else {
+            self.motion = MotionState::new(at);
+            return;
+        };
+        self.motion = MotionState::updated(previous.motion, previous_sample, next_sample, at);
     }
 
     pub fn geometry(&self) -> Geometry {

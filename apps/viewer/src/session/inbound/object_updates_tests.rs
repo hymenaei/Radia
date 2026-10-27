@@ -21,6 +21,59 @@ fn fixture_mapping_preserves_packet_order() {
 }
 
 #[test]
+fn motion_updates_preserve_physics_and_time_dilation_fields() {
+    let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
+    let Message::ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
+    update.objects.truncate(1);
+    update.region_data.time_dilation = 0x4000;
+    update.objects[0].update_flags |= super::super::FLAGS_USE_PHYSICS;
+    let batch = decode_object_message(REGION, 1, OrderEvidence::Ordered(1), &full).expect("full object batch");
+    let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
+    assert_eq!(observation.is_physical, Some(true));
+    assert_eq!(observation.time_dilation, Some(f32::from(0x4000_u16) / f32::from(u16::MAX)));
+    let Message::ObjectUpdate(update) = &full else { panic!("expected cached full object fixture") };
+    let reference = CachedObjectReference {
+        local_id: update.objects[0].local_id,
+        crc: update.objects[0].crc,
+        update_flags: update.objects[0].update_flags,
+    };
+    let mut invalid_fields = 0;
+    let cached = decode_cached_object(REGION, 1, OrderEvidence::Ordered(1), 0, reference, &full, &mut invalid_fields);
+    let Some(ObjectOperation::Observe(cached)) = cached else { panic!("expected cached observation") };
+    assert_eq!(cached.is_physical, Some(true));
+    assert_eq!(cached.time_dilation, observation.time_dilation);
+
+    let mut compressed = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED).message().clone();
+    let Message::ObjectUpdateCompressed(update) = &mut compressed else { panic!("expected compressed object fixture") };
+    update.objects.truncate(1);
+    update.region_data.time_dilation = 0x8000;
+    update.objects[0].update_flags |= super::super::FLAGS_USE_PHYSICS;
+    let batch = decode_object_message(REGION, 2, OrderEvidence::Ordered(2), &compressed).expect("compressed object batch");
+    let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
+    assert_eq!(observation.is_physical, Some(true));
+    assert_eq!(observation.time_dilation, Some(f32::from(0x8000_u16) / f32::from(u16::MAX)));
+    let Message::ObjectUpdateCompressed(update) = &compressed else { panic!("expected cached compressed object fixture") };
+    let reference = CachedObjectReference {
+        local_id: update.objects[0].local_id,
+        crc: update.objects[0].crc,
+        update_flags: update.objects[0].update_flags,
+    };
+    let mut invalid_fields = 0;
+    let cached = decode_cached_object(REGION, 2, OrderEvidence::Ordered(2), 0, reference, &compressed, &mut invalid_fields);
+    let Some(ObjectOperation::Observe(cached)) = cached else { panic!("expected cached observation") };
+    assert_eq!(cached.is_physical, Some(true));
+    assert_eq!(cached.time_dilation, observation.time_dilation);
+
+    let mut terse = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();
+    let Message::ImprovedTerseObjectUpdate(update) = &mut terse else { panic!("expected terse fixture") };
+    update.region_data.time_dilation = u16::MAX;
+    let batch = decode_object_message(REGION, 3, OrderEvidence::Ordered(3), &terse).expect("terse object batch");
+    let Some(ObjectOperation::Patch(patch)) = batch.blocks[0].as_ref() else { panic!("expected terse patch") };
+    assert_eq!(patch.is_physical, None);
+    assert_eq!(patch.time_dilation, Some(1.0));
+}
+
+#[test]
 fn malformed_terse_block_does_not_discard_later_object() {
     let fixture = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let Message::ImprovedTerseObjectUpdate(update) = fixture.message() else { panic!("expected terse fixture") };

@@ -24,11 +24,13 @@ use wgpu::{
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 
+use world::{Entity, WorldTransform};
+
 use self::cache::FrameCache;
 use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
 use self::mesh::GpuMesh;
 use self::storage::Storage;
-use crate::scene::{AgentPose, Camera, MeshId, ViewVersion};
+use crate::scene::{AgentPose, Camera, MeshId, ViewVersion, motion::RegionBounds};
 use crate::{
     pipeline::{SurfacePipelines, Water},
     texture::{TextureCompletion, TextureJob, TextureState, Textures},
@@ -219,6 +221,10 @@ pub(crate) struct GeometryRenderer {
     draw_report: Option<Instant>,
     omitted_faces: usize,
     mesh_budget_blocked: HashSet<MeshId>,
+    placements: HashMap<Entity, WorldTransform>,
+    future_placements: HashMap<Entity, WorldTransform>,
+    regions: Vec<RegionBounds>,
+    motion_redraw: bool,
     epoch: u64,
     prepared: Option<FramePreparation>,
     applied_agent: Option<Uuid>,
@@ -233,6 +239,7 @@ impl GeometryRenderer {
 
     pub(crate) fn needs_frame(&self, now: Instant) -> bool {
         self.prepared.as_ref().is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.memory.mesh_state(), now))
+            || self.motion_redraw
             || self.textures.uploading()
     }
 
@@ -265,6 +272,10 @@ impl GeometryRenderer {
             draw_report: None,
             omitted_faces: 0,
             mesh_budget_blocked: HashSet::new(),
+            placements: HashMap::new(),
+            future_placements: HashMap::new(),
+            regions: Vec::new(),
+            motion_redraw: false,
             epoch: 0,
             prepared: None,
             applied_agent: None,
@@ -304,6 +315,7 @@ impl GeometryRenderer {
     }
 
     pub(crate) fn skip(&mut self) {
+        self.motion_redraw = false;
         if let Some(agent_id) = self.applied_agent.take() {
             self.restore_agent_pose(agent_id);
         }

@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fmt::{self, Display, Formatter},
     mem::size_of,
+    time::Instant,
 };
 
 use world::{Entity, Region, WorldRevision};
@@ -134,8 +135,9 @@ impl SceneView {
         if batch.replace {
             self.mirror = Mirror::default();
         }
+        let now = Instant::now();
         for change in batch.changes {
-            self.mirror.apply(change);
+            self.mirror.apply_at(change, now);
         }
         self.sequence = batch.sequence;
         if batch.replace {

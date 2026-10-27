@@ -19,8 +19,8 @@ use super::{
     },
     event_queue::{self, EventQueueContext, EventQueueTask, Stop},
     request::{
-        RequestDeadline, decode_capability_value_with_response_limit, decode_seed_capabilities, get_capability_bytes, post_capability,
-        request_capabilities_response, validate_capability_names,
+        RequestDeadline, decode_capability_value_with_response_limit, decode_seed_capabilities, delete_capability, get_capability_bytes,
+        patch_capability, post_capability, request_capabilities_response, validate_capability_names,
     },
 };
 use crate::{
@@ -219,6 +219,59 @@ impl Client {
             let (response, permit) = client
                 .run_with_admitted_permit(deadline, permit, |http, permit| async move {
                     let response = post_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
+                    Ok((response, permit))
+                })
+                .await?;
+            drop(permit);
+            Ok(response.body)
+        })
+        .await
+    }
+
+    pub async fn patch_bytes_with_response_limit<Request>(
+        &self,
+        url: &CapabilityUrl,
+        payload: &Request,
+        max_response_bytes: usize,
+    ) -> Result<Vec<u8>, Error>
+    where
+        Request: Serialize + ?Sized,
+    {
+        validate_response_limit(max_response_bytes)?;
+        let deadline = RequestDeadline::new(self.request_timeout);
+        let permit = self.acquire_request_permit_on_runtime(deadline).await?;
+        let body = encode_request(payload)?;
+        if deadline.expired() {
+            return Err(deadline.error());
+        }
+        let client = self.clone();
+        let url = url.clone();
+        self.on_runtime(async move {
+            let (response, permit) = client
+                .run_with_admitted_permit(deadline, permit, |http, permit| async move {
+                    let response = patch_capability(&http, &url.url, body, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
+                    Ok((response, permit))
+                })
+                .await?;
+            drop(permit);
+            Ok(response.body)
+        })
+        .await
+    }
+
+    pub async fn delete_bytes_with_response_limit(&self, url: &CapabilityUrl, max_response_bytes: usize) -> Result<Vec<u8>, Error> {
+        validate_response_limit(max_response_bytes)?;
+        let deadline = RequestDeadline::new(self.request_timeout);
+        let permit = self.acquire_request_permit_on_runtime(deadline).await?;
+        if deadline.expired() {
+            return Err(deadline.error());
+        }
+        let client = self.clone();
+        let url = url.clone();
+        self.on_runtime(async move {
+            let (response, permit) = client
+                .run_with_admitted_permit(deadline, permit, |http, permit| async move {
+                    let response = delete_capability(&http, &url.url, max_response_bytes).await.map_err(Error::CapabilityHttp)?;
                     Ok((response, permit))
                 })
                 .await?;

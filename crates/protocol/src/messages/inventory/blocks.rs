@@ -46,6 +46,12 @@ pub struct MoveInventoryItemBlock {
     pub new_name: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MoveInventoryFolderBlock {
+    pub folder_id: Uuid,
+    pub parent_id: Uuid,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum ItemBlockOrder {
     UpdateCreate,
@@ -190,6 +196,21 @@ pub(crate) fn write_move(writer: &mut Writer<'_>, block: &MoveInventoryItemBlock
     writer.uuid(block.item_id);
     writer.uuid(block.folder_id);
     writer.variable1_string(&block.new_name)
+}
+
+pub(crate) fn read_move_folder(reader: &mut Reader<'_>) -> Result<Option<MoveInventoryFolderBlock>, LLUdpError> {
+    let folder_id = reader.uuid()?;
+    let parent_id = reader.uuid()?;
+    Ok((!folder_id.is_nil() && !parent_id.is_nil()).then_some(MoveInventoryFolderBlock { folder_id, parent_id }))
+}
+
+pub(crate) fn write_move_folder(writer: &mut Writer<'_>, block: &MoveInventoryFolderBlock) -> Result<(), LLUdpError> {
+    if block.folder_id.is_nil() || block.parent_id.is_nil() {
+        return Err(LLUdpError::InvalidMessage);
+    }
+    writer.uuid(block.folder_id);
+    writer.uuid(block.parent_id);
+    Ok(())
 }
 
 pub(crate) fn read_id(reader: &mut Reader<'_>) -> Result<Option<Uuid>, LLUdpError> {

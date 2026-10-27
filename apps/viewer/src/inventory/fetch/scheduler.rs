@@ -24,6 +24,7 @@ use super::{
     FolderFetch, InventoryFetchError, InventoryFetchEvent, MAX_AIS_DEPTH, MAX_FETCH_RETRIES, RequestFailure, ais, classify_request_error,
     legacy,
 };
+use crate::inventory::InventoryEditHandle;
 
 const REQUEST_CAPACITY: usize = 1024;
 const RESULT_CAPACITY: usize = 2;
@@ -80,6 +81,7 @@ impl ForegroundRequest {
 pub struct InventoryFetchHandle {
     requests: mpsc::Sender<ForegroundRequest>,
     status: watch::Receiver<InventoryLoadingStatus>,
+    edits: InventoryEditHandle,
 }
 
 impl InventoryFetchHandle {
@@ -103,6 +105,10 @@ impl InventoryFetchHandle {
     pub fn status(&self) -> watch::Receiver<InventoryLoadingStatus> {
         self.status.clone()
     }
+
+    pub fn edits(&self) -> InventoryEditHandle {
+        self.edits.clone()
+    }
 }
 
 pub(crate) struct InventoryFetchController {
@@ -116,12 +122,12 @@ pub(crate) struct InventoryFetchController {
 }
 
 impl InventoryFetchController {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(edits: InventoryEditHandle) -> Self {
         let (requests_tx, requests_rx) = mpsc::channel(REQUEST_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel(RESULT_CAPACITY);
         let (status_tx, status_rx) = watch::channel(InventoryLoadingStatus::default());
         Self {
-            handle: InventoryFetchHandle { requests: requests_tx, status: status_rx },
+            handle: InventoryFetchHandle { requests: requests_tx, status: status_rx, edits },
             requests: Some(requests_rx),
             events_tx,
             events_rx,

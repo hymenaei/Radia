@@ -53,7 +53,7 @@ pub(super) fn append_ais_folder(
     Ok(())
 }
 
-pub(super) fn to_category(
+pub(crate) fn to_category(
     wire: &WireCategory,
     owner: InventoryOwner,
     parent: Option<CategoryKey>,
@@ -72,7 +72,7 @@ pub(super) fn to_category(
     })
 }
 
-pub(super) fn to_item(wire: &WireItem, owner: InventoryOwner, parent: CategoryKey) -> Result<Item, InventoryFetchError> {
+pub(crate) fn to_item(wire: &WireItem, owner: InventoryOwner, parent: CategoryKey) -> Result<Item, InventoryFetchError> {
     validate_identity(wire.owner_id, wire.parent_id, owner, Some(parent))?;
     if wire.name.len() > ::inventory::MAX_INVENTORY_NAME_BYTES || wire.description.len() > ::inventory::MAX_INVENTORY_DESCRIPTION_BYTES {
         return Err(InventoryFetchError::InvalidResponse);

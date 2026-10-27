@@ -68,6 +68,38 @@ impl Client {
         self.execute(operation, request, max_response_bytes).await
     }
 
+    pub(crate) async fn patch(
+        &self,
+        operation: &str,
+        url: &Url,
+        content_type: &str,
+        accept: Option<&str>,
+        body: Vec<u8>,
+        max_response_bytes: usize,
+    ) -> Result<Response, Error> {
+        validate_http_url(url)?;
+        let mut request = self.client.patch(url.clone()).header(CONTENT_TYPE, content_type).body(body);
+        if let Some(accept) = accept {
+            request = request.header(ACCEPT, accept);
+        }
+        self.execute(operation, request, max_response_bytes).await
+    }
+
+    pub(crate) async fn delete(
+        &self,
+        operation: &str,
+        url: &Url,
+        accept: Option<&str>,
+        max_response_bytes: usize,
+    ) -> Result<Response, Error> {
+        validate_http_url(url)?;
+        let mut request = self.client.delete(url.clone());
+        if let Some(accept) = accept {
+            request = request.header(ACCEPT, accept);
+        }
+        self.execute(operation, request, max_response_bytes).await
+    }
+
     #[tracing::instrument(
         name = "http.execute", level = "debug", skip_all,
         fields(operation = %operation, response_limit = max_response_bytes)

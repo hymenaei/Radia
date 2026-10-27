@@ -686,7 +686,8 @@ async fn missing_folder_keeps_walk_retryable() {
     assert!(!inventory.snapshot().is_complete(missing));
 
     let (_status_sender, status) = watch::channel(InventoryLoadingStatus::default());
-    let handle = InventoryFetchHandle { requests: requests.clone(), status };
+    let handle =
+        InventoryFetchHandle { requests: requests.clone(), status, edits: crate::inventory::InventoryEditController::new().handle() };
     for _ in 0..2 {
         let completion = handle.request_folder(missing).expect("queue folder retry");
         let retry = peer.next().await;
@@ -782,7 +783,11 @@ async fn refetch_signal_fetches_a_folder_the_scheduler_knows_as_complete() {
     assert_eq!(changes.refetch_categories, [root]);
     model.send_replace(Some(inventory.snapshot()));
     let (_status, status_receiver) = tokio::sync::watch::channel(InventoryLoadingStatus::default());
-    let handle = InventoryFetchHandle { requests: requests.clone(), status: status_receiver };
+    let handle = InventoryFetchHandle {
+        requests: requests.clone(),
+        status: status_receiver,
+        edits: crate::inventory::InventoryEditController::new().handle(),
+    };
     handle.refetch_folder(root).expect("queue live-update refetch");
     let request = peer.next().await;
     assert_eq!(request.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));

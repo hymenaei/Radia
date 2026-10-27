@@ -4,8 +4,9 @@ use crate::{
     LLUdpError,
     lludp::{Message, codec::Writer},
     messages::{
-        BulkUpdateInventory, InventoryFolderBlock, InventoryItemBlock, MoveInventoryItem, MoveInventoryItemBlock, RemoveInventoryFolder,
-        RemoveInventoryItem, RemoveInventoryObjects, SaveAssetIntoInventory, UpdateCreateInventoryItem,
+        BulkUpdateInventory, InventoryFolderBlock, InventoryItemBlock, MoveInventoryFolder, MoveInventoryFolderBlock, MoveInventoryItem,
+        MoveInventoryItemBlock, RemoveInventoryFolder, RemoveInventoryItem, RemoveInventoryObjects, SaveAssetIntoInventory,
+        UpdateCreateInventoryItem,
     },
 };
 
@@ -40,7 +41,7 @@ fn item() -> InventoryItemBlock {
     }
 }
 
-fn messages() -> [Message; 7] {
+fn messages() -> [Message; 8] {
     [
         Message::UpdateCreateInventoryItem(UpdateCreateInventoryItem {
             agent_id: uuid(1),
@@ -81,6 +82,13 @@ fn messages() -> [Message; 7] {
             session_id: uuid(2),
             stamp: true,
             inventory_data: vec![MoveInventoryItemBlock { item_id: uuid(3), folder_id: uuid(4), new_name: "renamed".to_owned() }],
+            invalid_blocks: 0,
+        }),
+        Message::MoveInventoryFolder(MoveInventoryFolder {
+            agent_id: uuid(1),
+            session_id: uuid(2),
+            stamp: false,
+            inventory_data: vec![MoveInventoryFolderBlock { folder_id: uuid(3), parent_id: uuid(4) }],
             invalid_blocks: 0,
         }),
     ]
@@ -138,7 +146,16 @@ fn bulk_update_round_trips() {
 
 #[test]
 fn move_item_round_trips() {
-    assert_round_trip(messages()[6].clone());
+    let message = messages()[6].clone();
+    assert!(!message.is_inbound_only());
+    assert_round_trip(message);
+}
+
+#[test]
+fn move_folder_round_trips_as_an_outbound_message() {
+    let message = messages()[7].clone();
+    assert!(!message.is_inbound_only());
+    assert_round_trip(message);
 }
 
 #[test]

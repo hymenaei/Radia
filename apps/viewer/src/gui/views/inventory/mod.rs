@@ -7,11 +7,11 @@ use std::{
     },
 };
 
-use ::inventory::{AssetType, CategoryKey, InventoryNodeId, InventorySnapshot, InventoryType};
+use ::inventory::{AssetType, CategoryKey, FolderType, InventoryNodeId, InventoryNodeKey, InventorySnapshot, InventoryType, ItemKey};
 use futures::{StreamExt, stream::FuturesUnordered};
 use gpui::{Context, Entity, IntoElement, Render, Task, UniformListScrollHandle, Window, div, prelude::*, px, uniform_list};
 use gpui_component::{
-    IndexPath, Theme,
+    Disableable as _, IndexPath, Theme,
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
     select::{Select, SelectEvent, SelectItem, SelectState},
@@ -19,8 +19,10 @@ use gpui_component::{
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::inventory::{
-    InventoryFetchHandle, InventoryFetchOutcome, InventoryLoadingStatus,
+    EditIntent, InventoryEditHandle, InventoryEditOutcome, InventoryEditRejection, InventoryFetchHandle, InventoryFetchOutcome,
+    InventoryLoadingStatus,
     browser::{self, SearchResults, SearchTypeFilter, TreeRows},
+    validate_edit,
 };
 
 const TREE_ROW_HEIGHT: f32 = 28.0;
@@ -51,6 +53,62 @@ impl SelectItem for TypeOption {
 
     fn value(&self) -> &Self::Value {
         &self.filter
+    }
+}
+
+#[derive(Clone)]
+struct DestinationOption {
+    title: gpui::SharedString,
+    folder: CategoryKey,
+    disabled: bool,
+}
+
+impl SelectItem for DestinationOption {
+    type Value = CategoryKey;
+
+    fn title(&self) -> gpui::SharedString {
+        self.title.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.folder
+    }
+
+    fn disabled(&self) -> bool {
+        self.disabled
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NameEdit {
+    CreateFolder(CategoryKey),
+    RenameCategory(CategoryKey),
+    RenameItem(ItemKey),
+}
+
+enum WindowEdit {
+    CreateFolder(CategoryKey, String),
+    RenameCategory(CategoryKey, String),
+    RenameItem(ItemKey, String),
+    MoveItem(ItemKey, CategoryKey),
+    MoveFolder(CategoryKey, CategoryKey),
+    DeleteItem(ItemKey),
+    DeleteFolder(CategoryKey),
+    EmptyTrash,
+}
+
+impl WindowEdit {
+    async fn submit(self, edits: InventoryEditHandle) -> InventoryEditOutcome {
+        match self {
+            Self::CreateFolder(parent, name) => edits.create_folder(parent, name, FolderType::None).await,
+            Self::RenameCategory(category, name) => edits.rename_category(category, name).await,
+            Self::RenameItem(item, name) => edits.rename_item(item, name).await,
+            Self::MoveItem(item, destination) => edits.move_item(item, destination).await,
+            Self::MoveFolder(folder, destination) => edits.move_folder(folder, destination).await,
+            Self::DeleteItem(item) => edits.delete_item(item).await,
+            Self::DeleteFolder(folder) => edits.delete_folder(folder).await,
+            Self::EmptyTrash => edits.empty_trash().await,
+        }
     }
 }
 
@@ -139,10 +197,14 @@ impl SearchRefresh {
 pub(crate) struct InventoryScreen {
     snapshots: Option<InventorySnapshot>,
     fetch: InventoryFetchHandle,
+    edits: InventoryEditHandle,
     search_input: Entity<InputState>,
+    edit_name_input: Entity<InputState>,
     type_filter: Entity<SelectState<Vec<TypeOption>>>,
+    destination_select: Option<Entity<SelectState<Vec<DestinationOption>>>>,
     search_query: String,
     _search_subscription: gpui::Subscription,
+    _destination_subscription: Option<gpui::Subscription>,
     _type_subscription: gpui::Subscription,
     snapshot_task: Option<Task<()>>,
     status_task: Option<Task<()>>,
@@ -166,6 +228,12 @@ pub(crate) struct InventoryScreen {
     tree_scroll: UniformListScrollHandle,
     search_scroll: UniformListScrollHandle,
     type_filter_value: SearchTypeFilter,
+    selected_node: Option<InventoryNodeKey>,
+    name_edit: Option<NameEdit>,
+    edit_pending: bool,
+    edit_task: Option<Task<()>>,
+    edit_status: Option<(String, bool)>,
+    confirm_empty_trash: bool,
 }
 
 impl InventoryScreen {
@@ -176,6 +244,7 @@ impl InventoryScreen {
         fetch: InventoryFetchHandle,
     ) -> Self {
         let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search inventory"));
+        let edit_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Folder name"));
         let filter_options = type_options();
         let type_filter = cx.new(|cx| SelectState::new(filter_options, Some(IndexPath::default().row(0)), window, cx));
         let search_subscription = cx.subscribe(&search_input, |screen, _, event: &InputEvent, cx| {
@@ -189,6 +258,7 @@ impl InventoryScreen {
                 screen.search_changed(cx);
             }
         });
+        let edits = fetch.edits();
         let snapshot = snapshots.borrow_and_update().clone();
         let mut status_updates = fetch.status();
         let loading_status = status_updates.borrow_and_update().clone();
@@ -196,9 +266,13 @@ impl InventoryScreen {
         let mut screen = Self {
             snapshots: snapshot,
             fetch,
+            edits,
             search_input,
+            edit_name_input,
             type_filter,
+            destination_select: None,
             _search_subscription: search_subscription,
+            _destination_subscription: None,
             _type_subscription: type_subscription,
             search_query: String::new(),
             snapshot_task: None,
@@ -223,6 +297,12 @@ impl InventoryScreen {
             tree_scroll: UniformListScrollHandle::default(),
             search_scroll: UniformListScrollHandle::default(),
             type_filter_value: SearchTypeFilter::All,
+            selected_node: None,
+            name_edit: None,
+            edit_pending: false,
+            edit_task: None,
+            edit_status: None,
+            confirm_empty_trash: false,
         };
 
         if let Some(root) = screen.active_root() {
@@ -281,12 +361,198 @@ impl InventoryScreen {
         })
     }
 
+    fn selected_category(&self) -> Option<CategoryKey> {
+        let node = self.selected_node?;
+        let InventoryNodeId::Category(id) = node.id() else { return None };
+        Some(CategoryKey::new(node.owner(), id))
+    }
+
+    fn selected_item(&self) -> Option<ItemKey> {
+        let node = self.selected_node?;
+        let InventoryNodeId::Item(id) = node.id() else { return None };
+        Some(ItemKey::new(node.owner(), id))
+    }
+
+    fn selected_is_personal(&self) -> bool {
+        if self.active_tree != TreeKind::Personal {
+            return false;
+        }
+        let Some(snapshot) = &self.snapshots else { return false };
+        if let Some(node) = self.selected_node { node.owner() == snapshot.roots().personal().owner() } else { true }
+    }
+
+    fn new_folder_parent(&self) -> Option<CategoryKey> {
+        let snapshot = self.snapshots.as_ref()?;
+        if !self.selected_is_personal() {
+            return None;
+        }
+        match self.selected_node.map(InventoryNodeKey::id) {
+            Some(InventoryNodeId::Category(id)) => {
+                let key = CategoryKey::new(self.selected_node?.owner(), id);
+                self.can_edit(EditIntent::CreateFolder { parent: key }).then_some(key)
+            }
+            Some(InventoryNodeId::Item(id)) => {
+                let item = snapshot.item(ItemKey::new(self.selected_node?.owner(), id))?;
+                self.can_edit(EditIntent::CreateFolder { parent: item.parent }).then_some(item.parent)
+            }
+            None => {
+                let parent = snapshot.roots().personal();
+                self.can_edit(EditIntent::CreateFolder { parent }).then_some(parent)
+            }
+        }
+    }
+
+    fn can_edit(&self, intent: EditIntent) -> bool {
+        let Some(snapshot) = &self.snapshots else { return false };
+        if !self.selected_is_personal() {
+            return false;
+        }
+        validate_edit(snapshot, snapshot.roots().personal().owner(), intent).is_ok()
+    }
+
+    fn selected_can_rename(&self) -> bool {
+        self.selected_node.is_some_and(|node| self.can_edit(EditIntent::Rename { node }))
+    }
+
+    fn selected_can_move(&self) -> bool {
+        self.selected_node.is_some_and(|node| self.can_edit(EditIntent::Move { node, destination: None }))
+    }
+
+    fn selected_is_trash(&self) -> bool {
+        let Some(category) = self.selected_category() else { return false };
+        self.snapshots.as_ref().is_some_and(|snapshot| {
+            snapshot.category(category).is_some_and(|category| category.preferred_folder_type == FolderType::Trash)
+                && validate_edit(snapshot, snapshot.roots().personal().owner(), EditIntent::EmptyTrash).is_ok()
+                && self.selected_is_personal()
+        })
+    }
+
+    fn select_node(&mut self, node: InventoryNodeKey, cx: &mut Context<Self>) {
+        self.selected_node = Some(node);
+        self.name_edit = None;
+        self.destination_select = None;
+        self._destination_subscription = None;
+        self.confirm_empty_trash = false;
+        cx.notify();
+    }
+
+    fn begin_name_edit(&mut self, mode: NameEdit, value: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit_name_input.update(cx, |input, cx| input.set_value(value.to_owned(), window, cx));
+        self.name_edit = Some(mode);
+        self.destination_select = None;
+        self._destination_subscription = None;
+        self.confirm_empty_trash = false;
+        cx.notify();
+    }
+
+    fn open_move_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(source) = self.selected_node.filter(|_| self.selected_can_move()) else { return };
+        let Some(snapshot) = &self.snapshots else { return };
+        let owner = snapshot.roots().personal().owner();
+        let root = snapshot.roots().personal();
+        let mut destinations = vec![DestinationOption { title: "My Inventory".into(), folder: root, disabled: false }];
+        for row in &self.rows.rows {
+            let InventoryNodeId::Category(id) = row.node.id() else { continue };
+            if row.node.owner() != owner {
+                continue;
+            }
+            let key = CategoryKey::new(owner, id);
+            let Some(category) = snapshot.category(key) else { continue };
+            let label = format!("{}{}", "  ".repeat(row.depth.min(12)), category.name);
+            destinations.push(DestinationOption {
+                title: label.into(),
+                folder: key,
+                disabled: validate_edit(snapshot, owner, EditIntent::Move { node: source, destination: Some(key) }).is_err(),
+            });
+        }
+        let select = cx.new(|cx| SelectState::new(destinations, None, window, cx));
+        let subscription = cx.subscribe(&select, |screen, _, event: &SelectEvent<Vec<DestinationOption>>, cx| {
+            if let SelectEvent::Confirm(Some(destination)) = event {
+                screen.submit_move(*destination, cx);
+            }
+        });
+        self.name_edit = None;
+        self._destination_subscription = Some(subscription);
+        self.destination_select = Some(select);
+        self.confirm_empty_trash = false;
+        cx.notify();
+    }
+
+    fn submit_move(&mut self, destination: CategoryKey, cx: &mut Context<Self>) {
+        let Some(node) = self.selected_node.filter(|_| self.selected_can_move()) else { return };
+        if !self.can_edit(EditIntent::Move { node, destination: Some(destination) }) {
+            return;
+        }
+        self.destination_select = None;
+        self._destination_subscription = None;
+        match node.id() {
+            InventoryNodeId::Item(id) => self.start_edit(WindowEdit::MoveItem(ItemKey::new(node.owner(), id), destination), cx),
+            InventoryNodeId::Category(id) => {
+                self.start_edit(WindowEdit::MoveFolder(CategoryKey::new(node.owner(), id), destination), cx);
+            }
+        }
+    }
+
+    fn save_name_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(mode) = self.name_edit.take() else { return };
+        let value = self.edit_name_input.read(cx).value().to_string();
+        let edit = match mode {
+            NameEdit::CreateFolder(parent) => WindowEdit::CreateFolder(parent, value),
+            NameEdit::RenameCategory(category) => WindowEdit::RenameCategory(category, value),
+            NameEdit::RenameItem(item) => WindowEdit::RenameItem(item, value),
+        };
+        self.start_edit(edit, cx);
+    }
+
+    fn start_edit(&mut self, edit: WindowEdit, cx: &mut Context<Self>) {
+        if self.edit_pending {
+            return;
+        }
+        self.edit_pending = true;
+        self.edit_status = Some(("Updating inventory…".into(), false));
+        self.confirm_empty_trash = false;
+        let handle = self.edits.clone();
+        self.edit_task = Some(cx.spawn(async move |this, cx| {
+            let outcome = edit.submit(handle).await;
+            if this.update(cx, |screen, cx| screen.finish_edit(outcome, cx)).is_err() {
+                tracing::trace!("inventory edit finished after its window closed");
+            }
+        }));
+        cx.notify();
+    }
+
+    fn finish_edit(&mut self, outcome: InventoryEditOutcome, cx: &mut Context<Self>) {
+        self.edit_pending = false;
+        self.name_edit = None;
+        self.destination_select = None;
+        self._destination_subscription = None;
+        let (message, failed) = edit_status(outcome);
+        self.edit_status = Some((message.into(), failed));
+        if let InventoryEditOutcome::Created(category) = outcome
+            && self.active_tree == TreeKind::Personal
+        {
+            self.selected_node = Some(InventoryNodeKey::new(category.owner(), InventoryNodeId::Category(category.id())));
+            if let Some(parent) =
+                self.snapshots.as_ref().and_then(|snapshot| snapshot.category(category)).and_then(|category| category.parent)
+            {
+                self.expanded.insert(parent);
+                self.rebuild_rows(cx);
+            }
+        }
+        cx.notify();
+    }
+
     fn search_active(&self) -> bool {
         self.type_filter_value != SearchTypeFilter::All || !self.search_query.is_empty()
     }
 
     fn search_changed(&mut self, cx: &mut Context<Self>) {
         self.search_query = self.search_input.read(cx).value().to_string();
+        self.selected_node = None;
+        self.name_edit = None;
+        self.destination_select = None;
+        self._destination_subscription = None;
+        self.confirm_empty_trash = false;
         if let Some(cancel) = self.search_cancel.take() {
             cancel.store(true, Ordering::Release);
         }
@@ -355,6 +621,9 @@ impl InventoryScreen {
         if let Some(snapshot) = &self.snapshots {
             self.expanded.retain(|key| snapshot.category(*key).is_some());
             self.folder_requests.retain_snapshot(snapshot);
+            if self.selected_node.is_some_and(|node| !snapshot_contains_node(snapshot, node)) {
+                self.selected_node = None;
+            }
         }
         if self.search_active() {
             if let Some(revision) = self.search_refresh.snapshot_changed(revision) {
@@ -382,6 +651,11 @@ impl InventoryScreen {
 
     fn set_tree(&mut self, tree: TreeKind, cx: &mut Context<Self>) {
         self.active_tree = tree;
+        self.selected_node = None;
+        self.name_edit = None;
+        self.destination_select = None;
+        self._destination_subscription = None;
+        self.confirm_empty_trash = false;
         if let Some(root) = self.active_root() {
             self.request_folder(root);
         }
@@ -475,15 +749,20 @@ impl InventoryScreen {
         let InventoryNodeId::Category(id) = row.node.id() else {
             let InventoryNodeId::Item(id) = row.node.id() else { return div().into_any_element() };
             let Some(item) = snapshot.item(::inventory::ItemKey::new(row.node.owner(), id)) else { return div().into_any_element() };
+            let node = row.node;
             let theme = Theme::global(cx).colors;
             return div()
+                .id(format!("inventory-item-{}", id.uuid()))
                 .h(px(TREE_ROW_HEIGHT))
                 .flex()
                 .items_center()
                 .gap_2()
                 .pl(px((row.depth as f32) * INDENT_WIDTH + INDENT_WIDTH))
+                .when(self.selected_node == Some(row.node), |view| view.bg(theme.group_box))
                 .child(div().w(px(38.)).text_size(px(11.)).text_color(theme.muted_foreground).child(asset_type_label(item.asset_type)))
                 .child(div().min_w_0().flex_1().text_color(theme.foreground).child(clip_text(&item.name, 80)))
+                .cursor_pointer()
+                .on_click(cx.listener(move |screen, _, _, cx| screen.select_node(node, cx)))
                 .into_any_element();
         };
 
@@ -493,6 +772,7 @@ impl InventoryScreen {
         let complete = snapshot.is_complete(key);
         let child_count = snapshot.child_count(key);
         let has_disclosure = child_count > 0 || !complete;
+        let node = row.node;
         let disclosure = if has_disclosure { if expanded { "▾" } else { "▸" } } else { "" };
         let state = if self.folder_requests.is_pending(key) {
             "Loading…"
@@ -510,19 +790,158 @@ impl InventoryScreen {
             .items_center()
             .gap_2()
             .pl(px((row.depth as f32) * INDENT_WIDTH))
+            .when(self.selected_node == Some(row.node), |view| view.bg(theme.group_box))
             .child(div().w(px(20.)).text_color(theme.muted_foreground).child(disclosure))
             .child(div().w(px(38.)).text_size(px(11.)).text_color(theme.muted_foreground).child("DIR"))
             .child(div().min_w_0().flex_1().text_color(theme.foreground).child(clip_text(&category.name, 80)))
             .child(div().flex_none().text_size(px(11.)).text_color(theme.muted_foreground).child(state));
-        if has_disclosure {
-            row_view
-                .id(format!("inventory-folder-{}", id.uuid()))
-                .cursor_pointer()
-                .on_click(cx.listener(move |screen, _, _, cx| screen.toggle_folder(key, cx)))
-                .into_any_element()
-        } else {
-            row_view.into_any_element()
+        row_view
+            .id(format!("inventory-folder-{}", id.uuid()))
+            .cursor_pointer()
+            .on_click(cx.listener(move |screen, _, _, cx| {
+                screen.select_node(node, cx);
+                if has_disclosure {
+                    screen.toggle_folder(key, cx);
+                }
+            }))
+            .into_any_element()
+    }
+
+    fn selected_can_delete(&self) -> bool {
+        self.selected_node.is_some_and(|node| self.can_edit(EditIntent::Delete { node }))
+    }
+
+    fn begin_selected_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selected_can_rename() {
+            return;
         }
+        if let Some(category) = self.selected_category()
+            && let Some(name) =
+                self.snapshots.as_ref().and_then(|snapshot| snapshot.category(category)).map(|category| category.name.to_string())
+        {
+            self.begin_name_edit(NameEdit::RenameCategory(category), &name, window, cx);
+        } else if let Some(item) = self.selected_item()
+            && let Some(name) = self.snapshots.as_ref().and_then(|snapshot| snapshot.item(item)).map(|item| item.name.to_string())
+        {
+            self.begin_name_edit(NameEdit::RenameItem(item), &name, window, cx);
+        }
+    }
+
+    fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        if !self.selected_can_delete() {
+            return;
+        }
+        if let Some(item) = self.selected_item() {
+            self.start_edit(WindowEdit::DeleteItem(item), cx);
+        } else if let Some(category) = self.selected_category() {
+            self.start_edit(WindowEdit::DeleteFolder(category), cx);
+        }
+    }
+
+    fn render_edit_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let editing_available = !self.edit_pending && !self.search_active();
+        let create_enabled = editing_available && self.new_folder_parent().is_some();
+        let rename_enabled = editing_available && self.selected_can_rename();
+        let move_enabled = editing_available && self.selected_can_move();
+        let delete_enabled = editing_available && self.selected_can_delete();
+        let empty_trash_enabled = !self.edit_pending && self.selected_is_trash();
+        let mut actions = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(Button::new("inventory-new-folder").label("New Folder").h(px(30.)).disabled(!create_enabled).on_click(cx.listener(
+                |screen, _, window, cx| {
+                    if let Some(parent) = screen.new_folder_parent() {
+                        screen.begin_name_edit(NameEdit::CreateFolder(parent), "", window, cx);
+                    }
+                },
+            )))
+            .child(
+                Button::new("inventory-rename")
+                    .label("Rename")
+                    .h(px(30.))
+                    .disabled(!rename_enabled)
+                    .on_click(cx.listener(|screen, _, window, cx| screen.begin_selected_rename(window, cx))),
+            )
+            .child(
+                Button::new("inventory-delete")
+                    .label("Move to Trash")
+                    .h(px(30.))
+                    .disabled(!delete_enabled)
+                    .on_click(cx.listener(|screen, _, _, cx| screen.delete_selected(cx))),
+            )
+            .child(
+                Button::new("inventory-move")
+                    .label("Move to…")
+                    .h(px(30.))
+                    .disabled(!move_enabled)
+                    .on_click(cx.listener(|screen, _, window, cx| screen.open_move_picker(window, cx))),
+            )
+            .child(
+                Button::new("inventory-empty-trash")
+                    .label("Empty Trash")
+                    .h(px(30.))
+                    .with_variant(if self.confirm_empty_trash {
+                        gpui_component::button::ButtonVariant::Danger
+                    } else {
+                        gpui_component::button::ButtonVariant::Secondary
+                    })
+                    .disabled(!empty_trash_enabled)
+                    .on_click(cx.listener(|screen, _, _, cx| {
+                        screen.confirm_empty_trash = !screen.confirm_empty_trash;
+                        cx.notify();
+                    })),
+            );
+
+        if self.name_edit.is_some() {
+            actions = actions
+                .child(div().w(px(220.)).child(Input::new(&self.edit_name_input).h(px(30.))))
+                .child(
+                    Button::new("inventory-edit-save")
+                        .label("Save")
+                        .h(px(30.))
+                        .disabled(self.edit_pending)
+                        .on_click(cx.listener(|screen, _, _, cx| screen.save_name_edit(cx))),
+                )
+                .child(Button::new("inventory-edit-cancel").label("Cancel").h(px(30.)).disabled(self.edit_pending).on_click(cx.listener(
+                    |screen, _, _, cx| {
+                        screen.name_edit = None;
+                        cx.notify();
+                    },
+                )));
+        }
+        if let Some(destination) = &self.destination_select {
+            actions = actions.child(div().w(px(240.)).child(Select::new(destination).h(px(30.)).placeholder("Choose destination"))).child(
+                Button::new("inventory-move-cancel").label("Cancel").h(px(30.)).on_click(cx.listener(|screen, _, _, cx| {
+                    screen.destination_select = None;
+                    screen._destination_subscription = None;
+                    cx.notify();
+                })),
+            );
+        }
+        if self.confirm_empty_trash {
+            actions = actions
+                .child(
+                    div().text_size(px(12.)).text_color(Theme::global(cx).colors.danger).child("Permanently delete all contents of Trash?"),
+                )
+                .child(
+                    Button::new("inventory-empty-trash-confirm")
+                        .label("Delete all")
+                        .h(px(30.))
+                        .with_variant(gpui_component::button::ButtonVariant::Danger)
+                        .disabled(!empty_trash_enabled)
+                        .on_click(cx.listener(|screen, _, _, cx| {
+                            if screen.selected_is_trash() {
+                                screen.start_edit(WindowEdit::EmptyTrash, cx);
+                            }
+                        })),
+                )
+                .child(Button::new("inventory-empty-trash-cancel").label("Cancel").h(px(30.)).on_click(cx.listener(|screen, _, _, cx| {
+                    screen.confirm_empty_trash = false;
+                    cx.notify();
+                })));
+        }
+        actions
     }
 
     fn render_search_result(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -679,6 +1098,7 @@ impl Render for InventoryScreen {
                     .child(div().w(px(230.)).child(Select::new(&self.type_filter).h(px(36.)))),
             )
             .child(tab_row)
+            .child(self.render_edit_actions(cx))
             .child(div().text_size(px(12.)).text_color(theme.muted_foreground).child(self.render_status()))
             .when(self.request_error.is_some(), |view| {
                 view.child(
@@ -688,7 +1108,45 @@ impl Render for InventoryScreen {
                         .child(format!("Could not request folder: {}", self.request_error.as_deref().unwrap_or_default())),
                 )
             })
+            .when_some(self.edit_status.as_ref(), |view, (message, failed)| {
+                view.child(
+                    div().text_size(px(12.)).text_color(if *failed { theme.danger } else { theme.muted_foreground }).child(message.clone()),
+                )
+            })
             .child(content)
+    }
+}
+
+fn snapshot_contains_node(snapshot: &InventorySnapshot, node: InventoryNodeKey) -> bool {
+    match node.id() {
+        InventoryNodeId::Category(id) => snapshot.category(CategoryKey::new(node.owner(), id)).is_some(),
+        InventoryNodeId::Item(id) => snapshot.item(ItemKey::new(node.owner(), id)).is_some(),
+    }
+}
+
+fn edit_status(outcome: InventoryEditOutcome) -> (&'static str, bool) {
+    match outcome {
+        InventoryEditOutcome::Applied => ("Inventory updated", false),
+        InventoryEditOutcome::Created(_) => ("Folder created", false),
+        InventoryEditOutcome::Rejected(rejection) => (
+            match rejection {
+                InventoryEditRejection::QueueFull => "Too many inventory edits are queued; try again",
+                InventoryEditRejection::SessionEnded => "The inventory session has ended",
+                InventoryEditRejection::MissingCategory => "That folder no longer exists",
+                InventoryEditRejection::MissingItem => "That item no longer exists",
+                InventoryEditRejection::MissingTrash => "The Trash folder is unavailable",
+                InventoryEditRejection::DifferentOwner => "That entry belongs to another inventory",
+                InventoryEditRejection::RootFolder => "Inventory root folders cannot be changed",
+                InventoryEditRejection::ProtectedFolder => "System folders cannot be changed",
+                InventoryEditRejection::OperationNotAllowed => "That inventory operation is unavailable here",
+                InventoryEditRejection::InvalidName => "Enter a valid folder or item name",
+                InventoryEditRejection::FolderCycle => "A folder cannot be moved into itself",
+            },
+            true,
+        ),
+        InventoryEditOutcome::ServerError => ("The inventory server could not complete that change", true),
+        InventoryEditOutcome::Gone => ("The entry is gone; its parent folder is being refreshed", true),
+        InventoryEditOutcome::TimedOut => ("The update timed out; affected folders are being refreshed", true),
     }
 }
 

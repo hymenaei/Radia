@@ -1,6 +1,14 @@
-use std::{collections::HashSet, future::pending, ops::ControlFlow, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    future::pending,
+    ops::ControlFlow,
+    sync::Arc,
+};
 
-use ::inventory::{CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryChild, InventoryError, InventorySnapshot};
+use ::inventory::{
+    CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryChild, InventoryDelta, InventoryError, InventoryNodeId, InventoryNodeKey,
+    InventorySnapshot, ServerVersion,
+};
 use futures::{
     FutureExt,
     channel::oneshot,
@@ -27,8 +35,8 @@ use super::{
 use crate::{
     asset_coordinator::AssetCoordinator,
     inventory::{
-        FolderApplyOutcome, FolderFetch, InventoryFetchController, InventoryFetchError, InventoryFetchEvent, InventoryLoadingStatus,
-        favorites::load_favorites,
+        AisDelta, FolderApplyOutcome, FolderFetch, InventoryEditController, InventoryEditEvent, InventoryFetchController,
+        InventoryFetchError, InventoryFetchEvent, InventoryLoadingStatus, MoveExpectation, favorites::load_favorites,
     },
     remembered_login::{self, RememberedLogin},
     session::{
@@ -51,6 +59,7 @@ type Cancellation = Shared<BoxFuture<'static, ()>>;
 enum DriverInput {
     Session(Input),
     InventoryCache(Option<InventoryCacheEvent>),
+    InventoryEdit(Option<InventoryEditEvent>),
 }
 
 pub(crate) struct CredentialPersistence {
@@ -88,6 +97,8 @@ struct SessionDriver {
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
     rejected_inventory_blocks: u64,
     inventory_fetch: InventoryFetchController,
+    inventory_edits: InventoryEditController,
+    inventory_pending_moves: HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
     inventory_known: HashSet<CategoryKey>,
     inventory_complete: HashSet<CategoryKey>,
     inventory_failed: HashSet<CategoryKey>,
@@ -127,7 +138,8 @@ impl SessionDriver {
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
         let (inventory_changes, _) = watch::channel(None);
-        let inventory_fetch = InventoryFetchController::new();
+        let inventory_edits = InventoryEditController::new();
+        let inventory_fetch = InventoryFetchController::new(inventory_edits.handle());
 
         Self {
             session,
@@ -156,6 +168,8 @@ impl SessionDriver {
             inventory_changes,
             rejected_inventory_blocks: 0,
             inventory_fetch,
+            inventory_edits,
+            inventory_pending_moves: HashMap::new(),
             inventory_known: HashSet::new(),
             inventory_complete: HashSet::new(),
             inventory_failed: HashSet::new(),
@@ -187,23 +201,36 @@ impl SessionDriver {
                     self.inventory_fetch.next_event(),
                 ) => DriverInput::Session(input),
                 cache_event = self.inventory_cache.next_event() => DriverInput::InventoryCache(cache_event),
+                edit_event = self.inventory_edits.next_event() => DriverInput::InventoryEdit(edit_event),
             };
             let flow = match input {
                 DriverInput::InventoryCache(Some(event)) => {
-                    if let Some(inventory) = &mut self.inventory {
-                        let outcome = self.inventory_cache.handle_event(&self.runtime, event, inventory);
+                    let before = self.inventory.as_ref().map(Inventory::snapshot);
+                    let outcome =
+                        self.inventory.as_mut().map(|inventory| self.inventory_cache.handle_event(&self.runtime, event, inventory));
+                    if let Some(outcome) = outcome {
                         if let Some(snapshot) = outcome.snapshot {
+                            if let Some(before) = before {
+                                let changes = cache_restore_move_changes(&self.inventory_pending_moves, &before, &snapshot);
+                                self.process_inventory_changes(&changes, &snapshot);
+                            }
                             self.inventory_changes.send_replace(Some(snapshot));
                         }
                         if outcome.startup_complete
                             && let Some(capabilities) = self.inventory_fetch_capabilities.take()
                         {
+                            self.start_inventory_edits(capabilities.clone());
                             self.start_inventory_fetch(capabilities);
                         }
                     }
                     ControlFlow::Continue(())
                 }
                 DriverInput::InventoryCache(None) => ControlFlow::Continue(()),
+                DriverInput::InventoryEdit(Some(event)) => {
+                    self.handle_inventory_edit_event(event);
+                    ControlFlow::Continue(())
+                }
+                DriverInput::InventoryEdit(None) => ControlFlow::Continue(()),
                 DriverInput::Session(input) => match input {
                     Input::Cancelled => ControlFlow::Break(()),
                     Input::Event(event) => self.handle_network_event(event).await,
@@ -590,7 +617,7 @@ impl SessionDriver {
                 if !outcome.changes.is_empty()
                     && let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot)
                 {
-                    self.track_inventory_changes(&outcome.changes, &snapshot);
+                    self.process_inventory_changes(&outcome.changes, &snapshot);
                     self.inventory_changes.send_replace(Some(snapshot.clone()));
                     self.request_inventory_refetches(&outcome.changes, &snapshot);
                     self.publish_inventory_status();
@@ -748,6 +775,104 @@ impl SessionDriver {
         self.inventory_fetch.start(&self.runtime, capabilities, snapshot, model, self.cancellation.clone());
     }
 
+    fn start_inventory_edits(&mut self, capabilities: Client) {
+        if self.inventory.is_none() {
+            return;
+        }
+        let Some(session) = self.active_session.clone() else { return };
+        let model = self.inventory_changes.subscribe();
+        self.inventory_edits.start(&self.runtime, capabilities, self.session_handle.clone(), session, model, self.cancellation.clone());
+    }
+
+    fn handle_inventory_edit_event(&mut self, event: InventoryEditEvent) {
+        match event {
+            InventoryEditEvent::Apply { confirmation, applied } => {
+                let result = self.apply_inventory_confirmation(confirmation);
+                if applied.send(result).is_err() {
+                    tracing::trace!("inventory edit worker stopped before apply acknowledgement");
+                }
+            }
+            InventoryEditEvent::RefreshFolders { folders, refreshed } => {
+                let folder_count = folders.len();
+                let refreshed_inventory = self.mark_inventory_folders_incomplete(folders);
+                if !refreshed_inventory {
+                    tracing::debug!(folder_count, "inventory folder refresh could not be queued after an edit failure");
+                }
+                if refreshed.send(refreshed_inventory).is_err() {
+                    tracing::trace!("inventory edit worker stopped before folder refresh acknowledgement");
+                }
+            }
+            InventoryEditEvent::MoveStarted { expectation, confirmed, registered } => {
+                self.inventory_pending_moves.insert(expectation.node, (expectation, confirmed));
+                if registered.send(()).is_err() {
+                    tracing::trace!("inventory edit worker stopped before move registration acknowledgement");
+                }
+            }
+            InventoryEditEvent::MoveAborted { expectation, removed } => {
+                if self.inventory_pending_moves.get(&expectation.node).is_some_and(|(current, _)| *current == expectation) {
+                    self.inventory_pending_moves.remove(&expectation.node);
+                }
+                if removed.send(()).is_err() {
+                    tracing::trace!("inventory edit worker stopped before move abort acknowledgement");
+                }
+            }
+            InventoryEditEvent::MoveTimedOut { expectation, refreshed } => {
+                if self.inventory_pending_moves.get(&expectation.node).is_some_and(|(current, _)| *current == expectation) {
+                    self.inventory_pending_moves.remove(&expectation.node);
+                }
+                let applied = self.mark_inventory_folders_incomplete([expectation.from, expectation.to]);
+                if refreshed.send(applied).is_err() {
+                    tracing::trace!("inventory edit worker stopped before move timeout acknowledgement");
+                }
+            }
+        }
+    }
+
+    fn apply_inventory_confirmation(&mut self, confirmation: AisDelta) -> bool {
+        let Some(current) = self.inventory.as_ref().map(Inventory::snapshot) else { return false };
+        self.apply_inventory_edit_delta(confirmation.into_delta(&current))
+    }
+
+    fn apply_inventory_edit_delta(&mut self, delta: InventoryDelta) -> bool {
+        let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else { return false };
+        let Some(inventory) = self.inventory.as_mut() else { return false };
+        let changes = match inventory.apply_delta(delta) {
+            Ok(changes) => changes,
+            Err(error) => {
+                tracing::warn!(%error, "inventory edit confirmation could not be applied");
+                return false;
+            }
+        };
+        if changes.is_empty() {
+            return true;
+        }
+        let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot) else { return false };
+        self.process_inventory_changes(&changes, &snapshot);
+        self.inventory_changes.send_replace(Some(snapshot.clone()));
+        self.request_inventory_refetches(&changes, &snapshot);
+        self.publish_inventory_status();
+        self.inventory_cache.record_change(&self.runtime, changes, before, snapshot);
+        true
+    }
+
+    fn process_inventory_changes(&mut self, changes: &ChangeSet, snapshot: &InventorySnapshot) {
+        resolve_pending_inventory_moves(&mut self.inventory_pending_moves, changes);
+        self.track_inventory_changes(changes, snapshot);
+    }
+
+    fn mark_inventory_folders_incomplete(&mut self, folders: impl IntoIterator<Item = CategoryKey>) -> bool {
+        let Some(snapshot) = self.inventory.as_ref().map(Inventory::snapshot) else { return false };
+        let folders = folders.into_iter().filter(|folder| snapshot.category(*folder).is_some()).collect::<HashSet<_>>();
+        if folders.is_empty() {
+            return false;
+        }
+        let delta = InventoryDelta {
+            updated_category_versions: folders.into_iter().map(|folder| (folder, ServerVersion::UNKNOWN)).collect(),
+            ..InventoryDelta::default()
+        };
+        self.apply_inventory_edit_delta(delta)
+    }
+
     fn handle_inventory_fetch(&mut self, event: InventoryFetchEvent) {
         match event {
             InventoryFetchEvent::Folder { fetch, applied } => {
@@ -759,7 +884,7 @@ impl SessionDriver {
                 match result {
                     Some(Ok(Some(changes))) => {
                         if let Some(snapshot) = snapshot.as_ref() {
-                            self.track_inventory_changes(&changes, snapshot);
+                            self.process_inventory_changes(&changes, snapshot);
                             if snapshot.is_complete(folder) {
                                 self.inventory_complete.insert(folder);
                             } else {
@@ -856,6 +981,8 @@ impl SessionDriver {
     }
 
     async fn finish(mut self) {
+        self.inventory_pending_moves.clear();
+        self.inventory_edits.stop().await;
         self.inventory_fetch.stop().await;
         self.recovery.cancel();
         self.reads.finish();
@@ -867,6 +994,45 @@ impl SessionDriver {
             let region = self.session_world.region_for(simulator_id).map(|region| region.get());
             tracing::warn!(simulator = simulator_id.get(), region, %error, "could not retire simulator world region on session shutdown");
         }
+    }
+}
+
+pub(crate) fn resolve_pending_inventory_moves(
+    pending: &mut HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
+    changes: &ChangeSet,
+) {
+    for change in &changes.changes {
+        let InventoryChange::NodeMoved { node, from, to } = change else { continue };
+        let Some((expectation, _)) = pending.get(node) else { continue };
+        if expectation.from == *from
+            && expectation.to == *to
+            && let Some((_, confirmed)) = pending.remove(node)
+            && confirmed.send(()).is_err()
+        {
+            tracing::trace!("inventory edit worker stopped before receiving move confirmation");
+        }
+    }
+}
+
+fn cache_restore_move_changes(
+    pending: &HashMap<InventoryNodeKey, (MoveExpectation, tokio::sync::oneshot::Sender<()>)>,
+    before: &InventorySnapshot,
+    after: &InventorySnapshot,
+) -> ChangeSet {
+    let changes = pending
+        .iter()
+        .filter_map(|(node, (expectation, _))| {
+            (inventory_node_parent(before, *node) == Some(expectation.from) && inventory_node_parent(after, *node) == Some(expectation.to))
+                .then_some(InventoryChange::NodeMoved { node: *node, from: expectation.from, to: expectation.to })
+        })
+        .collect();
+    ChangeSet { revision: after.revision(), changes, refetch_categories: Vec::new() }
+}
+
+fn inventory_node_parent(snapshot: &InventorySnapshot, node: InventoryNodeKey) -> Option<CategoryKey> {
+    match node.id() {
+        InventoryNodeId::Category(id) => snapshot.category(CategoryKey::new(node.owner(), id)).and_then(|category| category.parent),
+        InventoryNodeId::Item(id) => snapshot.item(::inventory::ItemKey::new(node.owner(), id)).map(|item| item.parent),
     }
 }
 

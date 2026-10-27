@@ -68,7 +68,7 @@ pub(super) fn decode_event_batch(body: &[u8]) -> Result<(i32, Vec<CapabilityEven
         if event_size > super::MAX_QUEUED_CAPABILITY_EVENT_BYTES {
             return Err(format!("EventQueueGet event exceeded the {}-byte limit.", super::MAX_QUEUED_CAPABILITY_EVENT_BYTES));
         }
-        events.push(CapabilityEvent { message, body, retained_bytes: event_size });
+        events.push(CapabilityEvent { message, body, handoff_outcome: None, retained_bytes: event_size });
         if capability_event_batch_retained_size(&events, events.capacity()) > MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES {
             return Err(format!("EventQueueGet batch exceeded the {MAX_EVENT_QUEUE_BATCH_RETAINED_BYTES}-byte retained-data limit."));
         }

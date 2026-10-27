@@ -26,7 +26,7 @@ impl SessionDispatcher<'_> {
         };
         let (event, retained_bytes, coverage_watermark) = envelope.into_parts();
         match event {
-            Event::CapabilityEvent { simulator_id, source, message, mut body } => {
+            Event::CapabilityEvent { simulator_id, source, message, mut body, .. } => {
                 if !is_current_simulator(simulator_id, self.state.simulator_id, &self.run_state.neighbor_connections) {
                     return Ok(RuntimeAction::Continue);
                 }
@@ -38,13 +38,14 @@ impl SessionDispatcher<'_> {
                     shutdown: self.disconnect_requested.clone(),
                     capability_events: self.capability_events.clone(),
                 };
-                self.state.process_capability_event(simulator_id, &message, &body, None, &mut setup, &mut self.handoff_state).await?;
+                let handoff_outcome =
+                    self.state.process_capability_event(simulator_id, &message, &body, None, &mut setup, &mut self.handoff_state).await?;
                 redact_seed_capability(&mut body);
                 self.state
                     .publish_simulator_event(
                         simulator_id,
                         EventEnvelope::from_parts(
-                            Event::CapabilityEvent { simulator_id, source, message, body },
+                            Event::CapabilityEvent { simulator_id, source, message, body, handoff_outcome },
                             retained_bytes,
                             coverage_watermark,
                         ),
@@ -65,8 +66,9 @@ impl SessionDispatcher<'_> {
                     shutdown: self.disconnect_requested.clone(),
                     capability_events: self.capability_events.clone(),
                 };
-                for (index, event) in batch.iter().enumerate() {
-                    self.state
+                for (index, event) in batch.iter_mut().enumerate() {
+                    event.handoff_outcome = self
+                        .state
                         .process_capability_event(
                             simulator_id,
                             &event.message,

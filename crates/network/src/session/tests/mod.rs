@@ -296,6 +296,7 @@ fn retained_packet_event(budget: &SimulatorMemoryBudget, simulator_id: Simulator
             source,
             sequence,
             packet_order: Ordered(u64::from(sequence)),
+            handoff_outcome: None,
             message: packet.into_message(),
         },
         reservation.into_retention(),

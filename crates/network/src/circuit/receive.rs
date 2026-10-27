@@ -401,6 +401,7 @@ impl ConnectionTask {
                     sequence: packet.sequence(),
                     packet_order,
                     message: packet.into_message(),
+                    handoff_outcome: None,
                 },
                 memory_reservation.take().expect("application packet was admitted").into_retention(),
                 self.connection.coverage_losses.watermark(self.connection.simulator_id, CoverageSource::Lludp),

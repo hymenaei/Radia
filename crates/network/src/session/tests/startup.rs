@@ -365,7 +365,13 @@ async fn capability_events_wait_for_simulator_connection() {
     let mut first_event_permit = Some(queued_bytes.clone().acquire_many_owned(7).await.expect("reserve capability event bytes"));
 
     for (index, message) in ["First", "Second"].into_iter().enumerate() {
-        let event = Event::CapabilityEvent { simulator_id, source: endpoint, message: message.to_owned(), body: Value::Undefined };
+        let event = Event::CapabilityEvent {
+            simulator_id,
+            source: endpoint,
+            message: message.to_owned(),
+            body: Value::Undefined,
+            handoff_outcome: None,
+        };
         let envelope = if index == 0 {
             event_with_retained_bytes(event, first_event_permit.take().expect("first event permit"))
         } else {

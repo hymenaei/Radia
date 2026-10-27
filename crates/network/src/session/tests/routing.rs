@@ -197,6 +197,7 @@ async fn simulator_removal_releases_preconnect_bytes() {
                 source: "127.0.0.1:13001".parse().expect("simulator address"),
                 message: "Pending".into(),
                 body: Value::Undefined,
+                handoff_outcome: None,
             },
             permit,
         ),

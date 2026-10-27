@@ -16,7 +16,7 @@ use crate::{
     circuit::{HandoffCancellation, HandoffGeneration, HandoffTarget},
     coverage::{CoverageLossLedger, CoverageLossReason},
     event::EventRetention,
-    event::{Event, EventEnvelope, PacketOrder, SimulatorId},
+    event::{Event, EventEnvelope, HandoffEventOutcome, PacketOrder, SimulatorId},
 };
 use protocol::{lludp::Message, messages::AgentMovementComplete};
 use tokio::{
@@ -109,6 +109,13 @@ impl HandoffState {
 pub(super) enum HandoffAnnouncement {
     CrossedRegion,
     TeleportFinish(HandoffOrder),
+}
+
+enum HandoffResolution {
+    Continue,
+    Existing,
+    Ignored,
+    Conflict,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,33 +243,36 @@ impl SessionState {
         announcement: HandoffAnnouncement,
         setup: &mut PromotionSetup<'_>,
         state: &mut HandoffState,
-    ) -> Result<(), SessionError> {
+    ) -> Result<HandoffEventOutcome, SessionError> {
         if source != self.primary.simulator_id || state.is_conflicted() {
-            return Ok(());
+            return Ok(HandoffEventOutcome::Ignored);
         }
         if self.primary.region_handle == Some(handoff.region_handle) && self.primary.endpoint == handoff.endpoint {
-            return Ok(());
+            return Ok(HandoffEventOutcome::Ignored);
         }
 
         let mut evidence = HandoffEvidence::default();
-        if !self.resolve_pending_handoff(source, &handoff, announcement, setup, state, &mut evidence) {
-            return Ok(());
+        match self.resolve_pending_handoff(source, &handoff, announcement, setup, state, &mut evidence) {
+            HandoffResolution::Existing => return Ok(HandoffEventOutcome::Accepted),
+            HandoffResolution::Ignored => return Ok(HandoffEventOutcome::Ignored),
+            HandoffResolution::Conflict => return Ok(HandoffEventOutcome::Conflict),
+            HandoffResolution::Continue => {}
         }
         evidence.record(announcement);
         let Some(generation) = self.next_handoff_generation() else {
-            return Ok(());
+            return Ok(HandoffEventOutcome::Ignored);
         };
 
         let source = self.primary.simulator_id;
         let prepared = self.start_neighbor(source, handoff.region_handle, handoff.endpoint, Some(handoff.clone()), setup).await?;
         if !prepared {
-            return Ok(());
+            return Ok(HandoffEventOutcome::Ignored);
         }
 
         let Some(connection) =
             setup.state.neighbor_connections.get(&handoff.region_handle).filter(|connection| connection.endpoint == handoff.endpoint)
         else {
-            return Ok(());
+            return Ok(HandoffEventOutcome::Ignored);
         };
         let simulator_id = connection.simulator_id;
         if let Err(_error) = self.ensure_handoff_capabilities(
@@ -283,12 +293,12 @@ impl SessionState {
             if let Some(connection) = setup.state.neighbor_connections.get_mut(&handoff.region_handle) {
                 connection.queue_handoff_command(HandoffCommand::Cancel);
             }
-            return Ok(());
+            return Ok(HandoffEventOutcome::Ignored);
         }
         let region_handle = handoff.region_handle;
         state.set_pending(PendingPromotion { source, target: simulator_id, generation, handoff, evidence });
         tracing::info!(simulator = simulator_id.get(), region = region_handle, "simulator promotion started");
-        Ok(())
+        Ok(HandoffEventOutcome::Accepted)
     }
 
     fn resolve_pending_handoff(
@@ -299,9 +309,9 @@ impl SessionState {
         setup: &mut PromotionSetup<'_>,
         state: &mut HandoffState,
         evidence: &mut HandoffEvidence,
-    ) -> bool {
+    ) -> HandoffResolution {
         let Some(current) = state.pending().cloned() else {
-            return true;
+            return HandoffResolution::Continue;
         };
         match arbitrate_handoff(&current, handoff, announcement) {
             HandoffDecision::SameDestination => {
@@ -313,10 +323,10 @@ impl SessionState {
                     });
                 if same_live_target {
                     let Some(generation) = self.next_handoff_generation() else {
-                        return false;
+                        return HandoffResolution::Ignored;
                     };
                     current.generation = generation;
-                    return false;
+                    return HandoffResolution::Existing;
                 }
                 *evidence = current.evidence;
                 let current = state.take_pending().expect("same-destination handoff remains pending");
@@ -346,7 +356,7 @@ impl SessionState {
                     &self.coverage_losses,
                 );
             }
-            HandoffDecision::IgnoreStale => return false,
+            HandoffDecision::IgnoreStale => return HandoffResolution::Ignored,
             HandoffDecision::Conflict => {
                 state.conflict(&current);
                 cancel_pending_handoff(
@@ -365,10 +375,10 @@ impl SessionState {
                     region = handoff.region_handle,
                     "conflicting simulator handoff announcements; waiting for TeleportCancel"
                 );
-                return false;
+                return HandoffResolution::Conflict;
             }
         }
-        true
+        HandoffResolution::Continue
     }
 
     pub(super) async fn handle_handoff_message(
@@ -378,9 +388,9 @@ impl SessionState {
         packet_order: PacketOrder,
         setup: &mut PromotionSetup<'_>,
         state: &mut HandoffState,
-    ) -> Result<(), SessionError> {
+    ) -> Result<HandoffEventOutcome, SessionError> {
         if source != self.primary.simulator_id || state.is_conflicted() {
-            return Ok(());
+            return Ok(HandoffEventOutcome::Ignored);
         }
         match message {
             Message::TeleportFinish(_) => {
@@ -395,13 +405,12 @@ impl SessionState {
                         )
                         .await
                     }
-                    Err(_reason) => Ok(()),
+                    Err(_reason) => Ok(HandoffEventOutcome::Ignored),
                 }
             }
             Message::TeleportFailed(failed) if failed.agent_id == self.session.agent_id => {
-                if teleport_failure_matches(state.pending(), HandoffOrder::Packet(packet_order))
-                    && let Some(pending) = state.take_pending()
-                {
+                let matching = state.pending().is_none() || teleport_failure_matches(state.pending(), HandoffOrder::Packet(packet_order));
+                if matching && let Some(pending) = state.take_pending() {
                     cancel_pending_handoff(
                         pending,
                         "teleport failed",
@@ -414,10 +423,9 @@ impl SessionState {
                         &self.coverage_losses,
                     );
                 }
-                Ok(())
+                Ok(if matching { HandoffEventOutcome::Accepted } else { HandoffEventOutcome::Ignored })
             }
-            Message::TeleportFailed(_) => Ok(()),
-            _ => Ok(()),
+            _ => Ok(HandoffEventOutcome::Ignored),
         }
     }
 }

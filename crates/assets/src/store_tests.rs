@@ -150,6 +150,16 @@ fn mesh_lod_request(id: AssetId, block: &[u8]) -> MeshLodRequest {
     crate::mesh::decode_header(&header_bytes, asset_length).unwrap().lod(id, MeshLod::Low).unwrap()
 }
 
+fn mesh_full_asset_fixture(id: AssetId, block: &[u8]) -> (MeshLodRequest, Vec<u8>) {
+    let entry = mesh_llsd_map(&[("offset", mesh_llsd_integer(0)), ("size", mesh_llsd_integer(i32::try_from(block.len()).unwrap()))]);
+    let mut header = b"<?llsd/binary?>\n".to_vec();
+    header.extend(mesh_llsd_map(&[("version", mesh_llsd_integer(1)), ("low_lod", entry)]));
+    let asset_length = u64::try_from(header.len() + block.len()).unwrap();
+    let request = crate::mesh::decode_header(&header, asset_length).unwrap().lod(id, MeshLod::Low).unwrap();
+    header.extend_from_slice(block);
+    (request, header)
+}
+
 fn large_mesh_block_fixture(vertex_count: usize, face_count: usize) -> Vec<u8> {
     let position = mesh_llsd_binary(&vec![0; vertex_count * 6]);
     let mut triangle_list = Vec::with_capacity(vertex_count * 6);
@@ -435,6 +445,38 @@ fn decoded_material_and_environment_payloads_survive_disk_round_trips() {
     assert_eq!(cache.stats().hits, 3);
     assert_eq!(cache.stats().misses, 3);
     assert!(cache.stats().bytes_written > 0);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn cached_full_mesh_response_finishes() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let budget = Budget::default();
+    let now = Instant::now();
+    let id = AssetId::new(Uuid::from_u128(104));
+    let block = mesh_block_fixture();
+    let (request, asset) = mesh_full_asset_fixture(id, &block);
+    let resource = Resource { id, kind: Kind::Mesh };
+    let mut store = Store::with_cache(budget, Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
+
+    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("cold mesh reads cache") };
+    let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss schedules mesh fetch") };
+    let input = fetch.complete(Ok(asset.clone())).expect("full asset response enters decoding");
+    let decode = store.start_decode(input).expect("admit mesh decode");
+    let writes = store.complete(decode.run(), now);
+
+    assert_matches!(demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+    assert_eq!(writes.len(), 1);
+    for write in writes {
+        write.run();
+    }
+    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(resource) else { panic!("full mesh asset was cached") };
+    assert_eq!(cached.bytes, asset);
+    drop(demand);
+    drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 }
 

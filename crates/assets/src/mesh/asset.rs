@@ -305,6 +305,7 @@ fn geometry_bytes(vertices: usize, indices: usize, faces: usize) -> Result<usize
         .checked_mul(size_of::<Vertex>())
         .and_then(|bytes| bytes.checked_add(indices.checked_mul(size_of::<u32>())?))
         .and_then(|bytes| bytes.checked_add(faces.checked_mul(size_of::<Face>())?))
+        .and_then(|bytes| bytes.checked_add(size_of::<Mesh>()))
         .and_then(|bytes| bytes.checked_add(size_of::<Resident>()))
         .ok_or(AssetError::TooLarge)
 }

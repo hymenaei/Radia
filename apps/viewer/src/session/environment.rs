@@ -10,13 +10,15 @@ use futures::{
     stream::FuturesUnordered,
 };
 use llsd::{Limits, Map, Value, notation, xml};
+use math::Vec3;
 use network::{PacketOrder, SimulatorId, capabilities::Client};
 use protocol::{lludp::Message, messages::ParcelProperties};
 use tokio::{runtime::Handle, sync::Semaphore};
 use uuid::Uuid;
 use world::{
-    EnvironmentAssignment, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_SOURCE_BYTES, OrderEvidence,
-    ParcelLocalId, Region, RegionOutcome, UpdateAuthority, UpdateSource,
+    EnvironmentAssignment, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_SOURCE_BYTES,
+    MAX_PARCEL_DESCRIPTION_BYTES, MAX_PARCEL_NAME_BYTES, MAX_PARCEL_URL_BYTES, OrderEvidence, ParcelAccessSettings, ParcelBitmap,
+    ParcelFlags, ParcelLocalId, ParcelPropertiesData, ParcelPropertiesObservation, Region, RegionOutcome, UpdateAuthority, UpdateSource,
 };
 
 use super::world::SessionWorld;
@@ -339,9 +341,27 @@ impl EnvironmentIntake {
         }
         let Some(region) = world.region_for(simulator) else { return };
         match parcel_value(body) {
-            Ok(Some(notice)) => self.parcel(world, region, notice, true),
+            Ok(Some(notice)) => {
+                match parcel_properties_value(body) {
+                    Ok(observation) => {
+                        if let Some(source) = self.source(region).map(|source| source.with_authority(UpdateAuthority::Untracked))
+                            && world.observe_parcel_properties(source, observation).is_err()
+                        {
+                            self.record_parcel_rejection(world, simulator, region);
+                        }
+                    }
+                    Err(()) => self.record_parcel_rejection(world, simulator, region),
+                }
+                self.parcel(world, region, notice, true);
+            }
             Ok(None) => {}
-            Err(error) => tracing::debug!(?error, "invalid parcel environment notification"),
+            Err(_) => self.record_parcel_rejection(world, simulator, region),
+        }
+    }
+
+    fn record_parcel_rejection(&self, world: &mut SessionWorld, simulator: SimulatorId, region: Region) {
+        if let Some(rejected) = world.record_parcel_rejection() {
+            tracing::debug!(simulator = simulator.get(), region = region.get(), rejected, "parcel updates were repeatedly rejected");
         }
     }
 
@@ -583,6 +603,132 @@ fn parcel_value(value: &Value) -> Result<Option<ParcelNotice>, FetchError> {
     Ok(Some(ParcelNotice { parcel, sequence, version, overrides }))
 }
 
+fn parcel_properties_value(value: &Value) -> Result<ParcelPropertiesObservation, ()> {
+    let Value::Map(body) = value else { return Err(()) };
+    let parcel = required_block(body, "ParcelData")?;
+    let request_result = integer(parcel.get("RequestResult")).map_err(|_| ())?.ok_or(())?;
+    let sequence_id = integer(parcel.get("SequenceID")).map_err(|_| ())?.ok_or(())?;
+    if request_result == -1 || sequence_id < 0 {
+        return Ok(ParcelPropertiesObservation { request_result, sequence_id, properties: None });
+    }
+    if !(0..=1).contains(&request_result) {
+        return Err(());
+    }
+    let local_id = integer(parcel.get("LocalID")).map_err(|_| ())?.and_then(ParcelLocalId::new).ok_or(())?;
+    let owner_id = optional_uuid(parcel.get("OwnerID"))?;
+    let group_id = optional_uuid(parcel.get("GroupID"))?;
+    let group_owned = boolean(parcel.get("IsGroupOwned"))?.ok_or(())?;
+    let area = integer(parcel.get("Area")).map_err(|_| ())?.and_then(|area| u32::try_from(area).ok()).ok_or(())?;
+    let flags = integer(parcel.get("ParcelFlags")).map_err(|_| ())?.ok_or(())? as u32;
+    let bitmap = parcel.get("Bitmap").and_then(Value::as_binary).ok_or(())?;
+    let name = parcel_string(parcel.get("Name"), MAX_PARCEL_NAME_BYTES)?;
+    let description = parcel_string(parcel.get("Desc"), MAX_PARCEL_DESCRIPTION_BYTES)?;
+    let music_url = parcel_string(parcel.get("MusicURL"), MAX_PARCEL_URL_BYTES)?;
+    let media_url = parcel_string(parcel.get("MediaURL"), MAX_PARCEL_URL_BYTES)?;
+    let user_location = vector3(parcel.get("UserLocation"))?;
+    let user_look_at = vector3(parcel.get("UserLookAt"))?;
+    let landing_type = optional_u8(parcel.get("LandingType"))?;
+    let pass_price = integer(parcel.get("PassPrice")).map_err(|_| ())?.map(u32::try_from).transpose().map_err(|_| ())?;
+    let pass_hours = optional_f32(parcel.get("PassHours"))?;
+    let age = optional_block(body, "AgeVerificationBlock")?;
+    let allow_access = optional_block(body, "RegionAllowAccessBlock")?;
+
+    let properties = ParcelPropertiesData {
+        local_id,
+        name,
+        description,
+        owner_id,
+        group_id,
+        group_owned,
+        area,
+        flags: ParcelFlags::from_bits(flags),
+        bitmap: ParcelBitmap::from_bytes(bitmap).map_err(|_| ())?,
+        landing_point: user_location,
+        landing_look_at: user_look_at,
+        landing_type,
+        music_url,
+        media_url,
+        access: ParcelAccessSettings {
+            region_push_override: boolean(parcel.get("RegionPushOverride"))?,
+            region_deny_anonymous: boolean(parcel.get("RegionDenyAnonymous"))?,
+            region_deny_identified: boolean(parcel.get("RegionDenyIdentified"))?,
+            region_deny_transacted: boolean(parcel.get("RegionDenyTransacted"))?,
+            region_deny_age_unverified: age.map(|fields| boolean(fields.get("RegionDenyAgeUnverified"))).transpose()?.flatten(),
+            region_allow_access_override: allow_access
+                .map(|fields| boolean(fields.get("RegionAllowAccessOverride")))
+                .transpose()?
+                .flatten(),
+            pass_price,
+            pass_hours,
+        },
+    };
+    Ok(ParcelPropertiesObservation { request_result, sequence_id, properties: Some(properties) })
+}
+
+fn required_block<'a>(body: &'a Map, name: &str) -> Result<&'a Map, ()> {
+    let Some(Value::Array(values)) = body.get(name) else { return Err(()) };
+    let [Value::Map(fields)] = values.as_slice() else { return Err(()) };
+    Ok(fields)
+}
+
+fn optional_block<'a>(body: &'a Map, name: &str) -> Result<Option<&'a Map>, ()> {
+    match body.get(name) {
+        None => Ok(None),
+        Some(Value::Array(values)) if values.is_empty() => Ok(None),
+        Some(Value::Array(values)) => match values.as_slice() {
+            [Value::Map(fields)] => Ok(Some(fields)),
+            _ => Err(()),
+        },
+        _ => Err(()),
+    }
+}
+
+fn boolean(value: Option<&Value>) -> Result<Option<bool>, ()> {
+    match value {
+        None | Some(Value::Undefined) => Ok(None),
+        Some(Value::Boolean(value)) => Ok(Some(*value)),
+        _ => Err(()),
+    }
+}
+
+fn optional_uuid(value: Option<&Value>) -> Result<Option<Uuid>, ()> {
+    match value {
+        None | Some(Value::Undefined) => Ok(None),
+        Some(Value::Uuid(value)) => Ok(Some(*value)),
+        _ => Err(()),
+    }
+}
+
+fn optional_u8(value: Option<&Value>) -> Result<Option<u8>, ()> {
+    integer(value).map_err(|_| ())?.map(u8::try_from).transpose().map_err(|_| ())
+}
+
+fn optional_f32(value: Option<&Value>) -> Result<Option<f32>, ()> {
+    match value {
+        None | Some(Value::Undefined) => Ok(None),
+        Some(value) => value.as_finite_f32().map(Some).ok_or(()),
+    }
+}
+
+fn vector3(value: Option<&Value>) -> Result<Option<Vec3>, ()> {
+    match value {
+        None | Some(Value::Undefined) => Ok(None),
+        Some(Value::Array(values)) => {
+            let [x, y, z] = values.as_slice() else { return Err(()) };
+            Ok(Some(Vec3::new(x.as_finite_f32().ok_or(())?, y.as_finite_f32().ok_or(())?, z.as_finite_f32().ok_or(())?)))
+        }
+        _ => Err(()),
+    }
+}
+
+fn parcel_string(value: Option<&Value>, limit: usize) -> Result<Arc<str>, ()> {
+    let value = value.and_then(Value::as_str).ok_or(())?;
+    if value.len() > limit {
+        return Err(());
+    }
+    Ok(Arc::from(value))
+}
+
 fn parcel_message(message: &ParcelProperties) -> Result<Option<ParcelNotice>, FetchError> {
     let parcel = &message.parcel_data;
     let result = parcel.request_result.ok_or(FetchError::Malformed)?;
@@ -625,6 +771,40 @@ mod tests {
 
     fn scope() -> EnvironmentScope {
         EnvironmentScope::Parcel(ParcelLocalId::new(42).unwrap())
+    }
+
+    fn parcel_properties_event(sequence: i32, local_id: i32, name: &str) -> Value {
+        let data = Map::from([
+            ("RequestResult".into(), Value::Integer(0)),
+            ("SequenceID".into(), Value::Integer(sequence)),
+            ("LocalID".into(), Value::Integer(local_id)),
+            ("OwnerID".into(), Value::Uuid(Uuid::from_u128(11))),
+            ("IsGroupOwned".into(), Value::Boolean(false)),
+            ("Bitmap".into(), Value::Binary(vec![0; world::PARCEL_BITMAP_BYTES].into())),
+            ("Area".into(), Value::Integer(1024)),
+            ("ParcelFlags".into(), Value::Integer((1 << 0) | (1 << 1) | (1 << 5) | (1 << 6))),
+            ("Name".into(), Value::String(name.to_owned())),
+            ("Desc".into(), Value::String("Parcel description".to_owned())),
+            ("MusicURL".into(), Value::String("https://music.invalid/stream".to_owned())),
+            ("MediaURL".into(), Value::String("https://media.invalid/page".to_owned())),
+            ("GroupID".into(), Value::Uuid(Uuid::from_u128(12))),
+            ("PassPrice".into(), Value::Integer(5)),
+            ("PassHours".into(), Value::Real(1.5)),
+            ("UserLocation".into(), Value::Array(vec![Value::Real(1.0), Value::Real(2.0), Value::Real(3.0)])),
+            ("UserLookAt".into(), Value::Array(vec![Value::Real(0.0), Value::Real(1.0), Value::Real(0.0)])),
+            ("LandingType".into(), Value::Integer(1)),
+            ("RegionPushOverride".into(), Value::Boolean(true)),
+            ("RegionDenyAnonymous".into(), Value::Boolean(false)),
+            ("RegionDenyIdentified".into(), Value::Boolean(false)),
+            ("RegionDenyTransacted".into(), Value::Boolean(false)),
+        ]);
+        let age = Map::from([("RegionDenyAgeUnverified".into(), Value::Boolean(false))]);
+        let access = Map::from([("RegionAllowAccessOverride".into(), Value::Boolean(true))]);
+        Value::Map(Map::from([
+            ("ParcelData".into(), Value::Array(vec![Value::Map(data)])),
+            ("AgeVerificationBlock".into(), Value::Array(vec![Value::Map(age)])),
+            ("RegionAllowAccessBlock".into(), Value::Array(vec![Value::Map(access)])),
+        ]))
     }
 
     #[test]
@@ -690,6 +870,49 @@ mod tests {
         assert_eq!(parcel_value(&empty).unwrap(), None);
         let bad: Value = notation::from_slice(br#"{'ParcelData':[{'RequestResult':i0,'SequenceID':i0,'LocalID':i-1}]}"#).unwrap();
         assert_eq!(parcel_value(&bad), Err(FetchError::Malformed));
+    }
+
+    #[tokio::test]
+    async fn event_queue_parcel_properties_update_current_state_and_reject_stale_sequences() {
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let simulator = simulator_id();
+        let region = world.register_simulator(simulator, None).unwrap();
+        let client = Client::new(Url::parse("http://127.0.0.1:1/").unwrap()).unwrap();
+        let mut intake = EnvironmentIntake::new(Handle::current());
+        intake.routes.insert(region, Route { client, parcel: None, parcel_order: None });
+
+        let first = parcel_properties_event(40, 41, "First parcel");
+        intake.capability(&mut world, simulator, "ParcelProperties", &first, Some(simulator));
+        let current = world.world().parcel_state(region).unwrap().current.unwrap();
+        assert_eq!(current.sequence_id, 40);
+        assert_eq!(current.properties.local_id, ParcelLocalId::new(41).unwrap());
+        assert_eq!(current.properties.name.as_ref(), "First parcel");
+        assert_eq!(current.properties.access.pass_price, Some(5));
+        assert_eq!(current.properties.media_url.as_ref(), "https://media.invalid/page");
+
+        let tracked = parcel_properties_value(&parcel_properties_event(41, 42, "UDP parcel")).unwrap();
+        let _applied = world.observe_parcel_properties(UpdateSource::new(region, 1, OrderEvidence::Ordered(100), 0), tracked).unwrap();
+        let next = parcel_properties_event(42, 43, "Next parcel");
+        intake.capability(&mut world, simulator, "ParcelProperties", &next, Some(simulator));
+        let stale = parcel_properties_event(41, 42, "Stale parcel");
+        intake.capability(&mut world, simulator, "ParcelProperties", &stale, Some(simulator));
+
+        let current = world.world().parcel_state(region).unwrap().current.unwrap();
+        assert_eq!(current.sequence_id, 42);
+        assert_eq!(current.properties.local_id, ParcelLocalId::new(43).unwrap());
+        assert_eq!(current.properties.name.as_ref(), "Next parcel");
+        assert_eq!(world.world().environment(region).unwrap().parcel.unwrap().parcel, ParcelLocalId::new(43).unwrap());
+    }
+
+    #[test]
+    fn event_queue_parcel_properties_bound_untrusted_urls() {
+        let mut value = parcel_properties_event(1, 2, "Parcel");
+        let Value::Map(body) = &mut value else { panic!("event body must be a map") };
+        let Some(Value::Array(blocks)) = body.get_mut("ParcelData") else { panic!("parcel data block missing") };
+        let Some(Value::Map(data)) = blocks.first_mut() else { panic!("parcel data fields missing") };
+        data.insert("MediaURL".into(), Value::String("m".repeat(MAX_PARCEL_URL_BYTES + 1)));
+
+        assert_eq!(parcel_properties_value(&value), Err(()));
     }
 
     #[tokio::test]

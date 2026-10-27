@@ -61,7 +61,7 @@ fn linear_to_srgb(color: vec3<f32>) -> vec3<f32> {
     output.position = vec4<f32>(clip.xy, 0.0, clip.w);
     output.uv = corner;
     output.color = star.color_size.xyz;
-    output.alpha = state.viewport_alpha_blend.z;
+    output.alpha = state.viewport_alpha_blend.z * star.direction_intensity.w;
     output.screen_position = position.xy * state.time.x;
     return output;
 }

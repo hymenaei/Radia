@@ -15,7 +15,7 @@ use utils::AssetId;
 
 use crate::{
     Blob, Budget, Content, TextureEvents, TextureHandle, TextureSize, WeakTexture,
-    budget::{MESH_WORK_BYTES, Reservation, TEXTURE_WORK_BYTES, WORK_BYTES},
+    budget::{Reservation, TEXTURE_WORK_BYTES, WORK_BYTES},
     cache::{AssetCache, AssetLookup, CacheWrite, read_work_bytes},
     content::{Finished, Prepared, StoredContent},
     mesh::{MeshLod, MeshLodRequest},
@@ -39,11 +39,11 @@ pub enum Kind {
 }
 
 impl Kind {
-    const fn work_bytes(self) -> usize {
+    const fn work_bytes(self) -> Option<usize> {
         match self {
-            Self::Texture => TEXTURE_WORK_BYTES,
-            Self::Mesh => MESH_WORK_BYTES,
-            _ => WORK_BYTES,
+            Self::Texture => Some(TEXTURE_WORK_BYTES),
+            Self::Mesh => None,
+            _ => Some(WORK_BYTES),
         }
     }
 
@@ -491,8 +491,7 @@ impl FetchJob {
         if capacity > job.resource.kind.max_response_bytes() {
             return Err(FetchFailure::new(job, Failure::TooLarge));
         }
-        let decode_bytes = if job.resource.kind == Kind::Mesh { MESH_WORK_BYTES } else { capacity };
-        if !job.reservation.resize(decode_bytes.max(capacity)) {
+        if !job.reservation.resize(capacity) {
             return Err(FetchFailure::new(job, Failure::TooLarge));
         }
         Ok(DecodeInput { job, source: DecodeSource::Response(response) })
@@ -600,16 +599,19 @@ impl DecodeJob {
     }
 
     pub fn run(self) -> LoadCompletion {
-        let DecodeInput { job, source, .. } = self.0;
+        let DecodeInput { mut job, source, .. } = self.0;
+        let cancelled = &job.cancelled;
         let (result, origin) = match source {
-            DecodeSource::Response(response) => {
-                (crate::content::prepare_cancellable(job.request, job.size, response, || job.is_cancelled()), DecodeOrigin::Network)
-            }
-            DecodeSource::Disk(bytes) => {
-                (crate::content::prepare_disk(job.request, job.size, bytes, || job.is_cancelled()), DecodeOrigin::Disk)
-            }
+            DecodeSource::Response(response) => (
+                crate::content::prepare_cancellable(job.request, job.size, response, &mut job.reservation, || *cancelled.borrow()),
+                DecodeOrigin::Network,
+            ),
+            DecodeSource::Disk(bytes) => (
+                crate::content::prepare_disk(job.request, job.size, bytes, &mut job.reservation, || *cancelled.borrow()),
+                DecodeOrigin::Disk,
+            ),
             DecodeSource::Cached(source) => {
-                (crate::content::prepare_cached(job.size, &source, || job.is_cancelled()), DecodeOrigin::Memory)
+                (crate::content::prepare_cached(job.size, &source, || *cancelled.borrow()), DecodeOrigin::Memory)
             }
         };
         LoadCompletion { job, result, origin }
@@ -987,7 +989,9 @@ impl Store {
         ) {
             return Err(input);
         }
-        if !input.job.reservation.resize(input.job.resource.kind.work_bytes()) {
+        if let Some(bytes) = input.job.resource.kind.work_bytes()
+            && !input.job.reservation.resize(bytes)
+        {
             return Err(input);
         }
         let entry = self.entries.get_mut(&input.job.key).expect("validated running job");
@@ -1024,7 +1028,7 @@ impl Store {
         }
         match result {
             Ok(AssetLookup::Hit(asset)) => {
-                let decode_bytes = if job.resource.kind == Kind::Mesh { MESH_WORK_BYTES } else { asset.bytes.capacity() };
+                let decode_bytes = job.resource.kind.work_bytes().unwrap_or(asset.bytes.capacity());
                 job.reservation.shrink_to_at_most(decode_bytes.max(asset.bytes.capacity()));
                 if let LoadPhase::Running { stage, .. } = &mut entry.phase {
                     *stage = Stage::Fetching;
@@ -1036,8 +1040,7 @@ impl Store {
     }
 
     fn cache_read_fallback(entry: &mut AssetEntry, mut job: Job, now: Instant) -> Option<LoadJob> {
-        let response_bytes = if job.resource.kind == Kind::Mesh { MESH_WORK_BYTES } else { job.resource.kind.max_response_bytes() };
-        job.reservation.shrink_to_at_most(response_bytes);
+        job.reservation.shrink_to_at_most(job.resource.kind.max_response_bytes());
         if entry.priority == Priority::Background
             && let Some(view) = entry.views.get_mut(&job.route)
         {

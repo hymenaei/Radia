@@ -213,6 +213,7 @@ pub(crate) fn prepare_cancellable(
     request: Request,
     size: TextureSize,
     response: crate::FetchResponse,
+    reservation: &mut Reservation,
     cancelled: impl Fn() -> bool,
 ) -> Result<Prepared, Failure> {
     if cancelled() {
@@ -221,11 +222,13 @@ pub(crate) fn prepare_cancellable(
     let resource = request.resource();
     let (data, source) = match response {
         crate::FetchResponse::Full(bytes) if resource.kind == Kind::Mesh => {
-            let data = decode_mesh(request, &bytes, Some(bytes.len() as u64), None, &cancelled)?;
+            let capacity = bytes.capacity();
+            let data = decode_mesh(request, &bytes, Some(bytes.len() as u64), None, capacity, reservation, &cancelled)?;
             (data, Some(bytes))
         }
         crate::FetchResponse::Partial { bytes, range, total_length } if resource.kind == Kind::Mesh => {
-            (decode_mesh(request, &bytes, total_length, Some(range), &cancelled)?, None)
+            let capacity = bytes.capacity();
+            (decode_mesh(request, &bytes, total_length, Some(range), capacity, reservation, &cancelled)?, None)
         }
         crate::FetchResponse::Full(bytes) => {
             let bytes = envelope::extract(resource, bytes)?;
@@ -244,13 +247,20 @@ pub(crate) fn prepare_cached(size: TextureSize, source: &Blob, cancelled: impl F
     Ok(Prepared { kind: Kind::Texture, data, source: None })
 }
 
-pub(crate) fn prepare_disk(request: Request, size: TextureSize, bytes: Vec<u8>, cancelled: impl Fn() -> bool) -> Result<Prepared, Failure> {
+pub(crate) fn prepare_disk(
+    request: Request,
+    size: TextureSize,
+    bytes: Vec<u8>,
+    reservation: &mut Reservation,
+    cancelled: impl Fn() -> bool,
+) -> Result<Prepared, Failure> {
     if cancelled() {
         return Err(Failure::Cancelled);
     }
     let resource = request.resource();
     let data = if resource.kind == Kind::Mesh {
-        decode_mesh(request, &bytes, Some(bytes.len() as u64), None, &cancelled)?
+        let capacity = bytes.capacity();
+        decode_mesh(request, &bytes, Some(bytes.len() as u64), None, capacity, reservation, &cancelled)?
     } else {
         decode_payload(resource, size, &bytes, &cancelled)?
     };
@@ -276,6 +286,8 @@ fn decode_mesh(
     bytes: &[u8],
     total_length: Option<u64>,
     range: Option<std::ops::Range<u64>>,
+    input_capacity: usize,
+    reservation: &mut Reservation,
     cancelled: &impl Fn() -> bool,
 ) -> Result<Data, Failure> {
     if bytes.len() > mesh::MAX_MESH_ASSET_BYTES {
@@ -283,6 +295,13 @@ fn decode_mesh(
     }
     match request {
         Request::MeshHeader(_) => {
+            let parse_bytes = input_capacity
+                .checked_add(mesh::MAX_MESH_HEADER_BYTES)
+                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<MeshHeaderInner>()))
+                .ok_or(Failure::TooLarge)?;
+            if !reservation.resize(parse_bytes) {
+                return Err(Failure::TooLarge);
+            }
             let total_length = total_length.ok_or(Failure::MalformedBlock)?;
             if let Some(range) = range {
                 let initial_end = mesh::MESH_HEADER_BYTES.min(usize::try_from(total_length).unwrap_or(usize::MAX)) as u64;
@@ -317,7 +336,9 @@ fn decode_mesh(
                 let end = usize::try_from(expected.end).map_err(|_| Failure::MalformedBlock)?;
                 bytes.get(start..end).ok_or(Failure::MalformedBlock)?
             };
-            mesh::decode_lod_cancellable(block_bytes, cancelled).map(|geometry| Data::Mesh { lod, geometry }).map_err(mesh_failure)
+            mesh::decode_lod_cancellable_reserved(block_bytes, input_capacity, reservation, cancelled)
+                .map(|geometry| Data::Mesh { lod, geometry })
+                .map_err(mesh_failure)
         }
         _ => Err(Failure::Malformed),
     }

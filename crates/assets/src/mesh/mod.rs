@@ -5,6 +5,8 @@ pub use asset::{
     decode_header, decode_lod, decode_lod_cancellable, header_needs_more,
 };
 
+pub(crate) use asset::decode_lod_cancellable_reserved;
+
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},

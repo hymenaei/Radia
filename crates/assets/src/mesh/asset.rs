@@ -1,9 +1,11 @@
-use std::ops::Range;
+use std::{mem::size_of, ops::Range};
 
 use flate2::{Decompress, FlushDecompress, Status};
 use llsd::{Limits, Value, binary};
 use math::{Vec2, Vec3};
 use utils::AssetId;
+
+use crate::budget::{Reservation, Resident};
 
 use super::{
     Face, LodGeometry, MAX_MESH_INDICES, MAX_MESH_INDICES_PER_FACE, MAX_MESH_VERTICES, MAX_MESH_VERTICES_PER_FACE, Mesh, MeshError, Vertex,
@@ -121,7 +123,6 @@ enum PreparedSubmesh<'a> {
         normal_bytes: Option<&'a [u8]>,
         uv_bytes: Option<&'a [u8]>,
         triangle_bytes: &'a [u8],
-        vertex_count: usize,
         triangle_count: usize,
         position_domain: (Vec3, Vec3),
         uv_domain: Option<(Vec2, Vec2)>,
@@ -158,10 +159,38 @@ pub fn decode_lod(bytes: &[u8]) -> Result<LodGeometry, AssetError> {
 }
 
 pub fn decode_lod_cancellable(bytes: &[u8], cancelled: impl Fn() -> bool) -> Result<LodGeometry, AssetError> {
+    decode_lod_inner(bytes, bytes.len(), None, cancelled)
+}
+
+pub(crate) fn decode_lod_cancellable_reserved(
+    bytes: &[u8],
+    input_capacity: usize,
+    reservation: &mut Reservation,
+    cancelled: impl Fn() -> bool,
+) -> Result<LodGeometry, AssetError> {
+    decode_lod_inner(bytes, input_capacity, Some(reservation), cancelled)
+}
+
+fn decode_lod_inner(
+    bytes: &[u8],
+    input_capacity: usize,
+    mut reservation: Option<&mut Reservation>,
+    cancelled: impl Fn() -> bool,
+) -> Result<LodGeometry, AssetError> {
     if bytes.len() > MAX_MESH_BLOCK_BYTES {
         return Err(AssetError::TooLarge);
     }
-    let decoded = decompress_bounded(bytes, &cancelled)?;
+    if input_capacity < bytes.len() || input_capacity > MAX_MESH_ASSET_BYTES {
+        return Err(AssetError::TooLarge);
+    }
+    resize_reservation(&mut reservation, input_capacity)?;
+    let decoded = decompress_bounded(bytes, input_capacity, &mut reservation, &cancelled)?;
+    let before_parse = input_capacity
+        .checked_add(decoded.capacity())
+        .and_then(|size| size.checked_add(decoded.len()))
+        .and_then(|size| size.checked_add(MAX_MESH_LLSD_OVERHEAD_BYTES))
+        .ok_or(AssetError::TooLarge)?;
+    resize_reservation(&mut reservation, before_parse)?;
     let limits = Limits {
         max_bytes: MAX_MESH_DECODED_BLOCK_BYTES,
         max_depth: 8,
@@ -174,6 +203,22 @@ pub fn decode_lod_cancellable(bytes: &[u8], cancelled: impl Fn() -> bool) -> Res
     let value = binary::from_slice_with_limits::<Value>(&decoded, limits).map_err(|_| AssetError::MalformedBlock)?;
     drop(decoded);
     let (submeshes, total_vertices, total_indices) = prepare_submeshes(&value, &cancelled)?;
+    let parsed_value_bytes = binary_value_bytes(&value)?.checked_add(MAX_MESH_LLSD_OVERHEAD_BYTES).ok_or(AssetError::TooLarge)?;
+    if total_indices == 0 {
+        let face_count = u8::try_from(submeshes.len()).map_err(|_| AssetError::TooLarge)?;
+        drop(submeshes);
+        drop(value);
+        let empty_bytes = input_capacity
+            .checked_add(size_of::<LodGeometry>())
+            .and_then(|bytes| bytes.checked_add(size_of::<Resident>()))
+            .ok_or(AssetError::TooLarge)?;
+        resize_reservation(&mut reservation, empty_bytes)?;
+        return Ok(LodGeometry::Empty { face_count });
+    }
+    let geometry_bytes = geometry_bytes(total_vertices, total_indices, submeshes.len())?;
+    let with_geometry =
+        input_capacity.checked_add(parsed_value_bytes).and_then(|size| size.checked_add(geometry_bytes)).ok_or(AssetError::TooLarge)?;
+    resize_reservation(&mut reservation, with_geometry)?;
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let mut faces = Vec::new();
@@ -190,7 +235,6 @@ pub fn decode_lod_cancellable(bytes: &[u8], cancelled: impl Fn() -> bool) -> Res
             normal_bytes,
             uv_bytes,
             triangle_bytes,
-            vertex_count,
             triangle_count,
             position_domain,
             uv_domain,
@@ -199,43 +243,87 @@ pub fn decode_lod_cancellable(bytes: &[u8], cancelled: impl Fn() -> bool) -> Res
             faces.push(Face { slot: u8::try_from(slot).map_err(|_| AssetError::TooLarge)?, indices: index_start..index_start });
             continue;
         };
-        let positions = unpack_vec3(position_bytes, position_domain, &cancelled)?;
-        let uvs = match uv_bytes {
-            None => {
-                let mut uvs = Vec::new();
-                uvs.try_reserve_exact(vertex_count).map_err(|_| AssetError::TooLarge)?;
-                uvs.resize(vertex_count, Vec2::ZERO);
-                uvs
+        let base = u32::try_from(vertices.len()).map_err(|_| AssetError::TooLarge)?;
+        let position_chunks = position_bytes.as_chunks::<6>().0;
+        let normal_chunks = normal_bytes.map(|bytes| bytes.as_chunks::<6>().0);
+        let uv_chunks = uv_bytes.map(|bytes| bytes.as_chunks::<4>().0);
+        for (vertex_index, encoded) in position_chunks.iter().enumerate() {
+            if vertex_index.is_multiple_of(1024) && cancelled() {
+                return Err(AssetError::Cancelled);
             }
-            Some(uv_bytes) => unpack_vec2(uv_bytes, uv_domain.ok_or(AssetError::MalformedBlock)?, &cancelled)?,
-        };
-        let mut face_indices = Vec::new();
-        face_indices.try_reserve_exact(triangle_count).map_err(|_| AssetError::TooLarge)?;
-        for (index_position, encoded) in triangle_bytes[..triangle_count * 2].as_chunks::<2>().0.iter().enumerate() {
+            let position = unpack_position(encoded, position_domain);
+            let normal = match normal_chunks {
+                Some(chunks) => unpack_normal(chunks.get(vertex_index).ok_or(AssetError::MalformedBlock)?),
+                None => Vec3::ZERO,
+            };
+            let uv = match uv_chunks {
+                Some(chunks) => {
+                    unpack_uv(chunks.get(vertex_index).ok_or(AssetError::MalformedBlock)?, uv_domain.ok_or(AssetError::MalformedBlock)?)
+                }
+                None => Vec2::ZERO,
+            };
+            vertices.push(Vertex { position, normal, uv });
+        }
+        let index_start = u32::try_from(indices.len()).map_err(|_| AssetError::TooLarge)?;
+        let triangle_end = triangle_count.checked_mul(2).ok_or(AssetError::TooLarge)?;
+        let triangle_bytes = triangle_bytes.get(..triangle_end).ok_or(AssetError::MalformedBlock)?;
+        for (index_position, encoded) in triangle_bytes.as_chunks::<2>().0.iter().enumerate() {
             if index_position.is_multiple_of(1024) && cancelled() {
                 return Err(AssetError::Cancelled);
             }
-            let index = usize::from(u16::from_le_bytes([encoded[0], encoded[1]]));
-            face_indices.push(u32::try_from(index).map_err(|_| AssetError::TooLarge)?);
+            let index = u32::from(u16::from_le_bytes([encoded[0], encoded[1]]));
+            indices.push(base.checked_add(index).ok_or(AssetError::TooLarge)?);
         }
-        let normals = match normal_bytes {
-            None => generate_normals(&positions, &face_indices, &cancelled)?,
-            Some(normal_bytes) => unpack_normals(normal_bytes, &cancelled)?,
-        };
-        let base = u32::try_from(vertices.len()).map_err(|_| AssetError::TooLarge)?;
-        vertices.extend(positions.into_iter().zip(normals).zip(uvs).map(|((position, normal), uv)| Vertex { position, normal, uv }));
-        indices.extend(face_indices.into_iter().map(|index| base + index));
+        if normal_chunks.is_none() {
+            let start = usize::try_from(index_start).map_err(|_| AssetError::TooLarge)?;
+            let base_index = usize::try_from(base).map_err(|_| AssetError::TooLarge)?;
+            generate_normals(vertices.get_mut(base_index..).ok_or(AssetError::MalformedBlock)?, &indices[start..], base, &cancelled)?;
+        }
         let index_end = u32::try_from(indices.len()).map_err(|_| AssetError::TooLarge)?;
         faces.push(Face { slot: u8::try_from(slot).map_err(|_| AssetError::TooLarge)?, indices: index_start..index_end });
     }
-    if indices.is_empty() {
-        let face_count = u8::try_from(faces.len()).map_err(|_| AssetError::TooLarge)?;
-        return Ok(LodGeometry::Empty { face_count });
-    }
+    drop(value);
+    let after_decode = input_capacity.checked_add(geometry_bytes).ok_or(AssetError::TooLarge)?;
+    resize_reservation(&mut reservation, after_decode)?;
     Mesh::from_parts(vertices, indices, faces).map(LodGeometry::Geometry).map_err(|error| match error {
         MeshError::TooComplex => AssetError::TooLarge,
         MeshError::InvalidParameters | MeshError::Degenerate => AssetError::MalformedBlock,
     })
+}
+
+fn resize_reservation(reservation: &mut Option<&mut Reservation>, bytes: usize) -> Result<(), AssetError> {
+    if let Some(reservation) = reservation.as_deref_mut()
+        && !reservation.resize(bytes)
+    {
+        return Err(AssetError::TooLarge);
+    }
+    Ok(())
+}
+
+fn geometry_bytes(vertices: usize, indices: usize, faces: usize) -> Result<usize, AssetError> {
+    vertices
+        .checked_mul(size_of::<Vertex>())
+        .and_then(|bytes| bytes.checked_add(indices.checked_mul(size_of::<u32>())?))
+        .and_then(|bytes| bytes.checked_add(faces.checked_mul(size_of::<Face>())?))
+        .and_then(|bytes| bytes.checked_add(size_of::<Resident>()))
+        .ok_or(AssetError::TooLarge)
+}
+
+fn binary_value_bytes(value: &Value) -> Result<usize, AssetError> {
+    let bytes = match value {
+        Value::Binary(value) => value.len(),
+        Value::String(value) => value.len(),
+        Value::Uri(value) => value.as_str().len(),
+        Value::Array(values) => {
+            values.iter().try_fold(0_usize, |total, value| total.checked_add(binary_value_bytes(value)?).ok_or(AssetError::TooLarge))?
+        }
+        Value::Map(values) => values.iter().try_fold(0_usize, |total, (key, value)| {
+            let value_bytes = binary_value_bytes(value)?;
+            total.checked_add(key.len()).and_then(|total| total.checked_add(value_bytes)).ok_or(AssetError::TooLarge)
+        })?,
+        _ => 0,
+    };
+    Ok(bytes)
 }
 
 fn prepare_submeshes<'a>(value: &'a Value, cancelled: &impl Fn() -> bool) -> Result<(Vec<PreparedSubmesh<'a>>, usize, usize), AssetError> {
@@ -312,7 +400,6 @@ fn prepare_submeshes<'a>(value: &'a Value, cancelled: &impl Fn() -> bool) -> Res
             normal_bytes,
             uv_bytes,
             triangle_bytes,
-            vertex_count,
             triangle_count,
             position_domain,
             uv_domain,
@@ -369,7 +456,12 @@ fn header_limits() -> Limits {
     }
 }
 
-fn decompress_bounded(bytes: &[u8], cancelled: &impl Fn() -> bool) -> Result<Vec<u8>, AssetError> {
+fn decompress_bounded(
+    bytes: &[u8],
+    input_capacity: usize,
+    reservation: &mut Option<&mut Reservation>,
+    cancelled: &impl Fn() -> bool,
+) -> Result<Vec<u8>, AssetError> {
     let mut decoder = Decompress::new(true);
     let mut decoded = Vec::new();
     let mut chunk = [0; 16 * 1024];
@@ -389,7 +481,11 @@ fn decompress_bounded(bytes: &[u8], cancelled: &impl Fn() -> bool) -> Result<Vec
         if end > MAX_MESH_DECODED_BLOCK_BYTES {
             return Err(AssetError::TooLarge);
         }
+        let required = input_capacity.checked_add(end).ok_or(AssetError::TooLarge)?;
+        resize_reservation(reservation, required)?;
         decoded.try_reserve_exact(produced).map_err(|_| AssetError::TooLarge)?;
+        let allocated = input_capacity.checked_add(decoded.capacity()).ok_or(AssetError::TooLarge)?;
+        resize_reservation(reservation, allocated)?;
         decoded.extend_from_slice(&chunk[..produced]);
         if status == Status::StreamEnd {
             return (input_position == bytes.len()).then_some(decoded).ok_or(AssetError::MalformedBlock);
@@ -478,89 +574,63 @@ fn vector3(value: &Value) -> Result<Vec3, AssetError> {
     ))
 }
 
-fn unpack_vec3(bytes: &[u8], (min, max): (Vec3, Vec3), cancelled: &impl Fn() -> bool) -> Result<Vec<Vec3>, AssetError> {
-    if !bytes.len().is_multiple_of(6) {
-        return Err(AssetError::MalformedBlock);
-    }
-    let mut values = Vec::new();
-    values.try_reserve(bytes.len() / 6).map_err(|_| AssetError::TooLarge)?;
-    for (position, value) in bytes.as_chunks::<6>().0.iter().enumerate() {
-        if position.is_multiple_of(1024) && cancelled() {
-            return Err(AssetError::Cancelled);
-        }
-        let encoded =
-            [u16::from_le_bytes([value[0], value[1]]), u16::from_le_bytes([value[2], value[3]]), u16::from_le_bytes([value[4], value[5]])];
-        let normalized = Vec3::new(
-            f32::from(encoded[0]) / f32::from(u16::MAX),
-            f32::from(encoded[1]) / f32::from(u16::MAX),
-            f32::from(encoded[2]) / f32::from(u16::MAX),
-        );
-        values.push(min + normalized * (max - min));
-    }
-    Ok(values)
+fn unpack_position(encoded: &[u8; 6], (min, max): (Vec3, Vec3)) -> Vec3 {
+    let components = [
+        u16::from_le_bytes([encoded[0], encoded[1]]),
+        u16::from_le_bytes([encoded[2], encoded[3]]),
+        u16::from_le_bytes([encoded[4], encoded[5]]),
+    ];
+    let normalized = Vec3::new(
+        f32::from(components[0]) / f32::from(u16::MAX),
+        f32::from(components[1]) / f32::from(u16::MAX),
+        f32::from(components[2]) / f32::from(u16::MAX),
+    );
+    min + normalized * (max - min)
 }
 
-fn unpack_vec2(bytes: &[u8], (min, max): (Vec2, Vec2), cancelled: &impl Fn() -> bool) -> Result<Vec<Vec2>, AssetError> {
-    if !bytes.len().is_multiple_of(4) {
-        return Err(AssetError::MalformedBlock);
-    }
-    let mut values = Vec::new();
-    values.try_reserve(bytes.len() / 4).map_err(|_| AssetError::TooLarge)?;
-    for (position, value) in bytes.as_chunks::<4>().0.iter().enumerate() {
-        if position.is_multiple_of(1024) && cancelled() {
-            return Err(AssetError::Cancelled);
-        }
-        let encoded = [u16::from_le_bytes([value[0], value[1]]), u16::from_le_bytes([value[2], value[3]])];
-        let normalized = Vec2::new(f32::from(encoded[0]) / f32::from(u16::MAX), f32::from(encoded[1]) / f32::from(u16::MAX));
-        values.push(min + normalized * (max - min));
-    }
-    Ok(values)
+fn unpack_uv(encoded: &[u8; 4], (min, max): (Vec2, Vec2)) -> Vec2 {
+    let components = [u16::from_le_bytes([encoded[0], encoded[1]]), u16::from_le_bytes([encoded[2], encoded[3]])];
+    let normalized = Vec2::new(f32::from(components[0]) / f32::from(u16::MAX), f32::from(components[1]) / f32::from(u16::MAX));
+    min + normalized * (max - min)
 }
 
-fn unpack_normals(bytes: &[u8], cancelled: &impl Fn() -> bool) -> Result<Vec<Vec3>, AssetError> {
-    if !bytes.len().is_multiple_of(6) {
-        return Err(AssetError::MalformedBlock);
-    }
-    let mut values = Vec::new();
-    values.try_reserve(bytes.len() / 6).map_err(|_| AssetError::TooLarge)?;
-    for (position, value) in bytes.as_chunks::<6>().0.iter().enumerate() {
-        if position.is_multiple_of(1024) && cancelled() {
-            return Err(AssetError::Cancelled);
-        }
-        let encoded =
-            [u16::from_le_bytes([value[0], value[1]]), u16::from_le_bytes([value[2], value[3]]), u16::from_le_bytes([value[4], value[5]])];
-        values.push(Vec3::new(
-            f32::from(encoded[0]) / f32::from(u16::MAX) * 2.0 - 1.0,
-            f32::from(encoded[1]) / f32::from(u16::MAX) * 2.0 - 1.0,
-            f32::from(encoded[2]) / f32::from(u16::MAX) * 2.0 - 1.0,
-        ));
-    }
-    Ok(values)
+fn unpack_normal(encoded: &[u8; 6]) -> Vec3 {
+    let components = [
+        u16::from_le_bytes([encoded[0], encoded[1]]),
+        u16::from_le_bytes([encoded[2], encoded[3]]),
+        u16::from_le_bytes([encoded[4], encoded[5]]),
+    ];
+    Vec3::new(
+        f32::from(components[0]) / f32::from(u16::MAX) * 2.0 - 1.0,
+        f32::from(components[1]) / f32::from(u16::MAX) * 2.0 - 1.0,
+        f32::from(components[2]) / f32::from(u16::MAX) * 2.0 - 1.0,
+    )
 }
 
-fn generate_normals(positions: &[Vec3], indices: &[u32], cancelled: &impl Fn() -> bool) -> Result<Vec<Vec3>, AssetError> {
-    let mut normals = Vec::new();
-    normals.try_reserve(positions.len()).map_err(|_| AssetError::TooLarge)?;
-    normals.resize(positions.len(), Vec3::ZERO);
+fn generate_normals(vertices: &mut [Vertex], indices: &[u32], base: u32, cancelled: &impl Fn() -> bool) -> Result<(), AssetError> {
     for (position, triangle) in indices.as_chunks::<3>().0.iter().enumerate() {
         if position.is_multiple_of(1024) && cancelled() {
             return Err(AssetError::Cancelled);
         }
-        let a = usize::try_from(triangle[0]).map_err(|_| AssetError::MalformedBlock)?;
-        let b = usize::try_from(triangle[1]).map_err(|_| AssetError::MalformedBlock)?;
-        let c = usize::try_from(triangle[2]).map_err(|_| AssetError::MalformedBlock)?;
-        let normal = (positions[b] - positions[a]).cross(positions[c] - positions[a]);
-        normals[a] += normal;
-        normals[b] += normal;
-        normals[c] += normal;
+        let [a, b, c] = *triangle;
+        let a = usize::try_from(a.checked_sub(base).ok_or(AssetError::MalformedBlock)?).map_err(|_| AssetError::MalformedBlock)?;
+        let b = usize::try_from(b.checked_sub(base).ok_or(AssetError::MalformedBlock)?).map_err(|_| AssetError::MalformedBlock)?;
+        let c = usize::try_from(c.checked_sub(base).ok_or(AssetError::MalformedBlock)?).map_err(|_| AssetError::MalformedBlock)?;
+        let a_position = vertices.get(a).ok_or(AssetError::MalformedBlock)?.position;
+        let b_position = vertices.get(b).ok_or(AssetError::MalformedBlock)?.position;
+        let c_position = vertices.get(c).ok_or(AssetError::MalformedBlock)?.position;
+        let normal = (b_position - a_position).cross(c_position - a_position);
+        vertices.get_mut(a).ok_or(AssetError::MalformedBlock)?.normal += normal;
+        vertices.get_mut(b).ok_or(AssetError::MalformedBlock)?.normal += normal;
+        vertices.get_mut(c).ok_or(AssetError::MalformedBlock)?.normal += normal;
     }
-    for normal in &mut normals {
+    for vertex in vertices {
         if cancelled() {
             return Err(AssetError::Cancelled);
         }
-        *normal = if normal.length_squared() > f32::EPSILON { normal.normalize() } else { Vec3::Z };
+        vertex.normal = if vertex.normal.length_squared() > f32::EPSILON { vertex.normal.normalize() } else { Vec3::Z };
     }
-    Ok(normals)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -861,8 +931,15 @@ mod tests {
 
         assert!(encoded.len() > 2 * 1024 * 1024);
         assert!(encoded.len() <= MAX_MESH_BLOCK_BYTES);
-        let LodGeometry::Geometry(mesh) = decode_lod(&encoded).unwrap() else { panic!("geometry LOD") };
+        let budget = crate::budget::Budget::default();
+        let mut reservation = budget.reserve(encoded.capacity()).unwrap();
+        let LodGeometry::Geometry(mesh) =
+            decode_lod_cancellable_reserved(&encoded, encoded.capacity(), &mut reservation, || false).unwrap()
+        else {
+            panic!("geometry LOD")
+        };
 
+        assert!(budget.stats().high_water_bytes < 64 * 1024 * 1024);
         assert_eq!(mesh.vertices().len(), MAX_MESH_VERTICES);
         assert_eq!(mesh.indices().len(), MAX_MESH_INDICES);
         assert_eq!(mesh.faces().len(), MAX_MESH_FACES_PER_LOD);
@@ -908,7 +985,45 @@ mod tests {
     #[test]
     fn decompression_stops_at_the_output_limit() {
         let bytes = compressed(&vec![0; MAX_MESH_DECODED_BLOCK_BYTES + 1]);
-        assert_eq!(decompress_bounded(&bytes, &|| false), Err(AssetError::TooLarge));
+        let mut reservation = None;
+        assert_eq!(decompress_bounded(&bytes, bytes.len(), &mut reservation, &|| false), Err(AssetError::TooLarge));
+    }
+
+    #[test]
+    fn geometry_reservation_failure_is_too_large() {
+        let encoded = block(&[dense_submesh(20_000, 60_000, 1)]);
+        let mut no_reservation = None;
+        let decoded = decompress_bounded(&encoded, encoded.capacity(), &mut no_reservation, &|| false).unwrap();
+        let value = binary::from_slice_with_limits::<Value>(
+            &decoded,
+            Limits {
+                max_bytes: MAX_MESH_DECODED_BLOCK_BYTES,
+                max_depth: 8,
+                max_values: 512,
+                max_container_items: 64,
+                max_string_bytes: 64,
+                max_map_key_bytes: 64,
+                max_binary_bytes: MAX_MESH_DECODED_BLOCK_BYTES,
+            },
+        )
+        .unwrap();
+        let (submeshes, total_vertices, total_indices) = prepare_submeshes(&value, &|| false).unwrap();
+        let parsed_value_bytes = binary_value_bytes(&value).unwrap() + MAX_MESH_LLSD_OVERHEAD_BYTES;
+        let parse_peak = encoded.capacity() + decoded.capacity() + decoded.len() + MAX_MESH_LLSD_OVERHEAD_BYTES;
+        let geometry_peak =
+            encoded.capacity() + parsed_value_bytes + geometry_bytes(total_vertices, total_indices, submeshes.len()).unwrap();
+        assert!(geometry_peak > parse_peak);
+        drop(submeshes);
+        drop(value);
+        drop(decoded);
+
+        let budget = crate::budget::Budget::default();
+        let _blocker = budget.reserve(crate::budget::ASSET_WORK_BYTES - parse_peak).unwrap();
+        let mut reservation = budget.reserve(encoded.capacity()).unwrap();
+        assert_matches!(
+            decode_lod_cancellable_reserved(&encoded, encoded.capacity(), &mut reservation, || false),
+            Err(AssetError::TooLarge)
+        );
     }
 
     proptest! {
@@ -933,7 +1048,7 @@ mod tests {
             if let Ok(geometry) = result {
                 match geometry {
                     LodGeometry::Geometry(mesh) => {
-                        prop_assert!(mesh.owned_bytes() <= crate::budget::MESH_WORK_BYTES);
+                        prop_assert!(mesh.owned_bytes() <= geometry_bytes(MAX_MESH_VERTICES, MAX_MESH_INDICES, MAX_MESH_FACES_PER_LOD).unwrap());
                         prop_assert!(mesh.vertices().len() <= MAX_MESH_VERTICES);
                         prop_assert!(mesh.indices().len() <= MAX_MESH_INDICES);
                         prop_assert!(mesh.faces().len() <= MAX_MESH_FACES_PER_LOD);

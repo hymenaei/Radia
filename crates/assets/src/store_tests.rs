@@ -1,7 +1,7 @@
 use std::{
     assert_matches,
     io::Write,
-    sync::{Arc, mpsc},
+    sync::{Arc, Barrier, mpsc},
     thread,
     time::Duration,
 };
@@ -140,6 +140,41 @@ fn mesh_lod_requests(id: AssetId) -> (MeshLodRequest, MeshLodRequest, Vec<u8>) {
     let total = u64::try_from(header.len() + block.len() * 2).unwrap();
     let header = crate::mesh::decode_header(&header, total).unwrap();
     (header.lod(id, MeshLod::Low).unwrap(), header.lod(id, MeshLod::High).unwrap(), block)
+}
+
+fn mesh_lod_request(id: AssetId, block: &[u8]) -> MeshLodRequest {
+    let entry = mesh_llsd_map(&[("offset", mesh_llsd_integer(0)), ("size", mesh_llsd_integer(i32::try_from(block.len()).unwrap()))]);
+    let mut header_bytes = b"<?llsd/binary?>\n".to_vec();
+    header_bytes.extend(mesh_llsd_map(&[("version", mesh_llsd_integer(1)), ("low_lod", entry)]));
+    let asset_length = u64::try_from(header_bytes.len() + block.len()).unwrap();
+    crate::mesh::decode_header(&header_bytes, asset_length).unwrap().lod(id, MeshLod::Low).unwrap()
+}
+
+fn large_mesh_block_fixture(vertex_count: usize, face_count: usize) -> Vec<u8> {
+    let position = mesh_llsd_binary(&vec![0; vertex_count * 6]);
+    let mut triangle_list = Vec::with_capacity(vertex_count * 6);
+    for index in 0..vertex_count * 3 {
+        triangle_list.extend_from_slice(&u16::try_from(index % vertex_count).unwrap().to_le_bytes());
+    }
+    let submesh = mesh_llsd_map(&[("Position", position), ("TriangleList", mesh_llsd_binary(&triangle_list))]);
+    let faces = vec![submesh; face_count];
+    let mut payload = b"<?llsd/binary?>\n".to_vec();
+    payload.extend(mesh_llsd_array(&faces));
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&payload).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn mesh_decode_job(budget: Budget, now: Instant, id: AssetId, bytes: Vec<u8>) -> (Store, Demand, DecodeJob) {
+    let mut store = Store::new(budget);
+    let route = store.register_route().unwrap();
+    let request = mesh_lod_request(id, &bytes);
+    let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).unwrap();
+    let input = next_fetch(&mut store, now)
+        .complete_response(Ok(FetchResponse::Partial { bytes, range: request.range(), total_length: Some(request.asset_length()) }))
+        .unwrap();
+    let job = store.start_decode(input).unwrap();
+    (store, demand, job)
 }
 
 fn charged_blob(budget: &Budget, bytes: &[u8]) -> crate::Blob {
@@ -1057,6 +1092,67 @@ fn retired_material_cannot_publish() {
     store.complete(result, now);
     let Status::Ready(Content::Material(material)) = current.status() else { panic!("expected legacy material") };
     assert_eq!(*material, crate::material::legacy::decode(&binary::to_vec(&llsd::Value::Map(legacy_fields(2, 128))).unwrap()).unwrap());
+}
+
+#[test]
+fn mesh_decodes_share_budget() {
+    let budget = Budget::default();
+    let now = Instant::now();
+
+    let mut texture_store = Store::new(budget.clone());
+    let texture_route = texture_store.register_route().unwrap();
+    let texture_demand = texture_store.request(texture_route, Request::new(resource(301)), Priority::Visible, now).unwrap();
+    let texture_input = fetch(&mut texture_store, now, RGBA_J2C.to_vec());
+    let texture_decode = texture_store.start_decode(texture_input).unwrap();
+
+    let mut material_store = Store::new(budget.clone());
+    let material_route = material_store.register_route().unwrap();
+    let material_id = AssetId::new(Uuid::from_u128(302));
+    let material_demand = material_store.request(material_route, Request::PbrMaterial(material_id), Priority::Visible, now).unwrap();
+    let material_input = fetch(&mut material_store, now, material_envelope(PBR_JSON));
+    let material_decode = material_store.start_decode(material_input).unwrap();
+    assert_matches!(texture_demand.status(), Status::Decoding);
+    assert_matches!(material_demand.status(), Status::Decoding);
+
+    let mut stores = vec![texture_store, material_store];
+    let mut demands = vec![texture_demand, material_demand];
+    let mut jobs = vec![texture_decode, material_decode];
+    for id in 303..306 {
+        let (store, demand, job) = mesh_decode_job(budget.clone(), now, AssetId::new(Uuid::from_u128(id)), mesh_block_fixture());
+        stores.push(store);
+        demands.push(demand);
+        jobs.push(job);
+    }
+    let (store, demand, job) = mesh_decode_job(
+        budget.clone(),
+        now,
+        AssetId::new(Uuid::from_u128(306)),
+        large_mesh_block_fixture(crate::mesh::MAX_MESH_VERTICES_PER_FACE, 8),
+    );
+    stores.push(store);
+    demands.push(demand);
+    jobs.push(job);
+
+    assert!(budget.stats().charged_bytes < ASSET_WORK_BYTES);
+    let barrier = Arc::new(Barrier::new(jobs.len() + 1));
+    let completions = thread::scope(|scope| {
+        let handles = jobs
+            .into_iter()
+            .map(|job| {
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    job.run()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+    });
+    for ((mut store, demand), completion) in stores.into_iter().zip(demands).zip(completions) {
+        store.complete(completion, now);
+        assert_matches!(demand.status(), Status::Ready(_));
+    }
 }
 
 #[test]

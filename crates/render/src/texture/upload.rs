@@ -1,8 +1,9 @@
 use super::{
     BindGroupDescriptor, BindGroupEntry, BindingResource, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, Color,
-    CommandEncoder, Device, Extent3d, GpuCharge, GpuTexture, HashMap, LoadOp, Operations, Origin3d, RenderPassColorAttachment,
-    RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureDescriptor, TextureDimension,
-    TextureEntry, TextureUploadState, TextureUsages, TextureViewDescriptor, Textures, UPLOAD_BYTES, Upload, UploadData, mip_count,
+    CommandEncoder, Device, Extent3d, GpuCharge, GpuTexture, HashMap, LoadOp, MIP_VIEW_FORMATS, Operations, Origin3d,
+    RenderPassColorAttachment, RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo,
+    TextureDescriptor, TextureDimension, TextureEntry, TextureFormat, TextureUploadState, TextureUsages, TextureViewDescriptor, Textures,
+    UPLOAD_BYTES, Upload, UploadData, mip_count,
 };
 
 impl Textures {
@@ -39,7 +40,7 @@ impl Textures {
                 usage: TextureUsages::TEXTURE_BINDING
                     | TextureUsages::COPY_DST
                     | if matches!(pixels.data, UploadData::Rgba(_)) { TextureUsages::RENDER_ATTACHMENT } else { TextureUsages::empty() },
-                view_formats: &[],
+                view_formats: if matches!(&pixels.data, UploadData::Rgba(_)) { &MIP_VIEW_FORMATS } else { &[] },
             };
             let charge = GpuCharge::new(self.memory.clone(), self.cap_bytes.clone(), &descriptor);
             let texture = device.create_texture(&descriptor);
@@ -121,11 +122,13 @@ impl Textures {
                     break;
                 }
                 let source = gpu.texture.create_view(&TextureViewDescriptor {
+                    format: Some(TextureFormat::Rgba8Unorm),
                     base_mip_level: *mip - 1,
                     mip_level_count: Some(1),
                     ..Default::default()
                 });
                 let dest = gpu.texture.create_view(&TextureViewDescriptor {
+                    format: Some(TextureFormat::Rgba8Unorm),
                     base_mip_level: *mip,
                     mip_level_count: Some(1),
                     ..Default::default()

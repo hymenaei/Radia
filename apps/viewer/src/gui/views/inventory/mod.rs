@@ -19,8 +19,10 @@ use gpui_component::{
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::inventory::{
-    InventoryEditHandle, InventoryEditOutcome, InventoryEditRejection, InventoryFetchHandle, InventoryFetchOutcome, InventoryLoadingStatus,
+    EditIntent, InventoryEditHandle, InventoryEditOutcome, InventoryEditRejection, InventoryFetchHandle, InventoryFetchOutcome,
+    InventoryLoadingStatus,
     browser::{self, SearchResults, SearchTypeFilter, TreeRows},
+    validate_edit,
 };
 
 const TREE_ROW_HEIGHT: f32 = 28.0;
@@ -387,48 +389,42 @@ impl InventoryScreen {
         match self.selected_node.map(InventoryNodeKey::id) {
             Some(InventoryNodeId::Category(id)) => {
                 let key = CategoryKey::new(self.selected_node?.owner(), id);
-                let category = snapshot.category(key)?;
-                (snapshot.roots().contains(key) || !category.preferred_folder_type.is_protected()).then_some(key)
+                self.can_edit(EditIntent::CreateFolder { parent: key }).then_some(key)
             }
             Some(InventoryNodeId::Item(id)) => {
                 let item = snapshot.item(ItemKey::new(self.selected_node?.owner(), id))?;
-                let parent = snapshot.category(item.parent)?;
-                (snapshot.roots().contains(parent.key) || !parent.preferred_folder_type.is_protected()).then_some(parent.key)
+                self.can_edit(EditIntent::CreateFolder { parent: item.parent }).then_some(item.parent)
             }
-            None => Some(snapshot.roots().personal()),
+            None => {
+                let parent = snapshot.roots().personal();
+                self.can_edit(EditIntent::CreateFolder { parent }).then_some(parent)
+            }
         }
     }
 
-    fn selected_node_is_editable(&self) -> bool {
+    fn can_edit(&self, intent: EditIntent) -> bool {
         let Some(snapshot) = &self.snapshots else { return false };
         if !self.selected_is_personal() {
             return false;
         }
-        match self.selected_node.map(InventoryNodeKey::id) {
-            Some(InventoryNodeId::Category(id)) => {
-                let Some(node) = self.selected_node else { return false };
-                let key = CategoryKey::new(node.owner(), id);
-                snapshot
-                    .category(key)
-                    .is_some_and(|category| !snapshot.roots().contains(key) && !category.preferred_folder_type.is_protected())
-            }
-            Some(InventoryNodeId::Item(id)) => {
-                let Some(node) = self.selected_node else { return false };
-                let key = ItemKey::new(node.owner(), id);
-                snapshot
-                    .item(key)
-                    .and_then(|item| snapshot.category(item.parent))
-                    .is_some_and(|parent| snapshot.roots().contains(parent.key) || !parent.preferred_folder_type.is_protected())
-            }
-            None => false,
-        }
+        validate_edit(snapshot, snapshot.roots().personal().owner(), intent).is_ok()
+    }
+
+    fn selected_can_rename(&self) -> bool {
+        self.selected_node.is_some_and(|node| self.can_edit(EditIntent::Rename { node }))
+    }
+
+    fn selected_can_move(&self) -> bool {
+        self.selected_node.is_some_and(|node| self.can_edit(EditIntent::Move { node, destination: None }))
     }
 
     fn selected_is_trash(&self) -> bool {
-        self.selected_category()
-            .and_then(|key| self.snapshots.as_ref()?.category(key))
-            .is_some_and(|category| category.preferred_folder_type == FolderType::Trash)
-            && self.selected_is_personal()
+        let Some(category) = self.selected_category() else { return false };
+        self.snapshots.as_ref().is_some_and(|snapshot| {
+            snapshot.category(category).is_some_and(|category| category.preferred_folder_type == FolderType::Trash)
+                && validate_edit(snapshot, snapshot.roots().personal().owner(), EditIntent::EmptyTrash).is_ok()
+                && self.selected_is_personal()
+        })
     }
 
     fn select_node(&mut self, node: InventoryNodeKey, cx: &mut Context<Self>) {
@@ -450,7 +446,7 @@ impl InventoryScreen {
     }
 
     fn open_move_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(source) = self.selected_node.filter(|_| self.selected_node_is_editable()) else { return };
+        let Some(source) = self.selected_node.filter(|_| self.selected_can_move()) else { return };
         let Some(snapshot) = &self.snapshots else { return };
         let owner = snapshot.roots().personal().owner();
         let root = snapshot.roots().personal();
@@ -466,9 +462,7 @@ impl InventoryScreen {
             destinations.push(DestinationOption {
                 title: label.into(),
                 folder: key,
-                disabled: category.preferred_folder_type.is_protected()
-                    || matches!(source.id(), InventoryNodeId::Category(source_id) if source_id == id)
-                    || matches!(source.id(), InventoryNodeId::Category(source_id) if folder_contains(snapshot, CategoryKey::new(owner, source_id), key)),
+                disabled: validate_edit(snapshot, owner, EditIntent::Move { node: source, destination: Some(key) }).is_err(),
             });
         }
         let select = cx.new(|cx| SelectState::new(destinations, None, window, cx));
@@ -485,7 +479,10 @@ impl InventoryScreen {
     }
 
     fn submit_move(&mut self, destination: CategoryKey, cx: &mut Context<Self>) {
-        let Some(node) = self.selected_node.filter(|_| self.selected_node_is_editable()) else { return };
+        let Some(node) = self.selected_node.filter(|_| self.selected_can_move()) else { return };
+        if !self.can_edit(EditIntent::Move { node, destination: Some(destination) }) {
+            return;
+        }
         self.destination_select = None;
         self._destination_subscription = None;
         match node.id() {
@@ -811,27 +808,13 @@ impl InventoryScreen {
     }
 
     fn selected_can_delete(&self) -> bool {
-        if !self.selected_node_is_editable() {
-            return false;
-        }
-        if let Some(item) = self.selected_item() {
-            return self.snapshots.as_ref().and_then(|snapshot| snapshot.item(item)).is_some_and(|item| {
-                self.snapshots
-                    .as_ref()
-                    .and_then(|snapshot| snapshot.category_with_type(item.key.owner(), FolderType::Trash))
-                    .is_none_or(|trash| item.parent != trash.key)
-            });
-        }
-        self.selected_category().is_some_and(|key| {
-            self.snapshots.as_ref().is_some_and(|snapshot| {
-                snapshot.category(key).is_some_and(|category| {
-                    snapshot.category_with_type(key.owner(), FolderType::Trash).is_none_or(|trash| category.parent != Some(trash.key))
-                })
-            })
-        })
+        self.selected_node.is_some_and(|node| self.can_edit(EditIntent::Delete { node }))
     }
 
     fn begin_selected_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.selected_can_rename() {
+            return;
+        }
         if let Some(category) = self.selected_category()
             && let Some(name) =
                 self.snapshots.as_ref().and_then(|snapshot| snapshot.category(category)).map(|category| category.name.to_string())
@@ -858,7 +841,8 @@ impl InventoryScreen {
     fn render_edit_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let editing_available = !self.edit_pending && !self.search_active();
         let create_enabled = editing_available && self.new_folder_parent().is_some();
-        let selected_enabled = editing_available && self.selected_node_is_editable();
+        let rename_enabled = editing_available && self.selected_can_rename();
+        let move_enabled = editing_available && self.selected_can_move();
         let delete_enabled = editing_available && self.selected_can_delete();
         let empty_trash_enabled = !self.edit_pending && self.selected_is_trash();
         let mut actions = div()
@@ -876,7 +860,7 @@ impl InventoryScreen {
                 Button::new("inventory-rename")
                     .label("Rename")
                     .h(px(30.))
-                    .disabled(!selected_enabled)
+                    .disabled(!rename_enabled)
                     .on_click(cx.listener(|screen, _, window, cx| screen.begin_selected_rename(window, cx))),
             )
             .child(
@@ -890,7 +874,7 @@ impl InventoryScreen {
                 Button::new("inventory-move")
                     .label("Move to…")
                     .h(px(30.))
-                    .disabled(!selected_enabled)
+                    .disabled(!move_enabled)
                     .on_click(cx.listener(|screen, _, window, cx| screen.open_move_picker(window, cx))),
             )
             .child(
@@ -1140,21 +1124,6 @@ fn snapshot_contains_node(snapshot: &InventorySnapshot, node: InventoryNodeKey) 
     }
 }
 
-fn folder_contains(snapshot: &InventorySnapshot, ancestor: CategoryKey, descendant: CategoryKey) -> bool {
-    let mut current = Some(descendant);
-    let mut visited = HashSet::new();
-    while let Some(folder) = current {
-        if folder == ancestor {
-            return true;
-        }
-        if !visited.insert(folder) {
-            return true;
-        }
-        current = snapshot.category(folder).and_then(|category| category.parent);
-    }
-    false
-}
-
 fn edit_status(outcome: InventoryEditOutcome) -> (&'static str, bool) {
     match outcome {
         InventoryEditOutcome::Applied => ("Inventory updated", false),
@@ -1169,6 +1138,7 @@ fn edit_status(outcome: InventoryEditOutcome) -> (&'static str, bool) {
                 InventoryEditRejection::DifferentOwner => "That entry belongs to another inventory",
                 InventoryEditRejection::RootFolder => "Inventory root folders cannot be changed",
                 InventoryEditRejection::ProtectedFolder => "System folders cannot be changed",
+                InventoryEditRejection::OperationNotAllowed => "That inventory operation is unavailable here",
                 InventoryEditRejection::InvalidName => "Enter a valid folder or item name",
                 InventoryEditRejection::FolderCycle => "A folder cannot be moved into itself",
             },

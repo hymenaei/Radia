@@ -24,6 +24,7 @@ use uuid::Uuid;
 use super::{
     delta::{AisDelta, delta_from_ais_response, trash_folder},
     handle::InventoryEditHandle,
+    policy::{EditIntent, validate_edit},
     types::{EditOperation, EditRequest, InventoryEditOutcome, InventoryEditRejection, MoveExpectation},
 };
 
@@ -223,30 +224,38 @@ fn prepare_edit(
     match operation {
         EditOperation::CreateFolder { parent, name, preferred_type } => {
             validate_name(name)?;
-            validate_owner(parent.owner(), owner)?;
-            if snapshot.category(*parent).is_none() {
-                return Err(InventoryEditRejection::MissingCategory);
-            }
+            validate_edit(snapshot, owner, EditIntent::CreateFolder { parent: *parent })?;
             Ok(PreparedEdit::CreateFolder { parent: *parent, name: name.clone(), preferred_type: *preferred_type })
         }
         EditOperation::RenameCategory { category, name } => {
             validate_name(name)?;
-            validate_owner(category.owner(), owner)?;
-            let category_data = snapshot.category(*category).ok_or(InventoryEditRejection::MissingCategory)?;
-            validate_category_operation(*category, category_data.preferred_folder_type, snapshot)?;
+            validate_edit(
+                snapshot,
+                owner,
+                EditIntent::Rename { node: InventoryNodeKey::new(category.owner(), InventoryNodeId::Category(category.id())) },
+            )?;
             Ok(PreparedEdit::RenameCategory { category: *category, name: name.clone() })
         }
         EditOperation::RenameItem { item, name } => {
             validate_name(name)?;
-            validate_owner(item.owner(), owner)?;
+            validate_edit(
+                snapshot,
+                owner,
+                EditIntent::Rename { node: InventoryNodeKey::new(item.owner(), InventoryNodeId::Item(item.id())) },
+            )?;
             snapshot.item(*item).ok_or(InventoryEditRejection::MissingItem)?;
             Ok(PreparedEdit::RenameItem { item: *item, name: name.clone() })
         }
         EditOperation::MoveItem { item, destination } => {
-            validate_owner(item.owner(), owner)?;
-            validate_owner(destination.owner(), owner)?;
+            validate_edit(
+                snapshot,
+                owner,
+                EditIntent::Move {
+                    node: InventoryNodeKey::new(item.owner(), InventoryNodeId::Item(item.id())),
+                    destination: Some(*destination),
+                },
+            )?;
             let current = snapshot.item(*item).ok_or(InventoryEditRejection::MissingItem)?;
-            require_destination(*destination, snapshot)?;
             if current.parent == *destination {
                 return Ok(PreparedEdit::Noop);
             }
@@ -257,17 +266,18 @@ fn prepare_edit(
             }))
         }
         EditOperation::MoveFolder { folder, destination } => {
-            validate_owner(folder.owner(), owner)?;
-            validate_owner(destination.owner(), owner)?;
+            validate_edit(
+                snapshot,
+                owner,
+                EditIntent::Move {
+                    node: InventoryNodeKey::new(folder.owner(), InventoryNodeId::Category(folder.id())),
+                    destination: Some(*destination),
+                },
+            )?;
             let current = snapshot.category(*folder).ok_or(InventoryEditRejection::MissingCategory)?;
-            validate_category_operation(*folder, current.preferred_folder_type, snapshot)?;
-            require_destination(*destination, snapshot)?;
             let from = current.parent.ok_or(InventoryEditRejection::RootFolder)?;
             if from == *destination {
                 return Ok(PreparedEdit::Noop);
-            }
-            if folder_would_cycle(*folder, *destination, snapshot) {
-                return Err(InventoryEditRejection::FolderCycle);
             }
             Ok(PreparedEdit::Move(MoveExpectation {
                 node: InventoryNodeKey::new(owner, InventoryNodeId::Category(folder.id())),
@@ -276,12 +286,13 @@ fn prepare_edit(
             }))
         }
         EditOperation::DeleteItem(item) => {
-            validate_owner(item.owner(), owner)?;
+            validate_edit(
+                snapshot,
+                owner,
+                EditIntent::Delete { node: InventoryNodeKey::new(item.owner(), InventoryNodeId::Item(item.id())) },
+            )?;
             let current = snapshot.item(*item).ok_or(InventoryEditRejection::MissingItem)?;
             let trash = trash_folder(snapshot, owner).ok_or(InventoryEditRejection::MissingTrash)?;
-            if current.parent == trash {
-                return Ok(PreparedEdit::Noop);
-            }
             Ok(PreparedEdit::Move(MoveExpectation {
                 node: InventoryNodeKey::new(owner, InventoryNodeId::Item(item.id())),
                 from: current.parent,
@@ -289,17 +300,22 @@ fn prepare_edit(
             }))
         }
         EditOperation::DeleteFolder(folder) => {
-            validate_owner(folder.owner(), owner)?;
+            validate_edit(
+                snapshot,
+                owner,
+                EditIntent::Delete { node: InventoryNodeKey::new(folder.owner(), InventoryNodeId::Category(folder.id())) },
+            )?;
             let current = snapshot.category(*folder).ok_or(InventoryEditRejection::MissingCategory)?;
-            validate_category_operation(*folder, current.preferred_folder_type, snapshot)?;
             let trash = trash_folder(snapshot, owner).ok_or(InventoryEditRejection::MissingTrash)?;
             let from = current.parent.ok_or(InventoryEditRejection::RootFolder)?;
-            if from == trash {
-                return Ok(PreparedEdit::Noop);
-            }
-            if folder_would_cycle(*folder, trash, snapshot) {
-                return Err(InventoryEditRejection::FolderCycle);
-            }
+            validate_edit(
+                snapshot,
+                owner,
+                EditIntent::Move {
+                    node: InventoryNodeKey::new(folder.owner(), InventoryNodeId::Category(folder.id())),
+                    destination: Some(trash),
+                },
+            )?;
             Ok(PreparedEdit::Move(MoveExpectation {
                 node: InventoryNodeKey::new(owner, InventoryNodeId::Category(folder.id())),
                 from,
@@ -307,6 +323,7 @@ fn prepare_edit(
             }))
         }
         EditOperation::EmptyTrash => {
+            validate_edit(snapshot, owner, EditIntent::EmptyTrash)?;
             let trash = trash_folder(snapshot, owner).ok_or(InventoryEditRejection::MissingTrash)?;
             Ok(PreparedEdit::EmptyTrash(trash))
         }
@@ -315,40 +332,6 @@ fn prepare_edit(
 
 fn validate_name(name: &str) -> Result<(), InventoryEditRejection> {
     if name.len() > MAX_INVENTORY_NAME_BYTES { Err(InventoryEditRejection::InvalidName) } else { Ok(()) }
-}
-
-fn validate_owner(actual: InventoryOwner, expected: InventoryOwner) -> Result<(), InventoryEditRejection> {
-    if actual == expected { Ok(()) } else { Err(InventoryEditRejection::DifferentOwner) }
-}
-
-fn validate_category_operation(
-    key: CategoryKey,
-    folder_type: FolderType,
-    snapshot: &InventorySnapshot,
-) -> Result<(), InventoryEditRejection> {
-    if snapshot.roots().contains(key) {
-        return Err(InventoryEditRejection::RootFolder);
-    }
-    if folder_type.is_protected() {
-        return Err(InventoryEditRejection::ProtectedFolder);
-    }
-    Ok(())
-}
-
-fn require_destination(destination: CategoryKey, snapshot: &InventorySnapshot) -> Result<(), InventoryEditRejection> {
-    snapshot.category(destination).map(|_| ()).ok_or(InventoryEditRejection::MissingCategory)
-}
-
-fn folder_would_cycle(folder: CategoryKey, destination: CategoryKey, snapshot: &InventorySnapshot) -> bool {
-    let mut current = Some(destination);
-    let mut visited = std::collections::HashSet::new();
-    while let Some(key) = current {
-        if key == folder || !visited.insert(key) {
-            return true;
-        }
-        current = snapshot.category(key).and_then(|category| category.parent);
-    }
-    false
 }
 
 async fn execute_edit(

@@ -1,12 +1,15 @@
 mod controller;
-#[cfg(test)]
-mod controller_tests;
 mod delta;
 mod handle;
+mod policy;
 mod types;
 
 pub(crate) use controller::{InventoryEditController, InventoryEditEvent};
 pub(crate) use delta::AisDelta;
 pub use handle::InventoryEditHandle;
+pub(crate) use policy::{EditIntent, validate_edit};
 pub(crate) use types::MoveExpectation;
 pub use types::{InventoryEditOutcome, InventoryEditRejection};
+
+#[cfg(test)]
+mod controller_tests;

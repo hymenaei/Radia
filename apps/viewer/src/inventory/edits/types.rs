@@ -21,6 +21,7 @@ pub enum InventoryEditRejection {
     DifferentOwner,
     RootFolder,
     ProtectedFolder,
+    OperationNotAllowed,
     InvalidName,
     FolderCycle,
 }

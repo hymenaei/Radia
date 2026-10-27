@@ -1,11 +1,12 @@
 use std::assert_matches;
 
+use world::{FaceAppearance, SurfaceAppearance, TextureMapping};
+
 use super::support::{
     BTreeMap, BTreeSet, Budget, DVec3, Detail, FieldUpdate, Instant, Kind, NonZeroU32, ObjectObservation, ObjectPatch, ParentUpdate,
     Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, RecoveryReason, Region, RegionInfo, Shape,
     Status, Uuid, Vec3, add, camera, ids, move_root, positions, reply, settle, source, world,
 };
-use world::{FaceAppearance, SurfaceAppearance, TextureMapping};
 
 #[test]
 fn versions_fence_sessions_and_close() {

@@ -213,12 +213,21 @@ impl WorldHandoff {
     }
 
     pub(super) fn teleport_completed(&mut self, world: &mut SessionWorld, simulator_id: SimulatorId) {
+        self.clear_agent_parcel(world, simulator_id);
         self.observations.retain(|known, _| *known == simulator_id);
         self.promoted_target = None;
         self.world_primary = Some(simulator_id);
         for (retired, error) in world.retire_all_except(simulator_id) {
             let region = world.region_for(retired).map(|region| region.get());
             tracing::warn!(simulator = retired.get(), region, %error, "could not retire region after teleport");
+        }
+    }
+
+    fn clear_agent_parcel(&self, world: &mut SessionWorld, simulator_id: SimulatorId) {
+        if let Some(region) = world.region_for(simulator_id)
+            && let Err(error) = world.clear_agent_parcel(region)
+        {
+            tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "could not clear agent parcel after simulator promotion");
         }
     }
 
@@ -508,6 +517,8 @@ impl WorldHandoff {
         if completed {
             self.world_primary = Some(target);
             self.promoted_target = None;
+            self.clear_agent_parcel(world, target);
+            self.clear_agent_parcel(world, handoff.source);
         }
         (completed, applied)
     }

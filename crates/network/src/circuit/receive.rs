@@ -3,10 +3,7 @@ use std::{collections::VecDeque, io, net::SocketAddr, sync::Arc, time::Duration}
 use protocol::{
     LLUdpError,
     lludp::{Message, Packet},
-    messages::{
-        CompleteAgentMovement, CompletePingCheck, PingId, RegionHandshakeReply, agent::complete_agent_movement,
-        region::region_handshake_reply,
-    },
+    messages::{CompleteAgentMovement, CompletePingCheck, PingId, agent::complete_agent_movement},
     schema::ids::PACKET_ACK,
 };
 use tokio::{
@@ -407,7 +404,7 @@ impl ConnectionTask {
                 active_queue_class(self.pending_send.as_ref()),
             )?;
         }
-        if self.phase.has_region_handshake() && self.connection.handoff.is_some() {
+        if self.phase.has_region_handshake() && self.connection.region_handshake_reply_sent && self.connection.handoff.is_some() {
             self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
         }
         Ok(None)
@@ -529,23 +526,7 @@ impl ConnectionTask {
             }
             Message::RegionHandshake(_) => {
                 self.phase.mark_region_handshake();
-                queue_internal(
-                    &mut self.outbound,
-                    Message::RegionHandshakeReply(RegionHandshakeReply {
-                        agent_data: region_handshake_reply::AgentData {
-                            agent_id: self.connection.session.agent_id,
-                            session_id: self.connection.session.session_id,
-                        },
-                        region_info: region_handshake_reply::RegionInfo { flags: 0 },
-                    }),
-                    Delivery::Reliable,
-                    TrafficClass::Control,
-                    MovementSend::None,
-                    active_queue_class(self.pending_send.as_ref()),
-                )?;
-                if self.phase.is_established() && self.connection.handoff.is_some() {
-                    self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
-                }
+                self.connection.region_handshake_reply_sent = false;
             }
             Message::AgentMovementComplete(movement) => {
                 let matches_current_movement = match connection_role {

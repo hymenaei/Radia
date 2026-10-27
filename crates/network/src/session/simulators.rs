@@ -108,6 +108,7 @@ impl SimulatorConnectionState {
                 self.pending_handoff_command = Some(match command {
                     SimulatorCommand::PrepareHandoff(target) => HandoffCommand::Prepare(target),
                     SimulatorCommand::CancelHandoff => HandoffCommand::Cancel,
+                    SimulatorCommand::ReplyRegionHandshake { .. } => unreachable!("handshake replies are not deferred handoff commands"),
                     SimulatorCommand::Send { .. } => unreachable!("only handoff control commands are deferred"),
                 });
             }

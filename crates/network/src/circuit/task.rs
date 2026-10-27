@@ -439,6 +439,51 @@ impl ConnectionTask {
 
     fn command(&mut self, command: Option<SimulatorCommand>) -> Result<RunControl, ConnectionError> {
         match command {
+            Some(SimulatorCommand::ReplyRegionHandshake { message, completed }) => {
+                if self.phase.is_closing() {
+                    if let Err(error) = completed.send(Err(Error::SimulatorConnectionClosed)) {
+                        drop(error);
+                    }
+                } else {
+                    let queued = QueuedMessage {
+                        class: TrafficClass::Control,
+                        message,
+                        delivery: Delivery::Reliable,
+                        queued_at: Instant::now(),
+                        completion: Some(completed),
+                        cancel_target: None,
+                        report_failure: false,
+                        movement: MovementSend::None,
+                    };
+                    match self.outbound.push(queued, active_queue_class(self.pending_send.as_ref())) {
+                        Ok(()) => {
+                            if self.phase.has_region_handshake() {
+                                self.connection.region_handshake_reply_sent = true;
+                            }
+                            preempt_deferred_send(
+                                &mut self.pending_send,
+                                &mut self.outbound,
+                                &self.connection.circuit,
+                                self.ack_timer_due || self.phase.is_draining(),
+                            )?;
+                            if self.phase.is_established()
+                                && self.phase.has_region_handshake()
+                                && self.connection.region_handshake_reply_sent
+                                && self.connection.handoff.is_some()
+                            {
+                                self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
+                            }
+                        }
+                        Err(mut queued) => {
+                            if let Some(completed) = queued.completion.take()
+                                && let Err(error) = completed.send(Err(Error::SimulatorCommandQueueFull))
+                            {
+                                drop(error);
+                            }
+                        }
+                    }
+                }
+            }
             Some(SimulatorCommand::Send { message, delivery, completed, cancel_target, report_failure }) => {
                 let message_traffic_class = message_class(&message);
                 let mut failed_completion = completed;
@@ -517,7 +562,7 @@ impl ConnectionTask {
                 self.connection.session.seed_capability = target.seed_capability.clone();
                 self.connection.handoff = Some(target);
                 self.connection.handoff_role_generation = Some(role_generation);
-                if self.phase.is_established() && self.phase.has_region_handshake() {
+                if self.phase.is_established() && self.phase.has_region_handshake() && self.connection.region_handshake_reply_sent {
                     self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
                 }
             }

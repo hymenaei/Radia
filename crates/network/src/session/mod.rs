@@ -391,6 +391,34 @@ impl SessionHandle {
         }
     }
 
+    pub async fn reply_region_handshake(&self, simulator_id: SimulatorId, flags: u32) -> Result<(), Error> {
+        let mut disconnect_requested = self.disconnect_requested.subscribe();
+        let (completed, response) = oneshot::channel();
+        {
+            let admission_closed = self.command_admission_closed.lock().unwrap_or_else(|error| error.into_inner());
+            if *admission_closed || *self.disconnect_requested.borrow() || *self.worker_finished.borrow() {
+                return Err(Error::SessionClosed);
+            }
+        }
+        let command = Command::ReplyRegionHandshake { simulator_id, flags, completed };
+        tokio::select! {
+            biased;
+            _ = disconnect_requested.changed() => return Err(Error::SessionClosed),
+            result = self.commands.send(command) => result.map_err(|_| Error::SessionClosed)?,
+        }
+        tokio::select! {
+            biased;
+            _ = disconnect_requested.changed() => Err(Error::SessionClosed),
+            result = response => result.map_err(|_| {
+                if *self.disconnect_requested.borrow() || *self.worker_finished.borrow() || self.commands.is_closed() {
+                    Error::SessionClosed
+                } else {
+                    Error::SimulatorConnectionClosed
+                }
+            })?,
+        }
+    }
+
     pub async fn disconnect(&self) {
         self.request_disconnect();
         let mut worker_finished = self.worker_finished.clone();
@@ -406,6 +434,7 @@ pub(crate) enum Command {
     SubmitMfaCode(String),
     SendMessage { message: Message, delivery: Delivery },
     SendTo { simulator_id: SimulatorId, message: Message, delivery: Delivery, completed: oneshot::Sender<Result<(), Error>> },
+    ReplyRegionHandshake { simulator_id: SimulatorId, flags: u32, completed: oneshot::Sender<Result<(), Error>> },
 }
 
 impl outbound_message::Sealed for TeleportCancel {}

@@ -232,7 +232,7 @@ async fn primary_udp_activity_resets_keepalive_timeout() {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(TEST_EVENT_CAPACITY);
     let (_disconnect, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(login_session(endpoint), command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(login_session(endpoint), commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (_, peer) = receive(&simulator).await;
     simulator.send_to(&ack(20, 1), peer).await.expect("ack primary circuit");

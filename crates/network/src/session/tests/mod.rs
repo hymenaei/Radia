@@ -64,7 +64,7 @@ use crate::{
     capabilities::{CapabilityBudget, Client, EventQueueExit},
     circuit::{
         HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PRECONNECT_EVENTS,
-        NeighborEventQueueOutcome, SimulatorEvent, UdpTransport,
+        NeighborEventQueueOutcome, SimulatorCommand, SimulatorEvent, UdpTransport,
         admission::{MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES},
         lludp::{Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, RESENT_FLAG, ReceiveError},
         pacing::{OutboundBudget, OutboundBudgetHandle},

@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use protocol::lludp::Message;
 use tokio::{sync::mpsc, time::Instant};
 
 use super::teleport::is_teleport_cancel;
 use super::{
     ConnectionQueueFailure, EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_PENDING_LIFECYCLE_EVENTS,
-    MAX_PENDING_SESSION_EVENTS, MAX_PRECONNECT_EVENTS, RuntimeAction, SessionDispatcher, SessionError, queue_connection_message,
+    MAX_PENDING_SESSION_EVENTS, MAX_PRECONNECT_EVENTS, RuntimeAction, SessionDispatcher, SessionError, SimulatorCommand,
+    queue_connection_message,
     queue_primary_message,
 };
 use crate::{
@@ -168,6 +170,33 @@ impl SessionDispatcher<'_> {
                 if let Err(failure) = result
                     && let Some(completion) = failure.completion
                     && let Err(error) = completion.send(Err(failure.error))
+                {
+                    drop(error);
+                }
+            }
+            Some(Command::ReplyRegionHandshake { simulator_id, flags, completed }) => {
+                let message = Message::RegionHandshakeReply(protocol::messages::RegionHandshakeReply {
+                    agent_data: protocol::messages::region::region_handshake_reply::AgentData {
+                        agent_id: self.state.session.agent_id,
+                        session_id: self.state.session.session_id,
+                    },
+                    region_info: protocol::messages::region::region_handshake_reply::RegionInfo { flags },
+                });
+                let commands = if simulator_id == self.state.primary.simulator_id && !self.state.root_connection_failed {
+                    Some(&self.state.primary.commands)
+                } else {
+                    self.run_state
+                        .neighbor_connections
+                        .values()
+                        .find(|connection| connection.simulator_id == simulator_id)
+                        .map(|connection| &connection.commands)
+                };
+                let command = SimulatorCommand::ReplyRegionHandshake { message, completed };
+                let result =
+                    if let Some(commands) = commands { commands.send(command).await.map_err(|error| error.0) } else { Err(command) };
+                if let Err(SimulatorCommand::ReplyRegionHandshake { completed, .. }) = result
+                    && let Err(error) =
+                        completed.send(Err(if commands.is_some() { Error::SimulatorConnectionClosed } else { Error::SimulatorUnavailable }))
                 {
                     drop(error);
                 }

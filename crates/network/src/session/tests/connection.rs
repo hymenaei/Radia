@@ -121,8 +121,8 @@ async fn prepare_crossed_region_destination(
     set_sequence(&mut neighbor_handshake, 41);
     neighbor.send_to(&neighbor_handshake, neighbor_peer).await.expect("send destination region handshake");
     let reply = receive_message(neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
-    let movement = receive_message(neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
     neighbor.send_to(&acknowledgement(42, reply.sequence()), neighbor_peer).await.expect("ack destination handshake reply");
+    let movement = receive_message(neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
     neighbor.send_to(&acknowledgement(43, movement.sequence()), neighbor_peer).await.expect("ack destination movement request");
     let wrong_movement = Packet::new(
         44,
@@ -506,10 +506,10 @@ async fn neighbor_backpressure_controls() {
     let primary_endpoint = primary.local_addr().expect("primary simulator address");
     let neighbor_endpoint = neighbor.local_addr().expect("neighbor simulator address");
     let session = login_session(primary_endpoint);
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender.clone(), disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender.clone(), disconnect_requested));
 
     let (_, primary_peer) = receive(&primary).await;
     primary.send_to(&ack(20, 1), primary_peer).await.expect("ack primary circuit");
@@ -725,11 +725,11 @@ async fn event_queue_starts_neighbor() {
         circuit_code: 0x1122_3344,
         seed_capability: server.url("/seed"),
     };
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let mut received_events = EventReceiver::new(received_events);
     let (disconnect, shutdown) = watch::channel(false);
-    let worker = spawn(run_session(session, command_receiver, event_sender, shutdown));
+    let worker = spawn(run_session(session, commands.clone(), command_receiver, event_sender, shutdown));
 
     let (primary_packet, primary_peer) = receive_udp(&primary).await;
     std::assert_matches!(Packet::decode(&primary_packet).expect("decode initial circuit").message(), Message::UseCircuitCode(_));
@@ -827,7 +827,7 @@ async fn crossed_region_promotes_after_matching_movement() {
     let (event_sender, received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let mut received_events = EventReceiver::new(received_events);
     let (_disconnect, shutdown) = watch::channel(false);
-    let worker = spawn(run_session(session.clone(), command_receiver, event_sender, shutdown));
+    let worker = spawn(run_session(session.clone(), commands.clone(), command_receiver, event_sender, shutdown));
 
     let (primary_packet, primary_peer) = receive_udp(&primary).await;
     std::assert_matches!(Packet::decode(&primary_packet).expect("decode primary circuit").message(), Message::UseCircuitCode(_));

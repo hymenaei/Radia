@@ -135,6 +135,7 @@ async fn primary_intro_precedes_early_udp_data() {
     let (disconnect, disconnect_requested) = watch::channel(false);
     let client = spawn(run_session(
         login_session(simulator.local_addr().expect("primary simulator address")),
+        commands.clone(),
         command_receiver,
         event_sender,
         disconnect_requested,

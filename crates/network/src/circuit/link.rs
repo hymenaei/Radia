@@ -101,6 +101,10 @@ pub(crate) enum SimulatorEvent {
 }
 
 pub(crate) enum SimulatorCommand {
+    ReplyRegionHandshake {
+        message: Message,
+        completed: oneshot::Sender<Result<(), Error>>,
+    },
     Send {
         message: Message,
         delivery: Delivery,

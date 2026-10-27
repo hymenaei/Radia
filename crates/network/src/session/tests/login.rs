@@ -207,8 +207,10 @@ pub(super) fn spawn_session_client_with_event_sender(
 ) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>, mpsc::Sender<EventEnvelope>) {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
-    let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
     let retained_events = events.clone();
+    let (runtime_events, relay) =
+        super::relay_handshake_events(events, commands.clone(), CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
+    let terminal_event_permit = runtime_events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
     let coverage_losses = CoverageLossLedger::new();
     let coverage_changed = coverage_losses.subscribe();
     let (disconnect_requested, disconnect_signal) = watch::channel(false);
@@ -234,7 +236,7 @@ pub(super) fn spawn_session_client_with_event_sender(
             Channels {
                 commands: command_receiver,
                 command_sender: commands,
-                events,
+                events: runtime_events,
                 terminal_event_permit,
                 disconnect_requested: disconnect_signal,
                 coverage_losses,
@@ -243,6 +245,7 @@ pub(super) fn spawn_session_client_with_event_sender(
             SessionOptions::default(),
         )
         .await;
+        drop(relay);
         worker_finished_sender.send_replace(true);
         result
     });
@@ -255,7 +258,9 @@ pub(super) fn spawn_network_thread_session(
 ) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>) {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
-    let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
+    let (runtime_events, relay) =
+        super::relay_handshake_events(events, commands.clone(), CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
+    let terminal_event_permit = runtime_events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
     let coverage_losses = CoverageLossLedger::new();
     let coverage_changed = coverage_losses.subscribe();
     let (disconnect_requested, disconnect_signal) = watch::channel(false);
@@ -283,13 +288,14 @@ pub(super) fn spawn_network_thread_session(
             let channels = Channels {
                 commands: command_receiver,
                 command_sender: commands,
-                events: events.clone(),
+                events: runtime_events,
                 terminal_event_permit,
                 disconnect_requested: disconnect_signal.clone(),
                 coverage_losses,
             };
             let result = runtime.block_on(run_client(credentials, channels, login_url, SessionOptions::default()));
             runtime.shutdown_background();
+            drop(relay);
             worker_finished_sender.send_replace(true);
             result
         })

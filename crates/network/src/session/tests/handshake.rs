@@ -114,6 +114,48 @@ async fn handshake_chat_logout() {
 }
 
 #[tokio::test]
+async fn region_handshake_reply_is_explicit_and_preserves_application_flags() {
+    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+    let session = login_session(simulator.local_addr().expect("simulator address"));
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (event_sender, mut events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
+    let (disconnect_signal, disconnect_requested) = watch::channel(false);
+    let connection = connect_runtime(session, ResponseData::default()).await.expect("connect simulator runtime");
+    let terminal = event_sender.clone().try_reserve_owned().expect("reserve terminal event slot");
+    let client = spawn(connection.run(command_receiver, event_sender, disconnect_requested, terminal));
+
+    let (_, peer) = receive(&simulator).await;
+    simulator.send_to(&server_ack_many(20, &[1]), peer).await.expect("ack circuit establishment");
+    assert_eq!(receive(&simulator).await.0, expected_complete_movement(2));
+    simulator.send_to(&server_ack_many(21, &[2]), peer).await.expect("ack movement request");
+
+    for (sequence, flags, server_ack) in [(22, 7, 25), (23, 5, 26), (24, 7, 27)] {
+        let mut handshake = test_fixture("region_handshake.hex");
+        handshake[0] |= 0x40;
+        set_sequence(&mut handshake, sequence);
+        simulator.send_to(&handshake, peer).await.expect("send region handshake");
+        receive_ack(&simulator, sequence).await;
+        let simulator_id = loop {
+            if let Event::SimulatorMessage { simulator_id, message: Message::RegionHandshake(_), .. } = next_event(&mut events).await {
+                break simulator_id;
+            }
+        };
+        assert_no_datagram(&simulator);
+
+        let (completed, response) = oneshot::channel();
+        commands.send(Command::ReplyRegionHandshake { simulator_id, flags, completed }).await.expect("queue explicit handshake reply");
+        response.await.expect("network completion remains connected").expect("handshake reply is transmitted");
+        let reply = receive_message(&simulator, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
+        std::assert_matches!(reply.message(), Message::RegionHandshakeReply(reply) if reply.region_info.flags == flags);
+        simulator.send_to(&server_ack_many(server_ack, &[reply.sequence()]), peer).await.expect("ack explicit handshake reply");
+    }
+
+    disconnect_signal.send_replace(true);
+    receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    timeout(SIMULATOR_TIMEOUT, client).await.expect("session task stops").expect("session task does not panic").expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn handshake_survives_application_backlog() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));

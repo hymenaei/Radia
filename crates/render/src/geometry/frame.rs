@@ -96,7 +96,7 @@ impl GeometryRenderer {
                     scale: transform.scale,
                     pickable: true,
                     faces: Vec::new(),
-                    shading: ShadingMode::Studio,
+                    shading: ShadingMode::Surface,
                     region_water_id: None,
                 },
                 object.materials(),
@@ -224,10 +224,9 @@ impl GeometryRenderer {
                 match instance.shading {
                     ShadingMode::Terrain => {
                         params.color = [0.18, 0.23, 0.13, 1.0];
-                        params.params[0] = 1.0;
                     }
                     ShadingMode::RegionWater => {}
-                    ShadingMode::Studio => {}
+                    ShadingMode::Surface => {}
                 }
                 if params.blend && params.color[3] <= 0.0 {
                     continue;

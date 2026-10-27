@@ -71,7 +71,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
                 scale: transform.scale,
                 pickable: true,
                 faces: Vec::new(),
-                shading: ShadingMode::Studio,
+                shading: ShadingMode::Surface,
                 region_water_id: None,
             };
             let params = FaceParams::new(Some(&object.materials().unwrap()[0]));

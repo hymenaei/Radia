@@ -1,7 +1,6 @@
 struct Camera {
     projection: mat4x4<f32>,
     view: mat4x4<f32>,
-    light: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var image: texture_2d<f32>;
@@ -141,26 +140,25 @@ struct Surface {
     water.depth = max(clamp(clip.z / clip.w, 0.0, 1.0), 0.00000001);
     return water;
 }
-fn studio(v: Output, color: vec3<f32>, front: bool) -> vec3<f32> {
-    let eye = normalize(-v.position_view);
-    var normal = normalize(v.normal);
-    if !front {
-        normal = -normal;
-    }
-    let key = max(dot(normal, camera.light.xyz), 0.0);
-    let halfway = normalize(camera.light.xyz + eye);
-    let specular = pow(max(dot(normal, halfway), 0.0), 48.0) * 0.25;
-    return color * (0.15 + 0.85 * key) + vec3<f32>(specular);
-}
-
 @fragment fn fragment(v: Output, @builtin(front_facing) front: bool) -> Surface {
     let color = textureSample(image, image_sampler, v.uv) * v.color;
     if v.params.y == 1.0 && color.a < v.params.z { discard; }
     let alpha = select(1.0, clamp(color.a, 0.0, 1.0), v.params.y == 2.0);
-    let surface = mix(studio(v, color.rgb, front), color.rgb, v.params.x);
+    var normal_eye = safe_normalize(v.normal);
+    if !front {
+        normal_eye = -normal_eye;
+    }
     let light_direction_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_direction.xyz, 0.0)).xyz;
     let light_norm_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_norm.xyz, 0.0)).xyz;
-    let fogged = atmospheric_surface(surface, v.position_view, light_direction_eye, light_norm_eye, surface_atmosphere.atmosphere);
+    let fogged = shade_surface(
+        color.rgb,
+        v.position_view,
+        normal_eye,
+        light_direction_eye,
+        light_norm_eye,
+        v.params.x == 1.0,
+        surface_atmosphere.atmosphere,
+    );
     var output: Surface;
     output.color = vec4<f32>(fogged, alpha);
     output.depth = max(v.position.z, 0.00000001);

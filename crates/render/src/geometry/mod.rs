@@ -140,7 +140,7 @@ pub(crate) struct PickFace {
 }
 
 enum ShadingMode {
-    Studio,
+    Surface,
     Terrain,
     RegionWater,
 }

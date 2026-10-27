@@ -85,7 +85,7 @@ mod tests {
             scale,
             pickable: true,
             faces: Vec::new(),
-            shading: ShadingMode::Studio,
+            shading: ShadingMode::Surface,
             region_water_id: None,
         };
         let bytes = instance_base(&instance, DVec3::ZERO);

@@ -24,10 +24,9 @@ use super::{
 
 pub(crate) const INSTANCE_BYTES: usize = 192;
 pub(crate) const VERTEX_BYTES: usize = 32;
-const CAMERA_BYTES: usize = 144;
+const CAMERA_BYTES: usize = 128;
 const ATMOSPHERE_BYTES: usize = ATMOSPHERE_FLOATS * 4;
 const WATER_BYTES: usize = 32 * 4;
-const KEY_LIGHT: Vec3 = Vec3::new(-0.3, 0.5, 1.0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Pipeline {
@@ -228,11 +227,7 @@ impl SurfacePipelines {
     }
     pub(crate) fn update_camera_uniform(&self, queue: &Queue, camera: Camera, size: [u32; 2]) -> Mat4 {
         let projection = projection(camera, size);
-        let values = projection
-            .to_cols_array()
-            .into_iter()
-            .chain(camera_view(camera).to_cols_array())
-            .chain(KEY_LIGHT.normalize().extend(0.0).to_array());
+        let values = projection.to_cols_array().into_iter().chain(camera_view(camera).to_cols_array());
         let mut bytes = [0; CAMERA_BYTES];
         for (dest, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
             *dest = value.to_le_bytes();

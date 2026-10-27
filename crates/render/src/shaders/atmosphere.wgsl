@@ -10,6 +10,7 @@ struct Atmosphere {
     light_norm: vec4<f32>,
     water_specular: vec4<f32>,
     dome: vec4<f32>,
+    legacy_lighting: vec4<f32>,
 }
 
 struct AtmosphereTerms {
@@ -152,13 +153,36 @@ fn object_atmosphere_terms(
     return terms;
 }
 
-fn atmospheric_surface(
+fn legacy_surface_irradiance(
+    normal_eye: vec3<f32>,
+    light_direction_eye: vec3<f32>,
+    terms: ObjectAtmosphereTerms,
+    atmosphere: Atmosphere,
+) -> vec3<f32> {
+    let light_direction = safe_normalize(light_direction_eye);
+    let light_cosine = min(abs(dot(normal_eye, light_direction)), 1.0);
+    let ambient_factor = 1.0 - 0.5 * light_cosine * light_cosine;
+    let diffuse_factor = max(dot(normal_eye, light_direction), 0.0);
+    let ambient = vec3<f32>(atmosphere.legacy_lighting.x * ambient_factor);
+    let sunlight = srgb_to_linear(max(terms.sunlight, vec3<f32>(0.0))) * atmosphere.legacy_lighting.y * diffuse_factor;
+    return ambient + sunlight;
+}
+
+fn atmospheric_surface(color: vec3<f32>, terms: ObjectAtmosphereTerms, atmosphere: Atmosphere) -> vec3<f32> {
+    return color * terms.attenuation.x + srgb_to_linear(terms.additive * 2.0) * atmosphere.distance.z;
+}
+
+fn shade_surface(
     color: vec3<f32>,
     position_eye: vec3<f32>,
+    normal_eye: vec3<f32>,
     light_direction_eye: vec3<f32>,
     light_norm_eye: vec3<f32>,
+    fullbright: bool,
     atmosphere: Atmosphere,
 ) -> vec3<f32> {
     let terms = object_atmosphere_terms(position_eye, light_direction_eye, light_norm_eye, atmosphere);
-    return color * terms.attenuation.x + srgb_to_linear(terms.additive * 2.0) * atmosphere.distance.z;
+    let irradiance = legacy_surface_irradiance(normal_eye, light_direction_eye, terms, atmosphere);
+    let lit_color = select(color * irradiance, color, fullbright);
+    return atmospheric_surface(lit_color, terms, atmosphere);
 }

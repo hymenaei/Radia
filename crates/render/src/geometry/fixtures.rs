@@ -11,6 +11,14 @@ use world::{
 use crate::scene::{Budget, Camera, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView};
 
 pub(super) fn scene(alpha: u8) -> (Reconciler, SceneView, Camera) {
+    scene_with_scales(alpha, [Vec3::splat(2.0); 2])
+}
+
+pub(super) fn scene_with_scales(alpha: u8, scales: [Vec3; 2]) -> (Reconciler, SceneView, Camera) {
+    scene_with_mapping(alpha, scales, world::TextureMapping::Default)
+}
+
+pub(super) fn scene_with_mapping(alpha: u8, scales: [Vec3; 2], mapping: world::TextureMapping) -> (Reconciler, SceneView, Camera) {
     let mut world = World::new(WorldLimits {
         max_region_registrations: 1,
         max_entities: 2,
@@ -27,10 +35,13 @@ pub(super) fn scene(alpha: u8) -> (Reconciler, SceneView, Camera) {
     let region = Region::new(1);
     assert_matches!(world.adopt_region(region).unwrap().outcome, world::RegionOutcome::Adopted { .. });
     let _ = world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).unwrap();
-    for (id, y, mut color, shape) in [
+    for ((id, y, mut color, shape), scale) in [
         (1, -2.0, [255, 0, 0, 255], PrimShape::default()),
         (2, 2.0, [0, 255, 0, 255], PrimShape { path_scale_x: 150, ..PrimShape::default() }),
-    ] {
+    ]
+    .into_iter()
+    .zip(scales)
+    {
         color[3] = alpha;
         let mut object = ObjectObservation::new(
             UpdateSource::new(region, id, OrderEvidence::Ordered(u64::from(id)), 0),
@@ -41,10 +52,11 @@ pub(super) fn scene(alpha: u8) -> (Reconciler, SceneView, Camera) {
         );
         let position = if alpha == 255 { Vec3::new(10.0, y, 0.0) } else { Vec3::new(if id == 1 { 10.0 } else { 14.0 }, y * 0.35, 0.0) };
         object.pose = Some(Pose { position: Some(position), rotation: Some(Quat::IDENTITY) });
-        object.scale = Some(Vec3::splat(2.0));
+        object.scale = Some(scale);
         object.shape = FieldUpdate::Set(Shape::Prim(shape));
         object.appearance = FieldUpdate::Set(Appearance::Surface);
-        object.surface_appearance = Some(SurfaceAppearance::new(FaceAppearance { color, ..Default::default() }, Vec::new()).unwrap());
+        object.surface_appearance =
+            Some(SurfaceAppearance::new(FaceAppearance { color, mapping, ..Default::default() }, Vec::new()).unwrap());
         assert_matches!(world.observe_object(object).unwrap().outcome, world::ApplyOutcome::Introduced(_));
     }
     let (mut scene, mut view) = Reconciler::new(Budget::default());

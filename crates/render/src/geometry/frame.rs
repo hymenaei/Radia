@@ -177,14 +177,7 @@ impl GeometryRenderer {
                 let pipeline = if matches!(instance.shading, ShadingMode::Water) {
                     Pipeline::Water
                 } else {
-                    match (params.blend, params.double_sided, flips_winding(instance.scale)) {
-                        (true, true, _) => Pipeline::BlendDoubleSided,
-                        (true, false, true) => Pipeline::BlendFlipped,
-                        (true, false, false) => Pipeline::Blend,
-                        (false, true, _) => Pipeline::DoubleSided,
-                        (false, false, true) => Pipeline::FlippedWinding,
-                        (false, false, false) => Pipeline::Surface,
-                    }
+                    surface_pipeline(params.blend, params.double_sided, instance.scale)
                 };
                 let key = DrawKey { mesh: instance.mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture };
                 let order = (id.0, id.1, id.2, face.slot);
@@ -244,6 +237,17 @@ impl GeometryRenderer {
                 "slow scene preparation"
             );
         }
+    }
+}
+
+fn surface_pipeline(blend: bool, double_sided: bool, scale: Vec3) -> Pipeline {
+    match (blend, double_sided, flips_winding(scale)) {
+        (true, true, _) => Pipeline::BlendDoubleSided,
+        (true, false, true) => Pipeline::BlendFlipped,
+        (true, false, false) => Pipeline::Blend,
+        (false, true, _) => Pipeline::DoubleSided,
+        (false, false, true) => Pipeline::FlippedWinding,
+        (false, false, false) => Pipeline::Surface,
     }
 }
 

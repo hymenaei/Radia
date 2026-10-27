@@ -1139,26 +1139,43 @@ mod tests {
     }
 
     #[test]
-    fn circle2_path_matches_samples() {
-        let mesh = generate_at(PrimShape { path_curve: 0x30, profile_curve: 0, ..PrimShape::default() }, Detail::Lowest);
+    fn circle2_path_matches_reference() {
+        let mesh = generate_at(PrimShape { path_curve: 0x30, profile_curve: 0, path_scale_y: 150, ..PrimShape::default() }, Detail::Lowest);
         assert_eq!(mesh.faces().len(), 1);
         assert_eq!(mesh.vertices().len(), 49);
         assert_eq!(mesh.indices().len(), 216);
-        let first = mesh.vertices().iter().find(|vertex| vertex.uv == Vec2::ZERO).expect("first path sample");
-        let next = mesh.vertices().iter().find(|vertex| vertex.uv == Vec2::new(0.0, 1.0 / 6.0)).expect("second path sample");
-        close(first.position, Vec3::new(-0.025, 0.0, 0.0));
-        close(next.position, Vec3::new(-1.025, 0.0, 0.0));
+        let sqrt_three = 3.0_f32.sqrt();
+        let profile_y = 0.525 * sqrt_three / 4.0;
+        let cases = [
+            (Vec2::ZERO, Vec3::new(-0.025, 0.2625, 0.0)),
+            (Vec2::new(0.0, 1.0 / 6.0), Vec3::new(-1.025, 0.13125, 0.2625 * sqrt_three / 2.0)),
+            (Vec2::splat(1.0 / 6.0), Vec3::new(-0.7625, 0.13125 - profile_y / 2.0, profile_y * (1.0 - sqrt_three / 2.0))),
+        ];
+        for (uv, expected) in cases {
+            let vertex = mesh.vertices().iter().find(|vertex| vertex.uv == uv).expect("hand-derived Circle2 reference sample");
+            close(vertex.position, expected);
+        }
     }
 
     #[test]
-    fn test_curve_matches_samples() {
+    fn test_curve_matches_reference() {
         let mesh = generate_at(
             PrimShape { path_curve: 0x40, profile_curve: 0, path_scale_x: 150, path_scale_y: 125, path_twist: 50, ..PrimShape::default() },
             Detail::Lowest,
         );
         assert_eq!(mesh.faces().len(), 3);
-        let vertex = mesh.vertices().iter().find(|vertex| vertex.uv == Vec2::new(0.0, 0.25)).expect("quarter path sample");
-        close(vertex.position, Vec3::new(0.459375, -(PI / 8.0).sin() / 8.0, -0.375 + (PI / 8.0).cos() / 8.0));
+        let sqrt_two = 2.0_f32.sqrt();
+        let cases = [
+            (0.0, Vec3::new(0.525, 0.0, -0.5)),
+            (0.25, Vec3::new(0.459375, -(PI / 8.0).sin() / 8.0, -0.375 + (PI / 8.0).cos() / 8.0)),
+            (0.5, Vec3::new(0.39375, -sqrt_two / 8.0, -0.25 + sqrt_two / 8.0)),
+            (0.75, Vec3::new(0.328125, -3.0 * (3.0 * PI / 8.0).sin() / 8.0, -0.125 + 3.0 * (3.0 * PI / 8.0).cos() / 8.0)),
+            (1.0, Vec3::new(0.2625, -0.5, 0.0)),
+        ];
+        for (t, expected) in cases {
+            let vertex = mesh.vertices().iter().find(|vertex| vertex.uv == Vec2::new(0.0, t)).expect("hand-derived TEST reference sample");
+            close(vertex.position, expected);
+        }
     }
 
     #[test]

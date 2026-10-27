@@ -1,4 +1,5 @@
 use std::{
+    assert_matches,
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
@@ -464,6 +465,60 @@ fn size_limit_evicts_least_recently_used() {
     assert!(cache.accounted_size() <= cache.size_limit());
     cache.clear().expect("clear cache");
     assert_eq!(cache.entry_count(), 0);
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
+fn protection_tracks_live_keys() {
+    let directory = tempdir().expect("single cache directory");
+    let single = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open single cache");
+    single.put(key(10), vec![1; 64 * 1024]).expect("store sample entry");
+    let one_entry_limit = single.accounted_size();
+    single.shutdown().expect("close single cache");
+
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    for id in [50, 51] {
+        cache.put(key(id), vec![u8::try_from(id).expect("small test key"); 64 * 1024]).expect("store entry");
+    }
+    let first = cache.protect(key(50)).expect("protect first key");
+    let second = cache.protect(key(51)).expect("protect second key");
+    assert_eq!(cache.protected_bytes(), 128 * 1024);
+
+    cache.set_size_limit(one_entry_limit).expect("limit cache below live demand");
+    assert_eq!(cache.entry_count(), 2);
+    assert!(cache.accounted_size() > cache.size_limit());
+    for _ in 0..3 {
+        assert_matches!(cache.put(key(52), vec![3; 64 * 1024]), Err(StorageError::TooLarge));
+    }
+    assert_eq!(cache.entry_count(), 2);
+    assert_eq!(cache.protected_bytes(), 128 * 1024);
+    assert_matches!(cache.lookup(key(50)), Lookup::Hit(_));
+    assert_matches!(cache.lookup(key(51)), Lookup::Hit(_));
+
+    drop(first);
+    assert_eq!(cache.protected_bytes(), 64 * 1024);
+    cache.set_size_limit(one_entry_limit).expect("evict released key");
+    assert_eq!(cache.entry_count(), 1);
+    assert_eq!(cache.lookup(key(50)), Lookup::Miss);
+    assert_matches!(cache.lookup(key(51)), Lookup::Hit(_));
+    drop(second);
+    assert_eq!(cache.protected_bytes(), 0);
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
+fn protection_applies_to_later_writes() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    let protection = cache.protect(key(60)).expect("protect missing key");
+    assert_eq!(cache.protected_bytes(), 0);
+
+    cache.put(key(60), vec![7; 1024]).expect("write protected key");
+    assert_eq!(cache.protected_bytes(), 1024);
+
+    drop(protection);
+    assert_eq!(cache.protected_bytes(), 0);
     cache.shutdown().expect("close cache");
 }
 

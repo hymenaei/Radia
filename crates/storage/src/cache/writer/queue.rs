@@ -180,6 +180,11 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
         }
         state.drain_touches_best_effort();
         state.drain_invalid();
+        if state.accounted_size() > state.size_limit
+            && let Err(error) = state.enforce_limit(state.size_limit)
+        {
+            tracing::warn!(error = %error, "cache limit enforcement failed");
+        }
         state.sweep_step(QUEUE_SWEEP_CHUNK);
         if batch.closed {
             state.drain_invalid();

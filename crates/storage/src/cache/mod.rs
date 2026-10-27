@@ -3,7 +3,7 @@ mod index;
 mod writer;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
     fmt,
     fs::{self, File, OpenOptions},
@@ -26,6 +26,8 @@ use self::{
     index::{Index, Record},
     writer::{Command, WorkerState, WriteQueue, writer_loop},
 };
+
+pub use self::eviction::{EvictionCandidate, EvictionPolicy, EvictionReason, EvictionScore, LruPolicy};
 
 #[cfg(test)]
 use self::writer::WritePoint;
@@ -56,6 +58,8 @@ const INDEX_FILE: &str = "index.sqlite";
 const ENTRY_VALID: u8 = 0;
 const ENTRY_REPLACING: u8 = 1;
 const ENTRY_INVALID: u8 = 2;
+const ENTRY_EVICTING: u8 = 3;
+const EVICTION_HISTORY_LEN: usize = 8;
 
 pub const MIN_SIZE_LIMIT: u64 = MIN_SIZE_LIMIT_INTERNAL;
 
@@ -91,7 +95,7 @@ impl Key {
         Self { namespace, name }
     }
 
-    pub(super) const fn namespace(self) -> NamespaceId {
+    pub const fn namespace(self) -> NamespaceId {
         self.namespace
     }
 
@@ -312,6 +316,169 @@ pub enum UnavailableReason {
     Allocation,
 }
 
+pub struct Protection {
+    shared: Arc<ProtectionShared>,
+    key: Key,
+}
+
+impl Drop for Protection {
+    fn drop(&mut self) {
+        let mut state = lock_protection(&self.shared.state);
+        state.release(self.key, &self.shared.bytes);
+    }
+}
+
+#[derive(Default)]
+struct ActiveProtection {
+    count: usize,
+    charged_size: Option<u64>,
+}
+
+#[derive(Default)]
+pub(super) struct ProtectionRegistry {
+    active: HashMap<Key, ActiveProtection>,
+    sizes: HashMap<Key, u64>,
+    evicting: HashSet<Key>,
+    generation: u64,
+}
+
+impl ProtectionRegistry {
+    fn acquire(&mut self, key: Key, bytes: &AtomicU64) -> Result<(), StorageError> {
+        if let Some(active) = self.active.get_mut(&key) {
+            active.count = active.count.checked_add(1).ok_or(StorageError::TooLarge)?;
+        } else {
+            self.active.try_reserve(1).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+            let charged_size = if self.evicting.contains(&key) { None } else { self.sizes.get(&key).copied() };
+            if let Some(size) = charged_size {
+                bytes.fetch_add(size, Ordering::AcqRel);
+            }
+            self.active.insert(key, ActiveProtection { count: 1, charged_size });
+        }
+        self.generation = self.generation.saturating_add(1);
+        Ok(())
+    }
+
+    fn release(&mut self, key: Key, bytes: &AtomicU64) {
+        let Some(active) = self.active.get_mut(&key) else {
+            return;
+        };
+        if active.count > 1 {
+            active.count -= 1;
+        } else {
+            if let Some(active) = self.active.remove(&key)
+                && let Some(size) = active.charged_size
+            {
+                bytes.fetch_sub(size, Ordering::AcqRel);
+            }
+        }
+        self.generation = self.generation.saturating_add(1);
+    }
+
+    fn update_size(&mut self, key: Key, size: Option<u64>, bytes: &AtomicU64) {
+        self.sizes.remove(&key);
+        let is_evicting = self.evicting.contains(&key);
+        if let Some(active) = self.active.get_mut(&key) {
+            if let Some(charged_size) = active.charged_size.take() {
+                bytes.fetch_sub(charged_size, Ordering::AcqRel);
+            }
+            let next_charge = if is_evicting { None } else { size };
+            if let Some(size) = next_charge {
+                bytes.fetch_add(size, Ordering::AcqRel);
+            }
+            active.charged_size = next_charge;
+        }
+        if let Some(size) = size {
+            self.sizes.insert(key, size);
+        }
+        if size.is_none() {
+            self.evicting.remove(&key);
+        }
+        self.generation = self.generation.saturating_add(1);
+    }
+
+    fn is_active(&self, key: &Key) -> bool {
+        self.active.contains_key(key)
+    }
+
+    fn begin_eviction(&mut self, entry: &Entry) -> bool {
+        if self.active.contains_key(&entry.key) || self.evicting.contains(&entry.key) || self.evicting.try_reserve(1).is_err() {
+            return false;
+        }
+        if entry.state.compare_exchange(ENTRY_VALID, ENTRY_EVICTING, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return false;
+        }
+        self.evicting.insert(entry.key);
+        self.generation = self.generation.saturating_add(1);
+        true
+    }
+
+    fn restore_eviction(&mut self, entry: &Entry, bytes: &AtomicU64) {
+        if !self.evicting.remove(&entry.key) {
+            return;
+        }
+        entry.state.store(ENTRY_VALID, Ordering::Release);
+        if let Some(active) = self.active.get_mut(&entry.key)
+            && active.charged_size.is_none()
+            && let Some(size) = self.sizes.get(&entry.key).copied()
+        {
+            active.charged_size = Some(size);
+            bytes.fetch_add(size, Ordering::AcqRel);
+        }
+        self.generation = self.generation.saturating_add(1);
+    }
+}
+
+struct ProtectionShared {
+    state: Mutex<ProtectionRegistry>,
+    bytes: AtomicU64,
+}
+
+struct EvictionHistory {
+    sequence: AtomicU64,
+    reasons: [AtomicU64; EVICTION_HISTORY_LEN],
+}
+
+impl Default for EvictionHistory {
+    fn default() -> Self {
+        Self { sequence: AtomicU64::new(0), reasons: std::array::from_fn(|_| AtomicU64::new(0)) }
+    }
+}
+
+impl EvictionHistory {
+    fn record(&self, reason: EvictionReason) {
+        let sequence = self.sequence.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+        let slot = usize::try_from(sequence.saturating_sub(1) % EVICTION_HISTORY_LEN as u64).unwrap_or(0);
+        let packed = sequence.saturating_mul(256).saturating_add(u64::from(reason as u8));
+        if let Some(value) = self.reasons.get(slot) {
+            value.store(packed, Ordering::Release);
+        }
+    }
+
+    fn snapshot(&self) -> [Option<EvictionReason>; EVICTION_HISTORY_LEN] {
+        let latest = self.sequence.load(Ordering::Acquire);
+        let first = latest.saturating_sub(EVICTION_HISTORY_LEN as u64 - 1).max(1);
+        let mut reasons = [None; EVICTION_HISTORY_LEN];
+        for sequence in first..=latest {
+            let slot = usize::try_from(sequence.saturating_sub(1) % EVICTION_HISTORY_LEN as u64).unwrap_or(0);
+            let packed = self.reasons.get(slot).map_or(0, |value| value.load(Ordering::Acquire));
+            if packed / 256 == sequence {
+                let index = usize::try_from(sequence - first).unwrap_or(0);
+                if let Some(reason) = reasons.get_mut(index) {
+                    *reason = EvictionReason::from_code((packed % 256) as u8);
+                }
+            }
+        }
+        reasons
+    }
+}
+
+fn lock_protection(state: &Mutex<ProtectionRegistry>) -> std::sync::MutexGuard<'_, ProtectionRegistry> {
+    match state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[derive(Debug)]
 pub enum StorageError {
     InUse,
@@ -436,6 +603,10 @@ struct ReadState {
     entries: Arc<RwLock<HashMap<Key, Arc<Entry>>>>,
     touches: Arc<Mutex<HashMap<Key, PendingTouch>>>,
     invalid: Arc<Mutex<HashMap<Key, Arc<Entry>>>>,
+    namespace_entry_counts: Vec<AtomicUsize>,
+    protection: Arc<ProtectionShared>,
+    evictions: EvictionHistory,
+    policy: Arc<dyn EvictionPolicy>,
     active_reads: AtomicUsize,
     usage_clock: AtomicU64,
     size_limit: AtomicU64,
@@ -484,7 +655,16 @@ impl fmt::Debug for Cache {
 
 impl Cache {
     pub fn open(directory: impl AsRef<Path>, size_limit: u64, namespaces: &[Namespace]) -> Result<Self, StorageError> {
-        Self::open_internal(directory.as_ref(), size_limit, namespaces, Arc::new(writer::FaultHooks::default()))
+        Self::open_with_policy(directory, size_limit, namespaces, LruPolicy)
+    }
+
+    pub fn open_with_policy(
+        directory: impl AsRef<Path>,
+        size_limit: u64,
+        namespaces: &[Namespace],
+        policy: impl EvictionPolicy + 'static,
+    ) -> Result<Self, StorageError> {
+        Self::open_internal(directory.as_ref(), size_limit, namespaces, Arc::new(policy), Arc::new(writer::FaultHooks::default()))
     }
 
     pub fn lookup(&self, key: Key) -> Lookup {
@@ -520,6 +700,7 @@ impl Cache {
                     }
                     continue;
                 }
+                ENTRY_EVICTING => return Lookup::Miss,
                 ENTRY_VALID | ENTRY_REPLACING => {}
                 _ => return Lookup::Unavailable(UnavailableReason::Io),
             }
@@ -601,6 +782,15 @@ impl Cache {
         receive(receiver)
     }
 
+    pub fn protect(&self, key: Key) -> Result<Protection, StorageError> {
+        if !self.read_state.namespaces.contains(key.namespace) {
+            return Err(StorageError::UnknownNamespace);
+        }
+        let mut state = lock_protection(&self.read_state.protection.state);
+        state.acquire(key, &self.read_state.protection.bytes)?;
+        Ok(Protection { shared: Arc::clone(&self.read_state.protection), key })
+    }
+
     pub fn discard(&self, key: Key) {
         if !self.read_state.namespaces.contains(key.namespace) {
             return;
@@ -653,6 +843,18 @@ impl Cache {
         entries.values().filter(|entry| entry.state.load(Ordering::Acquire) != ENTRY_INVALID).count()
     }
 
+    pub fn namespace_entry_count(&self, namespace: NamespaceId) -> usize {
+        self.read_state.namespace_entry_counts.get(usize::from(namespace.0)).map_or(0, |count| count.load(Ordering::Relaxed))
+    }
+
+    pub fn protected_bytes(&self) -> u64 {
+        self.read_state.protection.bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn recent_evictions(&self) -> [Option<EvictionReason>; EVICTION_HISTORY_LEN] {
+        self.read_state.evictions.snapshot()
+    }
+
     pub fn shutdown(mut self) -> Result<(), StorageError> {
         let (reply, receiver) = mpsc::sync_channel(0);
         self.queue.send_terminal(Command::Shutdown { reply })?;
@@ -677,6 +879,7 @@ impl Cache {
         directory: &Path,
         size_limit: u64,
         namespace_config: &[Namespace],
+        policy: Arc<dyn EvictionPolicy>,
         hooks: Arc<writer::FaultHooks>,
     ) -> Result<Self, StorageError> {
         let root = directory.to_path_buf();
@@ -700,7 +903,18 @@ impl Cache {
         let (index, records) = Index::open(root.join(INDEX_FILE), &namespaces)?;
         let mut entries = HashMap::new();
         entries.try_reserve(records.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        let mut namespace_entry_counts = Vec::new();
+        namespace_entry_counts.try_reserve_exact(namespaces.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        namespace_entry_counts.extend((0..namespaces.len()).map(|_| AtomicUsize::new(0)));
+        let mut protection_state = ProtectionRegistry::default();
+        protection_state.sizes.try_reserve(records.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
         for record in records {
+            let namespace = usize::from(record.key.namespace().0);
+            let Some(count) = namespace_entry_counts.get(namespace) else {
+                return Err(StorageError::InvalidNamespaces);
+            };
+            count.fetch_add(1, Ordering::Relaxed);
+            protection_state.sizes.insert(record.key, record.size);
             entries.insert(record.key, Arc::new(Entry::from_record(record)));
         }
         let max_tick = entries.values().map(|entry| entry.last_use.load(Ordering::Relaxed)).max().unwrap_or(0);
@@ -714,6 +928,10 @@ impl Cache {
             entries,
             touches,
             invalid,
+            namespace_entry_counts,
+            protection: Arc::new(ProtectionShared { state: Mutex::new(protection_state), bytes: AtomicU64::new(0) }),
+            evictions: EvictionHistory::default(),
+            policy,
             active_reads: AtomicUsize::new(0),
             usage_clock: AtomicU64::new(max_tick),
             size_limit: AtomicU64::new(size_limit),

@@ -111,8 +111,10 @@ impl CameraUplink {
     ) {
         let camera = *self.observations.borrow_and_update();
         let movement = *self.movements.borrow_and_update();
-        let (Some(simulator), Some(session)) = (simulator, session) else { return };
-        self.tick_with(simulator, session.agent_id, session.session_id, origin, camera, movement, |message, delivery| match message {
+        let destination = simulator
+            .zip(session.map(|session| (session.agent_id, session.session_id)))
+            .map(|(simulator, (agent_id, session_id))| (simulator, agent_id, session_id));
+        self.tick_with(destination, origin, camera, movement, |message, delivery| match message {
             UplinkMessage::AgentUpdate(update) => session_handle.send(update, delivery),
             UplinkMessage::SetAlwaysRun(update) => session_handle.send(update, delivery),
         });
@@ -144,14 +146,16 @@ impl CameraUplink {
 
     fn tick_with(
         &mut self,
-        simulator: SimulatorId,
-        agent_id: Uuid,
-        session_id: Uuid,
+        destination: Option<(SimulatorId, Uuid, Uuid)>,
         origin: Option<DVec3>,
         camera: Option<Camera>,
         movement: Option<MovementObservation>,
         mut send: impl FnMut(UplinkMessage, Delivery) -> Result<(), Error>,
     ) {
+        let Some((simulator, agent_id, session_id)) = destination else {
+            self.clear_destination();
+            return;
+        };
         let now = Instant::now();
         if let Some(movement) = movement {
             let state = (simulator, agent_id, session_id, movement.always_run);
@@ -242,6 +246,16 @@ impl CameraUplink {
             }
         }
     }
+
+    fn clear_destination(&mut self) {
+        self.last_sent = None;
+        self.last_camera = None;
+        self.last_sent_at = None;
+        self.pending_at = None;
+        self.followup_at = None;
+        self.last_always_run = None;
+        self.always_run_retry_at = None;
+    }
 }
 
 fn camera_changed(previous: Camera, current: Camera) -> bool {
@@ -265,8 +279,9 @@ fn rotation_changed(previous: Quat, current: Quat) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::UdpSocket, time::Duration};
+    use std::{cell::Cell, net::UdpSocket, time::Duration};
 
+    use futures::FutureExt;
     use math::{DVec3, Quat, Vec3};
     use network::Delivery;
     use protocol::lludp::{Message, Packet};
@@ -320,7 +335,7 @@ mod tests {
         destination: std::net::SocketAddr,
         sequence: &mut u32,
     ) {
-        uplink.tick_with(simulator, agent_id, session_id, Some(DVec3::ZERO), camera.into(), Some(movement), |message, delivery| {
+        uplink.tick_with(Some((simulator, agent_id, session_id)), Some(DVec3::ZERO), camera.into(), Some(movement), |message, delivery| {
             let current = *sequence;
             *sequence += 1;
             let expected_delivery = match &message {
@@ -405,8 +420,7 @@ mod tests {
         let movement = controls.observation(false, Quat::IDENTITY);
         send_loopback(&mut uplink, simulator, agent_id, session_id, None::<Camera>, movement, &sender, destination, &mut sequence);
         let Message::AgentUpdate(_) = receive_packet(&receiver).await else { panic!("AgentUpdate before focus loss") };
-        controls.release_all();
-        let movement = controls.observation(false, Quat::IDENTITY);
+        let movement = controls.release_and_observe(Quat::IDENTITY);
         send_loopback(&mut uplink, simulator, agent_id, session_id, None::<Camera>, movement, &sender, destination, &mut sequence);
         let Message::AgentUpdate(update) = receive_packet(&receiver).await else { panic!("focus-loss AgentUpdate") };
         assert_eq!(update.agent_data.control_flags, 0x0000_6000);
@@ -428,7 +442,7 @@ mod tests {
             always_run: false,
             stop_sequence: 0,
         };
-        uplink.tick_with(simulator, Uuid::nil(), Uuid::nil(), Some(DVec3::ZERO), Some(camera), Some(movement), |message, _| {
+        uplink.tick_with(Some((simulator, Uuid::nil(), Uuid::nil())), Some(DVec3::ZERO), Some(camera), Some(movement), |message, _| {
             if let UplinkMessage::AgentUpdate(update) = message {
                 sent.push(update);
             }
@@ -436,7 +450,7 @@ mod tests {
         });
         let mut changed = movement;
         changed.control_flags = 0x0000_0401;
-        uplink.tick_with(simulator, Uuid::nil(), Uuid::nil(), Some(DVec3::ZERO), Some(camera), Some(changed), |message, _| {
+        uplink.tick_with(Some((simulator, Uuid::nil(), Uuid::nil())), Some(DVec3::ZERO), Some(camera), Some(changed), |message, _| {
             if let UplinkMessage::AgentUpdate(update) = message {
                 sent.push(update);
             }
@@ -444,7 +458,7 @@ mod tests {
         });
         assert_eq!(sent.len(), 2, "a control change bypasses the regular minimum period");
         advance(MIN_UPDATE_INTERVAL).await;
-        uplink.tick_with(simulator, Uuid::nil(), Uuid::nil(), Some(DVec3::ZERO), Some(camera), Some(changed), |message, _| {
+        uplink.tick_with(Some((simulator, Uuid::nil(), Uuid::nil())), Some(DVec3::ZERO), Some(camera), Some(changed), |message, _| {
             if let UplinkMessage::AgentUpdate(update) = message {
                 sent.push(update);
             }
@@ -452,7 +466,7 @@ mod tests {
         });
         assert_eq!(sent.len(), 3, "a control change schedules its protocol follow-up");
         advance(KEEPALIVE_INTERVAL - Duration::from_millis(1)).await;
-        uplink.tick_with(simulator, Uuid::nil(), Uuid::nil(), Some(DVec3::ZERO), Some(camera), Some(changed), |message, _| {
+        uplink.tick_with(Some((simulator, Uuid::nil(), Uuid::nil())), Some(DVec3::ZERO), Some(camera), Some(changed), |message, _| {
             if let UplinkMessage::AgentUpdate(update) = message {
                 sent.push(update);
             }
@@ -460,13 +474,47 @@ mod tests {
         });
         assert_eq!(sent.len(), 3);
         advance(Duration::from_millis(1)).await;
-        uplink.tick_with(simulator, Uuid::nil(), Uuid::nil(), Some(DVec3::ZERO), Some(camera), Some(changed), |message, _| {
+        uplink.tick_with(Some((simulator, Uuid::nil(), Uuid::nil())), Some(DVec3::ZERO), Some(camera), Some(changed), |message, _| {
             if let UplinkMessage::AgentUpdate(update) = message {
                 sent.push(update);
             }
             Ok(())
         });
         assert_eq!(sent.len(), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disconnected_uplink_suspends_keepalive_until_reconnect() {
+        let simulator = simulator_id();
+        let destination = Some((simulator, Uuid::nil(), Uuid::nil()));
+        let camera = view(DVec3::ZERO, Vec3::X);
+        let movement = crate::agent_movement::MovementObservation {
+            control_flags: 0,
+            body_rotation: Quat::IDENTITY,
+            always_run: false,
+            stop_sequence: 0,
+        };
+        let mut uplink = CameraUplink::new();
+        let sent = Cell::new(0);
+        let mut send = |_, _| {
+            sent.set(sent.get() + 1);
+            Ok(())
+        };
+
+        uplink.tick_with(destination, Some(DVec3::ZERO), Some(camera), Some(movement), &mut send);
+        assert_eq!(sent.get(), 2, "initial destination sends run state and movement");
+        assert!(uplink.next_deadline().is_some());
+        advance(KEEPALIVE_INTERVAL).await;
+        assert!(uplink.next_tick().now_or_never().is_some(), "the keepalive deadline is ready");
+
+        uplink.tick_with(None, Some(DVec3::ZERO), Some(camera), Some(movement), &mut send);
+        assert_eq!(uplink.next_deadline(), None);
+        assert!(uplink.next_tick().now_or_never().is_none(), "disconnect must not leave a ready timer ahead of session events");
+
+        uplink.request_update();
+        assert!(uplink.next_tick().now_or_never().is_some(), "a newly connected primary wakes the uplink");
+        uplink.tick_with(destination, Some(DVec3::ZERO), Some(camera), Some(movement), &mut send);
+        assert_eq!(sent.get(), 4, "the current state is resent when a destination returns");
     }
 
     #[tokio::test(start_paused = true)]
@@ -481,9 +529,7 @@ mod tests {
         };
         let mut sent = Vec::new();
         uplink.tick_with(
-            simulator,
-            Uuid::nil(),
-            Uuid::nil(),
+            Some((simulator, Uuid::nil(), Uuid::nil())),
             Some(DVec3::ZERO),
             Some(view(DVec3::ZERO, Vec3::X)),
             Some(movement),
@@ -495,9 +541,7 @@ mod tests {
             },
         );
         uplink.tick_with(
-            simulator,
-            Uuid::nil(),
-            Uuid::nil(),
+            Some((simulator, Uuid::nil(), Uuid::nil())),
             Some(DVec3::ZERO),
             Some(view(DVec3::new(1.0, 0.0, 0.0), Vec3::X)),
             Some(movement),
@@ -513,9 +557,7 @@ mod tests {
         assert_eq!(uplink.next_deadline(), Some(Instant::now() + Duration::from_millis(1)));
         advance(Duration::from_millis(1)).await;
         uplink.tick_with(
-            simulator,
-            Uuid::nil(),
-            Uuid::nil(),
+            Some((simulator, Uuid::nil(), Uuid::nil())),
             Some(DVec3::ZERO),
             Some(view(DVec3::new(1.0, 0.0, 0.0), Vec3::X)),
             Some(movement),

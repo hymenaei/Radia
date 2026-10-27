@@ -391,6 +391,7 @@ impl SessionDriver {
                 self.handoff.simulator_connected(&mut self.session_world, simulator_id, region_handle);
                 if region_handle.is_none() {
                     self.primary_simulator = Some(simulator_id);
+                    self.camera.request_update();
                 }
                 ControlFlow::Continue(())
             }

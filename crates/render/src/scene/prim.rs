@@ -12,7 +12,7 @@ use super::mesh::{Detail, MeshBuildError};
 const MAX_PRIM_FACES: usize = 9;
 
 #[derive(Default)]
-struct Builder {
+pub(super) struct Builder {
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
     faces: Vec<Face>,
@@ -21,7 +21,7 @@ struct Builder {
 }
 
 impl Builder {
-    fn vertex(&mut self, position: Vec3, uv: Vec2) -> Result<usize, MeshBuildError> {
+    pub(super) fn vertex(&mut self, position: Vec3, uv: Vec2) -> Result<usize, MeshBuildError> {
         if !position.is_finite() || !uv.is_finite() {
             return Err(MeshBuildError::InvalidParameters);
         }
@@ -34,7 +34,7 @@ impl Builder {
         Ok(index)
     }
 
-    fn triangle(&mut self, a: usize, b: usize, c: usize) -> Result<(), MeshBuildError> {
+    pub(super) fn triangle(&mut self, a: usize, b: usize, c: usize) -> Result<(), MeshBuildError> {
         if self.indices.len() + 3 > MAX_MESH_INDICES {
             return Err(MeshBuildError::TooComplex);
         }
@@ -42,11 +42,11 @@ impl Builder {
         Ok(())
     }
 
-    fn begin_face(&self) -> usize {
+    pub(super) fn begin_face(&self) -> usize {
         self.indices.len()
     }
 
-    fn end_face(&mut self, start: usize) -> Result<(), MeshBuildError> {
+    pub(super) fn end_face(&mut self, start: usize) -> Result<(), MeshBuildError> {
         if self.faces.len() == MAX_PRIM_FACES {
             return Err(MeshBuildError::TooComplex);
         }
@@ -58,7 +58,7 @@ impl Builder {
         self.vertices.len()
     }
 
-    fn seam(&mut self, a: usize, b: usize) {
+    pub(super) fn seam(&mut self, a: usize, b: usize) {
         let a = root(&mut self.parents, a);
         let b = root(&mut self.parents, b);
         self.parents[b] = a;
@@ -68,7 +68,7 @@ impl Builder {
         self.normal_overrides.push((index, normal));
     }
 
-    fn finish(mut self, cancelled: &AtomicBool) -> Result<Mesh, MeshBuildError> {
+    pub(super) fn finish(mut self, cancelled: &AtomicBool) -> Result<Mesh, MeshBuildError> {
         if self.indices.is_empty() {
             return Err(MeshBuildError::Degenerate);
         }

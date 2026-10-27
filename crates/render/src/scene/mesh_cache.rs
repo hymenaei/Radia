@@ -7,9 +7,9 @@ use std::{
     },
 };
 
-use world::PrimShape;
-
 use assets::mesh::Mesh;
+use utils::AssetId;
+use world::{PrimShape, SculptFlags, SculptType};
 
 use crate::scene::{Budget, Detail, MeshBuildError, SharedMesh, budget::MeshWork, mesh::retained_bytes, prim::tessellate};
 
@@ -20,6 +20,16 @@ const CACHE_BYTES: usize = 32 * 1024 * 1024;
 pub struct MeshKey {
     pub shape: PrimShape,
     pub detail: Detail,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SculptMeshKey {
+    pub asset_id: AssetId,
+    pub sculpt_type: SculptType,
+    pub flags: SculptFlags,
+    pub detail: Detail,
+    pub map_size: [u32; 2],
+    pub discard_level: u8,
 }
 
 #[derive(Clone)]

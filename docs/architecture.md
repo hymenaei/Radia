@@ -59,9 +59,9 @@ Owns Second Life wire types, LLUDP framing and field codecs, and typed messages 
 
 ### `crates/render`
 
-Derives bounded scene state from World and Assets, then renders it through GPU-owned resources. Reconciliation reads bounded World pages and change journals; it owns visibility and mesh demand, selects prim detail, tessellates prims, builds terrain and water geometry, and resolves materials. Region and parcel environment assignments come from World and publish as decoded scene environments; experience overrides bypass World and are published through Render.
+Derives bounded scene state from World and Assets, then renders it through GPU-owned resources. Reconciliation reads bounded World pages and change journals; it owns visibility and mesh demand, selects prim detail, tessellates prims and sculpt maps, builds terrain and water geometry, and resolves materials. Region and parcel environment assignments come from World and publish as decoded scene environments; experience overrides bypass World and are published through Render.
 
-`scene::prim` and `scene::surface` build the reusable CPU `assets::mesh::Mesh`; `scene::mesh` retains meshes and their identities. The model layer holds scene objects, regions, patches, and recovery status. `SceneView` applies sequence-checked batches and acknowledges delivery; abandoned deliveries trigger recovery, and stale work cannot publish after recovery or teardown. GPU modules own surfaces, buffers, textures, draw preparation, and resource retirement.
+`scene::prim`, `scene::sculpt`, and `scene::surface` build the reusable CPU `assets::mesh::Mesh`; `scene::mesh` retains meshes and their identities. Sculpt generation takes bounded decoded RGBA maps and uses a cache key containing the asset, sculpt type, flags, detail, image size, and discard level. Texture demand and placeholder lifecycle remain scene integration work. The model layer holds scene objects, regions, patches, and recovery status. `SceneView` applies sequence-checked batches and acknowledges delivery; abandoned deliveries trigger recovery, and stale work cannot publish after recovery or teardown. GPU modules own surfaces, buffers, textures, draw preparation, and resource retirement.
 
 ### `crates/storage`
 

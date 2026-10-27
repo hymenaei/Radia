@@ -53,6 +53,9 @@ pub(super) fn is_visible(instance: &Instance, camera: Camera, frustum: &Frustum)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use math::{Mat3, Quat};
+
+    use crate::geometry::fixtures;
 
     #[test]
     fn instance_attributes_match_shader() {

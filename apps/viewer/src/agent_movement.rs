@@ -137,6 +137,11 @@ impl HeldControls {
         self.request_stop();
     }
 
+    pub(crate) fn release_and_observe(&mut self, body_rotation: Quat) -> MovementObservation {
+        self.release_all();
+        self.observation(false, body_rotation)
+    }
+
     pub(crate) fn active(&self) -> bool {
         self.pressed != 0
     }
@@ -205,11 +210,15 @@ impl HeldControls {
 
 impl BodyRotation {
     pub(crate) fn update(&mut self, authoritative: Option<Quat>, yaw: f32, now: Instant) -> Quat {
-        if let Some(rotation) = authoritative
-            && self.authoritative.is_none_or(|previous| previous.dot(rotation).abs() < 0.999_999)
-        {
-            self.authoritative = Some(rotation);
-            self.current = rotation;
+        if let Some(rotation) = authoritative {
+            let changed = self.authoritative.is_none_or(|previous| previous.dot(rotation).abs() < 0.999_999);
+            if changed {
+                let predicted_turn = self.authoritative.is_some_and(|previous| self.current.dot(previous).abs() < 0.999_999);
+                self.authoritative = Some(rotation);
+                if yaw == 0.0 || !predicted_turn {
+                    self.current = rotation;
+                }
+            }
         }
         let dt = self.updated_at.map_or(Duration::ZERO, |previous| now.saturating_duration_since(previous).min(MAX_TURN_STEP));
         self.updated_at = Some(now);
@@ -268,8 +277,7 @@ mod tests {
         assert_eq!(movement.control_flags, AT_POS | FAST_AT | FLY);
         assert!(movement.always_run);
 
-        controls.release_all();
-        let stopped = controls.observation(false, Quat::IDENTITY);
+        let stopped = controls.release_and_observe(Quat::IDENTITY);
         assert_eq!(stopped.control_flags, STOP | FLY);
         assert!(stopped.stop_sequence > movement.stop_sequence);
         assert!(stopped.always_run);
@@ -292,5 +300,19 @@ mod tests {
                 .distance(authoritative * math::Vec3::X)
                 < 1e-5
         );
+    }
+
+    #[test]
+    fn delayed_authority_keeps_held_turn_progress() {
+        let start = Instant::now();
+        let mut rotation = BodyRotation::default();
+        rotation.update(Some(Quat::IDENTITY), 1.0, start);
+        for step in 1..=5 {
+            rotation.update(Some(Quat::IDENTITY), 1.0, start + Duration::from_millis(step * 100));
+        }
+
+        let current = rotation.update(Some(Quat::from_rotation_z(0.2)), 1.0, start + Duration::from_millis(600));
+        let expected = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2 * 0.6);
+        assert!((current * math::Vec3::X).distance(expected * math::Vec3::X) < 1e-5);
     }
 }

@@ -192,7 +192,12 @@ impl SceneWindow {
             WindowEvent::Focused(false) => {
                 self.release_drag(false);
                 self.modifiers = ModifiersState::empty();
-                self.controls.release_all();
+                let rotation = self.body_rotation.update(self.agent_pose().map(|pose| pose.rotation), 0.0, Instant::now());
+                let movement = self.controls.release_and_observe(rotation);
+                self.stop_clear_pending = movement.control_flags & STOP != 0;
+                if let Some(feed) = &mut self.feed {
+                    feed.set_movement(movement);
+                }
                 self.dirty = true;
             }
             WindowEvent::CursorMoved { position, .. } => self.cursor = *position,

@@ -21,6 +21,8 @@ const FAST_LEFT: u32 = 0x0000_0800;
 const FAST_UP: u32 = 0x0000_1000;
 const FLY: u32 = 0x0000_2000;
 pub(crate) const STOP: u32 = 0x0000_4000;
+const SIT_ON_GROUND: u32 = 0x0002_0000;
+const STAND_UP: u32 = 0x0001_0000;
 pub(crate) const BODY_ROTATION_DOT_THRESHOLD: f32 = 0.9997;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 const TURN_RATE: f32 = std::f32::consts::FRAC_PI_2;
@@ -64,6 +66,28 @@ pub(crate) struct MovementObservation {
 impl Default for MovementObservation {
     fn default() -> Self {
         Self { control_flags: 0, body_rotation: Quat::IDENTITY, always_run: false, stop_sequence: 0 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MovementAction {
+    SitOnGround,
+    StandUp,
+}
+
+impl MovementAction {
+    pub(crate) const fn control_flag(self) -> u32 {
+        match self {
+            Self::SitOnGround => SIT_ON_GROUND,
+            Self::StandUp => STAND_UP,
+        }
+    }
+}
+
+impl MovementObservation {
+    pub(crate) fn with_action(mut self, action: MovementAction) -> Self {
+        self.control_flags |= action.control_flag();
+        self
     }
 }
 

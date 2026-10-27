@@ -267,6 +267,13 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
             dead_reckoning.replace(Some(sample));
             dead_reckoning
         },
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        motion_source_seed: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        motion_source_seated: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        pose_seed: 0,
+        sit_camera: watch::channel(None).1,
         last_movement: None,
         incoming,
         _cancel: cancel,
@@ -332,6 +339,13 @@ async fn terrain_clamp_respects_parenting() {
         motion_region_scratch: Vec::new(),
         motion_active: HashMap::new(),
         dead_reckoning: DeadReckoning::default(),
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        motion_source_seed: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        motion_source_seated: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        pose_seed: 0,
+        sit_camera: watch::channel(None).1,
         last_movement: None,
         incoming,
         _cancel: cancel,
@@ -443,6 +457,7 @@ async fn pending_asset_preserves_scene() {
         watch::channel(None).0,
         watch::channel(None).0,
         agent_motion,
+        watch::channel(None).1,
         Handle::current(),
         || {},
     );
@@ -502,6 +517,7 @@ async fn stalled_publication_preserves_intake() {
         watch::channel(None).0,
         watch::channel(None).0,
         agent_motion,
+        watch::channel(None).1,
         Handle::current(),
         || {},
     );

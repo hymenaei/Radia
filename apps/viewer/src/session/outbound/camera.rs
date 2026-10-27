@@ -11,7 +11,7 @@ use tokio::{
 use uuid::Uuid;
 
 use super::agent;
-use crate::agent_movement::{BODY_ROTATION_DOT_THRESHOLD, MovementObservation};
+use crate::agent_movement::{BODY_ROTATION_DOT_THRESHOLD, MovementAction, MovementObservation};
 
 const MIN_UPDATE_INTERVAL: Duration = Duration::from_millis(8);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
@@ -31,6 +31,7 @@ pub(crate) struct CameraUplink {
     followup_at: Option<Instant>,
     last_always_run: Option<(SimulatorId, Uuid, Uuid, bool)>,
     always_run_retry_at: Option<Instant>,
+    pending_action: Option<MovementAction>,
 }
 
 #[derive(Clone, Copy)]
@@ -80,6 +81,7 @@ impl CameraUplink {
             followup_at: None,
             last_always_run: None,
             always_run_retry_at: None,
+            pending_action: None,
         }
     }
 
@@ -99,6 +101,11 @@ impl CameraUplink {
         if previous != current {
             self.request_update();
         }
+    }
+
+    pub(crate) fn request_action(&mut self, action: MovementAction) {
+        self.pending_action = Some(action);
+        self.request_update();
     }
 
     pub(crate) async fn next_tick(&mut self) -> Instant {
@@ -170,12 +177,16 @@ impl CameraUplink {
             }
         }
 
-        let movement = movement.unwrap_or(MovementObservation {
+        let mut movement = movement.unwrap_or(MovementObservation {
             control_flags: 0,
             body_rotation: Quat::IDENTITY,
             always_run: false,
             stop_sequence: 0,
         });
+        let action = self.pending_action;
+        if let Some(action) = action {
+            movement = movement.with_action(action);
+        }
         if let (Some(camera), Some(origin)) = (camera, origin) {
             self.last_camera = Some(LastCamera { simulator, agent_id, session_id, origin, camera });
         }
@@ -224,15 +235,19 @@ impl CameraUplink {
         self.pending_at = None;
         let update = agent::movement_camera(agent_id, session_id, camera, origin, movement);
         if let Some(update) = update {
-            match send(UplinkMessage::AgentUpdate(update), Delivery::Unreliable) {
+            let delivery = if action.is_some() { Delivery::Reliable } else { Delivery::Unreliable };
+            match send(UplinkMessage::AgentUpdate(update), delivery) {
                 Ok(()) => {
                     self.last_sent = Some(current);
                     self.last_sent_at = Some(now);
                     self.followup_at = control_changed.then_some(now + MIN_UPDATE_INTERVAL);
-                    if previous.is_none_or(|previous| {
-                        previous.simulator != simulator
-                            || previous.camera.is_none_or(|previous| previous.draw_distance() != camera.draw_distance())
-                    }) {
+                    if action.is_some() {
+                        self.pending_action = None;
+                        self.pending_at = Some(now + MIN_UPDATE_INTERVAL);
+                    }
+                    if previous
+                        .is_none_or(|previous| previous.simulator != simulator || previous.camera.draw_distance() != camera.draw_distance())
+                    {
                         tracing::debug!(draw_distance = camera.draw_distance(), "simulator viewing distance updated");
                     }
                 }
@@ -337,6 +352,7 @@ mod tests {
         agent_movement::{HeldControls, KeyBinding, MovementKey},
         camera::FollowCamera,
         session::world::{SessionWorld, viewer_world_limits},
+        test_helpers::simulator_id,
     };
 
     use super::{CameraUplink, KEEPALIVE_INTERVAL, MIN_UPDATE_INTERVAL, UplinkMessage, camera_changed};

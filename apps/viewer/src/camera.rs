@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use math::{DQuat, DVec3};
+use math::{DQuat, DVec3, Vec3};
 use render::scene;
 use world::WorldPose;
 
@@ -13,6 +13,7 @@ use winit::event::ElementState;
 use winit::keyboard::Key;
 
 use crate::DEFAULT_DRAW_DISTANCE;
+use crate::session::SitCameraOverride;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::agent_movement::{HeldControls, KeyBinding};
 
@@ -42,6 +43,8 @@ pub(crate) struct FollowCamera {
     focus_offset: DVec3,
     offset: DVec3,
     minimum: f64,
+    sit_camera: Option<SitCameraOverride>,
+    last_target: Option<(DVec3, DVec3)>,
 }
 
 impl Default for FollowCamera {
@@ -53,6 +56,8 @@ impl Default for FollowCamera {
             focus_offset: DVec3::new(1.0, 0.0, 1.0),
             offset: DVec3::new(-4.0, 0.0, -0.25),
             minimum: 0.5,
+            sit_camera: None,
+            last_target: None,
         }
     }
 }
@@ -72,11 +77,51 @@ impl FollowCamera {
         lod_factor: f32,
         now: Instant,
     ) -> Option<scene::Camera> {
-        let (position, focus) = self.advance(pose, now);
+        self.follow_with_sit_camera(pose, None, viewport, draw_distance, lod_factor, now)
+    }
+
+    pub(crate) fn follow_with_sit_camera(
+        &mut self,
+        pose: WorldPose,
+        sit_camera: Option<(SitCameraOverride, WorldPose)>,
+        viewport: [u32; 2],
+        draw_distance: f32,
+        lod_factor: f32,
+        now: Instant,
+    ) -> Option<scene::Camera> {
+        let current_sit_camera = sit_camera.map(|(camera, _)| camera);
+        if self.sit_camera != current_sit_camera {
+            let (position, focus) = self.current_position_and_focus(pose, now);
+            self.transition_from(position, focus, now);
+            self.sit_camera = current_sit_camera;
+        }
+        let (target_position, target_focus) = match sit_camera {
+            Some((camera, seat_pose)) => (
+                seat_pose.position + (seat_pose.rotation * camera.eye_offset).as_dvec3(),
+                seat_pose.position + (seat_pose.rotation * camera.at_offset).as_dvec3(),
+            ),
+            None => self.target_position_and_focus(pose),
+        };
+        let (position, focus) = self.advance_to(target_position, target_focus, now);
         Self::build_camera(position, focus, viewport, draw_distance, lod_factor)
     }
 
     fn build_camera(position: DVec3, focus: DVec3, viewport: [u32; 2], draw_distance: f32, lod_factor: f32) -> Option<scene::Camera> {
+        scene::Camera::new(position, (focus - position).as_vec3(), FRAC_PI_3, viewport)
+            .and_then(|camera| camera.with_quality(f64::from(draw_distance), f64::from(lod_factor)))
+            .ok()
+    }
+
+    pub(crate) fn scene_camera_override(
+        pose: WorldPose,
+        eye_offset: Vec3,
+        at_offset: Vec3,
+        viewport: [u32; 2],
+        draw_distance: f32,
+        lod_factor: f32,
+    ) -> Option<scene::Camera> {
+        let position = pose.position + (pose.rotation * eye_offset).as_dvec3();
+        let focus = pose.position + (pose.rotation * at_offset).as_dvec3();
         scene::Camera::new(position, (focus - position).as_vec3(), FRAC_PI_3, viewport)
             .and_then(|camera| camera.with_quality(f64::from(draw_distance), f64::from(lod_factor)))
             .ok()
@@ -126,8 +171,8 @@ impl FollowCamera {
         self.offset = self.offset.normalize() * distance;
     }
 
-    fn advance(&mut self, pose: WorldPose, now: Instant) -> (DVec3, DVec3) {
-        let (target_position, target_focus) = self.target_position_and_focus(pose);
+    fn advance_to(&mut self, target_position: DVec3, target_focus: DVec3, now: Instant) -> (DVec3, DVec3) {
+        self.last_target = Some((target_position, target_focus));
         let Some(previous_offset) = self.camera_offset else {
             self.camera_offset = Some(target_position - target_focus);
             self.updated_at = Some(now);
@@ -162,7 +207,7 @@ impl FollowCamera {
     }
 
     pub(crate) fn current_position_and_focus(&self, pose: WorldPose, now: Instant) -> (DVec3, DVec3) {
-        let (target_position, target_focus) = self.target_position_and_focus(pose);
+        let (target_position, target_focus) = self.last_target.unwrap_or_else(|| self.target_position_and_focus(pose));
         if let Some(transition) = &self.transition {
             let elapsed = now.saturating_duration_since(transition.start);
             if elapsed < FOCUS_TIME {
@@ -178,7 +223,7 @@ impl FollowCamera {
         if self.transition.as_ref().is_some_and(|transition| now.saturating_duration_since(transition.start) < FOCUS_TIME) {
             return true;
         }
-        let (target_position, target_focus) = self.target_position_and_focus(pose);
+        let (target_position, target_focus) = self.last_target.unwrap_or_else(|| self.target_position_and_focus(pose));
         self.camera_offset.is_some_and(|offset| (target_position - target_focus).distance(offset) > 0.01)
     }
 
@@ -471,6 +516,18 @@ mod tests {
         assert!(free.position().distance(follow.position()) < 1e-9);
         assert!(free.direction().distance(follow.direction()) < 1e-6);
         assert_eq!(free.draw_distance(), follow.draw_distance());
+    }
+
+    #[test]
+    fn sit_camera_overrides_follow_the_world_resolved_seat_pose() {
+        let pose =
+            WorldPose { position: DVec3::new(100.0, 200.0, 30.0), rotation: math::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2) };
+        let eye = Vec3::new(2.0, 0.0, 1.0);
+        let at = Vec3::new(0.0, 0.0, 1.0);
+        let camera = FollowCamera::scene_camera_override(pose, eye, at, [1280, 720], 128.0, 1.0).expect("valid sit camera");
+
+        assert!((camera.position() - (pose.position + DVec3::new(0.0, 2.0, 1.0))).length() < 1e-6);
+        assert!(camera.direction().distance(Vec3::new(0.0, -1.0, 0.0)) < 1e-6);
     }
 
     #[test]

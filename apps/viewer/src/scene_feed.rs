@@ -22,12 +22,15 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 use uuid::Uuid;
-use world::{Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, WorldPose};
+use world::{
+    Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, Parent, WorldPose,
+    WorldTransformState,
+};
 
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::{AssetHandle, RequestError},
-    session::{AgentMotionSample, EnvironmentInbox},
+    session::{AgentMotionSample, EnvironmentInbox, SitCameraOverride},
     world_reader::{ReadError, WorldReader},
 };
 
@@ -123,6 +126,13 @@ pub(crate) struct SceneFeed {
     motion_region_scratch: Vec<kinematics::RegionBounds>,
     motion_active: HashMap<world::Region, bool>,
     dead_reckoning: DeadReckoning,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    motion_source_seed: Option<u64>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    motion_source_seated: Option<bool>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pose_seed: u64,
+    sit_camera: watch::Receiver<Option<SitCameraOverride>>,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
@@ -135,6 +145,7 @@ impl SceneFeed {
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
         mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+        sit_camera: watch::Receiver<Option<SitCameraOverride>>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
@@ -147,12 +158,26 @@ impl SceneFeed {
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
         let agent_motions = agent_motion.clone();
+        let camera_updates = sit_camera.clone();
         let mut dead_reckoning = DeadReckoning::default();
         dead_reckoning.replace(*agent_motion.borrow_and_update());
         drop(
             runtime
                 .clone()
-                .spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, agent_motions, wake).in_current_span()),
+                .spawn(
+                    run(
+                        scene,
+                        sources,
+                        sender,
+                        runtime.clone(),
+                        cancelled,
+                        observations,
+                        agent_motions,
+                        camera_updates,
+                        wake,
+                    )
+                    .in_current_span(),
+                ),
         );
         Self {
             runtime,
@@ -170,6 +195,13 @@ impl SceneFeed {
             motion_region_scratch: Vec::new(),
             motion_active: HashMap::new(),
             dead_reckoning,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            motion_source_seed: None,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            motion_source_seated: None,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            pose_seed: 0,
+            sit_camera,
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -193,21 +225,54 @@ impl SceneFeed {
         }
         self.refresh_motion_circuits(now);
         let sample = self.dead_reckoning.sample?;
+        let seated = self.agent_is_seated();
+        let seed = self.pose_seed(sample.seed, seated);
+        if seated {
+            let agent = self.agent()?;
+            let pose = match agent.detail().world_transform.ok()? {
+                WorldTransformState::Resolved(transform) => transform.pose,
+                WorldTransformState::MissingScale(pose) => pose,
+                WorldTransformState::Provisional { pose, .. } => pose,
+                WorldTransformState::Unresolved(_) => return None,
+            };
+            return Some((pose, (seed, pose.rotation)));
+        }
         let mut pose = self.dead_reckoning.pose(now, &self.motion_region_scratch)?;
         if !sample.parented
             && let Some(ground) = self.view.terrain_height_at(pose.position)
         {
             pose.position.z = pose.position.z.max(ground + 0.5 * f64::from(sample.scale.z));
         }
-        Some((pose, (sample.seed, sample.simulator_rotation)))
+        Some((pose, (seed, sample.simulator_rotation)))
     }
 
     pub(crate) fn agent_id(&self) -> Uuid {
         self.agent_id
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn agent_motion_active(&self, now: Instant) -> bool {
-        self.dead_reckoning.active(now)
+        !self.agent_is_seated() && self.dead_reckoning.active(now)
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn agent_is_seated(&self) -> bool {
+        self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_)))
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn agent(&self) -> Option<&Object> {
+        self.agent.and_then(|entity| self.view.object(entity))
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn pose_seed(&mut self, source_seed: u64, seated: bool) -> u64 {
+        if self.motion_source_seed != Some(source_seed) || self.motion_source_seated != Some(seated) {
+            self.motion_source_seed = Some(source_seed);
+            self.motion_source_seated = Some(seated);
+            self.pose_seed = self.pose_seed.wrapping_add(1);
+        }
+        self.pose_seed
     }
 
     pub(crate) fn refresh_motion_circuits(&mut self, now: Instant) {
@@ -263,6 +328,24 @@ impl SceneFeed {
             }
         }
         self.motion_active.retain(|region, _| regions.contains(region));
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn sit_camera_pose(&self) -> Option<(SitCameraOverride, WorldPose)> {
+        let camera = (*self.sit_camera.borrow())?;
+        let agent = self.agent()?;
+        let Parent::Resolved(seat_entity) = agent.detail().summary.parent else { return None };
+        let seat = self.view.object(seat_entity)?;
+        if seat.detail().summary.id != camera.object_id {
+            return None;
+        }
+        let pose = match seat.detail().world_transform.ok()? {
+            WorldTransformState::Resolved(transform) => transform.pose,
+            WorldTransformState::MissingScale(pose) => pose,
+            WorldTransformState::Provisional { pose, .. } => pose,
+            WorldTransformState::Unresolved(_) => return None,
+        };
+        Some((camera, pose))
     }
 
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {
@@ -447,6 +530,7 @@ async fn run(
     cancelled: oneshot::Receiver<()>,
     mut camera: watch::Receiver<Option<Camera>>,
     mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+    mut sit_camera: watch::Receiver<Option<SitCameraOverride>>,
     wake: impl Fn(),
 ) {
     let SceneSources { mut reader, assets, environments, motion_circuits } = sources;
@@ -512,6 +596,7 @@ async fn run(
             let moved = camera.changed().fuse();
             let motion_updated = agent_motion.changed().fuse();
             let circuit_transition = motion_circuits.wait_for_transition().fuse();
+            let camera_overridden = sit_camera.changed().fuse();
             let available = assets.next().fuse();
             let released = textures.changed().fuse();
             let timer = async {
@@ -522,7 +607,19 @@ async fn run(
                 }
             }
             .fuse();
-            pin_mut!(reading, building, changed, moved, motion_updated, circuit_transition, available, released, timer, pushed);
+            pin_mut!(
+                reading,
+                building,
+                changed,
+                moved,
+                motion_updated,
+                circuit_transition,
+                camera_overridden,
+                available,
+                released,
+                timer,
+                pushed
+            );
             let mut asset_event = None;
             futures::select_biased! {
                 _ = cancelled => break,
@@ -549,6 +646,7 @@ async fn run(
                 result = motion_updated => { if result.is_err() { break; } wake(); }
                 _ = circuit_transition => wake(),
                 result = moved => { if result.is_err() { break; } }
+                result = camera_overridden => { if result.is_err() { break; } wake(); }
                 result = changed => { if result.is_err() { break; } scene.notify_world_change(); }
                 _ = timer => {}
             }

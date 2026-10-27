@@ -15,9 +15,17 @@ use futures::{
     future::{BoxFuture, Shared},
 };
 use network::{
-    AgentSession, CircuitMotionStatus, CoverageLoss, CoverageSource, Event, Grid, PacketOrder, SimulatorId, capabilities::Client,
+    AgentSession, CircuitMotionStatus, CoverageLoss, CoverageSource, Delivery, Event, Grid, PacketOrder, SimulatorId,
+    capabilities::Client,
 };
-use protocol::{lludp::Message, login::ResponseData, messages::RequestAgentData};
+use protocol::{
+    lludp::Message,
+    login::ResponseData,
+    messages::{
+        AgentRequestSit, AgentSit, RequestAgentData,
+        agent::agent_request_sit::{AgentData as SitAgentData, TargetObject},
+    },
+};
 use tokio::{runtime::Handle, sync::watch};
 use world::UpdateSource;
 
@@ -35,9 +43,11 @@ use crate::{
     inventory::{InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError, MoveExpectation},
     remembered_login::{self, RememberedLogin},
     session::{
-        AgentMotionPublisher, CameraUplink, RegionLookup, Session, SessionHandle,
+        AgentControlEvent, AgentControlHandle, AgentControlState, AgentMotionPublisher, CameraUplink, RegionLookup, Session,
+        SessionHandle, SitCameraOverride, SitOutcome,
+        agent_control::{AgentControlError, Command as AgentControlCommand},
         environment::{Completion, EnvironmentIntake},
-        inbound::object_media_requests,
+        inbound::{decode_sit_response, object_media_requests},
         object_cache::{ObjectCacheEvent, ObjectCacheSession},
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
         recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error, warn_unrecovered},
@@ -66,6 +76,7 @@ fn network_end_after_stream_close(disconnect_requested: bool, failure: Option<St
 
 enum DriverInput {
     Session(Input),
+    AgentControl(AgentControlEvent),
     InventoryCache(Option<InventoryCacheEvent>),
     ObjectCache(Option<ObjectCacheEvent>),
     InventoryEdit(Option<InventoryEditEvent>),
@@ -162,6 +173,9 @@ struct SessionDriver {
     motion_statuses: HashMap<SimulatorId, watch::Receiver<CircuitMotionStatus>>,
     region_motion_mapping: HashMap<world::Region, SimulatorId>,
     region_motion_sender: watch::Sender<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
+    agent_control: AgentControlState,
+    agent_control_handle: AgentControlHandle,
+    sit_camera: watch::Receiver<Option<SitCameraOverride>>,
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
     recovery: RecoveryIntake,
@@ -193,6 +207,7 @@ impl SessionDriver {
         let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone(), cache);
         let camera = CameraUplink::new();
         let (region_motion_sender, _) = watch::channel(Vec::new());
+        let (agent_control_handle, agent_control, sit_camera) = AgentControlState::new();
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
         let (inventory_changes, _) = watch::channel(None);
@@ -248,6 +263,9 @@ impl SessionDriver {
             motion_statuses: HashMap::new(),
             region_motion_mapping: HashMap::new(),
             region_motion_sender,
+            agent_control,
+            agent_control_handle,
+            sit_camera,
             region_lookup: None,
             media,
             recovery,
@@ -278,6 +296,7 @@ impl SessionDriver {
                     self.recovery.next_completion(),
                     self.inventory_fetch.next_event(),
                 ) => DriverInput::Session(input),
+                event = self.agent_control.next_event() => DriverInput::AgentControl(event),
                 cache_event = self.inventory_cache.next_event() => DriverInput::InventoryCache(cache_event),
                 cache_event = self.object_cache.next_event() => DriverInput::ObjectCache(cache_event),
                 edit_event = self.inventory_edits.next_event() => DriverInput::InventoryEdit(edit_event),
@@ -333,6 +352,10 @@ impl SessionDriver {
                     ControlFlow::Continue(())
                 }
                 DriverInput::InventoryEdit(None) => ControlFlow::Continue(()),
+                DriverInput::AgentControl(event) => {
+                    self.handle_agent_control_event(event).await;
+                    ControlFlow::Continue(())
+                }
                 DriverInput::Session(input) => match input {
                     Input::Cancelled => {
                         self.mailbox.publish(ViewerUpdate::Ended);
@@ -406,6 +429,101 @@ impl SessionDriver {
             .and_then(|simulator| self.session_world.region_for(simulator))
             .and_then(|region| self.session_world.world().region(region))
             .and_then(|info| info.resolved_origin())
+    }
+
+    async fn handle_agent_control_event(&mut self, event: AgentControlEvent) {
+        match event {
+            AgentControlEvent::Command(Some(command)) => self.handle_agent_control_command(command).await,
+            AgentControlEvent::Command(None) => {}
+            AgentControlEvent::SitTimedOut => self.agent_control.timeout_sit(),
+        }
+    }
+
+    async fn handle_agent_control_command(&mut self, command: AgentControlCommand) {
+        match command {
+            AgentControlCommand::SitOnObject { object_id, offset, reply } => {
+                if self.agent_control.has_pending_sit() {
+                    if reply.send(Err(AgentControlError::Busy)).is_err() {
+                        tracing::trace!("sit caller stopped before receiving the busy outcome");
+                    }
+                    return;
+                }
+                let (Some(simulator), Some(session)) = (self.primary_simulator, self.active_session.as_ref()) else {
+                    if reply.send(Err(AgentControlError::SimulatorUnavailable)).is_err() {
+                        tracing::trace!("sit caller stopped before receiving the simulator outcome");
+                    }
+                    return;
+                };
+                let request = AgentRequestSit {
+                    agent_data: SitAgentData { agent_id: session.agent_id, session_id: session.session_id },
+                    target_object: TargetObject { target_id: object_id, offset },
+                };
+                match self.session_handle.send_to(simulator, request, Delivery::Reliable).await {
+                    Ok(()) => self.agent_control.begin_sit(object_id, simulator, reply),
+                    Err(error) => {
+                        tracing::debug!(simulator = simulator.get(), %error, "sit request could not be queued");
+                        if reply.send(Err(AgentControlError::SendFailed)).is_err() {
+                            tracing::trace!("sit caller stopped before receiving the send outcome");
+                        }
+                    }
+                }
+            }
+            AgentControlCommand::SitOnGround { reply } => {
+                if self.primary_simulator.is_none() || self.active_session.is_none() {
+                    if reply.send(Err(AgentControlError::SimulatorUnavailable)).is_err() {
+                        tracing::trace!("ground-sit caller stopped before receiving the simulator outcome");
+                    }
+                    return;
+                }
+                self.agent_control.cancel_sit(SitOutcome::Cancelled);
+                self.agent_control.clear_camera_override();
+                self.camera.request_action(crate::agent_movement::MovementAction::SitOnGround);
+                if reply.send(Ok(())).is_err() {
+                    tracing::trace!("ground-sit caller stopped before receiving the queued outcome");
+                }
+            }
+            AgentControlCommand::StandUp { reply } => {
+                if self.primary_simulator.is_none() || self.active_session.is_none() {
+                    if reply.send(Err(AgentControlError::SimulatorUnavailable)).is_err() {
+                        tracing::trace!("stand-up caller stopped before receiving the simulator outcome");
+                    }
+                    return;
+                }
+                self.agent_control.cancel_sit(SitOutcome::Cancelled);
+                self.agent_control.clear_camera_override();
+                self.camera.request_action(crate::agent_movement::MovementAction::StandUp);
+                if reply.send(Ok(())).is_err() {
+                    tracing::trace!("stand-up caller stopped before receiving the queued outcome");
+                }
+            }
+        }
+    }
+
+    async fn handle_sit_response(&mut self, simulator: SimulatorId, message: &Message) {
+        let Some(response) = decode_sit_response(message) else { return };
+        if !self.agent_control.expects_response(simulator, response.object_id) {
+            return;
+        }
+        let Some(session) = self.active_session.as_ref() else {
+            self.agent_control.fail_sit(AgentControlError::SimulatorUnavailable);
+            return;
+        };
+        let sit = AgentSit { agent_id: session.agent_id, session_id: session.session_id };
+        match self.session_handle.send_to(simulator, sit, Delivery::Reliable).await {
+            Ok(()) => {
+                self.agent_control.accept_sit(
+                    simulator,
+                    response.object_id,
+                    response.auto_pilot,
+                    response.force_mouselook,
+                    response.camera_override,
+                );
+            }
+            Err(error) => {
+                tracing::debug!(simulator = simulator.get(), %error, "sit acceptance could not be queued");
+                self.agent_control.fail_sit(AgentControlError::SendFailed);
+            }
+        }
     }
 
     fn handle_media_result(&mut self, result: Option<ObjectMediaResult>) {
@@ -701,6 +819,14 @@ impl SessionDriver {
             }
         }
 
+        if message.name() == "AlertMessage" {
+            if Some(simulator_id) == self.primary_simulator && self.agent_control.refuse_sit(simulator_id) {
+                tracing::debug!(simulator = simulator_id.get(), "sit request was refused");
+            }
+        } else {
+            self.handle_sit_response(simulator_id, &message).await;
+        }
+
         if let Message::AgentMovementComplete(movement) = &message {
             let outcome = self.handoff.movement_complete(
                 &mut self.session_world,
@@ -739,6 +865,7 @@ impl SessionDriver {
         login_data: Option<ResponseData>,
     ) {
         self.camera.request_update();
+        self.agent_control.cancel_if_simulator_changed(simulator_id);
         self.media.set_client(simulator_id, capabilities.clone());
         self.network_failure = None;
         self.primary_disconnected = false;
@@ -777,6 +904,7 @@ impl SessionDriver {
         self.recovery.cancel_simulator(simulator_id);
         self.media.forget_simulator(simulator_id);
         if Some(simulator_id) == self.primary_simulator {
+            self.agent_control.cancel_sit(SitOutcome::SimulatorChanged);
             self.primary_simulator = None;
             self.camera.request_update();
         }
@@ -797,12 +925,15 @@ impl SessionDriver {
             motion_circuits: self.region_motion_sender.subscribe(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             assets: self.assets.handle(),
-            session,
+            session: session.clone(),
+            agent_control: self.agent_control_handle.clone(),
             region_name: self.session_world.region_name(simulator_id).map(str::to_owned),
             inventory_updates: self.inventory_changes.subscribe(),
             inventory_fetch: self.inventory.as_ref().map(|_| self.inventory_fetch.handle()),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             world_reader: self.reads.reader(),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            sit_camera: self.sit_camera.clone(),
         }));
     }
 
@@ -822,7 +953,7 @@ impl SessionDriver {
             .is_some_and(|entity| summary.touches_entity(entity))
     }
 
-    fn publish_world_agent_motion(&self, received_at: std::time::Instant) {
+    fn publish_world_agent_motion(&mut self, received_at: std::time::Instant) {
         let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
         self.agent_motion.publish_world(self.session_world.world(), agent_id, received_at);
     }
@@ -907,6 +1038,7 @@ impl SessionDriver {
         if let Some(inventory_bootstrap) = self.inventory_bootstrap.take() {
             inventory_bootstrap.abort();
         }
+        self.agent_control.fail_sit(AgentControlError::SessionEnded);
         self.inventory_pending_moves.clear();
         self.inventory_edits.stop().await;
         self.inventory_fetch.stop().await;

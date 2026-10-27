@@ -8,6 +8,7 @@ use network::{
 use protocol::{
     lludp::Message,
     lludp::Message::{ImprovedTerseObjectUpdate, KillObject, ObjectUpdate, ObjectUpdateCached},
+    lludp::Packet,
     messages::{CacheMissType::Full, CachedObjectReference, ObjectUpdateCached as CachedUpdate, RequestAgentData, object::kill_object},
 };
 use test_support::lludp::vectors;
@@ -17,7 +18,7 @@ use world::{
     Applied,
     ApplyOutcome::{Deferred, Introduced, TombstoneRecorded, Unchanged},
     DeferredReason::AmbiguousOrder,
-    LocalAddress, ObjectObservation, Parent, Pose, Region, RegionHandle, UpdateSource,
+    Kind, LocalAddress, ObjectObservation, Parent, ParentUpdate, Pose, Region, RegionHandle, UpdateSource,
 };
 
 use crate::session::coordinator::events::{MovementCompleteOutcome, PendingWorldHandoff, WorldHandoff};
@@ -343,6 +344,63 @@ fn region_connection_lifecycle() {
     assert!(intake.region_for(simulator_id).is_none());
     assert!(intake.world().region(region).is_none());
     assert!(apply_world_event(&mut intake, &simulator_message(simulator_id, 1, region_handshake("late"))).is_none());
+}
+
+#[tokio::test]
+async fn loopback_seat_removal_keeps_avatar_parenting_in_world() {
+    let simulator_id = simulator_id();
+    let simulator = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
+    let viewer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback viewer");
+    let seat_id = Uuid::from_u128(0x51);
+    let agent_id = Uuid::from_u128(0x52);
+    let seat_local_id = NonZeroU32::new(10).expect("seat local id");
+    let agent_local_id = NonZeroU32::new(11).expect("agent local id");
+    let mut intake = SessionWorld::new(viewer_world_limits());
+    let region = intake.register_simulator(simulator_id, None).expect("register simulator");
+    intake.set_self_agent(simulator_id, agent_id);
+    let seat = ObjectObservation::new(
+        UpdateSource::new(region, 1, world::OrderEvidence::Ordered(1), 0),
+        seat_id,
+        seat_local_id,
+        Kind::Object,
+        ParentUpdate::Root,
+    );
+    let mut agent = ObjectObservation::new(
+        UpdateSource::new(region, 2, world::OrderEvidence::Ordered(2), 0),
+        agent_id,
+        agent_local_id,
+        Kind::Avatar,
+        ParentUpdate::Local(seat_local_id),
+    );
+    agent.pose = Some(Pose { position: Some(Vec3::new(2.0, 3.0, 4.0)), rotation: Some(Quat::IDENTITY) });
+    intake
+        .apply_object_batch(
+            simulator_id,
+            ObjectBatch {
+                region,
+                region_handle: None,
+                blocks: vec![Some(ObjectOperation::Observe(seat)), Some(ObjectOperation::Observe(agent))],
+                invalid_blocks: 0,
+                invalid_fields: 0,
+            },
+        )
+        .expect("apply seat and avatar");
+    let seat_entity = intake.world().entity(seat_id).expect("seat entity");
+    let agent_entity = intake.world().entity(agent_id).expect("avatar entity");
+    assert_eq!(intake.world().object(agent_entity).expect("avatar").parent(), Parent::Resolved(seat_entity));
+
+    let removal =
+        Message::KillObject(kill_object::KillObject { object_data: vec![kill_object::ObjectData { local_id: seat_local_id.get() }] });
+    let bytes = Packet::new(3, removal).encode().expect("encode seat removal");
+    simulator.send_to(&bytes, viewer.local_addr().expect("viewer address")).await.expect("send seat removal");
+    let mut bytes = [0; 2048];
+    let (length, _) = viewer.recv_from(&mut bytes).await.expect("receive seat removal");
+    let message = Packet::decode(&bytes[..length]).expect("decode seat removal").message().clone();
+    assert!(matches!(message, Message::KillObject(_)));
+    apply_world_event(&mut intake, &simulator_message(simulator_id, 3, message)).expect("apply simulator seat removal");
+
+    let parent = intake.world().object(agent_entity).expect("avatar remains in world").parent();
+    assert!(matches!(parent, Parent::Pending { expected_uuid: Some(id), .. } if id == seat_id));
 }
 
 #[test]

@@ -155,6 +155,8 @@ messages! {
     RegionHandshake(crate::messages::RegionHandshake),
     RegionHandshakeReply(crate::messages::RegionHandshakeReply),
     AgentMovementComplete(crate::messages::AgentMovementComplete),
+    AgentRequestSit(crate::messages::AgentRequestSit),
+    AgentSit(crate::messages::AgentSit),
     AgentUpdate(crate::messages::AgentUpdate),
     SetAlwaysRun(crate::messages::SetAlwaysRun),
     AgentThrottle(crate::messages::AgentThrottle),

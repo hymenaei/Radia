@@ -9,12 +9,23 @@ use world::{
     MAX_AVATAR_VISUAL_PARAMS, SitTarget,
 };
 
+use crate::session::agent_control::SitCameraOverride;
+
 const MAX_AVATAR_TEXTURE_ENTRY_BYTES: usize = 4095;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SitTargetUpdate {
     pub(crate) object_id: Uuid,
     pub(crate) target: SitTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SitResponseUpdate {
+    pub(crate) object_id: Uuid,
+    pub(crate) target: Option<SitTarget>,
+    pub(crate) auto_pilot: bool,
+    pub(crate) force_mouselook: bool,
+    pub(crate) camera_override: Option<SitCameraOverride>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -68,15 +79,36 @@ pub(crate) fn decode_avatar_appearance_update(message: &Message) -> Result<Optio
 }
 
 pub(crate) fn decode_sit_target_update(message: &Message) -> Option<SitTargetUpdate> {
+    let response = decode_sit_response(message)?;
+    let target = response.target?;
+    Some(SitTargetUpdate { object_id: response.object_id, target })
+}
+
+pub(crate) fn decode_sit_response(message: &Message) -> Option<SitResponseUpdate> {
     let Message::AvatarSitResponse(message) = message else { return None };
     let object_id = message.sit_object.id?;
     if object_id.is_nil() {
         return None;
     }
-    let position = message.sit_transform.sit_position?;
-    let rotation = message.sit_transform.sit_rotation?;
+    let transform = &message.sit_transform;
+    let target = transform.sit_position.zip(transform.sit_rotation).and_then(|(position, rotation)| {
+        (position.is_finite() && rotation.is_finite() && rotation.length_squared() > 0.0).then_some(SitTarget { position, rotation })
+    });
+    let camera_override = transform.camera_eye_offset.zip(transform.camera_at_offset).and_then(|(eye_offset, at_offset)| {
+        (eye_offset.is_finite() && at_offset.is_finite() && eye_offset.distance(at_offset) > 0.001).then_some(SitCameraOverride {
+            object_id,
+            eye_offset,
+            at_offset,
+        })
+    });
 
-    Some(SitTargetUpdate { object_id, target: SitTarget { position, rotation } })
+    Some(SitResponseUpdate {
+        object_id,
+        target,
+        auto_pilot: transform.auto_pilot.unwrap_or(false),
+        force_mouselook: transform.force_mouselook.unwrap_or(false),
+        camera_override,
+    })
 }
 
 fn decode_avatar_textures(bytes: &[u8]) -> Result<Option<AvatarTextureSlots>, ()> {
@@ -114,7 +146,7 @@ mod tests {
     use uuid::Uuid;
     use world::{AvatarTextureSlot, AvatarVisualParamIndex};
 
-    use super::{decode_avatar_appearance_update, decode_sit_target_update};
+    use super::{decode_avatar_appearance_update, decode_sit_response, decode_sit_target_update};
 
     fn avatar_message(texture_entry: Vec<u8>, params: &[u8], appearance: Option<(u8, i32)>) -> Message {
         Message::AvatarAppearance(AvatarAppearance {
@@ -167,6 +199,22 @@ mod tests {
         assert_eq!(update.object_id, Uuid::from_u128(7));
         assert_eq!(update.target.position, Vec3::new(1.0, 2.0, 3.0));
         assert_eq!(update.target.rotation, Quat::IDENTITY);
+
+        let response = decode_sit_response(&Message::AvatarSitResponse(AvatarSitResponse {
+            sit_object: SitObject { id: Some(Uuid::from_u128(7)) },
+            sit_transform: SitTransform {
+                auto_pilot: Some(true),
+                sit_position: Some(Vec3::new(1.0, 2.0, 3.0)),
+                sit_rotation: Some(Quat::IDENTITY),
+                camera_eye_offset: Some(Vec3::X),
+                camera_at_offset: Some(Vec3::Y),
+                force_mouselook: Some(true),
+            },
+        }))
+        .expect("sit response");
+        assert!(response.auto_pilot);
+        assert!(response.force_mouselook);
+        assert_eq!(response.camera_override.unwrap().object_id, Uuid::from_u128(7));
     }
 
     #[test]

@@ -476,7 +476,8 @@ impl SceneWindow {
                 pose.rotation = rotation;
                 let (draw_distance, lod_factor) =
                     self.camera.as_ref().map_or((DEFAULT_DRAW_DISTANCE, 1.0), |camera| (camera.draw_distance, camera.lod_factor));
-                self.follow_camera.follow(pose, viewport, draw_distance, lod_factor, now)
+                let sit_camera = self.feed.as_ref().and_then(SceneFeed::sit_camera_pose);
+                self.follow_camera.follow_with_sit_camera(pose, sit_camera, viewport, draw_distance, lod_factor, now)
             }),
             CameraMode::Free => self.camera.as_ref().and_then(|camera| camera.scene_camera(viewport, now)),
         }
@@ -486,7 +487,9 @@ impl SceneWindow {
         let now = Instant::now();
         let (pose, seed) = self.agent_pose_and_seed_at(now);
         self.ensure_camera(pose);
-        let rotation = self.body_rotation.update(seed, self.controls.yaw(self.modifiers.shift_key()), now);
+        let seated = self.feed.as_ref().is_some_and(SceneFeed::agent_is_seated);
+        let body_rotation = self.body_rotation.update(seed, if seated { 0.0 } else { self.controls.yaw(self.modifiers.shift_key()) }, now);
+        let rotation = if seated { pose.map_or(body_rotation, |pose| pose.rotation) } else { body_rotation };
         let movement: MovementObservation = self.controls.observation(self.modifiers.shift_key(), rotation);
         self.stop_clear_pending = movement.control_flags & STOP != 0;
         let observation = self.camera_observation(pose, rotation, now);

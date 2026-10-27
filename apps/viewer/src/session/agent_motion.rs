@@ -47,12 +47,13 @@ impl AgentMotionSample {
 pub(crate) struct AgentMotionPublisher {
     sender: watch::Sender<Option<AgentMotionSample>>,
     seed: u64,
+    parent: Option<Parent>,
 }
 
 impl AgentMotionPublisher {
     pub(crate) fn new() -> Self {
         let (sender, _) = watch::channel(None);
-        Self { sender, seed: 0 }
+        Self { sender, seed: 0, parent: None }
     }
 
     pub(crate) fn receiver(&self) -> watch::Receiver<Option<AgentMotionSample>> {
@@ -109,7 +110,7 @@ impl AgentMotionPublisher {
         true
     }
 
-    pub(crate) fn publish_world(&self, world: &World, agent_id: Uuid, received_at: Instant) -> bool {
+    pub(crate) fn publish_world(&mut self, world: &World, agent_id: Uuid, received_at: Instant) -> bool {
         let Some(entity) = world.entity(agent_id) else { return false };
         let Some(agent) = world.object(entity) else { return false };
         let Ok(transform) = agent.world_transform() else { return false };
@@ -121,7 +122,12 @@ impl AgentMotionPublisher {
         let motion = agent.linear_motion();
         let source = agent.motion_source();
         let received_at = source.and_then(world::UpdateSource::motion_received_at).unwrap_or(received_at);
-        let parented = matches!(agent.parent(), Parent::Resolved(_) | Parent::Pending { .. });
+        let parent = agent.parent();
+        if self.parent.is_some_and(|previous| previous != parent) {
+            self.seed = self.seed.wrapping_add(1);
+        }
+        self.parent = Some(parent);
+        let parented = matches!(parent, Parent::Resolved(_) | Parent::Pending { .. });
         let (velocity, acceleration) = if parented {
             (Vec3::ZERO, Vec3::ZERO)
         } else {
@@ -262,7 +268,7 @@ mod tests {
         agent.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X), acceleration: Some(Vec3::Y) });
         let _ = world.observe_object(agent).expect("agent observation");
 
-        let publisher = AgentMotionPublisher::new();
+        let mut publisher = AgentMotionPublisher::new();
         let now = std::time::Instant::now();
         assert!(publisher.publish_world(&world, agent_id, now));
         let sample = publisher.receiver().borrow().expect("world sample");
@@ -296,7 +302,7 @@ mod tests {
         agent.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X), acceleration: Some(Vec3::Y) });
         let _ = world.observe_object(agent).expect("agent observation");
 
-        let publisher = AgentMotionPublisher::new();
+        let mut publisher = AgentMotionPublisher::new();
         let now = received_at + Duration::from_millis(100);
         assert!(publisher.publish_world(&world, agent_id, now));
         let sample = publisher.receiver().borrow().expect("world sample");
@@ -327,7 +333,7 @@ mod tests {
         agent.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X * 1.0e30), acceleration: Some(Vec3::Y) });
         let _ = world.observe_object(agent).expect("agent observation");
 
-        let publisher = AgentMotionPublisher::new();
+        let mut publisher = AgentMotionPublisher::new();
         assert!(publisher.publish_world(&world, agent_id, std::time::Instant::now()));
         let sample = publisher.receiver().borrow().expect("world sample");
         assert_eq!(sample.position, DVec3::new(10.0, 20.0, 3.0));

@@ -1,4 +1,6 @@
 pub mod agent_movement_complete;
+pub mod agent_request_sit;
+pub mod agent_sit;
 pub mod agent_throttle;
 pub mod agent_update;
 pub mod avatar_appearance;
@@ -12,6 +14,8 @@ pub mod teleport_failed;
 pub mod teleport_finish;
 
 pub use self::agent_movement_complete::AgentMovementComplete;
+pub use self::agent_request_sit::AgentRequestSit;
+pub use self::agent_sit::AgentSit;
 pub use self::agent_throttle::{AgentThrottle, ThrottleRates};
 pub use self::agent_update::AgentUpdate;
 pub use self::avatar_appearance::AvatarAppearance;

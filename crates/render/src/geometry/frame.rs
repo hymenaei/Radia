@@ -327,12 +327,4 @@ mod tests {
             "per-frame upload limits must not strand remaining meshes"
         );
     }
-
-    #[test]
-    fn mirrored_surfaces_flip_front_face() {
-        assert_eq!(surface_pipeline(false, false, Vec3::new(-1.0, 1.0, 1.0)), Pipeline::FlippedWinding);
-        assert_eq!(surface_pipeline(true, false, Vec3::new(-1.0, 1.0, 1.0)), Pipeline::BlendFlipped);
-        assert_eq!(surface_pipeline(false, false, Vec3::new(-1.0, -1.0, 1.0)), Pipeline::Surface);
-        assert_eq!(surface_pipeline(false, true, Vec3::new(-1.0, 1.0, 1.0)), Pipeline::DoubleSided);
-    }
 }

@@ -404,3 +404,6 @@ mod tests {
         assert_eq!(memory.depth.load(Ordering::Acquire), 0);
     }
 }
+
+#[cfg(test)]
+mod water_distance_tests;

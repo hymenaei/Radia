@@ -8971,7 +8971,6 @@ version = "0.0.1"
 dependencies = [
  "assets",
  "chrono",
- "criterion",
  "dirs 7.0.0",
  "egui",
  "egui-winit",
@@ -8992,7 +8991,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "test-support",
- "time",
  "tokio",
  "tracing",
  "tracing-appender",

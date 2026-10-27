@@ -68,15 +68,9 @@ keyring = { workspace = true, features = ["windows-native"] }
 keyring = { workspace = true, features = ["apple-native"] }
 
 [dev-dependencies]
-criterion.workspace = true
-time.workspace = true
 url.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 gpui = { workspace = true, features = ["test-support"] }
 test-support.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
-
-[[bench]]
-name = "main"
-harness = false

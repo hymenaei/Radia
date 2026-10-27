@@ -213,7 +213,14 @@ mod tests {
         packet_order: PacketOrder,
         message: Message,
     ) -> Event {
-        SimulatorMessage { simulator_id, source: "127.0.0.1:13000".parse().expect("simulator address"), sequence, packet_order, message }
+        SimulatorMessage {
+            simulator_id,
+            source: "127.0.0.1:13000".parse().expect("simulator address"),
+            sequence,
+            packet_order,
+            message,
+            handoff_outcome: None,
+        }
     }
 
     pub(super) fn chat_message(from_name: &str) -> Message {

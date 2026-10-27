@@ -3,6 +3,7 @@ use std::{collections::HashMap, num::NonZeroU32};
 use math::{Quat, Vec3};
 use network::{
     Event::{SimulatorConnected, SimulatorDisconnected},
+    HandoffEventOutcome,
     PacketOrder::{Ambiguous, Ordered},
 };
 use protocol::{
@@ -16,7 +17,7 @@ use world::{
     Applied,
     ApplyOutcome::{Deferred, Introduced, TombstoneRecorded, Unchanged},
     DeferredReason::AmbiguousOrder,
-    LocalAddress, ObjectObservation, OrderEvidence, Parent, Pose, Region, RegionHandle, UpdateSource,
+    LocalAddress, ObjectObservation, OrderEvidence, Parent, Pose, RegionHandle, UpdateSource,
 };
 
 use crate::session::coordinator::events::{PendingWorldHandoff, WorldHandoff};
@@ -27,6 +28,7 @@ use crate::session::coordinator::tests::{
 use crate::session::inbound::{ObjectBatch, ObjectOperation};
 use crate::session::{
     recovery::recovery_request,
+    teleport::{Destination, TeleportController},
     world::{IngestStatus, SessionWorld, viewer_world_limits},
 };
 use crate::test_helpers::simulator_id;
@@ -98,7 +100,6 @@ fn region_connection_lifecycle() {
 
     apply_world_event(&mut intake, &SimulatorConnected { simulator_id, region_handle: Some(handle), endpoint });
     let region = intake.region_for(simulator_id).expect("registered region");
-    assert_eq!(region, Region::new(simulator_id.get()));
     assert_eq!(intake.world().region(region).unwrap().handle, Some(RegionHandle::new(handle)));
 
     apply_world_event(&mut intake, &SimulatorDisconnected { simulator_id, region_handle: Some(handle), endpoint });
@@ -164,6 +165,63 @@ fn teleport_retirement_removes_old_primary_and_neighbor_world_state() {
     assert!(world.world().entity(agent_id).is_none());
     assert!(world.world().entity(neighbor_object).is_none());
     assert!(world.world().entity(destination_object).is_some());
+}
+
+#[test]
+fn return_teleport_restores_reused_region_route_and_keeps_both_retired_scenes_empty() {
+    let returning_simulator = simulator_id();
+    let current_simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x1234);
+    let old_return_object = Uuid::from_u128(0x1111);
+    let current_object = Uuid::from_u128(0x2222);
+    let returned_object = Uuid::from_u128(0x3333);
+    let returning_handle = RegionHandle::new(0x1111_0000_0000_0001);
+    let current_handle = RegionHandle::new(0x2222_0000_0000_0002);
+    let endpoint = "127.0.0.1:13001".parse().expect("return simulator endpoint");
+    let mut world = SessionWorld::new(viewer_world_limits());
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut world, returning_simulator, agent_id);
+    handoff.simulator_connected(&mut world, returning_simulator, Some(returning_handle.get()));
+    handoff.simulator_connected(&mut world, current_simulator, Some(current_handle.get()));
+    let original_return_region = world.region_for(returning_simulator).expect("original return region");
+    assert!(
+        apply_world_event(
+            &mut world,
+            &simulator_message(returning_simulator, 1, agent_update(old_return_object, 11, returning_handle.get()))
+        )
+        .is_some()
+    );
+    assert!(
+        apply_world_event(&mut world, &simulator_message(current_simulator, 2, agent_update(current_object, 22, current_handle.get())))
+            .is_some()
+    );
+
+    handoff.teleport_completed(&mut world, current_simulator);
+    assert!(world.region_for(returning_simulator).is_none());
+    assert!(world.world().entity(old_return_object).is_none());
+
+    let mut teleport = TeleportController::new();
+    teleport.on_start(&protocol::messages::TeleportStart { teleport_flags: 0 }, Some(current_handle.get()));
+    let destination = Destination { region_handle: returning_handle.get(), endpoint };
+    assert!(!teleport.on_finish(destination, 0, Some(13), HandoffEventOutcome::Accepted));
+    let region_handle = teleport.region_handle_for_promotion(endpoint).expect("accepted return destination");
+    assert!(handoff.restore_promoted_region(&mut world, returning_simulator, region_handle).is_some());
+    handoff.teleport_completed(&mut world, returning_simulator);
+
+    let returned_region = world.region_for(returning_simulator).expect("restored return region");
+    assert_ne!(returned_region, original_return_region);
+    assert_eq!(world.world().region(returned_region).expect("restored World region").handle, Some(returning_handle));
+    assert!(world.region_for(current_simulator).is_none());
+    assert!(world.world().entity(old_return_object).is_none());
+    assert!(world.world().entity(current_object).is_none());
+    assert!(
+        apply_world_event(
+            &mut world,
+            &simulator_message(returning_simulator, 3, agent_update(returned_object, 33, returning_handle.get()))
+        )
+        .is_some()
+    );
+    assert!(world.world().entity(returned_object).is_some());
 }
 
 #[test]

@@ -37,6 +37,7 @@ pub(super) enum IngestStatus {
 #[derive(Debug)]
 pub(super) enum RegistrationError {
     HandleChanged,
+    IdentityExhausted,
     Apply(ApplyError),
 }
 
@@ -220,12 +221,13 @@ pub(super) struct SessionWorld {
     world: World,
     regions: HashMap<SimulatorId, Region>,
     parcel_rejections: u64,
+    next_region_id: Option<u64>,
 }
 
 impl SessionWorld {
     pub(super) fn new(limits: WorldLimits) -> Self {
         let world = World::new(limits);
-        Self { world, regions: HashMap::new(), parcel_rejections: 0 }
+        Self { world, regions: HashMap::new(), parcel_rejections: 0, next_region_id: Some(1) }
     }
 
     pub(super) fn world(&self) -> &World {
@@ -303,9 +305,11 @@ impl SessionWorld {
             return Ok(region);
         }
 
-        let region = Region::new(simulator_id.get());
+        let region_id = self.next_region_id.ok_or(RegistrationError::IdentityExhausted)?;
+        let region = Region::new(region_id);
         self.world.adopt_region(region).map(|_| ()).map_err(RegistrationError::Apply)?;
         self.regions.insert(simulator_id, region);
+        self.next_region_id = region_id.checked_add(1);
         self.update_region_handle(region, handle).map_err(RegistrationError::Apply)?;
         Ok(region)
     }

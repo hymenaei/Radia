@@ -8,7 +8,7 @@ use protocol::messages::ParcelProperties;
 use uuid::Uuid;
 use world::{
     Applied, LocalAddress, ObjectObservation, OrderEvidence, OrderEvidence::Ordered, ParcelAccessSettings, ParcelBitmap, ParcelFlags,
-    ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesData, ParcelPropertiesObservation, RegionHandle, UpdateSource,
+    ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesData, ParcelPropertiesObservation, Region, RegionHandle, UpdateSource,
 };
 
 use super::{PresentationMailbox, ViewerUpdate};
@@ -163,6 +163,9 @@ impl WorldHandoff {
             Err(RegistrationError::HandleChanged) => {
                 tracing::error!(simulator = simulator_id.get(), region, "primary simulator handle changed during one connection lifetime");
             }
+            Err(RegistrationError::IdentityExhausted) => {
+                tracing::error!(simulator = simulator_id.get(), "World region identity space exhausted");
+            }
             Err(RegistrationError::Apply(error)) => {
                 tracing::error!(simulator = simulator_id.get(), region, %error, "could not register primary world region")
             }
@@ -177,10 +180,25 @@ impl WorldHandoff {
             Err(RegistrationError::HandleChanged) => {
                 tracing::warn!(simulator = simulator_id.get(), region, "simulator handle changed during one connection lifetime");
             }
+            Err(RegistrationError::IdentityExhausted) => {
+                tracing::warn!(simulator = simulator_id.get(), "World region identity space exhausted");
+            }
             Err(RegistrationError::Apply(error)) => {
                 tracing::warn!(simulator = simulator_id.get(), region, %error, "could not register simulator world region")
             }
         }
+    }
+
+    pub(super) fn restore_promoted_region(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator_id: SimulatorId,
+        region_handle: u64,
+    ) -> Option<Region> {
+        if world.region_for(simulator_id).is_none() {
+            self.simulator_connected(world, simulator_id, Some(region_handle));
+        }
+        world.region_for(simulator_id)
     }
 
     pub(super) fn simulator_disconnected(&mut self, world: &mut SessionWorld, simulator_id: SimulatorId) {

@@ -16,7 +16,9 @@ use futures::{
     future::{BoxFuture, Shared},
     pin_mut,
 };
-use network::{AgentSession, CoverageLoss, CoverageSource, Delivery, Event, Grid, PacketOrder, SimulatorId, capabilities::Client};
+use network::{
+    AgentSession, CoverageLoss, CoverageSource, Delivery, Event, Grid, HandoffEventOutcome, PacketOrder, SimulatorId, capabilities::Client,
+};
 use protocol::{
     lludp::Message,
     login::ResponseData,
@@ -323,7 +325,14 @@ impl SessionDriver {
         self.session_world.world().region(region)?.handle.map(|handle| handle.get())
     }
 
-    fn handle_teleport_message(&mut self, simulator_id: SimulatorId, sequence: u32, packet_order: PacketOrder, message: &Message) {
+    fn handle_teleport_message(
+        &mut self,
+        simulator_id: SimulatorId,
+        sequence: u32,
+        packet_order: PacketOrder,
+        message: &Message,
+        handoff_outcome: Option<HandoffEventOutcome>,
+    ) {
         if self.primary_simulator != Some(simulator_id) {
             return;
         }
@@ -335,7 +344,7 @@ impl SessionDriver {
             }
             Message::TeleportProgress(message) => self.teleport.on_progress(message, session.agent_id),
             Message::TeleportFailed(message) if message.agent_id == session.agent_id => {
-                self.teleport.on_failed(failure_from_udp(message));
+                self.teleport.on_failed(failure_from_udp(message), handoff_outcome.unwrap_or(HandoffEventOutcome::Ignored));
             }
             Message::TeleportLocal(message) if message.agent_id == session.agent_id => {
                 let Some(region) = self.session_world.region_for(simulator_id) else { return };
@@ -348,7 +357,12 @@ impl SessionDriver {
             }
             Message::TeleportFinish(message) if message.agent_id == session.agent_id => {
                 if let Some(destination) = destination_from_udp(message)
-                    && self.teleport.on_finish(destination, message.teleport_flags.unwrap_or_default(), message.sim_access)
+                    && self.teleport.on_finish(
+                        destination,
+                        message.teleport_flags.unwrap_or_default(),
+                        message.sim_access,
+                        handoff_outcome.unwrap_or(HandoffEventOutcome::Ignored),
+                    )
                 {
                     self.cancel_conflicted_teleport(session.agent_id, session.session_id);
                 }
@@ -357,7 +371,13 @@ impl SessionDriver {
         }
     }
 
-    fn handle_teleport_capability_event(&mut self, simulator_id: SimulatorId, message: &str, body: &llsd::Value) {
+    fn handle_teleport_capability_event(
+        &mut self,
+        simulator_id: SimulatorId,
+        message: &str,
+        body: &llsd::Value,
+        handoff_outcome: Option<HandoffEventOutcome>,
+    ) {
         if self.primary_simulator != Some(simulator_id) {
             return;
         }
@@ -365,21 +385,21 @@ impl SessionDriver {
         match message {
             "CrossedRegion" => {
                 if let Some(destination) = crossed_region_from_event(body, session.agent_id, session.session_id)
-                    && self.teleport.on_crossed_region(destination)
+                    && self.teleport.on_crossed_region(destination, handoff_outcome.unwrap_or(HandoffEventOutcome::Ignored))
                 {
                     self.cancel_conflicted_teleport(session.agent_id, session.session_id);
                 }
             }
             "TeleportFinish" => {
                 if let Some((destination, flags, sim_access)) = finish_metadata_from_event(body, session.agent_id)
-                    && self.teleport.on_finish(destination, flags, sim_access)
+                    && self.teleport.on_finish(destination, flags, sim_access, handoff_outcome.unwrap_or(HandoffEventOutcome::Ignored))
                 {
                     self.cancel_conflicted_teleport(session.agent_id, session.session_id);
                 }
             }
             "TeleportFailed" => {
                 if let Some(failure) = failure_from_event(body, session.agent_id) {
-                    self.teleport.on_failed(failure);
+                    self.teleport.on_failed(failure, handoff_outcome.unwrap_or(HandoffEventOutcome::Ignored));
                 }
             }
             _ => {}
@@ -480,6 +500,19 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
+                if self.session_world.region_for(simulator_id).is_none()
+                    && let Some(region_handle) = self.teleport.region_handle_for_promotion(session.simulator_address)
+                {
+                    if let Some(region) = self.handoff.restore_promoted_region(&mut self.session_world, simulator_id, region_handle) {
+                        self.assets.register(region, capabilities.clone());
+                    } else {
+                        tracing::warn!(
+                            simulator = simulator_id.get(),
+                            region = region_handle,
+                            "promoted simulator region could not be restored"
+                        );
+                    }
+                }
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                 if let Some(region) = self.session_world.region_for(simulator_id)
                     && let Err(error) = self.environment_pushes.clear_region(region)
@@ -515,9 +548,9 @@ impl SessionDriver {
                 }
                 ControlFlow::Continue(())
             }
-            SimulatorMessage { simulator_id, sequence, packet_order, source, message } => {
+            SimulatorMessage { simulator_id, sequence, packet_order, source, message, handoff_outcome } => {
                 self.handle_inventory_udp(&message);
-                self.handle_teleport_message(simulator_id, sequence, packet_order, &message);
+                self.handle_teleport_message(simulator_id, sequence, packet_order, &message, handoff_outcome);
                 self.handle_simulator_message(simulator_id, sequence, packet_order, source, message).await;
                 ControlFlow::Continue(())
             }
@@ -553,15 +586,15 @@ impl SessionDriver {
                 }
                 ControlFlow::Continue(())
             }
-            CapabilityEvent { simulator_id, message, body, .. } => {
-                self.handle_teleport_capability_event(simulator_id, &message, &body);
+            CapabilityEvent { simulator_id, message, body, handoff_outcome, .. } => {
+                self.handle_teleport_capability_event(simulator_id, &message, &body, handoff_outcome);
                 self.handle_inventory_event_queue(&message, &body);
                 self.environments.capability(&mut self.session_world, simulator_id, &message, &body, self.primary_simulator);
                 ControlFlow::Continue(())
             }
             CapabilityEventBatch { simulator_id, events, .. } => {
                 for event in &events {
-                    self.handle_teleport_capability_event(simulator_id, &event.message, &event.body);
+                    self.handle_teleport_capability_event(simulator_id, &event.message, &event.body, event.handoff_outcome);
                     self.handle_inventory_event_queue(&event.message, &event.body);
                 }
                 self.environments.capability_batch(

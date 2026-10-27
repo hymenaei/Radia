@@ -6,7 +6,7 @@ use std::{
 
 use llsd::Value;
 use math::Vec3;
-use network::{AgentSession, Error as NetworkError, SessionHandle, TeleportRequest as NetworkTeleportRequest};
+use network::{AgentSession, Error as NetworkError, HandoffEventOutcome, SessionHandle, TeleportRequest as NetworkTeleportRequest};
 use protocol::messages::{
     AlertInfo, TeleportCancel, TeleportFailed, TeleportFinish, TeleportLandmarkRequest as ProtocolLandmarkRequest, TeleportLocal,
     TeleportLocationRequest as ProtocolLocationRequest, TeleportProgress as ProtocolProgress, TeleportStart,
@@ -60,6 +60,8 @@ pub enum TeleportStatus {
     Cancelled,
     TimedOut,
     CrossingConflict { crossing_region_handle: u64, teleport_region_handle: u64 },
+    HandoffConflict { active_region_handle: Option<u64>, conflicting_region_handle: u64 },
+    SupersededByCrossing { region_handle: u64 },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -390,9 +392,11 @@ impl TeleportController {
         self.publish();
     }
 
-    pub(super) fn on_finish(&mut self, destination: Destination, flags: u32, sim_access: Option<u8>) -> bool {
-        if let (Some(_active), Some(crossing), CrossingState::Pending { region_handle, .. }) =
-            (&self.active, self.pending_crossing, &self.crossing)
+    pub(super) fn on_finish(&mut self, destination: Destination, flags: u32, sim_access: Option<u8>, outcome: HandoffEventOutcome) -> bool {
+        if outcome == HandoffEventOutcome::Ignored {
+            return false;
+        }
+        if let (Some(crossing), CrossingState::Pending { region_handle, .. }) = (self.pending_crossing, &self.crossing)
             && !same_destination(crossing, destination)
         {
             let crossing_region_handle = *region_handle;
@@ -400,6 +404,14 @@ impl TeleportController {
             self.pending_crossing = None;
             self.crossing = CrossingState::Conflict { region_handle: *region_handle };
             self.status = TeleportStatus::CrossingConflict { crossing_region_handle, teleport_region_handle: destination.region_handle };
+            self.publish();
+            return true;
+        }
+        if outcome == HandoffEventOutcome::Conflict {
+            let active_region_handle =
+                self.active.as_ref().and_then(|active| active.destination.map(|destination| destination.region_handle));
+            self.active = None;
+            self.status = TeleportStatus::HandoffConflict { active_region_handle, conflicting_region_handle: destination.region_handle };
             self.publish();
             return true;
         }
@@ -419,8 +431,8 @@ impl TeleportController {
         false
     }
 
-    pub(super) fn on_failed(&mut self, failure: TeleportFailure) {
-        if self.active.take().is_some() {
+    pub(super) fn on_failed(&mut self, failure: TeleportFailure, outcome: HandoffEventOutcome) {
+        if outcome == HandoffEventOutcome::Accepted && self.active.take().is_some() {
             self.status = TeleportStatus::Failed(failure);
             self.publish();
         }
@@ -437,7 +449,10 @@ impl TeleportController {
         true
     }
 
-    pub(super) fn on_crossed_region(&mut self, destination: Destination) -> bool {
+    pub(super) fn on_crossed_region(&mut self, destination: Destination, outcome: HandoffEventOutcome) -> bool {
+        if outcome == HandoffEventOutcome::Ignored {
+            return false;
+        }
         let during_teleport = self.active.as_ref().is_some_and(|active| active.started);
         if let Some(teleport_destination) = self.active.as_ref().and_then(|active| active.destination)
             && !same_destination(teleport_destination, destination)
@@ -449,6 +464,16 @@ impl TeleportController {
                 crossing_region_handle: destination.region_handle,
                 teleport_region_handle: teleport_destination.region_handle,
             };
+            self.publish();
+            return true;
+        }
+        if outcome == HandoffEventOutcome::Conflict {
+            let active_region_handle =
+                self.active.as_ref().and_then(|active| active.destination.map(|destination| destination.region_handle));
+            self.active = None;
+            self.pending_crossing = None;
+            self.crossing = CrossingState::Conflict { region_handle: destination.region_handle };
+            self.status = TeleportStatus::HandoffConflict { active_region_handle, conflicting_region_handle: destination.region_handle };
             self.publish();
             return true;
         }
@@ -481,14 +506,17 @@ impl TeleportController {
     }
 
     pub(super) fn on_simulator_promoted(&mut self, region_handle: Option<u64>, endpoint: SocketAddr) -> bool {
-        if let (Some(region_handle), Some(crossing), CrossingState::Pending { region_handle: pending, .. }) =
+        let completed_crossing = if let (Some(region_handle), Some(crossing), CrossingState::Pending { region_handle: pending, .. }) =
             (region_handle, self.pending_crossing, &self.crossing)
             && *pending == region_handle
             && crossing.endpoint == endpoint
         {
             self.pending_crossing = None;
             self.crossing = CrossingState::Complete { region_handle };
-        }
+            Some(region_handle)
+        } else {
+            None
+        };
         let completed = self
             .active
             .as_ref()
@@ -504,10 +532,27 @@ impl TeleportController {
             };
             self.publish();
             true
+        } else if let Some(region_handle) = completed_crossing
+            && self.active.take().is_some()
+        {
+            self.status = TeleportStatus::SupersededByCrossing { region_handle };
+            self.publish();
+            false
         } else {
             self.publish();
             false
         }
+    }
+
+    pub(super) fn region_handle_for_promotion(&self, endpoint: SocketAddr) -> Option<u64> {
+        self.active
+            .as_ref()
+            .and_then(|active| active.destination)
+            .filter(|destination| destination.endpoint == endpoint)
+            .map(|destination| destination.region_handle)
+            .or_else(|| {
+                self.pending_crossing.filter(|destination| destination.endpoint == endpoint).map(|destination| destination.region_handle)
+            })
     }
 
     pub(super) fn publish(&self) {
@@ -730,7 +775,7 @@ mod tests {
 
             let mut controller = TeleportController::new();
             controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
-            controller.on_failed(failure);
+            controller.on_failed(failure, HandoffEventOutcome::Accepted);
             std::assert_matches!(controller.state.borrow().status, TeleportStatus::Failed(_));
         }
         assert_eq!(failure(b"custom_reason".to_vec(), Vec::new()).reason, TeleportFailureReason::Unknown(b"custom_reason".to_vec()));
@@ -788,10 +833,10 @@ mod tests {
         let teleport = Destination { region_handle: 11, endpoint: "127.0.0.1:13011".parse().expect("teleport address") };
         let mut controller = TeleportController::new();
         controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
-        assert!(!controller.on_crossed_region(crossing));
+        assert!(!controller.on_crossed_region(crossing, HandoffEventOutcome::Accepted));
 
         std::assert_matches!(controller.state.borrow().crossing, CrossingState::Pending { region_handle: 10, during_teleport: true });
-        assert!(controller.on_finish(teleport, 0, Some(13)));
+        assert!(controller.on_finish(teleport, 0, Some(13), HandoffEventOutcome::Conflict));
         std::assert_matches!(
             controller.state.borrow().status,
             TeleportStatus::CrossingConflict { crossing_region_handle: 10, teleport_region_handle: 11 }
@@ -801,14 +846,14 @@ mod tests {
     }
 
     #[test]
-    fn crossing_after_teleport_finish_reports_and_clears_the_same_conflict() {
+    fn crossing_conflicts_with_finish_without_a_teleport_start() {
         let crossing = Destination { region_handle: 10, endpoint: "127.0.0.1:13010".parse().expect("crossing address") };
         let teleport = Destination { region_handle: 11, endpoint: "127.0.0.1:13011".parse().expect("teleport address") };
         let mut controller = TeleportController::new();
-        controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
-        assert!(!controller.on_finish(teleport, 0, Some(13)));
+        assert!(!controller.on_crossed_region(crossing, HandoffEventOutcome::Accepted));
 
-        assert!(controller.on_crossed_region(crossing));
+        assert!(controller.active.is_none());
+        assert!(controller.on_finish(teleport, 0, Some(13), HandoffEventOutcome::Conflict));
 
         std::assert_matches!(
             controller.state.borrow().status,
@@ -817,6 +862,122 @@ mod tests {
         assert_eq!(controller.state.borrow().crossing, CrossingState::Conflict { region_handle: 10 });
         assert!(controller.active.is_none());
         assert!(controller.pending_crossing.is_none());
+    }
+
+    #[test]
+    fn crossing_after_teleport_start_completes_as_a_conflict_when_finish_names_another_destination() {
+        let crossing = Destination { region_handle: 10, endpoint: "127.0.0.1:13010".parse().expect("crossing address") };
+        let teleport = Destination { region_handle: 11, endpoint: "127.0.0.1:13011".parse().expect("teleport address") };
+        let mut controller = TeleportController::new();
+        controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
+
+        assert!(!controller.on_crossed_region(crossing, HandoffEventOutcome::Accepted));
+        assert_eq!(controller.state.borrow().crossing, CrossingState::Pending { region_handle: 10, during_teleport: true });
+        assert!(controller.on_finish(teleport, 0, Some(13), HandoffEventOutcome::Conflict));
+
+        std::assert_matches!(
+            controller.state.borrow().status,
+            TeleportStatus::CrossingConflict { crossing_region_handle: 10, teleport_region_handle: 11 }
+        );
+        assert_eq!(controller.state.borrow().crossing, CrossingState::Conflict { region_handle: 10 });
+        assert!(controller.active.is_none());
+        assert!(controller.pending_crossing.is_none());
+    }
+
+    #[test]
+    fn crossing_promotion_supersedes_unfinished_teleport_and_allows_retry() {
+        let crossing = Destination { region_handle: 10, endpoint: "127.0.0.1:13010".parse().expect("crossing address") };
+        let mut controller = TeleportController::new();
+        controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
+        assert!(!controller.on_crossed_region(crossing, HandoffEventOutcome::Accepted));
+
+        assert!(!controller.on_simulator_promoted(Some(crossing.region_handle), crossing.endpoint));
+
+        assert_eq!(controller.state.borrow().crossing, CrossingState::Complete { region_handle: crossing.region_handle });
+        assert_eq!(controller.state.borrow().status, TeleportStatus::SupersededByCrossing { region_handle: crossing.region_handle });
+        assert!(controller.active.is_none());
+        assert!(controller.pending_crossing.is_none());
+    }
+
+    #[test]
+    fn crossing_after_teleport_finish_reports_and_clears_the_same_conflict() {
+        let crossing = Destination { region_handle: 10, endpoint: "127.0.0.1:13010".parse().expect("crossing address") };
+        let teleport = Destination { region_handle: 11, endpoint: "127.0.0.1:13011".parse().expect("teleport address") };
+        let mut controller = TeleportController::new();
+        controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
+        assert!(!controller.on_finish(teleport, 0, Some(13), HandoffEventOutcome::Accepted));
+
+        assert!(controller.on_crossed_region(crossing, HandoffEventOutcome::Conflict));
+
+        std::assert_matches!(
+            controller.state.borrow().status,
+            TeleportStatus::CrossingConflict { crossing_region_handle: 10, teleport_region_handle: 11 }
+        );
+        assert_eq!(controller.state.borrow().crossing, CrossingState::Conflict { region_handle: 10 });
+        assert!(controller.active.is_none());
+        assert!(controller.pending_crossing.is_none());
+    }
+
+    #[test]
+    fn ignored_handoff_notices_do_not_change_the_accepted_destination_or_failure_state() {
+        let accepted = Destination { region_handle: 10, endpoint: "127.0.0.1:13010".parse().expect("accepted address") };
+        let rejected = Destination { region_handle: 11, endpoint: "127.0.0.1:13011".parse().expect("rejected address") };
+        let mut controller = TeleportController::new();
+        controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
+        assert!(!controller.on_finish(accepted, 5, Some(13), HandoffEventOutcome::Accepted));
+        let before = controller.state.borrow().clone();
+
+        assert!(!controller.on_finish(rejected, 8, Some(21), HandoffEventOutcome::Ignored));
+        controller.on_failed(
+            TeleportFailure { reason: TeleportFailureReason::Blocked, server_reason: b"blocked_tport".to_vec(), alert_info: Vec::new() },
+            HandoffEventOutcome::Ignored,
+        );
+        assert!(!controller.on_crossed_region(rejected, HandoffEventOutcome::Ignored));
+
+        assert_eq!(controller.state.borrow().status, before.status);
+        assert_eq!(controller.state.borrow().crossing, before.crossing);
+        assert_eq!(controller.active.as_ref().and_then(|active| active.destination), Some(accepted));
+        assert_eq!(controller.active.as_ref().map(|active| active.flags), Some(5));
+        assert_eq!(controller.active.as_ref().and_then(|active| active.sim_access), Some(13));
+    }
+
+    #[test]
+    fn rejected_crossing_does_not_leave_a_pending_busy_state() {
+        let rejected = Destination { region_handle: 11, endpoint: "127.0.0.1:13011".parse().expect("rejected address") };
+        let mut controller = TeleportController::new();
+
+        assert!(!controller.on_crossed_region(rejected, HandoffEventOutcome::Ignored));
+
+        assert_eq!(controller.state.borrow().crossing, CrossingState::None);
+        assert!(controller.pending_crossing.is_none());
+        assert!(controller.active.is_none());
+    }
+
+    #[test]
+    fn network_crossing_conflict_is_not_published_as_pending() {
+        let destination = Destination { region_handle: 11, endpoint: "127.0.0.1:13011".parse().expect("conflicting address") };
+        let mut controller = TeleportController::new();
+
+        assert!(controller.on_crossed_region(destination, HandoffEventOutcome::Conflict));
+
+        assert_eq!(controller.state.borrow().crossing, CrossingState::Conflict { region_handle: destination.region_handle });
+        assert!(controller.pending_crossing.is_none());
+        assert!(controller.active.is_none());
+        std::assert_matches!(
+            controller.state.borrow().status,
+            TeleportStatus::HandoffConflict { active_region_handle: None, conflicting_region_handle: 11 }
+        );
+    }
+
+    #[test]
+    fn accepted_return_destination_supplies_its_region_handle_for_reused_simulator_promotion() {
+        let destination = Destination { region_handle: 10, endpoint: "127.0.0.1:13010".parse().expect("destination") };
+        let mut controller = TeleportController::new();
+        controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(20));
+        assert!(!controller.on_finish(destination, 0, Some(13), HandoffEventOutcome::Accepted));
+
+        assert_eq!(controller.region_handle_for_promotion(destination.endpoint), Some(destination.region_handle));
+        assert_eq!(controller.region_handle_for_promotion("127.0.0.1:13011".parse().expect("other endpoint")), None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -839,7 +1000,7 @@ mod tests {
     fn crossing_complete_is_published_for_retry() {
         let destination = Destination { region_handle: 12, endpoint: "127.0.0.1:13012".parse().expect("crossing address") };
         let mut controller = TeleportController::new();
-        assert!(!controller.on_crossed_region(destination));
+        assert!(!controller.on_crossed_region(destination, HandoffEventOutcome::Accepted));
 
         assert!(!controller.on_simulator_promoted(Some(destination.region_handle), destination.endpoint));
         assert_eq!(controller.state.borrow().crossing, CrossingState::Complete { region_handle: destination.region_handle });

@@ -204,62 +204,98 @@ fn inventory_with_children() -> (Inventory, CategoryKey, CategoryKey, CategoryKe
     (inventory, root, first, second)
 }
 
-fn root_response(root: CategoryKey, children: &[CategoryKey], child_count: u32) -> Vec<u8> {
-    let categories = children
-        .iter()
-        .map(|child| {
-            Value::Map(Map::from([
-                ("category_id".into(), Value::Uuid(child.id().uuid())),
-                ("name".into(), Value::String(format!("folder-{}", child.id().uuid().as_u128()))),
-                ("parent_id".into(), Value::Uuid(root.id().uuid())),
-                ("version".into(), Value::Integer(1)),
-                ("descendents".into(), Value::Integer(child_count as i32)),
-            ]))
-        })
-        .collect::<Vec<_>>();
-    let response = Value::Map(Map::from([
-        ("category_id".into(), Value::Uuid(root.id().uuid())),
-        ("name".into(), Value::String(format!("folder-{}", root.id().uuid().as_u128()))),
-        ("version".into(), Value::Integer(2)),
-        ("descendents".into(), Value::Integer(children.len() as i32)),
-        ("_embedded".into(), Value::Map(Map::from([("categories".into(), Value::Array(categories))]))),
-    ]));
+fn hypermedia_link(href: String) -> Value {
+    Value::Map(Map::from([("href".into(), Value::String(href)), ("name".into(), Value::String("link".into()))]))
+}
+
+fn ais_category(category_id: Uuid, owner_id: Uuid, parent_id: Option<Uuid>, name: String, version: i32) -> Value {
+    let base_uri = "https://inventory.example.invalid/";
+    let parent_id = parent_id.unwrap_or_else(Uuid::nil);
+    let category_uri = format!("{base_uri}category/{category_id}");
+    let parent_uri = format!("{base_uri}category/{parent_id}");
+    let links = Map::from([
+        ("self".into(), hypermedia_link(category_uri.clone())),
+        ("parent".into(), hypermedia_link(parent_uri)),
+        ("children".into(), hypermedia_link(format!("{category_uri}/children"))),
+        ("items".into(), hypermedia_link(format!("{category_uri}/items"))),
+        ("links".into(), hypermedia_link(format!("{category_uri}/links"))),
+    ]);
+    Value::Map(Map::from([
+        ("_base_uri".into(), Value::String(base_uri.into())),
+        ("_links".into(), Value::Map(links)),
+        ("agent_id".into(), Value::Uuid(owner_id)),
+        ("category_id".into(), Value::Uuid(category_id)),
+        ("name".into(), Value::String(name)),
+        ("parent_id".into(), Value::Uuid(parent_id)),
+        ("type_default".into(), Value::Integer(-1)),
+        ("version".into(), Value::Integer(version)),
+    ]))
+}
+
+fn ais_root_response(root: CategoryKey, categories: Map) -> Vec<u8> {
+    let mut response = ais_category(root.id().uuid(), root.owner().id(), None, format!("folder-{}", root.id().uuid().as_u128()), 2);
+    let Value::Map(fields) = &mut response else { unreachable!() };
+    fields.insert(
+        "_embedded".into(),
+        Value::Map(Map::from([
+            ("categories".into(), Value::Map(categories)),
+            ("items".into(), Value::Map(Map::new())),
+            ("links".into(), Value::Map(Map::new())),
+        ])),
+    );
     xml::to_vec(&response).expect("encode root response")
 }
 
-fn root_response_with_child_version(root: CategoryKey, child: CategoryKey, version: i32, child_count: u32) -> Vec<u8> {
-    let child = Value::Map(Map::from([
-        ("category_id".into(), Value::Uuid(child.id().uuid())),
-        ("name".into(), Value::String(format!("folder-{}", child.id().uuid().as_u128()))),
-        ("parent_id".into(), Value::Uuid(root.id().uuid())),
-        ("version".into(), Value::Integer(version)),
-        ("descendents".into(), Value::Integer(child_count as i32)),
-    ]));
-    let response = Value::Map(Map::from([
-        ("category_id".into(), Value::Uuid(root.id().uuid())),
-        ("name".into(), Value::String(format!("folder-{}", root.id().uuid().as_u128()))),
-        ("version".into(), Value::Integer(2)),
-        ("descendents".into(), Value::Integer(1)),
-        ("_embedded".into(), Value::Map(Map::from([("categories".into(), Value::Array(vec![child]))]))),
-    ]));
-    xml::to_vec(&response).expect("encode parent response with updated child metadata")
+fn root_response(root: CategoryKey, children: &[CategoryKey]) -> Vec<u8> {
+    let categories = children
+        .iter()
+        .map(|child| {
+            (
+                child.id().uuid().to_string(),
+                ais_category(
+                    child.id().uuid(),
+                    child.owner().id(),
+                    Some(root.id().uuid()),
+                    format!("folder-{}", child.id().uuid().as_u128()),
+                    1,
+                ),
+            )
+        })
+        .collect::<Map>();
+    ais_root_response(root, categories)
+}
+
+fn root_response_with_mismatched_category_key(root: CategoryKey, key_id: Uuid, child_id: Uuid) -> Vec<u8> {
+    let child = ais_category(child_id, root.owner().id(), Some(root.id().uuid()), format!("folder-{}", child_id.as_u128()), 1);
+    ais_root_response(root, Map::from([(key_id.to_string(), child)]))
+}
+
+fn root_response_with_child_version(root: CategoryKey, child: CategoryKey, version: i32) -> Vec<u8> {
+    let categories = Map::from([(
+        child.id().uuid().to_string(),
+        ais_category(
+            child.id().uuid(),
+            child.owner().id(),
+            Some(root.id().uuid()),
+            format!("folder-{}", child.id().uuid().as_u128()),
+            version,
+        ),
+    )]);
+    ais_root_response(root, categories)
 }
 
 fn empty_folder_response(folder: CategoryKey, version: i32) -> Vec<u8> {
-    let response = Value::Map(Map::from([
-        ("category_id".into(), Value::Uuid(folder.id().uuid())),
-        ("name".into(), Value::String(format!("folder-{}", folder.id().uuid().as_u128()))),
-        ("version".into(), Value::Integer(version)),
-        ("descendents".into(), Value::Integer(0)),
-        (
-            "_embedded".into(),
-            Value::Map(Map::from([
-                ("categories".into(), Value::Array(Vec::new())),
-                ("items".into(), Value::Array(Vec::new())),
-                ("links".into(), Value::Array(Vec::new())),
-            ])),
-        ),
-    ]));
+    let mut response =
+        ais_category(folder.id().uuid(), folder.owner().id(), None, format!("folder-{}", folder.id().uuid().as_u128()), version);
+    let Value::Map(fields) = &mut response else { unreachable!() };
+    fields.insert(
+        "_embedded".into(),
+        Value::Map(Map::from([
+            ("categories".into(), Value::Map(Map::new())),
+            ("items".into(), Value::Map(Map::new())),
+            ("links".into(), Value::Map(Map::new())),
+        ])),
+    );
     xml::to_vec(&response).expect("encode empty folder response")
 }
 
@@ -268,17 +304,18 @@ fn full_folder_response(folder: CategoryKey, item_count: usize, id_prefix: u128)
     let mut body = String::with_capacity(item_count.saturating_mul(240).saturating_add(256));
     write!(
         body,
-        "<llsd><map><key>category_id</key><uuid>{}</uuid><key>name</key><string>large</string><key>version</key><integer>1</integer><key>descendents</key><integer>{item_count}</integer><key>_embedded</key><map><key>items</key><array>",
-        folder.id().uuid()
+        "<llsd><map><key>_base_uri</key><string>https://inventory.example.invalid/</string><key>_links</key><map><key>self</key><map><key>href</key><string>https://inventory.example.invalid/category/{}</string><key>name</key><string>link</string></map></map><key>agent_id</key><uuid>{}</uuid><key>category_id</key><uuid>{}</uuid><key>name</key><string>large</string><key>parent_id</key><uuid>00000000-0000-0000-0000-000000000000</uuid><key>type_default</key><integer>-1</integer><key>version</key><integer>1</integer><key>_embedded</key><map><key>categories</key><map/><key>links</key><map/><key>items</key><map>",
+        folder.id().uuid(),
+        folder.owner().id(), folder.id().uuid()
     )
     .expect("write large-folder header");
     let parent_id = folder.id().uuid();
     for index in 0..item_count {
         let item_id = Uuid::from_u128(id_prefix + index as u128);
-        write!(body, "<map><key>item_id</key><uuid>{item_id}</uuid><key>parent_id</key><uuid>{parent_id}</uuid><key>name</key><string>i</string><key>type</key><integer>7</integer><key>inv_type</key><integer>7</integer></map>")
+        write!(body, "<key>{item_id}</key><map><key>item_id</key><uuid>{item_id}</uuid><key>parent_id</key><uuid>{parent_id}</uuid><key>name</key><string>i</string><key>created_at</key><integer>0</integer><key>type</key><integer>7</integer><key>inv_type</key><integer>7</integer></map>")
             .expect("write large-folder item");
     }
-    body.push_str("</array></map></map></llsd>");
+    body.push_str("</map></map></map></llsd>");
     body.into_bytes()
 }
 
@@ -360,42 +397,62 @@ async fn ais_recursively_decodes_folders_items_and_hypermedia_metadata() {
     let owner = InventoryOwner::new(Uuid::from_u128(1));
     let root = key(owner, 10);
     let child = key(owner, 11);
+    let item_id = Uuid::from_u128(12);
+    let base_uri = "https://inventory.example.invalid/";
+    let item_uri = format!("{base_uri}item/{item_id}");
+    let category_uri = format!("{base_uri}category/{}", child.id().uuid());
     let item = Value::Map(Map::from([
-        ("item_id".into(), Value::Uuid(Uuid::from_u128(12))),
+        ("_base_uri".into(), Value::String(base_uri.into())),
+        (
+            "_links".into(),
+            Value::Map(Map::from([("self".into(), hypermedia_link(item_uri)), ("parent".into(), hypermedia_link(category_uri.clone()))])),
+        ),
+        ("agent_id".into(), Value::Uuid(owner.id())),
+        ("asset_id".into(), Value::Uuid(Uuid::from_u128(13))),
+        ("created_at".into(), Value::Integer(1_700_000_000)),
+        ("flags".into(), Value::Integer(0)),
+        ("item_id".into(), Value::Uuid(item_id)),
         ("parent_id".into(), Value::Uuid(child.id().uuid())),
         ("name".into(), Value::String("card".into())),
         ("desc".into(), Value::String("sample".into())),
         ("type".into(), Value::Integer(7)),
         ("inv_type".into(), Value::Integer(7)),
-    ]));
-    let child_category = Value::Map(Map::from([
-        ("category_id".into(), Value::Uuid(child.id().uuid())),
-        ("parent_id".into(), Value::Uuid(root.id().uuid())),
-        ("name".into(), Value::String("child".into())),
-        ("version".into(), Value::Integer(4)),
-        ("descendents".into(), Value::Integer(1)),
-        ("_base_uri".into(), Value::String("https://inventory.example/".into())),
         (
-            "_links".into(),
-            Value::Map(Map::from([("self".into(), Value::Map(Map::from([("href".into(), Value::String("/category/child".into()))])))])),
+            "permissions".into(),
+            Value::Map(Map::from([
+                ("base_mask".into(), Value::Integer(581_632)),
+                ("creator_id".into(), Value::Uuid(Uuid::from_u128(14))),
+                ("everyone_mask".into(), Value::Integer(0)),
+                ("group_id".into(), Value::Uuid(Uuid::nil())),
+                ("group_mask".into(), Value::Integer(0)),
+                ("last_owner_id".into(), Value::Uuid(Uuid::from_u128(15))),
+                ("next_owner_mask".into(), Value::Integer(581_632)),
+                ("owner_id".into(), Value::Uuid(Uuid::from_u128(16))),
+                ("owner_mask".into(), Value::Integer(581_632)),
+            ])),
         ),
-        (
-            "_embedded".into(),
-            Value::Map(Map::from([("items".into(), Value::Array(vec![item])), ("links".into(), Value::Array(Vec::new()))])),
-        ),
+        ("sale_info".into(), Value::Map(Map::from([("sale_price".into(), Value::Integer(0)), ("sale_type".into(), Value::Integer(0))]))),
     ]));
-    let body = Value::Map(Map::from([
-        ("category_id".into(), Value::Uuid(root.id().uuid())),
-        ("name".into(), Value::String("root".into())),
-        ("version".into(), Value::Integer(3)),
-        ("descendents".into(), Value::Integer(1)),
-        ("_base_uri".into(), Value::String("https://inventory.example/".into())),
-        (
-            "_links".into(),
-            Value::Map(Map::from([("self".into(), Value::Map(Map::from([("href".into(), Value::String("/category/root".into()))])))])),
-        ),
-        ("_embedded".into(), Value::Map(Map::from([("categories".into(), Value::Array(vec![child_category]))]))),
-    ]));
+    let mut child_category = ais_category(child.id().uuid(), owner.id(), Some(root.id().uuid()), "child".into(), 4);
+    let Value::Map(child_fields) = &mut child_category else { unreachable!() };
+    child_fields.insert(
+        "_embedded".into(),
+        Value::Map(Map::from([
+            ("categories".into(), Value::Map(Map::new())),
+            ("items".into(), Value::Map(Map::from([(item_id.to_string(), item)]))),
+            ("links".into(), Value::Map(Map::new())),
+        ])),
+    );
+    let mut body = ais_category(root.id().uuid(), owner.id(), None, "root".into(), 3);
+    let Value::Map(root_fields) = &mut body else { unreachable!() };
+    root_fields.insert(
+        "_embedded".into(),
+        Value::Map(Map::from([
+            ("categories".into(), Value::Map(Map::from([(child.id().uuid().to_string(), child_category)]))),
+            ("items".into(), Value::Map(Map::new())),
+            ("links".into(), Value::Map(Map::new())),
+        ])),
+    );
     let response = xml::to_vec(&body).expect("encode AIS fixture");
     let responder = tokio::spawn(async move {
         let request = peer.next().await;
@@ -422,19 +479,41 @@ async fn ais_item_endpoint_decodes_a_link_target_only_when_requested() {
     let owner = InventoryOwner::new(Uuid::from_u128(1));
     let parent = key(owner, 15);
     let item_id = Uuid::from_u128(16);
+    let base_uri = "https://inventory.example.invalid/";
     let body = xml::to_vec(&Value::Map(Map::from([
+        ("_base_uri".into(), Value::String(base_uri.into())),
+        (
+            "_links".into(),
+            Value::Map(Map::from([
+                ("self".into(), hypermedia_link(format!("{base_uri}item/{item_id}"))),
+                ("parent".into(), hypermedia_link(format!("{base_uri}category/{}", parent.id().uuid()))),
+            ])),
+        ),
+        ("agent_id".into(), Value::Uuid(owner.id())),
+        ("created_at".into(), Value::Integer(1_700_000_000)),
+        ("desc".into(), Value::String("linked landmark".into())),
+        ("flags".into(), Value::Integer(0)),
+        ("inv_type".into(), Value::Integer(3)),
         ("item_id".into(), Value::Uuid(item_id)),
         ("parent_id".into(), Value::Uuid(parent.id().uuid())),
-        ("owner_id".into(), Value::Uuid(owner.id())),
         ("name".into(), Value::String("linked landmark".into())),
         ("asset_id".into(), Value::Uuid(Uuid::from_u128(17))),
         ("type".into(), Value::Integer(3)),
-        ("inv_type".into(), Value::Integer(3)),
-        ("_base_uri".into(), Value::String("https://inventory.example/".into())),
         (
-            "_links".into(),
-            Value::Map(Map::from([("self".into(), Value::Map(Map::from([("href".into(), Value::String("/item/target".into()))])))])),
+            "permissions".into(),
+            Value::Map(Map::from([
+                ("base_mask".into(), Value::Integer(581_632)),
+                ("creator_id".into(), Value::Uuid(Uuid::from_u128(18))),
+                ("everyone_mask".into(), Value::Integer(0)),
+                ("group_id".into(), Value::Uuid(Uuid::nil())),
+                ("group_mask".into(), Value::Integer(0)),
+                ("last_owner_id".into(), Value::Uuid(Uuid::from_u128(19))),
+                ("next_owner_mask".into(), Value::Integer(581_632)),
+                ("owner_id".into(), Value::Uuid(Uuid::from_u128(20))),
+                ("owner_mask".into(), Value::Integer(581_632)),
+            ])),
         ),
+        ("sale_info".into(), Value::Map(Map::from([("sale_price".into(), Value::Integer(0)), ("sale_type".into(), Value::Integer(0))]))),
     ])))
     .expect("encode AIS item fixture");
     let responder = tokio::spawn(async move {
@@ -647,7 +726,7 @@ async fn missing_folder_keeps_walk_retryable() {
 
     let root_request = peer.next().await;
     assert_eq!(root_request.path, format!("/ais/category/{}/children?depth=16", root.id().uuid()));
-    root_request.respond(200, root_response(root, &[missing, valid], 1)).await;
+    root_request.respond(200, root_response(root, &[missing, valid])).await;
     let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
     let mut inventory = inventory;
     apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply root response");
@@ -729,18 +808,15 @@ async fn rejected_folder_can_be_requested_again() {
     peer.grant(&[("InventoryAPIv3", "/ais")]).await;
 
     let first = peer.next().await;
-    first.respond(200, root_response(root, &[child, child], 0)).await;
-    let InventoryFetchEvent::Folder { fetch, applied } = next_event(&mut events).await else {
-        panic!("expected first folder result");
+    first.respond(200, root_response_with_mismatched_category_key(root, child.id().uuid(), Uuid::from_u128(47))).await;
+    let InventoryFetchEvent::Failed { folder, error } = next_event(&mut events).await else {
+        panic!("expected first folder response to fail validation");
     };
-    std::assert_matches!(
-        inventory.apply_folder_fetch(fetch.folder, fetch.version, fetch.descendent_count, fetch.children),
-        Err(::inventory::InventoryError::DuplicateFetchChild)
-    );
-    applied.send(FolderApplyOutcome { rejected: true }).expect("scheduler waits for rejected apply outcome");
+    assert_eq!(folder, root);
+    std::assert_matches!(error, InventoryFetchError::InvalidResponse);
     assert!(!inventory.snapshot().is_complete(root));
 
-    requests.send(ForegroundRequest::background(root)).await.expect("queue retry after rejected model apply");
+    requests.send(ForegroundRequest::background(root)).await.expect("queue retry after rejected folder response");
     let retry = peer.next().await;
     assert_eq!(retry.path, format!("/ais/category/{}/children?depth=0", root.id().uuid()));
     retry.respond(200, empty_folder_response(root, 2)).await;
@@ -828,7 +904,7 @@ async fn parent_response_requeues_a_completed_child_when_its_new_count_is_unknow
     apply_and_acknowledge(&mut inventory, &model, child_fetch, child_applied).expect("apply first child response");
     assert!(inventory.snapshot().is_complete(child));
 
-    root_request.respond(200, root_response_with_child_version(root, child, 11, 1)).await;
+    root_request.respond(200, root_response_with_child_version(root, child, 11)).await;
     let (fetch, applied) = take_folder_event(next_event(&mut events).await, root);
     apply_and_acknowledge(&mut inventory, &model, fetch, applied).expect("apply parent response");
     assert!(!inventory.snapshot().is_complete(child));
@@ -856,7 +932,7 @@ async fn foreground_request_preempts_in_flight_background_folders() {
 
     let root_request = peer.next().await;
     assert_eq!(root_request.path, format!("/ais/category/{}/children?depth=16", root.id().uuid()));
-    root_request.respond(200, root_response(root, &[first, second], 1)).await;
+    root_request.respond(200, root_response(root, &[first, second])).await;
     let (root_fetch, root_applied) = take_folder_event(next_event(&mut events).await, root);
     assert!(root_fetch.children.len() == 2);
     apply_and_acknowledge(&mut inventory, &model, root_fetch, root_applied).expect("apply root response");
@@ -917,7 +993,7 @@ async fn one_hundred_thousand_items_load_with_bounded_responses_and_concurrency(
     peer.grant(&[("InventoryAPIv3", "/ais")]).await;
 
     let root_request = peer.next().await;
-    root_request.respond(200, root_response(root, &[first, second], ITEMS_PER_FOLDER as u32)).await;
+    root_request.respond(200, root_response(root, &[first, second])).await;
     let (root_fetch, root_applied) = take_folder_event(next_event(&mut events).await, root);
     apply_and_acknowledge(&mut inventory, &model, root_fetch, root_applied).expect("apply root response");
 

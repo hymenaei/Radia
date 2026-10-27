@@ -133,10 +133,16 @@ struct ParseCounts {
     items: usize,
 }
 
+#[derive(Clone, Copy)]
+enum InventoryWireFormat {
+    Ais,
+    Legacy,
+}
+
 pub fn decode_ais_children(bytes: &[u8], expected_folder: Uuid, expected_owner: Uuid) -> Result<Category, DecodeError> {
     let response = decode_llsd(bytes)?;
     let mut counts = ParseCounts::default();
-    let category = parse_category(&response, expected_owner, None, 0, &mut counts)?;
+    let category = parse_category(&response, expected_owner, None, 0, &mut counts, InventoryWireFormat::Ais)?;
     if category.id != expected_folder {
         return Err(DecodeError::InvalidResponse);
     }
@@ -146,7 +152,7 @@ pub fn decode_ais_children(bytes: &[u8], expected_folder: Uuid, expected_owner: 
 pub fn decode_ais_item(bytes: &[u8], expected_item: Uuid, expected_owner: Uuid) -> Result<Item, DecodeError> {
     let response = decode_llsd(bytes)?;
     validate_hypermedia(map(&response)?)?;
-    let item = parse_item(&response, expected_owner, None, false)?;
+    let item = parse_item(&response, expected_owner, None, false, InventoryWireFormat::Ais)?;
     if item.id != expected_item || item.parent_id.is_none_or(|parent| parent.is_nil()) {
         return Err(DecodeError::InvalidResponse);
     }
@@ -156,15 +162,30 @@ pub fn decode_ais_item(bytes: &[u8], expected_item: Uuid, expected_owner: Uuid) 
 pub fn decode_ais_edit_response(bytes: &[u8], expected_owner: Uuid) -> Result<AisEditResponse, DecodeError> {
     let response = decode_llsd(bytes)?;
     let fields = map(&response)?;
-    let has_category = fields.contains_key("category_id")
-        || fields.contains_key("folder_id")
-        || (fields.contains_key("uuid") && fields.contains_key("type_default"));
-    let has_item = fields.contains_key("item_id") || (fields.contains_key("uuid") && fields.contains_key("inv_type"));
+    let has_category = fields.contains_key("category_id");
+    let has_item = fields.contains_key("item_id");
     if has_category && has_item {
         return Err(DecodeError::InvalidResponse);
     }
-    let category = has_category.then(|| parse_category(&response, expected_owner, None, 0, &mut ParseCounts::default())).transpose()?;
-    let item = has_item.then(|| parse_item(&response, expected_owner, None, false)).transpose()?;
+    let category = has_category
+        .then(|| parse_category(&response, expected_owner, None, 0, &mut ParseCounts::default(), InventoryWireFormat::Ais))
+        .transpose()?;
+    let item = has_item.then(|| parse_item(&response, expected_owner, None, false, InventoryWireFormat::Ais)).transpose()?;
+    let removed_items = metadata_ids(fields, "_removed_items", MAX_ITEMS)?;
+    validate_metadata_ids(fields, "_active_gestures_removed", MAX_ITEMS)?;
+    metadata_integer_uuid_map(fields, "_attachments_removed", MAX_ITEMS)?;
+    metadata_integer_uuid_map(fields, "_wearables_removed", MAX_ITEMS)?;
+    validate_metadata_ids(fields, "_moved_items", MAX_ITEMS)?;
+    metadata_uuid_uuid_map(fields, "_linked_ids", MAX_ITEMS)?;
+    validate_update_result(fields)?;
+    if uuid_field(fields, &["_top_category_id"])?.is_some_and(|id| id.is_nil()) {
+        return Err(DecodeError::InvalidResponse);
+    }
+    if let Some(total) = integer(fields, &["_total_items_removed"])?
+        && total < 0
+    {
+        return Err(DecodeError::InvalidResponse);
+    }
     Ok(AisEditResponse {
         category,
         item,
@@ -172,7 +193,7 @@ pub fn decode_ais_edit_response(bytes: &[u8], expected_owner: Uuid) -> Result<Ai
         created_items: metadata_ids(fields, "_created_items", MAX_ITEMS)?,
         updated_categories: metadata_ids(fields, "_updated_categories", MAX_CATEGORIES)?,
         updated_items: metadata_ids(fields, "_updated_items", MAX_ITEMS)?,
-        removed_items: metadata_ids(fields, "_removed_items", MAX_ITEMS)?,
+        removed_items,
         categories_removed: metadata_ids(fields, "_categories_removed", MAX_CATEGORIES)?,
         category_items_removed: metadata_ids(fields, "_category_items_removed", MAX_ITEMS)?,
         broken_links_removed: metadata_ids(fields, "_broken_links_removed", MAX_ITEMS)?,
@@ -236,7 +257,7 @@ pub fn decode_fetch_inventory2(bytes: &[u8], expected_owner: Uuid, requested_ite
     items
         .iter()
         .map(|value| {
-            let item = parse_item(value, expected_owner, None, false)?;
+            let item = parse_item(value, expected_owner, None, false, InventoryWireFormat::Legacy)?;
             if item.parent_id.is_none_or(|parent| parent.is_nil()) || !requested.contains(&item.id) || !returned.insert(item.id) {
                 return Err(DecodeError::InvalidResponse);
             }
@@ -284,11 +305,18 @@ fn parse_folder_descendents(value: &Value, requested: RequestedFolder) -> Result
     }
     let mut categories = Vec::with_capacity(raw_categories.len());
     for category in raw_categories {
-        categories.push(parse_category(category, requested.owner_id, Some(id), 0, &mut ParseCounts::default())?);
+        categories.push(parse_category(
+            category,
+            requested.owner_id,
+            Some(id),
+            0,
+            &mut ParseCounts::default(),
+            InventoryWireFormat::Legacy,
+        )?);
     }
     let mut items = Vec::with_capacity(raw_items.len());
     for item in raw_items {
-        items.push(parse_item(item, requested.owner_id, Some(id), false)?);
+        items.push(parse_item(item, requested.owner_id, Some(id), false, InventoryWireFormat::Legacy)?);
     }
     Ok(FolderDescendents { id, owner_id, version, descendent_count, categories, items })
 }
@@ -299,6 +327,7 @@ fn parse_category(
     expected_parent: Option<Uuid>,
     depth: usize,
     counts: &mut ParseCounts,
+    format: InventoryWireFormat,
 ) -> Result<Category, DecodeError> {
     if depth > MAX_AIS_DEPTH {
         return Err(DecodeError::TooLarge);
@@ -309,72 +338,123 @@ fn parse_category(
     }
     let fields = map(value)?;
     validate_hypermedia(fields)?;
-    let id = uuid_field(fields, &["category_id", "folder_id", "uuid"])?.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
-    let owner_id = owner_field(fields, expected_owner)?;
+    let id_names = match format {
+        InventoryWireFormat::Ais => &["category_id"][..],
+        InventoryWireFormat::Legacy => &["folder_id", "category_id"][..],
+    };
+    let id = uuid_field(fields, id_names)?.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
+    let owner_id = owner_field(fields, expected_owner, format)?;
     let parent_id = parent_field(fields, expected_parent)?;
     let name = string(fields, &["name"], "")?;
     if name.len() > MAX_NAME_BYTES {
         return Err(DecodeError::InvalidResponse);
     }
     let version = integer(fields, &["version"])?;
-    let descendent_count = count(fields, &["descendents", "descendent_count"])?;
+    let descendent_count = match format {
+        InventoryWireFormat::Ais => None,
+        InventoryWireFormat::Legacy => count(fields, &["descendents", "descendent_count"])?,
+    };
     if descendent_count.is_some_and(|count| count as usize > MAX_FOLDER_CHILDREN) {
         return Err(DecodeError::TooLarge);
     }
-    let preferred_folder_type = integer(fields, &["type_default"])?;
+    let preferred_folder_type = match format {
+        InventoryWireFormat::Ais => integer(fields, &["type_default"]),
+        InventoryWireFormat::Legacy => integer(fields, &["type_default", "type"]),
+    }?;
     let mut category = Category { id, owner_id, parent_id, name, version, descendent_count, preferred_folder_type, children: None };
     let Some(embedded) = fields.get("_embedded") else { return Ok(category) };
+    if matches!(format, InventoryWireFormat::Legacy) {
+        return Err(DecodeError::InvalidResponse);
+    }
     let embedded = map(embedded)?;
-    let raw_categories = optional_array(embedded, "categories", 0)?;
-    let raw_items = optional_array(embedded, "items", 0)?;
-    let raw_links = optional_array(embedded, "links", 0)?;
+    let raw_categories = map_field(embedded, "categories")?;
+    let raw_items = map_field(embedded, "items")?;
+    let raw_links = map_field(embedded, "links")?;
     let direct_count = raw_categories
-        .len()
-        .checked_add(raw_items.len())
-        .and_then(|count| count.checked_add(raw_links.len()))
+        .map_or(0, |values| values.len())
+        .checked_add(raw_items.map_or(0, |values| values.len()))
+        .and_then(|count| count.checked_add(raw_links.map_or(0, |values| values.len())))
         .ok_or(DecodeError::TooLarge)?;
     if direct_count > MAX_FOLDER_CHILDREN {
         return Err(DecodeError::TooLarge);
     }
     let mut children = Vec::with_capacity(direct_count);
-    for item in raw_items {
+    for (key, item) in raw_items.into_iter().flat_map(|items| items.iter()) {
         counts.items = counts.items.checked_add(1).ok_or(DecodeError::TooLarge)?;
         if counts.items > MAX_ITEMS {
             return Err(DecodeError::TooLarge);
         }
-        children.push(Child::Item(parse_item(item, expected_owner, Some(id), false)?));
+        let expected_id = Uuid::parse_str(key).map_err(|_| DecodeError::InvalidResponse)?;
+        let item = parse_item(item, expected_owner, Some(id), false, format)?;
+        if item.id != expected_id {
+            return Err(DecodeError::InvalidResponse);
+        }
+        children.push(Child::Item(item));
     }
-    for link in raw_links {
+    for (key, link) in raw_links.into_iter().flat_map(|links| links.iter()) {
         counts.items = counts.items.checked_add(1).ok_or(DecodeError::TooLarge)?;
         if counts.items > MAX_ITEMS {
             return Err(DecodeError::TooLarge);
         }
-        children.push(Child::Item(parse_item(link, expected_owner, Some(id), true)?));
+        let expected_id = Uuid::parse_str(key).map_err(|_| DecodeError::InvalidResponse)?;
+        let link = parse_item(link, expected_owner, Some(id), true, format)?;
+        if link.id != expected_id {
+            return Err(DecodeError::InvalidResponse);
+        }
+        children.push(Child::Item(link));
     }
-    for child in raw_categories {
-        children.push(Child::Category(parse_category(child, expected_owner, Some(id), depth.saturating_add(1), counts)?));
+    for (key, child) in raw_categories.into_iter().flat_map(|categories| categories.iter()) {
+        let expected_id = Uuid::parse_str(key).map_err(|_| DecodeError::InvalidResponse)?;
+        let child = parse_category(child, expected_owner, Some(id), depth.saturating_add(1), counts, format)?;
+        if child.id != expected_id {
+            return Err(DecodeError::InvalidResponse);
+        }
+        children.push(Child::Category(child));
     }
-    category.descendent_count = Some(category.descendent_count.unwrap_or(direct_count as u32));
+    if raw_categories.is_some() && raw_items.is_some() && raw_links.is_some() {
+        category.descendent_count = Some(direct_count as u32);
+    }
     category.children = Some(children);
     Ok(category)
 }
 
-fn parse_item(value: &Value, expected_owner: Uuid, expected_parent: Option<Uuid>, link: bool) -> Result<Item, DecodeError> {
+fn parse_item(
+    value: &Value,
+    expected_owner: Uuid,
+    expected_parent: Option<Uuid>,
+    link: bool,
+    format: InventoryWireFormat,
+) -> Result<Item, DecodeError> {
     let fields = map(value)?;
     validate_hypermedia(fields)?;
-    let id = uuid_field(fields, &["item_id", "uuid"])?.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
-    let owner_id = owner_field(fields, expected_owner)?;
+    let id = uuid_field(fields, &["item_id"])?.filter(|id| !id.is_nil()).ok_or(DecodeError::InvalidResponse)?;
+    let owner_id = owner_field(fields, expected_owner, format)?;
     let parent_id = parent_field(fields, expected_parent)?;
-    let asset_id = uuid_field(fields, if link { &["linked_id", "asset_id"] } else { &["asset_id", "linked_id"] })?;
-    let asset_type = inventory_type(fields, &["type", "asset_type"], named_asset_type)?;
-    let inventory_type = inventory_type(fields, &["inv_type", "inventory_type"], named_inventory_type)?;
+    let asset_id_names = match (format, link) {
+        (InventoryWireFormat::Ais, true) => &["linked_id"][..],
+        (InventoryWireFormat::Ais, false) => &["asset_id"][..],
+        (InventoryWireFormat::Legacy, _) => &["asset_id", "linked_id"][..],
+    };
+    let asset_id = uuid_field(fields, asset_id_names)?;
+    if matches!((format, link), (InventoryWireFormat::Ais, true)) && asset_id.is_none() {
+        return Err(DecodeError::InvalidResponse);
+    }
+    let (asset_type_names, inventory_type_names, description_names) = match format {
+        InventoryWireFormat::Ais => (&["type"][..], &["inv_type"][..], &["desc"][..]),
+        InventoryWireFormat::Legacy => (&["type", "asset_type"][..], &["inv_type", "inventory_type"][..], &["desc", "description"][..]),
+    };
+    let asset_type = inventory_type(fields, asset_type_names, named_asset_type)?;
+    let inventory_type = inventory_type(fields, inventory_type_names, named_inventory_type)?;
     let name = string(fields, &["name"], "")?;
-    let description = string(fields, &["desc", "description"], "")?;
+    let description = string(fields, description_names, "")?;
     if name.len() > MAX_NAME_BYTES || description.len() > MAX_DESCRIPTION_BYTES {
         return Err(DecodeError::InvalidResponse);
     }
     let flags = unsigned(fields, &["flags"])?.unwrap_or_default();
-    let created_at = timestamp(fields, &["created_at", "creation_date"])?.unwrap_or_default();
+    let created_at = match format {
+        InventoryWireFormat::Ais => integer(fields, &["created_at"])?.map(i64::from).unwrap_or_default(),
+        InventoryWireFormat::Legacy => timestamp(fields, &["created_at", "creation_date"])?.unwrap_or_default(),
+    };
     let permissions = map_field(fields, "permissions")?;
     let sale_info = map_field(fields, "sale_info")?;
     Ok(Item {
@@ -439,6 +519,26 @@ fn metadata_ids(fields: &llsd::Map, name: &str, limit: usize) -> Result<Vec<Uuid
     Ok(ids)
 }
 
+fn validate_metadata_ids(fields: &llsd::Map, name: &str, limit: usize) -> Result<(), DecodeError> {
+    let Some(value) = fields.get(name) else { return Ok(()) };
+    let values = array(Some(value))?;
+    if values.len() > limit {
+        return Err(DecodeError::TooLarge);
+    }
+    let mut unique = std::collections::HashSet::with_capacity(values.len());
+    for value in values {
+        let id = match value {
+            Value::Uuid(id) => *id,
+            Value::String(value) => Uuid::parse_str(value).map_err(|_| DecodeError::InvalidResponse)?,
+            _ => return Err(DecodeError::InvalidResponse),
+        };
+        if id.is_nil() || !unique.insert(id) {
+            return Err(DecodeError::InvalidResponse);
+        }
+    }
+    Ok(())
+}
+
 fn metadata_versions(fields: &llsd::Map, name: &str) -> Result<BTreeMap<Uuid, i32>, DecodeError> {
     let Some(value) = fields.get(name) else { return Ok(BTreeMap::new()) };
     let values = map(value)?;
@@ -456,6 +556,61 @@ fn metadata_versions(fields: &llsd::Map, name: &str) -> Result<BTreeMap<Uuid, i3
             Ok((id, version))
         })
         .collect()
+}
+
+fn metadata_integer_uuid_map(fields: &llsd::Map, name: &str, limit: usize) -> Result<(), DecodeError> {
+    let Some(values) = map_field(fields, name)? else { return Ok(()) };
+    if values.len() > limit {
+        return Err(DecodeError::TooLarge);
+    }
+    let mut indices = std::collections::HashSet::with_capacity(values.len());
+    for (index, value) in values {
+        let index = index.parse::<u32>().map_err(|_| DecodeError::InvalidResponse)?;
+        match value {
+            Value::Uuid(_) => {}
+            Value::String(value) => {
+                Uuid::parse_str(value).map_err(|_| DecodeError::InvalidResponse)?;
+            }
+            _ => return Err(DecodeError::InvalidResponse),
+        }
+        if !indices.insert(index) {
+            return Err(DecodeError::InvalidResponse);
+        }
+    }
+    Ok(())
+}
+
+fn metadata_uuid_uuid_map(fields: &llsd::Map, name: &str, limit: usize) -> Result<(), DecodeError> {
+    let Some(values) = map_field(fields, name)? else { return Ok(()) };
+    if values.len() > limit {
+        return Err(DecodeError::TooLarge);
+    }
+    for (key, value) in values {
+        Uuid::parse_str(key).map_err(|_| DecodeError::InvalidResponse)?;
+        match value {
+            Value::Uuid(_) => {}
+            Value::String(value) => {
+                Uuid::parse_str(value).map_err(|_| DecodeError::InvalidResponse)?;
+            }
+            _ => return Err(DecodeError::InvalidResponse),
+        }
+    }
+    Ok(())
+}
+
+fn validate_update_result(fields: &llsd::Map) -> Result<(), DecodeError> {
+    let Some(value) = fields.get("_update_result") else { return Ok(()) };
+    let result = map(value)?;
+    let Some(code) = integer(result, &["code"])? else { return Err(DecodeError::InvalidResponse) };
+    if !matches!(result.get("success"), Some(Value::Boolean(_)))
+        || !(0..=8).contains(&code)
+        || !matches!(result.get("message"), Some(Value::String(_)))
+        || (result.contains_key("fault_code") && integer(result, &["fault_code"])?.is_none())
+        || (result.contains_key("server_response") && !matches!(result.get("server_response"), Some(Value::String(_))))
+    {
+        return Err(DecodeError::InvalidResponse);
+    }
+    Ok(())
 }
 
 fn optional_array<'a>(fields: &'a llsd::Map, name: &str, descendent_count: u32) -> Result<&'a [Value], DecodeError> {
@@ -485,15 +640,16 @@ fn uuid_field(fields: &llsd::Map, names: &[&str]) -> Result<Option<Uuid>, Decode
     Ok(found)
 }
 
-fn owner_field(fields: &llsd::Map, expected: Uuid) -> Result<Option<Uuid>, DecodeError> {
-    for name in ["agent_id", "owner_id"] {
-        if let Some(owner) = uuid_field(fields, &[name])?
-            && owner != expected
-        {
-            return Err(DecodeError::InvalidResponse);
-        }
+fn owner_field(fields: &llsd::Map, expected: Uuid, format: InventoryWireFormat) -> Result<Option<Uuid>, DecodeError> {
+    let names = match format {
+        InventoryWireFormat::Ais => &["agent_id"][..],
+        InventoryWireFormat::Legacy => &["owner_id", "agent_id"][..],
+    };
+    let owner = uuid_field(fields, names)?;
+    if owner.is_some_and(|owner| owner != expected) {
+        return Err(DecodeError::InvalidResponse);
     }
-    uuid_field(fields, &["owner_id"])
+    Ok(owner)
 }
 
 fn parent_field(fields: &llsd::Map, expected: Option<Uuid>) -> Result<Option<Uuid>, DecodeError> {
@@ -692,36 +848,24 @@ mod tests {
         Value::Map(fields.into_iter().collect::<BTreeMap<_, _>>())
     }
 
-    fn category(id: Uuid, parent: Option<Uuid>, children: Vec<Value>, include_children: bool) -> Value {
+    fn category(id: Uuid, parent: Option<Uuid>, descendent_count: usize) -> Value {
         let mut fields = Map::from([
             ("category_id".into(), Value::Uuid(id)),
             ("name".into(), Value::String("folder".into())),
             ("version".into(), Value::Integer(4)),
-            ("descendents".into(), Value::Integer(children.len() as i32)),
+            ("descendents".into(), Value::Integer(descendent_count as i32)),
         ]);
         if let Some(parent) = parent {
             fields.insert("parent_id".into(), Value::Uuid(parent));
         }
-        if include_children {
-            fields.insert("_embedded".into(), map_value([("categories".into(), Value::Array(children))]));
-        }
         Value::Map(fields)
-    }
-
-    fn category_with_item(id: Uuid, parent: Uuid, item: Value) -> Value {
-        let mut value = match category(id, Some(parent), Vec::new(), false) {
-            Value::Map(fields) => fields,
-            _ => unreachable!(),
-        };
-        value.insert("descendents".into(), Value::Integer(1));
-        value.insert("_embedded".into(), map_value([("items".into(), Value::Array(vec![item]))]));
-        Value::Map(value)
     }
 
     fn item(id: Uuid, parent: Uuid, owner: Uuid) -> Value {
         Value::Map(Map::from([
             ("item_id".into(), Value::Uuid(id)),
-            ("owner_id".into(), Value::Uuid(owner)),
+            ("agent_id".into(), Value::Uuid(owner)),
+            ("created_at".into(), Value::Integer(1_700_000_000)),
             ("parent_id".into(), Value::Uuid(parent)),
             ("name".into(), Value::String("note".into())),
             ("desc".into(), Value::String("text".into())),
@@ -730,10 +874,18 @@ mod tests {
         ]))
     }
 
+    fn legacy_item(id: Uuid, parent: Uuid, owner: Uuid) -> Value {
+        let Value::Map(mut fields) = item(id, parent, owner) else { unreachable!() };
+        fields.remove("agent_id");
+        fields.insert("owner_id".into(), Value::Uuid(owner));
+        Value::Map(fields)
+    }
+
     fn item_with_types(id: Uuid, parent: Uuid, owner: Uuid, asset_type: Value, inventory_type: Value) -> Value {
         Value::Map(Map::from([
             ("item_id".into(), Value::Uuid(id)),
-            ("owner_id".into(), Value::Uuid(owner)),
+            ("agent_id".into(), Value::Uuid(owner)),
+            ("created_at".into(), Value::Integer(1_700_000_000)),
             ("parent_id".into(), Value::Uuid(parent)),
             ("name".into(), Value::String("item".into())),
             ("type".into(), asset_type),
@@ -745,9 +897,22 @@ mod tests {
         xml::to_vec(value).expect("LLSD fixture encodes")
     }
 
+    fn keyed(values: Vec<Value>, id_field: &str) -> Value {
+        Value::Map(
+            values
+                .into_iter()
+                .map(|value| {
+                    let fields = value.as_map().expect("keyed child is a map");
+                    let id = uuid_field(fields, &[id_field]).expect("valid child ID field").expect("child ID is present");
+                    (id.to_string(), value)
+                })
+                .collect(),
+        )
+    }
+
     #[test]
     fn ais_edit_response_decodes_all_change_metadata() {
-        let ids = (1..=9).map(Uuid::from_u128).collect::<Vec<_>>();
+        let ids = (1..=16).map(Uuid::from_u128).collect::<Vec<_>>();
         let metadata = Value::Map(Map::from([
             ("_created_categories".into(), Value::Array(vec![Value::Uuid(ids[0])])),
             ("_created_items".into(), Value::Array(vec![Value::Uuid(ids[1])])),
@@ -758,6 +923,21 @@ mod tests {
             ("_category_items_removed".into(), Value::Array(vec![Value::Uuid(ids[6])])),
             ("_broken_links_removed".into(), Value::Array(vec![Value::Uuid(ids[7])])),
             ("_updated_category_versions".into(), Value::Map(Map::from([(ids[8].to_string(), Value::Integer(12))]))),
+            ("_moved_items".into(), Value::Array(vec![Value::Uuid(ids[9])])),
+            ("_active_gestures_removed".into(), Value::Array(vec![Value::Uuid(ids[10])])),
+            ("_attachments_removed".into(), Value::Map(Map::from([("0".into(), Value::Uuid(ids[11]))]))),
+            ("_wearables_removed".into(), Value::Map(Map::from([("8".into(), Value::Uuid(ids[12]))]))),
+            ("_total_items_removed".into(), Value::Integer(4)),
+            ("_top_category_id".into(), Value::Uuid(ids[13])),
+            ("_linked_ids".into(), Value::Map(Map::from([(ids[14].to_string(), Value::Uuid(ids[15]))]))),
+            (
+                "_update_result".into(),
+                Value::Map(Map::from([
+                    ("success".into(), Value::Boolean(true)),
+                    ("code".into(), Value::Integer(0)),
+                    ("message".into(), Value::String("ok".into())),
+                ])),
+            ),
         ]));
 
         let response = decode_ais_edit_response(&encode(&metadata), Uuid::from_u128(99)).expect("valid AIS metadata");
@@ -774,25 +954,166 @@ mod tests {
     }
 
     #[test]
-    fn ais_recursive_children_decode() {
+    fn ais_edit_response_rejects_mistyped_metadata() {
+        let cases = [
+            ("_moved_items", Value::Map(Map::new())),
+            ("_updated_category_versions", Value::Array(Vec::new())),
+            ("_attachments_removed", Value::Array(Vec::new())),
+            ("_wearables_removed", Value::Array(Vec::new())),
+            ("_linked_ids", Value::Array(Vec::new())),
+            ("_total_items_removed", Value::Array(Vec::new())),
+            ("_update_result", Value::Array(Vec::new())),
+        ];
+        for (name, value) in cases {
+            let response = Value::Map(Map::from([(name.into(), value)]));
+            assert_eq!(
+                decode_ais_edit_response(&encode(&response), Uuid::from_u128(99)),
+                Err(DecodeError::InvalidResponse),
+                "{name} must use its AIS schema shape"
+            );
+        }
+    }
+
+    #[test]
+    fn ais_recursive_maps_decode_real_response() {
+        let owner = Uuid::from_u128(0x99);
+        let root = Uuid::from_u128(1);
+        let decoded = decode_ais_children(include_bytes!("../tests/fixtures/ais_recursive_children.llsd.xml"), root, owner)
+            .expect("official AIS response shape decodes");
+
+        assert_eq!(decoded.owner_id, Some(owner));
+        assert_eq!(decoded.descendent_count, Some(1));
+        let root_children = decoded.children.expect("root children are present");
+        assert_eq!(root_children.len(), 1);
+        let Child::Category(folder) = &root_children[0] else { panic!("expected folder") };
+        assert_eq!(folder.id, Uuid::from_u128(2));
+        assert_eq!(folder.descendent_count, Some(3));
+        let folder_children = folder.children.as_ref().expect("folder children are present");
+        assert_eq!(folder_children.len(), 3);
+
+        let Child::Item(note) = &folder_children[0] else { panic!("expected note item") };
+        assert_eq!(note.id, Uuid::from_u128(5));
+        assert_eq!(note.owner_id, Some(owner));
+        assert_eq!(note.created_at, 1_700_000_000);
+        assert_eq!(note.permissions.owner_id, Some(Uuid::from_u128(19)));
+        assert_eq!(note.permissions.creator_id, Some(Uuid::from_u128(17)));
+        assert_eq!(note.sale_info.sale_type, Some(0));
+        assert_eq!(note.sale_info.sale_price, Some(0));
+
+        let Child::Item(link) = &folder_children[1] else { panic!("expected link") };
+        assert_eq!(link.id, Uuid::from_u128(6));
+        assert_eq!(link.asset_id, Some(Uuid::from_u128(5)));
+        assert_eq!(link.asset_type, Some(24));
+
+        let Child::Category(nested) = &folder_children[2] else { panic!("expected nested folder") };
+        assert_eq!(nested.id, Uuid::from_u128(3));
+        assert_eq!(nested.descendent_count, Some(1));
+        let nested_children = nested.children.as_ref().expect("nested folder children are present");
+        assert_eq!(nested_children.len(), 1);
+        let Child::Item(nested_item) = &nested_children[0] else { panic!("expected nested item") };
+        assert_eq!(nested_item.id, Uuid::from_u128(7));
+    }
+
+    #[test]
+    fn embedded_map_keys_match_child_ids() {
         let owner = Uuid::from_u128(1);
         let root = Uuid::from_u128(2);
-        let child = Uuid::from_u128(3);
-        let child_category = category_with_item(child, root, item(Uuid::from_u128(4), child, owner));
-        let mut root_fields = match category(root, None, Vec::new(), true) {
+        let child_id = Uuid::from_u128(3);
+        let wrong_key = Uuid::from_u128(4);
+        let cases = [
+            (
+                "categories",
+                Value::Map(Map::from([
+                    ("agent_id".into(), Value::Uuid(owner)),
+                    ("category_id".into(), Value::Uuid(child_id)),
+                    ("name".into(), Value::String("folder".into())),
+                    ("parent_id".into(), Value::Uuid(root)),
+                    ("type_default".into(), Value::Integer(-1)),
+                    ("version".into(), Value::Integer(1)),
+                ])),
+            ),
+            ("items", item(child_id, root, owner)),
+            (
+                "links",
+                Value::Map(Map::from([
+                    ("agent_id".into(), Value::Uuid(owner)),
+                    ("item_id".into(), Value::Uuid(child_id)),
+                    ("linked_id".into(), Value::Uuid(Uuid::from_u128(5))),
+                    ("name".into(), Value::String("link".into())),
+                    ("parent_id".into(), Value::Uuid(root)),
+                    ("type".into(), Value::Integer(24)),
+                ])),
+            ),
+        ];
+
+        for (name, child) in cases {
+            let mut root_fields = Map::from([
+                ("agent_id".into(), Value::Uuid(owner)),
+                ("category_id".into(), Value::Uuid(root)),
+                ("name".into(), Value::String("root".into())),
+                ("parent_id".into(), Value::Uuid(Uuid::from_u128(6))),
+                ("type_default".into(), Value::Integer(-1)),
+                ("version".into(), Value::Integer(1)),
+            ]);
+            root_fields.insert("_embedded".into(), map_value([(name.into(), Value::Map(Map::from([(wrong_key.to_string(), child)])))]));
+            assert_eq!(
+                decode_ais_children(&encode(&Value::Map(root_fields)), root, owner),
+                Err(DecodeError::InvalidResponse),
+                "{name} map key must match the child's ID"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_arrays_are_rejected() {
+        let owner = Uuid::from_u128(1);
+        let root = Uuid::from_u128(2);
+        let mut root_fields = match category(root, None, 0) {
             Value::Map(fields) => fields,
             _ => unreachable!(),
         };
-        root_fields.insert("_embedded".into(), map_value([("categories".into(), Value::Array(vec![child_category]))]));
-        let decoded = decode_ais_children(&encode(&Value::Map(root_fields)), root, owner).expect("valid recursive response");
-        let children = decoded.children.expect("root children are present");
-        assert_eq!(children.len(), 1);
-        let Child::Category(parsed_child) = &children[0] else { panic!("expected nested category") };
-        assert_eq!(parsed_child.id, child);
-        let nested_children = parsed_child.children.as_ref().expect("child children are present");
-        assert_eq!(nested_children.len(), 1);
-        let Child::Item(parsed_item) = &nested_children[0] else { panic!("expected nested item") };
-        assert_eq!(parsed_item.id, Uuid::from_u128(4));
+        root_fields.insert("_embedded".into(), map_value([("items".into(), Value::Array(Vec::new()))]));
+        assert_eq!(decode_ais_children(&encode(&Value::Map(root_fields)), root, owner), Err(DecodeError::InvalidResponse));
+    }
+
+    #[test]
+    fn partial_embedded_children_do_not_set_count() {
+        let owner = Uuid::from_u128(1);
+        let root = Uuid::from_u128(2);
+        let mut root_fields = match category(root, None, 0) {
+            Value::Map(fields) => fields,
+            _ => unreachable!(),
+        };
+        root_fields.insert("agent_id".into(), Value::Uuid(owner));
+        root_fields
+            .insert("_embedded".into(), map_value([("items".into(), keyed(vec![item(Uuid::from_u128(3), root, owner)], "item_id"))]));
+
+        let decoded =
+            decode_ais_children(&encode(&Value::Map(root_fields)), root, owner).expect("partial children are valid but incomplete");
+
+        assert_eq!(decoded.descendent_count, None);
+    }
+
+    #[test]
+    fn ais_created_at_requires_unix_integer_shape() {
+        let owner = Uuid::from_u128(1);
+        let root = Uuid::from_u128(2);
+        let mut root_fields = match category(root, None, 1) {
+            Value::Map(fields) => fields,
+            _ => unreachable!(),
+        };
+        root_fields.insert("agent_id".into(), Value::Uuid(owner));
+        let Value::Map(mut item_fields) = item(Uuid::from_u128(3), root, owner) else { unreachable!() };
+        item_fields.insert("created_at".into(), Value::Date(llsd::Date::UNIX_EPOCH));
+        root_fields.insert(
+            "_embedded".into(),
+            map_value([
+                ("categories".into(), Value::Map(Map::new())),
+                ("items".into(), keyed(vec![Value::Map(item_fields)], "item_id")),
+                ("links".into(), Value::Map(Map::new())),
+            ]),
+        );
+        assert_eq!(decode_ais_children(&encode(&Value::Map(root_fields)), root, owner), Err(DecodeError::InvalidResponse));
     }
 
     #[test]
@@ -889,12 +1210,19 @@ mod tests {
         items.push(item_with_types(Uuid::from_u128(301), folder, owner, Value::Integer(7), Value::Boolean(true)));
         expected.push((7, 255));
 
-        let mut fields = match category(folder, None, Vec::new(), false) {
+        let mut fields = match category(folder, None, 0) {
             Value::Map(fields) => fields,
             _ => unreachable!(),
         };
         fields.insert("descendents".into(), Value::Integer(items.len() as i32));
-        fields.insert("_embedded".into(), map_value([("items".into(), Value::Array(items))]));
+        fields.insert(
+            "_embedded".into(),
+            map_value([
+                ("categories".into(), Value::Map(Map::new())),
+                ("items".into(), keyed(items, "item_id")),
+                ("links".into(), Value::Map(Map::new())),
+            ]),
+        );
         let decoded = decode_ais_children(&encode(&Value::Map(fields)), folder, owner).expect("one unknown field does not reject a folder");
         let children = decoded.children.expect("folder items are present");
         assert_eq!(children.len(), expected.len());
@@ -917,7 +1245,7 @@ mod tests {
                 ("owner_id".into(), Value::Uuid(owner)),
                 ("version".into(), Value::Integer(8)),
                 ("descendents".into(), Value::Integer(1)),
-                ("categories".into(), Value::Array(vec![category(child, Some(folder), Vec::new(), false)])),
+                ("categories".into(), Value::Array(vec![category(child, Some(folder), 0)])),
                 ("items".into(), Value::Array(Vec::new())),
             ]))]),
         )]));
@@ -931,11 +1259,22 @@ mod tests {
     fn folder_limit_is_typed() {
         let owner = Uuid::from_u128(1);
         let folder = Uuid::from_u128(2);
-        let mut value = match category(folder, None, Vec::new(), false) {
+        let mut value = match category(folder, None, 0) {
             Value::Map(fields) => fields,
             _ => unreachable!(),
         };
-        value.insert("descendents".into(), Value::Integer((MAX_FOLDER_CHILDREN + 1) as i32));
+        value.insert("agent_id".into(), Value::Uuid(owner));
+        let items = (0..=MAX_FOLDER_CHILDREN)
+            .map(|index| (Uuid::from_u128(index as u128 + 100).to_string(), Value::Map(Map::new())))
+            .collect::<Map>();
+        value.insert(
+            "_embedded".into(),
+            map_value([
+                ("categories".into(), Value::Map(Map::new())),
+                ("items".into(), Value::Map(items)),
+                ("links".into(), Value::Map(Map::new())),
+            ]),
+        );
         assert_eq!(decode_ais_children(&encode(&Value::Map(value)), folder, owner), Err(DecodeError::TooLarge));
     }
 
@@ -943,11 +1282,11 @@ mod tests {
     fn wrong_owner_is_rejected() {
         let owner = Uuid::from_u128(1);
         let root = Uuid::from_u128(2);
-        let mut value = match category(root, None, Vec::new(), false) {
+        let mut value = match category(root, None, 0) {
             Value::Map(fields) => fields,
             _ => unreachable!(),
         };
-        value.insert("owner_id".into(), Value::Uuid(Uuid::from_u128(3)));
+        value.insert("agent_id".into(), Value::Uuid(Uuid::from_u128(3)));
         assert_eq!(decode_ais_children(&encode(&Value::Map(value)), root, owner), Err(DecodeError::InvalidResponse));
     }
 
@@ -967,7 +1306,7 @@ mod tests {
         let owner = Uuid::from_u128(1);
         let parent = Uuid::from_u128(2);
         let item_id = Uuid::from_u128(3);
-        let response = Value::Map(Map::from([("items".into(), Value::Array(vec![item(item_id, parent, owner)]))]));
+        let response = Value::Map(Map::from([("items".into(), Value::Array(vec![legacy_item(item_id, parent, owner)]))]));
         assert_eq!(decode_fetch_inventory2(&encode(&response), owner, &[Uuid::from_u128(4)]), Err(DecodeError::InvalidResponse));
     }
 }

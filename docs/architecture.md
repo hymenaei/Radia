@@ -92,7 +92,7 @@ Terrain settings belong to each World region. Render derives a clamped compositi
 
 Terrain normals use the classic four diagonal height samples at a two-meter stride and sample across loaded patch and region neighbors.
 
-The surface camera uses one infinite reversed-Z projection for objects, terrain, and water, preserving depth ordering without a distance-based far clip. Object range culling and detail selection still use draw distance; terrain and water stay eligible throughout loaded regions and remain limited by the camera view frustum.
+The surface camera uses one infinite reversed-Z projection for objects, terrain, and water, preserving depth ordering without a distance-based far clip. Object range culling and detail selection still use draw distance; terrain and water stay eligible throughout loaded regions and remain limited by the camera view frustum. The void-water pass fills gaps outside region patches and excludes the submitted region-water rectangles; its coverage is independent of the water-wave coordinate clamp.
 
 ### `crates/storage`
 

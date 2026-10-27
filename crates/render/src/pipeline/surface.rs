@@ -338,7 +338,7 @@ impl SurfacePipelines {
                     BindGroupEntry { binding: 2, resource: BindingResource::Buffer(self.region_water_uniform.as_entire_buffer_binding()) },
                     BindGroupEntry { binding: 3, resource: BindingResource::TextureView(textures.view(normal_map.current)) },
                     BindGroupEntry { binding: 4, resource: BindingResource::TextureView(textures.view(normal_map.next)) },
-                    BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&textures.default_sampler) },
+                    BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&textures.water_sampler) },
                 ],
             });
             self.region_water_normal_keys = keys;

@@ -25,12 +25,17 @@ pub(super) fn scene_with_mapping(alpha: u8, scales: [Vec3; 2], mapping: world::T
 
 pub(super) fn scene_with_agent() -> (Reconciler, SceneView, Camera) {
     let (_, scene, view, camera) =
-        scene_with_world_with_agent(255, [Vec3::splat(2.0); 2], world::TextureMapping::Default, Some(Uuid::from_u128(1)));
+        scene_with_world_with_agent(255, [Vec3::splat(2.0); 2], world::TextureMapping::Default, Some(Uuid::from_u128(1)), false);
+    (scene, view, camera)
+}
+
+pub(super) fn water_scene(alpha: u8) -> (Reconciler, SceneView, Camera) {
+    let (_, scene, view, camera) = scene_with_world_with_agent(alpha, [Vec3::splat(2.0); 2], world::TextureMapping::Default, None, true);
     (scene, view, camera)
 }
 
 pub(super) fn scene_with_world(alpha: u8, scales: [Vec3; 2], mapping: world::TextureMapping) -> (World, Reconciler, SceneView, Camera) {
-    scene_with_world_with_agent(alpha, scales, mapping, None)
+    scene_with_world_with_agent(alpha, scales, mapping, None, false)
 }
 
 fn scene_with_world_with_agent(
@@ -38,6 +43,7 @@ fn scene_with_world_with_agent(
     scales: [Vec3; 2],
     mapping: world::TextureMapping,
     agent_id: Option<Uuid>,
+    with_water: bool,
 ) -> (World, Reconciler, SceneView, Camera) {
     let mut world = World::new(WorldLimits {
         max_region_registrations: 1,
@@ -80,6 +86,12 @@ fn scene_with_world_with_agent(
         object.surface_appearance =
             Some(SurfaceAppearance::new(FaceAppearance { color, mapping, ..Default::default() }, Vec::new()).unwrap());
         assert_matches!(world.observe_object(object).unwrap().outcome, world::ApplyOutcome::Introduced(_));
+    }
+    if with_water {
+        assert_matches!(
+            world.observe_water_height(UpdateSource::new(region, 3, OrderEvidence::Ordered(3), 0), 20.0).unwrap().outcome,
+            world::RegionOutcome::Patched { .. }
+        );
     }
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();

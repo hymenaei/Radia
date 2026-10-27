@@ -177,7 +177,6 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
         match shading {
             ShadingMode::Terrain => {
                 params.color = [0.18, 0.23, 0.13, 1.0];
-                params.params[0] = 1.0;
             }
             ShadingMode::RegionWater => {
                 params.color = COLOR.to_array();

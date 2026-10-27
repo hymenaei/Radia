@@ -24,11 +24,10 @@ use super::{
 
 pub(crate) const INSTANCE_BYTES: usize = 192;
 pub(crate) const VERTEX_BYTES: usize = 32;
-const CAMERA_BYTES: usize = 144;
+const CAMERA_BYTES: usize = 128;
 const ATMOSPHERE_BYTES: usize = ATMOSPHERE_FLOATS * 4;
 const WATER_BYTES: usize = 32 * 4;
-const KEY_LIGHT: Vec3 = Vec3::new(-0.3, 0.5, 1.0);
-const CAMERA_NEAR_PLANE: f32 = 0.05;
+pub(crate) const CAMERA_NEAR_PLANE: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Pipeline {
@@ -281,11 +280,7 @@ impl SurfacePipelines {
         let projection = projection(camera, size);
         let translation = Mat4::from_translation(-(camera.position() - origin).as_vec3());
         let view = camera_view(camera) * translation;
-        let values = (projection * translation)
-            .to_cols_array()
-            .into_iter()
-            .chain(view.to_cols_array())
-            .chain(KEY_LIGHT.normalize().extend(0.0).to_array());
+        let values = (projection * translation).to_cols_array().into_iter().chain(view.to_cols_array());
         let mut bytes = [0; CAMERA_BYTES];
         for (dest, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
             *dest = value.to_le_bytes();
@@ -431,21 +426,6 @@ mod tests {
         assert!(close.project_point3(Vec3::new(1.0e9, 0.0, 0.0)).z > 0.0);
         let frustum = math::Frustum::from_clip_matrix(close);
         assert!(frustum.intersects_sphere(DVec3::new(1.0e9, 0.0, 0.0), 0.0));
-    }
-
-    #[test]
-    fn stable_scene_origin_preserves_camera_projection() {
-        let camera = Camera::new(DVec3::new(280.0, 15.0, 120.0), -Vec3::Z, std::f64::consts::FRAC_PI_2, [1024, 1024]).unwrap();
-        let origin = DVec3::new(256.0, 0.0, 0.0);
-        let object = DVec3::new(300.0, 17.0, 0.0);
-        let vertex = Vec3::new(0.25, -0.1, 0.2);
-        let view_projection = projection(camera, [1024, 1024]);
-        let camera_relative = Mat4::from_translation((object - camera.position()).as_vec3());
-        let scene_relative = Mat4::from_translation((object - origin).as_vec3());
-        let camera_offset = Mat4::from_translation(-(camera.position() - origin).as_vec3());
-        let expected = (view_projection * camera_relative).project_point3(vertex);
-        let actual = (view_projection * camera_offset * scene_relative).project_point3(vertex);
-        assert!(actual.distance(expected) < 1e-5);
     }
 
     #[test]

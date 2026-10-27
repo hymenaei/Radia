@@ -147,7 +147,7 @@ impl Drop for FrameLease {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ShadingMode {
-    Studio,
+    Surface,
     Terrain,
     RegionWater,
 }

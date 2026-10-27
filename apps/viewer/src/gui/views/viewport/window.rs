@@ -503,9 +503,7 @@ impl SceneWindow {
                                 return None;
                             };
                             let key = ItemKey::new(InventoryOwner::new(*owner_id), ItemId::new(*item_id));
-                            items
-                                .item(key)
-                                .map(|item| crate::inventory::environments::environment_setting_label(item, items.library_owner()))
+                            items.label(key).map(str::to_owned)
                         })
                         .unwrap_or_else(|| "Saved environment".into()),
                 };
@@ -524,19 +522,24 @@ impl SceneWindow {
                         ui.separator();
                         match environment_items {
                             Some(crate::inventory::environments::EnvironmentItems::Ready(items)) => {
-                                for item in items.items() {
-                                    let choice = scene::EnvironmentChoice::Local(scene::LocalChoice::Inventory {
-                                        owner_id: item.key.owner().id(),
-                                        item_id: item.key.id().uuid(),
-                                        asset_id: item.asset_id,
-                                    });
-                                    let label = crate::inventory::environments::environment_setting_label(item, items.library_owner());
-                                    ui.add_enabled_ui(!item.asset_id.uuid().is_nil(), |ui| {
-                                        ui.selectable_value(&mut selected_environment, choice, label);
-                                    });
-                                }
-                                if items.items().next().is_none() {
+                                if items.items().is_empty() {
                                     ui.label("No saved environments");
+                                } else {
+                                    let rows = items.items();
+                                    let row_height = ui.text_style_height(&egui::TextStyle::Button);
+                                    egui::ScrollArea::vertical().max_height(320.0).show_rows(ui, row_height, rows.len(), |ui, visible| {
+                                        for index in visible {
+                                            let Some(item) = rows.get(index) else { continue };
+                                            let choice = scene::EnvironmentChoice::Local(scene::LocalChoice::Inventory {
+                                                owner_id: item.key.owner().id(),
+                                                item_id: item.key.id().uuid(),
+                                                asset_id: item.asset_id,
+                                            });
+                                            ui.add_enabled_ui(!item.asset_id.uuid().is_nil(), |ui| {
+                                                ui.selectable_value(&mut selected_environment, choice, &*item.label);
+                                            });
+                                        }
+                                    });
                                 }
                             }
                             Some(crate::inventory::environments::EnvironmentItems::Failed) => {

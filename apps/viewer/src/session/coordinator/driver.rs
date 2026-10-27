@@ -259,7 +259,9 @@ impl SessionDriver {
                 }
                 DriverInput::InventoryCache(None) => ControlFlow::Continue(()),
                 DriverInput::ObjectCache(Some(event)) => {
-                    self.object_cache.handle_event(event);
+                    if let Some((simulator_id, flags)) = self.object_cache.handle_event(event) {
+                        reply_region_handshake(self.session_handle.clone(), simulator_id, flags).await;
+                    }
                     ControlFlow::Continue(())
                 }
                 DriverInput::ObjectCache(None) => ControlFlow::Continue(()),
@@ -566,9 +568,8 @@ impl SessionDriver {
         let region = self.session_world.region_for(simulator_id);
         if let Message::RegionHandshake(handshake) = &message {
             self.object_cache.set_region_identity(simulator_id, handshake);
-            let flags = self.object_cache.region_handshake_flags(simulator_id);
-            if let Err(error) = self.session_handle.reply_region_handshake(simulator_id, flags).await {
-                tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
+            if let Some(flags) = self.object_cache.begin_region_load(simulator_id, &self.runtime) {
+                reply_region_handshake(self.session_handle.clone(), simulator_id, flags).await;
             }
         }
         self.object_cache.record_update(simulator_id, &message);
@@ -1161,6 +1162,12 @@ impl SessionDriver {
             let region = self.session_world.region_for(simulator_id).map(|region| region.get());
             tracing::warn!(simulator = simulator_id.get(), region, %error, "could not retire simulator world region on session shutdown");
         }
+    }
+}
+
+async fn reply_region_handshake(session_handle: SessionHandle, simulator_id: SimulatorId, flags: u32) {
+    if let Err(error) = session_handle.reply_region_handshake(simulator_id, flags).await {
+        tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
     }
 }
 

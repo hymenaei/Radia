@@ -1,7 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use network::{Grid, SimulatorId};
@@ -13,12 +14,16 @@ use protocol::{
         object::RegionData,
     },
 };
-use rusqlite::{Connection, Error as RusqliteError, OptionalExtension, Transaction, params, params_from_iter, types::Value as SqlValue};
+use rusqlite::{Connection, Error as RusqliteError, OptionalExtension, Transaction, params};
 use storage::{
     default_cache_dir,
     sqlite::{MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError},
 };
-use tokio::{runtime::Handle, sync::mpsc};
+use tokio::{
+    runtime::Handle,
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
+    time::timeout,
+};
 use uuid::Uuid;
 use world::{OrderEvidence, Region};
 
@@ -36,13 +41,12 @@ const MAX_TOTAL_ENTRIES: usize = 50_000;
 const MAX_TOTAL_BYTES: usize = 192 * 1024 * 1024;
 const MAX_GLOBAL_PRUNE_ROWS: usize = 255;
 const MAX_REGION_DELETE_BATCHES: usize = MAX_REGION_ENTRIES.div_ceil(255);
-const MAX_CACHE_READ_ENTRIES: usize = 255;
-const MAX_CACHE_READ_BYTES: usize = MAX_OBJECT_CACHE_ENTRY_BYTES * MAX_CACHE_READ_ENTRIES;
 const MAX_PENDING_SUBMISSIONS: usize = 16;
 const MAX_PENDING_ROWS: usize = 65_536;
 const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SCOPE_METADATA_BYTES: usize = 8 * 1024 * 1024;
-const MAX_CACHED_SCOPES: usize = MAX_TOTAL_ENTRIES;
+pub(super) const HANDSHAKE_CACHE_LOAD_TIMEOUT: Duration = Duration::from_millis(50);
+const MAX_PENDING_REGION_LOADS: usize = 2;
+const CACHE_EVENT_CAPACITY: usize = 16;
 const CACHE_SUPPORT_FLAG: u32 = 1;
 const EMPTY_CACHE_FLAG: u32 = 2;
 const SELF_APPEARANCE_FLAG: u32 = 4;
@@ -55,7 +59,7 @@ pub(super) struct CacheScope {
 }
 
 #[derive(Clone)]
-struct StoredEntry {
+pub(super) struct StoredEntry {
     local_id: i64,
     crc: i64,
     update_kind: i64,
@@ -64,6 +68,15 @@ struct StoredEntry {
     payload: Option<Vec<u8>>,
 }
 
+struct LoadedRegion {
+    scope: CacheScope,
+    entries: HashMap<u32, StoredEntry>,
+    bytes: usize,
+    last_used: u64,
+    complete: bool,
+}
+
+#[derive(Clone)]
 struct EncodedEntry {
     local_id: u32,
     crc: u32,
@@ -76,21 +89,31 @@ struct PendingSubmission {
     batches: Vec<SqliteBatch>,
     rows: usize,
     bytes: usize,
-    populated_scope: Option<CacheScope>,
 }
 
 pub(super) enum ObjectCacheEvent {
-    Ready { db: SqliteDb, status: OpenStatus, populated_scopes: HashSet<CacheScope> },
+    Ready { db: SqliteDb, status: OpenStatus },
     OpenFailed(String),
+    RegionLoaded { simulator_id: SimulatorId, scope: CacheScope, result: RegionLoadResult, _permit: OwnedSemaphorePermit },
+}
+
+pub(super) enum RegionLoadResult {
+    Loaded(HashMap<u32, StoredEntry>),
+    Failed(String),
+    TimedOut,
 }
 
 pub(super) struct ObjectCacheSession {
     grid_id: String,
     identities: HashMap<SimulatorId, CacheScope>,
-    populated_scopes: HashSet<CacheScope>,
+    loaded_regions: HashMap<SimulatorId, LoadedRegion>,
+    loaded_entries: usize,
+    loaded_bytes: usize,
+    use_clock: u64,
     db: Option<SqliteDb>,
-    event_sender: mpsc::UnboundedSender<ObjectCacheEvent>,
-    event_receiver: mpsc::UnboundedReceiver<ObjectCacheEvent>,
+    event_sender: mpsc::Sender<ObjectCacheEvent>,
+    event_receiver: mpsc::Receiver<ObjectCacheEvent>,
+    load_slots: Arc<Semaphore>,
     pending: Vec<PendingSubmission>,
     pending_rows: usize,
     pending_bytes: usize,
@@ -101,14 +124,18 @@ pub(super) struct ObjectCacheSession {
 
 impl ObjectCacheSession {
     pub(super) fn new(grid: Grid) -> Self {
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
+        let (event_sender, event_receiver) = mpsc::channel(CACHE_EVENT_CAPACITY);
         Self {
             grid_id: grid.id().to_owned(),
             identities: HashMap::new(),
-            populated_scopes: HashSet::new(),
+            loaded_regions: HashMap::new(),
+            loaded_entries: 0,
+            loaded_bytes: 0,
+            use_clock: 0,
             db: None,
             event_sender,
             event_receiver,
+            load_slots: Arc::new(Semaphore::new(MAX_PENDING_REGION_LOADS)),
             pending: Vec::new(),
             pending_rows: 0,
             pending_bytes: 0,
@@ -124,15 +151,14 @@ impl ObjectCacheSession {
         }
         self.started = true;
         let sender = self.event_sender.clone();
-        let grid_id = self.grid_id.clone();
         drop(runtime.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || open_default(&grid_id)).await;
+            let result = tokio::task::spawn_blocking(open_default).await;
             let event = match result {
-                Ok(Ok((db, status, populated_scopes))) => ObjectCacheEvent::Ready { db, status, populated_scopes },
+                Ok(Ok((db, status))) => ObjectCacheEvent::Ready { db, status },
                 Ok(Err(error)) => ObjectCacheEvent::OpenFailed(error),
                 Err(error) => ObjectCacheEvent::OpenFailed(error.to_string()),
             };
-            if let Err(send_error) = sender.send(event) {
+            if let Err(send_error) = sender.send(event).await {
                 drop(send_error);
             }
         }));
@@ -142,25 +168,20 @@ impl ObjectCacheSession {
         self.event_receiver.recv().await
     }
 
-    pub(super) fn handle_event(&mut self, event: ObjectCacheEvent) {
+    pub(super) fn handle_event(&mut self, event: ObjectCacheEvent) -> Option<(SimulatorId, u32)> {
         match event {
-            ObjectCacheEvent::Ready { db, status, populated_scopes } => {
+            ObjectCacheEvent::Ready { db, status } => {
                 if matches!(status, OpenStatus::Recreated(_)) {
                     tracing::warn!(?status, "object cache database was recreated; cached objects will be refetched");
                 }
                 self.db = Some(db);
-                self.populated_scopes = populated_scopes;
                 let pending = std::mem::take(&mut self.pending);
                 self.pending_rows = 0;
                 self.pending_bytes = 0;
                 for submission in pending {
-                    let populated_scope = submission.populated_scope.clone();
-                    if self.submit_to_db(submission)
-                        && let Some(scope) = populated_scope
-                    {
-                        self.populated_scopes.insert(scope);
-                    }
+                    self.submit_to_db(submission);
                 }
+                None
             }
             ObjectCacheEvent::OpenFailed(error) => {
                 self.warn(&error);
@@ -168,6 +189,25 @@ impl ObjectCacheSession {
                 self.pending.clear();
                 self.pending_rows = 0;
                 self.pending_bytes = 0;
+                None
+            }
+            ObjectCacheEvent::RegionLoaded { simulator_id, scope, result, _permit } => {
+                match result {
+                    RegionLoadResult::Loaded(mut entries) => {
+                        if self.identities.get(&simulator_id) == Some(&scope) {
+                            self.merge_partial_region(simulator_id, &scope, &mut entries);
+                            self.install_loaded_region(simulator_id, scope.clone(), entries);
+                        }
+                    }
+                    RegionLoadResult::Failed(error) => self.warn(&error),
+                    RegionLoadResult::TimedOut => self.warn("region object cache load exceeded its handshake deadline"),
+                }
+                let flags = if self.identities.get(&simulator_id) == Some(&scope) {
+                    self.region_handshake_flags(simulator_id)
+                } else {
+                    CACHE_SUPPORT_FLAG | SELF_APPEARANCE_FLAG | EMPTY_CACHE_FLAG
+                };
+                Some((simulator_id, flags))
             }
         }
     }
@@ -180,8 +220,8 @@ impl ObjectCacheSession {
         if previous == next {
             return;
         }
+        self.remove_loaded_region(simulator_id);
         if let Some(previous) = previous {
-            self.populated_scopes.remove(&previous);
             self.enqueue(make_scope_delete_submission(previous));
         }
         match next {
@@ -196,31 +236,71 @@ impl ObjectCacheSession {
 
     pub(super) fn forget_simulator(&mut self, simulator_id: SimulatorId) {
         self.identities.remove(&simulator_id);
+        self.remove_loaded_region(simulator_id);
     }
 
     pub(super) fn region_handshake_flags(&self, simulator_id: SimulatorId) -> u32 {
         let has_cache = self.db.is_some()
             && !self.disabled
-            && self.identities.get(&simulator_id).is_some_and(|scope| self.populated_scopes.contains(scope));
+            && self.identities.get(&simulator_id).is_some_and(|scope| {
+                self.loaded_regions
+                    .get(&simulator_id)
+                    .is_some_and(|region| region.scope == *scope && region.complete && !region.entries.is_empty())
+            });
         CACHE_SUPPORT_FLAG | SELF_APPEARANCE_FLAG | if has_cache { 0 } else { EMPTY_CACHE_FLAG }
     }
 
     pub(super) fn record_update(&mut self, simulator_id: SimulatorId, message: &Message) {
-        if self.disabled {
-            return;
-        }
         let Some(scope) = self.identities.get(&simulator_id).cloned() else { return };
         let entries = encode_entries(message);
         if entries.is_empty() {
             return;
         }
-        let submission = make_write_submission(scope.clone(), entries, now_millis());
-        if self.enqueue(submission) && self.db.is_some() {
-            self.populated_scopes.insert(scope);
+        self.remember_entries(simulator_id, scope.clone(), &entries);
+        if !self.disabled {
+            self.enqueue(make_write_submission(scope, entries, now_millis()));
         }
     }
 
-    pub(super) async fn resolve_cached(
+    pub(super) fn begin_region_load(&mut self, simulator_id: SimulatorId, runtime: &Handle) -> Option<u32> {
+        let Some(scope) = self.identities.get(&simulator_id).cloned() else { return Some(self.region_handshake_flags(simulator_id)) };
+        if self.loaded_regions.get(&simulator_id).is_some_and(|region| region.scope == scope && region.complete) {
+            return Some(self.region_handshake_flags(simulator_id));
+        }
+        if self.disabled {
+            return Some(self.region_handshake_flags(simulator_id));
+        }
+        let Some(db) = self.db.as_ref() else { return Some(self.region_handshake_flags(simulator_id)) };
+        let permit = match Arc::clone(&self.load_slots).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.warn("region object cache load capacity is full");
+                return Some(self.region_handshake_flags(simulator_id));
+            }
+        };
+        let receipt = match queue_scope_load(db, scope.clone()) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.warn(&error.to_string());
+                return Some(self.region_handshake_flags(simulator_id));
+            }
+        };
+        let sender = self.event_sender.clone();
+        drop(runtime.spawn(async move {
+            let result = match timeout(HANDSHAKE_CACHE_LOAD_TIMEOUT, receipt.wait()).await {
+                Ok(Ok(entries)) => RegionLoadResult::Loaded(entries),
+                Ok(Err(error)) => RegionLoadResult::Failed(error.to_string()),
+                Err(_) => RegionLoadResult::TimedOut,
+            };
+            let event = ObjectCacheEvent::RegionLoaded { simulator_id, scope, result, _permit: permit };
+            if let Err(send_error) = sender.send(event).await {
+                drop(send_error);
+            }
+        }));
+        None
+    }
+
+    pub(super) fn resolve_cached(
         &mut self,
         simulator_id: SimulatorId,
         region: Region,
@@ -230,24 +310,6 @@ impl ObjectCacheSession {
         mut batch: ObjectBatch,
     ) -> ObjectBatch {
         let scope = self.identities.get(&simulator_id).cloned();
-        let local_ids = batch
-            .blocks
-            .iter()
-            .filter_map(|operation| match operation {
-                Some(ObjectOperation::Cached { local_id, .. }) => Some(local_id.get()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let entries = match (self.db.as_ref(), scope.as_ref(), local_ids.is_empty()) {
-            (Some(db), Some(scope), false) => match load_entries(db, scope.clone(), local_ids).await {
-                Ok(entries) => entries,
-                Err(error) => {
-                    self.warn(&error.to_string());
-                    HashMap::new()
-                }
-            },
-            _ => HashMap::new(),
-        };
         let mut stale = HashSet::new();
         let mut invalid_fields = 0;
         for (index, operation) in batch.blocks.iter_mut().enumerate() {
@@ -255,7 +317,11 @@ impl ObjectCacheSession {
             let source = *source;
             let local_id = *local_id;
             let reference = update.objects.get(index).copied();
-            let entry = entries.get(&local_id.get());
+            let entry = self
+                .loaded_regions
+                .get(&simulator_id)
+                .filter(|region| scope.as_ref() == Some(&region.scope))
+                .and_then(|region| region.entries.get(&local_id.get()));
             let mut cache_miss_type = Full;
             let recovered = reference.zip(entry).and_then(|(reference, entry)| {
                 let Some(crc) = u32::try_from(entry.crc).ok() else {
@@ -281,7 +347,11 @@ impl ObjectCacheSession {
             };
         }
         batch.invalid_fields = batch.invalid_fields.saturating_add(invalid_fields);
-        if let Some(scope) = scope {
+        if let Some(scope) = scope
+            && self.loaded_regions.get(&simulator_id).is_some_and(|region| region.scope == scope)
+        {
+            self.touch_loaded_region(simulator_id, &scope);
+            self.remove_loaded_entries(simulator_id, &stale);
             self.enqueue(make_access_submission(scope, stale, now_millis()));
         }
         batch
@@ -290,7 +360,7 @@ impl ObjectCacheSession {
     pub(super) async fn close(mut self) {
         while !self.pending.is_empty() && self.db.is_none() && !self.disabled {
             let Some(event) = self.event_receiver.recv().await else { break };
-            self.handle_event(event);
+            assert!(self.handle_event(event).is_none());
         }
         let Some(db) = self.db.take() else { return };
         if db.had_write_failure() {
@@ -343,48 +413,155 @@ impl ObjectCacheSession {
         self.warned = true;
         tracing::warn!(%error, "object cache is unavailable; simulator updates will be fetched normally");
     }
+
+    fn remember_entries(&mut self, simulator_id: SimulatorId, scope: CacheScope, entries: &[EncodedEntry]) {
+        self.ensure_loaded_region(simulator_id, scope);
+        for entry in entries {
+            let current_bytes = self
+                .loaded_regions
+                .get(&simulator_id)
+                .and_then(|region| region.entries.get(&entry.local_id))
+                .map_or(0, |old| usize::try_from(old.payload_bytes).unwrap_or(usize::MAX));
+            let replacing = self.loaded_regions.get(&simulator_id).is_some_and(|region| region.entries.contains_key(&entry.local_id));
+            let Some(bytes_after) = self
+                .loaded_regions
+                .get(&simulator_id)
+                .and_then(|region| region.bytes.checked_sub(current_bytes))
+                .and_then(|bytes| bytes.checked_add(entry.payload.len()))
+            else {
+                continue;
+            };
+            let region_entries = self.loaded_regions.get(&simulator_id).map_or(0, |region| region.entries.len());
+            if (!replacing && region_entries >= MAX_REGION_ENTRIES) || bytes_after > MAX_REGION_BYTES {
+                continue;
+            }
+            let row_increment = usize::from(!replacing);
+            let byte_increment = entry.payload.len().saturating_sub(current_bytes);
+            self.make_loaded_room(simulator_id, row_increment, byte_increment);
+            let rows_after = self.loaded_entries.saturating_add(row_increment);
+            let bytes_after_global = self.loaded_bytes.saturating_sub(current_bytes).saturating_add(entry.payload.len());
+            if rows_after > MAX_TOTAL_ENTRIES || bytes_after_global > MAX_TOTAL_BYTES {
+                continue;
+            }
+            let last_used = self.next_use();
+            if let Some(region) = self.loaded_regions.get_mut(&simulator_id) {
+                region.bytes = bytes_after;
+                region.last_used = last_used;
+                region.entries.insert(entry.local_id, stored_entry(entry));
+            }
+            self.loaded_entries = rows_after;
+            self.loaded_bytes = bytes_after_global;
+        }
+    }
+
+    fn ensure_loaded_region(&mut self, simulator_id: SimulatorId, scope: CacheScope) {
+        if self.loaded_regions.get(&simulator_id).is_some_and(|region| region.scope == scope) {
+            return;
+        }
+        self.remove_loaded_region(simulator_id);
+        let last_used = self.next_use();
+        self.loaded_regions.insert(simulator_id, LoadedRegion { scope, entries: HashMap::new(), bytes: 0, last_used, complete: false });
+    }
+
+    fn merge_partial_region(&mut self, simulator_id: SimulatorId, scope: &CacheScope, entries: &mut HashMap<u32, StoredEntry>) {
+        let Some(partial) = self.loaded_regions.remove(&simulator_id) else { return };
+        self.loaded_entries = self.loaded_entries.saturating_sub(partial.entries.len());
+        self.loaded_bytes = self.loaded_bytes.saturating_sub(partial.bytes);
+        if partial.scope != *scope {
+            return;
+        }
+        let mut bytes = entries
+            .values()
+            .map(|entry| usize::try_from(entry.payload_bytes).unwrap_or(usize::MAX))
+            .try_fold(0_usize, usize::checked_add)
+            .unwrap_or(usize::MAX);
+        for (local_id, latest) in partial.entries {
+            let previous = entries.remove(&local_id);
+            let previous_bytes = previous.as_ref().map_or(0, |entry| usize::try_from(entry.payload_bytes).unwrap_or(usize::MAX));
+            let latest_bytes = usize::try_from(latest.payload_bytes).unwrap_or(usize::MAX);
+            let Some(bytes_after) = bytes.checked_sub(previous_bytes).and_then(|bytes| bytes.checked_add(latest_bytes)) else { continue };
+            if (previous.is_some() || entries.len() < MAX_REGION_ENTRIES) && bytes_after <= MAX_REGION_BYTES {
+                entries.insert(local_id, latest);
+                bytes = bytes_after;
+            } else if let Some(previous) = previous {
+                entries.insert(local_id, previous);
+            }
+        }
+    }
+
+    fn install_loaded_region(&mut self, simulator_id: SimulatorId, scope: CacheScope, entries: HashMap<u32, StoredEntry>) {
+        if entries.len() > MAX_REGION_ENTRIES {
+            return;
+        }
+        let bytes =
+            entries.values().map(|entry| usize::try_from(entry.payload_bytes).unwrap_or(usize::MAX)).try_fold(0_usize, usize::checked_add);
+        let Some(bytes) = bytes.filter(|bytes| *bytes <= MAX_REGION_BYTES) else { return };
+        self.make_loaded_room(simulator_id, entries.len(), bytes);
+        if entries.len() > MAX_TOTAL_ENTRIES
+            || bytes > MAX_TOTAL_BYTES
+            || self.loaded_entries.saturating_add(entries.len()) > MAX_TOTAL_ENTRIES
+            || self.loaded_bytes.saturating_add(bytes) > MAX_TOTAL_BYTES
+        {
+            return;
+        }
+        let last_used = self.next_use();
+        self.loaded_entries += entries.len();
+        self.loaded_bytes += bytes;
+        self.loaded_regions.insert(simulator_id, LoadedRegion { scope, entries, bytes, last_used, complete: true });
+    }
+
+    fn remove_loaded_region(&mut self, simulator_id: SimulatorId) {
+        if let Some(region) = self.loaded_regions.remove(&simulator_id) {
+            self.loaded_entries = self.loaded_entries.saturating_sub(region.entries.len());
+            self.loaded_bytes = self.loaded_bytes.saturating_sub(region.bytes);
+        }
+    }
+
+    fn remove_loaded_entries(&mut self, simulator_id: SimulatorId, local_ids: &HashSet<u32>) {
+        let Some(region) = self.loaded_regions.get_mut(&simulator_id) else { return };
+        for local_id in local_ids {
+            if let Some(entry) = region.entries.remove(local_id) {
+                let bytes = usize::try_from(entry.payload_bytes).unwrap_or(usize::MAX);
+                region.bytes = region.bytes.saturating_sub(bytes);
+                self.loaded_entries = self.loaded_entries.saturating_sub(1);
+                self.loaded_bytes = self.loaded_bytes.saturating_sub(bytes);
+            }
+        }
+    }
+
+    fn touch_loaded_region(&mut self, simulator_id: SimulatorId, scope: &CacheScope) {
+        let last_used = self.next_use();
+        if let Some(region) = self.loaded_regions.get_mut(&simulator_id).filter(|region| &region.scope == scope) {
+            region.last_used = last_used;
+        }
+    }
+
+    fn make_loaded_room(&mut self, current: SimulatorId, rows: usize, bytes: usize) {
+        while (self.loaded_entries.saturating_add(rows) > MAX_TOTAL_ENTRIES || self.loaded_bytes.saturating_add(bytes) > MAX_TOTAL_BYTES)
+            && let Some(oldest) = self
+                .loaded_regions
+                .iter()
+                .filter(|(simulator_id, _)| **simulator_id != current)
+                .min_by_key(|(_, region)| region.last_used)
+                .map(|(simulator_id, _)| *simulator_id)
+        {
+            self.remove_loaded_region(oldest);
+        }
+    }
+
+    fn next_use(&mut self) -> u64 {
+        self.use_clock = self.use_clock.saturating_add(1);
+        self.use_clock
+    }
 }
 
-fn open_default(grid_id: &str) -> Result<(SqliteDb, OpenStatus, HashSet<CacheScope>), String> {
+fn open_default() -> Result<(SqliteDb, OpenStatus), String> {
     let root = default_cache_dir().map_err(|error| error.to_string())?;
-    let (db, status) = open_at(root.join("objects.sqlite")).map_err(|error| error.to_string())?;
-    let populated_scopes = match load_populated_scopes(&db, grid_id) {
-        Ok(scopes) => scopes,
-        Err(error) => {
-            tracing::warn!(%error, "could not load object cache scope metadata; regions will be treated as empty until updated");
-            HashSet::new()
-        }
-    };
-    Ok((db, status, populated_scopes))
+    open_at(root.join("objects.sqlite")).map_err(|error| error.to_string())
 }
 
 fn open_at(path: impl AsRef<Path>) -> Result<(SqliteDb, OpenStatus), SqliteError> {
     SqliteDb::open(path, migrate)
-}
-
-fn load_populated_scopes(db: &SqliteDb, grid_id: &str) -> Result<HashSet<CacheScope>, SqliteError> {
-    let grid_id = grid_id.to_owned();
-    let receipt = db.read(MAX_SCOPE_METADATA_BYTES, move |transaction| {
-        let mut statement = transaction.prepare(
-            "SELECT s.grid_id, s.region_id, s.cache_id FROM region_scopes s
-             WHERE s.grid_id = ?1 AND EXISTS (
-                SELECT 1 FROM object_entries e
-                WHERE e.grid_id = s.grid_id AND e.region_id = s.region_id AND e.cache_id = s.cache_id
-             )
-             ORDER BY s.last_used DESC, s.region_id, s.cache_id LIMIT ?2",
-        )?;
-        let rows = statement.query_map(params![grid_id, MAX_CACHED_SCOPES as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, Vec<u8>>(2)?))
-        })?;
-        let mut scopes = HashSet::new();
-        for row in rows {
-            let (grid_id, region_id, cache_id) = row?;
-            let (Ok(region_id), Ok(cache_id)) = (Uuid::from_slice(&region_id), Uuid::from_slice(&cache_id)) else { continue };
-            scopes.insert(CacheScope { grid_id, region_id, cache_id });
-        }
-        Ok(scopes)
-    })?;
-    futures::executor::block_on(receipt.wait())
 }
 
 fn migrate(connection: &mut Connection) -> Result<(), MigrationError> {
@@ -424,53 +601,49 @@ fn migrate(connection: &mut Connection) -> Result<(), MigrationError> {
 #[cfg(test)]
 pub(super) fn open_for_test(path: impl AsRef<Path>, grid: Grid) -> ObjectCacheSession {
     let (db, status) = open_at(path).expect("open isolated object cache database");
-    let populated_scopes = load_populated_scopes(&db, grid.id()).expect("load isolated object cache metadata");
     let mut cache = ObjectCacheSession::new(grid);
-    cache.handle_event(ObjectCacheEvent::Ready { db, status, populated_scopes });
+    assert!(cache.handle_event(ObjectCacheEvent::Ready { db, status }).is_none());
     cache
 }
 
-async fn load_entries(db: &SqliteDb, scope: CacheScope, local_ids: Vec<u32>) -> Result<HashMap<u32, StoredEntry>, SqliteError> {
-    let mut unique_ids = local_ids;
-    unique_ids.sort_unstable();
-    unique_ids.dedup();
-    unique_ids.truncate(MAX_CACHE_READ_ENTRIES);
-    let weight = unique_ids.len().saturating_mul(MAX_OBJECT_CACHE_ENTRY_BYTES);
-    let receipt = db.read(weight.min(MAX_CACHE_READ_BYTES), move |transaction| {
-        let placeholders = (0..unique_ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
-        let query = format!(
+fn queue_scope_load(db: &SqliteDb, scope: CacheScope) -> Result<storage::sqlite::SqliteReceipt<HashMap<u32, StoredEntry>>, SqliteError> {
+    db.read(0, move |transaction| {
+        let (row_count, bytes) = scope_stats(transaction, &scope)?;
+        if row_count > MAX_REGION_ENTRIES || bytes > MAX_REGION_BYTES {
+            return Ok(HashMap::new());
+        }
+        let mut statement = transaction.prepare(
             "SELECT local_id, crc, update_kind, update_flags, length(payload),
-                    CASE WHEN length(payload) <= ? THEN payload ELSE NULL END
-             FROM object_entries
-             WHERE grid_id = ? AND region_id = ? AND cache_id = ? AND local_id IN ({placeholders})"
-        );
-        let mut values = Vec::with_capacity(unique_ids.len() + 4);
-        values.push(SqlValue::Integer(MAX_OBJECT_CACHE_ENTRY_BYTES as i64));
-        values.push(SqlValue::Text(scope.grid_id));
-        values.push(SqlValue::Blob(scope.region_id.as_bytes().to_vec()));
-        values.push(SqlValue::Blob(scope.cache_id.as_bytes().to_vec()));
-        values.extend(unique_ids.into_iter().map(|local_id| SqlValue::Integer(i64::from(local_id))));
-        let mut statement = transaction.prepare(&query)?;
-        let rows = statement.query_map(params_from_iter(values.iter()), |row| {
-            Ok(StoredEntry {
-                local_id: row.get(0)?,
-                crc: row.get(1)?,
-                update_kind: row.get(2)?,
-                update_flags: row.get(3)?,
-                payload_bytes: row.get(4)?,
-                payload: row.get(5)?,
-            })
-        })?;
-        let mut entries = HashMap::new();
-        for row in rows {
+                    CASE WHEN length(payload) <= ?1 THEN payload ELSE NULL END
+             FROM object_entries WHERE grid_id = ?2 AND region_id = ?3 AND cache_id = ?4 ORDER BY local_id",
+        )?;
+        let row_iter = statement.query_map(
+            params![
+                MAX_OBJECT_CACHE_ENTRY_BYTES as i64,
+                scope.grid_id,
+                scope.region_id.as_bytes().as_slice(),
+                scope.cache_id.as_bytes().as_slice()
+            ],
+            |row| {
+                Ok(StoredEntry {
+                    local_id: row.get(0)?,
+                    crc: row.get(1)?,
+                    update_kind: row.get(2)?,
+                    update_flags: row.get(3)?,
+                    payload_bytes: row.get(4)?,
+                    payload: row.get(5)?,
+                })
+            },
+        )?;
+        let mut entries = HashMap::with_capacity(row_count);
+        for row in row_iter {
             let entry = row?;
             if let Ok(local_id) = u32::try_from(entry.local_id) {
                 entries.insert(local_id, entry);
             }
         }
         Ok(entries)
-    })?;
-    receipt.wait().await
+    })
 }
 
 fn encode_entries(message: &Message) -> Vec<EncodedEntry> {
@@ -555,18 +728,15 @@ fn make_write_submission(scope: CacheScope, entries: Vec<EncodedEntry>, last_use
         Ok(())
     })
     .expect("object entries batch fits SQLite limits");
-    let scope_for_region_prune = scope.clone();
-    let region_prune = SqliteBatch::new(256, 256, move |transaction| {
-        prune_scope(transaction, &scope_for_region_prune, MAX_REGION_ENTRIES, MAX_REGION_BYTES)
-    })
-    .expect("region prune batch fits SQLite limits");
+    let region_prune =
+        SqliteBatch::new(256, 256, move |transaction| prune_scope(transaction, &scope, MAX_REGION_ENTRIES, MAX_REGION_BYTES))
+            .expect("region prune batch fits SQLite limits");
     let global_prune_first = SqliteBatch::new(256, 256, prune_global_chunk).expect("global prune batch fits SQLite limits");
     let global_prune_second = SqliteBatch::new(256, 256, prune_global_chunk).expect("global prune batch fits SQLite limits");
     PendingSubmission {
         batches: vec![scope_batch, entries_batch, region_prune, global_prune_first, global_prune_second],
         rows: submission_rows,
         bytes: submission_bytes,
-        populated_scope: Some(scope),
     }
 }
 
@@ -578,7 +748,7 @@ fn make_scope_delete_submission(scope: CacheScope) -> PendingSubmission {
             .expect("scope delete batch fits SQLite limits");
         batches.push(batch);
     }
-    PendingSubmission { batches, rows: MAX_REGION_DELETE_BATCHES * 256, bytes: MAX_REGION_DELETE_BATCHES * 256, populated_scope: None }
+    PendingSubmission { batches, rows: MAX_REGION_DELETE_BATCHES * 256, bytes: MAX_REGION_DELETE_BATCHES * 256 }
 }
 
 fn make_access_submission(scope: CacheScope, stale: HashSet<u32>, last_used: i64) -> PendingSubmission {
@@ -610,7 +780,7 @@ fn make_access_submission(scope: CacheScope, stale: HashSet<u32>, last_used: i64
         Ok(())
     })
     .expect("cache access batch fits SQLite limits");
-    PendingSubmission { batches: vec![batch], rows, bytes, populated_scope: None }
+    PendingSubmission { batches: vec![batch], rows, bytes }
 }
 
 fn upsert_scope(transaction: &Transaction<'_>, scope: &CacheScope, last_used: i64) -> Result<(), RusqliteError> {
@@ -746,6 +916,17 @@ fn scope_stats(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(usi
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     Ok((usize::try_from(rows).unwrap_or(usize::MAX), usize::try_from(bytes).unwrap_or(usize::MAX)))
+}
+
+fn stored_entry(entry: &EncodedEntry) -> StoredEntry {
+    StoredEntry {
+        local_id: i64::from(entry.local_id),
+        crc: i64::from(entry.crc),
+        update_kind: entry.update_kind,
+        update_flags: i64::from(entry.update_flags),
+        payload_bytes: i64::try_from(entry.payload.len()).unwrap_or(i64::MAX),
+        payload: Some(entry.payload.clone()),
+    }
 }
 
 fn decode_entry(entry: &StoredEntry, reference: CachedObjectReference, local_id: u32) -> Option<Message> {

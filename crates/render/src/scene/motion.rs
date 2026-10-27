@@ -40,7 +40,7 @@ impl MotionState {
     }
 
     pub(crate) fn updated(previous_state: Self, previous: MotionSample, next: MotionSample, at: Instant) -> Self {
-        if previous == next {
+        if same_motion(previous, next) {
             return previous_state;
         }
         let physical_velocity_changed = next.is_physical && previous.angular_velocity != next.angular_velocity;
@@ -59,6 +59,20 @@ impl MotionState {
     fn local_rotation(self, sample: MotionSample, now: Instant) -> Quat {
         local_rotation(sample, self, now)
     }
+}
+
+fn same_motion(previous: MotionSample, next: MotionSample) -> bool {
+    previous.transform.pose == next.transform.pose
+        && previous.region == next.region
+        && previous.local_position == next.local_position
+        && previous.local_rotation == next.local_rotation
+        && previous.velocity == next.velocity
+        && previous.acceleration == next.acceleration
+        && previous.angular_velocity == next.angular_velocity
+        && previous.is_physical == next.is_physical
+        && previous.time_dilation == next.time_dilation
+        && previous.is_attachment == next.is_attachment
+        && previous.source == next.source
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -352,6 +366,21 @@ mod tests {
         let next_state = MotionState::updated(old_state, old, next, update_at);
         close_vec(position_at_effective(next, next_state.elapsed(update_at) + 0.5), DVec3::X * 7.0);
         close_rotation(next_state.local_rotation(next, update_at), Quat::from_rotation_z(0.5));
+    }
+
+    #[test]
+    fn scale_update_keeps_motion_prediction_clock() {
+        let now = Instant::now();
+        let moving = sample(DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::Z, false);
+        let state = MotionState::new(now);
+        let update_at = now + Duration::from_millis(500);
+        let mut resized = moving;
+        resized.transform.scale = Vec3::splat(2.0);
+        let resized_state = MotionState::updated(state, moving, resized, update_at);
+
+        assert_eq!(resized_state.elapsed(update_at), 0.5);
+        close_vec(linear_position(resized, resized_state, now + Duration::from_secs(1), &[]), DVec3::X * 2.0);
+        close_rotation(resized_state.local_rotation(resized, now + Duration::from_secs(1)), Quat::from_rotation_z(1.0));
     }
 
     #[test]

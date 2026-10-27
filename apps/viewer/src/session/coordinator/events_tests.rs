@@ -347,7 +347,7 @@ fn region_connection_lifecycle() {
 }
 
 #[tokio::test]
-async fn loopback_seat_removal_keeps_avatar_parenting_in_world() {
+async fn seat_removal_preserves_parenting() {
     let simulator_id = simulator_id();
     let simulator = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
     let viewer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback viewer");
@@ -396,11 +396,11 @@ async fn loopback_seat_removal_keeps_avatar_parenting_in_world() {
     let mut bytes = [0; 2048];
     let (length, _) = viewer.recv_from(&mut bytes).await.expect("receive seat removal");
     let message = Packet::decode(&bytes[..length]).expect("decode seat removal").message().clone();
-    assert!(matches!(message, Message::KillObject(_)));
+    std::assert_matches!(message, Message::KillObject(_));
     apply_world_event(&mut intake, &simulator_message(simulator_id, 3, message)).expect("apply simulator seat removal");
 
     let parent = intake.world().object(agent_entity).expect("avatar remains in world").parent();
-    assert!(matches!(parent, Parent::Pending { expected_uuid: Some(id), .. } if id == seat_id));
+    std::assert_matches!(parent, Parent::Pending { expected_uuid: Some(id), .. } if id == seat_id);
 }
 
 #[test]
@@ -654,7 +654,7 @@ fn newer_handoff_conflicts_invalidate_observation() {
     )
     .expect("apply stale kill");
     let result = summary.blocks[0].applied().expect("recorded kill");
-    assert!(matches!(&result.outcome, TombstoneRecorded(address) if *address == removed_address));
+    std::assert_matches!(&result.outcome, TombstoneRecorded(address) if *address == removed_address);
     assert!(observations.contains_key(&destination_id));
 
     apply_world_event_with_handoff(
@@ -853,7 +853,7 @@ fn unknown_removal_cancels_recovery() {
     for (block, address) in summary.blocks.iter().zip(&addresses) {
         let result = block.applied().expect("recorded tombstone");
         assert_eq!(result.revision, None);
-        assert!(matches!(&result.outcome, TombstoneRecorded(recorded) if recorded == address));
+        std::assert_matches!(&result.outcome, TombstoneRecorded(recorded) if recorded == address);
     }
     assert_eq!(summary.recovery_cancellation_addresses().collect::<Vec<_>>(), addresses);
 }
@@ -868,13 +868,13 @@ fn repeated_removal_keeps_recovery() {
 
     let (_, first) = apply_world_event(&mut intake, &simulator_message(simulator_id, 1, message.clone())).expect("registered simulator");
     let first_result = first.blocks[0].applied().expect("recorded tombstone");
-    assert!(matches!(&first_result.outcome, TombstoneRecorded(_)));
+    std::assert_matches!(&first_result.outcome, TombstoneRecorded(_));
 
     let (_, repeated) = apply_world_event(&mut intake, &simulator_message(simulator_id, 1, message)).expect("registered simulator");
     let repeated_result = repeated.blocks[0].applied().expect("unchanged removal");
 
     assert_eq!(repeated_result.revision, None);
-    assert!(matches!(&repeated_result.outcome, Unchanged));
+    std::assert_matches!(&repeated_result.outcome, Unchanged);
     assert_eq!(repeated.recovery_cancellation_addresses().count(), 0);
 }
 
@@ -903,10 +903,10 @@ fn object_update_order_schedules_recovery() {
     {
         let state = intake.world();
         let child = state.object(state.entity(child_id).unwrap()).unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             child.parent(),
             Parent::Resolved(parent) if state.object(parent).unwrap().id() == parent_id
-        ));
+        );
     }
 
     let mut terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();

@@ -255,12 +255,10 @@ impl SceneFeed {
         !self.agent_is_seated() && self.dead_reckoning.active(now)
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn agent_is_seated(&self) -> bool {
-        self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_)))
+        self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_) | Parent::Pending { .. }))
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn agent(&self) -> Option<&Object> {
         self.agent.and_then(|entity| self.view.object(entity))
     }
@@ -330,7 +328,6 @@ impl SceneFeed {
         self.motion_active.retain(|region, _| regions.contains(region));
     }
 
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn sit_camera_pose(&self) -> Option<(SitCameraOverride, WorldPose)> {
         let camera = (*self.sit_camera.borrow())?;
         let agent = self.agent()?;

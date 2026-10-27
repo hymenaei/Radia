@@ -507,7 +507,7 @@ mod tests {
         let camera = view(DVec3::ZERO, Vec3::X);
         let mut controls = HeldControls::default();
         assert_eq!(
-            controls.keyboard_event(&Key::Named(NamedKey::Space), ElementState::Pressed, false, false),
+            controls.keyboard_event(&Key::Named(NamedKey::Space), ElementState::Pressed, false, false, false),
             Some((KeyBinding::Stop, true))
         );
         let mut uplink = CameraUplink::new();
@@ -574,7 +574,7 @@ mod tests {
 
         let mut controls = HeldControls::default();
         let (binding, changed) =
-            controls.keyboard_event(&Key::Character("w".into()), ElementState::Pressed, false, false).expect("forward key binding");
+            controls.keyboard_event(&Key::Character("w".into()), ElementState::Pressed, false, false, false).expect("forward key binding");
         assert_eq!(binding, KeyBinding::Movement(MovementKey::Forward));
         assert!(changed);
         let movement = controls.observation(false, Quat::IDENTITY);
@@ -656,7 +656,7 @@ mod tests {
         assert_eq!(sent.len(), 2, "held controls do not repeat before the one-second keepalive");
 
         let (_, changed) =
-            controls.keyboard_event(&Key::Character("w".into()), ElementState::Released, false, false).expect("forward key release");
+            controls.keyboard_event(&Key::Character("w".into()), ElementState::Released, false, false, false).expect("forward key release");
         assert!(changed);
         let released = controls.observation(false, Quat::IDENTITY);
         assert_eq!(released.control_flags, 0);

@@ -278,6 +278,7 @@ impl SceneWindow {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let was_free = self.camera_mode == CameraMode::Free;
+                let seated = self.feed.as_ref().is_some_and(SceneFeed::agent_is_seated);
                 let Some(changed) = handle_keyboard_input(
                     &mut self.controls,
                     &mut self.camera_mode,
@@ -285,6 +286,7 @@ impl SceneWindow {
                     event.state,
                     event.repeat,
                     capture.consumed || capture.keyboard,
+                    seated,
                 ) else {
                     return false;
                 };

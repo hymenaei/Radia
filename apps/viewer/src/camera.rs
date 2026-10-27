@@ -365,11 +365,12 @@ pub(crate) fn handle_keyboard_input(
     state: ElementState,
     repeat: bool,
     captured: bool,
+    seated: bool,
 ) -> Option<bool> {
     if state == ElementState::Pressed && !repeat && KeyBinding::from_key(key).is_some() {
         tracing::debug!(?key, captured, "viewport movement key received");
     }
-    let (binding, changed) = controls.keyboard_event(key, state, repeat, captured)?;
+    let (binding, changed) = controls.keyboard_event(key, state, repeat, captured, seated)?;
     camera_mode.on_movement_key(binding, state, repeat, captured);
     Some(changed)
 }
@@ -456,7 +457,7 @@ mod tests {
         let mut controls = HeldControls::default();
 
         assert_eq!(
-            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, false),
+            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, false, false),
             Some(true)
         );
         assert_eq!(mode, CameraMode::Follow);
@@ -469,7 +470,10 @@ mod tests {
         let mut mode = CameraMode::Free;
         let mut controls = HeldControls::default();
 
-        assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, true), None);
+        assert_eq!(
+            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, true, false),
+            None
+        );
         assert_eq!(mode, CameraMode::Free);
         assert_eq!(controls.observation(false, math::Quat::IDENTITY).control_flags, 0);
     }
@@ -484,7 +488,7 @@ mod tests {
             let mut controls = HeldControls::default();
 
             let binding = KeyBinding::from_key(&key).expect("mapped camera-return key");
-            assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &key, ElementState::Pressed, false, false), Some(true));
+            assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &key, ElementState::Pressed, false, false, false), Some(true));
             assert!(matches!(binding, KeyBinding::ToggleFlying | KeyBinding::ToggleRun | KeyBinding::Stop));
             assert_eq!(mode, CameraMode::Follow);
         }
@@ -500,7 +504,7 @@ mod tests {
         controls.set_pressed(MovementKey::Forward, true);
 
         assert_eq!(
-            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Released, false, false),
+            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Released, false, false, false),
             Some(true)
         );
         assert_eq!(mode, CameraMode::Free);

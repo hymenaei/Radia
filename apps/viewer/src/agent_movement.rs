@@ -162,7 +162,14 @@ impl HeldControls {
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    pub(crate) fn keyboard_event(&mut self, key: &Key, state: ElementState, repeat: bool, captured: bool) -> Option<(KeyBinding, bool)> {
+    pub(crate) fn keyboard_event(
+        &mut self,
+        key: &Key,
+        state: ElementState,
+        repeat: bool,
+        captured: bool,
+        seated: bool,
+    ) -> Option<(KeyBinding, bool)> {
         let binding = KeyBinding::from_key(key)?;
         if state == ElementState::Released {
             let changed = match binding {
@@ -179,10 +186,7 @@ impl HeldControls {
         }
         let changed = match binding {
             KeyBinding::Movement(key) => self.set_pressed(key, true),
-            KeyBinding::ToggleFlying => {
-                self.toggle_flying();
-                true
-            }
+            KeyBinding::ToggleFlying => self.toggle_flying(seated),
             KeyBinding::ToggleRun => {
                 self.toggle_run();
                 true
@@ -195,8 +199,12 @@ impl HeldControls {
         Some((binding, changed))
     }
 
-    pub(crate) fn toggle_flying(&mut self) {
+    pub(crate) fn toggle_flying(&mut self, seated: bool) -> bool {
+        if seated && !self.flying {
+            return false;
+        }
         self.flying = !self.flying;
+        true
     }
 
     pub(crate) fn toggle_run(&mut self) {
@@ -363,11 +371,11 @@ mod tests {
     fn captured_press_does_not_move() {
         let mut controls = HeldControls::default();
         let key = Key::Character("w".into());
-        assert_eq!(controls.keyboard_event(&key, ElementState::Pressed, false, true), None);
+        assert_eq!(controls.keyboard_event(&key, ElementState::Pressed, false, true, false), None);
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
 
-        controls.keyboard_event(&key, ElementState::Pressed, false, false).expect("forward press");
-        controls.keyboard_event(&key, ElementState::Released, false, true).expect("forward release");
+        controls.keyboard_event(&key, ElementState::Pressed, false, false, false).expect("forward press");
+        controls.keyboard_event(&key, ElementState::Released, false, true, false).expect("forward release");
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
     }
 
@@ -375,7 +383,7 @@ mod tests {
     fn toggles_and_focus_loss_publish_fly_run_and_stop_state() {
         let mut controls = HeldControls::default();
         controls.set_pressed(MovementKey::Forward, true);
-        controls.toggle_flying();
+        controls.toggle_flying(false);
         controls.toggle_run();
         let movement = controls.observation(false, Quat::IDENTITY);
         assert_eq!(movement.control_flags, AT_POS | FAST_AT | FLY);
@@ -386,6 +394,19 @@ mod tests {
         assert!(stopped.stop_sequence > movement.stop_sequence);
         assert!(stopped.always_run);
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, FLY);
+    }
+
+    #[test]
+    fn seated_agent_cannot_start_flying() {
+        let mut controls = HeldControls::default();
+        controls.toggle_flying(true);
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags & FLY, 0);
+
+        controls.toggle_flying(false);
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags & FLY, FLY);
+
+        controls.toggle_flying(true);
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags & FLY, 0);
     }
 
     #[test]

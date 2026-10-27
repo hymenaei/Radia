@@ -48,6 +48,7 @@ pub(super) enum DecodedWorldUpdate {
     SitTarget { source: UpdateSource, update: SitTargetUpdate },
     ParcelOverlay { source: UpdateSource, observation: ParcelOverlayObservation },
     ParcelProperties { source: UpdateSource, observation: ParcelPropertiesObservation },
+    ParcelMalformed,
     Malformed { invalid_blocks: usize, invalid_fields: usize },
 }
 
@@ -69,12 +70,15 @@ pub(super) fn decode_simulator_world_update(
     if let Message::RegionHandshake(handshake) = message {
         let extended = (!handshake.region_info4.is_empty())
             .then(|| handshake.region_info4.iter().fold(0_u64, |flags, block| flags | block.region_flags_extended));
-        if let Err(error) = world.observe_region_flags(
-            UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
-            Some(handshake.region_info1.region_flags),
-            extended,
-        ) {
-            tracing::debug!(simulator = simulator_id.get(), region = region.get(), %error, "could not update region parcel restrictions");
+        if world
+            .observe_region_flags(
+                UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
+                Some(handshake.region_info1.region_flags),
+                extended,
+            )
+            .is_err()
+        {
+            record_parcel_rejection(world, simulator_id, region);
         }
         if let Err(error) = world
             .update_water_height(UpdateSource::new(region, sequence, order_evidence(packet_order), 0), handshake.region_info1.water_height)
@@ -92,12 +96,15 @@ pub(super) fn decode_simulator_world_update(
     }
     if let Message::RegionInfo(info) = message {
         let extended = info.region_info3.iter().filter_map(|block| block.region_flags_extended).reduce(|a, b| a | b);
-        if let Err(error) = world.observe_region_flags(
-            UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
-            info.region_info.region_flags,
-            extended,
-        ) {
-            tracing::debug!(simulator = simulator_id.get(), region = region.get(), %error, "could not update region parcel restrictions");
+        if world
+            .observe_region_flags(
+                UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
+                info.region_info.region_flags,
+                extended,
+            )
+            .is_err()
+        {
+            record_parcel_rejection(world, simulator_id, region);
         }
     }
 
@@ -113,7 +120,7 @@ pub(super) fn decode_simulator_world_update(
                 source: UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
                 observation,
             },
-            Err(()) => DecodedWorldUpdate::Malformed { invalid_blocks: 1, invalid_fields: 0 },
+            Err(()) => DecodedWorldUpdate::ParcelMalformed,
         });
     }
 
@@ -130,6 +137,12 @@ pub(super) fn decode_simulator_world_update(
         Err(_) => return Some(DecodedWorldUpdate::Malformed { invalid_blocks: 1, invalid_fields: 0 }),
     }
     decode_object_message(region, sequence, order_evidence(packet_order), message).map(DecodedWorldUpdate::Object)
+}
+
+fn record_parcel_rejection(world: &mut SessionWorld, simulator_id: SimulatorId, region: world::Region) {
+    if let Some(rejected) = world.record_parcel_rejection() {
+        tracing::debug!(simulator = simulator_id.get(), region = region.get(), rejected, "parcel updates were repeatedly rejected");
+    }
 }
 
 impl WorldHandoff {
@@ -290,8 +303,8 @@ impl WorldHandoff {
                 }
             }
             DecodedWorldUpdate::ParcelOverlay { source, observation } => {
-                if let Err(error) = world.observe_parcel_overlay(source, observation) {
-                    tracing::debug!(simulator = simulator_id.get(), region = source.region().get(), %error, "could not apply parcel overlay part");
+                if world.observe_parcel_overlay(source, observation).is_err() {
+                    record_parcel_rejection(world, simulator_id, source.region());
                 }
                 None
             }
@@ -299,8 +312,16 @@ impl WorldHandoff {
                 if self.world_primary != Some(simulator_id) {
                     return None;
                 }
-                if let Err(error) = world.observe_parcel_properties(source, observation) {
-                    tracing::debug!(simulator = simulator_id.get(), region = source.region().get(), %error, "could not apply current parcel properties");
+                if world.observe_parcel_properties(source, observation).is_err() {
+                    record_parcel_rejection(world, simulator_id, source.region());
+                }
+                None
+            }
+            DecodedWorldUpdate::ParcelMalformed => {
+                if self.world_primary == Some(simulator_id)
+                    && let Some(region) = world.region_for(simulator_id)
+                {
+                    record_parcel_rejection(world, simulator_id, region);
                 }
                 None
             }

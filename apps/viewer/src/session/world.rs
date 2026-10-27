@@ -24,6 +24,7 @@ const MAX_WORLD_JOURNAL_ENTRIES: usize = 4_096;
 const MAX_REGION_NAME_BYTES: usize = 256;
 const MAX_INGEST_DIAGNOSTIC_ADDRESSES: usize = 8;
 const MAX_OBJECTS_PER_INTAKE_QUANTUM: usize = 32;
+const PARCEL_REJECTION_LOG_INTERVAL: u64 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IngestStatus {
@@ -218,12 +219,13 @@ impl IngestSummary {
 pub(super) struct SessionWorld {
     world: World,
     regions: HashMap<SimulatorId, Region>,
+    parcel_rejections: u64,
 }
 
 impl SessionWorld {
     pub(super) fn new(limits: WorldLimits) -> Self {
         let world = World::new(limits);
-        Self { world, regions: HashMap::new() }
+        Self { world, regions: HashMap::new(), parcel_rejections: 0 }
     }
 
     pub(super) fn world(&self) -> &World {
@@ -265,6 +267,12 @@ impl SessionWorld {
         extended: Option<u64>,
     ) -> Result<RegionApplied, ApplyError> {
         self.world.observe_region_flags(source, low, extended)
+    }
+
+    pub(super) fn record_parcel_rejection(&mut self) -> Option<u64> {
+        self.parcel_rejections = self.parcel_rejections.saturating_add(1);
+        (self.parcel_rejections != u64::MAX && self.parcel_rejections.is_multiple_of(PARCEL_REJECTION_LOG_INTERVAL))
+            .then_some(self.parcel_rejections)
     }
 
     pub(super) fn observe_environment(

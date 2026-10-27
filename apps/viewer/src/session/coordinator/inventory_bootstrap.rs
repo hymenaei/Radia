@@ -6,7 +6,8 @@ use std::{
 };
 
 use ::inventory::{Category, CategoryKey, FolderType, Inventory, InventoryError, InventoryLimits, InventoryOwner, ServerVersion};
-use protocol::login::{InventoryBootstrap as LoginInventoryBootstrap, InventorySkeleton, InventorySkeletonFolder};
+use protocol::login::{InventoryBootstrap as LoginInventoryBootstrap, InventorySkeleton, InventorySkeletonFolder, ResponseData};
+use tokio::{runtime::Handle, task::JoinHandle};
 use utils::FolderId;
 use uuid::Uuid;
 
@@ -87,6 +88,17 @@ pub(crate) fn build_inventory(
         inventory,
         InventoryBootstrapReport { personal_categories, library_categories, rejected_personal_entries, rejected_library_entries },
     ))
+}
+
+pub(crate) fn spawn_inventory_build(
+    runtime: &Handle,
+    agent_id: Uuid,
+    login_data: ResponseData,
+) -> JoinHandle<Result<(Inventory, InventoryBootstrapReport), String>> {
+    runtime.spawn_blocking(move || {
+        let bootstrap = login_data.inventory_bootstrap().map_err(|error| error.to_string())?;
+        build_inventory(agent_id, bootstrap).map_err(|error| error.to_string())
+    })
 }
 
 fn build_scope(owner: InventoryOwner, root_id: Uuid, skeleton: InventorySkeleton) -> ScopeCategories {
@@ -179,10 +191,51 @@ fn empty_root(owner: InventoryOwner, id: FolderId) -> Category {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::login::{InventorySkeleton, InventorySkeletonFolder};
+    use protocol::login::{InventorySkeleton, InventorySkeletonFolder, Value};
+    use std::{collections::BTreeMap, time::Duration};
+    use tokio::time::timeout;
 
     fn uuid(id: u128) -> Uuid {
         Uuid::from_u128(id)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn max_login_skeleton_does_not_block_intake() {
+        let root = uuid(1);
+        let folders = (1..=protocol::login::MAX_LOGIN_INVENTORY_FOLDERS)
+            .map(|id| {
+                let id = uuid(id as u128);
+                let parent_id = if id == root { Uuid::nil() } else { root };
+                Value::Struct(BTreeMap::from([
+                    ("folder_id".into(), Value::String(id.to_string())),
+                    ("parent_id".into(), Value::String(parent_id.to_string())),
+                    ("name".into(), Value::String("folder".into())),
+                    ("version".into(), Value::Integer(-1)),
+                ]))
+            })
+            .collect();
+        let login_data = ResponseData::from_fields(BTreeMap::from([
+            (
+                "inventory-root".into(),
+                Value::Array(vec![Value::Struct(BTreeMap::from([("folder_id".into(), Value::String(root.to_string()))]))]),
+            ),
+            ("inventory-skeleton".into(), Value::Array(folders)),
+        ]));
+        let started = std::time::Instant::now();
+        let build = spawn_inventory_build(&Handle::current(), uuid(10), login_data);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = sender.send(());
+        });
+
+        timeout(Duration::from_millis(100), receiver)
+            .await
+            .expect("session intake should run while login folders are built")
+            .expect("intake signal should arrive");
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let (inventory, report) = build.await.expect("inventory worker should finish").expect("valid login inventory should build");
+        assert_eq!(report.personal_categories, protocol::login::MAX_LOGIN_INVENTORY_FOLDERS);
+        assert_eq!(inventory.snapshot().categories().count(), protocol::login::MAX_LOGIN_INVENTORY_FOLDERS);
     }
 
     fn folder(id: u128, parent_id: u128, name: &str, type_default: Option<i32>) -> InventorySkeletonFolder {

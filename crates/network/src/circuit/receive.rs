@@ -15,9 +15,9 @@ use tokio::{
 };
 
 use super::{
-    ConnectionError, ConnectionRole, ConnectionTask, EVENT_BACKLOG_DISCONNECT_REASON, MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS,
-    MAX_QUEUED_SIMULATOR_EVENTS, NEIGHBOR_PRECONNECT_OVERFLOW_REASON, NeighborEventQueueOutcome, SimulatorEvent, SimulatorRequest,
-    active_queue_class, lifecycle::RunControl, outbound::MovementSend, preempt_deferred_send, preflight_loss_reason, queue_internal,
+    ConnectionError, ConnectionRole, ConnectionTask, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, NeighborEventQueueOutcome,
+    SimulatorEvent, SimulatorRequest, active_queue_class, lifecycle::RunControl, outbound::MovementSend, preempt_deferred_send,
+    preflight_loss_reason, queue_internal,
 };
 use crate::{
     circuit::admission::PacketMemoryReservation,
@@ -268,11 +268,6 @@ impl ConnectionTask {
             self.preconnect_messages.len() >= MAX_PRECONNECT_EVENTS
         };
         if dispatch_message && (self.phase.is_closing() || self.events.is_closed() || event_queue_full) {
-            if event_queue_full && !self.phase.is_closing() {
-                let reason =
-                    if self.phase.is_established() { EVENT_BACKLOG_DISCONNECT_REASON } else { NEIGHBOR_PRECONNECT_OVERFLOW_REASON };
-                self.phase.close(Some(reason), false);
-            }
             self.reject(RejectionKind::EventAdmission, CoverageLossReason::EventAdmission);
             self.last_udp_received = Instant::now();
             drop(memory_reservation);
@@ -318,7 +313,7 @@ impl ConnectionTask {
             endpoint: self.connection.session.simulator_address,
         }) {
             NeighborEventQueueOutcome::ReceiverClosed => return Ok(Some(RunControl::Finish(None))),
-            NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::Closing => {}
+            NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::BacklogFull => {}
         }
         while let Some(event) = self.preconnect_messages.pop_front() {
             let admission_rejected = self.events.is_closed() || self.pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS;
@@ -338,7 +333,7 @@ impl ConnectionTask {
                     }
                     return Ok(Some(RunControl::Finish(None)));
                 }
-                NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::Closing => {
+                NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::BacklogFull => {
                     if admission_rejected && let Some(watermark) = watermark {
                         record_coverage_loss(
                             &self.connection.coverage_losses,
@@ -431,7 +426,7 @@ impl ConnectionTask {
                     }
                     return RunControl::Finish(None);
                 }
-                NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::Closing => {
+                NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::BacklogFull => {
                     if admission_rejected && let Some(watermark) = watermark {
                         record_coverage_loss(
                             &self.connection.coverage_losses,
@@ -445,7 +440,6 @@ impl ConnectionTask {
         } else if self.preconnect_messages.len() < MAX_PRECONNECT_EVENTS {
             self.preconnect_messages.push_back(event);
         } else {
-            self.phase.close(Some(NEIGHBOR_PRECONNECT_OVERFLOW_REASON), false);
             self.packet_rejections.record(RejectionKind::EventAdmission);
             if let Some(watermark) = event.coverage_watermark() {
                 record_coverage_loss(
@@ -579,11 +573,7 @@ impl ConnectionTask {
     }
 
     fn queue_event(&mut self, event: impl Into<EventEnvelope>) -> NeighborEventQueueOutcome {
-        let outcome = super::queue_neighbor_event(&self.events, &mut self.pending_events, event);
-        if matches!(outcome, NeighborEventQueueOutcome::Closing) {
-            self.phase.close(Some(EVENT_BACKLOG_DISCONNECT_REASON), true);
-        }
-        outcome
+        super::queue_neighbor_event(&self.events, &mut self.pending_events, event)
     }
 
     fn reject(&mut self, kind: RejectionKind, reason: CoverageLossReason) {
@@ -598,15 +588,9 @@ pub(crate) fn queue_neighbor_event(
     event: impl Into<EventEnvelope>,
 ) -> NeighborEventQueueOutcome {
     match queue_neighbor_channel_event(events, pending_events, event.into()) {
-        EventQueueOutcome::Queued => {
-            if pending_events.len() >= MAX_PENDING_SIMULATOR_EVENTS {
-                NeighborEventQueueOutcome::Closing
-            } else {
-                NeighborEventQueueOutcome::Queued
-            }
-        }
+        EventQueueOutcome::Queued => NeighborEventQueueOutcome::Queued,
         EventQueueOutcome::ReceiverClosed => NeighborEventQueueOutcome::ReceiverClosed,
-        EventQueueOutcome::BacklogFull => NeighborEventQueueOutcome::Closing,
+        EventQueueOutcome::BacklogFull => NeighborEventQueueOutcome::BacklogFull,
     }
 }
 

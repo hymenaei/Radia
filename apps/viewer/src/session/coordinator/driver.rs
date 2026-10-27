@@ -26,7 +26,7 @@ use super::{
     WriteLock,
     events::{MovementCompleteOutcome, SimulatorScope, WorldHandoff, handle_simulator_message, order_evidence, route_recovery_targets},
     input::{Input, select_drain_input},
-    inventory_bootstrap::build_inventory,
+    inventory_bootstrap::{InventoryBootstrapReport, spawn_inventory_build},
     inventory_cache::{InventoryCacheEvent, InventoryCacheSession},
     inventory_intake::{self, InventoryIntakeError, InventoryIntakeOutcome},
     media::ObjectMediaIntake,
@@ -60,6 +60,7 @@ enum DriverInput {
     Session(Input),
     InventoryCache(Option<InventoryCacheEvent>),
     InventoryEdit(Option<InventoryEditEvent>),
+    InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), String>, tokio::task::JoinError>),
 }
 
 pub(crate) struct CredentialPersistence {
@@ -91,6 +92,10 @@ struct SessionDriver {
     handoff: WorldHandoff,
     active_session: Option<AgentSession>,
     active_login_data: Option<ResponseData>,
+    active_capabilities: Option<Client>,
+    favorites_enabled: bool,
+    inventory_bootstrap: Option<tokio::task::JoinHandle<Result<(Inventory, InventoryBootstrapReport), String>>>,
+    inventory_bootstrap_dirty: bool,
     inventory: Option<Inventory>,
     inventory_cache: InventoryCacheSession,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
@@ -162,6 +167,10 @@ impl SessionDriver {
             handoff: WorldHandoff::default(),
             active_session: None,
             active_login_data: None,
+            active_capabilities: None,
+            favorites_enabled: false,
+            inventory_bootstrap: None,
+            inventory_bootstrap_dirty: false,
             inventory: None,
             inventory_cache: InventoryCacheSession::new(),
             inventory_changes,
@@ -188,6 +197,12 @@ impl SessionDriver {
             self.media.flush(&self.session_world);
             let terrain_full = self.terrain.is_full();
             let event = async { if terrain_full { pending::<Option<Event>>().await } else { self.session.recv_event().await } };
+            let inventory_bootstrap = async {
+                match self.inventory_bootstrap.as_mut() {
+                    Some(task) => Some(task.await),
+                    None => pending().await,
+                }
+            };
             let input = tokio::select! {
                 input = select_drain_input(
                     &mut self.reads,
@@ -202,8 +217,24 @@ impl SessionDriver {
                 ) => DriverInput::Session(input),
                 cache_event = self.inventory_cache.next_event() => DriverInput::InventoryCache(cache_event),
                 edit_event = self.inventory_edits.next_event() => DriverInput::InventoryEdit(edit_event),
+                bootstrap = inventory_bootstrap => DriverInput::InventoryBootstrap(bootstrap.expect("bootstrap task must be pending")),
             };
             let flow = match input {
+                DriverInput::InventoryBootstrap(result) => {
+                    self.inventory_bootstrap = None;
+                    match result {
+                        Ok(Ok((inventory, report))) => self.finish_inventory_bootstrap(inventory, report),
+                        Ok(Err(error)) => {
+                            tracing::warn!(%error, "login inventory could not be initialized");
+                            self.start_favorites_load_for_active();
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "login inventory worker failed");
+                            self.start_favorites_load_for_active();
+                        }
+                    }
+                    ControlFlow::Continue(())
+                }
                 DriverInput::InventoryCache(Some(event)) => {
                     let before = self.inventory.as_ref().map(Inventory::snapshot);
                     let outcome =
@@ -336,37 +367,15 @@ impl SessionDriver {
             }
             SessionReady { simulator_id, session, capabilities, login_data } => {
                 self.handoff.session_ready(&mut self.session_world, simulator_id, session.agent_id);
-                if self.inventory.is_none() {
-                    match login_data.inventory_bootstrap() {
-                        Ok(bootstrap) => match build_inventory(session.agent_id, bootstrap) {
-                            Ok((inventory, report)) => {
-                                if report.rejected_personal_entries > 0 || report.rejected_library_entries > 0 {
-                                    tracing::warn!(
-                                        personal_rejected = report.rejected_personal_entries,
-                                        library_rejected = report.rejected_library_entries,
-                                        "login inventory skeleton contained rejected folders"
-                                    );
-                                }
-                                self.inventory_changes.send_replace(Some(inventory.snapshot()));
-                                self.inventory = Some(inventory);
-                            }
-                            Err(error) => tracing::warn!(%error, "login inventory could not be initialized"),
-                        },
-                        Err(error) => tracing::warn!(%error, "login inventory fields could not be parsed"),
-                    }
+                if self.inventory.is_none() && self.inventory_bootstrap.is_none() {
+                    self.inventory_bootstrap = Some(spawn_inventory_build(&self.runtime, session.agent_id, login_data.clone()));
                 }
-                if let Some(inventory) = &self.inventory {
-                    let library_owner = inventory.roots().library().map(|root| root.owner().id());
-                    self.inventory_cache.start(&self.runtime, self.credentials.grid, session.agent_id, library_owner, inventory);
-                }
+                self.favorites_enabled = true;
                 self.environments.session_ready(&mut self.session_world, simulator_id, &capabilities, self.primary_simulator);
                 if let Some(region) = self.session_world.region_for(simulator_id) {
                     self.assets.register(region, capabilities.clone());
                 }
-                self.active_login_data = Some(login_data.clone());
-                self.on_primary_changed(simulator_id, *session, capabilities.clone(), Some(login_data));
-                self.start_inventory_edits(capabilities.clone());
-                self.start_inventory_fetch(capabilities);
+                self.on_primary_changed(simulator_id, *session, capabilities, Some(login_data));
                 ControlFlow::Continue(())
             }
             SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
@@ -625,7 +634,12 @@ impl SessionDriver {
 
     fn handle_inventory_udp(&mut self, message: &Message) {
         let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
-        let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else { return };
+        let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else {
+            if self.inventory_bootstrap.is_some() && inventory_intake::is_inventory_udp_message(message, agent_id) {
+                self.inventory_bootstrap_dirty = true;
+            }
+            return;
+        };
         let Some(inventory) = self.inventory.as_mut() else { return };
         let result = inventory_intake::apply_udp(inventory, agent_id, message);
         self.apply_inventory_intake_result(result, before);
@@ -633,7 +647,12 @@ impl SessionDriver {
 
     fn handle_inventory_event_queue(&mut self, name: &str, body: &llsd::Value) {
         let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
-        let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else { return };
+        let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else {
+            if self.inventory_bootstrap.is_some() && inventory_intake::is_inventory_event_message(name) {
+                self.inventory_bootstrap_dirty = true;
+            }
+            return;
+        };
         let Some(inventory) = self.inventory.as_mut() else { return };
         let result = inventory_intake::apply_event_queue(inventory, agent_id, name, body);
         self.apply_inventory_intake_result(result, before);
@@ -687,11 +706,17 @@ impl SessionDriver {
         self.media.set_client(simulator_id, capabilities.clone());
         self.primary_simulator = Some(simulator_id);
         self.active_session = Some(session.clone());
-        if let Some(login_data) = &login_data {
-            self.active_login_data = Some(login_data.clone());
+        if let Some(login_data) = login_data {
+            self.active_login_data = Some(login_data);
         }
+        self.active_capabilities = Some(capabilities);
         let lookup = RegionLookup::new(self.session_handle.clone(), simulator_id, &session, self.runtime.clone());
-        self.region_lookup = Some(lookup.clone());
+        self.region_lookup = Some(lookup);
+        self.publish_session_ready_update(simulator_id, session);
+        self.start_favorites_load_for_active();
+    }
+
+    fn publish_session_ready_update(&self, simulator_id: SimulatorId, session: AgentSession) {
         self.mailbox.publish(ViewerUpdate::SessionReady(SessionReadyUpdate {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             environments: self.environment_inbox.clone(),
@@ -703,17 +728,63 @@ impl SessionDriver {
             agent_motion: self.agent_motion.receiver(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             assets: self.assets.handle(),
-            session: session.clone(),
+            session,
             region_name: self.session_world.region_name(simulator_id).map(str::to_owned),
             inventory_updates: self.inventory_changes.subscribe(),
             inventory_fetch: self.inventory.as_ref().map(|_| self.inventory_fetch.handle()),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             world_reader: self.reads.reader(),
         }));
-        if login_data.is_some() {
-            let inventory = self.inventory.as_ref().map(Inventory::snapshot);
-            self.spawn_favorites_load(session, capabilities, lookup, inventory);
+    }
+
+    fn finish_inventory_bootstrap(&mut self, inventory: Inventory, report: InventoryBootstrapReport) {
+        if report.rejected_personal_entries > 0 || report.rejected_library_entries > 0 {
+            tracing::warn!(
+                personal_rejected = report.rejected_personal_entries,
+                library_rejected = report.rejected_library_entries,
+                "login inventory skeleton contained rejected folders"
+            );
         }
+        if self.inventory_bootstrap_dirty {
+            self.inventory_cache.invalidate_restore();
+            tracing::warn!(
+                "early inventory updates arrived before login inventory was ready; cached contents will be refreshed from the simulator"
+            );
+        }
+        if let Some(session) = &self.active_session {
+            let library_owner = inventory.roots().library().map(|root| root.owner().id());
+            self.inventory_cache.start(&self.runtime, self.credentials.grid, session.agent_id, library_owner, &inventory);
+        }
+        self.inventory_changes.send_replace(Some(inventory.snapshot()));
+        self.inventory = Some(inventory);
+        self.inventory_bootstrap_dirty = false;
+        if let Some(capabilities) = self.active_capabilities.clone() {
+            self.start_inventory_edits(capabilities.clone());
+            self.start_inventory_fetch(capabilities);
+        }
+        if let Some(simulator_id) = self.primary_simulator
+            && let Some(session) = self.active_session.clone()
+        {
+            self.publish_session_ready_update(simulator_id, session);
+        }
+        self.start_favorites_load_for_active();
+    }
+
+    fn start_favorites_load_for_active(&self) {
+        if !self.favorites_enabled {
+            return;
+        }
+        let (Some(session), Some(capabilities), Some(lookup)) =
+            (self.active_session.clone(), self.active_capabilities.clone(), self.region_lookup.clone())
+        else {
+            return;
+        };
+        let inventory = match self.inventory.as_ref() {
+            Some(inventory) => Some(inventory.snapshot()),
+            None if self.inventory_bootstrap.is_some() => return,
+            None => None,
+        };
+        self.spawn_favorites_load(session, capabilities, lookup, inventory);
     }
 
     fn spawn_favorites_load(

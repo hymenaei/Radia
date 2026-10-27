@@ -30,9 +30,8 @@ use crate::{
     AgentSession,
     capabilities::{CapabilityBudget, Client, EventQueueExit, EventQueueRoleHandle},
     circuit::{
-        EVENT_BACKLOG_DISCONNECT_REASON, HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_TIMEOUT,
-        MAX_PENDING_SIMULATOR_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS, PrimaryState, SimulatorCommand,
-        SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome, UdpTransport,
+        HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_TIMEOUT, MAX_PENDING_SIMULATOR_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS,
+        MAX_SIMULATOR_CONNECTIONS, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome, UdpTransport,
         admission::{ConnectionRole, SimulatorMemoryBudget},
         lludp::Delivery,
         pacing::OutboundBudget,
@@ -308,7 +307,7 @@ impl SessionState {
         state: &mut RunState,
         event: impl Into<EventEnvelope>,
     ) -> Result<(), SessionError> {
-        let RunState { pending_events, logout_deadline, disconnect_reason, .. } = state;
+        let RunState { pending_events, logout_deadline, .. } = state;
         let event = event.into();
         if logout_deadline.is_some() && is_application_event(&event.event) {
             if let Some(watermark) = event.coverage_watermark() {
@@ -319,7 +318,7 @@ impl SessionState {
         let watermark = event.coverage_watermark();
         let outcome = queue_simulator_event(events, pending_events, event);
         let should_logout = match outcome {
-            EventQueueOutcome::Queued => pending_events.len() == MAX_PENDING_SIMULATOR_EVENTS,
+            EventQueueOutcome::Queued => false,
             EventQueueOutcome::ReceiverClosed => {
                 if let Some(watermark) = watermark {
                     record_coverage_loss(
@@ -343,7 +342,7 @@ impl SessionState {
                         CoverageLossReason::EventAdmission,
                     );
                 }
-                true
+                false
             }
         };
 
@@ -358,20 +357,6 @@ impl SessionState {
             );
         }
 
-        if pending_events.len() == MAX_PENDING_SIMULATOR_EVENTS {
-            let first_backlog_disconnect = *disconnect_reason != Some(EVENT_BACKLOG_DISCONNECT_REASON);
-            *disconnect_reason = Some(EVENT_BACKLOG_DISCONNECT_REASON);
-            if first_backlog_disconnect {
-                let (queue_occupancy, queue_capacity) = primary_event_queue_size(events, pending_events.len());
-                let backlog_duration_ms = self.event_backlog.duration_ms(now);
-                tracing::warn!(
-                    queue_occupancy,
-                    queue_capacity,
-                    backlog_duration_ms,
-                    "disconnecting primary simulator because its application-event queue reached the limit"
-                );
-            }
-        }
         if should_logout && logout_deadline.is_none() {
             let deadline = Instant::now() + LOGOUT_TIMEOUT;
             *logout_deadline = Some(deadline);
@@ -386,56 +371,6 @@ impl SessionState {
         Ok(())
     }
 
-    pub(super) async fn fail_preconnect_overflow(
-        &mut self,
-        simulator_id: SimulatorId,
-        events: &mpsc::Sender<EventEnvelope>,
-        state: &mut RunState,
-    ) -> Result<(), SessionError> {
-        for event in state.preconnect_events.remove(simulator_id) {
-            record_event_envelope_loss(&self.coverage_losses, event, CoverageLossReason::EventAdmission);
-        }
-        state.connected_simulators.remove(&simulator_id);
-        let error = SessionError::PreconnectBufferOverflow;
-        if simulator_id == self.simulator_id {
-            return Err(error);
-        }
-
-        let region_handle = state
-            .neighbor_connections
-            .iter()
-            .find_map(|(region_handle, connection)| (connection.simulator_id == simulator_id).then_some(*region_handle));
-        let Some(region_handle) = region_handle else {
-            return Ok(());
-        };
-        let Some(connection) = state.neighbor_connections.remove(&region_handle) else {
-            return Ok(());
-        };
-        tracing::warn!(
-            simulator = simulator_id.get(),
-            region = region_handle,
-            endpoint = %connection.endpoint,
-            %error,
-            "simulator pre-connect buffer overflowed"
-        );
-        if state.connected_simulators.contains(&simulator_id) && !connection.abort.is_finished() {
-            connection.log_disconnected(region_handle);
-        }
-        connection.abort.abort();
-        remove_simulator_capability(&mut state.simulator_capabilities, simulator_id);
-        self.publish_event(
-            events,
-            state,
-            Event::SimulatorFailed {
-                simulator_id,
-                region_handle: Some(region_handle),
-                endpoint: connection.endpoint,
-                reason: error.to_string(),
-            },
-        )
-        .await
-    }
-
     pub(super) async fn publish_simulator_event(
         &mut self,
         simulator_id: SimulatorId,
@@ -443,10 +378,21 @@ impl SessionState {
         events: &mpsc::Sender<EventEnvelope>,
         state: &mut RunState,
     ) -> Result<(), SessionError> {
+        let watermark = event.coverage_watermark();
         match queue_until_connected(&state.connected_simulators, &mut state.preconnect_events, simulator_id, event) {
             PreconnectOutcome::Ready(event) => self.publish_event(events, state, event).await,
             PreconnectOutcome::Buffered => Ok(()),
-            PreconnectOutcome::Full => self.fail_preconnect_overflow(simulator_id, events, state).await,
+            PreconnectOutcome::Full => {
+                if let Some(watermark) = watermark {
+                    record_coverage_loss(
+                        &self.coverage_losses,
+                        watermark.simulator_id,
+                        watermark.source,
+                        CoverageLossReason::EventAdmission,
+                    );
+                }
+                Ok(())
+            }
         }
     }
 
@@ -656,7 +602,6 @@ pub(super) struct RunState {
     pub(super) preconnect_events: PreconnectEvents,
     pub(super) pending_events: VecDeque<EventEnvelope>,
     pub(super) logout_deadline: Option<Instant>,
-    pub(super) disconnect_reason: Option<&'static str>,
 }
 
 impl RunState {
@@ -673,7 +618,6 @@ impl RunState {
             preconnect_events: PreconnectEvents::default(),
             pending_events: VecDeque::with_capacity(MAX_QUEUED_SIMULATOR_EVENTS),
             logout_deadline: None,
-            disconnect_reason: None,
         }
     }
 }

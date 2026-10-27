@@ -508,10 +508,10 @@ impl SessionDispatcher<'_> {
         if simulator_id == self.state.primary.simulator_id {
             if *self.disconnect_requested.borrow() {
                 self.state.neighbor_cancellation.send_replace(true);
-                return Ok(RuntimeAction::Exit(super::logout::finish_session_logout(self.run_state.disconnect_reason)));
+                return Ok(RuntimeAction::Exit(Ok(())));
             }
             return Ok(RuntimeAction::Exit(match outcome {
-                SimulatorTaskOutcome::Finished(Ok(())) => super::logout::finish_session_logout(self.run_state.disconnect_reason),
+                SimulatorTaskOutcome::Finished(Ok(())) => Ok(()),
                 SimulatorTaskOutcome::Finished(Err(reason)) | SimulatorTaskOutcome::ConnectFailed(reason) => {
                     Err(SessionError::Connection(reason))
                 }

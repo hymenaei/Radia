@@ -1,6 +1,6 @@
 use super::disconnect::{
-    RETRANSMISSION_TIMEOUT, SIMULATOR_TIMEOUT, assert_no_datagram, client_ack, complete_ping, expected_complete_movement, expected_fixture,
-    expected_zerocoded_reply, is_complete_ping, logout_message, packet_ack, packet_ack_contains, receive_packet, receive_primary_connected,
+    RETRANSMISSION_TIMEOUT, SIMULATOR_TIMEOUT, assert_no_datagram, complete_ping, expected_complete_movement, expected_fixture,
+    expected_zerocoded_reply, is_complete_ping, logout_message, packet_ack, receive_packet, receive_primary_connected,
     receive_with_timeout, server_ack_many, start_ping_packet, with_appended_ack,
 };
 use super::*;
@@ -225,12 +225,12 @@ async fn ping_survives_backpressure() {
 }
 
 #[tokio::test]
-async fn overload_keeps_control() {
+async fn region_arrival_object_burst_survives_slow_consumer() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
     let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
-    let (_disconnect_signal, disconnect_requested) = watch::channel(false);
+    let (disconnect_signal, disconnect_requested) = watch::channel(false);
     let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
@@ -253,69 +253,42 @@ async fn overload_keeps_control() {
     movement_complete[0] |= 0x40;
     set_sequence(&mut movement_complete, 23);
     simulator.send_to(&movement_complete, peer).await.expect("send movement completion");
-    std::assert_matches!(next_event(&mut events).await, Event::SessionReady { .. });
-    std::assert_matches!(next_event(&mut events).await, Event::SimulatorMessage { sequence: 23, .. });
 
-    let message_count = SESSION_EVENT_CAPACITY + MAX_PENDING_SIMULATOR_EVENTS;
-    for sequence in 24..24 + message_count as u32 {
-        let mut chat = test_fixture("chat_from_simulator.hex");
-        chat[0] |= 0x40;
-        set_sequence(&mut chat, sequence);
-        simulator.send_to(&chat, peer).await.expect("fill the bounded event backlog");
+    const OBJECT_COUNT: usize = 64;
+    let first_sequence = 24;
+    let last_sequence = first_sequence + OBJECT_COUNT as u32 - 1;
+    for sequence in first_sequence..=last_sequence {
+        let mut update = test_fixture("object_update.hex");
+        update[0] |= 0x40;
+        set_sequence(&mut update, sequence);
+        simulator.send_to(&update, peer).await.expect("send region-arrival object update");
     }
 
-    let logout = timeout(SIMULATOR_TIMEOUT, async {
-        loop {
-            let (bytes, _) = receive(&simulator).await;
-            let packet = Packet::decode(&bytes).expect("decode client message");
-            if matches!(packet.message(), Message::LogoutRequest(_)) {
-                break packet;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let mut received = HashSet::with_capacity(OBJECT_COUNT);
+    let mut losses = Vec::new();
+    timeout(SIMULATOR_TIMEOUT, async {
+        while received.len() < OBJECT_COUNT {
+            match next_event(&mut events).await {
+                Event::SimulatorMessage { sequence, message: Message::ObjectUpdate(_), .. }
+                    if (first_sequence..=last_sequence).contains(&sequence) =>
+                {
+                    assert!(received.insert(sequence), "each accepted object update should arrive once");
+                }
+                Event::CoverageLost { loss } => losses.push(loss),
+                Event::Failed(reason) => panic!("slow consumer ended the session: {reason}"),
+                _ => {}
             }
         }
     })
     .await
-    .expect("saturated event backlog should start logout");
+    .expect("the slow consumer should receive every object update after the pause");
+    assert_eq!(received, (first_sequence..=last_sequence).collect());
+    assert!(losses.is_empty(), "the bounded queue should retain this burst without coverage loss");
 
-    let mut undeliverable_chat = test_fixture("chat_from_simulator.hex");
-    undeliverable_chat[0] |= 0x40;
-    set_sequence(&mut undeliverable_chat, 42);
-    simulator.send_to(&undeliverable_chat, peer).await.expect("send chat after overload starts");
-    let ping = start_ping_packet(43, 8, 0);
-    simulator.send_to(&ping, peer).await.expect("send ping while logging out");
-
-    let mut acknowledged_undeliverable_chat = false;
-    let ping_reply = timeout(SIMULATOR_TIMEOUT, async {
-        loop {
-            let (bytes, _) = receive(&simulator).await;
-            let packet = Packet::decode(&bytes).expect("decode simulator reply");
-            acknowledged_undeliverable_chat |= packet.appended_acks().contains(&42) || packet_ack_contains(packet.message(), 42);
-            if is_complete_ping(packet.message(), 8) {
-                break packet;
-            }
-        }
-    })
-    .await
-    .expect("ping should be answered after event backlog saturation");
-    assert!(is_complete_ping(ping_reply.message(), 8));
-    assert!(!acknowledged_undeliverable_chat, "a reliable payload rejected by event admission must not be acknowledged");
-
-    simulator.send_to(&server_ack_many(50, &[logout.sequence()]), peer).await.expect("ack logout request");
-    let mut logout_reply = test_fixture("logout_reply.hex");
-    logout_reply[0] |= 0x40;
-    set_sequence(&mut logout_reply, 51);
-    simulator.send_to(&logout_reply, peer).await.expect("send logout reply");
-    assert_eq!(receive(&simulator).await.0, client_ack(logout.sequence() + 2, 51));
-    let failure = timeout(SIMULATOR_TIMEOUT, async {
-        loop {
-            if let Event::Failed(reason) = next_event(&mut events).await {
-                break reason;
-            }
-        }
-    })
-    .await
-    .expect("event backlog disconnect should reach the viewer");
-    assert!(failure.contains("could not keep up with incoming events"));
-    assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_err());
+    disconnect_signal.send_replace(true);
+    assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_ok());
 }
 
 #[tokio::test]

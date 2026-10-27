@@ -46,10 +46,10 @@ use outbound::{
 pub(crate) use admission::{ConnectionRole, SimulatorMemoryBudget};
 pub(crate) use error::ConnectionError;
 pub(crate) use link::{
-    ACK_INTERVAL, EVENT_BACKLOG_DISCONNECT_REASON, HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_TIMEOUT,
-    MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS,
-    MAX_QUEUED_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS, NEIGHBOR_PRECONNECT_OVERFLOW_REASON, NeighborEventQueueOutcome, PrimaryState,
-    SimulatorCommand, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome, connection_message_has_application_event,
+    ACK_INTERVAL, HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS,
+    MAX_NEIGHBOR_SIMULATORS, MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS,
+    NeighborEventQueueOutcome, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome,
+    connection_message_has_application_event,
 };
 #[cfg(test)]
 pub(crate) use lludp::test_values::NEW_RELIABLE_ACK_CAPACITY;

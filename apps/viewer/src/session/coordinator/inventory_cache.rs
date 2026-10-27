@@ -30,6 +30,7 @@ pub(super) struct InventoryCacheSession {
     pending_overflow: bool,
     disabled: bool,
     restore: Option<PendingRestore>,
+    restore_invalidated: bool,
 }
 
 struct PendingRestore {
@@ -70,6 +71,7 @@ impl InventoryCacheSession {
             pending_overflow: false,
             disabled: false,
             restore: None,
+            restore_invalidated: false,
         }
     }
 
@@ -110,6 +112,11 @@ impl InventoryCacheSession {
             return Some(InventoryCacheEvent::RestoreBatch);
         }
         self.event_receiver.recv().await
+    }
+
+    pub(super) fn invalidate_restore(&mut self) {
+        self.restore_invalidated = true;
+        self.restore = None;
     }
 
     pub(super) fn record_change(&mut self, runtime: &Handle, changes: ChangeSet, before: InventorySnapshot, after: InventorySnapshot) {
@@ -231,7 +238,9 @@ impl InventoryCacheSession {
                 Err(error) => self.warn_once(&error),
             }
         }
-        self.restore = Some(PendingRestore { restore, excluded });
+        if !self.restore_invalidated {
+            self.restore = Some(PendingRestore { restore, excluded });
+        }
     }
 
     fn clear_pending_writes(&mut self) {

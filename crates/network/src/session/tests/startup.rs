@@ -300,8 +300,10 @@ async fn primary_disconnect_survives_full_queue() {
 
 #[tokio::test]
 async fn primary_failure_survives_full_queue() {
-    let (event, simulator_id, endpoint) =
-        terminal_after_full_queue(Err(crate::session::SessionError::ShutdownReason("simulator failed"))).await;
+    let (event, simulator_id, endpoint) = terminal_after_full_queue(Err(crate::session::SessionError::Connection(
+        crate::circuit::ConnectionError::ShutdownReason("simulator failed"),
+    )))
+    .await;
     std::assert_matches!(
         event,
         Event::SimulatorFailed { simulator_id: actual_id, region_handle: None, endpoint: actual_endpoint, reason }

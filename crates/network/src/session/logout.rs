@@ -175,7 +175,7 @@ impl SessionDispatcher<'_> {
             self.state.neighbor_cancellation.send_replace(true);
             return Ok(RuntimeAction::Exit(Ok(())));
         }
-        Ok(RuntimeAction::Exit(finish_session_logout(self.run_state.disconnect_reason)))
+        Ok(RuntimeAction::Exit(Ok(())))
     }
 
     pub(super) async fn handle_event_receiver_closed(&mut self) -> Result<RuntimeAction, SessionError> {
@@ -188,13 +188,6 @@ fn logout_completion_error(error: Error) -> LogoutAttemptError {
     match error {
         Error::SimulatorLogoutSendAgeExpired => LogoutAttemptError::Unavailable(LogoutUnavailable::Deadline),
         error => LogoutAttemptError::Unexpected(error),
-    }
-}
-
-pub(super) fn finish_session_logout(reason: Option<&'static str>) -> Result<(), SessionError> {
-    match reason {
-        Some(reason) => Err(SessionError::ShutdownReason(reason)),
-        None => Ok(()),
     }
 }
 

@@ -63,9 +63,8 @@ use crate::{
     AgentSession, Error, Grid, StartLocation,
     capabilities::{CapabilityBudget, Client, EventQueueExit},
     circuit::{
-        EVENT_BACKLOG_DISCONNECT_REASON, HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS,
-        MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, NeighborEventQueueOutcome, SimulatorEvent,
-        UdpTransport,
+        HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PRECONNECT_EVENTS,
+        MAX_QUEUED_SIMULATOR_EVENTS, NeighborEventQueueOutcome, SimulatorEvent, UdpTransport,
         admission::{MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES},
         lludp::{Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, RESENT_FLAG, ReceiveError},
         pacing::{OutboundBudget, OutboundBudgetHandle},
@@ -79,7 +78,7 @@ use crate::{
     session::{COMMAND_CAPACITY, Command, DEFAULT_UPSTREAM_BYTES_PER_SECOND, NETWORK_THREAD_STACK_SIZE},
 };
 
-use super::logout::{LogoutAttemptError, LogoutOutcome, LogoutUnavailable, PendingLogout, send_logout_with_deadline};
+use super::logout::{LogoutAttemptError, LogoutOutcome, PendingLogout, send_logout_with_deadline};
 use super::*;
 use super::{
     HandoffState, NEIGHBOR_COMMAND_CAPACITY, PreconnectEvents, PreconnectOutcome, SimulatorCapabilitySession, SimulatorConnection,

@@ -42,6 +42,106 @@ async fn run_event_batch_order_survives_forwarding() {
     assert_eq!(server.finish().len(), 3);
 }
 
+async fn run_event_queue_teleport_finish_promotes_destination() {
+    use llsd::{Map, Value, xml};
+
+    use crate::fixtures::http::{EventQueueTestServer, EventServerResponse, response};
+
+    let (release, poll_response) = sync::mpsc::channel();
+    let server = EventQueueTestServer::start(|base| {
+        let seed = format!("<llsd><map><key>EventQueueGet</key><uri>{base}events</uri></map></llsd>");
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed)),
+            EventServerResponse::Controlled(poll_response),
+            EventServerResponse::Hold,
+        ]
+    });
+    let seed_capability = server.url("/seed");
+    let mut harness = Box::pin(connected_neighbor_with_seed(seed_capability.clone())).await;
+    let session = AgentSession { seed_capability, ..login_session(harness.primary.local_addr().expect("primary simulator address")) };
+    let destination = UdpSocket::bind("127.0.0.1:0").await.expect("bind teleport destination");
+    let destination_endpoint = destination.local_addr().expect("teleport destination address");
+    let destination_region = 0x3000_0000_0000_3000_u64;
+    let SocketAddr::V4(destination_endpoint) = destination_endpoint else { panic!("test simulator must use IPv4") };
+    let event = Value::Map(Map::from([(
+        "Info".into(),
+        Value::Array(vec![Value::Map(Map::from([
+            ("AgentID".into(), Value::Uuid(session.agent_id)),
+            ("RegionHandle".into(), Value::Binary(destination_region.to_be_bytes().to_vec().into())),
+            ("SimIP".into(), Value::Binary(destination_endpoint.ip().octets().to_vec().into())),
+            ("SimPort".into(), Value::Integer(i32::from(destination_endpoint.port()))),
+            ("SeedCapability".into(), Value::Uri(session.seed_capability.to_string().into())),
+            ("TeleportFlags".into(), Value::Integer(7)),
+            ("SimAccess".into(), Value::Integer(13)),
+        ]))]),
+    )]));
+    let body = xml::to_string(&Value::Map(Map::from([
+        ("id".into(), Value::Integer(1)),
+        (
+            "events".into(),
+            Value::Array(vec![Value::Map(Map::from([("message".into(), Value::String("TeleportFinish".into())), ("body".into(), event)]))]),
+        ),
+    ])))
+    .expect("encode TeleportFinish EventQueue batch");
+    release.send(response(200, "OK", "application/llsd+xml", None, &body)).expect("deliver TeleportFinish event");
+
+    timeout(WAIT, async {
+        loop {
+            if let Event::CapabilityEventBatch { events, .. } = next_raw_event(&mut harness.events).await
+                && let Some(event) = events.iter().find(|event| event.message == "TeleportFinish")
+            {
+                let fields = crate::session::teleport::event_fields(&event.body).expect("published finish body");
+                let info = crate::session::teleport::event_block(fields, "Info").expect("published finish Info");
+                assert_eq!(info.get("SeedCapability"), Some(&Value::String("[redacted]".into())));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("TeleportFinish from EventQueue reaches the session event stream");
+
+    let (bytes, destination_peer) = timeout(WAIT, receive(&destination)).await.expect("destination circuit should be established");
+    let use_circuit = Packet::decode(&bytes).expect("decode destination circuit packet");
+    std::assert_matches!(use_circuit.message(), Message::UseCircuitCode(_));
+    assert!(use_circuit.is_reliable());
+    destination.send_to(&ack(80, use_circuit.sequence()), destination_peer).await.expect("ack destination circuit");
+
+    let mut handshake = test_fixture("region_handshake.hex");
+    handshake[0] |= 0x40;
+    set_sequence(&mut handshake, 81);
+    destination.send_to(&handshake, destination_peer).await.expect("send destination handshake");
+    let reply = receive_message(&destination, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
+    let movement = receive_message(&destination, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
+    destination.send_to(&ack(82, reply.sequence()), destination_peer).await.expect("ack destination handshake reply");
+    destination.send_to(&ack(83, movement.sequence()), destination_peer).await.expect("ack destination movement request");
+    destination
+        .send_to(&movement_complete_packet(84, session.agent_id, session.session_id, destination_region), destination_peer)
+        .await
+        .expect("complete movement into teleport destination");
+
+    timeout(WAIT, async {
+        loop {
+            match next_raw_event(&mut harness.events).await {
+                Event::SimulatorPromoted { previous_simulator_id, simulator_id, session, .. } => {
+                    assert_eq!(previous_simulator_id, harness.primary_id);
+                    assert_ne!(simulator_id, harness.primary_id);
+                    assert_eq!(session.simulator_address, destination.local_addr().expect("teleport destination address"));
+                    break;
+                }
+                Event::Failed(reason) => panic!("EventQueue teleport handoff failed: {reason}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("EventQueue teleport destination is promoted after movement completion");
+
+    harness.disconnect.send_replace(true);
+    receive_message(&destination, |message| matches!(message, Message::LogoutRequest(_))).await;
+    assert!(timeout(WAIT, harness.client).await.expect("shutdown completes").expect("session task").is_ok());
+    assert_eq!(server.finish().len(), 3);
+}
+
 async fn run_return_handoff_reuses_root_connection() {
     let mut harness = Box::pin(connected_neighbor()).await;
     let session = login_session(harness.primary.local_addr().expect("primary endpoint"));
@@ -346,6 +446,11 @@ async fn run_disconnect_logs_out_promoted_primary() {
 #[test]
 fn event_batch_preserves_forwarded_order() {
     run_large_stack_test(run_event_batch_order_survives_forwarding);
+}
+
+#[test]
+fn event_queue_teleport_finish_promotes_destination() {
+    run_large_stack_test(run_event_queue_teleport_finish_promotes_destination);
 }
 
 #[test]

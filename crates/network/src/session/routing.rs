@@ -137,6 +137,29 @@ impl SessionDispatcher<'_> {
                     self.state.publish_event(&self.events, &mut self.run_state, Event::SendFailed(failure.error.to_string())).await?;
                 }
             }
+            Some(Command::RequestTeleport { message, completed }) => {
+                if completed.is_closed() {
+                    return Ok(RuntimeAction::Continue);
+                }
+                let result = if self.handoff_state.pending().is_some_and(|pending| pending.evidence.crossed_region) {
+                    Err(Error::SimulatorHandoffInProgress)
+                } else if !self.startup.is_ready() {
+                    Err(Error::SimulatorNotReady)
+                } else {
+                    queue_primary_message(
+                        &self.state.primary.commands,
+                        self.state.session.agent_id,
+                        self.state.session.session_id,
+                        message,
+                        crate::circuit::lludp::Delivery::Reliable,
+                        self.handoff_state.cancellation(),
+                    )
+                    .map_err(|failure| failure.error)
+                };
+                if let Err(error) = completed.send(result) {
+                    drop(error);
+                }
+            }
             Some(Command::SendTo { simulator_id, message, delivery, completed }) => {
                 let cancel_handoff = simulator_id == self.state.primary.simulator_id
                     && is_teleport_cancel(&message, self.state.session.agent_id, self.state.session.session_id);

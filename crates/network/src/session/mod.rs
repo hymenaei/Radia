@@ -27,7 +27,7 @@ use std::{
 use protocol::lludp::Message;
 use protocol::messages::{
     AgentUpdate, ChatFromViewer, MapBlockRequest, MoveInventoryFolder, MoveInventoryItem, RegionHandleRequest, RequestMultipleObjects,
-    SetAlwaysRun, TeleportCancel,
+    SetAlwaysRun, TeleportCancel, TeleportLandmarkRequest, TeleportLocationRequest,
 };
 use tokio::sync::{
     mpsc::{self, Receiver, Sender},
@@ -390,6 +390,36 @@ impl SessionHandle {
         }
     }
 
+    pub async fn request_teleport(&self, request: TeleportRequest) -> Result<(), Error> {
+        if matches!(
+            &request,
+            TeleportRequest::Location(request) if !request.position.is_finite() || !request.look_at.is_finite()
+        ) {
+            return Err(Error::InvalidTeleportRequest);
+        }
+        let message = match request {
+            TeleportRequest::Location(request) => Message::TeleportLocationRequest(request),
+            TeleportRequest::Landmark(request) => Message::TeleportLandmarkRequest(request),
+        };
+        let mut disconnect_requested = self.disconnect_requested.subscribe();
+        let (completed, response) = oneshot::channel();
+        {
+            let admission_closed = self.command_admission_closed.lock().unwrap_or_else(|error| error.into_inner());
+            if *admission_closed || *self.disconnect_requested.borrow() || *self.worker_finished.borrow() {
+                return Err(Error::SessionClosed);
+            }
+            self.commands.try_send(Command::RequestTeleport { message, completed }).map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => Error::CommandQueueFull,
+                mpsc::error::TrySendError::Closed(_) => Error::SessionClosed,
+            })?;
+        }
+        tokio::select! {
+            biased;
+            _ = disconnect_requested.changed() => Err(Error::SessionClosed),
+            result = response => result.map_err(|_| Error::SessionClosed)?,
+        }
+    }
+
     pub async fn disconnect(&self) {
         self.request_disconnect();
         let mut worker_finished = self.worker_finished.clone();
@@ -405,6 +435,13 @@ pub(crate) enum Command {
     SubmitMfaCode(String),
     SendMessage { message: Message, delivery: Delivery },
     SendTo { simulator_id: SimulatorId, message: Message, delivery: Delivery, completed: oneshot::Sender<Result<(), Error>> },
+    RequestTeleport { message: Message, completed: oneshot::Sender<Result<(), Error>> },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TeleportRequest {
+    Location(TeleportLocationRequest),
+    Landmark(TeleportLandmarkRequest),
 }
 
 impl outbound_message::Sealed for TeleportCancel {}

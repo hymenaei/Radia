@@ -174,6 +174,11 @@ pub(super) async fn run_client(
                                 drop(error);
                             }
                         }
+                        Some(Command::RequestTeleport { completed, .. }) => {
+                            if let Err(error) = completed.send(Err(Error::SimulatorNotReady)) {
+                                drop(error);
+                            }
+                        }
                         None => return Ok(()),
                     }
                 }

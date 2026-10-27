@@ -16,4 +16,6 @@ pub use coverage::{
 pub use error::Error;
 pub use event::{CapabilityEvent, Event, EventQueueBatchOrder, PacketOrder, SimulatorId};
 pub use login::{AgentSession, Grid, LoginCredentials, StartLocation};
-pub use session::{DEFAULT_UPSTREAM_BYTES_PER_SECOND, MfaChallenge, OutboundMessage, Session, SessionHandle, SessionOptions};
+pub use session::{
+    DEFAULT_UPSTREAM_BYTES_PER_SECOND, MfaChallenge, OutboundMessage, Session, SessionHandle, SessionOptions, TeleportRequest,
+};

@@ -51,6 +51,8 @@ pub(super) enum WritePoint {
     LookupHashMismatch,
     #[cfg(test)]
     IndexTouchBusy,
+    #[cfg(test)]
+    PutQueued,
 }
 
 #[cfg(test)]
@@ -143,6 +145,23 @@ impl FaultHooks {
             Err(poisoned) => poisoned.into_inner().push(pause),
         }
         (started_receiver, resume_sender)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pause_many_at(&self, point: WritePoint, count: usize) -> (Receiver<()>, Vec<SyncSender<()>>) {
+        let (started, started_receiver) = mpsc::sync_channel(count);
+        let mut pauses = Vec::with_capacity(count);
+        let mut resumes = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (resume_sender, resume) = mpsc::sync_channel(1);
+            pauses.push(TestPause { point, started: started.clone(), resume });
+            resumes.push(resume_sender);
+        }
+        match self.pause.lock() {
+            Ok(mut current) => current.extend(pauses),
+            Err(poisoned) => poisoned.into_inner().extend(pauses),
+        }
+        (started_receiver, resumes)
     }
 }
 

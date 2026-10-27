@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -494,7 +494,8 @@ fn replacement_crash_never_trusts_bytes() {
             WritePoint::DataWriteFailure
             | WritePoint::LookupEntrySelected
             | WritePoint::LookupHashMismatch
-            | WritePoint::IndexTouchBusy => unreachable!(),
+            | WritePoint::IndexTouchBusy
+            | WritePoint::PutQueued => unreachable!(),
         }
         cache.shutdown().expect("close recovered cache");
     }
@@ -525,29 +526,41 @@ fn crash_mid_batch_keeps_rows() {
 
     thread::scope(|scope| {
         let writing_cache = Arc::clone(&cache);
-        let first = scope.spawn(move || writing_cache.put(key(600), b"barrier".to_vec()));
+        let first = thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn_scoped(scope, move || writing_cache.put(key(600), b"barrier".to_vec()))
+            .expect("spawn first cache write");
         started.recv_timeout(Duration::from_secs(3)).expect("first write reached index");
 
+        let write_count = MAX_BATCH_ROWS + 1;
+        let (queued, resumes) = cache.pause_many_at(WritePoint::PutQueued, write_count);
         let mut pending = Vec::new();
         for id in 0..=MAX_BATCH_ROWS {
-            let (reply, result) = mpsc::sync_channel(1);
-            cache
-                .queue
-                .try_send(
-                    Command::Put {
-                        key: key(u16::try_from(id).expect("batch key fits")),
-                        bytes: vec![u8::try_from(id % 251).expect("byte value")],
-                        reply,
-                    },
-                    1,
-                )
-                .expect("queue cache write");
-            pending.push(result);
+            let writing_cache = Arc::clone(&cache);
+            let write_key = key(u16::try_from(id).expect("batch key fits"));
+            let bytes = vec![u8::try_from(id % 251).expect("byte value")];
+            pending.push(
+                thread::Builder::new()
+                    .stack_size(256 * 1024)
+                    .spawn_scoped(scope, move || writing_cache.put(write_key, bytes))
+                    .expect("spawn queued cache write"),
+            );
+        }
+        let mut admitted = 0;
+        for _ in 0..write_count {
+            if queued.recv_timeout(Duration::from_secs(3)).is_err() {
+                break;
+            }
+            admitted += 1;
+        }
+        for resume in resumes {
+            resume.send(()).expect("release queued write");
         }
         cache.read_state.hooks.arm_after(WritePoint::IndexBatchCommitted, 2);
         resume.send(()).expect("release first write");
         first.join().expect("first writer completes").expect("first write commits");
-        assert!(pending.iter().all(|result| result.recv().is_ok_and(|value| value.is_err())));
+        assert_eq!(admitted, write_count, "every public write entered the bounded queue");
+        assert!(pending.into_iter().all(|write| write.join().is_ok_and(|result| result.is_err())));
     });
 
     Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).simulate_crash().expect("stop failed writer");
@@ -569,22 +582,40 @@ fn full_write_queue_rejects_more_work() {
 
     thread::scope(|scope| {
         let writing_cache = Arc::clone(&cache);
-        let first = scope.spawn(move || writing_cache.put(key(900), vec![1]));
+        let first = thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn_scoped(scope, move || writing_cache.put(key(u16::MAX), vec![1]))
+            .expect("spawn first cache write");
         started.recv_timeout(Duration::from_secs(3)).expect("first write reached payload stage");
 
+        let write_count = MAX_QUEUED_WRITES - 1;
+        let (queued, resumes) = cache.pause_many_at(WritePoint::PutQueued, write_count);
         let mut pending = Vec::new();
         for id in 0..MAX_QUEUED_WRITES - 1 {
-            let (reply, result) = mpsc::sync_channel(1);
-            cache
-                .queue
-                .try_send(Command::Put { key: key(u16::try_from(id).expect("queue key fits")), bytes: Vec::new(), reply }, 0)
-                .expect("fill write queue");
-            pending.push(result);
+            let writing_cache = Arc::clone(&cache);
+            let write_key = key(u16::try_from(id).expect("queue key fits"));
+            pending.push(
+                thread::Builder::new()
+                    .stack_size(256 * 1024)
+                    .spawn_scoped(scope, move || writing_cache.put(write_key, Vec::new()))
+                    .expect("spawn queued cache write"),
+            );
         }
-        std::assert_matches!(cache.put(key(901), Vec::new()), Err(StorageError::Unavailable(UnavailableReason::WriteQueueFull)));
+        let mut admitted = 0;
+        for _ in 0..write_count {
+            if queued.recv_timeout(Duration::from_secs(3)).is_err() {
+                break;
+            }
+            admitted += 1;
+        }
+        std::assert_matches!(cache.put(key(1024), Vec::new()), Err(StorageError::Unavailable(UnavailableReason::WriteQueueFull)));
+        for resume in resumes {
+            resume.send(()).expect("release queued write");
+        }
         resume.send(()).expect("release first write");
         first.join().expect("first writer completes").expect("first write commits");
-        assert!(pending.iter().all(|result| result.recv().is_ok_and(|value| value.is_ok())));
+        assert_eq!(admitted, write_count, "all public writes entered the bounded queue");
+        assert!(pending.into_iter().all(|write| write.join().is_ok_and(|result| result.is_ok())));
     });
 
     Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().expect("close cache");

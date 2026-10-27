@@ -587,6 +587,8 @@ impl Cache {
         let weight = bytes.len();
         let (reply, receiver) = mpsc::sync_channel(0);
         self.queue.try_send(Command::Put { key, bytes, reply }, weight)?;
+        #[cfg(test)]
+        self.read_state.hooks.check(WritePoint::PutQueued)?;
         receive(receiver)
     }
 
@@ -783,6 +785,11 @@ impl Cache {
     #[cfg(test)]
     fn pause_at(&self, point: WritePoint) -> (Receiver<()>, SyncSender<()>) {
         self.read_state.hooks.pause_at(point)
+    }
+
+    #[cfg(test)]
+    fn pause_many_at(&self, point: WritePoint, count: usize) -> (Receiver<()>, Vec<SyncSender<()>>) {
+        self.read_state.hooks.pause_many_at(point, count)
     }
 }
 

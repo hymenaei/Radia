@@ -386,8 +386,9 @@ mod tests {
         assert_eq!(world.revision(), revision);
         let _ = world.observe_terrain_settings(source(3), second).unwrap();
         assert_eq!(world.region_page(None, 8).unwrap().regions[0].terrain_settings, Some(second));
-        assert!(
-            matches!(world.change_page(barrier.changes, 8).unwrap().records.last().unwrap().change, WorldChange::RegionUpdated(region) if region == Region::new(1))
+        std::assert_matches!(
+            world.change_page(barrier.changes, 8).unwrap().records.last().unwrap().change,
+            WorldChange::RegionUpdated(region) if region == Region::new(1)
         );
         let _ = world.retire_region(Region::new(1)).unwrap();
         assert_eq!(world.observe_terrain_settings(source(4), first), Err(ApplyError::StaleRegion));

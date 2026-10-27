@@ -14,8 +14,10 @@ use std::{
 
 use math::{Bounds, Vec2, Vec3};
 
-pub const MAX_MESH_VERTICES: usize = 32_768;
-pub const MAX_MESH_INDICES: usize = 196_608;
+pub const MAX_MESH_VERTICES_PER_FACE: usize = 65_535;
+pub const MAX_MESH_INDICES_PER_FACE: usize = 3 * MAX_MESH_VERTICES_PER_FACE;
+pub const MAX_MESH_VERTICES: usize = MAX_MESH_VERTICES_PER_FACE * 8;
+pub const MAX_MESH_INDICES: usize = MAX_MESH_INDICES_PER_FACE * 8;
 pub const MAX_MESH_FACES: usize = MAX_MESH_INDICES / 3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]

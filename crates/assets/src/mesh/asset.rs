@@ -5,14 +5,20 @@ use llsd::{Limits, Value, binary};
 use math::{Vec2, Vec3};
 use utils::AssetId;
 
-use super::{Face, LodGeometry, MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh, MeshError, Vertex};
+use super::{
+    Face, LodGeometry, MAX_MESH_INDICES, MAX_MESH_INDICES_PER_FACE, MAX_MESH_VERTICES, MAX_MESH_VERTICES_PER_FACE, Mesh, MeshError, Vertex,
+};
 
 pub const MESH_HEADER_BYTES: usize = 4096;
 pub const MAX_MESH_HEADER_BYTES: usize = 64 * 1024;
 pub const MAX_MESH_ASSET_BYTES: usize = 32 * 1024 * 1024;
-pub const MAX_MESH_BLOCK_BYTES: usize = 2 * 1024 * 1024;
-const MAX_MESH_DECODED_BLOCK_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_MESH_BLOCK_BYTES: usize = MAX_MESH_ASSET_BYTES;
 const MAX_MESH_FACES_PER_LOD: usize = 8;
+const MAX_MESH_LLSD_OVERHEAD_BYTES: usize = 128 * 1024;
+const MAX_MESH_PACKED_VERTEX_BYTES: usize = 6 + 6 + 4 + 12;
+const MAX_MESH_DECODED_BLOCK_BYTES: usize = MAX_MESH_VERTICES_PER_FACE * MAX_MESH_FACES_PER_LOD * MAX_MESH_PACKED_VERTEX_BYTES
+    + MAX_MESH_INDICES_PER_FACE * MAX_MESH_FACES_PER_LOD * 2
+    + MAX_MESH_LLSD_OVERHEAD_BYTES;
 const MAX_MESH_VERSION: u32 = 999;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -107,6 +113,21 @@ pub enum AssetError {
     Cancelled,
 }
 
+enum PreparedSubmesh<'a> {
+    NoGeometry,
+    Empty,
+    Geometry {
+        position_bytes: &'a [u8],
+        normal_bytes: Option<&'a [u8]>,
+        uv_bytes: Option<&'a [u8]>,
+        triangle_bytes: &'a [u8],
+        vertex_count: usize,
+        triangle_count: usize,
+        position_domain: (Vec3, Vec3),
+        uv_domain: Option<(Vec2, Vec2)>,
+    },
+}
+
 pub fn decode_header(bytes: &[u8], asset_length: u64) -> Result<MeshHeader, AssetError> {
     if asset_length == 0 || asset_length > MAX_MESH_ASSET_BYTES as u64 || bytes.len() > MAX_MESH_HEADER_BYTES {
         return Err(AssetError::TooLarge);
@@ -151,95 +172,58 @@ pub fn decode_lod_cancellable(bytes: &[u8], cancelled: impl Fn() -> bool) -> Res
         max_binary_bytes: MAX_MESH_DECODED_BLOCK_BYTES,
     };
     let value = binary::from_slice_with_limits::<Value>(&decoded, limits).map_err(|_| AssetError::MalformedBlock)?;
-    let Value::Array(submeshes) = value else { return Err(AssetError::MalformedBlock) };
-    if submeshes.len() > MAX_MESH_FACES_PER_LOD {
-        return Err(AssetError::TooLarge);
-    }
+    drop(decoded);
+    let (submeshes, total_vertices, total_indices) = prepare_submeshes(&value, &cancelled)?;
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let mut faces = Vec::new();
-    vertices.try_reserve(submeshes.len().min(MAX_MESH_FACES_PER_LOD)).map_err(|_| AssetError::TooLarge)?;
-    indices.try_reserve(submeshes.len().min(MAX_MESH_FACES_PER_LOD)).map_err(|_| AssetError::TooLarge)?;
-    faces.try_reserve(submeshes.len()).map_err(|_| AssetError::TooLarge)?;
-    for (slot, submesh) in submeshes.iter().enumerate() {
+    vertices.try_reserve_exact(total_vertices).map_err(|_| AssetError::TooLarge)?;
+    indices.try_reserve_exact(total_indices).map_err(|_| AssetError::TooLarge)?;
+    faces.try_reserve_exact(submeshes.len()).map_err(|_| AssetError::TooLarge)?;
+    for (slot, submesh) in submeshes.into_iter().enumerate() {
         if cancelled() {
             return Err(AssetError::Cancelled);
         }
-        let Value::Map(submesh) = submesh else { return Err(AssetError::MalformedBlock) };
         let index_start = u32::try_from(indices.len()).map_err(|_| AssetError::TooLarge)?;
-        if submesh.contains_key("NoGeometry") {
+        let PreparedSubmesh::Geometry {
+            position_bytes,
+            normal_bytes,
+            uv_bytes,
+            triangle_bytes,
+            vertex_count,
+            triangle_count,
+            position_domain,
+            uv_domain,
+        } = submesh
+        else {
             faces.push(Face { slot: u8::try_from(slot).map_err(|_| AssetError::TooLarge)?, indices: index_start..index_start });
             continue;
-        }
-        let triangle_bytes = optional_binary_field(submesh, "TriangleList")?;
-        if !triangle_bytes.len().is_multiple_of(2) {
-            return Err(AssetError::MalformedBlock);
-        }
-        let triangle_count = triangle_bytes.len() / 2 / 3 * 3;
-        let total_indices = indices.len().checked_add(triangle_count).ok_or(AssetError::TooLarge)?;
-        if total_indices > MAX_MESH_INDICES {
-            return Err(AssetError::TooLarge);
-        }
-        if triangle_count == 0 {
-            faces.push(Face { slot: u8::try_from(slot).map_err(|_| AssetError::TooLarge)?, indices: index_start..index_start });
-            continue;
-        }
-
-        let position_bytes = binary_field(submesh, "Position")?;
-        if !position_bytes.len().is_multiple_of(6) {
-            return Err(AssetError::MalformedBlock);
-        }
-        let vertex_count = position_bytes.len() / 6;
-        if vertex_count == 0 {
-            return Err(AssetError::MalformedBlock);
-        }
-        let total_vertices = vertices.len().checked_add(vertex_count).ok_or(AssetError::TooLarge)?;
-        if total_vertices > MAX_MESH_VERTICES {
-            return Err(AssetError::TooLarge);
-        }
-        let position_domain = submesh.get("PositionDomain").map(domain3).transpose()?.unwrap_or((Vec3::splat(-0.5), Vec3::splat(0.5)));
+        };
         let positions = unpack_vec3(position_bytes, position_domain, &cancelled)?;
-        let uvs = match optional_binary_field(submesh, "TexCoord0")? {
-            [] => {
+        let uvs = match uv_bytes {
+            None => {
                 let mut uvs = Vec::new();
-                uvs.try_reserve(vertex_count).map_err(|_| AssetError::TooLarge)?;
+                uvs.try_reserve_exact(vertex_count).map_err(|_| AssetError::TooLarge)?;
                 uvs.resize(vertex_count, Vec2::ZERO);
                 uvs
             }
-            uv_bytes if uv_bytes.len() == vertex_count.checked_mul(4).ok_or(AssetError::TooLarge)? => {
-                let uv_domain = domain2(submesh.get("TexCoord0Domain").ok_or(AssetError::MalformedBlock)?)?;
-                unpack_vec2(uv_bytes, uv_domain, &cancelled)?
-            }
-            _ => return Err(AssetError::MalformedBlock),
+            Some(uv_bytes) => unpack_vec2(uv_bytes, uv_domain.ok_or(AssetError::MalformedBlock)?, &cancelled)?,
         };
         let mut face_indices = Vec::new();
-        face_indices.try_reserve(triangle_count).map_err(|_| AssetError::TooLarge)?;
+        face_indices.try_reserve_exact(triangle_count).map_err(|_| AssetError::TooLarge)?;
         for (index_position, encoded) in triangle_bytes[..triangle_count * 2].as_chunks::<2>().0.iter().enumerate() {
             if index_position.is_multiple_of(1024) && cancelled() {
                 return Err(AssetError::Cancelled);
             }
             let index = usize::from(u16::from_le_bytes([encoded[0], encoded[1]]));
-            if index >= vertex_count {
-                return Err(AssetError::MalformedBlock);
-            }
             face_indices.push(u32::try_from(index).map_err(|_| AssetError::TooLarge)?);
         }
-        let normals = match submesh.get("Normal") {
+        let normals = match normal_bytes {
             None => generate_normals(&positions, &face_indices, &cancelled)?,
-            Some(Value::Binary(value)) if value.as_slice().is_empty() => generate_normals(&positions, &face_indices, &cancelled)?,
-            Some(Value::Binary(value)) => {
-                if value.len() != vertex_count.checked_mul(6).ok_or(AssetError::TooLarge)? {
-                    return Err(AssetError::MalformedBlock);
-                }
-                unpack_normals(value.as_slice(), &cancelled)?
-            }
-            Some(_) => return Err(AssetError::MalformedBlock),
+            Some(normal_bytes) => unpack_normals(normal_bytes, &cancelled)?,
         };
-        let new_vertices = vertices.len().checked_add(vertex_count).ok_or(AssetError::TooLarge)?;
-        vertices.try_reserve(vertex_count).map_err(|_| AssetError::TooLarge)?;
-        vertices.extend((0..vertex_count).map(|index| Vertex { position: positions[index], normal: normals[index], uv: uvs[index] }));
-        let base = u32::try_from(new_vertices - vertex_count).map_err(|_| AssetError::TooLarge)?;
-        indices.try_reserve(face_indices.len()).map_err(|_| AssetError::TooLarge)?;
+        let base = u32::try_from(vertices.len()).map_err(|_| AssetError::TooLarge)?;
+        vertices.extend(positions.into_iter().zip(normals).zip(uvs).map(|((position, normal), uv)| Vertex { position, normal, uv }));
         indices.extend(face_indices.into_iter().map(|index| base + index));
         let index_end = u32::try_from(indices.len()).map_err(|_| AssetError::TooLarge)?;
         faces.push(Face { slot: u8::try_from(slot).map_err(|_| AssetError::TooLarge)?, indices: index_start..index_end });
@@ -252,6 +236,89 @@ pub fn decode_lod_cancellable(bytes: &[u8], cancelled: impl Fn() -> bool) -> Res
         MeshError::TooComplex => AssetError::TooLarge,
         MeshError::InvalidParameters | MeshError::Degenerate => AssetError::MalformedBlock,
     })
+}
+
+fn prepare_submeshes<'a>(value: &'a Value, cancelled: &impl Fn() -> bool) -> Result<(Vec<PreparedSubmesh<'a>>, usize, usize), AssetError> {
+    let Value::Array(submeshes) = value else { return Err(AssetError::MalformedBlock) };
+    if submeshes.len() > MAX_MESH_FACES_PER_LOD {
+        return Err(AssetError::TooLarge);
+    }
+    let mut prepared = Vec::new();
+    prepared.try_reserve_exact(submeshes.len()).map_err(|_| AssetError::TooLarge)?;
+    let mut total_vertices = 0_usize;
+    let mut total_indices = 0_usize;
+    for submesh in submeshes {
+        if cancelled() {
+            return Err(AssetError::Cancelled);
+        }
+        let Value::Map(fields) = submesh else { return Err(AssetError::MalformedBlock) };
+        if fields.contains_key("NoGeometry") {
+            prepared.push(PreparedSubmesh::NoGeometry);
+            continue;
+        }
+        let triangle_bytes = optional_binary_field(fields, "TriangleList")?;
+        if !triangle_bytes.len().is_multiple_of(2) {
+            return Err(AssetError::MalformedBlock);
+        }
+        let triangle_count = triangle_bytes.len() / 2 / 3 * 3;
+        if triangle_count > MAX_MESH_INDICES_PER_FACE {
+            return Err(AssetError::TooLarge);
+        }
+        if triangle_count == 0 {
+            prepared.push(PreparedSubmesh::Empty);
+            continue;
+        }
+        let position_bytes = binary_field(fields, "Position")?;
+        if !position_bytes.len().is_multiple_of(6) {
+            return Err(AssetError::MalformedBlock);
+        }
+        let vertex_count = position_bytes.len() / 6;
+        if vertex_count == 0 {
+            return Err(AssetError::MalformedBlock);
+        }
+        if vertex_count > MAX_MESH_VERTICES_PER_FACE {
+            return Err(AssetError::TooLarge);
+        }
+        total_vertices = total_vertices.checked_add(vertex_count).ok_or(AssetError::TooLarge)?;
+        total_indices = total_indices.checked_add(triangle_count).ok_or(AssetError::TooLarge)?;
+        if total_vertices > MAX_MESH_VERTICES || total_indices > MAX_MESH_INDICES {
+            return Err(AssetError::TooLarge);
+        }
+        for (index_position, encoded) in triangle_bytes[..triangle_count * 2].as_chunks::<2>().0.iter().enumerate() {
+            if index_position.is_multiple_of(1024) && cancelled() {
+                return Err(AssetError::Cancelled);
+            }
+            let index = usize::from(u16::from_le_bytes([encoded[0], encoded[1]]));
+            if index >= vertex_count {
+                return Err(AssetError::MalformedBlock);
+            }
+        }
+        let normal_bytes = match fields.get("Normal") {
+            None => None,
+            Some(Value::Binary(value)) if value.is_empty() => None,
+            Some(Value::Binary(value)) if value.len() == vertex_count.checked_mul(6).ok_or(AssetError::TooLarge)? => Some(value.as_slice()),
+            Some(Value::Binary(_)) => return Err(AssetError::MalformedBlock),
+            Some(_) => return Err(AssetError::MalformedBlock),
+        };
+        let uv_bytes = match optional_binary_field(fields, "TexCoord0")? {
+            [] => None,
+            uv_bytes if uv_bytes.len() == vertex_count.checked_mul(4).ok_or(AssetError::TooLarge)? => Some(uv_bytes),
+            _ => return Err(AssetError::MalformedBlock),
+        };
+        let position_domain = fields.get("PositionDomain").map(domain3).transpose()?.unwrap_or((Vec3::splat(-0.5), Vec3::splat(0.5)));
+        let uv_domain = uv_bytes.map(|_| domain2(fields.get("TexCoord0Domain").ok_or(AssetError::MalformedBlock)?)).transpose()?;
+        prepared.push(PreparedSubmesh::Geometry {
+            position_bytes,
+            normal_bytes,
+            uv_bytes,
+            triangle_bytes,
+            vertex_count,
+            triangle_count,
+            position_domain,
+            uv_domain,
+        });
+    }
+    Ok((prepared, total_vertices, total_indices))
 }
 
 fn parse_version(value: &Value) -> Result<u32, AssetError> {
@@ -610,6 +677,56 @@ mod tests {
         map(&[("TriangleList", sized(b'b', &[]))])
     }
 
+    fn dense_submesh(vertex_count: usize, index_count: usize, seed: u32) -> Vec<u8> {
+        let mut random = seed;
+        let mut positions = Vec::with_capacity(vertex_count * 6);
+        let mut normals = Vec::with_capacity(vertex_count * 6);
+        let mut uvs = Vec::with_capacity(vertex_count * 4);
+        let mut weights = Vec::with_capacity(vertex_count * 12);
+        let mut triangles = Vec::with_capacity(index_count * 2);
+        for vertex in 0..vertex_count {
+            let position =
+                if vertex == 0 { [0, u16::MAX, 32_768] } else { [next_u16(&mut random), next_u16(&mut random), next_u16(&mut random)] };
+            let normal =
+                if vertex == 0 { [u16::MAX, 32_768, 0] } else { [next_u16(&mut random), next_u16(&mut random), next_u16(&mut random)] };
+            let uv = if vertex == 0 { [0, u16::MAX] } else { [next_u16(&mut random), next_u16(&mut random)] };
+            for value in position {
+                positions.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in normal {
+                normals.extend_from_slice(&value.to_le_bytes());
+            }
+            for value in uv {
+                uvs.extend_from_slice(&value.to_le_bytes());
+            }
+            for joint in 0..4_u8 {
+                weights.push(joint);
+                let weight = if joint == 3 { 16_383_u16 } else { 16_384_u16 };
+                weights.extend_from_slice(&weight.to_le_bytes());
+            }
+        }
+        for index in 0..index_count {
+            let vertex = u16::try_from(index % vertex_count).unwrap();
+            triangles.extend_from_slice(&vertex.to_le_bytes());
+        }
+        map(&[
+            ("Position", sized(b'b', &positions)),
+            ("PositionDomain", domain(&[-1.0, -1.0, -1.0], &[1.0, 1.0, 1.0])),
+            ("Normal", sized(b'b', &normals)),
+            ("TexCoord0", sized(b'b', &uvs)),
+            ("TexCoord0Domain", domain(&[0.0, 0.0], &[1.0, 1.0])),
+            ("Weights", sized(b'b', &weights)),
+            ("TriangleList", sized(b'b', &triangles)),
+        ])
+    }
+
+    fn next_u16(state: &mut u32) -> u16 {
+        *state ^= *state << 13;
+        *state ^= *state >> 17;
+        *state ^= *state << 5;
+        *state as u16
+    }
+
     fn block(faces: &[Vec<u8>]) -> Vec<u8> {
         compressed(&binary_document(array(faces)))
     }
@@ -658,21 +775,19 @@ mod tests {
     }
 
     #[test]
-    fn decodes_each_lod_and_preserves_domains_uvs_and_face_order() {
+    fn decodes_lod_blocks_and_preserves_geometry() {
         let encoded = block(&[submesh(true, false), submesh(false, true), submesh(false, false)]);
-        for lod in [MeshLod::Lowest, MeshLod::Low, MeshLod::Medium, MeshLod::High] {
-            let LodGeometry::Geometry(mesh) = decode_lod(&encoded).unwrap() else { panic!("geometry LOD") };
+        let LodGeometry::Geometry(mesh) = decode_lod(&encoded).unwrap() else { panic!("geometry LOD") };
 
-            assert_eq!(mesh.faces(), &[Face { slot: 0, indices: 0..3 }, Face { slot: 1, indices: 3..3 }, Face { slot: 2, indices: 3..6 }]);
-            assert_eq!(mesh.vertices()[0].position, Vec3::new(-1.0, 2.0, -3.0));
-            assert_eq!(mesh.vertices()[1].position, Vec3::new(-1.0, -2.0, -3.0));
-            assert_eq!(mesh.vertices()[0].uv, Vec2::new(-0.5, 2.25));
-            assert_eq!(mesh.vertices()[1].uv, Vec2::new(1.5, 1.25));
-            assert_eq!(mesh.vertices()[0].normal.x, 1.0);
-            assert!(mesh.vertices()[0].normal.y.abs() < 0.00002);
-            assert_eq!(mesh.vertices()[0].normal.z, -1.0);
-            assert_eq!(mesh.vertices()[3].normal, Vec3::NEG_X);
-        }
+        assert_eq!(mesh.faces(), &[Face { slot: 0, indices: 0..3 }, Face { slot: 1, indices: 3..3 }, Face { slot: 2, indices: 3..6 }]);
+        assert_eq!(mesh.vertices()[0].position, Vec3::new(-1.0, 2.0, -3.0));
+        assert_eq!(mesh.vertices()[1].position, Vec3::new(-1.0, -2.0, -3.0));
+        assert_eq!(mesh.vertices()[0].uv, Vec2::new(-0.5, 2.25));
+        assert_eq!(mesh.vertices()[1].uv, Vec2::new(1.5, 1.25));
+        assert_eq!(mesh.vertices()[0].normal.x, 1.0);
+        assert!(mesh.vertices()[0].normal.y.abs() < 0.00002);
+        assert_eq!(mesh.vertices()[0].normal.z, -1.0);
+        assert_eq!(mesh.vertices()[3].normal, Vec3::NEG_X);
     }
 
     #[test]
@@ -737,6 +852,38 @@ mod tests {
     }
 
     #[test]
+    fn lod_decodes_format_maximum_geometry() {
+        let faces = (0..MAX_MESH_FACES_PER_LOD)
+            .map(|face| dense_submesh(MAX_MESH_VERTICES_PER_FACE, MAX_MESH_INDICES_PER_FACE, u32::try_from(face + 1).unwrap()))
+            .collect::<Vec<_>>();
+        let encoded = block(&faces);
+        drop(faces);
+
+        assert!(encoded.len() > 2 * 1024 * 1024);
+        assert!(encoded.len() <= MAX_MESH_BLOCK_BYTES);
+        let LodGeometry::Geometry(mesh) = decode_lod(&encoded).unwrap() else { panic!("geometry LOD") };
+
+        assert_eq!(mesh.vertices().len(), MAX_MESH_VERTICES);
+        assert_eq!(mesh.indices().len(), MAX_MESH_INDICES);
+        assert_eq!(mesh.faces().len(), MAX_MESH_FACES_PER_LOD);
+        assert_eq!(mesh.vertices()[0].position.x, -1.0);
+        assert_eq!(mesh.vertices()[0].position.y, 1.0);
+        assert_eq!(mesh.vertices()[0].uv, Vec2::new(0.0, 1.0));
+        assert_eq!(mesh.vertices()[0].normal.x, 1.0);
+        assert_eq!(mesh.vertices()[0].normal.z, -1.0);
+        assert_eq!(mesh.faces()[7].indices, (MAX_MESH_INDICES - MAX_MESH_INDICES_PER_FACE) as u32..MAX_MESH_INDICES as u32);
+    }
+
+    #[test]
+    fn lod_rejects_counts_over_face_limits() {
+        let too_many_vertices = block(&[dense_submesh(MAX_MESH_VERTICES_PER_FACE + 1, 3, 1)]);
+        assert_eq!(decode_lod(&too_many_vertices).err(), Some(AssetError::TooLarge));
+
+        let too_many_indices = block(&[dense_submesh(3, MAX_MESH_INDICES_PER_FACE + 3, 1)]);
+        assert_eq!(decode_lod(&too_many_indices).err(), Some(AssetError::TooLarge));
+    }
+
+    #[test]
     fn header_rejects_unsupported_versions_and_out_of_bounds_blocks() {
         let encoded = block(&[submesh(false, false)]);
         let (_, length) = header_with_blocks(&[(MeshLod::Low, &encoded)], 0);
@@ -786,7 +933,7 @@ mod tests {
             if let Ok(geometry) = result {
                 match geometry {
                     LodGeometry::Geometry(mesh) => {
-                        prop_assert!(mesh.owned_bytes() <= MAX_MESH_DECODED_BLOCK_BYTES);
+                        prop_assert!(mesh.owned_bytes() <= crate::budget::MESH_WORK_BYTES);
                         prop_assert!(mesh.vertices().len() <= MAX_MESH_VERTICES);
                         prop_assert!(mesh.indices().len() <= MAX_MESH_INDICES);
                         prop_assert!(mesh.faces().len() <= MAX_MESH_FACES_PER_LOD);

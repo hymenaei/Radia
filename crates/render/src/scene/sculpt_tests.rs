@@ -33,12 +33,10 @@ fn close(a: Vec3, b: Vec3) {
 }
 
 #[test]
-fn map_positions_and_winding_match_reference() {
+fn stitched_samples_match_hand_derived_reference_for_all_flags() {
     let rgba = sample_map();
-    let combinations =
-        [(false, false, [60, 60, 44]), (true, false, [180, 60, 96]), (false, true, [180, 60, 96]), (true, true, [60, 60, 44])];
     for sculpt_type in [SculptType::Sphere, SculptType::Torus, SculptType::Plane, SculptType::Cylinder] {
-        for (invert, mirror, middle_rgb) in combinations {
+        for (invert, mirror) in [(false, false), (true, false), (false, true), (true, true)] {
             let flags = SculptFlags { invert, mirror };
             let mesh = tessellate_sculpt([8, 8], &rgba, sculpt_type, flags, Detail::High).unwrap();
             assert_eq!(mesh.vertices().len(), 25, "{sculpt_type:?} {flags:?} vertices");
@@ -48,22 +46,31 @@ fn map_positions_and_winding_match_reference() {
             assert_eq!(mesh.faces()[0].indices, 0..96);
 
             let reverse = invert ^ mirror;
-            let expected_uv = Vec2::new(if reverse { 0.75 } else { 0.25 }, 0.25);
-            let middle = mesh.vertices()[6];
-            close(middle.position, decoded_color(middle_rgb[0], middle_rgb[1], middle_rgb[2], mirror));
-            assert_eq!(middle.uv, expected_uv);
-
-            let expected_first = match sculpt_type {
-                SculptType::Sphere => decoded_color(120, 0, 52, mirror),
-                SculptType::Torus | SculptType::Cylinder => decoded_color(0, 0, 0, mirror),
-                SculptType::Plane => {
-                    let [x, y] = if reverse { [7, 0] } else { [0, 0] };
-                    decoded_color((x * 30) as u8, (y * 30) as u8, (x * 13 + y * 9) as u8, mirror)
-                }
+            let wrapped_x = [0, 2, 4, 6, 0];
+            let reversed_wrapped_x = [7, 5, 3, 1, 7];
+            let expected_x_by_row: [[u32; 5]; 5] = match (sculpt_type, reverse) {
+                (SculptType::Sphere, false) => [[4; 5], wrapped_x, wrapped_x, wrapped_x, [4; 5]],
+                (SculptType::Sphere, true) => [[3; 5], reversed_wrapped_x, reversed_wrapped_x, reversed_wrapped_x, [3; 5]],
+                (SculptType::Torus | SculptType::Cylinder, false) => [wrapped_x; 5],
+                (SculptType::Torus | SculptType::Cylinder, true) => [reversed_wrapped_x; 5],
+                (SculptType::Plane, false) => [[0, 2, 4, 6, 7]; 5],
+                (SculptType::Plane, true) => [[7, 5, 3, 1, 0]; 5],
             };
-            let first = mesh.vertices()[0];
-            close(first.position, expected_first);
-            assert_eq!(first.uv, Vec2::new(if reverse { 1.0 } else { 0.0 }, 0.0));
+            let expected_y_by_row = match sculpt_type {
+                SculptType::Torus => [0, 2, 4, 6, 0],
+                SculptType::Sphere | SculptType::Plane | SculptType::Cylinder => [0, 2, 4, 6, 7],
+            };
+            let expected_u_by_column = if reverse { [1.0, 0.75, 0.5, 0.25, 0.0] } else { [0.0, 0.25, 0.5, 0.75, 1.0] };
+            let expected_v_by_row = [0.0, 0.25, 0.5, 0.75, 1.0];
+            for row in 0..5 {
+                for column in 0..5 {
+                    let x = expected_x_by_row[row][column];
+                    let y = expected_y_by_row[row];
+                    let pixel = ((y * 8 + x) * 4) as usize;
+                    close(mesh.vertices()[row * 5 + column].position, decoded_color(rgba[pixel], rgba[pixel + 1], rgba[pixel + 2], mirror));
+                    assert_eq!(mesh.vertices()[row * 5 + column].uv, Vec2::new(expected_u_by_column[column], expected_v_by_row[row]));
+                }
+            }
 
             let triangles = mesh.indices().as_chunks::<3>().0;
             assert_eq!(triangles[0], [0, 6, 5]);
@@ -138,16 +145,18 @@ fn resolution_matches_detail_and_aspect_ratio() {
             let mesh = tessellate_sculpt([16, 8], &rgba, sculpt_type, flags, Detail::High).unwrap();
             assert_eq!(mesh.vertices().len(), 45);
             assert_eq!(mesh.indices().len(), 192);
-            close(mesh.vertices()[22].position, decoded_color(120, 120, 80, mirror));
+            let reverse = invert ^ mirror;
+            let middle_x = if reverse { 7 } else { 8 };
+            close(mesh.vertices()[22].position, decoded_color((middle_x * 15) as u8, 120, (middle_x * 5 + 40) as u8, mirror));
             assert_eq!(mesh.vertices()[22].uv, Vec2::new(0.5, 0.5));
-            let first_rgb = match sculpt_type {
-                SculptType::Sphere => [120, 0, 40],
-                SculptType::Torus | SculptType::Cylinder => [0, 0, 0],
-                SculptType::Plane if invert ^ mirror => [225, 0, 75],
-                SculptType::Plane => [0, 0, 0],
+            let first_x = match sculpt_type {
+                SculptType::Sphere if reverse => 7,
+                SculptType::Sphere => 8,
+                SculptType::Torus | SculptType::Plane | SculptType::Cylinder if reverse => 15,
+                SculptType::Torus | SculptType::Plane | SculptType::Cylinder => 0,
             };
-            close(mesh.vertices()[0].position, decoded_color(first_rgb[0], first_rgb[1], first_rgb[2], mirror));
-            assert_eq!(mesh.vertices()[0].uv, Vec2::new(if invert ^ mirror { 1.0 } else { 0.0 }, 0.0));
+            close(mesh.vertices()[0].position, decoded_color((first_x * 15) as u8, 0, (first_x * 5) as u8, mirror));
+            assert_eq!(mesh.vertices()[0].uv, Vec2::new(if reverse { 1.0 } else { 0.0 }, 0.0));
             assert_eq!(mesh.indices()[..6], [0, 10, 9, 0, 1, 10]);
         }
     }

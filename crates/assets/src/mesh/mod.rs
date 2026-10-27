@@ -27,7 +27,6 @@ pub struct Vertex {
     pub position: Vec3,
     pub normal: Vec3,
     pub uv: Vec2,
-    pub weights: [f32; 4],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,11 +79,7 @@ impl Mesh {
         let mut min = Vec3::splat(f32::INFINITY);
         let mut max = Vec3::splat(f32::NEG_INFINITY);
         for vertex in &vertices {
-            if !vertex.position.is_finite()
-                || !vertex.normal.is_finite()
-                || !vertex.uv.is_finite()
-                || !vertex.weights.iter().all(|weight| weight.is_finite())
-            {
+            if !vertex.position.is_finite() || !vertex.normal.is_finite() || !vertex.uv.is_finite() {
                 return Err(MeshError::InvalidParameters);
             }
             min = min.min(vertex.position);
@@ -139,7 +134,7 @@ mod tests {
     use super::*;
 
     fn vertex() -> Vertex {
-        Vertex { position: Vec3::ZERO, normal: Vec3::Z, uv: Vec2::ZERO, weights: [0.0; 4] }
+        Vertex { position: Vec3::ZERO, normal: Vec3::Z, uv: Vec2::ZERO }
     }
 
     #[test]
@@ -186,7 +181,6 @@ mod tests {
             ("nan position", Vertex { position: Vec3::NAN, ..vertex() }),
             ("infinite normal", Vertex { normal: Vec3::splat(f32::INFINITY), ..vertex() }),
             ("infinite uv", Vertex { uv: Vec2::splat(f32::NEG_INFINITY), ..vertex() }),
-            ("nan terrain weight", Vertex { weights: [0.0, f32::NAN, 0.0, 0.0], ..vertex() }),
         ] {
             assert_matches!(
                 Mesh::from_parts(vec![vertex(), invalid, vertex()], vec![0, 1, 2], vec![]).err(),

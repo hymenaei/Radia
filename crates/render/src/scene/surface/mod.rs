@@ -31,6 +31,7 @@ pub struct Surface {
     pub kind: SurfaceKind,
     pub position: DVec3,
     pub mesh: PreparedMesh,
+    pub terrain_composition: Option<Arc<[f32]>>,
 }
 
 enum Input {
@@ -49,8 +50,10 @@ pub(in crate::scene) struct SurfaceJob {
 impl SurfaceJob {
     pub(in crate::scene) fn run(self) -> SurfaceCompletion {
         let result = match &self.input {
-            Input::Terrain(tiles) => tiles.mesh(&self.cancelled),
-            Input::Water(height) => water::mesh(*height),
+            Input::Terrain(tiles) => {
+                tiles.mesh(&self.cancelled).map(|(mesh, composition)| BuiltSurface { mesh, composition: Some(composition) })
+            }
+            Input::Water(height) => water::mesh(*height).map(|mesh| BuiltSurface { mesh, composition: None }),
         };
         SurfaceCompletion { key: self.key, position: self.position, result, work: self.work, cancelled: self.cancelled }
     }
@@ -59,9 +62,14 @@ impl SurfaceJob {
 pub(in crate::scene) struct SurfaceCompletion {
     key: Key,
     position: DVec3,
-    result: Result<Mesh, MeshBuildError>,
+    result: Result<BuiltSurface, MeshBuildError>,
     work: MeshWork,
     cancelled: Arc<AtomicBool>,
+}
+
+struct BuiltSurface {
+    mesh: Mesh,
+    composition: Option<Vec<f32>>,
 }
 
 pub(in crate::scene) enum SurfaceStep {
@@ -201,18 +209,20 @@ impl SurfaceJobs {
             return None;
         }
         self.running.remove(&completion.key);
-        let mesh = match completion.result {
-            Ok(mesh) => {
-                let lease = completion.work.lease.split(retained_bytes(&mesh)).expect("terrain fits admitted work");
-                PreparedMesh::Ready(SharedMesh::new(mesh, lease))
+        let (mesh, terrain_composition) = match completion.result {
+            Ok(BuiltSurface { mesh, composition }) => {
+                let composition_bytes = composition.as_ref().map_or(0, |values| std::mem::size_of_val(values.as_slice()));
+                let retained = retained_bytes(&mesh).checked_add(composition_bytes).expect("terrain allocation size is representable");
+                let lease = completion.work.lease.split(retained).expect("terrain fits admitted work");
+                (PreparedMesh::Ready(SharedMesh::new(mesh, lease)), composition.map(Arc::from))
             }
             Err(MeshBuildError::Cancelled) => {
                 self.dirty.insert(completion.key);
                 return None;
             }
-            Err(error) => PreparedMesh::Failed(error),
+            Err(error) => (PreparedMesh::Failed(error), None),
         };
-        Some(Surface { region: completion.key.1, kind: completion.key.0, position: completion.position, mesh })
+        Some(Surface { region: completion.key.1, kind: completion.key.0, position: completion.position, mesh, terrain_composition })
     }
 }
 

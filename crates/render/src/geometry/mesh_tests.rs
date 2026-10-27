@@ -26,11 +26,11 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba8UnormSrgb);
     let filler = separate_pages.then(|| {
         let (_, shared) = view.objects().next().unwrap().mesh().unwrap();
-        assert!(geometry.upload_mesh(device, shared, &mut 0));
+        assert!(geometry.upload_mesh(device, shared, None, &mut 0));
         let allocation = &geometry.meshes[&shared.id()].allocation;
         let vertices = allocation.buffers().vertices.size() as usize / VERTEX_BYTES - allocation.vertices().end as usize;
         let indices = allocation.buffers().indices.size() as usize / size_of::<u32>() - allocation.indices().end as usize;
-        geometry.storage.allocate(device, vertices, indices, &geometry.memory).unwrap()
+        geometry.storage.allocate(device, vertices, indices, false, &geometry.memory).unwrap()
     });
     let mut encoder = device.create_command_encoder(&Default::default());
     let depth = geometry.depth(device, [128, 128]).unwrap();
@@ -61,7 +61,6 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
                 floats(&mut vertices, vertex.position.to_array());
                 floats(&mut vertices, vertex.normal.to_array());
                 floats(&mut vertices, vertex.uv.to_array());
-                floats(&mut vertices, vertex.weights);
             }
             let indices: Vec<_> = mesh.indices().iter().flat_map(|index| index.to_le_bytes()).collect();
             let Placement::Ready(transform) = object.placement() else { panic!("fixture object must be placed") };
@@ -74,6 +73,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
                 faces: Vec::new(),
                 shading: ShadingMode::Studio,
                 terrain_textures: None,
+                terrain_composition: None,
             };
             let params = FaceParams::new(Some(&object.materials().unwrap()[0]));
             let packed = packed_instance(&instance_base(&instance, camera.position()), &params, instance.scale);
@@ -181,7 +181,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
     assert_eq!(geometry.memory.mesh_state().bytes, charged);
     assert!(geometry.needs_frame(), "retirement must unblock preparation without freeing a whole page");
-    let reused = geometry.storage.allocate(device, old_vertices.len(), old_indices.len(), &geometry.memory).unwrap();
+    let reused = geometry.storage.allocate(device, old_vertices.len(), old_indices.len(), false, &geometry.memory).unwrap();
     assert_eq!((reused.vertices(), reused.indices()), (old_vertices, old_indices));
     assert!(Arc::ptr_eq(reused.buffers(), &old_buffers));
     drop(reused);
@@ -311,6 +311,8 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
             pickable: true,
             faces: Vec::new(),
             shading: ShadingMode::Studio,
+            terrain_textures: None,
+            terrain_composition: None,
         };
         instances.extend_from_slice(&packed_instance(&instance_base(&instance, camera.position()), &params, instance.scale));
     }

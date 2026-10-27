@@ -13,17 +13,21 @@ pub(super) struct GpuMesh {
 }
 
 impl GeometryRenderer {
-    pub(super) fn upload_mesh(&mut self, device: &Device, shared: &SharedMesh, uploaded: &mut usize) -> bool {
+    pub(super) fn upload_mesh(&mut self, device: &Device, shared: &SharedMesh, composition: Option<&[f32]>, uploaded: &mut usize) -> bool {
         let key = shared.id();
         if self.meshes.contains_key(&key) {
             return true;
         }
         let mesh = shared.mesh();
+        if composition.is_some_and(|values| values.len() != mesh.vertices().len()) {
+            return false;
+        }
         let Some(bytes) = mesh
             .vertices()
             .len()
             .checked_mul(VERTEX_BYTES)
             .and_then(|vertices| mesh.indices().len().checked_mul(4).and_then(|indices| vertices.checked_add(indices)))
+            .and_then(|bytes| composition.map_or(Some(bytes), |values| values.len().checked_mul(size_of::<f32>())?.checked_add(bytes)))
         else {
             return false;
         };
@@ -33,7 +37,9 @@ impl GeometryRenderer {
         if self.meshes.len() >= MAX_MESHES && !self.retire_mesh() {
             return false;
         }
-        let Some(allocation) = self.storage.allocate(device, mesh.vertices().len(), mesh.indices().len(), &self.memory) else {
+        let Some(allocation) =
+            self.storage.allocate(device, mesh.vertices().len(), mesh.indices().len(), composition.is_some(), &self.memory)
+        else {
             self.retire_mesh();
             return false;
         };
@@ -42,9 +48,14 @@ impl GeometryRenderer {
             floats(&mut packed, vertex.position.to_array());
             floats(&mut packed, vertex.normal.to_array());
             floats(&mut packed, vertex.uv.to_array());
-            floats(&mut packed, vertex.weights);
         }
         self.queue.write_buffer(&allocation.buffers().vertices, u64::from(allocation.vertices().start) * VERTEX_BYTES as u64, &packed);
+        if let Some(composition) = composition {
+            let mut packed = Vec::with_capacity(std::mem::size_of_val(composition));
+            floats_slice(&mut packed, composition);
+            let buffer = allocation.buffers().composition.as_ref().expect("composition allocation has a terrain buffer");
+            self.queue.write_buffer(buffer, u64::from(allocation.vertices().start) * size_of::<f32>() as u64, &packed);
+        }
         packed.clear();
         for index in mesh.indices() {
             packed.extend_from_slice(&index.to_le_bytes());
@@ -88,6 +99,12 @@ impl GeometryRenderer {
 }
 
 fn floats<const N: usize>(bytes: &mut Vec<u8>, values: [f32; N]) {
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn floats_slice(bytes: &mut Vec<u8>, values: &[f32]) {
     for value in values {
         bytes.extend_from_slice(&value.to_le_bytes());
     }

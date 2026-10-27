@@ -47,10 +47,11 @@ impl Terrain {
         Self { tiles, patch, origin, settings }
     }
 
-    pub(super) fn mesh(&self, cancelled: &AtomicBool) -> Result<Mesh, MeshBuildError> {
+    pub(super) fn mesh(&self, cancelled: &AtomicBool) -> Result<(Mesh, Vec<f32>), MeshBuildError> {
         let tiles = &self.tiles;
         let (patch_x, patch_y) = self.patch.coordinates();
         let mut vertices = Vec::with_capacity(289);
+        let mut composition_values = Vec::with_capacity(289);
         let mut indices = Vec::with_capacity(1536);
         let mut grid = [[None; 17]; 17];
         for y in 0..17 {
@@ -62,8 +63,8 @@ impl Terrain {
                 let normal = classic_normal(x, y, |x, y| sample(tiles, x, y).unwrap_or(z));
                 let local_x = f32::from(patch_x) * 16.0 + x as f32;
                 let local_y = f32::from(patch_y) * 16.0 + y as f32;
-                let weights = self.settings.map_or([1.0, 0.0, 0.0, 0.0], |settings| {
-                    blend_weights(
+                let composition = self.settings.map_or(0.0, |settings| {
+                    composition_coordinate(
                         &settings,
                         local_x,
                         local_y,
@@ -77,8 +78,8 @@ impl Terrain {
                     position: Vec3::new(x as f32, y as f32, z as f32),
                     normal,
                     uv: Vec2::new(x as f32, y as f32) / 16.0,
-                    weights,
                 });
+                composition_values.push(composition);
             }
         }
         for y in 0..16 {
@@ -90,7 +91,8 @@ impl Terrain {
             }
         }
         let count = indices.len() as u32;
-        Mesh::from_parts(vertices, indices, vec![Face { slot: 0, indices: 0..count }]).map_err(MeshBuildError::from)
+        let mesh = Mesh::from_parts(vertices, indices, vec![Face { slot: 0, indices: 0..count }]).map_err(MeshBuildError::from)?;
+        Ok((mesh, composition_values))
     }
 }
 
@@ -153,7 +155,7 @@ fn sample(tiles: &[Option<Tile>; 9], x: i32, y: i32) -> Option<f64> {
     Some(f64::from(tile.patch.source().heights()[y * 16 + x]))
 }
 
-fn blend_weights(settings: &TerrainSettings, local_x: f32, local_y: f32, height: f32, global_x: f32, global_y: f32) -> [f32; 4] {
+fn composition_coordinate(settings: &TerrainSettings, local_x: f32, local_y: f32, height: f32, global_x: f32, global_y: f32) -> f32 {
     let x = (local_x / TERRAIN_REGION_SIZE).clamp(0.0, 1.0);
     let y = (local_y / TERRAIN_REGION_SIZE).clamp(0.0, 1.0);
     let start = bilinear(*settings.start_heights(), x, y);
@@ -163,23 +165,12 @@ fn blend_weights(settings: &TerrainSettings, local_x: f32, local_y: f32, height:
     let low = noise2([global_x * NOISE_LOW_FREQUENCY_SCALE, global_y * NOISE_LOW_FREQUENCY_SCALE]);
     let high = turbulence2([global_x, global_y], 2.0);
     let twiddle = (low * 6.5 + high * NOISE_SLOPE_SQUARED) * NOISE_MAGNITUDE;
-    layer_weights((height + twiddle - start) * 4.0 / range)
+    ((height + twiddle - start) * 4.0 / range).clamp(0.0, 3.0)
 }
 
 fn bilinear(corners: [f32; 4], x: f32, y: f32) -> f32 {
     let [southwest, southeast, northwest, northeast] = corners;
     (1.0 - x) * (1.0 - y) * southwest + x * (1.0 - y) * southeast + (1.0 - x) * y * northwest + x * y * northeast
-}
-
-fn layer_weights(value: f32) -> [f32; 4] {
-    let value = value.clamp(0.0, 3.0);
-    let lower = value.floor() as usize;
-    let upper = (lower + 1).min(3);
-    let upper_weight = value - lower as f32;
-    let mut weights = [0.0; 4];
-    weights[lower] = 1.0 - upper_weight;
-    weights[upper] += upper_weight;
-    weights
 }
 
 #[derive(Clone, Copy)]
@@ -265,6 +256,7 @@ fn turbulence2(point: [f32; 2], mut frequency: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::texture::TERRAIN_ALPHA_RAMP;
 
     fn settings(textures: [Uuid; 4], start_heights: [f32; 4], height_ranges: [f32; 4]) -> TerrainSettings {
         TerrainSettings::new(textures, start_heights, height_ranges).unwrap()
@@ -276,20 +268,12 @@ mod tests {
         let ranges = [40.0, 80.0, 120.0, 160.0];
         let settings = settings([Uuid::nil(); 4], starts, ranges);
         let corners = [(0.0, 0.0), (256.0, 0.0), (0.0, 256.0), (256.0, 256.0)];
-        let boundaries = [
-            (0.0, [1.0, 0.0, 0.0, 0.0]),
-            (0.25, [0.75, 0.25, 0.0, 0.0]),
-            (1.0, [0.0, 1.0, 0.0, 0.0]),
-            (1.5, [0.0, 0.5, 0.5, 0.0]),
-            (2.0, [0.0, 0.0, 1.0, 0.0]),
-            (3.0, [0.0, 0.0, 0.0, 1.0]),
-            (4.0, [0.0, 0.0, 0.0, 1.0]),
-        ];
+        let boundaries = [(0.0, 0.0), (0.25, 0.25), (1.0, 1.0), (1.5, 1.5), (2.0, 2.0), (3.0, 3.0), (4.0, 3.0)];
         for (index, (start, range)) in starts.into_iter().zip(ranges).enumerate() {
             let (x, y) = corners[index];
             for (scaled, expected) in boundaries {
                 let height = start + range * scaled / 4.0;
-                assert_eq!(blend_weights(&settings, x, y, height, 0.0, 0.0), expected, "corner {index}, scaled height {scaled}");
+                assert_eq!(composition_coordinate(&settings, x, y, height, 0.0, 0.0), expected, "corner {index}, scaled height {scaled}");
             }
         }
         assert_eq!(bilinear(starts, 0.0, 0.0), 10.0);
@@ -302,27 +286,85 @@ mod tests {
         assert_eq!(bilinear(ranges, 1.0, 1.0), 160.0);
         assert_eq!(bilinear(starts, 0.5, 0.5), 25.0);
         assert_eq!(bilinear(ranges, 0.5, 0.5), 100.0);
-        let weight_sum = blend_weights(&settings, 128.0, 128.0, 50.0, 2048.0, 4096.0).iter().sum::<f32>();
-        assert!((weight_sum - 1.0).abs() < 1.0e-6);
+        assert_eq!(composition_coordinate(&settings, 128.0, 128.0, 50.0, 0.0, 0.0), 1.0);
     }
 
     #[test]
-    fn neighbor_edge_weights_match_when_edge_height_ranges_and_terrain_heights_match() {
+    fn neighbor_edge_coordinates_match_for_matching_settings() {
         let west = settings([Uuid::from_u128(1); 4], [10.0, 20.0, 30.0, 40.0], [40.0, 80.0, 120.0, 160.0]);
         let east = settings([Uuid::from_u128(2); 4], [20.0, 22.0, 40.0, 42.0], [80.0, 81.0, 160.0, 161.0]);
-        let west_weights = blend_weights(&west, 256.0, 64.0, 34.5, 256.0, 64.0);
-        let east_weights = blend_weights(&east, 0.0, 64.0, 34.5, 256.0, 64.0);
-        assert_eq!(west_weights, east_weights);
+        let west_coordinate = composition_coordinate(&west, 256.0, 64.0, 34.5, 256.0, 64.0);
+        let east_coordinate = composition_coordinate(&east, 0.0, 64.0, 34.5, 256.0, 64.0);
+        assert_eq!(west_coordinate, east_coordinate);
         assert_ne!(west.detail_textures(), east.detail_textures());
     }
 
     #[test]
     fn official_noise_fixture_at_nonzero_region_coordinates() {
         let settings = settings([Uuid::nil(); 4], [10.0, 20.0, 30.0, 40.0], [40.0, 80.0, 120.0, 160.0]);
-        let weights = blend_weights(&settings, 128.0, 128.0, 50.0, 2048.0, 4096.0);
-        let expected = [0.039_978_027, 0.960_022, 0.0, 0.0];
-        for (actual, expected) in weights.into_iter().zip(expected) {
-            assert!((actual - expected).abs() < 1.0e-6, "noise weight {actual} != {expected}");
+        let coordinate = composition_coordinate(&settings, 128.0, 128.0, 50.0, 2048.0, 4096.0);
+        assert!((coordinate - 0.960_022).abs() < 1.0e-6, "composition coordinate {coordinate}");
+    }
+
+    fn ramp_alpha(coordinate: f32) -> f32 {
+        let position = coordinate.clamp(0.0, 1.0) * TERRAIN_ALPHA_RAMP.len() as f32 - 0.5;
+        let lower = position.floor();
+        let fraction = position - lower;
+        let sample = |index: f32| {
+            let index = index.clamp(0.0, TERRAIN_ALPHA_RAMP.len() as f32 - 1.0) as usize;
+            f32::from(TERRAIN_ALPHA_RAMP[index]) / 255.0
+        };
+        let first = sample(lower);
+        first + (sample(lower + 1.0) - first) * fraction
+    }
+
+    fn ramp_weights(coordinate: f32) -> [f32; 4] {
+        let alpha1 = ramp_alpha(coordinate);
+        let alpha2 = ramp_alpha(coordinate - 2.0);
+        let alpha_final = ramp_alpha(coordinate - 1.0);
+        [alpha_final * alpha1, alpha_final * (1.0 - alpha1), (1.0 - alpha_final) * alpha2, (1.0 - alpha_final) * (1.0 - alpha2)]
+    }
+
+    fn mix(first: [f32; 3], second: [f32; 3], alpha: f32) -> [f32; 3] {
+        std::array::from_fn(|index| first[index] * (1.0 - alpha) + second[index] * alpha)
+    }
+
+    #[test]
+    fn ramp_layer_boundaries_match_reference() {
+        let cases = [
+            (0.0, [0.992_172_24, 0.003_906_19, 0.003_906_19, 0.000_015_38]),
+            (1.0, [0.007_812_38, 0.988_266_05, 0.003_906_19, 0.000_015_38]),
+            (2.0, [0.000_061_51, 0.007_781_62, 0.988_266_05, 0.003_890_81]),
+            (3.0, [0.000_061_51, 0.007_781_62, 0.007_781_62, 0.984_375_24]),
+        ];
+        for (coordinate, expected) in cases {
+            for (actual, expected) in ramp_weights(coordinate).into_iter().zip(expected) {
+                assert!((actual - expected).abs() < 1.0e-6, "coordinate {coordinate}: {actual} != {expected}");
+            }
+        }
+    }
+
+    #[test]
+    fn mid_triangle_matches_official_ramp() {
+        let vertex_composition = [1.25, 1.75, 1.5];
+        let composition = vertex_composition[0] * 0.25 + vertex_composition[1] * 0.25 + vertex_composition[2] * 0.5;
+        assert_eq!(composition, 1.5);
+
+        let alpha1 = ramp_alpha(composition);
+        let alpha2 = ramp_alpha(composition - 2.0);
+        let alpha_final = ramp_alpha(composition - 1.0);
+        assert!((alpha1 - 2.0 / 255.0).abs() < 1.0e-6);
+        assert!((alpha2 - 254.0 / 255.0).abs() < 1.0e-6);
+        assert!((alpha_final - 379.0 / 510.0).abs() < 1.0e-6);
+
+        let c3 = [1.0, 1.0, 1.0];
+        let c2 = [0.0, 0.0, 1.0];
+        let c1 = [0.0, 1.0, 0.0];
+        let c0 = [1.0, 0.0, 0.0];
+        let actual = mix(mix(c3, c2, alpha2), mix(c1, c0, alpha1), alpha_final);
+        let expected = [0.006_835_83, 0.738_316_03, 0.256_862_75];
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-6, "{actual} != {expected}");
         }
     }
 
@@ -354,8 +396,10 @@ mod tests {
 
     fn assert_edge_normals_match(west: Terrain, east: Terrain, seam_x: f64) {
         let cancelled = AtomicBool::new(false);
-        let west_mesh = west.mesh(&cancelled).unwrap();
-        let east_mesh = east.mesh(&cancelled).unwrap();
+        let (west_mesh, west_composition) = west.mesh(&cancelled).unwrap();
+        let (east_mesh, east_composition) = east.mesh(&cancelled).unwrap();
+        assert_eq!(west_composition.len(), west_mesh.vertices().len());
+        assert_eq!(east_composition.len(), east_mesh.vertices().len());
         let west_normal = west_mesh.vertices()[8 * 17 + 16].normal;
         let east_normal = east_mesh.vertices()[8 * 17].normal;
         let expected = Vec3::new(-1.0 / 5.0_f32.sqrt(), 0.0, 2.0 / 5.0_f32.sqrt());

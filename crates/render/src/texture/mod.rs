@@ -30,6 +30,8 @@ const DEFAULT_SOFT_CAP: usize = 1024 * 1024 * 1024;
 const STAGING_BYTES: usize = 48 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_JOBS: usize = 2;
+const TERRAIN_ALPHA_RAMP_WIDTH: u32 = 256;
+pub(crate) const TERRAIN_ALPHA_RAMP: &[u8; 256] = include_bytes!("../terrain_alpha_ramp.r8");
 
 #[derive(Default)]
 struct Accounting {
@@ -261,6 +263,9 @@ pub(crate) struct Textures {
     fallback: BindGroup,
     terrain_fallback: TextureView,
     terrain_sampler: wgpu::Sampler,
+    _terrain_alpha_ramp: Texture,
+    terrain_alpha_ramp_view: TextureView,
+    terrain_alpha_ramp_sampler: wgpu::Sampler,
     terrain_bindings: HashMap<TerrainTextureKey, BindGroup>,
     mip_layout: BindGroupLayout,
     mip_pipeline: RenderPipeline,
@@ -312,6 +317,22 @@ impl Textures {
             ty: BindingType::Sampler(SamplerBindingType::Filtering),
             count: None,
         });
+        terrain_entries.push(BindGroupLayoutEntry {
+            binding: 5,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Texture {
+                sample_type: TextureSampleType::Float { filterable: true },
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+        terrain_entries.push(BindGroupLayoutEntry {
+            binding: 6,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Sampler(SamplerBindingType::Filtering),
+            count: None,
+        });
         let terrain_layout = device
             .create_bind_group_layout(&BindGroupLayoutDescriptor { label: Some("Terrain detail textures"), entries: &terrain_entries });
         let texture = device.create_texture(&TextureDescriptor {
@@ -354,6 +375,31 @@ impl Textures {
             mag_filter: FilterMode::Linear,
             min_filter: FilterMode::Linear,
             mipmap_filter: MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+        let terrain_alpha_ramp = device.create_texture(&TextureDescriptor {
+            label: Some("Legacy terrain alpha ramp"),
+            size: Extent3d { width: TERRAIN_ALPHA_RAMP_WIDTH, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::R8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            terrain_alpha_ramp.as_image_copy(),
+            TERRAIN_ALPHA_RAMP,
+            TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(TERRAIN_ALPHA_RAMP_WIDTH), rows_per_image: Some(1) },
+            Extent3d { width: TERRAIN_ALPHA_RAMP_WIDTH, height: 1, depth_or_array_layers: 1 },
+        );
+        let terrain_alpha_ramp_view = terrain_alpha_ramp.create_view(&TextureViewDescriptor::default());
+        let terrain_alpha_ramp_sampler = device.create_sampler(&SamplerDescriptor {
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: MipmapFilterMode::Nearest,
             ..Default::default()
         });
         let mip_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -415,6 +461,9 @@ impl Textures {
             fallback,
             terrain_fallback,
             terrain_sampler,
+            _terrain_alpha_ramp: terrain_alpha_ramp,
+            terrain_alpha_ramp_view,
+            terrain_alpha_ramp_sampler,
             terrain_bindings: HashMap::new(),
             mip_layout,
             mip_pipeline,
@@ -603,6 +652,8 @@ impl Textures {
             .map(|(index, view)| BindGroupEntry { binding: index as u32, resource: BindingResource::TextureView(view) })
             .collect();
         entries.push(BindGroupEntry { binding: 4, resource: BindingResource::Sampler(&self.terrain_sampler) });
+        entries.push(BindGroupEntry { binding: 5, resource: BindingResource::TextureView(&self.terrain_alpha_ramp_view) });
+        entries.push(BindGroupEntry { binding: 6, resource: BindingResource::Sampler(&self.terrain_alpha_ramp_sampler) });
         let binding = device.create_bind_group(&BindGroupDescriptor {
             label: Some("Terrain detail images"),
             layout: &self.terrain_layout,

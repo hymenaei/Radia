@@ -29,7 +29,7 @@ impl Builder {
             return Err(MeshBuildError::TooComplex);
         }
         let index = self.vertices.len();
-        self.vertices.push(Vertex { position, normal: Vec3::ZERO, uv, weights: [0.0; 4] });
+        self.vertices.push(Vertex { position, normal: Vec3::ZERO, uv });
         self.parents.push(index);
         Ok(index)
     }

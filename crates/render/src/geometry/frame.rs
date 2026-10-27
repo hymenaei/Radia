@@ -68,6 +68,7 @@ impl GeometryRenderer {
                     faces: Vec::new(),
                     shading: ShadingMode::Studio,
                     terrain_textures: None,
+                    terrain_composition: None,
                 },
                 object.materials(),
                 animation,
@@ -99,6 +100,7 @@ impl GeometryRenderer {
                     faces: Vec::new(),
                     shading,
                     terrain_textures,
+                    terrain_composition: surface.terrain_composition.clone(),
                 },
                 None,
                 None,
@@ -169,7 +171,7 @@ impl GeometryRenderer {
         let mut pending_textures = HashSet::new();
         let mut animated_faces = false;
         for (id, mut instance, faces, animation, appearance) in candidates {
-            if !self.upload_mesh(device, &instance.mesh, &mut uploaded) {
+            if !self.upload_mesh(device, &instance.mesh, instance.terrain_composition.as_deref(), &mut uploaded) {
                 pending_meshes.insert(instance.mesh.id());
                 continue;
             }

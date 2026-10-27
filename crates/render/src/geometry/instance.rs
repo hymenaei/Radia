@@ -51,7 +51,10 @@ pub(super) fn is_visible(instance: &Instance, camera: Camera, frustum: &Frustum)
 
 #[cfg(test)]
 mod tests {
+    use math::{Mat3, Quat};
+
     use super::*;
+    use crate::geometry::fixtures;
 
     #[test]
     fn instance_attributes_match_shader() {
@@ -86,6 +89,7 @@ mod tests {
             faces: Vec::new(),
             shading: ShadingMode::Studio,
             terrain_textures: None,
+            terrain_composition: None,
         };
         let bytes = instance_base(&instance, DVec3::ZERO);
         let column = |index: usize| {
@@ -121,6 +125,7 @@ mod tests {
             faces: Vec::new(),
             shading,
             terrain_textures: None,
+            terrain_composition: None,
         };
         let terrain = instance(ShadingMode::Terrain);
         let water = instance(ShadingMode::Water);

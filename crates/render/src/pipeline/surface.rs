@@ -11,7 +11,7 @@ use wgpu::{
 use crate::scene::Camera;
 
 pub(crate) const INSTANCE_BYTES: usize = 192;
-pub(crate) const VERTEX_BYTES: usize = 48;
+pub(crate) const VERTEX_BYTES: usize = 32;
 const CAMERA_BYTES: usize = 144;
 const KEY_LIGHT: Vec3 = Vec3::new(-0.3, 0.5, 1.0);
 const CAMERA_NEAR_PLANE: f32 = 0.05;
@@ -84,8 +84,25 @@ impl SurfacePipelines {
                     VertexAttribute { format: VertexFormat::Float32x3, offset: 0, shader_location: 0 },
                     VertexAttribute { format: VertexFormat::Float32x3, offset: 12, shader_location: 1 },
                     VertexAttribute { format: VertexFormat::Float32x2, offset: 24, shader_location: 2 },
-                    VertexAttribute { format: VertexFormat::Float32x4, offset: 32, shader_location: 3 },
+                    VertexAttribute { format: VertexFormat::Float32, offset: 28, shader_location: 3 },
                 ],
+            }),
+            Some(VertexBufferLayout { array_stride: INSTANCE_BYTES as u64, step_mode: VertexStepMode::Instance, attributes: &attributes }),
+        ];
+        let terrain_buffers = [
+            Some(VertexBufferLayout {
+                array_stride: VERTEX_BYTES as u64,
+                step_mode: VertexStepMode::Vertex,
+                attributes: &[
+                    VertexAttribute { format: VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+                    VertexAttribute { format: VertexFormat::Float32x3, offset: 12, shader_location: 1 },
+                    VertexAttribute { format: VertexFormat::Float32x2, offset: 24, shader_location: 2 },
+                ],
+            }),
+            Some(VertexBufferLayout {
+                array_stride: size_of::<f32>() as u64,
+                step_mode: VertexStepMode::Vertex,
+                attributes: &[VertexAttribute { format: VertexFormat::Float32, offset: 0, shader_location: 3 }],
             }),
             Some(VertexBufferLayout { array_stride: INSTANCE_BYTES as u64, step_mode: VertexStepMode::Instance, attributes: &attributes }),
         ];
@@ -135,7 +152,7 @@ impl SurfacePipelines {
                 module: &terrain_shader,
                 entry_point: Some("terrain_vertex"),
                 compilation_options: Default::default(),
-                buffers: &buffers,
+                buffers: &terrain_buffers,
             },
             primitive: descriptor.primitive,
             depth_stencil: descriptor.depth_stencil.clone(),

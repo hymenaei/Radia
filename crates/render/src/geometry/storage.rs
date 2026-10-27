@@ -16,6 +16,7 @@ const PAGE_BYTES: usize = 1024 * 1024;
 
 pub(super) struct Buffers {
     pub vertices: Buffer,
+    pub composition: Option<Buffer>,
     pub indices: Buffer,
     _lease: Lease,
 }
@@ -145,19 +146,29 @@ pub(super) struct Storage {
 }
 
 impl Storage {
-    pub fn allocate(&mut self, device: &Device, vertices: usize, indices: usize, memory: &Arc<Accounting>) -> Option<Allocation> {
+    pub fn allocate(
+        &mut self,
+        device: &Device,
+        vertices: usize,
+        indices: usize,
+        has_composition: bool,
+        memory: &Arc<Accounting>,
+    ) -> Option<Allocation> {
         let vertex_count = u32::try_from(vertices).ok()?;
         let index_count = u32::try_from(indices).ok()?;
         if vertex_count == 0 || index_count == 0 {
             return None;
         }
         for page in &mut self.pages {
+            if page.buffers.composition.is_some() != has_composition {
+                continue;
+            }
             if let Some(block) = page.layout.allocate(vertex_count, index_count, memory) {
                 return Some(Allocation { buffers: page.buffers.clone(), block });
             }
         }
-        let (vertex_bytes, index_bytes) = page_bytes(vertices, indices)?;
-        let bytes = vertex_bytes.checked_add(index_bytes)?;
+        let (vertex_bytes, index_bytes, composition_bytes) = page_bytes(vertices, indices, has_composition)?;
+        let bytes = vertex_bytes.checked_add(index_bytes)?.checked_add(composition_bytes)?;
         let vertex_capacity = u32::try_from(vertex_bytes / VERTEX_BYTES).ok()?;
         let index_capacity = u32::try_from(index_bytes / size_of::<u32>()).ok()?;
         let lease = memory.reserve(bytes, Resource::Mesh).or_else(|| {
@@ -166,6 +177,7 @@ impl Storage {
         })?;
         let buffers = Arc::new(Buffers {
             vertices: buffer(device, "Scene vertex page", vertex_bytes, BufferUsages::VERTEX),
+            composition: has_composition.then(|| buffer(device, "Terrain composition page", composition_bytes, BufferUsages::VERTEX)),
             indices: buffer(device, "Scene index page", index_bytes, BufferUsages::INDEX),
             _lease: lease,
         });
@@ -176,12 +188,13 @@ impl Storage {
     }
 }
 
-fn page_bytes(vertices: usize, indices: usize) -> Option<(usize, usize)> {
+fn page_bytes(vertices: usize, indices: usize, has_composition: bool) -> Option<(usize, usize, usize)> {
     let vertex_bytes = vertices.checked_mul(VERTEX_BYTES)?;
     let index_bytes = indices.checked_mul(size_of::<u32>())?;
-    let bytes = vertex_bytes.checked_add(index_bytes)?;
+    let composition_bytes = if has_composition { vertices.checked_mul(size_of::<f32>())? } else { 0 };
+    let bytes = vertex_bytes.checked_add(index_bytes)?.checked_add(composition_bytes)?;
     let meshes = PAGE_BYTES.checked_div(bytes)?.max(1);
-    Some((vertex_bytes.checked_mul(meshes)?, index_bytes.checked_mul(meshes)?))
+    Some((vertex_bytes.checked_mul(meshes)?, index_bytes.checked_mul(meshes)?, composition_bytes.checked_mul(meshes)?))
 }
 
 #[cfg(test)]
@@ -211,6 +224,21 @@ mod tests {
         let reused = layout.allocate(4, 6, &memory).unwrap();
         assert_eq!((reused.vertices.clone(), reused.indices.clone()), original, "only the released mesh's space is available");
         assert_eq!((second.vertices.clone(), second.indices.clone()), retained, "live mesh offsets remain stable");
+    }
+
+    #[test]
+    fn terrain_page_budget_includes_composition_stream() {
+        let (surface_vertices, surface_indices, surface_composition) = page_bytes(289, 1536, false).unwrap();
+        let (terrain_vertices, terrain_indices, terrain_composition) = page_bytes(289, 1536, true).unwrap();
+        assert_eq!(surface_composition, 0);
+        let surface_bytes = surface_vertices + surface_indices + surface_composition;
+        let terrain_bytes = terrain_vertices + terrain_indices + terrain_composition;
+        let surface_meshes = surface_vertices / (289 * VERTEX_BYTES);
+        let meshes = terrain_vertices / (289 * VERTEX_BYTES);
+        assert_eq!(surface_bytes, surface_meshes * (289 * VERTEX_BYTES + 1536 * size_of::<u32>()));
+        assert_eq!(terrain_composition, meshes * 289 * size_of::<f32>());
+        assert_eq!(terrain_bytes, meshes * (289 * VERTEX_BYTES + 1536 * size_of::<u32>() + 289 * size_of::<f32>()));
+        assert!(terrain_bytes > meshes * (289 * VERTEX_BYTES + 1536 * size_of::<u32>()));
     }
 
     #[test]

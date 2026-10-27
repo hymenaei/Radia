@@ -694,7 +694,7 @@ impl Cache {
             Err(std::fs::TryLockError::WouldBlock) => return Err(StorageError::InUse),
             Err(std::fs::TryLockError::Error(error)) => return Err(StorageError::Io(error)),
         }
-        discard_old_index_files(&root)?;
+        discard_old_index_files(&root);
         let (index, records) = Index::open(root.join(INDEX_FILE), &namespaces)?;
         let mut entries = HashMap::new();
         entries.try_reserve(records.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
@@ -830,15 +830,16 @@ fn receive<T>(receiver: Receiver<Result<T, StorageError>>) -> Result<T, StorageE
     receiver.recv().map_err(|_| StorageError::Unavailable(UnavailableReason::WriterStopped))?
 }
 
-fn discard_old_index_files(root: &Path) -> Result<(), StorageError> {
+fn discard_old_index_files(root: &Path) {
     for name in [SNAPSHOT_FILE, JOURNAL_FILE] {
         match fs::remove_file(root.join(name)) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(StorageError::Io(error)),
+            Err(error) => {
+                tracing::warn!(path = %root.join(name).display(), error = %error, "cache could not remove an obsolete index file")
+            }
         }
     }
-    Ok(())
 }
 
 pub fn default_cache_dir() -> Result<PathBuf, StorageError> {

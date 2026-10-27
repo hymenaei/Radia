@@ -20,7 +20,7 @@ use std::sync::{
 
 use super::{
     DIRECTORY_OVERHEAD, DirectoryId, ENTRY_INVALID, ENTRY_REPLACING, ENTRY_VALID, Entry, FILE_OVERHEAD, INDEX_FILE, INDEX_FILE_OVERHEAD,
-    Key, PendingTouch, ReadState, StorageError, UnavailableReason,
+    JOURNAL_FILE, Key, PendingTouch, ReadState, SNAPSHOT_FILE, StorageError, UnavailableReason,
     index::{Index, Mutation},
 };
 use crate::{
@@ -951,7 +951,7 @@ fn is_index_file(root: &Path, path: &Path) -> bool {
     };
     name == INDEX_FILE
         || name.strip_prefix(INDEX_FILE).is_some_and(|suffix| matches!(suffix, "-wal" | "-shm" | ".maintenance.lock"))
-        || name == "lock"
+        || matches!(name, JOURNAL_FILE | SNAPSHOT_FILE | "lock")
 }
 
 fn effective_entry(key: &Key, changes: &HashMap<Key, Option<Arc<Entry>>>, entries: &HashMap<Key, Arc<Entry>>) -> Option<Arc<Entry>> {

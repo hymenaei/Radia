@@ -216,6 +216,35 @@ fn locked_old_index_temp_does_not_block_open() {
     cache.shutdown().expect("close cache");
 }
 
+#[cfg(windows)]
+fn locked_old_index_file_is_retried(name: &str) {
+    let directory = tempdir().expect("cache directory");
+    let path = directory.path().join(name);
+    fs::write(&path, b"obsolete").expect("write obsolete index file");
+    let locked_file = fs::OpenOptions::new().read(true).share_mode(0).open(&path).expect("lock obsolete index file");
+
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open despite locked legacy index file");
+    cache.shutdown().expect("close cache");
+    assert!(path.exists(), "locked {name} was removed");
+
+    drop(locked_file);
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("retry obsolete file removal on open");
+    assert!(!path.exists(), "{name} remained after the next open");
+    cache.shutdown().expect("close reopened cache");
+}
+
+#[cfg(windows)]
+#[test]
+fn locked_old_snapshot_does_not_block_open() {
+    locked_old_index_file_is_retried("snapshot");
+}
+
+#[cfg(windows)]
+#[test]
+fn locked_old_journal_does_not_block_open() {
+    locked_old_index_file_is_retried("journal");
+}
+
 #[test]
 fn corrupt_index_sweeps_payloads() {
     let directory = tempdir().expect("cache directory");

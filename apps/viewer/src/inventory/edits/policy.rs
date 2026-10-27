@@ -51,9 +51,6 @@ pub(crate) fn validate_edit(snapshot: &InventorySnapshot, owner: InventoryOwner,
                     let key = CategoryKey::new(owner, id);
                     let category = snapshot.category(key).ok_or(InventoryEditRejection::MissingCategory)?;
                     validate_category_source(snapshot, category)?;
-                    if category_is_within(snapshot, key, FolderType::CurrentOutfit) {
-                        return Err(InventoryEditRejection::OperationNotAllowed);
-                    }
                     category.parent
                 }
                 InventoryNodeId::Item(id) => {
@@ -85,8 +82,7 @@ pub(crate) fn validate_edit(snapshot: &InventorySnapshot, owner: InventoryOwner,
                     let key = CategoryKey::new(owner, id);
                     let category = snapshot.category(key).ok_or(InventoryEditRejection::MissingCategory)?;
                     validate_category_source(snapshot, category)?;
-                    if category_is_within(snapshot, key, FolderType::Trash) || category_is_within(snapshot, key, FolderType::CurrentOutfit)
-                    {
+                    if category_is_within(snapshot, key, FolderType::Trash) {
                         return Err(InventoryEditRejection::OperationNotAllowed);
                     }
                 }
@@ -196,6 +192,7 @@ mod tests {
         object: CategoryKey,
         clothing: CategoryKey,
         current_outfit: CategoryKey,
+        current_outfit_child: CategoryKey,
         inbox: CategoryKey,
         trash_child: CategoryKey,
         object_item: ItemKey,
@@ -253,6 +250,7 @@ mod tests {
         let current_outfit = key(owner, 6);
         let inbox = key(owner, 7);
         let trash_child = key(owner, 8);
+        let current_outfit_child = key(owner, 12);
         let object_item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(9)));
         let trash_item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(10)));
         let current_outfit_item = ItemKey::new(owner, ItemId::new(Uuid::from_u128(11)));
@@ -265,6 +263,7 @@ mod tests {
             category(current_outfit, Some(root), FolderType::CurrentOutfit),
             category(inbox, Some(root), FolderType::Inbox),
             category(trash_child, Some(trash), FolderType::None),
+            category(current_outfit_child, Some(current_outfit), FolderType::None),
         ] {
             inventory.upsert_category(entry).expect("valid category");
         }
@@ -278,6 +277,7 @@ mod tests {
             object,
             clothing,
             current_outfit,
+            current_outfit_child,
             inbox,
             trash_child,
             object_item,
@@ -346,6 +346,14 @@ mod tests {
             validate_edit(
                 &snapshot,
                 fixture.owner,
+                EditIntent::Move { node: category_node(fixture.current_outfit_child), destination: Some(fixture.object) }
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_edit(
+                &snapshot,
+                fixture.owner,
                 EditIntent::Move { node: item_node(fixture.object_item), destination: Some(fixture.trash) }
             ),
             Ok(())
@@ -357,6 +365,10 @@ mod tests {
         assert_eq!(
             validate_edit(&snapshot, fixture.owner, EditIntent::Delete { node: item_node(fixture.current_outfit_item) }),
             Err(InventoryEditRejection::OperationNotAllowed)
+        );
+        assert_eq!(
+            validate_edit(&snapshot, fixture.owner, EditIntent::Delete { node: category_node(fixture.current_outfit_child) }),
+            Ok(())
         );
         assert_eq!(
             validate_edit(

@@ -6,7 +6,10 @@ use std::{
 };
 
 use ::inventory::{Category, CategoryKey, FolderType, Inventory, InventoryError, InventoryLimits, InventoryOwner, ServerVersion};
-use protocol::login::{InventoryBootstrap as LoginInventoryBootstrap, InventorySkeleton, InventorySkeletonFolder, ResponseData};
+use protocol::login::{
+    InventoryBootstrap as LoginInventoryBootstrap, InventoryBootstrapError as LoginInventoryBootstrapError, InventorySkeleton,
+    InventorySkeletonFolder, ResponseData,
+};
 use tokio::{runtime::Handle, task::JoinHandle};
 use utils::FolderId;
 use uuid::Uuid;
@@ -41,6 +44,30 @@ impl Error for InventoryBootstrapError {}
 impl From<InventoryError> for InventoryBootstrapError {
     fn from(error: InventoryError) -> Self {
         Self::Model(error)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum InventoryWorkerError {
+    Login(LoginInventoryBootstrapError),
+    Build(InventoryBootstrapError),
+}
+
+impl fmt::Display for InventoryWorkerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Login(error) => write!(formatter, "{error}"),
+            Self::Build(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl Error for InventoryWorkerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Login(error) => Some(error),
+            Self::Build(error) => Some(error),
+        }
     }
 }
 
@@ -94,10 +121,10 @@ pub(crate) fn spawn_inventory_build(
     runtime: &Handle,
     agent_id: Uuid,
     login_data: ResponseData,
-) -> JoinHandle<Result<(Inventory, InventoryBootstrapReport), String>> {
+) -> JoinHandle<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>> {
     runtime.spawn_blocking(move || {
-        let bootstrap = login_data.inventory_bootstrap().map_err(|error| error.to_string())?;
-        build_inventory(agent_id, bootstrap).map_err(|error| error.to_string())
+        let bootstrap = login_data.inventory_bootstrap().map_err(InventoryWorkerError::Login)?;
+        build_inventory(agent_id, bootstrap).map_err(InventoryWorkerError::Build)
     })
 }
 
@@ -236,6 +263,19 @@ mod tests {
         let (inventory, report) = build.await.expect("inventory worker should finish").expect("valid login inventory should build");
         assert_eq!(report.personal_categories, protocol::login::MAX_LOGIN_INVENTORY_FOLDERS);
         assert_eq!(inventory.snapshot().categories().count(), protocol::login::MAX_LOGIN_INVENTORY_FOLDERS);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_preserves_login_and_model_error_types() {
+        let invalid_login = ResponseData::from_fields(BTreeMap::from([("inventory-root".into(), Value::String("invalid".into()))]));
+        let login_result = spawn_inventory_build(&Handle::current(), uuid(10), invalid_login).await.expect("login worker should complete");
+        let Err(login_error) = login_result else { panic!("invalid login root should fail parsing") };
+        std::assert_matches!(login_error, InventoryWorkerError::Login(LoginInventoryBootstrapError::InvalidPersonalRoot));
+
+        let model_result =
+            spawn_inventory_build(&Handle::current(), uuid(10), ResponseData::default()).await.expect("login worker should complete");
+        let Err(model_error) = model_result else { panic!("missing personal root should fail model construction") };
+        std::assert_matches!(model_error, InventoryWorkerError::Build(InventoryBootstrapError::MissingPersonalRoot));
     }
 
     fn folder(id: u128, parent_id: u128, name: &str, type_default: Option<i32>) -> InventorySkeletonFolder {

@@ -26,7 +26,7 @@ use super::{
     WriteLock,
     events::{MovementCompleteOutcome, SimulatorScope, WorldHandoff, handle_simulator_message, order_evidence, route_recovery_targets},
     input::{Input, select_drain_input},
-    inventory_bootstrap::{InventoryBootstrapReport, spawn_inventory_build},
+    inventory_bootstrap::{InventoryBootstrapReport, InventoryWorkerError, spawn_inventory_build},
     inventory_cache::{InventoryCacheEvent, InventoryCacheSession},
     inventory_intake::{self, InventoryIntakeError, InventoryIntakeOutcome},
     media::ObjectMediaIntake,
@@ -60,7 +60,7 @@ enum DriverInput {
     Session(Input),
     InventoryCache(Option<InventoryCacheEvent>),
     InventoryEdit(Option<InventoryEditEvent>),
-    InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), String>, tokio::task::JoinError>),
+    InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>, tokio::task::JoinError>),
 }
 
 pub(crate) struct CredentialPersistence {
@@ -94,7 +94,7 @@ struct SessionDriver {
     active_login_data: Option<ResponseData>,
     active_capabilities: Option<Client>,
     favorites_enabled: bool,
-    inventory_bootstrap: Option<tokio::task::JoinHandle<Result<(Inventory, InventoryBootstrapReport), String>>>,
+    inventory_bootstrap: Option<tokio::task::JoinHandle<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>>>,
     inventory_bootstrap_dirty: bool,
     inventory: Option<Inventory>,
     inventory_cache: InventoryCacheSession,

@@ -1,5 +1,5 @@
-use math::camera::rh::{proj::directx::perspective, view::look_to_mat4};
-use math::{Mat4, Vec3};
+use math::camera::rh::view::look_to_mat4;
+use math::{Mat4, Vec3, Vec4};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
     BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
@@ -14,6 +14,7 @@ pub(crate) const INSTANCE_BYTES: usize = 192;
 pub(crate) const VERTEX_BYTES: usize = 48;
 const CAMERA_BYTES: usize = 144;
 const KEY_LIGHT: Vec3 = Vec3::new(-0.3, 0.5, 1.0);
+const CAMERA_NEAR_PLANE: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Pipeline {
@@ -230,7 +231,14 @@ impl SurfacePipelines {
 }
 
 pub(crate) fn projection(camera: Camera, size: [u32; 2]) -> Mat4 {
-    perspective(camera.vertical_fov() as f32, size[0] as f32 / size[1] as f32, camera.draw_distance() as f32, 0.05) * camera_view(camera)
+    let focal = 1.0 / (camera.vertical_fov() as f32 * 0.5).tan();
+    let aspect = size[0] as f32 / size[1] as f32;
+    Mat4::from_cols(
+        Vec4::new(focal / aspect, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, focal, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 0.0, -1.0),
+        Vec4::new(0.0, 0.0, CAMERA_NEAR_PLANE, 0.0),
+    ) * camera_view(camera)
 }
 
 fn camera_view(camera: Camera) -> Mat4 {
@@ -252,10 +260,17 @@ mod tests {
         assert!(center.x.abs() < 1e-6 && center.y.abs() < 1e-6 && (0.0..1.0).contains(&center.z));
         assert!(matrix.project_point3(Vec3::new(10.0, 0.0, 1.0)).y > 0.0);
         assert!(matrix.project_point3(Vec3::new(10.0, -1.0, 0.0)).x > 0.0);
-        assert!((matrix.project_point3(Vec3::new(0.05, 0.0, 0.0)).z - 1.0).abs() < 1e-5);
-        let close = projection(camera.with_quality(32.0, 1.0).unwrap(), [1000, 1000]);
-        assert!(close.project_point3(Vec3::new(32.0, 0.0, 0.0)).z.abs() < 1e-6);
-        assert!(close.project_point3(Vec3::new(40.0, 0.0, 0.0)).z < 0.0);
+        assert!((matrix.project_point3(Vec3::new(CAMERA_NEAR_PLANE, 0.0, 0.0)).z - 1.0).abs() < 1e-5);
+        let close_camera = camera.with_quality(64.0, 1.0).unwrap();
+        let far_camera = camera.with_quality(512.0, 1.0).unwrap();
+        let close = projection(close_camera, [1000, 1000]);
+        let far = projection(far_camera, [1000, 1000]);
+        assert_eq!(close, far);
+        assert!(close.project_point3(Vec3::new(32.0, 0.0, 0.0)).z > 0.0);
+        assert!(close.project_point3(Vec3::new(40.0, 0.0, 0.0)).z > 0.0);
+        assert!(close.project_point3(Vec3::new(1.0e9, 0.0, 0.0)).z > 0.0);
+        let frustum = math::Frustum::from_clip_matrix(close);
+        assert!(frustum.intersects_sphere(DVec3::new(1.0e9, 0.0, 0.0), 0.0));
     }
 
     #[test]

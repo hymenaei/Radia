@@ -1,6 +1,6 @@
 use math::{DVec3, Frustum, Mat4, Vec3, normal_matrix};
 
-use super::{Instance, TRANSFORM_BYTES};
+use super::{Instance, ShadingMode, TRANSFORM_BYTES};
 use crate::{material::FaceParams, pipeline::INSTANCE_BYTES, scene::Camera};
 
 pub(super) fn model(instance: &Instance, origin: DVec3) -> Mat4 {
@@ -37,7 +37,7 @@ pub(super) fn is_visible(instance: &Instance, camera: Camera, frustum: &Frustum)
     let radius = ((bounds.max.as_dvec3() - bounds.min.as_dvec3()) * 0.5 * instance.scale.as_dvec3()).length();
     if !offset.is_finite()
         || !radius.is_finite()
-        || offset.length() - radius > camera.draw_distance()
+        || (instance.shading == ShadingMode::Studio && offset.length() - radius > camera.draw_distance())
         || offset.abs().max_element() + radius > f64::from(f32::MAX) / 16.0
     {
         return false;
@@ -105,5 +105,36 @@ mod tests {
         let world_normal = normal * local_normal;
         let world_tangent = rotation * (scale * local_tangent);
         assert!(world_normal.dot(world_tangent).abs() < 1e-5);
+    }
+
+    #[test]
+    fn terrain_visibility_ignores_draw_distance_but_objects_do_not() {
+        let (_scene, view, _) = fixtures::scene(255);
+        let object = view.objects().next().expect("fixture object");
+        let (_, mesh) = object.mesh().expect("fixture mesh");
+        let instance = |shading| Instance {
+            mesh: mesh.clone(),
+            position: DVec3::new(100.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+            pickable: true,
+            faces: Vec::new(),
+            shading,
+            terrain_textures: None,
+        };
+        let terrain = instance(ShadingMode::Terrain);
+        let water = instance(ShadingMode::Water);
+        let object = instance(ShadingMode::Studio);
+        let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1000, 1000]).unwrap();
+        let close = camera.with_quality(64.0, 1.0).unwrap();
+        let far = camera.with_quality(512.0, 1.0).unwrap();
+        let frustum = Frustum::from_clip_matrix(Mat4::from_scale(Vec3::splat(0.001)));
+
+        assert!(is_visible(&terrain, close, &frustum));
+        assert!(is_visible(&terrain, far, &frustum));
+        assert!(is_visible(&water, close, &frustum));
+        assert!(is_visible(&water, far, &frustum));
+        assert!(!is_visible(&object, close, &frustum));
+        assert!(is_visible(&object, far, &frustum));
     }
 }

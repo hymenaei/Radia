@@ -72,6 +72,10 @@ World stores texture animation as a validated appearance facet observed from ful
 
 Terrain settings belong to each World region. Render derives composition coordinates per vertex from the four handshake start heights and ranges, terrain height, and globally positioned noise. The terrain shader evaluates the legacy alpha ramp per fragment, blends the region's four detail textures, and sends the albedo through the shared `shade_surface` path. Scene asset demand publishes ready handles back with the region and uses a neutral fallback while a layer is unavailable. Terrain uses filtered texture mipmaps at distance. It does not build the legacy viewer's cached low-resolution terrain composite, so distant texture appearance still needs a live comparison.
 
+Terrain normals use the classic four diagonal height samples at a two-meter stride and sample across loaded patch and region neighbors.
+
+The surface camera uses one infinite reversed-Z projection for objects, terrain, and water, preserving depth ordering without a distance-based far clip. Object range culling and detail selection still use draw distance; terrain and water stay eligible throughout loaded regions and remain limited by the camera view frustum.
+
 ### `crates/storage`
 
 Owns versioned, size-bounded persistent bytes. Each consumer opens a root and declares its fixed namespace table as validated relative directories and lowercase alphanumeric extensions. A key is a namespace index and a 128-bit name; storage resolves it to `<namespace>/<first-two-name-hex>/<hyphenated-lowercase-name>.<extension>`. The snapshot stores the namespace table once, and snapshot records and journal entries store only the namespace index and name. Each consumer root has one snapshot, journal, process lock, size limit, and LRU across its namespaces. Namespace tables can change: recovery remaps entries whose directory and extension remain declared, drops entries for removed namespaces, and sweeps their files as orphans.

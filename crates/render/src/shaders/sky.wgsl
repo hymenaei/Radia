@@ -143,7 +143,9 @@ fn halo_color(optical_dot: f32) -> vec3<f32> {
     let cloud_shadow = sky.atmosphere.glow.w;
     let ambient = sky.atmosphere.ambient.xyz
         + max(vec3<f32>(0.0), vec3<f32>(1.0) - sky.atmosphere.ambient.xyz) * cloud_shadow * 0.5;
-    let sunlight = terms.sunlight * max(1.0 - cloud_shadow, 0.0);
+    let below_cloud_off_axis = 1.0 / max(0.000001, max(0.0, terms.ray.y) + terms.light.y);
+    let below_cloud_sunlight = sky.atmosphere.sunlight.xyz * exp(-terms.light_attenuation * below_cloud_off_axis);
+    let sunlight = below_cloud_sunlight * max(1.0 - cloud_shadow, 0.0);
     let haze_angle = max(1.0 - dot(terms.ray, terms.light), 0.001) * sky.atmosphere.glow.x;
     let haze_glow = select(0.0, clamp(pow(haze_angle, sky.atmosphere.glow.z), -100000.0, 100000.0) + 0.25, sky.atmosphere.distance.w >= 1.0);
     let below_cloud = sky.atmosphere.blue_horizon.xyz * terms.blue_weight * (sunlight + ambient)

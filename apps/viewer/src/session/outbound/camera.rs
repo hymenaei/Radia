@@ -399,6 +399,13 @@ mod tests {
             let current = *sequence;
             *sequence += 1;
             let expected_delivery = match &message {
+                UplinkMessage::AgentUpdate(update)
+                    if update.agent_data.control_flags
+                        & (MovementAction::SitOnGround.control_flag() | MovementAction::StandUp.control_flag())
+                        != 0 =>
+                {
+                    Delivery::Reliable
+                }
                 UplinkMessage::AgentUpdate(_) => Delivery::Unreliable,
                 UplinkMessage::SetAlwaysRun(_) => Delivery::Reliable,
             };
@@ -464,7 +471,7 @@ mod tests {
         }
 
         let mut controls = HeldControls::default();
-        controls.toggle_flying();
+        controls.toggle_flying(false);
         controls.toggle_run();
         let movement = controls.observation(false, Quat::IDENTITY);
         send_loopback(&mut uplink, simulator, agent_id, session_id, None::<Camera>, movement, &sender, destination, &mut sequence);
@@ -680,6 +687,45 @@ mod tests {
         assert_eq!(release_follow_up.agent_data.control_flags, 0);
         assert_eq!(sent.len(), 4);
     }
+
+    #[tokio::test]
+    async fn sit_actions_reach_simulator() {
+        let receiver = TokioUdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind loopback viewer");
+        let destination = receiver.local_addr().expect("simulator address");
+        let simulator = simulator_id();
+        let (agent_id, session_id) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut sequence = 1;
+        let mut uplink = CameraUplink::new();
+        let mut controls = HeldControls::default();
+        controls.set_pressed(MovementKey::Forward, true);
+        let movement = controls.observation(false, Quat::IDENTITY);
+        let camera = view(DVec3::ZERO, Vec3::X);
+
+        uplink.request_action(MovementAction::SitOnGround);
+        send_loopback(&mut uplink, simulator, agent_id, session_id, camera, movement, &sender, destination, &mut sequence);
+        let first = receive_packet(&receiver).await;
+        let update = match first {
+            Message::SetAlwaysRun(_) => receive_packet(&receiver).await,
+            message => message,
+        };
+        let Message::AgentUpdate(update) = update else { panic!("ground-sit AgentUpdate") };
+        assert_eq!(update.agent_data.control_flags, 0x0002_0401);
+
+        send_loopback(&mut uplink, simulator, agent_id, session_id, None::<Camera>, movement, &sender, destination, &mut sequence);
+        let Message::AgentUpdate(update) = receive_packet(&receiver).await else { panic!("cleared ground-sit AgentUpdate") };
+        assert_eq!(update.agent_data.control_flags, 0x0000_0401);
+
+        uplink.request_action(MovementAction::StandUp);
+        send_loopback(&mut uplink, simulator, agent_id, session_id, None::<Camera>, movement, &sender, destination, &mut sequence);
+        let Message::AgentUpdate(update) = receive_packet(&receiver).await else { panic!("stand-up AgentUpdate") };
+        assert_eq!(update.agent_data.control_flags, 0x0001_0401);
+
+        send_loopback(&mut uplink, simulator, agent_id, session_id, None::<Camera>, movement, &sender, destination, &mut sequence);
+        let Message::AgentUpdate(update) = receive_packet(&receiver).await else { panic!("cleared stand-up AgentUpdate") };
+        assert_eq!(update.agent_data.control_flags, 0x0000_0401);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn controls_send_on_change_and_keepalive_after_one_second() {
         let simulator = simulator_id();

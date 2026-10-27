@@ -1,17 +1,19 @@
 use std::{
     collections::HashMap,
+    ops::Range,
     str::from_utf8,
     time::{Duration, Instant},
 };
 
 use llsd::{Limits, Value, xml};
-use reqwest::{StatusCode, Url};
+use reqwest::{StatusCode, Url, header::CONTENT_RANGE};
 use tokio::time;
 
 use super::budget::{
     MAX_CAPABILITY_NAME_BYTES, MAX_CAPABILITY_NAMES, MAX_CAPABILITY_NAMES_BYTES, MAX_CAPABILITY_REQUEST_BODY_BYTES,
     MAX_CAPABILITY_RESPONSE_BYTES, MAX_LLSD_NESTING_DEPTH, MAX_LLSD_XML_ELEMENTS, MAX_SEED_CAPABILITY_RESPONSE_BYTES,
 };
+use super::client::{ContentRange, RangeResponse};
 use crate::{
     error::Error,
     http::{self, ErrorKind, RedirectPolicy, Response},
@@ -66,7 +68,7 @@ pub(super) fn is_transient_seed_lookup(error: &Error) -> bool {
     match error.kind {
         ErrorKind::Transport | ErrorKind::Timeout => true,
         ErrorKind::HttpStatus => error.status.is_some_and(|status| status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS),
-        ErrorKind::Cancelled | ErrorKind::ResourceExhausted | ErrorKind::InvalidUrl => false,
+        ErrorKind::Cancelled | ErrorKind::ResourceExhausted | ErrorKind::InvalidResponse | ErrorKind::InvalidUrl => false,
     }
 }
 
@@ -185,6 +187,57 @@ pub(super) async fn get_capability_bytes(
         ));
     }
     Ok(response)
+}
+
+pub(super) async fn get_capability_range_bytes(
+    client: &http::Client,
+    url: &Url,
+    range: Range<u64>,
+    max_response_bytes: usize,
+    redirect_policy: RedirectPolicy,
+) -> Result<RangeResponse, http::Error> {
+    let end = range.end - 1;
+    let value = format!("bytes={}-{}", range.start, end);
+    let response = client.get_range_with_redirect_policy("capability_range_get", url, &value, max_response_bytes, redirect_policy).await?;
+    match response.status {
+        StatusCode::OK => Ok(RangeResponse::Full(response.body)),
+        StatusCode::PARTIAL_CONTENT => {
+            let mut values = response.headers.get_all(CONTENT_RANGE).iter();
+            let content_range = match values.next() {
+                Some(value) if values.next().is_none() => Some(parse_content_range(value).ok_or_else(|| {
+                    http::Error::invalid_response(
+                        response.status,
+                        response.elapsed,
+                        "Capability range response has an invalid Content-Range.",
+                    )
+                })?),
+                None => None,
+                Some(_) => {
+                    return Err(http::Error::invalid_response(
+                        response.status,
+                        response.elapsed,
+                        "Capability range response has multiple Content-Range headers.",
+                    ));
+                }
+            };
+            Ok(RangeResponse::Partial { bytes: response.body, content_range })
+        }
+        status => Err(http::Error::http_status(status, response.elapsed, response.retry_after(), "Could not fetch capability byte range")),
+    }
+}
+
+fn parse_content_range(value: &reqwest::header::HeaderValue) -> Option<ContentRange> {
+    let value = value.to_str().ok()?;
+    let (unit, value) = value.split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (bounds, total) = value.split_once('/')?;
+    let (start, end) = bounds.split_once('-')?;
+    let start = start.parse().ok()?;
+    let end = end.parse().ok()?;
+    let total = if total == "*" { None } else { Some(total.parse().ok()?) };
+    (start <= end && total.is_none_or(|total| end < total)).then_some(ContentRange { start, end, total })
 }
 
 pub(super) fn decode_llsd_xml(body: &str, context: &str) -> Result<Value, String> {

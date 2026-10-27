@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, future::Future, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt, future::Future, net::SocketAddr, ops::Range, sync::Arc, time::Duration};
 
 use llsd::xml;
 use reqwest::Url;
@@ -20,7 +20,7 @@ use super::{
     event_queue::{self, EventQueueContext, EventQueueTask, Stop},
     request::{
         RequestDeadline, decode_capability_value_with_response_limit, decode_seed_capabilities, delete_capability, get_capability_bytes,
-        patch_capability, post_capability, request_capabilities_response, validate_capability_names,
+        get_capability_range_bytes, patch_capability, post_capability, request_capabilities_response, validate_capability_names,
     },
 };
 use crate::{
@@ -76,6 +76,19 @@ impl fmt::Debug for CapabilityUrl {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_tuple("CapabilityUrl").field(&"[REDACTED]").finish()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContentRange {
+    pub start: u64,
+    pub end: u64,
+    pub total: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RangeResponse {
+    Partial { bytes: Vec<u8>, content_range: Option<ContentRange> },
+    Full(Vec<u8>),
 }
 
 #[derive(Clone)]
@@ -292,6 +305,35 @@ impl Client {
         redirect_policy: RedirectPolicy,
     ) -> Result<Vec<u8>, Error> {
         self.get_bytes_inner(url, None, max_response_bytes, redirect_policy).await
+    }
+
+    pub async fn get_range_with_response_limit_and_redirect_policy(
+        &self,
+        url: &CapabilityUrl,
+        range: Range<u64>,
+        max_response_bytes: usize,
+        redirect_policy: RedirectPolicy,
+    ) -> Result<RangeResponse, Error> {
+        validate_response_limit(max_response_bytes)?;
+        if range.start >= range.end {
+            return Err(Error::Capability("Capability byte range must be non-empty.".into()));
+        }
+        let deadline = RequestDeadline::new(self.request_timeout);
+        let client = self.clone();
+        let url = url.clone();
+        self.on_runtime(async move {
+            let (response, permit) = client
+                .run_with_permit(deadline, |http, permit| async move {
+                    let response = get_capability_range_bytes(&http, &url.url, range, max_response_bytes, redirect_policy)
+                        .await
+                        .map_err(Error::CapabilityHttp)?;
+                    Ok((response, permit))
+                })
+                .await?;
+            drop(permit);
+            Ok(response)
+        })
+        .await
     }
 
     pub async fn get_bytes_with_accept(&self, url: &CapabilityUrl, accept: &str, max_response_bytes: usize) -> Result<Vec<u8>, Error> {

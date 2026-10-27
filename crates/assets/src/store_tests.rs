@@ -1,10 +1,12 @@
 use std::{
     assert_matches,
-    sync::{Arc, mpsc},
+    io::Write,
+    sync::{Arc, Barrier, mpsc},
     thread,
     time::Duration,
 };
 
+use flate2::{Compression, write::ZlibEncoder};
 use llsd::binary;
 use tempfile::tempdir;
 use test_support::texture::{GRAY_4096_J2C, RGBA_J2C, RGBA_RAW};
@@ -40,6 +42,149 @@ impl StoreHarness {
 
 fn resource(id: u128) -> Resource {
     Resource { id: AssetId::new(Uuid::from_u128(id)), kind: Kind::Texture }
+}
+
+fn mesh_resource(id: u128) -> Resource {
+    Resource { id: AssetId::new(Uuid::from_u128(id)), kind: Kind::Mesh }
+}
+
+fn mesh_llsd_integer(value: i32) -> Vec<u8> {
+    let mut bytes = vec![b'i'];
+    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes
+}
+
+fn mesh_llsd_real(value: f64) -> Vec<u8> {
+    let mut bytes = vec![b'r'];
+    bytes.extend_from_slice(&value.to_be_bytes());
+    bytes
+}
+
+fn mesh_llsd_map(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut bytes = vec![b'{'];
+    bytes.extend_from_slice(&u32::try_from(entries.len()).unwrap().to_be_bytes());
+    for (key, value) in entries {
+        bytes.push(b'k');
+        bytes.extend_from_slice(&u32::try_from(key.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(key.as_bytes());
+        bytes.extend_from_slice(value);
+    }
+    bytes.push(b'}');
+    bytes
+}
+
+fn mesh_llsd_array(items: &[Vec<u8>]) -> Vec<u8> {
+    let mut bytes = vec![b'['];
+    bytes.extend_from_slice(&u32::try_from(items.len()).unwrap().to_be_bytes());
+    for item in items {
+        bytes.extend_from_slice(item);
+    }
+    bytes.push(b']');
+    bytes
+}
+
+fn mesh_llsd_binary(bytes: &[u8]) -> Vec<u8> {
+    let mut encoded = vec![b'b'];
+    encoded.extend_from_slice(&u32::try_from(bytes.len()).unwrap().to_be_bytes());
+    encoded.extend_from_slice(bytes);
+    encoded
+}
+
+fn mesh_llsd_domain() -> Vec<u8> {
+    let vector = |values: &[f64]| mesh_llsd_array(&values.iter().copied().map(mesh_llsd_real).collect::<Vec<_>>());
+    mesh_llsd_map(&[("Min", vector(&[0.0, 0.0, 0.0])), ("Max", vector(&[1.0, 1.0, 1.0]))])
+}
+
+fn mesh_block_fixture() -> Vec<u8> {
+    let position = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00];
+    let uv = [0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff];
+    let triangles = [0x00, 0x00, 0x01, 0x00, 0x02, 0x00];
+    let submesh = mesh_llsd_map(&[
+        ("Position", mesh_llsd_binary(&position)),
+        ("PositionDomain", mesh_llsd_domain()),
+        ("TexCoord0", mesh_llsd_binary(&uv)),
+        (
+            "TexCoord0Domain",
+            mesh_llsd_map(&[
+                ("Min", mesh_llsd_array(&[mesh_llsd_real(0.0), mesh_llsd_real(0.0)])),
+                ("Max", mesh_llsd_array(&[mesh_llsd_real(1.0), mesh_llsd_real(1.0)])),
+            ]),
+        ),
+        ("TriangleList", mesh_llsd_binary(&triangles)),
+    ]);
+    let mut payload = b"<?llsd/binary?>\n".to_vec();
+    payload.extend(mesh_llsd_array(&[submesh]));
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&payload).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn mesh_lod_requests(id: AssetId) -> (MeshLodRequest, MeshLodRequest, Vec<u8>) {
+    let block = mesh_block_fixture();
+    let encoded_entry = |offset: i32, size: i32| mesh_llsd_map(&[("offset", mesh_llsd_integer(offset)), ("size", mesh_llsd_integer(size))]);
+    let block_size = i32::try_from(block.len()).unwrap();
+    let block_header = |low_offset: i32, high_offset: i32| {
+        let mut bytes = b"<?llsd/binary?>\n".to_vec();
+        bytes.extend(mesh_llsd_map(&[
+            ("version", mesh_llsd_integer(1)),
+            ("lowest_lod", encoded_entry(-1, 0)),
+            ("low_lod", encoded_entry(low_offset, block_size)),
+            ("medium_lod", encoded_entry(-1, 0)),
+            ("high_lod", encoded_entry(high_offset, block_size)),
+            ("physics_mesh", encoded_entry(-1, 0)),
+            ("skin", encoded_entry(-1, 0)),
+        ]));
+        bytes
+    };
+    let header = block_header(0, block_size);
+    let total = u64::try_from(header.len() + block.len() * 2).unwrap();
+    let header = crate::mesh::decode_header(&header, total).unwrap();
+    (header.lod(id, MeshLod::Low).unwrap(), header.lod(id, MeshLod::High).unwrap(), block)
+}
+
+fn mesh_lod_request(id: AssetId, block: &[u8]) -> MeshLodRequest {
+    let entry = mesh_llsd_map(&[("offset", mesh_llsd_integer(0)), ("size", mesh_llsd_integer(i32::try_from(block.len()).unwrap()))]);
+    let mut header_bytes = b"<?llsd/binary?>\n".to_vec();
+    header_bytes.extend(mesh_llsd_map(&[("version", mesh_llsd_integer(1)), ("low_lod", entry)]));
+    let asset_length = u64::try_from(header_bytes.len() + block.len()).unwrap();
+    crate::mesh::decode_header(&header_bytes, asset_length).unwrap().lod(id, MeshLod::Low).unwrap()
+}
+
+fn mesh_full_asset_fixture(id: AssetId, block: &[u8]) -> (MeshLodRequest, Vec<u8>) {
+    let entry = mesh_llsd_map(&[("offset", mesh_llsd_integer(0)), ("size", mesh_llsd_integer(i32::try_from(block.len()).unwrap()))]);
+    let mut header = b"<?llsd/binary?>\n".to_vec();
+    header.extend(mesh_llsd_map(&[("version", mesh_llsd_integer(1)), ("low_lod", entry)]));
+    let asset_length = u64::try_from(header.len() + block.len()).unwrap();
+    let request = crate::mesh::decode_header(&header, asset_length).unwrap().lod(id, MeshLod::Low).unwrap();
+    header.extend_from_slice(block);
+    (request, header)
+}
+
+fn large_mesh_block_fixture(vertex_count: usize, face_count: usize) -> Vec<u8> {
+    let position = mesh_llsd_binary(&vec![0; vertex_count * 6]);
+    let mut triangle_list = Vec::with_capacity(vertex_count * 6);
+    for index in 0..vertex_count * 3 {
+        triangle_list.extend_from_slice(&u16::try_from(index % vertex_count).unwrap().to_le_bytes());
+    }
+    let submesh = mesh_llsd_map(&[("Position", position), ("TriangleList", mesh_llsd_binary(&triangle_list))]);
+    let faces = vec![submesh; face_count];
+    let mut payload = b"<?llsd/binary?>\n".to_vec();
+    payload.extend(mesh_llsd_array(&faces));
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&payload).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn mesh_decode_job(budget: Budget, now: Instant, id: AssetId, bytes: Vec<u8>) -> (Store, Demand, DecodeJob) {
+    let mut store = Store::new(budget);
+    let route = store.register_route().unwrap();
+    let request = mesh_lod_request(id, &bytes);
+    let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).unwrap();
+    let input = next_fetch(&mut store, now)
+        .complete_response(Ok(FetchResponse::Partial { bytes, range: request.range(), total_length: Some(request.asset_length()) }))
+        .unwrap();
+    let job = store.start_decode(input).unwrap();
+    (store, demand, job)
 }
 
 fn charged_blob(budget: &Budget, bytes: &[u8]) -> crate::Blob {
@@ -89,7 +234,14 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
     );
     let input = store.complete_cache_read(read.run(), now).expect("cache hit supplies input");
     let LoadJob::Decode(input) = input else { panic!("cache hit follows decode admission") };
-    assert_eq!(store.entries.get(&resource).and_then(|entry| entry.views.get(&route)).map(|view| view.attempts), Some(0));
+    assert_eq!(
+        store
+            .entries
+            .get(&LoadKey { resource, unit: AssetUnit::Whole })
+            .and_then(|entry| entry.views.get(&route))
+            .map(|view| view.attempts),
+        Some(0)
+    );
     let decode = store.start_decode(input).expect("decode admission");
     assert!(store.complete(decode.run(), now).is_empty());
     assert_matches!(demand.status(), Status::Ready(Content::Texture(_)));
@@ -293,6 +445,38 @@ fn decoded_material_and_environment_payloads_survive_disk_round_trips() {
     assert_eq!(cache.stats().hits, 3);
     assert_eq!(cache.stats().misses, 3);
     assert!(cache.stats().bytes_written > 0);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn cached_full_mesh_response_finishes() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let budget = Budget::default();
+    let now = Instant::now();
+    let id = AssetId::new(Uuid::from_u128(104));
+    let block = mesh_block_fixture();
+    let (request, asset) = mesh_full_asset_fixture(id, &block);
+    let resource = Resource { id, kind: Kind::Mesh };
+    let mut store = Store::with_cache(budget, Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
+
+    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("cold mesh reads cache") };
+    let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss schedules mesh fetch") };
+    let input = fetch.complete(Ok(asset.clone())).expect("full asset response enters decoding");
+    let decode = store.start_decode(input).expect("admit mesh decode");
+    let writes = store.complete(decode.run(), now);
+
+    assert_matches!(demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+    assert_eq!(writes.len(), 1);
+    for write in writes {
+        write.run();
+    }
+    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(resource) else { panic!("full mesh asset was cached") };
+    assert_eq!(cached.bytes, asset);
+    drop(demand);
+    drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 }
 
@@ -950,6 +1134,129 @@ fn retired_material_cannot_publish() {
     store.complete(result, now);
     let Status::Ready(Content::Material(material)) = current.status() else { panic!("expected legacy material") };
     assert_eq!(*material, crate::material::legacy::decode(&binary::to_vec(&llsd::Value::Map(legacy_fields(2, 128))).unwrap()).unwrap());
+}
+
+#[test]
+fn mesh_decodes_share_budget() {
+    let budget = Budget::default();
+    let now = Instant::now();
+
+    let mut texture_store = Store::new(budget.clone());
+    let texture_route = texture_store.register_route().unwrap();
+    let texture_demand = texture_store.request(texture_route, Request::new(resource(301)), Priority::Visible, now).unwrap();
+    let texture_input = fetch(&mut texture_store, now, RGBA_J2C.to_vec());
+    let texture_decode = texture_store.start_decode(texture_input).unwrap();
+
+    let mut material_store = Store::new(budget.clone());
+    let material_route = material_store.register_route().unwrap();
+    let material_id = AssetId::new(Uuid::from_u128(302));
+    let material_demand = material_store.request(material_route, Request::PbrMaterial(material_id), Priority::Visible, now).unwrap();
+    let material_input = fetch(&mut material_store, now, material_envelope(PBR_JSON));
+    let material_decode = material_store.start_decode(material_input).unwrap();
+    assert_matches!(texture_demand.status(), Status::Decoding);
+    assert_matches!(material_demand.status(), Status::Decoding);
+
+    let mut stores = vec![texture_store, material_store];
+    let mut demands = vec![texture_demand, material_demand];
+    let mut jobs = vec![texture_decode, material_decode];
+    for id in 303..306 {
+        let (store, demand, job) = mesh_decode_job(budget.clone(), now, AssetId::new(Uuid::from_u128(id)), mesh_block_fixture());
+        stores.push(store);
+        demands.push(demand);
+        jobs.push(job);
+    }
+    let (store, demand, job) = mesh_decode_job(
+        budget.clone(),
+        now,
+        AssetId::new(Uuid::from_u128(306)),
+        large_mesh_block_fixture(crate::mesh::MAX_MESH_VERTICES_PER_FACE, 8),
+    );
+    stores.push(store);
+    demands.push(demand);
+    jobs.push(job);
+
+    assert!(budget.stats().charged_bytes < ASSET_WORK_BYTES);
+    let barrier = Arc::new(Barrier::new(jobs.len() + 1));
+    let completions = thread::scope(|scope| {
+        let handles = jobs
+            .into_iter()
+            .map(|job| {
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    job.run()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+    });
+    for ((mut store, demand), completion) in stores.into_iter().zip(demands).zip(completions) {
+        store.complete(completion, now);
+        assert_matches!(demand.status(), Status::Ready(_));
+    }
+}
+
+#[test]
+fn failed_mesh_lod_keeps_another_lod_ready() {
+    let id = mesh_resource(101).id;
+    let (low, high, block) = mesh_lod_requests(id);
+    let now = Instant::now();
+    let mut store = Store::new(Budget::default());
+    let route = store.register_route().unwrap();
+    let low_demand = store.request(route, Request::MeshLod(low), Priority::Visible, now).unwrap();
+    let high_demand = store.request(route, Request::MeshLod(high), Priority::Visible, now).unwrap();
+
+    let fetch = next_fetch(&mut store, now);
+    assert_eq!(fetch.request(), Request::MeshLod(low));
+    let input = fetch
+        .complete_response(Ok(FetchResponse::Partial { bytes: block.clone(), range: low.range(), total_length: Some(low.asset_length()) }))
+        .unwrap();
+    let decode = store.start_decode(input).unwrap();
+    store.complete(decode.run(), now);
+    assert_matches!(low_demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+
+    let fetch = next_fetch(&mut store, now);
+    assert_eq!(fetch.request(), Request::MeshLod(high));
+    let input = fetch
+        .complete_response(Ok(FetchResponse::Partial {
+            bytes: vec![0; block.len()],
+            range: high.range(),
+            total_length: Some(high.asset_length()),
+        }))
+        .unwrap();
+    let decode = store.start_decode(input).unwrap();
+    store.complete(decode.run(), now);
+    assert_matches!(high_demand.status(), Status::Failed { failure: Failure::MalformedBlock, retry_at: None });
+    assert_matches!(low_demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+}
+
+#[test]
+fn mesh_lod_fetches_cancel_independently() {
+    let id = mesh_resource(102).id;
+    let (low, high, _) = mesh_lod_requests(id);
+    let now = Instant::now();
+    let budget = Budget::default();
+    let mut store = Store::new(budget.clone());
+    let route = store.register_route().unwrap();
+    let low_demand = store.request(route, Request::MeshLod(low), Priority::Visible, now).unwrap();
+    let high_demand = store.request(route, Request::MeshLod(high), Priority::Visible, now).unwrap();
+    let low_fetch = next_fetch(&mut store, now);
+    let high_fetch = next_fetch(&mut store, now);
+    assert_eq!(low_fetch.request(), Request::MeshLod(low));
+    assert_eq!(high_fetch.request(), Request::MeshLod(high));
+
+    drop(low_demand);
+    store.maintain(now);
+    assert!(low_fetch.is_cancelled());
+    assert!(!high_fetch.is_cancelled());
+
+    drop(high_demand);
+    store.maintain(now);
+    assert!(high_fetch.is_cancelled());
+    store.complete(low_fetch.complete_response(Err(Failure::Cancelled)).unwrap_err().into(), now);
+    store.complete(high_fetch.complete_response(Err(Failure::Cancelled)).unwrap_err().into(), now);
+    assert_eq!(budget.stats().charged_bytes, 0);
 }
 
 #[test]

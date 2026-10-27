@@ -30,12 +30,23 @@ use crate::fixtures::{
 };
 use crate::{
     Error::{Capability, CapabilityHttp},
-    capabilities::{CapabilityBudget, CapabilityUrl, Client},
+    capabilities::{CapabilityBudget, CapabilityUrl, Client, ContentRange, RangeResponse},
     event::Event,
-    http,
+    http::{self, RedirectPolicy},
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn byte_response(status: u16, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+    let mut response = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n", body.len());
+    for (name, value) in headers {
+        response.push_str(&format!("{name}: {value}\r\n"));
+    }
+    response.push_str("Connection: close\r\n\r\n");
+    let mut response = response.into_bytes();
+    response.extend_from_slice(body);
+    response
+}
 
 #[derive(Clone, Default)]
 struct SerializationProbe {
@@ -151,6 +162,118 @@ async fn explicit_accept_header_is_sent() {
     let request = str::from_utf8(&requests[0]).expect("request is UTF-8");
     let (headers, _) = request.split_once("\r\n\r\n").expect("request has headers");
     assert!(headers.to_ascii_lowercase().contains("accept: application/llsd+xml"));
+}
+
+#[tokio::test]
+async fn range_get_distinguishes_partial_and_full_responses() {
+    let server =
+        LocalServer::start(vec![byte_response(206, &[("Content-Range", "bytes 2-5/10")], b"part"), byte_response(200, &[], b"whole")]);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
+
+    let partial = client
+        .get_range_with_response_limit_and_redirect_policy(&url, 2..6, 64, RedirectPolicy::None)
+        .await
+        .expect("bounded partial response");
+    assert_eq!(
+        partial,
+        RangeResponse::Partial { bytes: b"part".to_vec(), content_range: Some(ContentRange { start: 2, end: 5, total: Some(10) }) }
+    );
+
+    let full = client
+        .get_range_with_response_limit_and_redirect_policy(&url, 2..6, 64, RedirectPolicy::None)
+        .await
+        .expect("bounded full response when the server ignores Range");
+    assert_eq!(full, RangeResponse::Full(b"whole".to_vec()));
+
+    let requests = server.finish();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let request = str::from_utf8(&request).expect("request is UTF-8").to_ascii_lowercase();
+        assert!(request.contains("range: bytes=2-5"));
+    }
+}
+
+#[tokio::test]
+async fn range_redirect_preserves_viewer_asset_policy_and_bound() {
+    let server = LocalServer::start(vec![
+        byte_response(302, &[("Location", "/redirected")], b""),
+        byte_response(206, &[("Content-Range", "bytes 0-1/4")], b"ok"),
+    ]);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
+
+    let response = client
+        .get_range_with_response_limit_and_redirect_policy(&url, 0..2, 8, RedirectPolicy::ViewerAsset)
+        .await
+        .expect("bounded redirected range response");
+    assert_eq!(
+        response,
+        RangeResponse::Partial { bytes: b"ok".to_vec(), content_range: Some(ContentRange { start: 0, end: 1, total: Some(4) }) }
+    );
+
+    let requests = server.finish();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let request = str::from_utf8(&request).expect("request is UTF-8").to_ascii_lowercase();
+        assert!(request.contains("range: bytes=0-1"));
+        assert!(request.contains("accept-encoding: identity"));
+    }
+}
+
+#[tokio::test]
+async fn ignored_range_stays_within_response_limit() {
+    let server = LocalServer::start(vec![byte_response(200, &[], b"whole")]);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
+
+    let error = client
+        .get_range_with_response_limit_and_redirect_policy(&url, 0..1, 4, RedirectPolicy::None)
+        .await
+        .expect_err("a server that ignores Range must respect the response limit");
+    std::assert_matches!(error, CapabilityHttp(error) if error.kind == http::ErrorKind::ResourceExhausted);
+    assert_eq!(server.finish().len(), 1);
+}
+
+#[tokio::test]
+async fn ignored_range_chunked_body_stays_within_response_limit() {
+    let response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nwhole\r\n0\r\n\r\n".to_vec();
+    let server = LocalServer::start(vec![response]);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
+
+    let error = client
+        .get_range_with_response_limit_and_redirect_policy(&url, 0..1, 4, RedirectPolicy::None)
+        .await
+        .expect_err("chunked ignored-range body must respect the response limit");
+    std::assert_matches!(error, CapabilityHttp(error) if error.kind == http::ErrorKind::ResourceExhausted);
+    assert_eq!(server.finish().len(), 1);
+}
+
+#[tokio::test]
+async fn invalid_content_range_is_rejected_and_unknown_total_is_reported() {
+    let server = LocalServer::start(vec![
+        byte_response(206, &[("Content-Range", "bytes 0-1/1")], b"no"),
+        byte_response(206, &[("Content-Range", "bytes 0-1/*")], b"ok"),
+    ]);
+    let client = Client::new(server.url("/seed")).expect("active Tokio runtime");
+    let url = CapabilityUrl::parse(server.url("/resource").as_str()).expect("valid capability URL");
+
+    let error = client
+        .get_range_with_response_limit_and_redirect_policy(&url, 0..2, 8, RedirectPolicy::None)
+        .await
+        .expect_err("a range beyond the stated total is malformed");
+    std::assert_matches!(error, CapabilityHttp(error) if error.kind == http::ErrorKind::InvalidResponse);
+
+    let response = client
+        .get_range_with_response_limit_and_redirect_policy(&url, 0..2, 8, RedirectPolicy::None)
+        .await
+        .expect("an unknown total is distinct from a malformed range");
+    assert_eq!(
+        response,
+        RangeResponse::Partial { bytes: b"ok".to_vec(), content_range: Some(ContentRange { start: 0, end: 1, total: None }) }
+    );
+    assert_eq!(server.finish().len(), 2);
 }
 
 #[tokio::test]

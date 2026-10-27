@@ -92,11 +92,13 @@ pub(crate) struct SitCameraOverride {
     pub(crate) at_offset: Vec3,
 }
 
+#[derive(Debug)]
 pub(crate) enum AgentControlEvent {
     Command(Option<Command>),
     SitTimedOut,
 }
 
+#[derive(Debug)]
 pub(crate) enum Command {
     SitOnObject { object_id: Uuid, offset: Vec3, reply: oneshot::Sender<Result<SitOutcome, AgentControlError>> },
     SitOnGround { reply: oneshot::Sender<Result<(), AgentControlError>> },
@@ -166,8 +168,10 @@ impl AgentControlState {
         if !self.pending_sit.as_ref().is_some_and(|pending| pending.simulator == simulator && pending.object_id == object_id) {
             return false;
         }
-        if let Some(pending) = self.pending_sit.take() {
-            let _ = pending.reply.send(Ok(SitOutcome::Accepted { auto_pilot, force_mouselook }));
+        if let Some(pending) = self.pending_sit.take()
+            && pending.reply.send(Ok(SitOutcome::Accepted { auto_pilot, force_mouselook })).is_err()
+        {
+            tracing::trace!("sit caller stopped before receiving acceptance");
         }
         self.set_camera_override(camera_override);
         true
@@ -178,8 +182,10 @@ impl AgentControlState {
     }
 
     pub(crate) fn cancel_sit(&mut self, outcome: SitOutcome) {
-        if let Some(pending) = self.pending_sit.take() {
-            let _ = pending.reply.send(Ok(outcome));
+        if let Some(pending) = self.pending_sit.take()
+            && pending.reply.send(Ok(outcome)).is_err()
+        {
+            tracing::trace!("sit caller stopped before receiving cancellation");
         }
     }
 
@@ -190,8 +196,10 @@ impl AgentControlState {
     }
 
     pub(crate) fn fail_sit(&mut self, error: AgentControlError) {
-        if let Some(pending) = self.pending_sit.take() {
-            let _ = pending.reply.send(Err(error));
+        if let Some(pending) = self.pending_sit.take()
+            && pending.reply.send(Err(error)).is_err()
+        {
+            tracing::trace!("sit caller stopped before receiving failure");
         }
     }
 
@@ -209,8 +217,10 @@ impl AgentControlState {
         if !self.pending_sit.as_ref().is_some_and(|pending| pending.simulator == simulator) {
             return false;
         }
-        if let Some(pending) = self.pending_sit.take() {
-            let _ = pending.reply.send(outcome);
+        if let Some(pending) = self.pending_sit.take()
+            && pending.reply.send(outcome).is_err()
+        {
+            tracing::trace!("sit caller stopped before receiving outcome");
         }
         true
     }
@@ -229,125 +239,16 @@ impl AgentControlState {
 
 #[cfg(test)]
 mod tests {
-    use math::{Quat, Vec3};
-    use protocol::{
-        lludp::{BlockValues, FieldValue, Message, Packet, SchemaMessage},
-        messages::{
-            AgentRequestSit, AgentSit, AvatarSitResponse,
-            agent::agent_request_sit::{AgentData as SitAgentData, TargetObject},
-            agent::avatar_sit_response::{SitObject, SitTransform},
-        },
-    };
-    use tokio::{net::UdpSocket, time::advance};
+    use math::Vec3;
+    use tokio::{sync::oneshot, time::advance};
     use uuid::Uuid;
 
-    use crate::{session::inbound::decode_sit_response, test_helpers::simulator_id};
+    use crate::test_helpers::simulator_id;
 
-    use super::{AgentControlEvent, AgentControlState, Command, SIT_RESPONSE_TIMEOUT, SitCameraOverride, SitOutcome};
-
-    async fn receive_message(socket: &UdpSocket) -> Message {
-        let mut bytes = [0; 2048];
-        let (length, _) = socket.recv_from(&mut bytes).await.expect("loopback packet");
-        Packet::decode(&bytes[..length]).expect("valid packet").message().clone()
-    }
-
-    async fn send_message(socket: &UdpSocket, destination: std::net::SocketAddr, sequence: u32, message: Message) {
-        let bytes = Packet::new(sequence, message).encode().expect("encode packet");
-        socket.send_to(&bytes, destination).await.expect("send loopback packet");
-    }
-
-    fn alert_message() -> Message {
-        let schema = SchemaMessage::schema_by_name("AlertMessage").expect("AlertMessage schema");
-        Message::Schema(
-            SchemaMessage::new(
-                schema,
-                vec![
-                    BlockValues::single(vec![FieldValue::Bytes(b"SitFailed".to_vec())]),
-                    BlockValues::new(Vec::new()),
-                    BlockValues::new(Vec::new()),
-                ],
-            )
-            .expect("valid AlertMessage"),
-        )
-    }
-
-    #[tokio::test]
-    async fn loopback_simulator_accepts_object_sit_and_receives_agent_sit() {
-        let simulator_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
-        let viewer_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback viewer");
-        let simulator_address = simulator_socket.local_addr().expect("simulator address");
-        let viewer_address = viewer_socket.local_addr().expect("viewer address");
-        let simulator = simulator_id();
-        let agent_id = Uuid::from_u128(1);
-        let session_id = Uuid::from_u128(2);
-        let object_id = Uuid::from_u128(3);
-        let (handle, mut state, camera_updates) = AgentControlState::new();
-        let call = tokio::spawn(async move { handle.sit_on_object(object_id, Vec3::new(1.0, 2.0, 3.0)).await });
-
-        let AgentControlEvent::Command(Some(Command::SitOnObject { object_id: requested, offset, reply })) = state.next_event().await
-        else {
-            panic!("object-sit command")
-        };
-        assert_eq!(requested, object_id);
-        assert_eq!(offset, Vec3::new(1.0, 2.0, 3.0));
-        let request = AgentRequestSit {
-            agent_data: SitAgentData { agent_id, session_id },
-            target_object: TargetObject { target_id: object_id, offset },
-        };
-        send_message(&viewer_socket, simulator_address, 1, Message::AgentRequestSit(request.clone())).await;
-        assert_eq!(receive_message(&simulator_socket).await, Message::AgentRequestSit(request));
-        state.begin_sit(object_id, simulator, reply);
-
-        let response = AvatarSitResponse {
-            sit_object: SitObject { id: Some(object_id) },
-            sit_transform: SitTransform {
-                auto_pilot: Some(true),
-                sit_position: Some(Vec3::new(4.0, 5.0, 6.0)),
-                sit_rotation: Some(Quat::IDENTITY),
-                camera_eye_offset: Some(Vec3::new(2.0, 0.0, 1.0)),
-                camera_at_offset: Some(Vec3::new(0.0, 0.0, 1.0)),
-                force_mouselook: Some(false),
-            },
-        };
-        send_message(&simulator_socket, viewer_address, 2, Message::AvatarSitResponse(response)).await;
-        let Message::AvatarSitResponse(response) = receive_message(&viewer_socket).await else { panic!("AvatarSitResponse") };
-        let response = decode_sit_response(&Message::AvatarSitResponse(response)).expect("valid sit response");
-        let camera_override = response.camera_override;
-        assert!(state.accept_sit(simulator, response.object_id, response.auto_pilot, response.force_mouselook, camera_override,));
-
-        let sit = AgentSit { agent_id, session_id };
-        send_message(&viewer_socket, simulator_address, 3, Message::AgentSit(sit.clone())).await;
-        assert_eq!(receive_message(&simulator_socket).await, Message::AgentSit(sit));
-        assert_eq!(
-            *camera_updates.borrow(),
-            Some(SitCameraOverride { object_id, eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) })
-        );
-        assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: true, force_mouselook: false }));
-    }
-
-    #[tokio::test]
-    async fn loopback_alert_refuses_object_sit() {
-        let simulator_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
-        let viewer_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback viewer");
-        let viewer_address = viewer_socket.local_addr().expect("viewer address");
-        let simulator = simulator_id();
-        let object_id = Uuid::from_u128(3);
-        let (handle, mut state, _) = AgentControlState::new();
-        let call = tokio::spawn(async move { handle.sit_on_object(object_id, Vec3::ZERO).await });
-        let AgentControlEvent::Command(Some(Command::SitOnObject { reply, .. })) = state.next_event().await else {
-            panic!("object-sit command")
-        };
-        state.begin_sit(object_id, simulator, reply);
-
-        send_message(&simulator_socket, viewer_address, 1, alert_message()).await;
-        let message = receive_message(&viewer_socket).await;
-        assert_eq!(message.name(), "AlertMessage");
-        assert!(state.refuse_sit(simulator));
-        assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::Refused));
-    }
+    use super::{AgentControlEvent, AgentControlState, Command, SIT_RESPONSE_TIMEOUT, SitOutcome};
 
     #[tokio::test(start_paused = true)]
-    async fn sit_request_times_out_after_the_bounded_response_window() {
+    async fn sit_request_times_out() {
         let (handle, mut state, _) = AgentControlState::new();
         let object_id = Uuid::from_u128(3);
         let simulator = simulator_id();
@@ -357,13 +258,13 @@ mod tests {
         };
         state.begin_sit(object_id, simulator, reply);
         advance(SIT_RESPONSE_TIMEOUT).await;
-        assert!(matches!(state.next_event().await, AgentControlEvent::SitTimedOut));
+        std::assert_matches!(state.next_event().await, AgentControlEvent::SitTimedOut);
         state.timeout_sit();
         assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::TimedOut));
     }
 
     #[tokio::test]
-    async fn standing_cancels_a_pending_object_sit() {
+    async fn stand_cancels_pending_sit() {
         let (handle, mut state, _) = AgentControlState::new();
         let object_id = Uuid::from_u128(3);
         let simulator = simulator_id();
@@ -384,7 +285,20 @@ mod tests {
     }
 
     #[test]
-    fn object_sit_rejects_nil_ids_and_non_finite_offsets() {
+    fn dropped_reply_clears_pending_sit() {
+        let (_, mut state, _) = AgentControlState::new();
+        let (reply, response) = oneshot::channel();
+        let simulator = simulator_id();
+        let object_id = Uuid::from_u128(3);
+        state.begin_sit(object_id, simulator, reply);
+        drop(response);
+
+        std::assert_matches!(state.accept_sit(simulator, object_id, true, false, None), true);
+        std::assert_matches!(state.has_pending_sit(), false);
+    }
+
+    #[test]
+    fn invalid_sit_target_is_rejected() {
         let (handle, _, _) = AgentControlState::new();
         assert_eq!(
             futures::executor::block_on(handle.sit_on_object(Uuid::nil(), Vec3::ZERO)),

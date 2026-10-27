@@ -2,6 +2,7 @@ use std::{
     error,
     fmt::{self, Debug, Display, Formatter},
     future::Future,
+    net::IpAddr,
     time::{Duration, SystemTime},
 };
 
@@ -15,19 +16,32 @@ use tokio::time::{self, Instant};
 #[derive(Clone)]
 pub(crate) struct Client {
     client: reqwest::Client,
+    viewer_asset_client: reqwest::Client,
     timeout: Option<Duration>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RedirectPolicy {
+    #[default]
+    None,
+    ViewerAsset,
 }
 
 impl Client {
     pub(crate) fn new(timeout: Option<Duration>, http1_only: bool, user_agent: Option<&str>) -> Result<Self, reqwest::Error> {
-        let mut builder = reqwest::Client::builder().redirect(Policy::none());
+        let mut builder = reqwest::Client::builder().redirect(Policy::none()).referer(false);
+        let mut viewer_asset_builder = reqwest::Client::builder().redirect(viewer_asset_redirect_policy()).referer(false);
         if http1_only {
             builder = builder.http1_only();
+            viewer_asset_builder = viewer_asset_builder.http1_only();
         }
         if let Some(user_agent) = user_agent {
             builder = builder.user_agent(user_agent);
+            viewer_asset_builder = viewer_asset_builder.user_agent(user_agent);
         }
-        builder.build().map(|client| Self { client, timeout })
+        let client = builder.build()?;
+        let viewer_asset_client = viewer_asset_builder.build()?;
+        Ok(Self { client, viewer_asset_client, timeout })
     }
 
     pub(crate) fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
@@ -49,6 +63,37 @@ impl Client {
     ) -> Result<Response, Error> {
         validate_http_url(url)?;
         self.execute(operation, self.client.get(url.clone()).header(ACCEPT, accept), max_response_bytes).await
+    }
+
+    pub(crate) async fn get_with_accept_and_redirect_policy(
+        &self,
+        operation: &str,
+        url: &Url,
+        accept: &str,
+        max_response_bytes: usize,
+        redirect_policy: RedirectPolicy,
+    ) -> Result<Response, Error> {
+        validate_http_url(url)?;
+        let client = match redirect_policy {
+            RedirectPolicy::None => &self.client,
+            RedirectPolicy::ViewerAsset => &self.viewer_asset_client,
+        };
+        self.execute(operation, client.get(url.clone()).header(ACCEPT, accept), max_response_bytes).await
+    }
+
+    pub(crate) async fn get_with_redirect_policy(
+        &self,
+        operation: &str,
+        url: &Url,
+        max_response_bytes: usize,
+        redirect_policy: RedirectPolicy,
+    ) -> Result<Response, Error> {
+        validate_http_url(url)?;
+        let client = match redirect_policy {
+            RedirectPolicy::None => &self.client,
+            RedirectPolicy::ViewerAsset => &self.viewer_asset_client,
+        };
+        self.execute(operation, client.get(url.clone()), max_response_bytes).await
     }
 
     pub(crate) async fn post(
@@ -142,6 +187,32 @@ impl Client {
         );
         Ok(Response { status, headers, body, elapsed })
     }
+}
+
+fn viewer_asset_redirect_policy() -> Policy {
+    Policy::custom(|attempt| {
+        if attempt.previous().len() >= 6 {
+            return attempt.stop();
+        }
+        let target = attempt.url();
+        if target.scheme() == "https"
+            || attempt
+                .previous()
+                .last()
+                .is_some_and(|source| source.scheme() == target.scheme() && is_loopback_url(source) && is_loopback_url(target))
+        {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
+fn is_loopback_url(url: &Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().is_ok_and(|address| address.is_loopback())
+    })
 }
 
 pub(crate) struct Response {

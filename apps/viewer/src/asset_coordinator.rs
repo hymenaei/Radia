@@ -3,7 +3,7 @@ use std::{
     future::pending,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -17,7 +17,7 @@ use assets::{
 use futures::{FutureExt, StreamExt, channel::oneshot, pin_mut, stream::FuturesUnordered};
 use network::{
     Error,
-    capabilities::{CapabilityUrl, Client, HttpErrorKind},
+    capabilities::{CapabilityUrl, Client, HttpErrorKind, RedirectPolicy},
 };
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{OnceCell, mpsc, watch};
@@ -29,6 +29,7 @@ use tracing::Instrument;
 use world::Region;
 
 const COMMANDS: usize = 64;
+static UNEXPECTED_HTTP_STATUS_WARNED: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Clone)]
 struct CapabilityTransport {
@@ -42,13 +43,16 @@ impl CapabilityTransport {
     }
 
     async fn fetch(&self, job: &FetchJob) -> Result<Vec<u8>, Failure> {
+        let resource = job.resource();
         let grants = self
             .grants
             .get_or_try_init(|| async {
-                self.client.request_capabilities(&["ViewerAsset", "RenderMaterials"]).await.map_err(classify_network_error)
+                self.client
+                    .request_capabilities(&["ViewerAsset", "RenderMaterials"])
+                    .await
+                    .map_err(|error| classify_network_error(error, resource.kind))
             })
             .await?;
-        let resource = job.resource();
         let limit = resource.kind.max_response_bytes();
         match resource.kind {
             Kind::Texture | Kind::PbrMaterial | Kind::Environment => {
@@ -60,12 +64,18 @@ impl CapabilityTransport {
                     Kind::LegacyMaterial => unreachable!("separate capability"),
                 };
                 let url = grant.with_trailing_slash().with_query_pair(field, &resource.id.uuid().to_string());
-                self.client.get_bytes_with_response_limit(&url, limit).await.map_err(classify_network_error)
+                self.client
+                    .get_bytes_with_response_limit_and_redirect_policy(&url, limit, RedirectPolicy::ViewerAsset)
+                    .await
+                    .map_err(|error| classify_network_error(error, resource.kind))
             }
             Kind::LegacyMaterial => {
                 let grant = grants.get("RenderMaterials").ok_or(Failure::MissingCapability)?;
                 let request = legacy_request(resource.id)?;
-                self.client.post_bytes_with_response_limit(grant, &request, limit).await.map_err(classify_network_error)
+                self.client
+                    .post_bytes_with_response_limit(grant, &request, limit)
+                    .await
+                    .map_err(|error| classify_network_error(error, resource.kind))
             }
         }
     }
@@ -242,7 +252,7 @@ enum WorkerResult {
 
 type CacheWriteSpawner = dyn for<'a, 'b> FnMut(Vec<CacheWrite>, &'a Handle, &'b mut FuturesUnordered<JoinHandle<WorkerResult>>) + Send;
 
-fn classify_network_error(error: Error) -> Failure {
+fn classify_network_error(error: Error, kind: Kind) -> Failure {
     match error {
         Error::CapabilitySessionClosed | Error::SessionClosed => Failure::RouteClosed,
         Error::CapabilityRequestCanceled => Failure::Cancelled,
@@ -251,15 +261,31 @@ fn classify_network_error(error: Error) -> Failure {
                 Some(401 | 403) => Failure::Denied,
                 Some(404 | 410) => Failure::NotFound,
                 Some(408 | 429 | 500..=599) => Failure::Transient { retry_after: error.retry_after.unwrap_or_default() },
-                _ => Failure::Malformed,
+                Some(status) => {
+                    warn_unexpected_http_status(kind, status);
+                    Failure::HttpStatus { status }
+                }
+                None => Failure::Network,
             },
             HttpErrorKind::Transport | HttpErrorKind::Timeout => Failure::Transient { retry_after: error.retry_after.unwrap_or_default() },
             HttpErrorKind::ResourceExhausted => Failure::TooLarge,
             HttpErrorKind::Cancelled => Failure::Cancelled,
-            HttpErrorKind::InvalidUrl => Failure::Malformed,
-            _ => Failure::Malformed,
+            HttpErrorKind::InvalidUrl => Failure::Network,
+            _ => Failure::Network,
         },
-        _ => Failure::Malformed,
+        _ => Failure::Network,
+    }
+}
+
+fn warn_unexpected_http_status(kind: Kind, status: u16) {
+    let bit = match kind {
+        Kind::Texture => 1,
+        Kind::PbrMaterial => 2,
+        Kind::LegacyMaterial => 4,
+        Kind::Environment => 8,
+    };
+    if UNEXPECTED_HTTP_STATUS_WARNED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+        tracing::warn!(kind = ?kind, http_status = status, "asset request returned an unexpected HTTP status");
     }
 }
 
@@ -523,6 +549,16 @@ mod tests {
 
     impl Peer {
         fn new(count: usize, mut respond: impl FnMut(usize, &[u8], &Url) -> (u16, Vec<u8>) + Send + 'static) -> Self {
+            Self::new_with_headers(count, move |index, request, base| {
+                let (status, body) = respond(index, request, base);
+                (status, Vec::new(), body)
+            })
+        }
+
+        fn new_with_headers(
+            count: usize,
+            mut respond: impl FnMut(usize, &[u8], &Url) -> (u16, Vec<(String, String)>, Vec<u8>) + Send + 'static,
+        ) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
@@ -541,8 +577,12 @@ mod tests {
                         }
                     };
                     let request = read_request(&mut stream);
-                    let (status, body) = respond(index, &request, &base);
-                    let header = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    let (status, headers, body) = respond(index, &request, &base);
+                    let mut header = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n", body.len());
+                    for (name, value) in headers {
+                        header.push_str(&format!("{name}: {value}\r\n"));
+                    }
+                    header.push_str("Connection: close\r\n\r\n");
                     let _ = stream.write_all(header.as_bytes()).and_then(|_| stream.write_all(&body));
                     requests.push(request);
                 }
@@ -612,6 +652,54 @@ mod tests {
             drop(demand);
         }
         assert_eq!(peer.finish().len(), 4, "capability discovery is shared across resource kinds");
+    }
+
+    #[tokio::test]
+    async fn viewer_asset_redirect_decodes_library_environment() {
+        let settings = include_bytes!("../../../crates/assets/tests/fixtures/settings/Midday.dat").to_vec();
+        let peer = Peer::new_with_headers(3, move |index, request, base| {
+            let headers = String::from_utf8_lossy(request);
+            match index {
+                0 => (200, Vec::new(), grants(base)),
+                1 => {
+                    assert!(headers.starts_with("GET /content/?settings_id=00000000-0000-0000-0000-000000000001 HTTP/1.1"));
+                    (302, vec![("Location".into(), base.join("settings").unwrap().to_string())], Vec::new())
+                }
+                2 => {
+                    assert!(headers.starts_with("GET /settings HTTP/1.1"));
+                    assert!(!headers.to_ascii_lowercase().contains("referer:"));
+                    (200, Vec::new(), settings.clone())
+                }
+                _ => unreachable!(),
+            }
+        });
+        let (cancel, cancelled) = oneshot::channel();
+        let service = AssetCoordinator::with_budget(
+            Handle::current(),
+            async move {
+                let _ = cancelled.await;
+            },
+            Budget::default(),
+            None,
+        );
+        let region = Region::new(1);
+        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let handle = service.handle();
+        let mut demand = handle.request(region, assets::Request::new(resource(Kind::Environment)), Priority::Visible).await.unwrap();
+        loop {
+            match demand.status() {
+                assets::Status::Ready(assets::Content::Environment(_)) => break,
+                assets::Status::Failed { failure, .. } => panic!("unexpected environment failure: {failure:?}"),
+                _ => {
+                    demand.changed().await;
+                }
+            }
+        }
+        cancel.send(()).unwrap();
+        service.stop().await;
+        assert_eq!(peer.finish().len(), 3);
+        drop(demand);
+        drop(handle);
     }
 
     #[tokio::test]
@@ -730,7 +818,7 @@ mod tests {
 
     #[tokio::test]
     async fn server_failures_and_partial_full_responses_are_not_cached() {
-        for (response_status, body) in [(503, Vec::new()), (206, RGBA_J2C.to_vec())] {
+        for (response_status, body) in [(503, Vec::new()), (206, RGBA_J2C.to_vec()), (418, Vec::new())] {
             let directory = tempdir().unwrap();
             let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
             let peer = Peer::new(2, move |index, _, base| if index == 0 { (200, grants(base)) } else { (response_status, body.clone()) });
@@ -758,7 +846,7 @@ mod tests {
             if response_status == 503 {
                 assert_matches!(failure, Failure::Transient { .. });
             } else {
-                assert_eq!(failure, Failure::Malformed);
+                assert_eq!(failure, Failure::HttpStatus { status: response_status });
             }
             cancel.send(()).unwrap();
             service.stop().await;

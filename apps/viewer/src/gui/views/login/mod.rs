@@ -24,7 +24,7 @@ use self::{
     spawn::{SpawnChoice, SpawnOption, spawn_options},
 };
 use crate::gui::views::chat::ChatScreen;
-use crate::inventory::{FavoriteLocation, InventoryFetchHandle, InventoryFetchRequestError, InventoryLoadingStatus, favorite_store};
+use crate::inventory::{FavoriteLocation, InventoryFetchHandle, InventoryFetchRequestError, favorite_store};
 use crate::{
     gui::window_geometry::observe,
     remembered_login::{self, CredentialStoreError, RememberedLogin},
@@ -182,11 +182,6 @@ impl ActiveSession {
 }
 
 impl LoginScreen {
-    pub(crate) fn inventory_window_data(&self) -> Option<(watch::Receiver<Option<InventorySnapshot>>, InventoryFetchHandle)> {
-        let ready = self.active_session.as_ref()?.ready()?;
-        Some((ready.inventory_updates.clone(), ready.inventory_fetch.clone()?))
-    }
-
     pub fn request_inventory_folder(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
         let handle = self
             .active_session
@@ -195,15 +190,6 @@ impl LoginScreen {
             .and_then(|ready| ready.inventory_fetch.as_ref())
             .ok_or(InventoryFetchRequestError::SessionEnded)?;
         handle.refetch_folder(folder)
-    }
-
-    #[allow(dead_code)]
-    pub fn inventory_loading_status(&self) -> Option<watch::Receiver<InventoryLoadingStatus>> {
-        self.active_session
-            .as_ref()
-            .and_then(ActiveSession::ready)
-            .and_then(|ready| ready.inventory_fetch.as_ref())
-            .map(InventoryFetchHandle::status)
     }
 
     pub fn new(window: &mut Window, cx: &mut Context<Self>, shutdown_session: Arc<Mutex<Option<SessionHandle>>>) -> Self {

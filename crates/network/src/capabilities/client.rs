@@ -27,7 +27,7 @@ use crate::{
     coverage::CoverageLossLedger,
     error::Error,
     event::{EventEnvelope, SimulatorId},
-    http::{self, validate_http_url},
+    http::{self, RedirectPolicy, validate_http_url},
 };
 
 #[derive(Clone)]
@@ -282,14 +282,29 @@ impl Client {
     }
 
     pub async fn get_bytes_with_response_limit(&self, url: &CapabilityUrl, max_response_bytes: usize) -> Result<Vec<u8>, Error> {
-        self.get_bytes_inner(url, None, max_response_bytes).await
+        self.get_bytes_inner(url, None, max_response_bytes, RedirectPolicy::None).await
+    }
+
+    pub async fn get_bytes_with_response_limit_and_redirect_policy(
+        &self,
+        url: &CapabilityUrl,
+        max_response_bytes: usize,
+        redirect_policy: RedirectPolicy,
+    ) -> Result<Vec<u8>, Error> {
+        self.get_bytes_inner(url, None, max_response_bytes, redirect_policy).await
     }
 
     pub async fn get_bytes_with_accept(&self, url: &CapabilityUrl, accept: &str, max_response_bytes: usize) -> Result<Vec<u8>, Error> {
-        self.get_bytes_inner(url, Some(accept.to_owned()), max_response_bytes).await
+        self.get_bytes_inner(url, Some(accept.to_owned()), max_response_bytes, RedirectPolicy::None).await
     }
 
-    async fn get_bytes_inner(&self, url: &CapabilityUrl, accept: Option<String>, max_response_bytes: usize) -> Result<Vec<u8>, Error> {
+    async fn get_bytes_inner(
+        &self,
+        url: &CapabilityUrl,
+        accept: Option<String>,
+        max_response_bytes: usize,
+        redirect_policy: RedirectPolicy,
+    ) -> Result<Vec<u8>, Error> {
         validate_response_limit(max_response_bytes)?;
         let deadline = RequestDeadline::new(self.request_timeout);
         let client = self.clone();
@@ -297,7 +312,7 @@ impl Client {
         self.on_runtime(async move {
             let (response, permit) = client
                 .run_with_permit(deadline, |http, permit| async move {
-                    let response = get_capability_bytes(&http, &url.url, accept.as_deref(), max_response_bytes)
+                    let response = get_capability_bytes(&http, &url.url, accept.as_deref(), max_response_bytes, redirect_policy)
                         .await
                         .map_err(Error::CapabilityHttp)?;
                     Ok((response, permit))

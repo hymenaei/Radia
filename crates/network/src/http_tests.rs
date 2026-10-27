@@ -13,7 +13,7 @@ use url::Url;
 
 use crate::fixtures::http::{LocalServer, response};
 
-use super::{Client, Error, ErrorKind, RETRY_AFTER, Response, retry_after_delay, validate_http_url};
+use super::{Client, Error, ErrorKind, RETRY_AFTER, RedirectPolicy, Response, retry_after_delay, validate_http_url};
 
 #[test]
 fn retry_after_formats() {
@@ -51,6 +51,46 @@ async fn redirects_are_not_followed() {
 
     assert_eq!(response.status, StatusCode::FOUND);
     assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn viewer_asset_redirects_follow_loopback_without_referer() {
+    let redirect = b"HTTP/1.1 302 Found\r\nLocation: /settings\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let settings = b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nsettings";
+    let server = LocalServer::start(vec![redirect.to_vec(), settings.to_vec()]);
+    let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
+
+    let response = client
+        .get_with_redirect_policy("test", &server.url("/asset?capability-secret"), 16, RedirectPolicy::ViewerAsset)
+        .await
+        .expect("follow loopback ViewerAsset redirect");
+    let requests = server.finish();
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body, b"settings");
+    assert_eq!(requests.len(), 2);
+    assert!(String::from_utf8_lossy(&requests[1]).starts_with("GET /settings HTTP/1.1"));
+    assert!(!String::from_utf8_lossy(&requests[1]).to_ascii_lowercase().contains("referer:"));
+}
+
+#[tokio::test]
+async fn viewer_asset_redirects_stop_after_five_hops() {
+    let mut responses = (1..=5)
+        .map(|hop| format!("HTTP/1.1 302 Found\r\nLocation: /hop{hop}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes())
+        .collect::<Vec<_>>();
+    responses.push(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec());
+    let server = LocalServer::start(responses);
+    let client = Client::new(Some(Duration::from_secs(2)), false, None).expect("build HTTP client");
+
+    let response = client
+        .get_with_redirect_policy("test", &server.url("/start"), 16, RedirectPolicy::ViewerAsset)
+        .await
+        .expect("follow up to five ViewerAsset redirects");
+    let requests = server.finish();
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body, b"ok");
+    assert_eq!(requests.len(), 6);
 }
 
 #[tokio::test]

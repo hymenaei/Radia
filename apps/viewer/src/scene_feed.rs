@@ -192,7 +192,7 @@ async fn acquire_asset_demand(handle: AssetHandle, request: AssetRequest) -> Ass
                 let failure = match error {
                     RequestError::Closed | RequestError::Admission(assets::AdmissionError::Closed) => assets::Failure::SessionClosed,
                     RequestError::Admission(assets::AdmissionError::Route) => assets::Failure::RouteClosed,
-                    _ => assets::Failure::Malformed,
+                    _ => assets::Failure::Network,
                 };
                 return AssetStatusEvent {
                     ticket: request.ticket,

@@ -115,6 +115,8 @@ pub enum Failure {
     MissingCapability,
     NotFound,
     Denied,
+    HttpStatus { status: u16 },
+    Network,
     TooLarge,
     Malformed,
     Unsupported,

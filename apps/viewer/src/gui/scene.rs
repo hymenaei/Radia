@@ -24,7 +24,6 @@ use crate::{
 pub(super) struct State {
     main: MainWindow,
     chat_window: Option<AnyWindowHandle>,
-    inventory_window: Option<AnyWindowHandle>,
     viewport: Option<Viewport>,
 }
 
@@ -47,15 +46,12 @@ impl MainWindow {
 
 impl State {
     pub(super) fn new() -> Self {
-        Self { main: MainWindow::Login, chat_window: None, inventory_window: None, viewport: None }
+        Self { main: MainWindow::Login, chat_window: None, viewport: None }
     }
 
     pub(super) fn window_closed(&mut self, closed_window_id: WindowId) -> bool {
         if self.chat_window.is_some_and(|window| window.window_id() == closed_window_id) {
             self.chat_window = None;
-        }
-        if self.inventory_window.is_some_and(|window| window.window_id() == closed_window_id) {
-            self.inventory_window = None;
         }
         matches!(self.main, MainWindow::Scene(_))
     }
@@ -160,11 +156,6 @@ fn viewport_event(event: crate::gui::views::viewport::ViewportEvent, cx: &mut Ap
     {
         viewport.chat_received();
     }
-    if matches!(event, ViewportEvent::Inventory(_))
-        && let Some(viewport) = &cx.global::<AppLifecycle>().scene.viewport
-    {
-        viewport.inventory_received();
-    }
     match event {
         ViewportEvent::Ready(generation) if main == MainWindow::Starting(generation) => {
             cx.global_mut::<AppLifecycle>().scene.main = MainWindow::Scene(generation);
@@ -176,7 +167,6 @@ fn viewport_event(event: crate::gui::views::viewport::ViewportEvent, cx: &mut Ap
             }
         }
         ViewportEvent::Chat(generation) if main == MainWindow::Scene(generation) => show_chat(true, cx),
-        ViewportEvent::Inventory(generation) if main == MainWindow::Scene(generation) => show_inventory(true, cx),
         ViewportEvent::Closed(generation) if main.is_current(generation) => shutdown(cx),
         ViewportEvent::Failed(generation, error) => scene_failed(generation, error, cx),
         _ => {}
@@ -226,11 +216,6 @@ fn show_login(cx: &mut App) {
     {
         tracing::trace!("chat window was already unavailable during removal");
     }
-    if let Some(inventory) = cx.global_mut::<AppLifecycle>().scene.inventory_window.take()
-        && inventory.update(cx, |_, window, _| window.remove_window()).is_err()
-    {
-        tracing::trace!("inventory window was already unavailable during removal");
-    }
 }
 
 fn show_chat(focus: bool, cx: &mut App) {
@@ -275,82 +260,9 @@ fn show_chat(focus: bool, cx: &mut App) {
     }
 }
 
-fn show_inventory(focus: bool, cx: &mut App) {
-    let lifecycle = cx.global::<AppLifecycle>();
-    if lifecycle.quitting {
-        return;
-    }
-    if let Some(window) = lifecycle.scene.inventory_window {
-        if focus && window.update(cx, |_, window, _| window.activate_window()).is_err() {
-            tracing::trace!("inventory window was already unavailable during activation");
-        }
-        return;
-    }
-    let Some(controller) = &lifecycle.controller else {
-        return;
-    };
-    let Some((snapshots, fetch)) = controller.read(cx).inventory_window_data() else {
-        return;
-    };
-    let minimum = size(px(560.), px(420.));
-    let options = WindowOptions {
-        titlebar: Some(TitlebarOptions {
-            title: Some("Inventory".into()),
-            appears_transparent: window_chrome::appears_transparent(),
-            ..Default::default()
-        }),
-        window_bounds: Some(WindowBounds::Windowed(super::window_geometry::restore_bounds(
-            "inventory",
-            None,
-            size(px(920.), px(720.)),
-            minimum,
-            cx,
-        ))),
-        window_min_size: Some(minimum),
-        focus,
-        ..Default::default()
-    };
-    match cx.open_window(options, move |window, cx| {
-        let view = cx.new(|cx| InventoryWindow::new(snapshots, fetch, window, cx));
-        cx.new(|cx| Root::new(view, window, cx))
-    }) {
-        Ok(window) => cx.global_mut::<AppLifecycle>().scene.inventory_window = Some(window.into()),
-        Err(error) => tracing::error!(%error, "could not open inventory window"),
-    }
-}
-
 struct ChatWindow {
     chat: Entity<super::views::chat::ChatScreen>,
     _geometry: Subscription,
-}
-
-struct InventoryWindow {
-    screen: Entity<super::views::inventory::InventoryScreen>,
-    _geometry: Subscription,
-}
-
-impl InventoryWindow {
-    fn new(
-        snapshots: watch::Receiver<Option<::inventory::InventorySnapshot>>,
-        fetch: crate::inventory::InventoryFetchHandle,
-        window: &mut Window,
-        cx: &mut gpui::Context<Self>,
-    ) -> Self {
-        Self {
-            screen: cx.new(|cx| super::views::inventory::InventoryScreen::new(window, cx, snapshots, fetch)),
-            _geometry: super::window_geometry::observe("inventory", window, cx),
-        }
-    }
-}
-
-impl Render for InventoryWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
-        let theme = Theme::global(cx).colors;
-        let titlebar = window_chrome::titlebar(window, Some("Inventory"), theme);
-        let content = div().size_full().flex().flex_col().bg(theme.background).text_color(theme.foreground);
-        let content = if let Some(titlebar) = titlebar { content.child(titlebar) } else { content };
-        content.child(div().flex_1().min_h_0().child(self.screen.clone()))
-    }
 }
 
 impl ChatWindow {

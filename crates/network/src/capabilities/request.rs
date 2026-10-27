@@ -14,7 +14,7 @@ use super::budget::{
 };
 use crate::{
     error::Error,
-    http::{self, ErrorKind, Response},
+    http::{self, ErrorKind, RedirectPolicy, Response},
 };
 
 #[derive(Clone, Copy)]
@@ -166,10 +166,15 @@ pub(super) async fn get_capability_bytes(
     url: &Url,
     accept: Option<&str>,
     max_response_bytes: usize,
+    redirect_policy: RedirectPolicy,
 ) -> Result<Response, http::Error> {
-    let response = match accept {
-        Some(accept) => client.get_with_accept("capability_get", url, accept, max_response_bytes).await?,
-        None => client.get("capability_get", url, max_response_bytes).await?,
+    let response = match (accept, redirect_policy) {
+        (Some(accept), RedirectPolicy::None) => client.get_with_accept("capability_get", url, accept, max_response_bytes).await?,
+        (None, RedirectPolicy::None) => client.get("capability_get", url, max_response_bytes).await?,
+        (Some(accept), RedirectPolicy::ViewerAsset) => {
+            client.get_with_accept_and_redirect_policy("capability_get", url, accept, max_response_bytes, redirect_policy).await?
+        }
+        (None, redirect_policy) => client.get_with_redirect_policy("capability_get", url, max_response_bytes, redirect_policy).await?,
     };
     if !response.status.is_success() || response.status == reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(http::Error::http_status(

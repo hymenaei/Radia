@@ -250,7 +250,11 @@ mod tests {
             .filter_map(|event| match event {
                 AssetChange::Request(request) => match request.request {
                     Request::Texture { id, .. } => Some(id),
-                    Request::PbrMaterial(_) | Request::LegacyMaterial(_) | Request::Environment(_) => None,
+                    Request::PbrMaterial(_)
+                    | Request::LegacyMaterial(_)
+                    | Request::Environment(_)
+                    | Request::MeshHeader(_)
+                    | Request::MeshLod(_) => None,
                 },
                 AssetChange::Release(_) => None,
             })

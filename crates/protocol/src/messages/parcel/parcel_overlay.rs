@@ -55,6 +55,6 @@ mod tests {
         let payload = [0, 0, 0, 0, 4, 0, 1];
         let mut reader = Reader::new(&payload);
 
-        assert!(matches!(ParcelOverlay::decode(&mut reader), Err(LLUdpError::TruncatedPacket)));
+        std::assert_matches!(ParcelOverlay::decode(&mut reader), Err(LLUdpError::TruncatedPacket));
     }
 }

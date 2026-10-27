@@ -26,7 +26,7 @@ fn motion_updates_preserve_physics_and_time_dilation_fields() {
     let Message::ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects.truncate(1);
     update.region_data.time_dilation = 0x4000;
-    update.objects[0].update_flags |= super::super::FLAGS_USE_PHYSICS;
+    update.objects[0].update_flags |= crate::session::inbound::object::FLAGS_USE_PHYSICS;
     let batch = decode_object_message(REGION, 1, OrderEvidence::Ordered(1), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
     assert_eq!(observation.is_physical, Some(true));
@@ -47,7 +47,7 @@ fn motion_updates_preserve_physics_and_time_dilation_fields() {
     let Message::ObjectUpdateCompressed(update) = &mut compressed else { panic!("expected compressed object fixture") };
     update.objects.truncate(1);
     update.region_data.time_dilation = 0x8000;
-    update.objects[0].update_flags |= super::super::FLAGS_USE_PHYSICS;
+    update.objects[0].update_flags |= crate::session::inbound::object::FLAGS_USE_PHYSICS;
     let batch = decode_object_message(REGION, 2, OrderEvidence::Ordered(2), &compressed).expect("compressed object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
     assert_eq!(observation.is_physical, Some(true));

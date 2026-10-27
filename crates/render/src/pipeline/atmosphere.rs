@@ -1,6 +1,8 @@
+use std::sync::OnceLock;
+
 use math::srgb_to_linear;
 
-use crate::environment::Evaluated;
+use crate::environment::{Evaluated, Schedule, Sources, evaluate};
 
 pub(crate) const SKY_DOME_RADIUS: f32 = 15_000.0;
 pub(crate) const SKY_DOME_OFFSET: f32 = 0.96;
@@ -12,7 +14,7 @@ const LEGACY_AMBIENT_SCALE: f32 = 1.5;
 pub(crate) fn atmosphere_values(environment: Option<&Evaluated>) -> [f32; ATMOSPHERE_FLOATS] {
     let mut values = [0.0; ATMOSPHERE_FLOATS];
     values[40..44].copy_from_slice(&[SKY_DOME_RADIUS, SKY_DOME_HEIGHT, 0.0, 0.0]);
-    let Some(environment) = environment else { return values };
+    let Some(environment) = environment else { return default_atmosphere_values() };
     let haze = &environment.sky.haze;
     let sun_up = environment.sky.sun_direction[2] >= 0.0;
     let moon_up = environment.sky.moon_direction[2] >= 0.0;
@@ -57,6 +59,23 @@ pub(crate) fn atmosphere_values(environment: Option<&Evaluated>) -> [f32; ATMOSP
     values
 }
 
+fn default_atmosphere_values() -> [f32; ATMOSPHERE_FLOATS] {
+    static VALUES: OnceLock<[f32; ATMOSPHERE_FLOATS]> = OnceLock::new();
+    *VALUES.get_or_init(|| {
+        let sources = Sources {
+            base: None,
+            schedule: Schedule::default(),
+            experience_day: None,
+            experience_sky: None,
+            experience_water: None,
+            sky_override: None,
+            water_override: None,
+            local: None,
+        };
+        atmosphere_values(Some(&evaluate(&sources, 0.0, 0.0)))
+    })
+}
+
 fn legacy_ambient_irradiance(ambient: [f32; 3], cloud_shadow: f32) -> f32 {
     let cloud_shadow = cloud_shadow.clamp(0.0, 1.0);
     let cloud_adjusted = ambient.map(|component| {
@@ -92,6 +111,7 @@ mod tests {
         };
         let environment = evaluate(&sources, 0.0, 0.0);
         let values = atmosphere_values(Some(&environment));
+        assert_eq!(atmosphere_values(None), values);
         assert_eq!(&values[0..3], &[0.4954, 0.4954, 0.6399]);
         assert_eq!(&values[4..7], &[0.2447, 0.4487, 0.7599]);
         assert_eq!(&values[8..12], &[0.19, 0.7, 0.0001, 1605.0]);

@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use assets::Priority;
 use math::{DVec3, Mat4};
 use uuid::Uuid;
 use wgpu::{CommandEncoder, Device};
@@ -86,6 +87,11 @@ impl GeometryRenderer {
         }
         let key = FramePreparationKey { version: view.geometry_version(), camera, agent_pose, size };
         let same = self.prepared.as_ref().is_some_and(|prepared| prepared.key == key);
+        if same {
+            for texture in &self.visible_texture_requests {
+                self.textures.request(texture, self.epoch, Priority::Visible);
+            }
+        }
         let motion_was_active = self.motion_redraw;
         self.motion_redraw = false;
         if same {

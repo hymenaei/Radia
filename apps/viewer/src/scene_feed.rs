@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     future::Future,
     sync::{Arc, OnceLock},
     time::{Duration, Instant, SystemTime},
@@ -23,6 +23,7 @@ use render::scene::{
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
+use utils::AssetId;
 use uuid::Uuid;
 use world::{
     Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, Region, WorldPose,
@@ -110,6 +111,7 @@ impl DeadReckoning {
 struct EnvironmentSelection {
     choice: EnvironmentChoice,
     agent_region: Option<Region>,
+    active_textures: BTreeSet<AssetId>,
 }
 
 pub(crate) struct SceneSources {
@@ -160,8 +162,11 @@ impl SceneFeed {
         let budget = MEMORY.get_or_init(Budget::default).clone();
         let (scene, view) = Reconciler::new(budget.clone());
         let (sender, incoming) = mpsc::channel(1);
-        let (environment_selection, selected_environment) =
-            watch::channel(EnvironmentSelection { choice: EnvironmentChoice::default(), agent_region: None });
+        let (environment_selection, selected_environment) = watch::channel(EnvironmentSelection {
+            choice: EnvironmentChoice::default(),
+            agent_region: None,
+            active_textures: BTreeSet::new(),
+        });
         let (environment_items_sender, environment_items) = watch::channel(EnvironmentItems::Loading);
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
         drop(runtime.clone().spawn(update_environment_items(
@@ -354,7 +359,8 @@ impl SceneFeed {
             if selected.choice == choice && selected.agent_region == Some(agent_region) && published == choice {
                 false
             } else {
-                *selected = EnvironmentSelection { choice, agent_region: Some(agent_region) };
+                *selected =
+                    EnvironmentSelection { choice, agent_region: Some(agent_region), active_textures: selected.active_textures.clone() };
                 true
             }
         });
@@ -394,7 +400,19 @@ impl SceneFeed {
 
     pub(crate) fn update_environment(&mut self, now: Instant) -> bool {
         let agent = self.agent().map(|agent| (agent.detail().summary.address.region(), avatar_altitude(agent)));
-        self.environment.update(&self.view, agent, SystemTime::now(), now)
+        let changed = self.environment.update(&self.view, agent, SystemTime::now(), now);
+        let agent_region = agent.map(|(region, _)| region);
+        let active_textures = self.environment.texture_assets();
+        self.environment_selection.send_if_modified(|selection| {
+            if selection.agent_region == agent_region && selection.active_textures == active_textures {
+                false
+            } else {
+                selection.agent_region = agent_region;
+                selection.active_textures = active_textures;
+                true
+            }
+        });
+        changed
     }
 
     pub(crate) fn drain(&mut self) -> Result<(), ApplyError> {
@@ -623,6 +641,46 @@ async fn execute_world_read(reader: &WorldReader, job: &ReadJob) -> Result<ReadR
     })
 }
 
+async fn update_environment_items(
+    mut snapshots: watch::Receiver<Option<InventorySnapshot>>,
+    output: watch::Sender<EnvironmentItems>,
+    runtime: Handle,
+    wake: Arc<dyn Fn() + Send + Sync>,
+) {
+    let mut snapshot = snapshots.borrow_and_update().clone();
+    loop {
+        let Some(current) = snapshot else {
+            output.send_replace(EnvironmentItems::Loading);
+            tokio::select! {
+                _ = output.closed() => return,
+                changed = snapshots.changed() => if changed.is_err() { return },
+            }
+            snapshot = snapshots.borrow_and_update().clone();
+            continue;
+        };
+        let revision = current.revision();
+        let result = runtime.spawn_blocking(move || environments::environment_items(current)).await;
+        let latest = snapshots.borrow().clone();
+        if latest.as_ref().is_some_and(|latest| latest.revision() == revision) {
+            match result {
+                Ok(menu) => {
+                    output.send_replace(EnvironmentItems::Ready(menu));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "environment inventory query failed");
+                    output.send_replace(EnvironmentItems::Failed);
+                }
+            }
+            wake();
+            tokio::select! {
+                _ = output.closed() => return,
+                changed = snapshots.changed() => if changed.is_err() { return },
+            }
+        }
+        snapshot = snapshots.borrow_and_update().clone();
+    }
+}
+
 #[tracing::instrument(name = "scene.feed", level = "debug", skip_all)]
 async fn run(
     mut scene: Reconciler,
@@ -753,6 +811,7 @@ async fn run(
             {
                 tracing::warn!(choice = ?selection.choice, ?error, "local environment selection rejected");
             }
+            scene.set_active_environment_textures(selection.agent_region, selection.active_textures);
         }
         if let Some((ticket, status)) = asset_event {
             scene.complete_asset(ticket, status);
@@ -852,8 +911,11 @@ mod tests {
         let (camera, _) = watch::channel(None);
         let agent_motion = watch::channel(None).1;
         let assets = AssetCoordinator::new(Handle::current(), pending(), None);
-        let (environment_selection, selected_environment) =
-            watch::channel(EnvironmentSelection { choice: EnvironmentChoice::default(), agent_region: None });
+        let (environment_selection, selected_environment) = watch::channel(EnvironmentSelection {
+            choice: EnvironmentChoice::default(),
+            agent_region: None,
+            active_textures: BTreeSet::new(),
+        });
         let choice = EnvironmentChoice::Local(render::scene::LocalChoice::Preset(render::scene::EnvironmentPreset::Midday));
         let mut feed = SceneFeed {
             runtime: Handle::current(),

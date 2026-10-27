@@ -212,6 +212,7 @@ pub(crate) struct GeometryRenderer {
     textures: Textures,
     requested_textures: HashSet<TextureId>,
     visible_textures: HashSet<TextureId>,
+    visible_texture_requests: Vec<TextureHandle>,
     region_water_bounds: [Vec4; MAX_REGIONS],
     region_water_ids: [u128; MAX_REGIONS],
     region_water_count: usize,
@@ -258,6 +259,10 @@ impl GeometryRenderer {
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
         self.prepared.as_ref().and_then(|prepared| prepared.animation_deadline)
     }
+
+    pub(crate) fn texture_revision(&self) -> u64 {
+        self.textures.state().revision
+    }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
@@ -272,6 +277,7 @@ impl GeometryRenderer {
             textures,
             requested_textures: HashSet::new(),
             visible_textures: HashSet::new(),
+            visible_texture_requests: Vec::new(),
             region_water_bounds: [Vec4::ZERO; MAX_REGIONS],
             region_water_ids: [0; MAX_REGIONS],
             region_water_count: 0,
@@ -367,6 +373,7 @@ impl GeometryRenderer {
         }
         self.draw_list.clear();
         self.visible_textures.clear();
+        self.visible_texture_requests.clear();
         self.stats.instances = 0;
         self.stats.draw_calls = 0;
         self.stats.draw_commands = 0;
@@ -401,6 +408,7 @@ impl GeometryRenderer {
         self.textures.set_soft_cap(mib);
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
+        self.sky.draw(pass);
         self.void_water.draw(pass);
         let mut pipeline = None;
         let mut texture = None;
@@ -445,7 +453,6 @@ impl GeometryRenderer {
                 }
             }
         }
-        self.sky.draw(pass);
     }
 
     pub(crate) fn submitted(&mut self, frame: FrameLease) {

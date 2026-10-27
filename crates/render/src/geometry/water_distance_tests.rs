@@ -151,6 +151,8 @@ fn render_frame(
         Some(camera.position()),
         Some(WATER_HEIGHT),
         projection(camera, SIZE).inverse(),
+        0,
+        0,
     );
     let bytes_per_row = SIZE[0] * 4;
     let padded = bytes_per_row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;

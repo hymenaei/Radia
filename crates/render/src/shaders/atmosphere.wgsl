@@ -136,7 +136,7 @@ fn object_atmosphere_terms(
     let haze_weight = vec3<f32>(atmosphere.haze.y) / combined_density;
     let light_attenuation = (atmosphere.blue_density.xyz + vec3<f32>(atmosphere.haze.y * 0.25))
         * (atmosphere.haze.z * atmosphere.haze.w);
-    let above_horizon_factor = 1.0 / max(0.000001, light_norm_eye.y);
+    let above_horizon_factor = atmosphere.light_norm.w;
     var terms: ObjectAtmosphereTerms;
     terms.sunlight = atmosphere.sunlight.xyz * exp(-light_attenuation * above_horizon_factor);
     terms.attenuation = exp(-combined_density * length(relative_position) * atmosphere.haze.z * atmosphere.distance.x);

@@ -1,4 +1,7 @@
-use std::num::NonZeroU64;
+use std::{
+    num::NonZeroU64,
+    time::{Duration, Instant},
+};
 
 use crate::environment::Evaluated;
 use math::{DVec3, Mat4};
@@ -17,6 +20,16 @@ const EXPOSURE_FLOATS: usize = 32;
 const EXPOSURE_BYTES: usize = EXPOSURE_FLOATS * 4;
 const TONE_FLOATS: usize = 28;
 const TONE_BYTES: usize = TONE_FLOATS * 4;
+const EXPOSURE_SETTLE_TIME: Duration = Duration::from_secs(4);
+
+#[derive(PartialEq)]
+struct ExposureInputs {
+    scene_version: u64,
+    texture_revision: u64,
+    inverse_view_projection: Mat4,
+    environment: Evaluated,
+    fog: [f32; 8],
+}
 
 pub(crate) struct PostProcess {
     exposure_pipeline: RenderPipeline,
@@ -37,6 +50,8 @@ pub(crate) struct PostProcess {
     dummy_depth_view: TextureView,
     current_exposure: usize,
     has_history: bool,
+    exposure_inputs: Option<ExposureInputs>,
+    exposure_until: Option<Instant>,
 }
 
 impl PostProcess {
@@ -117,6 +132,8 @@ impl PostProcess {
             dummy_depth_view,
             current_exposure: 0,
             has_history: false,
+            exposure_inputs: None,
+            exposure_until: None,
         };
         postprocess.resize(device, [1, 1]);
         postprocess
@@ -193,6 +210,10 @@ impl PostProcess {
         });
     }
 
+    pub(crate) fn needs_frame(&self) -> bool {
+        exposure_needs_frame(self.exposure_until, Instant::now())
+    }
+
     pub(crate) fn render(
         &mut self,
         queue: &Queue,
@@ -203,9 +224,23 @@ impl PostProcess {
         camera_position: Option<DVec3>,
         water_height: Option<f64>,
         inverse_view_projection: Mat4,
+        scene_version: u64,
+        texture_revision: u64,
     ) {
         let (minimum_exposure, maximum_exposure, tonemap_mix) = environment_values(environment);
         let fog = camera_position.map_or([0.0; 8], |position| water_fog_values(environment, position, water_height));
+        if let Some(environment) =
+            environment.filter(|environment| environment.sky.reflection_probe_ambiance.is_some_and(|ambiance| ambiance > 0.0))
+        {
+            let inputs = ExposureInputs { scene_version, texture_revision, inverse_view_projection, environment: environment.clone(), fog };
+            if self.exposure_inputs.as_ref() != Some(&inputs) {
+                self.exposure_until = self.has_history.then(|| Instant::now() + EXPOSURE_SETTLE_TIME);
+                self.exposure_inputs = Some(inputs);
+            }
+        } else {
+            self.exposure_inputs = None;
+            self.exposure_until = None;
+        }
         let mut exposure = [0.0; EXPOSURE_FLOATS];
         exposure[..8].copy_from_slice(&[
             0.5,
@@ -283,6 +318,10 @@ fn environment_values(environment: Option<&Evaluated>) -> (f32, f32, f32) {
     let gamma = environment.map_or(1.0, |environment| environment.sky.gamma);
     let hdr_scale = gamma.max(0.0).sqrt() * 2.0;
     if hdr_scale > 1.0 { (1.0 / hdr_scale, hdr_scale, 1.0) } else { (1.0, 1.0, 1.0) }
+}
+
+fn exposure_needs_frame(until: Option<Instant>, now: Instant) -> bool {
+    until.is_some_and(|until| now < until)
 }
 
 fn fullscreen_pipeline(
@@ -451,5 +490,13 @@ mod tests {
         assert!((minimum - (1.0 / 2.4)).abs() < 0.000001);
         assert!((maximum - 2.4).abs() < 0.000001);
         assert_eq!(mix, 1.0);
+    }
+
+    #[test]
+    fn exposure_requests_frames_only_while_settling() {
+        let now = Instant::now();
+        assert!(exposure_needs_frame(Some(now + EXPOSURE_SETTLE_TIME), now));
+        assert!(!exposure_needs_frame(Some(now), now));
+        assert!(!exposure_needs_frame(None, now));
     }
 }

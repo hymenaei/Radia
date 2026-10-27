@@ -105,7 +105,7 @@ fn texture_animation_updates_clear_and_preserve_by_path() {
 
     let cached = packet(vectors::OBJECT_UPDATE_CACHED).message().clone();
     let batch = decode_object_message(REGION, 41, OrderEvidence::Ordered(41), &cached).expect("cached object batch");
-    assert!(matches!(batch.blocks[0], Some(ObjectOperation::Cached { .. })), "cached references only request recovery");
+    std::assert_matches!(batch.blocks[0], Some(ObjectOperation::Cached { .. }));
 }
 
 #[test]

@@ -8,7 +8,7 @@ use std::{
 
 use reqwest::{
     RequestBuilder, StatusCode, Url,
-    header::{ACCEPT, CONTENT_TYPE, HeaderMap, RETRY_AFTER},
+    header::{ACCEPT, ACCEPT_ENCODING, CONTENT_TYPE, HeaderMap, RANGE, RETRY_AFTER},
     redirect::Policy,
 };
 use tokio::time::{self, Instant};
@@ -94,6 +94,22 @@ impl Client {
             RedirectPolicy::ViewerAsset => &self.viewer_asset_client,
         };
         self.execute(operation, client.get(url.clone()), max_response_bytes).await
+    }
+
+    pub(crate) async fn get_range_with_redirect_policy(
+        &self,
+        operation: &str,
+        url: &Url,
+        range: &str,
+        max_response_bytes: usize,
+        redirect_policy: RedirectPolicy,
+    ) -> Result<Response, Error> {
+        validate_http_url(url)?;
+        let client = match redirect_policy {
+            RedirectPolicy::None => &self.client,
+            RedirectPolicy::ViewerAsset => &self.viewer_asset_client,
+        };
+        self.execute(operation, client.get(url.clone()).header(RANGE, range).header(ACCEPT_ENCODING, "identity"), max_response_bytes).await
     }
 
     pub(crate) async fn post(
@@ -249,6 +265,7 @@ pub enum ErrorKind {
     Cancelled,
     ResourceExhausted,
     HttpStatus,
+    InvalidResponse,
     InvalidUrl,
 }
 
@@ -308,6 +325,10 @@ impl Error {
 
     pub(crate) fn http_status(status: StatusCode, elapsed: Duration, retry_after: Option<Duration>, context: &str) -> Self {
         Self::new(ErrorKind::HttpStatus, elapsed, Some(status), retry_after, format!("{context}: HTTP {status}"))
+    }
+
+    pub(crate) fn invalid_response(status: StatusCode, elapsed: Duration, context: &str) -> Self {
+        Self::new(ErrorKind::InvalidResponse, elapsed, Some(status), None, context.into())
     }
 }
 

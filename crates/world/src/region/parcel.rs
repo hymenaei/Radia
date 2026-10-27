@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use super::environment::ParcelLocalId;
 use crate::{
-    ApplyError, Region, RegionApplied, RegionOutcome, UpdateSource, World, WorldChange, WorldRevision, newer_field, update::FieldStamp,
+    ApplyError, Region, RegionApplied, RegionOutcome, UpdateAuthority, UpdateSource, World, WorldChange, WorldRevision, newer_field,
+    update::FieldStamp,
 };
 
 pub const PARCEL_GRID_EDGE: usize = 64;
@@ -333,7 +334,8 @@ impl ParcelRead {
 pub(crate) struct ParcelState {
     current: Option<CurrentParcel>,
     last_agent_sequence: Option<u32>,
-    agent_fence: Option<FieldStamp>,
+    tracked_agent_fence: Option<FieldStamp>,
+    event_queue_fence: Option<FieldStamp>,
     overlay: OverlayAssembly,
     region_flags: RegionFlags,
     region_low_fence: Option<FieldStamp>,
@@ -343,6 +345,23 @@ pub(crate) struct ParcelState {
 impl ParcelState {
     pub(crate) fn retained_bytes(&self) -> usize {
         self.current.as_ref().map_or(0, |current| current.properties.retained_bytes()) + self.overlay.retained_bytes()
+    }
+
+    fn property_fence(&self, authority: UpdateAuthority) -> Option<FieldStamp> {
+        match authority {
+            UpdateAuthority::Tracked => self.tracked_agent_fence,
+            UpdateAuthority::Untracked => self.event_queue_fence,
+        }
+    }
+
+    fn advance_property_fence(&mut self, authority: UpdateAuthority, fence: FieldStamp) {
+        let current = match authority {
+            UpdateAuthority::Tracked => &mut self.tracked_agent_fence,
+            UpdateAuthority::Untracked => &mut self.event_queue_fence,
+        };
+        if newer_field(fence, *current) {
+            *current = Some(fence);
+        }
     }
 
     #[cfg(test)]
@@ -547,11 +566,15 @@ impl World {
         }
         let sequence_id = u32::try_from(observation.sequence_id).map_err(|_| ApplyError::InvalidValue { field: "parcel_sequence_id" })?;
         let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
-        let fence = FieldStamp { authority: source.authority(), stamp };
+        let authority = source.authority();
+        let fence = FieldStamp { authority, stamp };
         let current = &self.regions[&region].parcels;
+        let source_fence = current.property_fence(authority);
+        let newer_source = newer_field(fence, source_fence);
         let newer_sequence = sequence_id > 0 && current.last_agent_sequence.is_some_and(|last| sequence_id > last);
         let stale_sequence = sequence_id > 0 && current.last_agent_sequence.is_some_and(|last| sequence_id <= last);
-        if stale_sequence || (!newer_sequence && !newer_field(fence, current.agent_fence)) {
+        let newer_event_sequence = authority == UpdateAuthority::Untracked && newer_sequence;
+        if stale_sequence || (!newer_source && !newer_event_sequence) {
             return Ok(RegionApplied::unchanged());
         }
         let properties = observation.properties.ok_or(ApplyError::InvalidValue { field: "parcel_properties" })?;
@@ -563,28 +586,25 @@ impl World {
         {
             return Err(ApplyError::ParcelBudgetExhausted);
         }
+        let supersedes_selection = newer_sequence || (authority == UpdateAuthority::Untracked && newer_source);
         let selection_changed = self.regions[&region].environment.selected_parcel() != Some(properties.local_id);
         let environment_changed =
-            self.agent_parcel_selection_changes(region, properties.local_id, fence) || (newer_sequence && selection_changed);
+            self.agent_parcel_selection_changes(region, properties.local_id, fence) || (supersedes_selection && selection_changed);
         let properties_changed =
             current.current.as_ref().is_none_or(|current| current.sequence_id != sequence_id || current.properties != properties);
         if !environment_changed && !properties_changed {
             let current = &mut self.regions.get_mut(&region).expect("active region").parcels;
-            if newer_field(fence, current.agent_fence) {
-                current.agent_fence = Some(fence);
-            }
+            current.advance_property_fence(authority, fence);
             current.last_agent_sequence = Some(current.last_agent_sequence.map_or(sequence_id, |last| last.max(sequence_id)));
             return Ok(RegionApplied::unchanged());
         }
         self.ensure_revision_available()?;
         let revision = WorldRevision(self.revision().get() + 1);
         let environment_changed =
-            self.select_agent_parcel_at_revision(region, Some(properties.local_id), Some(fence), newer_sequence, revision);
+            self.select_agent_parcel_at_revision(region, Some(properties.local_id), Some(fence), supersedes_selection, revision);
         let parcels = &mut self.regions.get_mut(&region).expect("active region").parcels;
         parcels.current = Some(CurrentParcel { sequence_id, properties });
-        if newer_field(fence, parcels.agent_fence) {
-            parcels.agent_fence = Some(fence);
-        }
+        parcels.advance_property_fence(authority, fence);
         parcels.last_agent_sequence = Some(parcels.last_agent_sequence.map_or(sequence_id, |last| last.max(sequence_id)));
         self.parcel_bytes = self.parcel_bytes - old_bytes + next_bytes;
         let mut changes = Vec::with_capacity(2);

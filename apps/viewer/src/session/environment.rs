@@ -925,6 +925,14 @@ mod tests {
         assert_eq!(current.sequence_id, 42);
         assert_eq!(current.properties.local_id, ParcelLocalId::new(43).unwrap());
         assert_eq!(current.properties.name.as_ref(), "EventQueue parcel");
+
+        let next_event = parcel_properties_event(0, 45, "Sequence-zero EventQueue parcel");
+        intake.capability(&mut world, simulator, "ParcelProperties", &next_event, Some(simulator));
+        let current = world.world().parcel_state(region).unwrap().current.unwrap();
+        assert_eq!(current.sequence_id, 0);
+        assert_eq!(current.properties.local_id, ParcelLocalId::new(45).unwrap());
+        assert_eq!(current.properties.name.as_ref(), "Sequence-zero EventQueue parcel");
+        assert_eq!(world.world().environment(region).unwrap().parcel.unwrap().parcel, ParcelLocalId::new(45).unwrap());
     }
 
     #[test]

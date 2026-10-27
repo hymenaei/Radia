@@ -3,6 +3,7 @@ use super::disconnect::{
     expected_zerocoded_reply, packet_ack_contains, receive_primary_connected, server_ack_many, with_appended_ack,
 };
 use super::*;
+use crate::session::SessionHandle;
 use tokio::task::yield_now;
 
 #[tokio::test]
@@ -120,6 +121,13 @@ async fn region_handshake_reply_is_explicit_and_preserves_application_flags() {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
+    let (_, worker_finished) = watch::channel(false);
+    let handle = SessionHandle {
+        commands: commands.clone(),
+        disconnect_requested: disconnect_signal.clone(),
+        command_admission_closed: Arc::new(std::sync::Mutex::new(false)),
+        worker_finished,
+    };
     let connection = connect_runtime(session, ResponseData::default()).await.expect("connect simulator runtime");
     let terminal = event_sender.clone().try_reserve_owned().expect("reserve terminal event slot");
     let client = spawn(connection.run(command_receiver, event_sender, disconnect_requested, terminal));
@@ -142,8 +150,7 @@ async fn region_handshake_reply_is_explicit_and_preserves_application_flags() {
         };
         assert_no_datagram(&simulator);
 
-        let (completed, response) = oneshot::channel();
-        commands.send(Command::ReplyRegionHandshake { simulator_id, flags, completed }).await.expect("queue explicit handshake reply");
+        let response = handle.try_reply_region_handshake(simulator_id, flags).expect("queue explicit handshake reply");
         response.await.expect("network completion remains connected").expect("handshake reply is transmitted");
         let reply = receive_message(&simulator, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
         std::assert_matches!(reply.message(), Message::RegionHandshakeReply(reply) if reply.region_info.flags == flags);
@@ -153,6 +160,18 @@ async fn region_handshake_reply_is_explicit_and_preserves_application_flags() {
     disconnect_signal.send_replace(true);
     receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
     timeout(SIMULATOR_TIMEOUT, client).await.expect("session task stops").expect("session task does not panic").expect("clean shutdown");
+}
+
+#[test]
+fn region_handshake_reply_reports_a_full_command_queue_without_waiting() {
+    let (commands, _receiver) = mpsc::channel(1);
+    commands.try_send(Command::SubmitMfaCode("123456".into())).expect("fill command queue");
+    let (disconnect_requested, _) = watch::channel(false);
+    let (_, worker_finished) = watch::channel(false);
+    let handle =
+        SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(std::sync::Mutex::new(false)), worker_finished };
+
+    std::assert_matches!(handle.try_reply_region_handshake(SimulatorId::new(1), 7), Err(Error::CommandQueueFull));
 }
 
 #[tokio::test]

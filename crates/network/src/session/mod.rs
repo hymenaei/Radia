@@ -419,6 +419,21 @@ impl SessionHandle {
         }
     }
 
+    pub fn try_reply_region_handshake(&self, simulator_id: SimulatorId, flags: u32) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+        let (completed, response) = oneshot::channel();
+        {
+            let admission_closed = self.command_admission_closed.lock().unwrap_or_else(|error| error.into_inner());
+            if *admission_closed || *self.disconnect_requested.borrow() || *self.worker_finished.borrow() {
+                return Err(Error::SessionClosed);
+            }
+            self.commands.try_send(Command::ReplyRegionHandshake { simulator_id, flags, completed }).map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => Error::CommandQueueFull,
+                mpsc::error::TrySendError::Closed(_) => Error::SessionClosed,
+            })?;
+        }
+        Ok(response)
+    }
+
     pub async fn disconnect(&self) {
         self.request_disconnect();
         let mut worker_finished = self.worker_finished.clone();

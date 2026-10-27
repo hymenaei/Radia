@@ -813,6 +813,9 @@ fn local_environment_failure(failure: assets::Failure) -> String {
         }
         assets::Failure::Deadline => "The environment request timed out.".into(),
         assets::Failure::Transient { .. } => "The environment request failed temporarily.".into(),
+        assets::Failure::MissingLod(_) | assets::Failure::MalformedBlock | assets::Failure::UnsupportedVersion(_) => {
+            "The environment asset is malformed or unsupported.".into()
+        }
     }
 }
 

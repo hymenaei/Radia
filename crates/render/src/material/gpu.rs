@@ -140,6 +140,29 @@ mod tests {
     }
 
     #[test]
+    fn pbr_and_texture_entry_transforms_compose() {
+        let material_transform = UvTransform { offset: [0.25, -0.125], scale: [2.0, 3.0], rotation: FRAC_PI_2 };
+        let texture_entry_transform = UvTransform { offset: [-0.25, 0.125], scale: [0.5, 1.5], rotation: FRAC_PI_2 };
+        let face = FaceMaterial {
+            slot: 0,
+            material: MaterialDescription::Pbr(PbrMaterial {
+                base_color: MaterialTexture { transform: material_transform, ..MaterialTexture::default() },
+                ..PbrMaterial::default()
+            }),
+            legacy_state: None,
+            pbr_state: None,
+            alpha: AlphaBehavior::Opaque,
+            base_color_texture: None,
+        };
+
+        let params = FaceParams::with_texture_entry_transform(Some(&face), Some(texture_entry_transform));
+        let expected = [[-4.5, 0.0, 1.375, 0.0], [0.0, 1.0, -0.125, 0.0]];
+        for (actual, expected) in params.uv.iter().flatten().zip(expected.iter().flatten()) {
+            assert!((actual - expected).abs() < 1e-6, "UV matrix coefficient {actual} differed from {expected}");
+        }
+    }
+
+    #[test]
     fn fallback_preserves_material() {
         let id = AssetId::new(Uuid::from_u128(42));
         let mut material = PbrMaterial {

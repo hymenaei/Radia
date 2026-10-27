@@ -508,6 +508,36 @@ fn protection_tracks_live_keys() {
 }
 
 #[test]
+fn protected_scan_reaches_unprotected() {
+    const ENTRY_BYTES: usize = 16 * 1024;
+    const ENTRY_BYTES_U64: u64 = 16 * 1024;
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    let mut protections = Vec::new();
+    for id in 0..129u16 {
+        let value = u8::try_from(id).expect("test key fits a byte");
+        cache.put(key(id), vec![value; ENTRY_BYTES]).expect("store entry");
+        if id < 128 {
+            protections.push(cache.protect(key(id)).expect("protect live entry"));
+        }
+    }
+    let current_size = cache.accounted_size();
+    cache.set_size_limit(current_size).expect("set limit to current size");
+
+    cache.put(key(129), vec![129; ENTRY_BYTES]).expect("evict beyond the protected scan window");
+
+    assert_eq!(cache.entry_count(), 129);
+    assert_eq!(cache.protected_bytes(), 128 * ENTRY_BYTES_U64);
+    for id in 0..128u16 {
+        assert_matches!(cache.lookup(key(id)), Lookup::Hit(_));
+    }
+    assert_eq!(cache.lookup(key(128)), Lookup::Miss);
+    assert_matches!(cache.lookup(key(129)), Lookup::Hit(_));
+    drop(protections);
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
 fn protection_applies_to_later_writes() {
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");

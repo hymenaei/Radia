@@ -26,7 +26,7 @@ use super::{
 };
 use crate::{
     EvictionCandidate, EvictionPolicy, EvictionReason,
-    cache::eviction::Lru,
+    cache::eviction::{Lru, OrderedScan},
     sqlite::{MAX_BATCH_ROWS, SqliteError},
 };
 use disk::{DATA_TEMP_PREFIX, delete_data, fail_temporary, persist_with_retry, remove_path};
@@ -41,6 +41,7 @@ const QUEUE_SWEEP_CHUNK: usize = 64;
 const MAX_SWEEP_DEPTH: usize = 32;
 const MAX_EVICTIONS_PER_BATCH: usize = 32;
 const MAX_EVICTION_CANDIDATES: usize = 128;
+const MAX_EVICTION_SCAN_PASSES: usize = 4;
 
 #[repr(usize)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -207,12 +208,19 @@ impl CommitFailure {
     }
 }
 
+enum VictimSearch {
+    Found(Key, EvictionReason),
+    Exhausted,
+    Deferred,
+}
+
 pub(super) struct WorkerState {
     root: PathBuf,
     _lock_file: File,
     index: Index,
     read_state: Arc<ReadState>,
     lru: Lru,
+    eviction_scan_cursor: Option<(u64, Key)>,
     referenced_keys: HashSet<Key>,
     directory_counts: HashMap<DirectoryId, usize>,
     directory_count: u64,
@@ -264,6 +272,7 @@ impl WorkerState {
             size_limit: read_state.size_limit.load(Ordering::Relaxed),
             read_state,
             lru,
+            eviction_scan_cursor: None,
             referenced_keys,
             directory_counts,
             directory_count,
@@ -361,7 +370,7 @@ impl WorkerState {
         results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect()
     }
 
-    fn plan_puts(&self, staged: &[Arc<Entry>], protection: &ProtectionRegistry) -> Result<Plan, StorageError> {
+    fn plan_puts(&mut self, staged: &[Arc<Entry>], protection: &ProtectionRegistry) -> Result<Plan, StorageError> {
         let entries = read_map(&self.read_state.entries);
         let mut changes = HashMap::new();
         changes.try_reserve(staged.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
@@ -373,7 +382,6 @@ impl WorkerState {
             .map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
         let mut new_order = BTreeSet::<(u64, Key)>::new();
         let mut new_stamps = HashMap::<Key, u64>::new();
-        let base_order = self.lru.oldest().peekable();
         let mut data_bytes = self.data_bytes;
         let mut directory_count = self.directory_count;
         let mut entry_count = self.entry_count;
@@ -399,8 +407,8 @@ impl WorkerState {
                 if eviction_reasons.len() >= MAX_EVICTIONS_PER_BATCH {
                     return Err(StorageError::TooLarge);
                 }
-                let (victim, reason) = next_victim(
-                    &base_order,
+                let VictimSearch::Found(victim, reason) = find_victim(
+                    &self.lru,
                     &mut new_order,
                     &mut new_stamps,
                     Some(key),
@@ -409,9 +417,10 @@ impl WorkerState {
                     protection,
                     self.read_state.policy.as_ref(),
                     now,
-                    MAX_EVICTION_CANDIDATES,
-                )
-                .ok_or(StorageError::TooLarge)?;
+                    &mut self.eviction_scan_cursor,
+                ) else {
+                    return Err(StorageError::TooLarge);
+                };
                 let previous = effective_entry(&victim, &changes, &entries).ok_or(StorageError::TooLarge)?;
                 self.adjust_directories(&victim, -1, &mut directory_deltas, &mut directory_count)?;
                 data_bytes = data_bytes.checked_sub(previous.size).ok_or(StorageError::TooLarge)?;
@@ -901,7 +910,6 @@ impl WorkerState {
                 return Ok(());
             }
             let entries = read_map(&self.read_state.entries);
-            let base_order = self.lru.oldest().peekable();
             let mut changes = HashMap::<Key, Option<Arc<Entry>>>::new();
             let mut eviction_reasons = HashMap::new();
             eviction_reasons.try_reserve(MAX_EVICTIONS_PER_BATCH).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
@@ -912,9 +920,10 @@ impl WorkerState {
             let mut no_new_order = BTreeSet::new();
             let mut no_new_stamps = HashMap::new();
             let now = self.read_state.usage_clock.load(Ordering::Relaxed);
+            let mut scan_exhausted = false;
             while !self.fits(data_bytes, entry_count, directory_count, limit)? && eviction_reasons.len() < MAX_EVICTIONS_PER_BATCH {
-                let Some((key, reason)) = next_victim(
-                    &base_order,
+                let (key, reason) = match find_victim(
+                    &self.lru,
                     &mut no_new_order,
                     &mut no_new_stamps,
                     None,
@@ -923,9 +932,14 @@ impl WorkerState {
                     &protection,
                     self.read_state.policy.as_ref(),
                     now,
-                    MAX_EVICTION_CANDIDATES,
-                ) else {
-                    break;
+                    &mut self.eviction_scan_cursor,
+                ) {
+                    VictimSearch::Found(key, reason) => (key, reason),
+                    VictimSearch::Exhausted => {
+                        scan_exhausted = true;
+                        break;
+                    }
+                    VictimSearch::Deferred => break,
                 };
                 let entry = effective_entry(&key, &changes, &entries).ok_or(StorageError::TooLarge)?;
                 self.adjust_directories(&key, -1, &mut directory_deltas, &mut directory_count)?;
@@ -935,11 +949,9 @@ impl WorkerState {
                 changes.insert(key, None);
                 eviction_reasons.insert(key, reason);
             }
-            drop(base_order);
             drop(entries);
             if changes.is_empty() {
-                self.blocked_protection_generation =
-                    (self.accounted_size() > limit && protection.active.len() >= self.entry_count).then_some(protection.generation);
+                self.blocked_protection_generation = (self.accounted_size() > limit && scan_exhausted).then_some(protection.generation);
                 return Ok(());
             }
             let plan = Plan { changes, directory_deltas, eviction_reasons };
@@ -1153,8 +1165,8 @@ impl WorkerState {
         while !self.sweep_step(QUEUE_SWEEP_CHUNK) {}
     }
 }
-fn next_victim(
-    base_order: &std::iter::Peekable<impl Iterator<Item = (u64, Key)> + Clone>,
+fn find_victim(
+    lru: &Lru,
     new_order: &mut BTreeSet<(u64, Key)>,
     new_stamps: &mut HashMap<Key, u64>,
     excluded: Option<Key>,
@@ -1163,15 +1175,37 @@ fn next_victim(
     protection: &ProtectionRegistry,
     policy: &dyn EvictionPolicy,
     now: u64,
-    max_candidates: usize,
-) -> Option<(Key, EvictionReason)> {
-    let mut base_scan = base_order.clone();
-    let mut new_scan = new_order.iter().peekable();
+    scan_cursor: &mut Option<(u64, Key)>,
+) -> VictimSearch {
+    for _ in 0..MAX_EVICTION_SCAN_PASSES {
+        match scan_victim(lru, new_order, new_stamps, excluded, changes, entries, protection, policy, now, scan_cursor) {
+            VictimSearch::Found(key, reason) => return VictimSearch::Found(key, reason),
+            VictimSearch::Exhausted => return VictimSearch::Exhausted,
+            VictimSearch::Deferred => {}
+        }
+    }
+    VictimSearch::Deferred
+}
+
+fn scan_victim(
+    lru: &Lru,
+    new_order: &mut BTreeSet<(u64, Key)>,
+    new_stamps: &mut HashMap<Key, u64>,
+    excluded: Option<Key>,
+    changes: &HashMap<Key, Option<Arc<Entry>>>,
+    entries: &HashMap<Key, Arc<Entry>>,
+    protection: &ProtectionRegistry,
+    policy: &dyn EvictionPolicy,
+    now: u64,
+    scan_cursor: &mut Option<(u64, Key)>,
+) -> VictimSearch {
+    let mut base_scan = lru.scan_after(*scan_cursor).peekable();
+    let mut new_scan = OrderedScan::new(new_order, *scan_cursor).peekable();
     let mut selected: Option<(u128, u64, Key, EvictionReason, bool)> = None;
     let mut inspected = 0usize;
-    while inspected < max_candidates {
+    while inspected < MAX_EVICTION_CANDIDATES {
         let next_base = base_scan.peek().copied();
-        let next_new = new_scan.peek().copied().copied();
+        let next_new = new_scan.peek().copied();
         let (stamp, key, is_new) = match (next_base, next_new) {
             (Some(base_candidate), Some(new_candidate)) if base_candidate <= new_candidate => {
                 base_scan.next();
@@ -1188,6 +1222,7 @@ fn next_victim(
             (None, None) => break,
         };
         inspected += 1;
+        *scan_cursor = Some((stamp, key));
         let stale = if is_new {
             changes.get(&key).is_some_and(Option::is_none) || effective_entry(&key, changes, entries).is_none()
         } else {
@@ -1211,11 +1246,14 @@ fn next_victim(
             selected = Some(rank);
         }
     }
-    let (_, _, key, reason, is_new) = selected?;
+    let has_more = base_scan.peek().is_some() || new_scan.peek().is_some();
+    let Some((_, _, key, reason, is_new)) = selected else {
+        return if has_more { VictimSearch::Deferred } else { VictimSearch::Exhausted };
+    };
     drop(new_scan);
     drop(base_scan);
     if is_new {
         remove_new_candidate(&key, new_order, new_stamps);
     }
-    Some((key, reason))
+    VictimSearch::Found(key, reason)
 }

@@ -186,6 +186,27 @@ pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockVal
                     .collect(),
             ),
         ]),
+        Message::TeleportLocationRequest(message) => Some(vec![
+            one(vec![FieldValue::Uuid(message.agent_id), FieldValue::Uuid(message.session_id)]),
+            one(vec![FieldValue::U64(message.region_handle), FieldValue::Vector3(message.position), FieldValue::Vector3(message.look_at)]),
+        ]),
+        Message::TeleportLocal(message) => Some(vec![one(vec![
+            FieldValue::Uuid(message.agent_id),
+            FieldValue::U32(message.location_id),
+            FieldValue::Vector3(message.position),
+            FieldValue::Vector3(message.look_at),
+            FieldValue::U32(message.teleport_flags),
+        ])]),
+        Message::TeleportLandmarkRequest(message) => Some(vec![one(vec![
+            FieldValue::Uuid(message.agent_id),
+            FieldValue::Uuid(message.session_id),
+            FieldValue::Uuid(message.landmark_id),
+        ])]),
+        Message::TeleportProgress(message) => Some(vec![
+            one(vec![FieldValue::Uuid(message.agent_id)]),
+            one(vec![FieldValue::U32(message.teleport_flags), FieldValue::Bytes(message.message.clone())]),
+        ]),
+        Message::TeleportStart(message) => Some(vec![one(vec![FieldValue::U32(message.teleport_flags)])]),
         Message::LogoutRequest(message) => {
             Some(vec![one(vec![FieldValue::Uuid(message.agent_data.agent_id), FieldValue::Uuid(message.agent_data.session_id)])])
         }

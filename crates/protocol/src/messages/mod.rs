@@ -11,8 +11,9 @@ pub mod region;
 pub mod terrain;
 
 pub use self::agent::{
-    AgentMovementComplete, AgentThrottle, AgentUpdate, AvatarAppearance, AvatarSitResponse, CompleteAgentMovement, LogoutReply,
-    LogoutRequest, SetAlwaysRun, TeleportCancel, TeleportFailed, TeleportFinish, ThrottleRates,
+    AgentMovementComplete, AgentThrottle, AgentUpdate, AlertInfo, AvatarAppearance, AvatarSitResponse, CompleteAgentMovement, LogoutReply,
+    LogoutRequest, SetAlwaysRun, TeleportCancel, TeleportFailed, TeleportFinish, TeleportLandmarkRequest, TeleportLocal,
+    TeleportLocationRequest, TeleportProgress, TeleportStart, ThrottleRates,
 };
 pub use self::chat::{ChatFromSimulator, ChatFromViewer};
 pub use self::circuit::{CompletePingCheck, PacketAck, PingId, StartPingCheck, UseCircuitCode};

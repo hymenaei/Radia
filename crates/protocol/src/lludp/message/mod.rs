@@ -198,6 +198,11 @@ messages! {
     RegionInfo(crate::messages::RegionInfo),
     TeleportFinish(crate::messages::TeleportFinish),
     TeleportFailed(crate::messages::TeleportFailed),
+    TeleportLocationRequest(crate::messages::TeleportLocationRequest),
+    TeleportLocal(crate::messages::TeleportLocal),
+    TeleportLandmarkRequest(crate::messages::TeleportLandmarkRequest),
+    TeleportProgress(crate::messages::TeleportProgress),
+    TeleportStart(crate::messages::TeleportStart),
 }
 
 #[cfg(test)]

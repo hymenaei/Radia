@@ -280,10 +280,19 @@ impl AssetDemand {
             return;
         };
         let textures = *settings.detail_textures();
-        let size = TextureSize::new(128);
-        let priority = data.summary().info.resolved_origin().map_or(Priority::Background, |origin| {
+        let previous = self.terrain_targets.get(&region).map(|target| target.size);
+        let (size, priority) = data.summary().info.resolved_origin().map_or((TextureSize::new(128), Priority::Background), |origin| {
             let center = origin + DVec3::new(128.0, 128.0, 0.0);
-            if camera.importance(center, 181.0).is_some() { Priority::Visible } else { Priority::Background }
+            let priority = if camera.importance(center, 181.0).is_some() { Priority::Visible } else { Priority::Background };
+            let size = if priority == Priority::Visible {
+                let position = camera.position();
+                let closest =
+                    DVec3::new(position.x.clamp(origin.x, origin.x + 256.0), position.y.clamp(origin.y, origin.y + 256.0), origin.z);
+                camera.texture_size(closest, 16.0, previous)
+            } else {
+                TextureSize::new(128)
+            };
+            (size, priority)
         });
         if self
             .terrain_targets
@@ -709,5 +718,24 @@ mod tests {
         assert_eq!(demand.terrain_targets[&east].textures, east_textures);
         assert_eq!(demand.entries.keys().filter(|key| key.region == south).count(), 4);
         assert_eq!(demand.entries.keys().filter(|key| key.region == east).count(), 4);
+    }
+
+    #[test]
+    fn nearby_terrain_details_refine_beyond_initial_size() {
+        let budget = Budget::default();
+        let region = Region::new(1);
+        let mut mirror = Mirror::default();
+        mirror.regions.insert(region, region_data(&budget, region, DVec3::ZERO, ids(60)));
+        let close = camera().with_quality(64.0, 1.0).unwrap();
+        let mut demand = AssetDemand::new(budget);
+        demand.set_camera(close);
+        demand.invalidate_region(region);
+        process(&mut demand, &mirror);
+        let nearby_size = demand.terrain_targets[&region].size;
+        assert!(nearby_size.edge() > 128);
+
+        demand.set_camera(close.with_quality(512.0, 1.0).unwrap());
+        process(&mut demand, &mirror);
+        assert_eq!(demand.terrain_targets[&region].size, nearby_size);
     }
 }

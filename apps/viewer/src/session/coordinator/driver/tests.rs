@@ -4,6 +4,16 @@ use ::inventory::{
     AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryLimits, InventoryNodeId, InventoryNodeKey,
     InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
 };
+use math::{Quat, Vec3};
+use network::{Delivery, SimulatorId};
+use protocol::{
+    lludp::{BlockValues, FieldValue, Message, Packet, SchemaMessage},
+    messages::{
+        AgentRequestSit, AgentSit, AvatarSitResponse,
+        agent::agent_request_sit::{AgentData as SitAgentData, TargetObject},
+        agent::avatar_sit_response::{SitObject, SitTransform},
+    },
+};
 use tokio::sync::oneshot;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
@@ -56,6 +66,75 @@ fn disconnect_request_keeps_failure() {
 #[test]
 fn unexpected_primary_disconnect_fails() {
     assert_eq!(network_end_after_stream_close(false, None, true), SessionEnd::Failed("The primary simulator disconnected.".into()));
+}
+
+use super::{SitTransport, handle_sit_alert, process_agent_control_command, process_sit_response};
+
+struct LoopbackSitTransport<'a> {
+    socket: &'a tokio::net::UdpSocket,
+    destination: std::net::SocketAddr,
+    simulator: SimulatorId,
+    sequence: std::sync::atomic::AtomicU32,
+}
+
+impl LoopbackSitTransport<'_> {
+    async fn send(&self, simulator: SimulatorId, delivery: Delivery, message: Message) -> Result<(), network::Error> {
+        assert_eq!(simulator, self.simulator);
+        assert_eq!(delivery, Delivery::Reliable);
+        let sequence = self.sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let bytes = Packet::new(sequence, message).encode().map_err(|_| network::Error::SessionClosed)?;
+        self.socket.send_to(&bytes, self.destination).await.map(|_| ()).map_err(|_| network::Error::SessionClosed)
+    }
+}
+
+impl SitTransport for LoopbackSitTransport<'_> {
+    async fn send_request(&self, simulator: SimulatorId, request: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error> {
+        self.send(simulator, delivery, Message::AgentRequestSit(request)).await
+    }
+
+    async fn send_sit(&self, simulator: SimulatorId, sit: AgentSit, delivery: Delivery) -> Result<(), network::Error> {
+        self.send(simulator, delivery, Message::AgentSit(sit)).await
+    }
+}
+
+async fn receive_loopback_message(socket: &tokio::net::UdpSocket) -> Message {
+    let mut bytes = [0; 2048];
+    let (length, _) = socket.recv_from(&mut bytes).await.expect("loopback packet");
+    Packet::decode(&bytes[..length]).expect("valid loopback packet").message().clone()
+}
+
+async fn send_loopback_message(socket: &tokio::net::UdpSocket, destination: std::net::SocketAddr, message: Message) {
+    let bytes = Packet::new(1, message).encode().expect("encode loopback packet");
+    socket.send_to(&bytes, destination).await.expect("send loopback packet");
+}
+
+fn alert_message(message: &[u8]) -> Message {
+    let schema = SchemaMessage::schema_by_name("AlertMessage").expect("AlertMessage schema");
+    Message::Schema(
+        SchemaMessage::new(
+            schema,
+            vec![
+                BlockValues::single(vec![FieldValue::Bytes(message.to_vec())]),
+                BlockValues::new(Vec::new()),
+                BlockValues::new(Vec::new()),
+            ],
+        )
+        .expect("valid AlertMessage"),
+    )
+}
+
+fn sit_response(object_id: Uuid) -> Message {
+    Message::AvatarSitResponse(AvatarSitResponse {
+        sit_object: SitObject { id: Some(object_id) },
+        sit_transform: SitTransform {
+            auto_pilot: Some(true),
+            sit_position: Some(Vec3::new(4.0, 5.0, 6.0)),
+            sit_rotation: Some(Quat::IDENTITY),
+            camera_eye_offset: Some(Vec3::new(2.0, 0.0, 1.0)),
+            camera_at_offset: Some(Vec3::new(0.0, 0.0, 1.0)),
+            force_mouselook: Some(false),
+        },
+    })
 }
 
 fn category(key: CategoryKey, parent: Option<CategoryKey>, version: ServerVersion, descendent_count: Option<u32>) -> Category {
@@ -251,4 +330,94 @@ async fn cache_restore_move_resolves_pending_inventory_edit() {
     resolve_pending_inventory_moves(&mut pending, &changes);
     confirmation.await.expect("cache restore change set confirms pending edit");
     assert!(pending.is_empty());
+}
+
+#[tokio::test]
+async fn unrelated_alert_preserves_pending_sit() {
+    use crate::{
+        session::{AgentControlEvent, AgentControlState, CameraUplink, SitCameraOverride, SitOutcome},
+        test_helpers::simulator_id,
+    };
+
+    let simulator_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
+    let viewer_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback viewer");
+    let simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x61);
+    let session_id = Uuid::from_u128(0x62);
+    let object_id = Uuid::from_u128(0x63);
+    let offset = Vec3::new(1.0, 2.0, 3.0);
+    let (handle, mut agent_control, camera_updates) = AgentControlState::new();
+    let call = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.sit_on_object(object_id, offset).await }
+    });
+    let AgentControlEvent::Command(Some(command)) = agent_control.next_event().await else { panic!("sit command") };
+    let transport = LoopbackSitTransport {
+        socket: &viewer_socket,
+        destination: simulator_socket.local_addr().expect("simulator address"),
+        simulator,
+        sequence: std::sync::atomic::AtomicU32::new(1),
+    };
+    let mut camera = CameraUplink::new();
+    process_agent_control_command(&transport, &mut agent_control, &mut camera, Some(simulator), Some((agent_id, session_id)), command)
+        .await;
+
+    let expected_request =
+        AgentRequestSit { agent_data: SitAgentData { agent_id, session_id }, target_object: TargetObject { target_id: object_id, offset } };
+    assert_eq!(receive_loopback_message(&simulator_socket).await, Message::AgentRequestSit(expected_request));
+
+    let viewer_address = viewer_socket.local_addr().expect("viewer address");
+    send_loopback_message(&simulator_socket, viewer_address, alert_message(b"Unrelated notice")).await;
+    let alert = receive_loopback_message(&viewer_socket).await;
+    std::assert_matches!(handle_sit_alert(&mut agent_control, Some(simulator), simulator, &alert), false);
+
+    send_loopback_message(&simulator_socket, viewer_address, sit_response(object_id)).await;
+    let response = receive_loopback_message(&viewer_socket).await;
+    process_sit_response(&transport, &mut agent_control, simulator, Some((agent_id, session_id)), &response).await;
+    assert_eq!(receive_loopback_message(&simulator_socket).await, Message::AgentSit(AgentSit { agent_id, session_id }));
+    assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: true, force_mouselook: false }));
+    assert_eq!(
+        *camera_updates.borrow(),
+        Some(SitCameraOverride { object_id, eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) })
+    );
+}
+
+#[tokio::test]
+async fn sit_failure_alert_returns_refused() {
+    use crate::{
+        session::{AgentControlEvent, AgentControlState, CameraUplink, SitOutcome},
+        test_helpers::simulator_id,
+    };
+
+    let simulator_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
+    let viewer_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback viewer");
+    let simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x71);
+    let session_id = Uuid::from_u128(0x72);
+    let object_id = Uuid::from_u128(0x73);
+    let (handle, mut agent_control, _) = AgentControlState::new();
+    let call = tokio::spawn(async move { handle.sit_on_object(object_id, Vec3::ZERO).await });
+    let AgentControlEvent::Command(Some(command)) = agent_control.next_event().await else { panic!("sit command") };
+    let transport = LoopbackSitTransport {
+        socket: &viewer_socket,
+        destination: simulator_socket.local_addr().expect("simulator address"),
+        simulator,
+        sequence: std::sync::atomic::AtomicU32::new(1),
+    };
+    process_agent_control_command(
+        &transport,
+        &mut agent_control,
+        &mut CameraUplink::new(),
+        Some(simulator),
+        Some((agent_id, session_id)),
+        command,
+    )
+    .await;
+    let Message::AgentRequestSit(request) = receive_loopback_message(&simulator_socket).await else { panic!("AgentRequestSit") };
+    assert_eq!(request.target_object.target_id, object_id);
+
+    send_loopback_message(&simulator_socket, viewer_socket.local_addr().expect("viewer address"), alert_message(b"SitFailed\0")).await;
+    let alert = receive_loopback_message(&viewer_socket).await;
+    std::assert_matches!(handle_sit_alert(&mut agent_control, Some(simulator), simulator, &alert), true);
+    assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::Refused));
 }

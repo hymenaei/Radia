@@ -16,7 +16,7 @@ use tokio::{runtime::Handle, sync::Semaphore};
 use uuid::Uuid;
 use world::{
     EnvironmentAssignment, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_SOURCE_BYTES, OrderEvidence,
-    ParcelLocalId, Region, RegionOutcome, UpdateSource,
+    ParcelLocalId, Region, RegionOutcome, UpdateAuthority, UpdateSource,
 };
 
 use super::world::SessionWorld;
@@ -130,9 +130,8 @@ impl EnvironmentIntake {
     }
 
     fn clear_parcel(&mut self, world: &mut SessionWorld, region: Region) {
-        let Some(source) = self.source(region) else { return };
-        if let Err(error) = world.observe_agent_parcel(source, None) {
-            tracing::warn!(region = region.get(), %error, "could not clear environment parcel selection");
+        if let Err(error) = world.clear_agent_parcel(region) {
+            tracing::warn!(region = region.get(), %error, "could not clear current parcel state");
         }
         if let Some(route) = self.routes.get_mut(&region) {
             route.parcel = None;
@@ -150,7 +149,7 @@ impl EnvironmentIntake {
         }
     }
 
-    fn parcel(&mut self, world: &mut SessionWorld, region: Region, notice: ParcelNotice) {
+    fn parcel(&mut self, world: &mut SessionWorld, region: Region, notice: ParcelNotice, update_selection: bool) {
         let Some(route) = self.routes.get(&region) else { return };
         if let Some(previous) = route.parcel {
             if notice.sequence < 0 && previous.parcel != notice.parcel {
@@ -174,14 +173,25 @@ impl EnvironmentIntake {
         let notice =
             ParcelNotice { sequence: route.parcel.map_or(notice.sequence, |previous| previous.sequence.max(notice.sequence)), ..notice };
         if route.parcel.is_some_and(|previous| previous.parcel != notice.parcel) {
-            self.clear_parcel(world, region);
+            self.cancel_parcel(region);
         }
-        let Some(source) = self.source(region) else { return };
-        if let Err(error) = world.observe_agent_parcel(source, Some(notice.parcel)) {
-            tracing::warn!(region = region.get(), %error, "could not observe environment parcel selection");
+        let source = if update_selection {
+            let Some(source) = self.source(region) else { return };
+            let source = source.with_authority(UpdateAuthority::Untracked);
+            if let Err(error) = world.observe_agent_parcel(source, Some(notice.parcel)) {
+                tracing::warn!(region = region.get(), %error, "could not observe environment parcel selection");
+                return;
+            }
+            Some(source)
+        } else {
+            None
+        };
+        let Some(source) = source.or_else(|| self.source(region)) else {
             return;
+        };
+        if let Some(route) = self.routes.get_mut(&region) {
+            route.parcel = Some(notice);
         }
-        self.routes.get_mut(&region).expect("registered environment route").parcel = Some(notice);
         if notice.overrides {
             self.queue(world, region, EnvironmentScope::Parcel(notice.parcel));
         } else if let Some(target) = world.world().environment_target(region, EnvironmentScope::Parcel(notice.parcel)) {
@@ -307,7 +317,13 @@ impl EnvironmentIntake {
                         return;
                     }
                     route.parcel_order = Some(order);
-                    self.parcel(world, region, notice);
+                    let current = world.world().parcel_state(region).and_then(|state| state.current);
+                    if current.as_ref().is_none_or(|current| {
+                        u32::try_from(notice.sequence).ok() != Some(current.sequence_id) || current.properties.local_id != notice.parcel
+                    }) {
+                        return;
+                    }
+                    self.parcel(world, region, notice, false);
                 }
                 Ok(None) => {}
                 Err(error) => tracing::debug!(?error, "invalid parcel environment notification"),
@@ -323,7 +339,7 @@ impl EnvironmentIntake {
         }
         let Some(region) = world.region_for(simulator) else { return };
         match parcel_value(body) {
-            Ok(Some(notice)) => self.parcel(world, region, notice),
+            Ok(Some(notice)) => self.parcel(world, region, notice, true),
             Ok(None) => {}
             Err(error) => tracing::debug!(?error, "invalid parcel environment notification"),
         }
@@ -685,21 +701,21 @@ mod tests {
         let mut intake = EnvironmentIntake::new(Handle::current());
         intake.routes.insert(region, Route { client, parcel: None, parcel_order: None });
         let notice = ParcelNotice { parcel: ParcelLocalId::new(42).unwrap(), sequence: 1, version: 7, overrides: true };
-        intake.parcel(&mut world, region, ParcelNotice { sequence: -10000, ..notice });
+        intake.parcel(&mut world, region, ParcelNotice { sequence: -10000, ..notice }, true);
         assert_eq!(world.world().environment(region).unwrap().parcel, None, "selected parcels do not select the avatar parcel");
-        intake.parcel(&mut world, region, notice);
+        intake.parcel(&mut world, region, notice, true);
         let old = intake.queued.remove(&(region, scope())).unwrap();
         intake.order.clear();
-        intake.parcel(&mut world, region, ParcelNotice { parcel: ParcelLocalId::new(43).unwrap(), sequence: 2, ..notice });
-        intake.parcel(&mut world, region, ParcelNotice { sequence: 3, ..notice });
+        intake.parcel(&mut world, region, ParcelNotice { parcel: ParcelLocalId::new(43).unwrap(), sequence: 2, ..notice }, true);
+        intake.parcel(&mut world, region, ParcelNotice { sequence: 3, ..notice }, true);
         intake.queued.clear();
         intake.order.clear();
         intake.complete(&mut world, Completion { request: old, result: decode(RESPONSE.as_bytes(), scope()) });
         assert_eq!(world.world().environment(region).unwrap().parcel.unwrap().assignment, None, "late A results cannot survive A → B → A");
-        intake.parcel(&mut world, region, ParcelNotice { sequence: 0, overrides: false, ..notice });
+        intake.parcel(&mut world, region, ParcelNotice { sequence: 0, overrides: false, ..notice }, true);
         let parcel = world.world().environment(region).unwrap().parcel.unwrap();
         assert_eq!(parcel.assignment.unwrap().source, EnvironmentSource::Inherit, "disabling parcel overrides clears active settings");
-        intake.parcel(&mut world, region, ParcelNotice { sequence: 1, parcel: ParcelLocalId::new(43).unwrap(), ..notice });
+        intake.parcel(&mut world, region, ParcelNotice { sequence: 1, parcel: ParcelLocalId::new(43).unwrap(), ..notice }, true);
         assert_eq!(
             world.world().environment(region).unwrap().parcel.unwrap().parcel,
             notice.parcel,
@@ -759,6 +775,7 @@ mod tests {
             &mut world,
             region,
             ParcelNotice { parcel: ParcelLocalId::new(42).unwrap(), sequence: 1, version: 7, overrides: true },
+            true,
         );
         let Some(completion) = intake.next_completion().await else { panic!("environment completion missing") };
         intake.complete(&mut world, *completion);

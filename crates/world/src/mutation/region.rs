@@ -77,6 +77,7 @@ impl World {
         let removed_region = self.regions.remove(&region).expect("active region remains registered");
         self.terrain_patches -= removed_region.terrain.patch_count();
         self.environment_bytes -= removed_region.environment.source_bytes();
+        self.parcel_bytes -= removed_region.parcels.retained_bytes();
         self.retired.insert(region);
         self.tombstones.remove_region(region);
         self.floors.remove(&region);

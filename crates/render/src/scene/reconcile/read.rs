@@ -276,6 +276,7 @@ impl Reconciler {
             WorldChange::EnvironmentUpdated(region) => {
                 self.world.environments.insert(region);
             }
+            WorldChange::ParcelUpdated(_) => {}
             WorldChange::TerrainPatchUpdated { region, .. } | WorldChange::WaterHeightUpdated(region) => {
                 self.world.terrain.insert(region);
             }

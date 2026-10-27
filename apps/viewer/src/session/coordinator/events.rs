@@ -1,11 +1,15 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
 
 #[cfg(test)]
 use network::Event;
 use network::{AgentSession, PacketOrder, SimulatorId};
 use protocol::lludp::Message;
+use protocol::messages::ParcelProperties;
 use uuid::Uuid;
-use world::{Applied, LocalAddress, ObjectObservation, OrderEvidence, OrderEvidence::Ordered, RegionHandle, UpdateSource};
+use world::{
+    Applied, LocalAddress, ObjectObservation, OrderEvidence, OrderEvidence::Ordered, ParcelAccessSettings, ParcelBitmap, ParcelFlags,
+    ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesData, ParcelPropertiesObservation, RegionHandle, UpdateSource,
+};
 
 use super::{PresentationMailbox, ViewerUpdate};
 use crate::session::{
@@ -42,6 +46,8 @@ pub(super) enum DecodedWorldUpdate {
     Object(ObjectBatch),
     AvatarAppearance { source: UpdateSource, update: AvatarAppearanceMessage },
     SitTarget { source: UpdateSource, update: SitTargetUpdate },
+    ParcelOverlay { source: UpdateSource, observation: ParcelOverlayObservation },
+    ParcelProperties { source: UpdateSource, observation: ParcelPropertiesObservation },
     Malformed { invalid_blocks: usize, invalid_fields: usize },
 }
 
@@ -61,6 +67,15 @@ pub(super) fn decode_simulator_world_update(
 ) -> Option<DecodedWorldUpdate> {
     let region = world.region_for(simulator_id)?;
     if let Message::RegionHandshake(handshake) = message {
+        let extended = (!handshake.region_info4.is_empty())
+            .then(|| handshake.region_info4.iter().fold(0_u64, |flags, block| flags | block.region_flags_extended));
+        if let Err(error) = world.observe_region_flags(
+            UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
+            Some(handshake.region_info1.region_flags),
+            extended,
+        ) {
+            tracing::debug!(simulator = simulator_id.get(), region = region.get(), %error, "could not update region parcel restrictions");
+        }
         if let Err(error) = world
             .update_water_height(UpdateSource::new(region, sequence, order_evidence(packet_order), 0), handshake.region_info1.water_height)
         {
@@ -74,6 +89,32 @@ pub(super) fn decode_simulator_world_update(
         ) {
             tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "could not update region handshake metadata");
         }
+    }
+    if let Message::RegionInfo(info) = message {
+        let extended = info.region_info3.iter().filter_map(|block| block.region_flags_extended).reduce(|a, b| a | b);
+        if let Err(error) = world.observe_region_flags(
+            UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
+            info.region_info.region_flags,
+            extended,
+        ) {
+            tracing::debug!(simulator = simulator_id.get(), region = region.get(), %error, "could not update region parcel restrictions");
+        }
+    }
+
+    if let Message::ParcelOverlay(message) = message {
+        return Some(DecodedWorldUpdate::ParcelOverlay {
+            source: UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
+            observation: ParcelOverlayObservation { sequence_id: message.sequence_id, data: message.data.clone() },
+        });
+    }
+    if let Message::ParcelProperties(message) = message {
+        return Some(match parcel_properties_observation(message) {
+            Ok(observation) => DecodedWorldUpdate::ParcelProperties {
+                source: UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
+                observation,
+            },
+            Err(()) => DecodedWorldUpdate::Malformed { invalid_blocks: 1, invalid_fields: 0 },
+        });
     }
 
     if let Some(update) = decode_sit_target_update(message) {
@@ -248,6 +289,21 @@ impl WorldHandoff {
                     None => None,
                 }
             }
+            DecodedWorldUpdate::ParcelOverlay { source, observation } => {
+                if let Err(error) = world.observe_parcel_overlay(source, observation) {
+                    tracing::debug!(simulator = simulator_id.get(), region = source.region().get(), %error, "could not apply parcel overlay part");
+                }
+                None
+            }
+            DecodedWorldUpdate::ParcelProperties { source, observation } => {
+                if self.world_primary != Some(simulator_id) {
+                    return None;
+                }
+                if let Err(error) = world.observe_parcel_properties(source, observation) {
+                    tracing::debug!(simulator = simulator_id.get(), region = source.region().get(), %error, "could not apply current parcel properties");
+                }
+                None
+            }
             DecodedWorldUpdate::Malformed { invalid_blocks, invalid_fields } => {
                 let mut summary = IngestSummary::new(IngestStatus::Applied);
                 summary.invalid_blocks = invalid_blocks;
@@ -398,6 +454,59 @@ impl WorldHandoff {
         }
         (completed, applied)
     }
+}
+
+fn parcel_properties_observation(message: &ParcelProperties) -> Result<ParcelPropertiesObservation, ()> {
+    let parcel = &message.parcel_data;
+    let request_result = parcel.request_result.ok_or(())?;
+    let sequence_id = parcel.sequence_id.ok_or(())?;
+    if request_result == -1 || sequence_id < 0 {
+        return Ok(ParcelPropertiesObservation { request_result, sequence_id, properties: None });
+    }
+    let local_id = ParcelLocalId::new(parcel.local_id.ok_or(())?).ok_or(())?;
+    let name = wire_string(parcel.name.as_deref().ok_or(())?, world::MAX_PARCEL_NAME_BYTES)?;
+    let description = wire_string(parcel.description.as_deref().ok_or(())?, world::MAX_PARCEL_DESCRIPTION_BYTES)?;
+    let music_url = wire_string(parcel.music_url.as_deref().ok_or(())?, world::MAX_PARCEL_URL_BYTES)?;
+    let media_url = wire_string(parcel.media_url.as_deref().ok_or(())?, world::MAX_PARCEL_URL_BYTES)?;
+    let bitmap = ParcelBitmap::from_bytes(parcel.bitmap.as_deref().ok_or(())?).map_err(|_| ())?;
+    let area = u32::try_from(parcel.area.ok_or(())?).map_err(|_| ())?;
+    let pass_price = parcel.pass_price.map(u32::try_from).transpose().map_err(|_| ())?;
+    let properties = ParcelPropertiesData {
+        local_id,
+        name,
+        description,
+        owner_id: parcel.owner_id,
+        group_id: parcel.group_id,
+        group_owned: parcel.is_group_owned.ok_or(())?,
+        area,
+        flags: ParcelFlags::from_bits(parcel.parcel_flags.ok_or(())?),
+        bitmap,
+        landing_point: parcel.user_location,
+        landing_look_at: parcel.user_look_at,
+        landing_type: parcel.landing_type,
+        music_url,
+        media_url,
+        access: ParcelAccessSettings {
+            region_push_override: parcel.region_push_override,
+            region_deny_anonymous: parcel.region_deny_anonymous,
+            region_deny_identified: parcel.region_deny_identified,
+            region_deny_transacted: parcel.region_deny_transacted,
+            region_deny_age_unverified: message.age_verification_block.region_deny_age_unverified,
+            region_allow_access_override: message.region_allow_access_block.region_allow_access_override,
+            pass_price,
+            pass_hours: parcel.pass_hours,
+        },
+    };
+    Ok(ParcelPropertiesObservation { request_result, sequence_id, properties: Some(properties) })
+}
+
+fn wire_string(bytes: &[u8], limit: usize) -> Result<Arc<str>, ()> {
+    let bytes = bytes.strip_suffix(&[0]).unwrap_or(bytes);
+    if bytes.len() > limit {
+        return Err(());
+    }
+    let decoded: Cow<'_, str> = String::from_utf8_lossy(bytes);
+    Ok(Arc::from(decoded.as_ref()))
 }
 
 pub(super) fn conflicts_with_handoff_observation(operation: &ObjectOperation, observation: &ObjectObservation) -> bool {

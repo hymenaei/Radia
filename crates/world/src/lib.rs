@@ -55,6 +55,12 @@ pub use region::environment::{
     EnvironmentAssignment, EnvironmentRead, EnvironmentScope, EnvironmentSource, EnvironmentTarget, MAX_ENVIRONMENT_BYTES,
     MAX_ENVIRONMENT_READ_BYTES, MAX_ENVIRONMENT_SOURCE_BYTES, ParcelEnvironment, ParcelLocalId,
 };
+pub use region::parcel::{
+    CurrentParcel, EffectiveRestrictions, MAX_PARCEL_BYTES, MAX_PARCEL_DESCRIPTION_BYTES, MAX_PARCEL_NAME_BYTES, MAX_PARCEL_READ_BYTES,
+    MAX_PARCEL_REGION_BYTES, MAX_PARCEL_URL_BYTES, PARCEL_BITMAP_BYTES, PARCEL_GRID_EDGE, PARCEL_OVERLAY_CELLS, PARCEL_OVERLAY_PART_BYTES,
+    PARCEL_OVERLAY_PARTS, ParcelAccessSettings, ParcelBitmap, ParcelFlags, ParcelOverlayCell, ParcelOverlayGrid, ParcelOverlayObservation,
+    ParcelOwnership, ParcelPropertiesData, ParcelPropertiesObservation, ParcelRead, RegionFlags,
+};
 pub use region::terrain::{
     MAX_TERRAIN_PAGE_PATCHES, MAX_TERRAIN_PATCHES, TERRAIN_PATCH_SAMPLES, TERRAIN_PATCH_SIZE, TERRAIN_REGION_SIZE, TerrainPage,
     TerrainPageCursor, TerrainPatch, TerrainPatchError, TerrainPatchId,
@@ -80,6 +86,7 @@ pub struct World {
     object_media_bytes: usize,
     terrain_patches: usize,
     environment_bytes: usize,
+    parcel_bytes: usize,
     limits: WorldLimits,
     journal: Journal,
 }
@@ -100,6 +107,7 @@ impl World {
             object_media_bytes: 0,
             terrain_patches: 0,
             environment_bytes: 0,
+            parcel_bytes: 0,
             limits,
             journal: Journal::new(),
         }

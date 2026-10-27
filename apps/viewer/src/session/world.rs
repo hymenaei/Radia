@@ -6,7 +6,8 @@ use world::{
     Appearance, Applied, ApplyError,
     ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded},
     EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
-    OrderEvidence, ParcelLocalId, Region, RegionApplied, RegionHandle, RegionInfo, RegionOutcome, UpdateSource, World, WorldLimits,
+    OrderEvidence, ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesObservation, Region, RegionApplied, RegionHandle, RegionInfo,
+    RegionOutcome, UpdateSource, World, WorldLimits,
 };
 
 use super::{
@@ -152,6 +153,7 @@ impl IngestSummary {
                         EntityBudgetExhausted
                         | TerrainBudgetExhausted
                         | EnvironmentBudgetExhausted
+                        | world::ApplyError::ParcelBudgetExhausted
                         | RegistrationBudgetExhausted
                         | RevisionExhausted
                         | FrameGenerationExhausted
@@ -234,6 +236,35 @@ impl SessionWorld {
         parcel: Option<ParcelLocalId>,
     ) -> Result<RegionApplied, ApplyError> {
         self.world.observe_agent_parcel(source, parcel)
+    }
+
+    pub(super) fn clear_agent_parcel(&mut self, region: Region) -> Result<RegionApplied, ApplyError> {
+        self.world.clear_agent_parcel(region)
+    }
+
+    pub(super) fn observe_parcel_overlay(
+        &mut self,
+        source: UpdateSource,
+        observation: ParcelOverlayObservation,
+    ) -> Result<RegionApplied, ApplyError> {
+        self.world.observe_parcel_overlay(source, observation)
+    }
+
+    pub(super) fn observe_parcel_properties(
+        &mut self,
+        source: UpdateSource,
+        observation: ParcelPropertiesObservation,
+    ) -> Result<RegionApplied, ApplyError> {
+        self.world.observe_parcel_properties(source, observation)
+    }
+
+    pub(super) fn observe_region_flags(
+        &mut self,
+        source: UpdateSource,
+        low: Option<u32>,
+        extended: Option<u64>,
+    ) -> Result<RegionApplied, ApplyError> {
+        self.world.observe_region_flags(source, low, extended)
     }
 
     pub(super) fn observe_environment(

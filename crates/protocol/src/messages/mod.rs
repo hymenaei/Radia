@@ -29,7 +29,7 @@ pub use self::object::{
     ObjectExtraParams, ObjectMotion, ObjectRequest, ObjectSound, ObjectSpecificData, ObjectText, ObjectUpdate, ObjectUpdateCached,
     ObjectUpdateCompressed, RegionData, RequestAgentData, RequestMultipleObjects,
 };
-pub use self::parcel::ParcelProperties;
+pub use self::parcel::{ParcelOverlay, ParcelProperties};
 pub use self::region::{
     ConfirmEnableSimulator, DisableSimulator, EnableSimulator, RegionHandleRequest, RegionHandshake, RegionHandshakeReply,
     RegionIdAndHandleReply, RegionInfo,

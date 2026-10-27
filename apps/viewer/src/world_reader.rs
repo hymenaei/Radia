@@ -15,14 +15,15 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use world::{
     Entity, EnvironmentRead, MAX_ENVIRONMENT_READ_BYTES, MAX_OBJECT_DETAIL_BATCH_BYTES, MAX_OBJECT_DETAIL_BATCH_ITEMS,
-    MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS,
-    ObjectDetailBatch, ObjectListItem, ObjectListPage, ObjectPageCursor, Region, RegionPage, RegionPageCursor, RegionSummary,
-    TERRAIN_PATCH_SAMPLES, TerrainPage, TerrainPageCursor, TerrainPatch, World, WorldChangeCursor, WorldChangePage, WorldChangeRecord,
-    WorldReadBarrier, WorldReadError, WorldRevision,
+    MAX_OBJECT_PAGE_ITEMS, MAX_PARCEL_READ_BYTES, MAX_REGION_PAGE_BYTES, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES,
+    MAX_WORLD_CHANGE_PAGE_ITEMS, ObjectDetailBatch, ObjectListItem, ObjectListPage, ObjectPageCursor, ParcelRead, Region, RegionPage,
+    RegionPageCursor, RegionSummary, TERRAIN_PATCH_SAMPLES, TerrainPage, TerrainPageCursor, TerrainPatch, World, WorldChangeCursor,
+    WorldChangePage, WorldChangeRecord, WorldReadBarrier, WorldReadError, WorldRevision,
 };
 
 const MAX_OUTSTANDING_READS: usize = 8;
-const MAX_RESERVED_REPLY_BYTES: usize = MAX_ENVIRONMENT_READ_BYTES;
+const MAX_RESERVED_REPLY_BYTES: usize =
+    if MAX_ENVIRONMENT_READ_BYTES > MAX_PARCEL_READ_BYTES { MAX_ENVIRONMENT_READ_BYTES } else { MAX_PARCEL_READ_BYTES };
 const READ_TIMEOUT: Duration = Duration::from_secs(1);
 pub(crate) const MAX_INTAKE_TURNS: usize = 8;
 const ACTIVE: u8 = 0;
@@ -116,6 +117,7 @@ pub(crate) enum ReadRequest {
     Changes(WorldChangeCursor, usize, ReadResponder<WorldChangePage>),
     Terrain(Region, Option<TerrainPageCursor>, usize, ReadResponder<Option<TerrainPage>>),
     Environment(Region, ReadResponder<Option<EnvironmentRead>>),
+    ParcelState(Region, ReadResponder<Option<ParcelRead>>),
 }
 
 impl ReadRequest {
@@ -138,6 +140,7 @@ impl ReadRequest {
                 reply.send(world.terrain_page(region, cursor, limit).map_err(ReadError::World));
             }
             Self::Environment(region, reply) if !reply.cancelled() => reply.send(Ok(world.environment(region))),
+            Self::ParcelState(region, reply) if !reply.cancelled() => reply.send(Ok(world.parcel_state(region))),
             _ => {}
         }
     }
@@ -195,6 +198,10 @@ impl WorldReader {
 
     pub async fn environment(&self, region: Region) -> Result<Option<EnvironmentRead>, ReadError> {
         self.request(MAX_ENVIRONMENT_READ_BYTES, |reply| ReadRequest::Environment(region, reply)).await
+    }
+
+    pub async fn parcel_state(&self, region: Region) -> Result<Option<ParcelRead>, ReadError> {
+        self.request(MAX_PARCEL_READ_BYTES, |reply| ReadRequest::ParcelState(region, reply)).await
     }
 
     pub async fn changes(&self, cursor: WorldChangeCursor, limit: usize) -> Result<WorldChangePage, ReadError> {

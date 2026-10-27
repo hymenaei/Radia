@@ -191,6 +191,7 @@ messages! {
     MoveInventoryItem(crate::messages::MoveInventoryItem),
     MoveInventoryFolder(crate::messages::MoveInventoryFolder),
     ParcelProperties(crate::messages::ParcelProperties),
+    ParcelOverlay(crate::messages::ParcelOverlay),
     GenericMessage(crate::messages::GenericMessage),
     LayerData(crate::messages::LayerData),
     RegionInfo(crate::messages::RegionInfo),

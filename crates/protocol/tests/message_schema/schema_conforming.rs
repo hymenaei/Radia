@@ -435,6 +435,9 @@ pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockVal
                     .collect(),
             ),
         ]),
+        Message::ParcelOverlay(message) => {
+            Some(vec![one(vec![FieldValue::S32(message.sequence_id), FieldValue::Bytes(message.data.clone())])])
+        }
         Message::Schema(_) | Message::Unknown { .. } => None,
     }
 }

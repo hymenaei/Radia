@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::{Entity, LocalAddress, ObjectMedia, Parent};
-use crate::{MAX_ENVIRONMENT_BYTES, MAX_TERRAIN_PATCHES, World};
+use crate::{MAX_ENVIRONMENT_BYTES, MAX_PARCEL_BYTES, MAX_TERRAIN_PATCHES, World};
 
 #[cfg(test)]
 impl World {
@@ -11,6 +11,13 @@ impl World {
         let environment_bytes: usize = self.regions.values().map(|state| state.environment.source_bytes()).sum();
         if environment_bytes != self.environment_bytes || environment_bytes > MAX_ENVIRONMENT_BYTES {
             return Err("environment source accounting is inconsistent");
+        }
+        let parcel_bytes: usize = self.regions.values().map(|state| state.parcels.retained_bytes()).sum();
+        if parcel_bytes != self.parcel_bytes || parcel_bytes > MAX_PARCEL_BYTES {
+            return Err("parcel state accounting is inconsistent");
+        }
+        if self.regions.values().any(|state| !state.parcels.invariants_hold()) {
+            return Err("parcel state invariants are inconsistent");
         }
         let terrain_patches: usize = self.regions.values().map(|state| state.terrain.patch_count()).sum();
         if terrain_patches != self.terrain_patches || terrain_patches > MAX_TERRAIN_PATCHES {

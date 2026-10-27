@@ -9,7 +9,6 @@ use std::{
     time::Duration,
 };
 
-pub use storage::EvictionReason as CacheEvictionReason;
 use storage::{
     Cache as StorageCache, CacheValue, EvictionReason, Key as StorageKey, Lookup as StorageLookup, Namespace, NamespaceId, Protection,
     StorageError, UnavailableReason,
@@ -20,6 +19,8 @@ use crate::{
     budget::Reservation,
     cache_policy::{AssetEvictionPolicy, DecodeCosts},
 };
+
+pub use storage::EvictionReason as CacheEvictionReason;
 
 const MAX_IN_FLIGHT_WRITES: usize = 2;
 const TEXTURES: NamespaceId = NamespaceId::new(0);

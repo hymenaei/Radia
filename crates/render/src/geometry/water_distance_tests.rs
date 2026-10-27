@@ -14,7 +14,6 @@ use crate::{
     FrameInput,
     environment::{Schedule, Sources, evaluate},
     pipeline::{PostProcess, projection},
-    scene::{Budget, Reconciler},
     texture::CompressionQuality,
 };
 
@@ -50,13 +49,13 @@ fn water_color_ignores_far_plane() {
             26.0,
         )
     });
-    let (_scene, view) = Reconciler::new(Budget::default());
+    let (_scene, view, _) = fixtures::water_scene(0);
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float);
 
     for (preset, environment) in ["midday", "sunset", "midnight"].into_iter().zip(&presets) {
         for height in [0.5, 2.0, 20.0, 200.0] {
             let mut render = |draw_distance| {
-                let camera = Camera::new(DVec3::new(240.0, 128.0, WATER_HEIGHT + height), Vec3::X, 1.0, SIZE)
+                let camera = Camera::new(DVec3::new(128.0, 128.0, WATER_HEIGHT + height), Vec3::X, 1.0, SIZE)
                     .expect("camera is valid")
                     .with_quality(draw_distance, 1.0)
                     .expect("draw distance is valid");

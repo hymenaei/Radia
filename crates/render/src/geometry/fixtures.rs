@@ -19,6 +19,14 @@ pub(super) fn scene_with_scales(alpha: u8, scales: [Vec3; 2]) -> (Reconciler, Sc
 }
 
 pub(super) fn scene_with_mapping(alpha: u8, scales: [Vec3; 2], mapping: world::TextureMapping) -> (Reconciler, SceneView, Camera) {
+    scene_with_setup(alpha, scales, mapping, false)
+}
+
+pub(super) fn water_scene(alpha: u8) -> (Reconciler, SceneView, Camera) {
+    scene_with_setup(alpha, [Vec3::splat(2.0); 2], world::TextureMapping::Default, true)
+}
+
+fn scene_with_setup(alpha: u8, scales: [Vec3; 2], mapping: world::TextureMapping, with_water: bool) -> (Reconciler, SceneView, Camera) {
     let mut world = World::new(WorldLimits {
         max_region_registrations: 1,
         max_entities: 2,
@@ -58,6 +66,12 @@ pub(super) fn scene_with_mapping(alpha: u8, scales: [Vec3; 2], mapping: world::T
         object.surface_appearance =
             Some(SurfaceAppearance::new(FaceAppearance { color, mapping, ..Default::default() }, Vec::new()).unwrap());
         assert_matches!(world.observe_object(object).unwrap().outcome, world::ApplyOutcome::Introduced(_));
+    }
+    if with_water {
+        assert_matches!(
+            world.observe_water_height(UpdateSource::new(region, 3, OrderEvidence::Ordered(3), 0), 20.0).unwrap().outcome,
+            world::RegionOutcome::Patched { .. }
+        );
     }
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();

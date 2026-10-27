@@ -1,5 +1,5 @@
-use math::camera::rh::{proj::directx::perspective, view::look_to_mat4};
-use math::{DVec3, Mat4, Vec3};
+use math::camera::rh::view::look_to_mat4;
+use math::{DVec3, Mat4, Vec3, Vec4};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
     BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
@@ -27,6 +27,7 @@ pub(crate) const VERTEX_BYTES: usize = 32;
 const CAMERA_BYTES: usize = 128;
 const ATMOSPHERE_BYTES: usize = ATMOSPHERE_FLOATS * 4;
 const WATER_BYTES: usize = 32 * 4;
+pub(crate) const CAMERA_NEAR_PLANE: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Pipeline {
@@ -284,7 +285,7 @@ impl SurfacePipelines {
                     BindGroupEntry { binding: 2, resource: BindingResource::Buffer(self.region_water_uniform.as_entire_buffer_binding()) },
                     BindGroupEntry { binding: 3, resource: BindingResource::TextureView(textures.view(normal_map.current)) },
                     BindGroupEntry { binding: 4, resource: BindingResource::TextureView(textures.view(normal_map.next)) },
-                    BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&textures.default_sampler) },
+                    BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&textures.water_sampler) },
                 ],
             });
             self.region_water_normal_keys = keys;
@@ -332,7 +333,14 @@ fn write_floats(queue: &Queue, buffer: &Buffer, bytes: &mut [u8], values: &[f32]
 }
 
 pub(crate) fn projection(camera: Camera, size: [u32; 2]) -> Mat4 {
-    perspective(camera.vertical_fov() as f32, size[0] as f32 / size[1] as f32, camera.draw_distance() as f32, 0.05) * camera_view(camera)
+    let focal = 1.0 / (camera.vertical_fov() as f32 * 0.5).tan();
+    let aspect = size[0] as f32 / size[1] as f32;
+    Mat4::from_cols(
+        Vec4::new(focal / aspect, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, focal, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 0.0, -1.0),
+        Vec4::new(0.0, 0.0, CAMERA_NEAR_PLANE, 0.0),
+    ) * camera_view(camera)
 }
 
 pub(crate) fn camera_view(camera: Camera) -> Mat4 {
@@ -356,8 +364,11 @@ mod tests {
         assert!(matrix.project_point3(Vec3::new(10.0, -1.0, 0.0)).x > 0.0);
         assert!((matrix.project_point3(Vec3::new(0.05, 0.0, 0.0)).z - 1.0).abs() < 1e-5);
         let close = projection(camera.with_quality(32.0, 1.0).unwrap(), [1000, 1000]);
-        assert!(close.project_point3(Vec3::new(32.0, 0.0, 0.0)).z.abs() < 1e-6);
-        assert!(close.project_point3(Vec3::new(40.0, 0.0, 0.0)).z < 0.0);
+        let distant = projection(camera.with_quality(1024.0, 1.0).unwrap(), [1000, 1000]);
+        assert_eq!(close, distant);
+        assert!(close.project_point3(Vec3::new(32.0, 0.0, 0.0)).z > 0.0);
+        assert!(close.project_point3(Vec3::new(1_000_000.0, 0.0, 0.0)).z > 0.0);
+        assert!(math::Frustum::from_clip_matrix(close).intersects_sphere(DVec3::new(1.0e9, 0.0, 0.0), 0.0));
     }
 
     #[test]

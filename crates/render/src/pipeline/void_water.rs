@@ -7,7 +7,7 @@ use wgpu::{
 };
 
 use super::atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values};
-use super::surface::camera_view;
+use super::surface::{CAMERA_NEAR_PLANE, camera_view};
 use super::water::water_surface_values;
 use crate::{
     environment::Evaluated,
@@ -96,7 +96,7 @@ impl VoidWater {
             layout: &layout,
             entries: &[BindGroupEntry { binding: 0, resource: BindingResource::Buffer(uniform.as_entire_buffer_binding()) }],
         });
-        let normal_map_binding = textures.pair_binding(device, None, None);
+        let normal_map_binding = textures.water_pair_binding(device, None, None);
         Self {
             pipeline,
             uniform,
@@ -126,7 +126,7 @@ impl VoidWater {
         let keys = [normal_map.current, normal_map.next];
         let states = keys.map(|key| textures.view_state(key));
         if keys != [self.normal_map.current, self.normal_map.next] || states != self.normal_map_view_states {
-            self.normal_map_binding = textures.pair_binding(device, normal_map.current, normal_map.next);
+            self.normal_map_binding = textures.water_pair_binding(device, normal_map.current, normal_map.next);
             self.normal_map_view_states = states;
         }
         self.normal_map = normal_map;
@@ -134,14 +134,13 @@ impl VoidWater {
             return;
         };
         let count = region_water_count.min(MAX_REGIONS);
-        let far = camera.draw_distance().clamp(0.1, f64::from(f32::MAX) / 16.0) as f32;
-        let near = 0.05_f32;
+        let near = CAMERA_NEAR_PLANE;
         let normal_present = normal_map.current.is_some() || normal_map.next.is_some();
         let mut values = [0.0; VOID_WATER_UNIFORM_FLOATS];
         let mut offset = 0;
         append(&mut values, &mut offset, inverse.to_cols_array());
         append(&mut values, &mut offset, camera_view(camera).to_cols_array());
-        append(&mut values, &mut offset, [relative_water_height, count as f32, far, near]);
+        append(&mut values, &mut offset, [relative_water_height, count as f32, near, 0.0]);
         append(
             &mut values,
             &mut offset,

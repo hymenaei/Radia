@@ -274,6 +274,7 @@ pub(crate) struct Textures {
     pub(crate) layout: BindGroupLayout,
     pub(crate) pair_layout: BindGroupLayout,
     pub(crate) default_sampler: wgpu::Sampler,
+    pub(crate) water_sampler: wgpu::Sampler,
     fallback: BindGroup,
     fallback_view: TextureView,
     mip_layout: BindGroupLayout,
@@ -340,6 +341,16 @@ impl Textures {
             ],
         });
         let default_sampler = make_sampler(device, Sampler::default());
+        let water_sampler = device.create_sampler(&SamplerDescriptor {
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: MipmapFilterMode::Linear,
+            lod_max_clamp: 32.0,
+            anisotropy_clamp: 16,
+            ..Default::default()
+        });
         let texture = device.create_texture(&TextureDescriptor {
             label: Some("Neutral image"),
             size: Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -416,6 +427,7 @@ impl Textures {
             layout,
             pair_layout,
             default_sampler,
+            water_sampler,
             fallback,
             fallback_view,
             mip_layout,
@@ -637,13 +649,27 @@ impl Textures {
     }
 
     pub(crate) fn pair_binding(&self, device: &Device, first: Option<TextureKey>, second: Option<TextureKey>) -> BindGroup {
+        self.pair_binding_with_sampler(device, first, second, &self.default_sampler)
+    }
+
+    pub(crate) fn water_pair_binding(&self, device: &Device, first: Option<TextureKey>, second: Option<TextureKey>) -> BindGroup {
+        self.pair_binding_with_sampler(device, first, second, &self.water_sampler)
+    }
+
+    fn pair_binding_with_sampler(
+        &self,
+        device: &Device,
+        first: Option<TextureKey>,
+        second: Option<TextureKey>,
+        sampler: &wgpu::Sampler,
+    ) -> BindGroup {
         device.create_bind_group(&BindGroupDescriptor {
             label: Some("Texture pair"),
             layout: &self.pair_layout,
             entries: &[
                 BindGroupEntry { binding: 0, resource: BindingResource::TextureView(self.view(first)) },
                 BindGroupEntry { binding: 1, resource: BindingResource::TextureView(self.view(second)) },
-                BindGroupEntry { binding: 2, resource: BindingResource::Sampler(&self.default_sampler) },
+                BindGroupEntry { binding: 2, resource: BindingResource::Sampler(sampler) },
             ],
         })
     }

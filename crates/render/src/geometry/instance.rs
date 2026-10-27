@@ -1,6 +1,6 @@
 use math::{DVec3, Frustum, Mat4, Vec3, normal_matrix};
 
-use super::{Instance, TRANSFORM_BYTES};
+use super::{Instance, ShadingMode, TRANSFORM_BYTES};
 use crate::{material::FaceParams, pipeline::INSTANCE_BYTES, scene::Camera};
 
 pub(super) fn model(instance: &Instance, origin: DVec3) -> Mat4 {
@@ -35,9 +35,10 @@ pub(super) fn is_visible(instance: &Instance, camera: Camera, frustum: &Frustum)
     let center = (bounds.min.as_dvec3() + bounds.max.as_dvec3()) * 0.5 * instance.scale.as_dvec3();
     let offset = instance.position - camera.position() + (instance.rotation * center.as_vec3()).as_dvec3();
     let radius = ((bounds.max.as_dvec3() - bounds.min.as_dvec3()) * 0.5 * instance.scale.as_dvec3()).length();
+    let beyond_draw_distance = !matches!(&instance.shading, ShadingMode::RegionWater) && offset.length() - radius > camera.draw_distance();
     if !offset.is_finite()
         || !radius.is_finite()
-        || offset.length() - radius > camera.draw_distance()
+        || beyond_draw_distance
         || offset.abs().max_element() + radius > f64::from(f32::MAX) / 16.0
     {
         return false;
@@ -106,5 +107,38 @@ mod tests {
         let world_normal = normal * local_normal;
         let world_tangent = rotation * (scale * local_tangent);
         assert!(world_normal.dot(world_tangent).abs() < 1e-5);
+    }
+
+    #[test]
+    fn region_water_visibility_ignores_user_draw_distance() {
+        use crate::pipeline::projection;
+
+        let (_scene, view, _) = fixtures::scene(255);
+        let object = view.objects().next().expect("fixture object");
+        let (_, mesh) = object.mesh().expect("fixture mesh");
+        let camera = Camera::new(DVec3::new(240.0, 128.0, 20.0), -Vec3::X, 1.0, [1280, 720]).unwrap().with_quality(32.0, 1.0).unwrap();
+        let frustum = Frustum::from_clip_matrix(projection(camera, [1280, 720]));
+        let water = Instance {
+            mesh: mesh.clone(),
+            position: DVec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+            pickable: false,
+            faces: Vec::new(),
+            shading: ShadingMode::RegionWater,
+            region_water_id: Some(1),
+        };
+        let surface = Instance {
+            mesh: mesh.clone(),
+            position: DVec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+            pickable: true,
+            faces: Vec::new(),
+            shading: ShadingMode::Surface,
+            region_water_id: None,
+        };
+        assert!(is_visible(&water, camera, &frustum));
+        assert!(!is_visible(&surface, camera, &frustum));
     }
 }

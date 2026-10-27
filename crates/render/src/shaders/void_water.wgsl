@@ -99,8 +99,7 @@ struct VoidWaterOutput {
         void_water.surface,
         void_water.atmosphere,
     );
-    let finite_depth = void_water.plane.w * (void_water.plane.z / max(view_distance, void_water.plane.w) - 1.0) / (void_water.plane.z - void_water.plane.w);
-    let depth = max(finite_depth, 0.00000001);
+    let depth = max(void_water.plane.z / max(view_distance, void_water.plane.z), 0.00000001);
     var output: VoidWaterOutput;
     output.color = color;
     output.depth = depth;

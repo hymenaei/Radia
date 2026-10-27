@@ -570,7 +570,9 @@ impl World {
             current.current.as_ref().is_none_or(|current| current.sequence_id != sequence_id || current.properties != properties);
         if !environment_changed && !properties_changed {
             let current = &mut self.regions.get_mut(&region).expect("active region").parcels;
-            current.agent_fence = Some(fence);
+            if newer_field(fence, current.agent_fence) {
+                current.agent_fence = Some(fence);
+            }
             current.last_agent_sequence = Some(current.last_agent_sequence.map_or(sequence_id, |last| last.max(sequence_id)));
             return Ok(RegionApplied::unchanged());
         }
@@ -580,7 +582,9 @@ impl World {
             self.select_agent_parcel_at_revision(region, Some(properties.local_id), Some(fence), newer_sequence, revision);
         let parcels = &mut self.regions.get_mut(&region).expect("active region").parcels;
         parcels.current = Some(CurrentParcel { sequence_id, properties });
-        parcels.agent_fence = Some(fence);
+        if newer_field(fence, parcels.agent_fence) {
+            parcels.agent_fence = Some(fence);
+        }
         parcels.last_agent_sequence = Some(parcels.last_agent_sequence.map_or(sequence_id, |last| last.max(sequence_id)));
         self.parcel_bytes = self.parcel_bytes - old_bytes + next_bytes;
         let mut changes = Vec::with_capacity(2);

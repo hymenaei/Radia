@@ -904,6 +904,29 @@ mod tests {
         assert_eq!(world.world().environment(region).unwrap().parcel.unwrap().parcel, ParcelLocalId::new(43).unwrap());
     }
 
+    #[tokio::test]
+    async fn delayed_sequence_zero_lludp_reply_cannot_overwrite_newer_event_queue_properties() {
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let simulator = simulator_id();
+        let region = world.register_simulator(simulator, None).unwrap();
+        let client = Client::new(Url::parse("http://127.0.0.1:1/").unwrap()).unwrap();
+        let mut intake = EnvironmentIntake::new(Handle::current());
+        intake.routes.insert(region, Route { client, parcel: None, parcel_order: None });
+
+        let initial = parcel_properties_value(&parcel_properties_event(0, 41, "Initial parcel")).unwrap();
+        let _applied = world.observe_parcel_properties(UpdateSource::new(region, 1, OrderEvidence::Ordered(100), 0), initial).unwrap();
+        let event = parcel_properties_event(42, 43, "EventQueue parcel");
+        intake.capability(&mut world, simulator, "ParcelProperties", &event, Some(simulator));
+
+        let delayed = parcel_properties_value(&parcel_properties_event(0, 44, "Delayed UDP parcel")).unwrap();
+        let _applied = world.observe_parcel_properties(UpdateSource::new(region, 2, OrderEvidence::Ordered(99), 0), delayed).unwrap();
+
+        let current = world.world().parcel_state(region).unwrap().current.unwrap();
+        assert_eq!(current.sequence_id, 42);
+        assert_eq!(current.properties.local_id, ParcelLocalId::new(43).unwrap());
+        assert_eq!(current.properties.name.as_ref(), "EventQueue parcel");
+    }
+
     #[test]
     fn event_queue_parcel_properties_bound_untrusted_urls() {
         let mut value = parcel_properties_event(1, 2, "Parcel");

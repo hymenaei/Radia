@@ -147,6 +147,12 @@ pub enum Event {
     Failed(String),
 }
 
+impl Event {
+    pub(crate) fn is_application(&self) -> bool {
+        matches!(self, Self::CapabilityEvent { .. } | Self::CapabilityEventBatch { .. } | Self::SimulatorMessage { .. })
+    }
+}
+
 impl fmt::Debug for Event {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -309,14 +309,14 @@ impl SessionState {
     ) -> Result<(), SessionError> {
         let RunState { pending_events, logout_deadline, .. } = state;
         let event = event.into();
-        if logout_deadline.is_some() && is_application_event(&event.event) {
+        if logout_deadline.is_some() && event.event.is_application() {
             if let Some(watermark) = event.coverage_watermark() {
                 record_coverage_loss(&self.coverage_losses, watermark.simulator_id, watermark.source, CoverageLossReason::EventAdmission);
             }
             return Ok(());
         }
         let watermark = event.coverage_watermark();
-        let outcome = queue_simulator_event(events, pending_events, event);
+        let outcome = queue_simulator_event(events, pending_events, event).await;
         let should_logout = match outcome {
             EventQueueOutcome::Queued => false,
             EventQueueOutcome::ReceiverClosed => {
@@ -620,10 +620,6 @@ impl RunState {
             logout_deadline: None,
         }
     }
-}
-
-fn is_application_event(event: &Event) -> bool {
-    matches!(event, Event::CapabilityEvent { .. } | Event::CapabilityEventBatch { .. } | Event::SimulatorMessage { .. })
 }
 
 pub(super) async fn retry_pending_handoff_commands(retry: &mut time::Interval, connections: &mut HashMap<u64, SimulatorConnectionState>) {

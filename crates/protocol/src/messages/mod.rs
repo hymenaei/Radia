@@ -12,7 +12,7 @@ pub mod terrain;
 
 pub use self::agent::{
     AgentMovementComplete, AgentThrottle, AgentUpdate, AvatarAppearance, AvatarSitResponse, CompleteAgentMovement, LogoutReply,
-    LogoutRequest, TeleportCancel, TeleportFailed, TeleportFinish, ThrottleRates,
+    LogoutRequest, SetAlwaysRun, TeleportCancel, TeleportFailed, TeleportFinish, ThrottleRates,
 };
 pub use self::chat::{ChatFromSimulator, ChatFromViewer};
 pub use self::circuit::{CompletePingCheck, PacketAck, PingId, StartPingCheck, UseCircuitCode};

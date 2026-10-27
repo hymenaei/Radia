@@ -132,6 +132,11 @@ pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockVal
         }
         Message::AgentMovementComplete(_) => None,
         Message::AgentUpdate(message) => Some(vec![one(agent_update_fields(message))]),
+        Message::SetAlwaysRun(message) => Some(vec![one(vec![
+            FieldValue::Uuid(message.agent_id),
+            FieldValue::Uuid(message.session_id),
+            FieldValue::Bool(message.always_run),
+        ])]),
         Message::AgentThrottle(message) => {
             let rates = message.throttle.throttles;
             let rate_bytes = [

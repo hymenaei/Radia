@@ -13,7 +13,10 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-use crate::{asset_coordinator::AssetHandle, session::experience_environment::EnvironmentInbox, world_reader::WorldReader};
+use crate::{
+    agent_movement::MovementObservation, asset_coordinator::AssetHandle, session::experience_environment::EnvironmentInbox,
+    world_reader::WorldReader,
+};
 use crate::{
     inventory::{FavoriteLocation, InventoryFetchHandle, favorite_store::FavoriteStoreError, favorites::FavoritesError},
     remembered_login::{CredentialStoreError, RememberedLogin},
@@ -141,6 +144,8 @@ pub(crate) struct SessionReadyUpdate {
     pub(crate) environments: EnvironmentInbox,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) camera: watch::Sender<Option<Camera>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) movement: watch::Sender<Option<MovementObservation>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,

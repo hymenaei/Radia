@@ -23,6 +23,7 @@ use uuid::Uuid;
 use world::{Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS};
 
 use crate::{
+    agent_movement::MovementObservation,
     asset_coordinator::{AssetHandle, RequestError},
     session::EnvironmentInbox,
     world_reader::{ReadError, WorldReader},
@@ -42,6 +43,8 @@ pub(crate) struct SceneFeed {
     agent: Option<Entity>,
     pub(crate) water_height: Option<f64>,
     camera: watch::Sender<Option<Camera>>,
+    movement: watch::Sender<Option<MovementObservation>>,
+    last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
 }
@@ -51,6 +54,7 @@ impl SceneFeed {
         sources: SceneSources,
         agent_id: Uuid,
         camera: watch::Sender<Option<Camera>>,
+        movement: watch::Sender<Option<MovementObservation>>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
@@ -61,22 +65,54 @@ impl SceneFeed {
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
         drop(runtime.clone().spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, wake).in_current_span()));
-        Self { runtime, view, budget, agent_id, agent: None, water_height: None, camera, incoming, _cancel: cancel }
+        Self {
+            runtime,
+            view,
+            budget,
+            agent_id,
+            agent: None,
+            water_height: None,
+            camera,
+            movement,
+            last_movement: None,
+            incoming,
+            _cancel: cancel,
+        }
     }
 
     pub(crate) fn agent(&self) -> Option<&Object> {
         self.agent.and_then(|entity| self.view.object(entity))
     }
 
-    pub(crate) fn set_camera(&self, camera: Camera) {
+    pub(crate) fn set_camera(&self, camera: Option<Camera>) {
         self.camera.send_if_modified(|previous| {
-            if *previous == Some(camera) {
+            if *previous == camera {
                 false
             } else {
-                *previous = Some(camera);
+                *previous = camera;
                 true
             }
         });
+    }
+
+    pub(crate) fn set_movement(&mut self, movement: MovementObservation) {
+        let changed = self.last_movement.is_none_or(|previous| {
+            previous.control_flags != movement.control_flags
+                || previous.always_run != movement.always_run
+                || previous.stop_sequence != movement.stop_sequence
+                || previous.body_rotation.dot(movement.body_rotation).abs() < crate::agent_movement::BODY_ROTATION_DOT_THRESHOLD
+        });
+        if changed {
+            self.last_movement = Some(movement);
+            self.movement.send_if_modified(|previous| {
+                if *previous == Some(movement) {
+                    false
+                } else {
+                    *previous = Some(movement);
+                    true
+                }
+            });
+        }
     }
 
     pub(crate) fn drain(&mut self) -> Result<(), ApplyError> {
@@ -431,6 +467,8 @@ mod tests {
             agent: None,
             water_height: None,
             camera,
+            movement: watch::channel(None).0,
+            last_movement: None,
             incoming,
             _cancel: cancel,
         };
@@ -516,10 +554,11 @@ mod tests {
             SceneSources { reader: reads.reader(), environments, assets: assets.handle() },
             Uuid::from_u128(2),
             watch::channel(None).0,
+            watch::channel(None).0,
             Handle::current(),
             || {},
         );
-        feed.set_camera(Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1000, 1000]).unwrap());
+        feed.set_camera(Some(Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1000, 1000]).unwrap()));
         let receiving = async {
             loop {
                 let batch = feed.incoming.recv().await.expect("scene remains active");
@@ -571,6 +610,7 @@ mod tests {
         let mut feed = SceneFeed::start(
             SceneSources { reader: reader.clone(), environments, assets: assets.handle() },
             Uuid::from_u128(1),
+            watch::channel(None).0,
             watch::channel(None).0,
             Handle::current(),
             || {},

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use math::Vec3;
 use world::{Kind, ObjectDetail, PrimShape, Shape, WorldTransform, WorldTransformState};
 
 use crate::material::FaceMaterial;
@@ -47,7 +48,11 @@ impl Object {
     pub fn placement(&self) -> Placement {
         let detail = self.detail();
         if detail.summary.kind == Kind::Avatar {
-            return Placement::Hidden(HiddenReason::Avatar);
+            return detail
+                .world_transform
+                .ok()
+                .and_then(placeholder_avatar_transform)
+                .map_or(Placement::Hidden(HiddenReason::UnresolvedPose), Placement::Ready);
         }
         let Ok(WorldTransformState::Resolved(transform)) = detail.world_transform else {
             return Placement::Hidden(HiddenReason::UnresolvedPose);
@@ -59,12 +64,25 @@ impl Object {
     }
 
     pub fn geometry(&self) -> Geometry {
+        if self.detail().summary.kind == Kind::Avatar {
+            return Geometry::Prim(PrimShape { path_curve: 0x20, profile_curve: 5, ..PrimShape::default() });
+        }
         match self.detail().shape {
             Some(Shape::Prim(shape)) => Geometry::Prim(shape),
             Some(shape) => Geometry::Unsupported(shape),
             None => Geometry::Missing,
         }
     }
+}
+
+fn placeholder_avatar_transform(transform: WorldTransformState) -> Option<WorldTransform> {
+    let mut transform = match transform {
+        WorldTransformState::Resolved(transform) => transform,
+        WorldTransformState::MissingScale(pose) => WorldTransform { pose, scale: Vec3::new(0.6, 0.45, 1.9) },
+        WorldTransformState::Provisional { .. } | WorldTransformState::Unresolved(_) => return None,
+    };
+    transform.scale = Vec3::new(0.6, 0.45, 1.9);
+    Some(transform)
 }
 
 struct ObjectData {
@@ -90,4 +108,24 @@ pub enum Geometry {
     Prim(PrimShape),
     Unsupported(Shape),
     Missing,
+}
+
+#[cfg(test)]
+mod tests {
+    use math::{DVec3, Quat};
+    use world::{WorldPose, WorldTransform};
+
+    use super::placeholder_avatar_transform;
+    use world::WorldTransformState;
+
+    #[test]
+    fn placeholder_avatar_uses_world_pose_and_default_agent_dimensions() {
+        let pose = WorldPose { position: DVec3::new(10.0, 20.0, 30.0), rotation: Quat::from_rotation_z(0.5) };
+        let transform = placeholder_avatar_transform(WorldTransformState::MissingScale(pose)).expect("placeholder transform");
+        assert_eq!(transform, WorldTransform { pose, scale: math::Vec3::new(0.6, 0.45, 1.9) });
+        assert!(
+            placeholder_avatar_transform(WorldTransformState::Provisional { pose, reason: world::UnresolvedReason::PendingParent })
+                .is_none()
+        );
+    }
 }

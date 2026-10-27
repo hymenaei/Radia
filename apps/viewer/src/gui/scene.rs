@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::{
+    agent_movement::MovementObservation,
     asset_coordinator::AssetHandle,
     gui::{
         AppLifecycle,
@@ -74,10 +75,18 @@ pub(crate) fn start_session(
     assets: &AssetHandle,
     agent_id: Uuid,
     camera: watch::Sender<Option<Camera>>,
+    movement: watch::Sender<Option<MovementObservation>>,
     cx: &mut App,
 ) {
     if start_scene(generation, cx) {
-        connect_world(generation, SceneSources { reader: reader.clone(), environments, assets: assets.clone() }, agent_id, camera, cx);
+        connect_world(
+            generation,
+            SceneSources { reader: reader.clone(), environments, assets: assets.clone() },
+            agent_id,
+            camera,
+            movement,
+            cx,
+        );
     }
 }
 
@@ -137,13 +146,20 @@ fn start_scene(generation: u64, cx: &mut App) -> bool {
     true
 }
 
-fn connect_world(generation: u64, sources: SceneSources, agent_id: Uuid, camera: watch::Sender<Option<Camera>>, cx: &mut App) {
+fn connect_world(
+    generation: u64,
+    sources: SceneSources,
+    agent_id: Uuid,
+    camera: watch::Sender<Option<Camera>>,
+    movement: watch::Sender<Option<MovementObservation>>,
+    cx: &mut App,
+) {
     let lifecycle = cx.global::<AppLifecycle>();
     if !lifecycle.quitting
         && lifecycle.scene.main.is_current(generation)
         && let Some(viewport) = &lifecycle.scene.viewport
     {
-        viewport.connect_world(generation, sources, agent_id, camera, service_runtime(cx));
+        viewport.connect_world(generation, sources, agent_id, camera, movement, service_runtime(cx));
     }
 }
 

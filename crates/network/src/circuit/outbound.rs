@@ -545,7 +545,8 @@ pub(super) fn prepare_shutdown_send(
 pub(super) fn message_class(message: &Message) -> TrafficClass {
     match message {
         Message::AgentUpdate(_) | Message::CompleteAgentMovement(_) => TrafficClass::Deadline,
-        Message::UseCircuitCode(_)
+        Message::SetAlwaysRun(_)
+        | Message::UseCircuitCode(_)
         | Message::RegionHandshakeReply(_)
         | Message::CompletePingCheck(_)
         | Message::LogoutRequest(_)

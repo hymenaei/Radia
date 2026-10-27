@@ -5,6 +5,7 @@ use std::{
 
 use math::{DQuat, DVec3};
 use render::scene;
+use world::WorldPose;
 
 use crate::DEFAULT_DRAW_DISTANCE;
 
@@ -24,6 +25,23 @@ pub(crate) struct OrbitCamera {
     transition: Option<Transition>,
     pub(crate) draw_distance: f32,
     pub(crate) lod_factor: f32,
+}
+
+pub(crate) struct FollowCamera;
+
+impl FollowCamera {
+    pub(crate) fn scene_camera(pose: WorldPose, viewport: [u32; 2], draw_distance: f32, lod_factor: f32) -> Option<scene::Camera> {
+        let (position, focus) = Self::position_and_focus(pose);
+        scene::Camera::new(position, (focus - position).as_vec3(), FRAC_PI_3, viewport)
+            .and_then(|camera| camera.with_quality(f64::from(draw_distance), f64::from(lod_factor)))
+            .ok()
+    }
+
+    fn position_and_focus(pose: WorldPose) -> (DVec3, DVec3) {
+        let offset = (pose.rotation * math::Vec3::new(-3.0, 0.0, 0.75)).as_dvec3();
+        let focus = (pose.rotation * math::Vec3::new(1.0, 0.0, 1.0)).as_dvec3();
+        (pose.position + offset, pose.position + focus)
+    }
 }
 
 impl OrbitCamera {
@@ -112,6 +130,19 @@ impl OrbitCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn follow_camera_uses_official_rear_view_offsets_in_agent_axes() {
+        let pose = WorldPose { position: DVec3::new(100.0, 200.0, 30.0), rotation: math::Quat::IDENTITY };
+        let (position, focus) = FollowCamera::position_and_focus(pose);
+        assert_eq!(position, pose.position + DVec3::new(-3.0, 0.0, 0.75));
+        assert_eq!(focus, pose.position + DVec3::new(1.0, 0.0, 1.0));
+
+        let pose = WorldPose { rotation: math::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2), ..pose };
+        let (position, focus) = FollowCamera::position_and_focus(pose);
+        assert!((position - (pose.position + DVec3::new(0.0, -3.0, 0.75))).length() < 1e-6);
+        assert!((focus - (pose.position + DVec3::new(0.0, 1.0, 1.0))).length() < 1e-6);
+    }
 
     #[test]
     fn focus_eases() {

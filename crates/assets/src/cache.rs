@@ -19,11 +19,13 @@ const TEXTURES: NamespaceId = NamespaceId::new(0);
 const PBR_MATERIALS: NamespaceId = NamespaceId::new(1);
 const LEGACY_MATERIALS: NamespaceId = NamespaceId::new(2);
 const ENVIRONMENTS: NamespaceId = NamespaceId::new(3);
-const NAMESPACES: [Namespace; 4] = [
+const MESHES: NamespaceId = NamespaceId::new(4);
+const NAMESPACES: [Namespace; 5] = [
     Namespace::new("textures", "j2c"),
     Namespace::new("materials/pbr", "llsd"),
     Namespace::new("materials/legacy", "llsd"),
     Namespace::new("environments", "llsd"),
+    Namespace::new("meshes", "llmesh"),
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -248,6 +250,7 @@ fn storage_key(resource: Resource) -> StorageKey {
         Kind::PbrMaterial => PBR_MATERIALS,
         Kind::LegacyMaterial => LEGACY_MATERIALS,
         Kind::Environment => ENVIRONMENTS,
+        Kind::Mesh => MESHES,
     };
     StorageKey::new(namespace, *resource.id.uuid().as_bytes())
 }

@@ -1,3 +1,10 @@
+mod asset;
+
+pub use asset::{
+    AssetError, MAX_MESH_ASSET_BYTES, MAX_MESH_BLOCK_BYTES, MAX_MESH_HEADER_BYTES, MESH_HEADER_BYTES, MeshHeader, MeshLod, MeshLodRequest,
+    decode_header, decode_lod, decode_lod_cancellable, header_needs_more,
+};
+
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
@@ -24,11 +31,18 @@ pub struct Face {
     pub indices: Range<u32>,
 }
 
+#[derive(Debug)]
 pub struct Mesh {
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
     faces: Vec<Face>,
     bounds: Bounds,
+}
+
+#[derive(Debug)]
+pub enum LodGeometry {
+    Geometry(Mesh),
+    Empty { face_count: u8 },
 }
 
 impl Mesh {

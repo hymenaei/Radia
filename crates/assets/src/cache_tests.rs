@@ -68,9 +68,11 @@ fn llsd_kinds_use_distinct_paths() {
     let pbr = resource(0xabcdef0123456789abcdef0123456789, Kind::PbrMaterial);
     let legacy = resource(0xabcdef0123456789abcdef0123456789, Kind::LegacyMaterial);
     let environment = resource(0xabcdef0123456789abcdef0123456789, Kind::Environment);
+    let mesh = resource(0xabcdef0123456789abcdef0123456789, Kind::Mesh);
     cache.put_complete(pbr, b"pbr llsd".to_vec()).expect("store PBR material");
     cache.put_complete(legacy, b"legacy llsd".to_vec()).expect("store legacy material");
     cache.put_complete(environment, b"environment llsd".to_vec()).expect("store environment");
+    cache.put_complete(mesh, b"mesh payload".to_vec()).expect("store mesh");
 
     let name = "abcdef01-2345-6789-abcd-ef0123456789";
     assert_eq!(std::fs::read(directory.path().join(format!("assets/materials/pbr/ab/{name}.llsd"))).expect("read PBR file"), b"pbr llsd");
@@ -82,6 +84,7 @@ fn llsd_kinds_use_distinct_paths() {
         std::fs::read(directory.path().join(format!("assets/environments/ab/{name}.llsd"))).expect("read environment file"),
         b"environment llsd"
     );
+    assert_eq!(std::fs::read(directory.path().join(format!("assets/meshes/ab/{name}.llmesh"))).expect("read mesh file"), b"mesh payload");
     assert!(!directory.path().join("assets/animations").exists());
     cache.shutdown().expect("close cache");
 }

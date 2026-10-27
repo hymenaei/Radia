@@ -1,7 +1,7 @@
 mod de;
 mod ser;
 
-pub use de::from_slice_with_limits;
+pub use de::{from_slice_prefix_with_limits, from_slice_with_limits};
 
 use std::io::{Read, Write};
 

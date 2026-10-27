@@ -34,7 +34,7 @@ pub(crate) fn extract(resource: Resource, bytes: Vec<u8>) -> Result<Vec<u8>, Fai
         return Err(Failure::TooLarge);
     }
     match resource.kind {
-        Kind::Texture | Kind::Environment => {
+        Kind::Texture | Kind::Environment | Kind::Mesh => {
             if bytes.is_empty() {
                 Err(Failure::Malformed)
             } else {

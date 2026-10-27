@@ -12,6 +12,7 @@ use tokio::sync::watch;
 pub const ASSET_WORK_BYTES: usize = 512 * 1024 * 1024;
 pub(crate) const WORK_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const TEXTURE_WORK_BYTES: usize = 192 * 1024 * 1024;
+pub(crate) const MESH_WORK_BYTES: usize = 64 * 1024 * 1024;
 
 struct Accounting {
     charged: AtomicUsize,

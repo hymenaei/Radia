@@ -401,18 +401,55 @@ impl<'de> MapAccess<'de> for BinaryMapAccess<'_, 'de> {
     }
 }
 
-pub fn from_slice_with_limits<T: DeserializeOwned>(input: &[u8], limits: Limits) -> Result<T> {
+pub fn from_slice_prefix_with_limits<T: DeserializeOwned>(input: &[u8], limits: Limits) -> Result<(T, usize)> {
     if input.len() > limits.max_bytes {
         return Err(Error::LimitExceeded("input bytes"));
     }
-    let input = match strip_header(input, b"llsd/binary") {
+    let parsed = match strip_header(input, b"llsd/binary") {
         Some(rest) => rest.trim_ascii_start(),
         None => input,
     };
-    let mut de = Deserializer::new(input, limits);
+    let prefix = input.len() - parsed.len();
+    let mut de = Deserializer::new(parsed, limits);
     let value = T::deserialize(&mut de)?;
-    if !de.cursor.is_empty() {
+    let consumed = parsed.len() - de.cursor.remaining().len();
+    Ok((value, prefix + consumed))
+}
+
+pub fn from_slice_with_limits<T: DeserializeOwned>(input: &[u8], limits: Limits) -> Result<T> {
+    let (value, consumed) = from_slice_prefix_with_limits(input, limits)?;
+    if consumed != input.len() {
         return Err(Error::TrailingData);
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches;
+
+    use crate::{Error, Limits, Value, binary};
+
+    #[test]
+    fn prefix_decode_reports_serialized_value_length() {
+        let value = Value::Map([("version".into(), Value::Integer(1))].into());
+        let mut bytes = binary::to_vec(&value).unwrap();
+        let length = bytes.len();
+        bytes.extend_from_slice(b"tail");
+
+        assert_eq!(binary::from_slice_prefix_with_limits::<Value>(&bytes, Limits::default()).unwrap(), (value, length));
+        assert_matches!(binary::from_slice_with_limits::<Value>(&bytes, Limits::default()), Err(Error::TrailingData));
+    }
+
+    #[test]
+    fn prefix_decode_counts_binary_header_and_separator() {
+        let value = Value::Integer(7);
+        let encoded = b"i\0\0\0\x07";
+        let mut bytes = b"<?llsd/binary?>\n  ".to_vec();
+        let prefix = bytes.len();
+        bytes.extend_from_slice(encoded);
+        bytes.extend_from_slice(b"next");
+
+        assert_eq!(binary::from_slice_prefix_with_limits::<Value>(&bytes, Limits::default()).unwrap(), (value, prefix + encoded.len()));
+    }
 }

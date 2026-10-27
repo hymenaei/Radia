@@ -10,7 +10,7 @@ mod texture;
 
 pub(crate) use budget::Blob;
 pub use budget::{ASSET_WORK_BYTES, Budget, MemoryStats};
-pub use content::{Content, Environment, Material};
+pub use content::{Content, Environment, Material, MeshAsset, MeshHeaderAsset};
 pub use envelope::legacy_request;
 pub use environment::{
     Atmosphere, CelestialBody, Clouds, DayCycle, DensityLayer, EnvironmentDescription, EnvironmentSettings, Haze, Keyframe, Sky, Water,
@@ -20,8 +20,9 @@ pub use material::{
     TextureMapping, TextureRef, Wrap,
 };
 pub use store::{
-    AdmissionError, CacheReadCompletion, CacheReadJob, DecodeInput, DecodeJob, Demand, Failure, FetchFailure, FetchJob, Kind,
-    LoadCompletion, LoadJob, MAX_ASSET_DECODES, MAX_ASSET_FETCHES, MAX_ASSET_ROUTES, Priority, Request, Resource, Route, Status, Store,
+    AdmissionError, CacheReadCompletion, CacheReadJob, DecodeInput, DecodeJob, Demand, Failure, FetchFailure, FetchJob, FetchResponse,
+    Kind, LoadCompletion, LoadJob, MAX_ASSET_DECODES, MAX_ASSET_FETCHES, MAX_ASSET_ROUTES, Priority, Request, Resource, Route, Status,
+    Store,
 };
 pub use texture::{
     ColorSpace, Image, ImageInfo, MAX_SOURCE_EDGE, MAX_TEXTURE_EDGE, PixelAlpha, PixelFormat, TextureDecodeJob, TextureEvents,

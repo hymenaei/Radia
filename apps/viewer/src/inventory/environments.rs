@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use ::inventory::{AssetType, CategoryKey, InventoryOwner, InventorySnapshot, Item, ItemKey};
 
@@ -7,28 +7,31 @@ const MAX_ENVIRONMENT_LABEL_CHARS: usize = 128;
 
 #[derive(Clone)]
 pub(crate) struct EnvironmentMenu {
-    snapshot: InventorySnapshot,
-    items: Arc<[ItemKey]>,
+    items: Arc<[EnvironmentMenuItem]>,
+    indices: HashMap<ItemKey, usize>,
+}
+
+#[derive(Clone)]
+pub(crate) struct EnvironmentMenuItem {
+    pub(crate) key: ItemKey,
+    pub(crate) asset_id: utils::AssetId,
+    pub(crate) label: Arc<str>,
 }
 
 impl EnvironmentMenu {
-    pub(crate) fn items(&self) -> impl Iterator<Item = &Item> {
-        self.items.iter().filter_map(|key| self.snapshot.item(*key))
+    pub(crate) fn items(&self) -> &[EnvironmentMenuItem] {
+        &self.items
     }
 
-    pub(crate) fn item(&self, key: ItemKey) -> Option<&Item> {
-        self.snapshot.item(key)
-    }
-
-    pub(crate) fn library_owner(&self) -> Option<InventoryOwner> {
-        self.snapshot.roots().library().map(CategoryKey::owner)
+    pub(crate) fn label(&self, key: ItemKey) -> Option<&str> {
+        self.indices.get(&key).and_then(|index| self.items.get(*index)).map(|item| &*item.label)
     }
 }
 
 #[derive(Clone)]
 pub(crate) enum EnvironmentItems {
     Loading,
-    Ready(EnvironmentMenu),
+    Ready(Arc<EnvironmentMenu>),
     Failed,
 }
 
@@ -52,12 +55,18 @@ impl EnvironmentSettingKind {
 }
 
 pub(crate) fn environment_items(snapshot: InventorySnapshot) -> EnvironmentMenu {
-    let mut items = snapshot.items_of_asset_type(AssetType::Settings).map(|item| item.key).collect::<Vec<_>>();
-    items.sort_unstable_by(|left, right| match (snapshot.item(*left), snapshot.item(*right)) {
-        (Some(left), Some(right)) => (left.name.as_ref(), left.key).cmp(&(right.name.as_ref(), right.key)),
-        _ => left.cmp(right),
-    });
-    EnvironmentMenu { snapshot, items: Arc::from(items) }
+    let library_owner = snapshot.roots().library().map(CategoryKey::owner);
+    let mut items = snapshot
+        .items_of_asset_type(AssetType::Settings)
+        .map(|item| EnvironmentMenuItem {
+            key: item.key,
+            asset_id: item.asset_id,
+            label: Arc::from(environment_setting_label(item, library_owner)),
+        })
+        .collect::<Vec<_>>();
+    items.sort_unstable_by(|left, right| (left.label.as_ref(), left.key).cmp(&(right.label.as_ref(), right.key)));
+    let indices = items.iter().enumerate().map(|(index, item)| (item.key, index)).collect();
+    EnvironmentMenu { items: Arc::from(items), indices }
 }
 
 fn environment_setting_kind(flags: u32) -> EnvironmentSettingKind {
@@ -89,7 +98,7 @@ mod tests {
     use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
     use uuid::Uuid;
 
-    use super::{EnvironmentSettingKind, environment_items, environment_setting_kind, environment_setting_label};
+    use super::environment_items;
 
     #[test]
     fn environment_items_cover_personal_and_library_settings() {
@@ -105,23 +114,18 @@ mod tests {
         inventory.upsert_item(item(personal, 7, 1, "Not settings", AssetType::Notecard, InventoryType::Notecard)).expect("notecard");
 
         let menu = environment_items(inventory.snapshot());
-        let items = menu.items().collect::<Vec<_>>();
+        let items = menu.items();
 
         assert_eq!(items.len(), 4);
         assert_eq!(
-            items.iter().map(|item| (item.name.as_ref(), environment_setting_kind(item.flags))).collect::<Vec<_>>(),
-            [
-                ("Cycle", EnvironmentSettingKind::DayCycle),
-                ("Other", EnvironmentSettingKind::Other),
-                ("Sky\nPreset", EnvironmentSettingKind::Sky),
-                ("Water", EnvironmentSettingKind::Water),
-            ]
+            items.iter().map(|item| item.label.as_ref()).collect::<Vec<_>>(),
+            ["Cycle (Day cycle)", "Other (Settings, Library)", "SkyPreset (Sky)", "Water (Water, Library)",]
         );
-        assert_eq!(environment_setting_label(items[2], Some(library)), "SkyPreset (Sky)");
+        assert_eq!(menu.label(items[2].key), Some("SkyPreset (Sky)"));
         assert!(items.iter().any(|item| item.key.owner() == library));
 
         inventory.upsert_item(item(personal, 8, 1, "Later", AssetType::Settings, InventoryType::Settings)).expect("later setting");
-        assert_eq!(environment_items(inventory.snapshot()).items().count(), 5);
+        assert_eq!(environment_items(inventory.snapshot()).items().len(), 5);
     }
 
     fn model() -> (Inventory, InventoryOwner) {

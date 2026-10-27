@@ -132,11 +132,11 @@ pub fn header_needs_more(bytes: &[u8]) -> bool {
     matches!(binary::from_slice_prefix_with_limits::<Value>(bytes, header_limits()), Err(llsd::Error::UnexpectedEof))
 }
 
-pub fn decode_lod(bytes: &[u8], lod: MeshLod) -> Result<LodGeometry, AssetError> {
-    decode_lod_cancellable(bytes, lod, || false)
+pub fn decode_lod(bytes: &[u8]) -> Result<LodGeometry, AssetError> {
+    decode_lod_cancellable(bytes, || false)
 }
 
-pub fn decode_lod_cancellable(bytes: &[u8], _lod: MeshLod, cancelled: impl Fn() -> bool) -> Result<LodGeometry, AssetError> {
+pub fn decode_lod_cancellable(bytes: &[u8], cancelled: impl Fn() -> bool) -> Result<LodGeometry, AssetError> {
     if bytes.len() > MAX_MESH_BLOCK_BYTES {
         return Err(AssetError::TooLarge);
     }
@@ -661,7 +661,7 @@ mod tests {
     fn decodes_each_lod_and_preserves_domains_uvs_and_face_order() {
         let encoded = block(&[submesh(true, false), submesh(false, true), submesh(false, false)]);
         for lod in [MeshLod::Lowest, MeshLod::Low, MeshLod::Medium, MeshLod::High] {
-            let LodGeometry::Geometry(mesh) = decode_lod(&encoded, lod).unwrap() else { panic!("geometry LOD") };
+            let LodGeometry::Geometry(mesh) = decode_lod(&encoded).unwrap() else { panic!("geometry LOD") };
 
             assert_eq!(mesh.faces(), &[Face { slot: 0, indices: 0..3 }, Face { slot: 1, indices: 3..3 }, Face { slot: 2, indices: 3..6 }]);
             assert_eq!(mesh.vertices()[0].position, Vec3::new(-1.0, 2.0, -3.0));
@@ -693,16 +693,14 @@ mod tests {
     fn missing_lod_is_distinct_from_an_empty_lod() {
         let (header_bytes, length) = header_with_blocks(&[], 0);
         assert_eq!(decode_header(&header_bytes, length).unwrap().lod(id(), MeshLod::Low), Err(AssetError::MissingLod(MeshLod::Low)));
-        assert_matches!(decode_lod(&block(&[]), MeshLod::Low), Ok(LodGeometry::Empty { face_count: 0 }));
-        assert_matches!(decode_lod(&block(&[submesh(false, true)]), MeshLod::Low), Ok(LodGeometry::Empty { face_count: 1 }));
-        assert_matches!(decode_lod(&block(&[empty_submesh()]), MeshLod::Low), Ok(LodGeometry::Empty { face_count: 1 }));
+        assert_matches!(decode_lod(&block(&[])), Ok(LodGeometry::Empty { face_count: 0 }));
+        assert_matches!(decode_lod(&block(&[submesh(false, true)])), Ok(LodGeometry::Empty { face_count: 1 }));
+        assert_matches!(decode_lod(&block(&[empty_submesh()])), Ok(LodGeometry::Empty { face_count: 1 }));
     }
 
     #[test]
     fn incomplete_trailing_triangles_are_dropped() {
-        let LodGeometry::Geometry(mesh) = decode_lod(&block(&[submesh_with_partial_triangle()]), MeshLod::Low).unwrap() else {
-            panic!("geometry LOD")
-        };
+        let LodGeometry::Geometry(mesh) = decode_lod(&block(&[submesh_with_partial_triangle()])).unwrap() else { panic!("geometry LOD") };
 
         assert_eq!(mesh.faces(), &[Face { slot: 0, indices: 0..3 }]);
         assert_eq!(mesh.indices(), &[0, 1, 2]);
@@ -710,9 +708,7 @@ mod tests {
 
     #[test]
     fn absent_position_domain_and_uvs_use_the_format_defaults() {
-        let LodGeometry::Geometry(mesh) = decode_lod(&block(&[submesh_without_domains_or_uvs()]), MeshLod::High).unwrap() else {
-            panic!("geometry LOD")
-        };
+        let LodGeometry::Geometry(mesh) = decode_lod(&block(&[submesh_without_domains_or_uvs()])).unwrap() else { panic!("geometry LOD") };
 
         assert_eq!(mesh.vertices()[0].position, Vec3::new(-0.5, 0.5, -0.5));
         assert_eq!(mesh.vertices()[1].position, Vec3::new(0.5, -0.5, -0.5));
@@ -731,7 +727,7 @@ mod tests {
             submesh(false, false),
             submesh(false, false),
         ];
-        let LodGeometry::Geometry(mesh) = decode_lod(&block(&faces), MeshLod::Medium).unwrap() else { panic!("geometry LOD") };
+        let LodGeometry::Geometry(mesh) = decode_lod(&block(&faces)).unwrap() else { panic!("geometry LOD") };
 
         assert_eq!(mesh.faces().len(), MAX_MESH_FACES_PER_LOD);
         assert_eq!(mesh.faces()[0], Face { slot: 0, indices: 0..0 });
@@ -755,11 +751,11 @@ mod tests {
     #[test]
     fn truncated_and_malformed_blocks_fail_without_panicking() {
         let encoded = block(&[submesh(false, false)]);
-        assert_eq!(decode_lod(&encoded[..encoded.len() - 1], MeshLod::Low).err(), Some(AssetError::MalformedBlock));
+        assert_eq!(decode_lod(&encoded[..encoded.len() - 1]).err(), Some(AssetError::MalformedBlock));
         let mut trailing = encoded;
         trailing.push(0);
-        assert_eq!(decode_lod(&trailing, MeshLod::Low).err(), Some(AssetError::MalformedBlock));
-        assert_eq!(decode_lod(b"not zlib", MeshLod::Low).err(), Some(AssetError::MalformedBlock));
+        assert_eq!(decode_lod(&trailing).err(), Some(AssetError::MalformedBlock));
+        assert_eq!(decode_lod(b"not zlib").err(), Some(AssetError::MalformedBlock));
     }
 
     #[test]
@@ -786,7 +782,7 @@ mod tests {
 
         #[test]
         fn arbitrary_block_bytes_are_bounded_and_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=4096)) {
-            let result = decode_lod(&bytes, MeshLod::Lowest);
+            let result = decode_lod(&bytes);
             if let Ok(geometry) = result {
                 match geometry {
                     LodGeometry::Geometry(mesh) => {

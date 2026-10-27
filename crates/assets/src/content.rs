@@ -317,7 +317,7 @@ fn decode_mesh(
                 let end = usize::try_from(expected.end).map_err(|_| Failure::MalformedBlock)?;
                 bytes.get(start..end).ok_or(Failure::MalformedBlock)?
             };
-            mesh::decode_lod_cancellable(block_bytes, lod, cancelled).map(|geometry| Data::Mesh { lod, geometry }).map_err(mesh_failure)
+            mesh::decode_lod_cancellable(block_bytes, cancelled).map(|geometry| Data::Mesh { lod, geometry }).map_err(mesh_failure)
         }
         _ => Err(Failure::Malformed),
     }

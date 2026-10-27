@@ -197,7 +197,7 @@ impl World {
         }
         self.ensure_revision_available()?;
         let revision = WorldRevision(self.revision().get() + 1);
-        self.update_agent_parcel_selection_at_revision(region, parcel, Some(fence), revision);
+        self.update_agent_parcel_selection_at_revision(region, parcel, Some(fence), false, revision);
         Ok(self.publish_region_patch(WorldChange::EnvironmentUpdated(region)))
     }
 
@@ -206,14 +206,16 @@ impl World {
         region: Region,
         parcel: Option<ParcelLocalId>,
         fence: Option<FieldStamp>,
+        supersedes_fence: bool,
         revision: WorldRevision,
     ) -> bool {
         let environment = &self.regions[&region].environment;
-        if fence.is_some_and(|fence| !newer_field(fence, environment.parcel_fence())) {
+        let current_fence = environment.parcel_fence();
+        if fence.is_some_and(|fence| !supersedes_fence && !newer_field(fence, current_fence)) {
             return false;
         }
         if environment.selected_parcel() == parcel {
-            if let Some(fence) = fence {
+            if let Some(fence) = fence.filter(|fence| newer_field(*fence, current_fence)) {
                 self.regions.get_mut(&region).expect("active region").environment.parcel_fence = Some(fence);
             }
             return false;
@@ -222,7 +224,7 @@ impl World {
         self.environment_bytes -= environment.parcel.as_ref().map_or(0, |observed| observed.assignment.source_bytes());
         environment.parcel = None;
         environment.selected_parcel = parcel.map(|parcel| (parcel, revision));
-        if let Some(fence) = fence {
+        if let Some(fence) = fence.filter(|fence| newer_field(*fence, current_fence)) {
             environment.parcel_fence = Some(fence);
         }
         true

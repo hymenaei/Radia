@@ -468,30 +468,56 @@ impl World {
         {
             return Err(ApplyError::ParcelBudgetExhausted);
         }
-        let will_publish = (if restart { 0 } else { assembly.present }) | (1 << index) == (1 << PARCEL_OVERLAY_PARTS) - 1;
+        let mut preserved = 0_u8;
+        if restart {
+            for part in 0..PARCEL_OVERLAY_PARTS {
+                let bit = 1 << part;
+                if part != index
+                    && assembly.present & bit != 0
+                    && assembly.staging_fences[part].is_some_and(|staged| newer_field(staged, Some(fence)))
+                {
+                    preserved |= bit;
+                }
+            }
+        }
+        let present = (if restart { preserved } else { assembly.present }) | (1 << index);
+        let will_publish = present == (1 << PARCEL_OVERLAY_PARTS) - 1;
         if will_publish {
             self.ensure_revision_available()?;
         }
         let publish = {
             let assembly = &mut self.regions.get_mut(&region).expect("active region").parcels.overlay;
-            if assembly.staging.is_none() || restart {
-                assembly.staging = Some(Box::new([0; PARCEL_OVERLAY_CELLS]));
-                assembly.present = 0;
-                assembly.staging_fences = [None; PARCEL_OVERLAY_PARTS];
+            let mut staging = match assembly.staging.take() {
+                Some(staging) => staging,
+                None => {
+                    assembly.present = 0;
+                    assembly.staging_fences = [None; PARCEL_OVERLAY_PARTS];
+                    Box::new([0; PARCEL_OVERLAY_CELLS])
+                }
+            };
+            if restart {
+                for part in 0..PARCEL_OVERLAY_PARTS {
+                    let bit = 1 << part;
+                    if part != index && assembly.present & bit != 0 && preserved & bit == 0 {
+                        let start = part * PARCEL_OVERLAY_PART_BYTES;
+                        staging[start..start + PARCEL_OVERLAY_PART_BYTES].fill(0);
+                        assembly.present &= !bit;
+                        assembly.staging_fences[part] = None;
+                    }
+                }
             }
-            let staging = assembly.staging.as_mut().expect("new parcel overlay staging grid");
             let offset = index * PARCEL_OVERLAY_PART_BYTES;
             staging[offset..offset + PARCEL_OVERLAY_PART_BYTES].copy_from_slice(&observation.data);
             assembly.staging_fences[index] = Some(fence);
             assembly.present |= 1 << index;
             if assembly.present == (1 << PARCEL_OVERLAY_PARTS) - 1 {
-                let staging = assembly.staging.take().expect("complete parcel overlay has staging data");
                 assembly.complete = Some(ParcelOverlayGrid(Arc::from(staging)));
                 assembly.complete_fences = assembly.staging_fences;
                 assembly.staging_fences = [None; PARCEL_OVERLAY_PARTS];
                 assembly.present = 0;
                 true
             } else {
+                assembly.staging = Some(staging);
                 false
             }
         };
@@ -523,9 +549,9 @@ impl World {
         let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
         let fence = FieldStamp { authority: source.authority(), stamp };
         let current = &self.regions[&region].parcels;
-        if !newer_field(fence, current.agent_fence)
-            || (sequence_id > 0 && current.last_agent_sequence.is_some_and(|last| sequence_id <= last))
-        {
+        let newer_sequence = sequence_id > 0 && current.last_agent_sequence.is_some_and(|last| sequence_id > last);
+        let stale_sequence = sequence_id > 0 && current.last_agent_sequence.is_some_and(|last| sequence_id <= last);
+        if stale_sequence || (!newer_sequence && !newer_field(fence, current.agent_fence)) {
             return Ok(RegionApplied::unchanged());
         }
         let properties = observation.properties.ok_or(ApplyError::InvalidValue { field: "parcel_properties" })?;
@@ -537,7 +563,9 @@ impl World {
         {
             return Err(ApplyError::ParcelBudgetExhausted);
         }
-        let environment_changed = self.agent_parcel_selection_changes(region, properties.local_id, fence);
+        let selection_changed = self.regions[&region].environment.selected_parcel() != Some(properties.local_id);
+        let environment_changed =
+            self.agent_parcel_selection_changes(region, properties.local_id, fence) || (newer_sequence && selection_changed);
         let properties_changed =
             current.current.as_ref().is_none_or(|current| current.sequence_id != sequence_id || current.properties != properties);
         if !environment_changed && !properties_changed {
@@ -548,7 +576,8 @@ impl World {
         }
         self.ensure_revision_available()?;
         let revision = WorldRevision(self.revision().get() + 1);
-        let environment_changed = self.select_agent_parcel_at_revision(region, Some(properties.local_id), Some(fence), revision);
+        let environment_changed =
+            self.select_agent_parcel_at_revision(region, Some(properties.local_id), Some(fence), newer_sequence, revision);
         let parcels = &mut self.regions.get_mut(&region).expect("active region").parcels;
         parcels.current = Some(CurrentParcel { sequence_id, properties });
         parcels.agent_fence = Some(fence);
@@ -614,7 +643,7 @@ impl World {
         self.ensure_revision_available()?;
         let revision = WorldRevision(self.revision().get() + 1);
         let old_bytes = parcels.retained_bytes();
-        let selected_changed = self.select_agent_parcel_at_revision(region, None, None, revision);
+        let selected_changed = self.select_agent_parcel_at_revision(region, None, None, false, revision);
         let parcels = &mut self.regions.get_mut(&region).expect("active region").parcels;
         parcels.current = None;
         let new_bytes = parcels.retained_bytes();
@@ -640,9 +669,10 @@ impl World {
         region: Region,
         parcel: Option<ParcelLocalId>,
         fence: Option<FieldStamp>,
+        supersedes_fence: bool,
         revision: WorldRevision,
     ) -> bool {
-        self.update_agent_parcel_selection_at_revision(region, parcel, fence, revision)
+        self.update_agent_parcel_selection_at_revision(region, parcel, fence, supersedes_fence, revision)
     }
 }
 
@@ -808,6 +838,26 @@ mod tests {
 
         let state = world.parcel_state(region).unwrap();
         assert_eq!(state.overlay.as_ref().unwrap().raw_cell(0, 0), Some(0xfd));
+        assert_eq!(world.check_invariants(), Ok(()));
+    }
+
+    #[test]
+    fn overlay_restart_preserves_parts_newer_than_its_boundary() {
+        let region = Region::new(3);
+        let mut world = World::new(limits());
+        let _ = world.adopt_region(region).unwrap();
+
+        observe_overlay(&mut world, region, 1, 0, overlay_part(0x10));
+        observe_overlay(&mut world, region, 21, 1, overlay_part(0x21));
+        observe_overlay(&mut world, region, 20, 0, overlay_part(0x20));
+        observe_overlay(&mut world, region, 22, 2, overlay_part(0x22));
+        observe_overlay(&mut world, region, 23, 3, overlay_part(0x23));
+
+        let grid = world.parcel_state(region).unwrap().overlay.unwrap();
+        assert_eq!(grid.raw_cell(0, 0), Some(0x20));
+        assert_eq!(grid.raw_cell(0, 16), Some(0x21));
+        assert_eq!(grid.raw_cell(0, 32), Some(0x22));
+        assert_eq!(grid.raw_cell(0, 48), Some(0x23));
         assert_eq!(world.check_invariants(), Ok(()));
     }
 

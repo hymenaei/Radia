@@ -10,7 +10,7 @@ use protocol::{
         },
     },
     messages::{
-        CachedObjectReference, ExtraParamUpdate, ExtraParameter, ObjectData, object::decode_texture_entry,
+        CacheMissType, CachedObjectReference, ExtraParamUpdate, ExtraParameter, ObjectData, object::decode_texture_entry,
         object::improved_terse_object_update, object::object_update_compressed,
     },
     types::{ObjectShape, TextureEntry, TextureFace, decode_render_material_bindings},
@@ -51,7 +51,7 @@ pub(crate) enum ObjectOperation {
     Observe(ObjectObservation),
     Patch(ObjectPatch),
     Remove { source: UpdateSource, local_id: NonZeroU32 },
-    Cached { source: UpdateSource, local_id: NonZeroU32 },
+    Cached { source: UpdateSource, local_id: NonZeroU32, cache_miss_type: CacheMissType },
 }
 
 impl ObjectOperation {
@@ -67,9 +67,40 @@ impl ObjectOperation {
         let (source, local_id) = match self {
             Self::Observe(observation) => (observation.source, observation.local_id),
             Self::Patch(patch) => (patch.source, patch.local_id),
-            Self::Remove { source, local_id } | Self::Cached { source, local_id } => (*source, *local_id),
+            Self::Remove { source, local_id } | Self::Cached { source, local_id, .. } => (*source, *local_id),
         };
         LocalAddress::new(source.region(), local_id)
+    }
+}
+
+pub(in crate::session) fn decode_cached_object(
+    region: Region,
+    sequence: u32,
+    order: OrderEvidence,
+    block_ordinal: u32,
+    reference: CachedObjectReference,
+    message: &Message,
+    invalid_fields: &mut usize,
+) -> Option<ObjectOperation> {
+    let source = UpdateSource::new(region, sequence, order, block_ordinal);
+    match message {
+        ObjectUpdate(update) if update.objects.len() == 1 => {
+            let mut object = update.objects[0].clone();
+            if object.local_id != reference.local_id || object.crc != reference.crc {
+                return None;
+            }
+            object.update_flags = reference.update_flags;
+            full_observation(&object, source, invalid_fields).ok()
+        }
+        ObjectUpdateCompressed(update) if update.objects.len() == 1 => {
+            let mut object = update.objects[0].clone();
+            if object.local_id != reference.local_id || object.crc != reference.crc {
+                return None;
+            }
+            object.update_flags = reference.update_flags;
+            compressed_observation(&object, source, invalid_fields).ok()
+        }
+        _ => None,
     }
 }
 
@@ -446,7 +477,7 @@ fn face_appearance(face: &TextureFace) -> FaceAppearance {
 }
 
 fn cached_patch(block: &CachedObjectReference, source: UpdateSource, _: &mut usize) -> Result<ObjectOperation, InvalidBlock> {
-    Ok(ObjectOperation::Cached { source, local_id: local_id(block.local_id)? })
+    Ok(ObjectOperation::Cached { source, local_id: local_id(block.local_id)?, cache_miss_type: CacheMissType::Full })
 }
 
 fn local_id(value: u32) -> Result<NonZeroU32, InvalidBlock> {

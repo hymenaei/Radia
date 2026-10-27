@@ -4,6 +4,7 @@ mod environment;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod experience_environment;
 mod inbound;
+mod object_cache;
 mod object_media;
 mod outbound;
 mod recovery;

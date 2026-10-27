@@ -29,7 +29,7 @@ mod tests {
     };
 
     use math::Vec3;
-    use network::{Event, Event::SimulatorMessage, PacketOrder, PacketOrder::Ordered, SimulatorId};
+    use network::{Event, Event::SimulatorMessage, Grid, PacketOrder, PacketOrder::Ordered, SimulatorId};
     use protocol::{
         Audible, ChatSourceType, ChatType,
         lludp::Message,
@@ -47,6 +47,7 @@ mod tests {
 
     use crate::session::coordinator::events::WorldHandoff;
     use crate::session::coordinator::input::Input;
+    use crate::session::object_cache::ObjectCacheSession;
     use crate::session::world::{IngestSummary, SessionWorld, viewer_world_limits};
     use crate::test_helpers::simulator_id;
     use crate::world_reader::WorldReadHost;
@@ -240,8 +241,19 @@ mod tests {
 
     async fn apply_world_cooperatively(world: &mut SessionWorld, handoff: &mut WorldHandoff, event: &Event) {
         if let Event::SimulatorMessage { simulator_id, sequence, packet_order, message, .. } = event {
-            let _ =
-                handoff.apply_message_cooperatively(world, *simulator_id, *sequence, *packet_order, message, None, &mut |_, _| {}).await;
+            let mut object_cache = ObjectCacheSession::new(Grid::Agni);
+            let _ = handoff
+                .apply_message_cooperatively(
+                    world,
+                    *simulator_id,
+                    *sequence,
+                    *packet_order,
+                    message,
+                    None,
+                    &mut object_cache,
+                    &mut |_, _| {},
+                )
+                .await;
         } else {
             let _ = handoff.apply_event(world, event, None);
         }

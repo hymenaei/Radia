@@ -18,6 +18,7 @@ use crate::session::{
         AvatarAppearanceMessage, ObjectBatch, ObjectOperation, SitTargetUpdate, decode_avatar_appearance_update, decode_object_message,
         decode_sit_target_update,
     },
+    object_cache::ObjectCacheSession,
     world::{IngestStatus, IngestSummary, RegistrationError, SessionWorld},
 };
 
@@ -73,9 +74,9 @@ pub(super) enum DecodedWorldUpdate {
 
 pub(super) fn route_recovery_targets(
     world: &SessionWorld,
-    addresses: impl Iterator<Item = LocalAddress>,
-) -> Vec<(Option<SimulatorId>, LocalAddress)> {
-    addresses.map(|address| (world.simulator_for_region(address.region()), address)).collect()
+    targets: impl Iterator<Item = (LocalAddress, protocol::messages::CacheMissType)>,
+) -> Vec<(Option<SimulatorId>, LocalAddress, protocol::messages::CacheMissType)> {
+    targets.map(|(address, cache_miss_type)| (world.simulator_for_region(address.region()), address, cache_miss_type)).collect()
 }
 
 pub(super) fn decode_simulator_world_update(
@@ -317,9 +318,18 @@ impl WorldHandoff {
         packet_order: PacketOrder,
         message: &Message,
         agent_id: Option<Uuid>,
-        on_object_chunk: &mut impl FnMut(Vec<(Option<SimulatorId>, LocalAddress)>, Vec<LocalAddress>),
+        object_cache: &mut ObjectCacheSession,
+        on_object_chunk: &mut impl FnMut(Vec<(Option<SimulatorId>, LocalAddress, protocol::messages::CacheMissType)>, Vec<LocalAddress>),
     ) -> Option<SimulatorMessageOutcome> {
         let update = decode_simulator_world_update(world, simulator_id, sequence, packet_order, message)?;
+        let update = match (update, message) {
+            (DecodedWorldUpdate::Object(batch), Message::ObjectUpdateCached(cached)) => {
+                let region = world.region_for(simulator_id)?;
+                let batch = object_cache.resolve_cached(simulator_id, region, sequence, order_evidence(packet_order), cached, batch).await;
+                DecodedWorldUpdate::Object(batch)
+            }
+            (update, _) => update,
+        };
         match update {
             DecodedWorldUpdate::Object(batch) => {
                 let batch = self.filter_batch(world, simulator_id, agent_id, batch)?;

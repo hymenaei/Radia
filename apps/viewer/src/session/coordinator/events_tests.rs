@@ -8,7 +8,7 @@ use network::{
 use protocol::{
     lludp::Message,
     lludp::Message::{ImprovedTerseObjectUpdate, KillObject, ObjectUpdate, ObjectUpdateCached},
-    messages::{CacheMissType::Full, RequestAgentData, object::kill_object},
+    messages::{CacheMissType::Full, CachedObjectReference, ObjectUpdateCached as CachedUpdate, RequestAgentData, object::kill_object},
 };
 use test_support::lludp::vectors;
 use uuid::Uuid;
@@ -26,6 +26,7 @@ use crate::session::coordinator::tests::{
 };
 use crate::session::inbound::{ObjectBatch, ObjectOperation};
 use crate::session::{
+    object_cache::ObjectCacheSession,
     recovery::recovery_request,
     world::{IngestStatus, SessionWorld, viewer_world_limits},
 };
@@ -68,6 +69,121 @@ fn begin_world_handoff(
     *world_primary = handoff.world_primary;
     *promoted_target = handoff.promoted_target;
     result
+}
+
+fn assert_public_world_invariants(world: &SessionWorld, region: Region) {
+    let state = world.world();
+    let mut object_views = state.objects();
+    let objects = object_views.iter().collect::<Vec<_>>();
+    assert_eq!(objects.len(), state.object_count());
+    for object in objects {
+        let entity = state.entity_at(object.address()).expect("live object address remains indexed");
+        assert_eq!(state.object(entity).map(|indexed| indexed.id()), Some(object.id()));
+        if let Parent::Resolved(parent) = object.parent() {
+            assert!(state.object(parent).is_some(), "resolved parent remains live");
+        }
+    }
+    assert_eq!(state.objects_in_region(region).count(), state.object_count());
+}
+
+async fn apply_with_cache(
+    world: &mut SessionWorld,
+    handoff: &mut WorldHandoff,
+    cache: &mut ObjectCacheSession,
+    simulator: network::SimulatorId,
+    sequence: u32,
+    message: &Message,
+) -> Vec<(Option<network::SimulatorId>, LocalAddress, protocol::messages::CacheMissType)> {
+    let mut recovery = Vec::new();
+    let _ = handoff
+        .apply_message_cooperatively(world, simulator, sequence, Ordered(u64::from(sequence)), message, None, cache, &mut |targets, _| {
+            recovery.extend(targets)
+        })
+        .await;
+    recovery
+}
+
+#[tokio::test]
+async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
+    let directory = tempfile::tempdir().expect("create isolated cache directory");
+    let simulator = simulator_id();
+    let mut cache = crate::session::object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
+    let Message::RegionHandshake(mut handshake) = fixture_packet(vectors::REGION_HANDSHAKE).into_message() else {
+        panic!("region handshake fixture should decode as a handshake");
+    };
+    handshake.region_info1.cache_id = Uuid::from_u128(0x9876);
+    let Some(info) = &mut handshake.region_info2 else { panic!("test handshake includes region identity") };
+    info.region_id = Uuid::from_u128(0x5432);
+    cache.set_region_identity(simulator, &handshake);
+
+    let region_handle = 0x2222_0000_0000_0002;
+    let mut world = SessionWorld::new(viewer_world_limits());
+    world.register_simulator(simulator, Some(RegionHandle::new(region_handle))).expect("register region");
+    let region = world.region_for(simulator).expect("region exists");
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut world, simulator, Uuid::nil());
+    let mut full = fixture_packet(vectors::OBJECT_UPDATE).into_message();
+    let ObjectUpdate(update) = &mut full else { panic!("full object fixture should decode as an update") };
+    update.region_data.region_handle = region_handle;
+    update.objects[1].parent_local_id = update.objects[0].local_id;
+    cache.record_update(simulator, &full);
+
+    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 1, &full).await;
+    assert_public_world_invariants(&world, region);
+
+    let make_cached = |message: &Message| {
+        let Message::ObjectUpdate(update) = message else { panic!("cached source is a full update") };
+        Message::ObjectUpdateCached(CachedUpdate {
+            region_data: update.region_data,
+            objects: update
+                .objects
+                .iter()
+                .map(|object| CachedObjectReference { local_id: object.local_id, crc: object.crc, update_flags: object.update_flags })
+                .collect(),
+        })
+    };
+    let cached = make_cached(&full);
+    assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 2, &cached).await.is_empty());
+    assert_public_world_invariants(&world, region);
+
+    let parent_local_id = match &full {
+        Message::ObjectUpdate(update) => update.objects[0].local_id,
+        _ => unreachable!(),
+    };
+    let mut terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).into_message();
+    let ImprovedTerseObjectUpdate(update) = &mut terse else { panic!("terse fixture should decode as an update") };
+    update.region_data.region_handle = region_handle;
+    let object = update.objects[0].as_decoded_mut().expect("terse fixture object is valid");
+    object.local_id = parent_local_id;
+    object.motion.position = Vec3::new(31.0, 42.0, 53.0);
+    object.motion.rotation = Quat::IDENTITY;
+    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 3, &terse).await;
+    assert_public_world_invariants(&world, region);
+
+    let Message::ObjectUpdate(update) = &mut full else { unreachable!() };
+    update.objects[0].crc = update.objects[0].crc.wrapping_add(1);
+    cache.record_update(simulator, &full);
+    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 4, &full).await;
+    assert_public_world_invariants(&world, region);
+
+    let cached = make_cached(&full);
+    assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 5, &cached).await.is_empty());
+    assert_public_world_invariants(&world, region);
+
+    let child_local_id = match &full {
+        Message::ObjectUpdate(update) => update.objects[1].local_id,
+        _ => unreachable!(),
+    };
+    let mut terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).into_message();
+    let ImprovedTerseObjectUpdate(update) = &mut terse else { unreachable!() };
+    update.region_data.region_handle = region_handle;
+    let object = update.objects[0].as_decoded_mut().expect("terse fixture object is valid");
+    object.local_id = child_local_id;
+    object.motion.position = Vec3::new(-5.0, 7.0, 11.0);
+    object.motion.rotation = Quat::IDENTITY;
+    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 6, &terse).await;
+    assert_public_world_invariants(&world, region);
+    cache.close().await;
 }
 
 fn complete_promoted_handoff(

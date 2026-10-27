@@ -43,6 +43,7 @@ use crate::{
         AgentMotionPublisher, CameraUplink, RegionLookup, Session, SessionHandle,
         environment::{Completion, EnvironmentIntake},
         inbound::object_media_requests,
+        object_cache::{ObjectCacheEvent, ObjectCacheSession},
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
         recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error, warn_unrecovered},
         terrain::{DecodedTerrain, TerrainDecodeQueue},
@@ -59,6 +60,7 @@ type Cancellation = Shared<BoxFuture<'static, ()>>;
 enum DriverInput {
     Session(Input),
     InventoryCache(Option<InventoryCacheEvent>),
+    ObjectCache(Option<ObjectCacheEvent>),
     InventoryEdit(Option<InventoryEditEvent>),
     InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>, tokio::task::JoinError>),
 }
@@ -98,6 +100,7 @@ struct SessionDriver {
     inventory_bootstrap_dirty: bool,
     inventory: Option<Inventory>,
     inventory_cache: InventoryCacheSession,
+    object_cache: ObjectCacheSession,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
     rejected_inventory_blocks: u64,
     inventory_fetch: InventoryFetchController,
@@ -145,6 +148,8 @@ impl SessionDriver {
         let (inventory_changes, _) = watch::channel(None);
         let inventory_edits = InventoryEditController::new();
         let inventory_fetch = InventoryFetchController::new(inventory_edits.handle());
+        let mut object_cache = ObjectCacheSession::new(credentials.grid);
+        object_cache.start(&runtime);
 
         Self {
             session,
@@ -173,6 +178,7 @@ impl SessionDriver {
             inventory_bootstrap_dirty: false,
             inventory: None,
             inventory_cache: InventoryCacheSession::new(),
+            object_cache,
             inventory_changes,
             rejected_inventory_blocks: 0,
             inventory_fetch,
@@ -216,6 +222,7 @@ impl SessionDriver {
                     self.inventory_fetch.next_event(),
                 ) => DriverInput::Session(input),
                 cache_event = self.inventory_cache.next_event() => DriverInput::InventoryCache(cache_event),
+                cache_event = self.object_cache.next_event() => DriverInput::ObjectCache(cache_event),
                 edit_event = self.inventory_edits.next_event() => DriverInput::InventoryEdit(edit_event),
                 bootstrap = inventory_bootstrap => DriverInput::InventoryBootstrap(bootstrap.expect("bootstrap task must be pending")),
             };
@@ -251,6 +258,11 @@ impl SessionDriver {
                     ControlFlow::Continue(())
                 }
                 DriverInput::InventoryCache(None) => ControlFlow::Continue(()),
+                DriverInput::ObjectCache(Some(event)) => {
+                    self.object_cache.handle_event(event);
+                    ControlFlow::Continue(())
+                }
+                DriverInput::ObjectCache(None) => ControlFlow::Continue(()),
                 DriverInput::InventoryEdit(Some(event)) => {
                     self.handle_inventory_edit_event(event);
                     ControlFlow::Continue(())
@@ -453,6 +465,7 @@ impl SessionDriver {
                     self.assets.retire(region);
                 }
                 self.handoff.simulator_disconnected(&mut self.session_world, simulator_id);
+                self.object_cache.forget_simulator(simulator_id);
                 self.recovery.cancel_simulator(simulator_id);
                 self.media.forget_simulator(simulator_id);
                 if Some(simulator_id) == self.primary_simulator {
@@ -551,6 +564,14 @@ impl SessionDriver {
         let received_at = std::time::Instant::now();
         let primary_origin_before = (self.primary_simulator == Some(simulator_id)).then(|| self.primary_region_origin()).flatten();
         let region = self.session_world.region_for(simulator_id);
+        if let Message::RegionHandshake(handshake) = &message {
+            self.object_cache.set_region_identity(simulator_id, handshake);
+            let flags = self.object_cache.region_handshake_flags(simulator_id);
+            if let Err(error) = self.session_handle.reply_region_handshake(simulator_id, flags).await {
+                tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
+            }
+        }
+        self.object_cache.record_update(simulator_id, &message);
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         if matches!(packet_order, PacketOrder::Ordered(_))
             && Some(simulator_id) == self.primary_simulator
@@ -582,6 +603,7 @@ impl SessionDriver {
                     packet_order,
                     &message,
                     agent_id,
+                    &mut self.object_cache,
                     &mut on_object_chunk,
                 )
                 .await
@@ -822,7 +844,7 @@ impl SessionDriver {
 
     fn process_ingest_summary(&mut self, simulator_id: SimulatorId, summary: IngestSummary) {
         summary.log_incomplete_data(simulator_id, self.session_world.region_for(simulator_id));
-        let targets = route_recovery_targets(&self.session_world, summary.recovery_targets());
+        let targets = route_recovery_targets(&self.session_world, summary.recovery_requests());
         let updated = summary.recovery_cancellation_addresses().collect();
         let agent_data =
             self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
@@ -1134,6 +1156,7 @@ impl SessionDriver {
         drop(self.terrain);
         self.assets.stop().await;
         self.inventory_cache.close().await;
+        self.object_cache.close().await;
         for (simulator_id, error) in self.session_world.retire_all() {
             let region = self.session_world.region_for(simulator_id).map(|region| region.get());
             tracing::warn!(simulator = simulator_id.get(), region, %error, "could not retire simulator world region on session shutdown");

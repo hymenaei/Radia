@@ -357,7 +357,7 @@ fn lookup_checks_hash_and_removes_corruption() {
 fn busy_usage_update_is_requeued_and_merged() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
     let hooks = Arc::new(writer::FaultHooks::default());
-    let cache = Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, hooks)?;
+    let cache = Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::new(LruPolicy), hooks)?;
     let cache_key = key(25);
     cache.put(cache_key, b"usage metadata".to_vec())?;
     let first = match cache.lookup(cache_key) {

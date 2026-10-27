@@ -19,7 +19,7 @@ use world::{
 use crate::scene::{
     AssetChange, AssetTicket, Batch, Budget, Camera, EnvironmentPush, EnvironmentPushError, MeshCompletion, MeshJob, Object, Patch,
     RecoveryReason, RegionData, SceneView, Status, SurfaceKind,
-    asset_demand::AssetDemand,
+    asset_demand::{AssetDemand, AssetUser},
     budget::Lease,
     dependencies::{Dependencies, DependencyTraversal},
     environment::ViewerEnvironments,
@@ -203,9 +203,14 @@ impl Reconciler {
         if self.viewer.complete(ticket, &status) {
             return;
         }
-        for entity in self.preparation.assets.complete(ticket, status) {
-            if let Some(object) = self.state.mirror.objects.get(&entity) {
-                self.preparation.assets.invalidate(object);
+        for user in self.preparation.assets.complete(ticket, status) {
+            match user {
+                AssetUser::Object(entity) => {
+                    if let Some(object) = self.state.mirror.objects.get(&entity) {
+                        self.preparation.assets.invalidate(object);
+                    }
+                }
+                AssetUser::Terrain(_) => {}
             }
         }
     }

@@ -7,7 +7,7 @@ use world::{
     ApplyOutcome::{AgentHandedOff, Introduced, TombstoneRecorded},
     EnvironmentAssignment, EnvironmentTarget, FieldRejectionReason, Kind, LocalAddress, ObjectMediaUpdate, ObjectObservation, ObjectPatch,
     OrderEvidence, ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesObservation, Region, RegionApplied, RegionHandle, RegionInfo,
-    RegionOutcome, UpdateSource, World, WorldLimits,
+    RegionOutcome, TerrainSettings, UpdateSource, World, WorldLimits,
 };
 
 use super::{
@@ -335,6 +335,18 @@ impl SessionWorld {
 
     pub(super) fn update_water_height(&mut self, source: UpdateSource, height: f32) -> Result<(), ApplyError> {
         self.world.observe_water_height(source, height).map(|_| ())
+    }
+
+    pub(super) fn update_terrain_settings(
+        &mut self,
+        source: UpdateSource,
+        detail_textures: [Uuid; 4],
+        start_heights: [f32; 4],
+        height_ranges: [f32; 4],
+    ) -> Result<(), ApplyError> {
+        let settings = TerrainSettings::new(detail_textures, start_heights, height_ranges)
+            .map_err(|_| ApplyError::InvalidValue { field: "terrain_settings" })?;
+        self.world.observe_terrain_settings(source, settings).map(|_| ())
     }
 
     pub(super) fn apply_terrain(&mut self, decoded: DecodedTerrain) -> usize {

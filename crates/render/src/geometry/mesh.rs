@@ -42,6 +42,7 @@ impl GeometryRenderer {
             floats(&mut packed, vertex.position.to_array());
             floats(&mut packed, vertex.normal.to_array());
             floats(&mut packed, vertex.uv.to_array());
+            floats(&mut packed, vertex.weights);
         }
         self.queue.write_buffer(&allocation.buffers().vertices, u64::from(allocation.vertices().start) * VERTEX_BYTES as u64, &packed);
         packed.clear();

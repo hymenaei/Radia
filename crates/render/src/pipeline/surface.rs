@@ -11,12 +11,13 @@ use wgpu::{
 use crate::scene::Camera;
 
 pub(crate) const INSTANCE_BYTES: usize = 192;
-pub(crate) const VERTEX_BYTES: usize = 32;
+pub(crate) const VERTEX_BYTES: usize = 48;
 const CAMERA_BYTES: usize = 144;
 const KEY_LIGHT: Vec3 = Vec3::new(-0.3, 0.5, 1.0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Pipeline {
+    Terrain,
     Surface,
     FlippedWinding,
     DoubleSided,
@@ -27,6 +28,7 @@ pub(crate) enum Pipeline {
 }
 
 pub(crate) struct SurfacePipelines {
+    terrain: RenderPipeline,
     pipeline: RenderPipeline,
     flipped_winding: RenderPipeline,
     double_sided: RenderPipeline,
@@ -39,24 +41,24 @@ pub(crate) struct SurfacePipelines {
 }
 
 impl SurfacePipelines {
-    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout) -> Self {
+    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout, terrain_textures: &BindGroupLayout) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Scene preview"),
             source: ShaderSource::Wgsl(include_str!("../shaders/surface.wgsl").into()),
         });
         let attributes = [
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 0, shader_location: 3 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 16, shader_location: 4 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 32, shader_location: 5 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 48, shader_location: 6 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 64, shader_location: 7 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 80, shader_location: 8 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 96, shader_location: 9 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 112, shader_location: 10 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 128, shader_location: 11 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 144, shader_location: 12 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 160, shader_location: 13 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 176, shader_location: 14 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 0, shader_location: 4 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 16, shader_location: 5 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 32, shader_location: 6 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 48, shader_location: 7 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 64, shader_location: 8 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 80, shader_location: 9 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 96, shader_location: 10 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 112, shader_location: 11 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 128, shader_location: 12 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 144, shader_location: 13 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 160, shader_location: 14 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 176, shader_location: 15 },
         ];
         let camera_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Surface camera"),
@@ -73,16 +75,17 @@ impl SurfacePipelines {
             immediate_size: 0,
         });
         let buffers = [
-            VertexBufferLayout {
+            Some(VertexBufferLayout {
                 array_stride: VERTEX_BYTES as u64,
                 step_mode: VertexStepMode::Vertex,
                 attributes: &[
                     VertexAttribute { format: VertexFormat::Float32x3, offset: 0, shader_location: 0 },
                     VertexAttribute { format: VertexFormat::Float32x3, offset: 12, shader_location: 1 },
                     VertexAttribute { format: VertexFormat::Float32x2, offset: 24, shader_location: 2 },
+                    VertexAttribute { format: VertexFormat::Float32x4, offset: 32, shader_location: 3 },
                 ],
-            },
-            VertexBufferLayout { array_stride: INSTANCE_BYTES as u64, step_mode: VertexStepMode::Instance, attributes: &attributes },
+            }),
+            Some(VertexBufferLayout { array_stride: INSTANCE_BYTES as u64, step_mode: VertexStepMode::Instance, attributes: &attributes }),
         ];
         let targets = [Some(ColorTargetState { format, blend: None, write_mask: ColorWrites::ALL })];
         let descriptor = RenderPipelineDescriptor {
@@ -92,7 +95,7 @@ impl SurfacePipelines {
                 module: &shader,
                 entry_point: Some("vertex"),
                 compilation_options: Default::default(),
-                buffers: &buffers.map(Some),
+                buffers: &buffers,
             },
             primitive: PrimitiveState { cull_mode: Some(Face::Back), ..Default::default() },
             depth_stencil: Some(DepthStencilState {
@@ -113,6 +116,36 @@ impl SurfacePipelines {
             cache: None,
         };
         let pipeline = device.create_render_pipeline(&descriptor);
+        let terrain_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Legacy terrain detail blend"),
+            source: ShaderSource::Wgsl(include_str!("../shaders/terrain.wgsl").into()),
+        });
+        let terrain_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Legacy terrain pipeline"),
+            bind_group_layouts: &[Some(&camera_layout), Some(textures), Some(terrain_textures)],
+            immediate_size: 0,
+        });
+        let terrain = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("Legacy terrain"),
+            layout: Some(&terrain_layout),
+            vertex: VertexState {
+                module: &terrain_shader,
+                entry_point: Some("vertex"),
+                compilation_options: Default::default(),
+                buffers: &buffers,
+            },
+            primitive: descriptor.primitive,
+            depth_stencil: descriptor.depth_stencil.clone(),
+            multisample: descriptor.multisample,
+            fragment: Some(FragmentState {
+                module: &terrain_shader,
+                entry_point: Some("fragment"),
+                compilation_options: Default::default(),
+                targets: &targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let flipped_winding = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Flipped winding scene preview"),
             primitive: PrimitiveState { front_face: FrontFace::Cw, ..descriptor.primitive },
@@ -163,7 +196,7 @@ impl SurfacePipelines {
             entries: &[BindGroupEntry { binding: 0, resource: BindingResource::Buffer(camera.as_entire_buffer_binding()) }],
         });
 
-        Self { pipeline, flipped_winding, double_sided, blend, blend_flipped, blend_double_sided, water, camera, binding }
+        Self { terrain, pipeline, flipped_winding, double_sided, blend, blend_flipped, blend_double_sided, water, camera, binding }
     }
     pub(crate) fn update_camera_uniform(&self, queue: &Queue, camera: Camera, size: [u32; 2]) -> Mat4 {
         let projection = projection(camera, size);
@@ -181,6 +214,7 @@ impl SurfacePipelines {
     }
     pub(crate) fn bind_pipeline(&self, pass: &mut RenderPass<'_>, pipeline: Pipeline) {
         pass.set_pipeline(match pipeline {
+            Pipeline::Terrain => &self.terrain,
             Pipeline::Surface => &self.pipeline,
             Pipeline::FlippedWinding => &self.flipped_winding,
             Pipeline::DoubleSided => &self.double_sided,

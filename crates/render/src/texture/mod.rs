@@ -198,6 +198,9 @@ pub(crate) struct TextureKey {
     pub(crate) sampler: Sampler,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct TerrainTextureKey(pub(crate) [Option<TextureKey>; 4]);
+
 struct GpuTexture {
     texture: Texture,
     view: TextureView,
@@ -254,7 +257,11 @@ pub(crate) struct Textures {
     staged: Vec<Upload>,
     pixels: Vec<UploadPixels>,
     pub(crate) layout: BindGroupLayout,
+    pub(crate) terrain_layout: BindGroupLayout,
     fallback: BindGroup,
+    terrain_fallback: TextureView,
+    terrain_sampler: wgpu::Sampler,
+    terrain_bindings: HashMap<TerrainTextureKey, BindGroup>,
     mip_layout: BindGroupLayout,
     mip_pipeline: RenderPipeline,
     pub(crate) uploaded: usize,
@@ -287,6 +294,26 @@ impl Textures {
                 },
             ],
         });
+        let mut terrain_entries: Vec<_> = (0..4)
+            .map(|binding| BindGroupLayoutEntry {
+                binding,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: true },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            })
+            .collect();
+        terrain_entries.push(BindGroupLayoutEntry {
+            binding: 4,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Sampler(SamplerBindingType::Filtering),
+            count: None,
+        });
+        let terrain_layout = device
+            .create_bind_group_layout(&BindGroupLayoutDescriptor { label: Some("Terrain detail textures"), entries: &terrain_entries });
         let texture = device.create_texture(&TextureDescriptor {
             label: Some("Neutral image"),
             size: Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -304,6 +331,31 @@ impl Textures {
             Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
         let fallback = binding(device, &layout, &texture.create_view(&TextureViewDescriptor::default()), Sampler::default());
+        let neutral = device.create_texture(&TextureDescriptor {
+            label: Some("Neutral terrain detail"),
+            size: Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            neutral.as_image_copy(),
+            &[46, 59, 33, 255],
+            TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let terrain_fallback = neutral.create_view(&TextureViewDescriptor::default());
+        let terrain_sampler = device.create_sampler(&SamplerDescriptor {
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: MipmapFilterMode::Linear,
+            ..Default::default()
+        });
         let mip_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Mipmap source"),
             entries: &[BindGroupLayoutEntry {
@@ -359,7 +411,11 @@ impl Textures {
             staged: Vec::new(),
             pixels: Vec::new(),
             layout,
+            terrain_layout,
             fallback,
+            terrain_fallback,
+            terrain_sampler,
+            terrain_bindings: HashMap::new(),
             mip_layout,
             mip_pipeline,
             uploaded: 0,
@@ -523,6 +579,55 @@ impl Textures {
         };
         gpu.bindings.entry(key.sampler).or_insert_with(|| binding(device, &self.layout, &gpu.view, key.sampler));
         Some(key)
+    }
+
+    pub(crate) fn terrain_key(&mut self, textures: &[Option<TextureHandle>; 4], epoch: u64) -> TerrainTextureKey {
+        TerrainTextureKey(std::array::from_fn(|index| {
+            let texture = textures[index].as_ref()?;
+            self.request(texture, epoch, Priority::Visible);
+            let key = TextureKey { id: texture.id(), sampler: Sampler::default() };
+            self.texture_view(key).map(|_| key)
+        }))
+    }
+
+    pub(crate) fn prepare_terrain_binding(&mut self, device: &Device, key: TerrainTextureKey) {
+        if self.terrain_bindings.contains_key(&key) {
+            return;
+        }
+        let views: [TextureView; 4] = std::array::from_fn(|index| {
+            key.0[index].and_then(|key| self.texture_view(key).cloned()).unwrap_or_else(|| self.terrain_fallback.clone())
+        });
+        let mut entries: Vec<_> = views
+            .iter()
+            .enumerate()
+            .map(|(index, view)| BindGroupEntry { binding: index as u32, resource: BindingResource::TextureView(view) })
+            .collect();
+        entries.push(BindGroupEntry { binding: 4, resource: BindingResource::Sampler(&self.terrain_sampler) });
+        let binding = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Terrain detail images"),
+            layout: &self.terrain_layout,
+            entries: &entries,
+        });
+        self.terrain_bindings.insert(key, binding);
+    }
+
+    pub(crate) fn terrain_binding(&self, key: TerrainTextureKey) -> &BindGroup {
+        self.terrain_bindings.get(&key).expect("terrain binding prepared with its draw")
+    }
+
+    pub(crate) fn clear_terrain_bindings(&mut self) {
+        self.terrain_bindings.clear();
+    }
+
+    fn texture_view(&self, key: TextureKey) -> Option<&TextureView> {
+        let entry = self.entries.get(&key.id)?;
+        if !entry.owner.is_alive() {
+            return None;
+        }
+        match &entry.state {
+            TextureUploadState::Ready(gpu) => Some(&gpu.view),
+            _ => entry.fallback.as_ref().map(|gpu| &gpu.view),
+        }
     }
 
     pub(crate) fn binding(&self, key: Option<TextureKey>) -> &BindGroup {

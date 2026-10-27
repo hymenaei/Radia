@@ -3,6 +3,8 @@ use std::collections::{
     Bound::{Excluded, Unbounded},
 };
 
+use uuid::Uuid;
+
 use crate::{ApplyError, Region, RegionApplied, UpdateSource, WorldReadError, WorldRevision, update::FieldStamp};
 use crate::{World, WorldChange, WorldId, newer_field};
 
@@ -11,6 +13,56 @@ pub const TERRAIN_PATCH_SAMPLES: usize = TERRAIN_PATCH_SIZE * TERRAIN_PATCH_SIZE
 pub const TERRAIN_REGION_SIZE: usize = 256;
 pub const MAX_TERRAIN_PATCHES: usize = 65_536;
 pub const MAX_TERRAIN_PAGE_PATCHES: usize = 8;
+
+const DEFAULT_DETAIL_TEXTURES: [Uuid; 4] = [
+    Uuid::from_u128(0x0bc5822874a07e8389bc5c23464bcec5),
+    Uuid::from_u128(0x63338ede0037c4fd855b015d77112fc8),
+    Uuid::from_u128(0x303cd3818560757923f1f0a880799740),
+    Uuid::from_u128(0x53a2f40648951d13d541d2e3b86bc19c),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TerrainSettings {
+    detail_textures: [Uuid; 4],
+    start_heights: [f32; 4],
+    height_ranges: [f32; 4],
+}
+
+impl TerrainSettings {
+    pub fn new(detail_textures: [Uuid; 4], start_heights: [f32; 4], height_ranges: [f32; 4]) -> Result<Self, TerrainSettingsError> {
+        if !start_heights.iter().all(|height| height.is_finite()) {
+            return Err(TerrainSettingsError::NonFiniteStartHeight);
+        }
+        if !height_ranges.iter().all(|range| range.is_finite() && *range > 0.0) {
+            return Err(TerrainSettingsError::InvalidHeightRange);
+        }
+        Ok(Self {
+            detail_textures: std::array::from_fn(|index| {
+                if detail_textures[index].is_nil() { DEFAULT_DETAIL_TEXTURES[index] } else { detail_textures[index] }
+            }),
+            start_heights,
+            height_ranges,
+        })
+    }
+
+    pub fn detail_textures(&self) -> &[Uuid; 4] {
+        &self.detail_textures
+    }
+
+    pub fn start_heights(&self) -> &[f32; 4] {
+        &self.start_heights
+    }
+
+    pub fn height_ranges(&self) -> &[f32; 4] {
+        &self.height_ranges
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerrainSettingsError {
+    NonFiniteStartHeight,
+    InvalidHeightRange,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TerrainPatchId(u8);
@@ -61,11 +113,15 @@ struct ObservedPatch {
 pub(crate) struct Terrain {
     patches: BTreeMap<TerrainPatchId, ObservedPatch>,
     water: Option<(f32, FieldStamp)>,
+    settings: Option<(TerrainSettings, FieldStamp)>,
 }
 
 impl Terrain {
     pub(crate) fn patch_count(&self) -> usize {
         self.patches.len()
+    }
+    pub(crate) fn settings(&self) -> Option<TerrainSettings> {
+        self.settings.map(|(settings, _)| settings)
     }
 }
 
@@ -130,6 +186,23 @@ impl World {
         self.ensure_revision_available()?;
         self.regions.get_mut(&region).expect("active region").terrain.water = Some((height, fence));
         Ok(self.publish_region_patch(WorldChange::WaterHeightUpdated(region)))
+    }
+    pub fn observe_terrain_settings(&mut self, source: UpdateSource, settings: TerrainSettings) -> Result<RegionApplied, ApplyError> {
+        let region = source.region();
+        self.require_active_region(region)?;
+        let Some(stamp) = source.stamp() else { return Ok(RegionApplied::unchanged()) };
+        let fence = FieldStamp { authority: source.authority(), stamp };
+        let current = self.regions[&region].terrain.settings;
+        if !newer_field(fence, current.map(|(_, fence)| fence)) {
+            return Ok(RegionApplied::unchanged());
+        }
+        if current.is_some_and(|(current, _)| current == settings) {
+            self.regions.get_mut(&region).expect("active region").terrain.settings = Some((settings, fence));
+            return Ok(RegionApplied::unchanged());
+        }
+        self.ensure_revision_available()?;
+        self.regions.get_mut(&region).expect("active region").terrain.settings = Some((settings, fence));
+        Ok(self.publish_region_patch(WorldChange::RegionUpdated(region)))
     }
     pub fn terrain_page(
         &self,
@@ -291,6 +364,35 @@ mod tests {
         assert_eq!(page(&world).patches[0].heights()[0], 1.0);
         assert_eq!(page(&world).water_height, None);
         assert_eq!(world.terrain_patches, 1);
+    }
+    #[test]
+    fn null_detail_ids_resolve_to_official_defaults_and_ranges_are_validated() {
+        let settings = TerrainSettings::new([Uuid::nil(); 4], [0.0; 4], [1.0; 4]).unwrap();
+        assert_eq!(settings.detail_textures, DEFAULT_DETAIL_TEXTURES);
+        assert_eq!(TerrainSettings::new([Uuid::nil(); 4], [f32::NAN; 4], [1.0; 4]), Err(TerrainSettingsError::NonFiniteStartHeight));
+        assert_eq!(TerrainSettings::new([Uuid::nil(); 4], [0.0; 4], [0.0; 4]), Err(TerrainSettingsError::InvalidHeightRange));
+        assert_eq!(TerrainSettings::new([Uuid::nil(); 4], [0.0; 4], [f32::INFINITY; 4]), Err(TerrainSettingsError::InvalidHeightRange));
+    }
+    #[test]
+    fn settings_are_live_fenced_and_retired_with_the_region() {
+        let mut world = world();
+        let first = TerrainSettings::new([Uuid::nil(); 4], [0.0; 4], [10.0; 4]).unwrap();
+        let second = TerrainSettings::new([Uuid::nil(); 4], [1.0; 4], [20.0; 4]).unwrap();
+        let barrier = world.read_barrier();
+        let _ = world.observe_terrain_settings(source(2), first).unwrap();
+        assert_eq!(world.region_page(None, 8).unwrap().regions[0].terrain_settings, Some(first));
+        let revision = world.revision();
+        let _ = world.observe_terrain_settings(source(1), second).unwrap();
+        assert_eq!(world.revision(), revision);
+        let _ = world.observe_terrain_settings(source(3), second).unwrap();
+        assert_eq!(world.region_page(None, 8).unwrap().regions[0].terrain_settings, Some(second));
+        assert!(
+            matches!(world.change_page(barrier.changes, 8).unwrap().records.last().unwrap().change, WorldChange::RegionUpdated(region) if region == Region::new(1))
+        );
+        let _ = world.retire_region(Region::new(1)).unwrap();
+        assert_eq!(world.observe_terrain_settings(source(4), first), Err(ApplyError::StaleRegion));
+        let _ = world.adopt_region(Region::new(2)).unwrap();
+        assert_eq!(world.region_page(None, 8).unwrap().regions[0].terrain_settings, None);
     }
     #[test]
     fn global_capacity_allows_replacement_and_retirement_releases_admission() {

@@ -61,6 +61,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
                 floats(&mut vertices, vertex.position.to_array());
                 floats(&mut vertices, vertex.normal.to_array());
                 floats(&mut vertices, vertex.uv.to_array());
+                floats(&mut vertices, vertex.weights);
             }
             let indices: Vec<_> = mesh.indices().iter().flat_map(|index| index.to_le_bytes()).collect();
             let Placement::Ready(transform) = object.placement() else { panic!("fixture object must be placed") };
@@ -72,6 +73,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
                 pickable: true,
                 faces: Vec::new(),
                 shading: ShadingMode::Studio,
+                terrain_textures: None,
             };
             let params = FaceParams::new(Some(&object.materials().unwrap()[0]));
             let packed = packed_instance(&instance_base(&instance, camera.position()), &params, instance.scale);

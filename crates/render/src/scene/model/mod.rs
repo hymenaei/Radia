@@ -14,6 +14,7 @@ use std::{
     },
 };
 
+use assets::TextureHandle;
 use world::{Entity, Region, RegionSummary, TerrainPatch, TerrainPatchId, WorldRevision};
 
 use crate::scene::region_environment::RegionEnvironment;
@@ -38,14 +39,20 @@ impl SceneLifetime {
 }
 
 #[derive(Clone)]
-pub struct RegionData(Arc<RegionValue>);
+pub struct RegionData(Arc<RegionValue>, Arc<[Option<TextureHandle>; 4]>);
 
 impl RegionData {
     pub(in crate::scene) fn new(summary: RegionSummary, lease: Lease) -> Self {
-        Self(Arc::new(RegionValue { summary, _lease: lease }))
+        Self(Arc::new(RegionValue { summary, _lease: lease }), Arc::new([None, None, None, None]))
+    }
+    pub(in crate::scene) fn with_terrain_textures(&self, textures: [Option<TextureHandle>; 4]) -> Self {
+        Self(self.0.clone(), Arc::new(textures))
     }
     pub fn summary(&self) -> &RegionSummary {
         &self.0.summary
+    }
+    pub fn terrain_textures(&self) -> &[Option<TextureHandle>; 4] {
+        &self.1
     }
 }
 

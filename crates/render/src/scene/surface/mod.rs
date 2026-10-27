@@ -117,6 +117,14 @@ impl SurfaceJobs {
         self.invalidate((SurfaceKind::Water, region));
     }
 
+    pub(in crate::scene) fn terrain_settings(&mut self, mirror: &Mirror, region: Region) {
+        for &(patch_region, patch) in mirror.patches.keys() {
+            if patch_region == region {
+                self.invalidate((SurfaceKind::Terrain(patch), region));
+            }
+        }
+    }
+
     pub(in crate::scene) fn regions(&mut self, mirror: &Mirror) {
         for &(region, patch) in mirror.patches.keys() {
             self.invalidate((SurfaceKind::Terrain(patch), region));
@@ -164,7 +172,7 @@ impl SurfaceJobs {
         let (position, input) = match key.0 {
             SurfaceKind::Terrain(patch) => {
                 let (x, y) = patch.coordinates();
-                let tiles = Terrain::capture(mirror, key.1, patch);
+                let tiles = Terrain::capture(mirror, key.1, patch, origin);
                 if self.hydrating.contains(&key.1) && !tiles.complete() {
                     self.dirty.remove(&key);
                     self.deferred.insert(key);

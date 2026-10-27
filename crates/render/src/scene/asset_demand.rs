@@ -8,6 +8,8 @@ use std::{
 };
 
 use assets::{Content, Failure, Kind, MaterialDescription, Priority, Request, Resource, Status, TextureRef, TextureSize};
+use math::DVec3;
+use utils::AssetId;
 use uuid::Uuid;
 use world::{Entity, FaceAppearance, MAX_SURFACE_FACES, Region};
 
@@ -69,7 +71,7 @@ struct AssetKey {
 
 struct Entry {
     ticket: AssetTicket,
-    users: HashMap<Entity, (TextureSize, Priority)>,
+    users: HashMap<AssetUser, (TextureSize, Priority)>,
     size: TextureSize,
     priority: Priority,
     status: Option<Status>,
@@ -78,6 +80,19 @@ struct Entry {
 struct ObjectDemand {
     keys: HashSet<AssetKey>,
     faces: usize,
+    size: TextureSize,
+    priority: Priority,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(in crate::scene) enum AssetUser {
+    Object(Entity),
+    Terrain(Region),
+}
+
+struct TerrainDemand {
+    textures: [Uuid; 4],
+    keys: HashSet<AssetKey>,
     size: TextureSize,
     priority: Priority,
 }
@@ -94,6 +109,10 @@ pub(in crate::scene) struct AssetDemand {
     entries: HashMap<AssetKey, Entry>,
     tickets: HashMap<AssetTicket, AssetKey>,
     targets: HashMap<Entity, ObjectDemand>,
+    terrain_targets: HashMap<Region, TerrainDemand>,
+    dirty_terrain: BTreeSet<Region>,
+    terrain_changes: BTreeSet<Region>,
+    terrain_rescan: bool,
     events: VecDeque<AssetChange>,
     faces: usize,
 }
@@ -112,6 +131,10 @@ impl AssetDemand {
             entries: HashMap::new(),
             tickets: HashMap::new(),
             targets: HashMap::new(),
+            terrain_targets: HashMap::new(),
+            dirty_terrain: BTreeSet::new(),
+            terrain_changes: BTreeSet::new(),
+            terrain_rescan: false,
             events: VecDeque::new(),
             faces: 0,
         }
@@ -121,6 +144,7 @@ impl AssetDemand {
         if self.camera != Some(camera) {
             self.camera = Some(camera);
             self.rescan = true;
+            self.terrain_rescan = true;
         }
     }
 
@@ -130,12 +154,32 @@ impl AssetDemand {
         }
     }
 
+    pub(in crate::scene) fn invalidate_region(&mut self, region: Region) {
+        self.dirty_terrain.insert(region);
+    }
+
     pub(in crate::scene) fn event(&mut self) -> Option<AssetChange> {
         self.events.pop_front()
     }
 
+    pub(in crate::scene) fn take_terrain_changes(&mut self) -> Vec<Region> {
+        std::mem::take(&mut self.terrain_changes).into_iter().collect()
+    }
+
+    pub(in crate::scene) fn terrain_textures(&self, region: Region) -> [Option<assets::TextureHandle>; 4] {
+        let Some(target) = self.terrain_targets.get(&region) else { return [None, None, None, None] };
+        std::array::from_fn(|index| {
+            let key = AssetKey { region, resource: Resource { id: AssetId::new(target.textures[index]), kind: Kind::Texture } };
+            self.entries.get(&key).and_then(|entry| entry.status.as_ref()).and_then(Status::content).and_then(|content| match content {
+                Content::Texture(texture) => Some(texture.clone()),
+                _ => None,
+            })
+        })
+    }
+
     pub(in crate::scene) fn has_work(&self) -> bool {
-        self.camera.is_some() && (self.scan || self.rescan || !self.dirty.is_empty())
+        self.camera.is_some()
+            && (self.scan || self.rescan || !self.dirty.is_empty() || !self.dirty_terrain.is_empty() || self.terrain_rescan)
     }
 
     pub(in crate::scene) fn retry_admission(&mut self) -> bool {
@@ -148,7 +192,7 @@ impl AssetDemand {
         }
     }
 
-    pub(in crate::scene) fn complete(&mut self, ticket: AssetTicket, mut status: Status) -> Vec<Entity> {
+    pub(in crate::scene) fn complete(&mut self, ticket: AssetTicket, mut status: Status) -> Vec<AssetUser> {
         let Some(key) = self.tickets.get(&ticket).copied() else { return Vec::new() };
         if let Status::Ready(content) | Status::Refining(content) | Status::RefinementFailed { content, .. } = &status {
             let valid = match (key.resource.kind, content) {
@@ -163,7 +207,12 @@ impl AssetDemand {
         }
         let Some(entry) = self.entries.get_mut(&key) else { return Vec::new() };
         entry.status = Some(status.retaining(entry.status.as_ref().and_then(Status::content)));
-        entry.users.keys().copied().collect()
+        let users: Vec<_> = entry.users.keys().copied().collect();
+        self.terrain_changes.extend(users.iter().filter_map(|user| match user {
+            AssetUser::Terrain(region) => Some(*region),
+            AssetUser::Object(_) => None,
+        }));
+        users
     }
 
     pub(in crate::scene) fn remove(&mut self, entity: Entity) {
@@ -171,14 +220,24 @@ impl AssetDemand {
             self.rescan = true;
             self.faces -= target.faces;
             for key in target.keys {
-                self.release(entity, key);
+                self.release(AssetUser::Object(entity), key);
             }
         }
     }
 
-    fn release(&mut self, entity: Entity, key: AssetKey) {
+    pub(in crate::scene) fn remove_region(&mut self, region: Region) {
+        self.dirty_terrain.remove(&region);
+        self.terrain_changes.remove(&region);
+        if let Some(target) = self.terrain_targets.remove(&region) {
+            for key in target.keys {
+                self.release(AssetUser::Terrain(region), key);
+            }
+        }
+    }
+
+    fn release(&mut self, user: AssetUser, key: AssetKey) {
         if let Some(entry) = self.entries.get_mut(&key) {
-            entry.users.remove(&entity);
+            entry.users.remove(&user);
             if entry.users.is_empty() {
                 let entry = self.entries.remove(&key).expect("entry exists");
                 if self.tickets.remove(&entry.ticket).is_some() {
@@ -211,6 +270,56 @@ impl AssetDemand {
         }));
     }
 
+    fn resolve_terrain(&mut self, camera: Camera, mirror: &Mirror, region: Region) {
+        let Some(data) = mirror.regions.get(&region) else {
+            self.remove_region(region);
+            return;
+        };
+        let Some(settings) = data.summary().terrain_settings else {
+            self.remove_region(region);
+            return;
+        };
+        let textures = *settings.detail_textures();
+        let size = TextureSize::new(128);
+        let priority = data.summary().info.resolved_origin().map_or(Priority::Background, |origin| {
+            let center = origin + DVec3::new(128.0, 128.0, 0.0);
+            if camera.importance(center, 181.0).is_some() { Priority::Visible } else { Priority::Background }
+        });
+        if self
+            .terrain_targets
+            .get(&region)
+            .is_some_and(|target| target.textures == textures && target.size == size && target.priority == priority)
+        {
+            return;
+        }
+        let user = AssetUser::Terrain(region);
+        if let Some(target) = self.terrain_targets.get(&region) {
+            for key in &target.keys {
+                if let Some(entry) = self.entries.get_mut(key) {
+                    entry.users.remove(&user);
+                }
+            }
+        }
+        let mut keys = HashSet::new();
+        for id in textures {
+            self.register(user, region, Resource { id: AssetId::new(id), kind: Kind::Texture }, size, priority, &mut keys);
+        }
+        let old = self.terrain_targets.remove(&region);
+        if let Some(old) = &old {
+            for key in old.keys.difference(&keys) {
+                self.release(user, *key);
+            }
+        }
+        for key in &keys {
+            self.refresh(*key);
+        }
+        let changed = old.as_ref().is_none_or(|old| old.textures != textures);
+        self.terrain_targets.insert(region, TerrainDemand { textures, keys, size, priority });
+        if changed {
+            self.terrain_changes.insert(region);
+        }
+    }
+
     pub(in crate::scene) fn reset(&mut self) {
         for ticket in self.tickets.keys() {
             self.events.push_back(AssetChange::Release(*ticket));
@@ -218,6 +327,10 @@ impl AssetDemand {
         self.entries.clear();
         self.tickets.clear();
         self.targets.clear();
+        self.terrain_targets.clear();
+        self.dirty_terrain.clear();
+        self.terrain_changes.clear();
+        self.terrain_rescan = false;
         self.dirty.clear();
         self.faces = 0;
         self.scan = self.camera.is_some();
@@ -228,6 +341,13 @@ impl AssetDemand {
 
     pub(in crate::scene) fn step(&mut self, mirror: &Mirror, identities: &BTreeMap<Uuid, Entity>) -> Vec<MaterialChange> {
         let Some(camera) = self.camera else { return Vec::new() };
+        if self.terrain_rescan {
+            self.dirty_terrain.extend(mirror.regions.keys().copied());
+            self.terrain_rescan = false;
+        }
+        if let Some(region) = self.dirty_terrain.pop_first() {
+            self.resolve_terrain(camera, mirror, region);
+        }
         if !self.scan && self.rescan {
             self.scan = true;
             self.rescan = false;
@@ -321,7 +441,7 @@ impl AssetDemand {
         if let Some(target) = self.targets.get(&entity) {
             for key in &target.keys {
                 if let Some(entry) = self.entries.get_mut(key) {
-                    entry.users.remove(&entity);
+                    entry.users.remove(&AssetUser::Object(entity));
                 }
             }
         }
@@ -333,7 +453,7 @@ impl AssetDemand {
         self.faces = self.faces - previous + count;
         if let Some(old) = old {
             for key in old.keys.difference(&keys) {
-                self.release(entity, *key);
+                self.release(AssetUser::Object(entity), *key);
             }
         }
         for key in &keys {
@@ -358,6 +478,27 @@ impl AssetDemand {
         priority: Priority,
         keys: &mut HashSet<AssetKey>,
     ) -> (Resolution, Option<Content>) {
+        let key = self.register(AssetUser::Object(entity), region, resource, size, priority, keys);
+        let entry = self.entries.get(&key).expect("registered asset entry");
+        match &entry.status {
+            Some(Status::Ready(content)) => (Resolution::Ready, Some(content.clone())),
+            Some(Status::Refining(content)) => (Resolution::Pending, Some(content.clone())),
+            Some(Status::RefinementFailed { content, failure }) => (Resolution::Failed(*failure), Some(content.clone())),
+            Some(Status::Failed { failure, .. }) => (Resolution::Failed(*failure), None),
+            Some(Status::StaleSession) => (Resolution::Failed(Failure::SessionClosed), None),
+            _ => (Resolution::Pending, None),
+        }
+    }
+
+    fn register(
+        &mut self,
+        user: AssetUser,
+        region: Region,
+        resource: Resource,
+        size: TextureSize,
+        priority: Priority,
+        keys: &mut HashSet<AssetKey>,
+    ) -> AssetKey {
         let key = AssetKey { region, resource };
         keys.insert(key);
         let entry = self.entries.entry(key).or_insert_with(|| {
@@ -368,20 +509,13 @@ impl AssetDemand {
         });
         entry
             .users
-            .entry(entity)
+            .entry(user)
             .and_modify(|old| {
                 old.0 = old.0.max(size);
                 old.1 = old.1.max(priority);
             })
             .or_insert((size, priority));
-        match &entry.status {
-            Some(Status::Ready(content)) => (Resolution::Ready, Some(content.clone())),
-            Some(Status::Refining(content)) => (Resolution::Pending, Some(content.clone())),
-            Some(Status::RefinementFailed { content, failure }) => (Resolution::Failed(*failure), Some(content.clone())),
-            Some(Status::Failed { failure, .. }) => (Resolution::Failed(*failure), None),
-            Some(Status::StaleSession) => (Resolution::Failed(Failure::SessionClosed), None),
-            _ => (Resolution::Pending, None),
-        }
+        key
     }
 
     fn face(
@@ -451,4 +585,129 @@ impl AssetDemand {
 
 fn request(resource: Resource, size: TextureSize) -> Request {
     if resource.kind == Kind::Texture { Request::Texture { id: resource.id, size } } else { Request::new(resource) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::RegionData;
+    use math::DVec3;
+    use world::{RegionInfo, RegionSummary, TerrainSettings};
+
+    fn settings(textures: [Uuid; 4]) -> TerrainSettings {
+        TerrainSettings::new(textures, [0.0; 4], [64.0; 4]).unwrap()
+    }
+
+    fn region_data(budget: &Budget, region: Region, origin: DVec3, textures: [Uuid; 4]) -> RegionData {
+        RegionData::new(
+            RegionSummary {
+                region,
+                info: RegionInfo { origin: Some(origin), ..RegionInfo::default() },
+                terrain_settings: Some(settings(textures)),
+            },
+            budget.reserve(512).unwrap(),
+        )
+    }
+
+    fn camera() -> Camera {
+        Camera::new(DVec3::new(128.0, 128.0, 32.0), DVec3::X.as_vec3(), 1.0, [1280, 720]).unwrap()
+    }
+
+    fn ids(seed: u128) -> [Uuid; 4] {
+        std::array::from_fn(|index| Uuid::from_u128(seed + index as u128))
+    }
+
+    fn process(demand: &mut AssetDemand, mirror: &Mirror) {
+        let _ = demand.step(mirror, &BTreeMap::new());
+    }
+
+    #[test]
+    fn live_region_texture_changes_release_old_demands_and_request_replacements() {
+        let budget = Budget::default();
+        let region = Region::new(1);
+        let original = ids(10);
+        let replacement = ids(20);
+        let mut mirror = Mirror::default();
+        mirror.regions.insert(region, region_data(&budget, region, DVec3::ZERO, original));
+        let mut demand = AssetDemand::new(budget.clone());
+        demand.set_camera(camera());
+        demand.invalidate_region(region);
+        process(&mut demand, &mirror);
+        let old_tickets: Vec<_> = std::iter::from_fn(|| demand.event())
+            .filter_map(|change| match change {
+                AssetChange::Request(request) => Some(request.ticket),
+                AssetChange::Release(_) => None,
+            })
+            .collect();
+        assert_eq!(old_tickets.len(), 4);
+        assert_eq!(demand.terrain_targets[&region].textures, original);
+
+        mirror.regions.insert(region, region_data(&budget, region, DVec3::ZERO, replacement));
+        demand.invalidate_region(region);
+        process(&mut demand, &mirror);
+        assert_eq!(demand.terrain_targets[&region].textures, replacement);
+        let mut requested = 0;
+        let mut released = 0;
+        while let Some(change) = demand.event() {
+            match change {
+                AssetChange::Request(request) => {
+                    assert_eq!(request.region, region);
+                    requested += 1;
+                }
+                AssetChange::Release(_) => released += 1,
+            }
+        }
+        assert_eq!(requested, 4);
+        assert_eq!(released, 4);
+        assert!(demand.entries.keys().all(|key| key.region != region || replacement.contains(&key.resource.id.uuid())));
+    }
+
+    #[test]
+    fn missing_and_failed_details_keep_the_neutral_fallback_for_each_layer() {
+        let budget = Budget::default();
+        let region = Region::new(1);
+        let textures = ids(30);
+        let mut mirror = Mirror::default();
+        mirror.regions.insert(region, region_data(&budget, region, DVec3::ZERO, textures));
+        let mut demand = AssetDemand::new(budget);
+        demand.set_camera(camera());
+        demand.invalidate_region(region);
+        process(&mut demand, &mirror);
+        assert!(demand.terrain_textures(region).iter().all(Option::is_none));
+        let tickets: Vec<_> = std::iter::from_fn(|| demand.event())
+            .filter_map(|change| match change {
+                AssetChange::Request(request) => Some(request.ticket),
+                AssetChange::Release(_) => None,
+            })
+            .collect();
+        assert_eq!(tickets.len(), 4);
+        for ticket in tickets {
+            let users = demand.complete(ticket, Status::Failed { failure: Failure::NotFound, retry_at: None });
+            assert_eq!(users, [AssetUser::Terrain(region)]);
+        }
+        assert!(demand.terrain_textures(region).iter().all(Option::is_none));
+        assert_eq!(demand.take_terrain_changes(), [region]);
+    }
+
+    #[test]
+    fn neighboring_regions_keep_separate_detail_texture_sets() {
+        let budget = Budget::default();
+        let south = Region::new(1);
+        let east = Region::new(2);
+        let south_textures = ids(40);
+        let east_textures = ids(50);
+        let mut mirror = Mirror::default();
+        mirror.regions.insert(south, region_data(&budget, south, DVec3::ZERO, south_textures));
+        mirror.regions.insert(east, region_data(&budget, east, DVec3::new(256.0, 0.0, 0.0), east_textures));
+        let mut demand = AssetDemand::new(budget);
+        demand.set_camera(camera());
+        demand.invalidate_region(south);
+        demand.invalidate_region(east);
+        process(&mut demand, &mirror);
+        process(&mut demand, &mirror);
+        assert_eq!(demand.terrain_targets[&south].textures, south_textures);
+        assert_eq!(demand.terrain_targets[&east].textures, east_textures);
+        assert_eq!(demand.entries.keys().filter(|key| key.region == south).count(), 4);
+        assert_eq!(demand.entries.keys().filter(|key| key.region == east).count(), 4);
+    }
 }

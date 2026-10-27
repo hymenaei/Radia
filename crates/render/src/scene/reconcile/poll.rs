@@ -127,11 +127,18 @@ impl Reconciler {
                 return ReconcileStep::Build(job);
             }
             let changes = self.preparation.assets.step(&self.state.mirror, &self.state.identities);
-            if !changes.is_empty() {
-                let mut published = Vec::with_capacity(changes.len());
+            let terrain = self.preparation.assets.take_terrain_changes();
+            if !changes.is_empty() || !terrain.is_empty() {
+                let mut published = Vec::with_capacity(changes.len() + terrain.len());
                 for change in changes {
                     self.state.mirror.apply(Change::Material(change.clone()));
                     published.push(Change::Material(change));
+                }
+                for region in terrain {
+                    let Some(old) = self.state.mirror.regions.get(&region).cloned() else { continue };
+                    let updated = old.with_terrain_textures(self.preparation.assets.terrain_textures(region));
+                    self.state.mirror.apply(Change::Region(updated.clone()));
+                    published.push(Change::Region(updated));
                 }
                 return ReconcileStep::Publish(self.batch_at(
                     false,

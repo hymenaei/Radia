@@ -85,6 +85,14 @@ pub(super) fn decode_simulator_world_update(
         {
             tracing::debug!(simulator = simulator_id.get(), region = region.get(), %error, "could not update region water height");
         }
+        if let Err(error) = world.update_terrain_settings(
+            UpdateSource::new(region, sequence, order_evidence(packet_order), 0),
+            handshake.region_info1.terrain_detail,
+            handshake.region_info1.terrain_start_heights,
+            handshake.region_info1.terrain_height_ranges,
+        ) {
+            tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "could not update region terrain settings");
+        }
         let region_id = handshake.region_info2.as_ref().map(|info| info.region_id).filter(|id| !id.is_nil());
         if let Err(error) = world.update_handshake_metadata(
             UpdateSource::new(region, sequence, order_evidence(packet_order), 0),

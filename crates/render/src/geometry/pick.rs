@@ -162,6 +162,7 @@ mod tests {
             pickable: true,
             faces: vec![PickFace { indices, double_sided }],
             shading: ShadingMode::Studio,
+            terrain_textures: None,
         }
     }
 

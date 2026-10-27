@@ -7,7 +7,7 @@ use crate::object::components::Fenced;
 use crate::update::FieldUpdate;
 use crate::{
     Appearance, AvatarAppearance, AvatarAppearanceUpdate, FieldGroup, FieldRejectionReason, Kind, ObjectMedia, ObjectMediaUpdate,
-    PbrMaterialAssignments, PbrMaterialOverrides, Rejections, Shape, SitTarget, SurfaceAppearance, UpdateAuthority,
+    PbrMaterialAssignments, PbrMaterialOverrides, Rejections, Shape, SitTarget, SurfaceAppearance, TextureAnimation, UpdateAuthority,
 };
 
 impl Facet for Shape {
@@ -41,6 +41,7 @@ impl Facet for Appearance {
         updates.surface_appearance.is_some()
             || updates.pbr_materials.is_some()
             || updates.pbr_material_overrides.is_some()
+            || updates.texture_animation.is_some()
             || updates.object_media.is_some()
     }
 
@@ -71,6 +72,31 @@ impl Facet for Arc<SurfaceAppearance> {
 
     fn view(&self) -> &Self::View {
         self.as_ref()
+    }
+}
+
+impl Facet for TextureAnimation {
+    type Update = FieldUpdate<TextureAnimation>;
+    type View = TextureAnimation;
+
+    const GROUP: FieldGroup = FieldGroup::TextureAnimation;
+    const CLASSES: WorldChangeClasses = WorldChangeClasses::APPEARANCE;
+    const AVATAR: bool = false;
+
+    fn support(kind: Kind, appearance: Option<Appearance>, update: &Self::Update) -> FacetSupport {
+        if matches!(update, FieldUpdate::Clear) || accepts_surface(kind, appearance) {
+            FacetSupport::Supported
+        } else {
+            FacetSupport::Rejected(FieldRejectionReason::InvalidValue { field: "texture_animation" })
+        }
+    }
+
+    fn merge(_current: Option<&Self>, update: Self::Update, _context: FacetContext) -> FacetMerge<Self> {
+        merge_field(update)
+    }
+
+    fn view(&self) -> &Self::View {
+        self
     }
 }
 

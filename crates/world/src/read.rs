@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, LinearMotion, ObjectMedia, PbrMaterialAssignments, SitTarget, SurfaceAppearance,
-    Transform,
+    TextureAnimation, Transform,
 };
 use crate::{
     Entity, Kind, LocalAddress, Parent, PbrMaterialOverrides, PoseError, PoseState, Region, RegionInfo, Shape, WorldRevision,
@@ -98,6 +98,7 @@ pub struct ObjectDetail {
     pub shape: Option<Shape>,
     pub appearance: Option<Appearance>,
     pub surface_appearance: Option<SurfaceAppearance>,
+    pub texture_animation: Option<TextureAnimation>,
     pub pbr_materials: Option<PbrMaterialAssignments>,
     pub pbr_material_overrides: Option<PbrMaterialOverrides>,
     pub avatar_appearance: Option<AvatarAppearance>,
@@ -342,6 +343,7 @@ impl World {
             shape: object.shape(),
             appearance: object.appearance(),
             surface_appearance: object.surface_appearance().cloned(),
+            texture_animation: object.texture_animation(),
             pbr_materials: object.pbr_materials().cloned(),
             pbr_material_overrides: object.pbr_material_overrides().cloned(),
             avatar_appearance: object.avatar_appearance().cloned(),

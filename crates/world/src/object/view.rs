@@ -10,8 +10,8 @@ use crate::object::components::Fenced;
 use crate::object::storage::ComponentView;
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, Kind, LinearMotion, LocalAddress, LocalTransform, ObjectMedia,
-    Parent, PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Shape, SitTarget, SurfaceAppearance, Transform,
-    WorldTransformState,
+    Parent, PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Shape, SitTarget, SurfaceAppearance, TextureAnimation,
+    Transform, WorldTransformState,
 };
 use crate::{ObjectOrdering, ObjectRecord, World};
 
@@ -98,6 +98,10 @@ impl<'a> Object<'a> {
 
     pub fn surface_appearance(&self) -> Option<&'a SurfaceAppearance> {
         self.facet::<Arc<SurfaceAppearance>>()
+    }
+
+    pub fn texture_animation(&self) -> Option<TextureAnimation> {
+        self.facet::<TextureAnimation>().copied()
     }
 
     pub fn pbr_materials(&self) -> Option<&'a PbrMaterialAssignments> {

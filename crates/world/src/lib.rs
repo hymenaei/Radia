@@ -28,7 +28,7 @@ pub use identity::{Entity, LocalAddress, ObjectBindingTarget, Region, RegionHand
 pub use object::appearance::{
     Appearance, FaceAppearance, MAX_PBR_MATERIAL_BINDINGS, MAX_SURFACE_FACES, PbrAlphaMode, PbrMaterialAssignments,
     PbrMaterialAssignmentsError, PbrMaterialOverride, PbrMaterialOverrides, PbrMaterialOverridesError, PbrTextureOverride,
-    PbrTextureTransformOverride, SurfaceAppearance, SurfaceAppearanceError, TextureMapping,
+    PbrTextureTransformOverride, SurfaceAppearance, SurfaceAppearanceError, TextureAnimation, TextureAnimationError, TextureMapping,
 };
 pub use object::avatar::{
     AvatarAppearance, AvatarAppearanceError, AvatarAppearanceUpdate, AvatarBakeSlot, AvatarTextureSlot, AvatarTextureSlots,

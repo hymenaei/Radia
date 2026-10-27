@@ -39,6 +39,7 @@ impl Fields {
                 shape: present_update(observation.shape),
                 appearance: present_update(observation.appearance),
                 surface_appearance: observation.surface_appearance,
+                texture_animation: present_update(observation.texture_animation),
                 pbr_materials: observation.pbr_materials,
                 ..FacetUpdates::default()
             },
@@ -56,6 +57,7 @@ impl Fields {
                 shape: present_update(patch.shape),
                 appearance: present_update(patch.appearance),
                 surface_appearance: patch.surface_appearance,
+                texture_animation: present_update(patch.texture_animation),
                 pbr_materials: patch.pbr_materials,
                 pbr_material_overrides: patch.pbr_material_overrides,
                 avatar_appearance: patch.avatar_appearance,

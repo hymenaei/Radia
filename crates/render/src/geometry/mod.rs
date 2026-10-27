@@ -164,11 +164,16 @@ struct FramePreparation {
     textures: TextureState,
     meshes: MeshState,
     more_meshes: bool,
+    animated_faces: bool,
 }
 
 impl FramePreparation {
+    fn needs_frame(&self, textures: TextureState, meshes: MeshState) -> bool {
+        self.animated_faces || self.more_meshes || self.textures != textures || self.meshes != meshes
+    }
+
     fn reusable(&self, key: &FramePreparationKey, textures: TextureState, meshes: MeshState) -> bool {
-        self.key == *key && self.textures == textures && self.meshes == meshes && !self.more_meshes
+        self.key == *key && self.textures == textures && self.meshes == meshes && !self.more_meshes && !self.animated_faces
     }
 }
 
@@ -207,9 +212,8 @@ impl GeometryRenderer {
     }
 
     pub(crate) fn needs_frame(&self) -> bool {
-        self.prepared.as_ref().is_some_and(|prepared| {
-            prepared.more_meshes || prepared.textures != self.textures.state() || prepared.meshes != self.memory.mesh_state()
-        }) || self.textures.uploading()
+        self.prepared.as_ref().is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.memory.mesh_state()))
+            || self.textures.uploading()
     }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();

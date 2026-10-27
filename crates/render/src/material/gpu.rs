@@ -15,6 +15,10 @@ pub(crate) struct FaceParams {
 
 impl FaceParams {
     pub(crate) fn new(face: Option<&FaceMaterial>) -> Self {
+        Self::with_texture_entry_transform(face, None)
+    }
+
+    pub(crate) fn with_texture_entry_transform(face: Option<&FaceMaterial>, transform: Option<UvTransform>) -> Self {
         let mut result = Self {
             color: [0.38, 0.38, 0.38, 1.0],
             uv: [[1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 1.0, 0.0]],
@@ -41,11 +45,19 @@ impl FaceParams {
             MaterialDescription::Legacy(material) => {
                 result.params[0] = f32::from(u8::from(material.fullbright));
                 result.params[3] = f32::from(u8::from(material.mapping == TextureMapping::Planar));
-                (legacy_uv(material.diffuse.transform), Sampler::default(), !matches!(material.mapping, TextureMapping::Unsupported(_)))
+                (
+                    legacy_uv(transform.unwrap_or(material.diffuse.transform)),
+                    Sampler::default(),
+                    !matches!(material.mapping, TextureMapping::Unsupported(_)),
+                )
             }
             MaterialDescription::Pbr(material) => {
                 result.params[0] = f32::from(u8::from(material.unlit));
-                (pbr_uv(material.base_color.transform), material.base_color.sampler, material.base_color.tex_coord == 0)
+                let matrix = transform.map_or_else(
+                    || pbr_uv(material.base_color.transform),
+                    |transform| pbr_with_texture_entry(material.base_color.transform, transform),
+                );
+                (matrix, material.base_color.sampler, material.base_color.tex_coord == 0)
             }
         };
         if supported && matrix.iter().flatten().all(|value| value.is_finite()) {
@@ -73,6 +85,23 @@ fn pbr_uv(transform: UvTransform) -> [[f32; 4]; 2] {
     let [x, y] = transform.scale.map(f64::from);
     let [u, v] = transform.offset.map(f64::from);
     [[c * x, s * y, u - s * y, 0.0].map(|n| n as f32), [s * x, -c * y, v + c * y, 0.0].map(|n| n as f32)]
+}
+
+fn pbr_with_texture_entry(material: UvTransform, texture_entry: UvTransform) -> [[f32; 4]; 2] {
+    let texture_entry = legacy_uv(texture_entry);
+    let unflipped = [texture_entry[0], [-texture_entry[1][0], -texture_entry[1][1], 1.0 - texture_entry[1][2], 0.0]];
+    compose_uv(pbr_uv(material), unflipped)
+}
+
+fn compose_uv(first: [[f32; 4]; 2], second: [[f32; 4]; 2]) -> [[f32; 4]; 2] {
+    first.map(|row| {
+        [
+            row[0] * second[0][0] + row[1] * second[1][0],
+            row[0] * second[0][1] + row[1] * second[1][1],
+            row[0] * second[0][2] + row[1] * second[1][2] + row[2],
+            0.0,
+        ]
+    })
 }
 
 #[cfg(test)]

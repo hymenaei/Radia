@@ -6,6 +6,7 @@ use std::{
 use assets::Priority;
 use math::{Frustum, Quat, Vec3, flips_winding};
 use wgpu::{CommandEncoder, Device};
+use world::FaceAppearance;
 
 use super::{FramePreparation, FramePreparationKey, GeometryRenderer, Instance, MAX_INSTANCES, PickFace, PrepareTimes, ShadingMode, Stats};
 use crate::geometry::{
@@ -27,6 +28,7 @@ impl GeometryRenderer {
         water_height: Option<f64>,
     ) {
         let started = Instant::now();
+        let animation_now = started;
         let mut times = PrepareTimes::default();
         let key = FramePreparationKey { version: view.version(), camera, size, water_height };
         let same = self.prepared.as_ref().is_some_and(|prepared| prepared.key == key);
@@ -49,6 +51,11 @@ impl GeometryRenderer {
         self.water.update(&self.queue, view, camera, projection, water_height);
         let objects = view.objects().filter_map(|object| {
             let (Some((_, mesh)), Placement::Ready(transform)) = (object.mesh(), object.placement()) else { return None };
+            let animation = object
+                .detail()
+                .texture_animation
+                .zip(object.animation_timing(animation_now))
+                .map(|(animation, (elapsed, offset))| (animation, elapsed, offset));
             Some((
                 (2, object.detail().summary.id.as_u128(), 0),
                 Instance {
@@ -61,6 +68,8 @@ impl GeometryRenderer {
                     shading: ShadingMode::Studio,
                 },
                 object.materials(),
+                animation,
+                object.detail().surface_appearance.as_ref(),
             ))
         });
         let surfaces = view.surfaces().filter_map(|surface| {
@@ -84,6 +93,8 @@ impl GeometryRenderer {
                     shading,
                 },
                 None,
+                None,
+                None,
             ))
         });
         let mut candidates = Vec::new();
@@ -96,7 +107,7 @@ impl GeometryRenderer {
                 break;
             }
         }
-        candidates.sort_unstable_by_key(|(id, _, _)| *id);
+        candidates.sort_unstable_by_key(|(id, _, _, _, _)| *id);
         times.visibility = visibility_started.elapsed();
         let requests_started = Instant::now();
         self.requested_textures.clear();
@@ -115,7 +126,7 @@ impl GeometryRenderer {
             self.requested_textures.insert(texture.id());
             self.textures.request(texture, self.epoch, priority);
         };
-        for (_, instance, faces) in &candidates {
+        for (_, instance, faces, _, _) in &candidates {
             if let Some(mesh) = self.meshes.get_mut(&instance.mesh.id()) {
                 mesh.used = self.epoch;
             }
@@ -143,7 +154,8 @@ impl GeometryRenderer {
         let mut uploaded = 0;
         let mut pending_meshes = HashSet::new();
         let mut pending_textures = HashSet::new();
-        for (id, mut instance, faces) in candidates {
+        let mut animated_faces = false;
+        for (id, mut instance, faces, animation, appearance) in candidates {
             if !self.upload_mesh(device, &instance.mesh, &mut uploaded) {
                 pending_meshes.insert(instance.mesh.id());
                 continue;
@@ -153,7 +165,22 @@ impl GeometryRenderer {
                 if face.indices.is_empty() {
                     continue;
                 }
-                let mut params = FaceParams::new(faces.and_then(|faces| faces.iter().find(|material| material.slot == face.slot)));
+                let animation = animation.filter(|(animation, _, _)| animation.is_enabled() && animation.targets_face(face.slot));
+                let texture_entry_transform = animation.map(|(animation, elapsed, offset)| {
+                    animation.transform_at(
+                        elapsed,
+                        offset,
+                        appearance
+                            .and_then(|appearance| appearance.face(face.slot))
+                            .map_or_else(FaceAppearance::default, |face| *face)
+                            .transform,
+                    )
+                });
+                let animate_frame = animation.is_some_and(|(animation, elapsed, offset)| animation.is_changing_at(elapsed, offset));
+                let mut params = FaceParams::with_texture_entry_transform(
+                    faces.and_then(|faces| faces.iter().find(|material| material.slot == face.slot)),
+                    texture_entry_transform,
+                );
                 match instance.shading {
                     ShadingMode::Terrain => {
                         params.color = [0.18, 0.23, 0.13, 1.0];
@@ -189,6 +216,7 @@ impl GeometryRenderer {
                 if !batches.push(key, order, distance_squared, || packed_instance(&base, &params, instance.scale)) {
                     continue;
                 }
+                animated_faces |= animate_frame && params.texture.is_some();
                 instance.faces.push(PickFace { indices: face.indices.clone(), double_sided: params.double_sided });
             }
             if !instance.faces.is_empty() {
@@ -210,6 +238,7 @@ impl GeometryRenderer {
             textures: self.textures.state(),
             meshes: self.memory.mesh_state(),
             more_meshes: !pending_meshes.is_empty() && uploaded > 0,
+            animated_faces,
         });
         self.stats.pending_textures = pending_textures.len();
         self.stats.pending_meshes = pending_meshes.len();
@@ -276,8 +305,13 @@ mod tests {
     fn preparation_tracks_scene_inputs() {
         let (mut scene, view) = Reconciler::new(Budget::default());
         let (_other_scene, other) = Reconciler::new(Budget::default());
-        let prepared =
-            FramePreparation { key: prepare_key(&view), textures: texture_state(), meshes: MeshState::default(), more_meshes: false };
+        let prepared = FramePreparation {
+            key: prepare_key(&view),
+            textures: texture_state(),
+            meshes: MeshState::default(),
+            more_meshes: false,
+            animated_faces: false,
+        };
         assert!(prepared.reusable(&prepare_key(&view), texture_state(), MeshState::default()));
         let mut moved = prepare_key(&view);
         moved.camera = Camera::new(DVec3::X, Vec3::X, 1.0, [720, 720]).unwrap();
@@ -306,7 +340,13 @@ mod tests {
     fn preparation_tracks_gpu_progress() {
         let (_scene, view) = Reconciler::new(Budget::default());
         let state = texture_state();
-        let mut prepared = FramePreparation { key: prepare_key(&view), textures: state, meshes: MeshState::default(), more_meshes: false };
+        let mut prepared = FramePreparation {
+            key: prepare_key(&view),
+            textures: state,
+            meshes: MeshState::default(),
+            more_meshes: false,
+            animated_faces: false,
+        };
         for (reason, changed) in [
             ("image readiness or cancellation", TextureState { revision: 1, ..state }),
             ("handle release or asset change", TextureState { lifecycle: 1, ..state }),
@@ -326,5 +366,24 @@ mod tests {
             !prepared.reusable(&prepare_key(&view), state, MeshState::default()),
             "per-frame upload limits must not strand remaining meshes"
         );
+    }
+
+    #[test]
+    fn redraw_stops_without_visible_animation() {
+        let (_scene, view) = Reconciler::new(Budget::default());
+        let state = texture_state();
+        let mut prepared = FramePreparation {
+            key: prepare_key(&view),
+            textures: state,
+            meshes: MeshState::default(),
+            more_meshes: false,
+            animated_faces: false,
+        };
+
+        assert!(!prepared.needs_frame(state, MeshState::default()), "a static scene needs no frame after preparation");
+        prepared.animated_faces = true;
+        assert!(prepared.needs_frame(state, MeshState::default()), "a visible animated face keeps the frame scheduler active");
+        prepared.animated_faces = false;
+        assert!(!prepared.needs_frame(state, MeshState::default()), "removing the final visible animated face stops redraws");
     }
 }

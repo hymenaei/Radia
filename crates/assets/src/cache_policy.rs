@@ -110,6 +110,7 @@ mod tests {
     struct TraceAsset {
         id: u32,
         size: u64,
+        kind: Kind,
         decode_micros: u64,
     }
 
@@ -120,23 +121,24 @@ mod tests {
         use_count: u64,
     }
 
-    fn candidate(id: u32, size: u64, last_use: u64, use_count: u64) -> EvictionCandidate {
+    fn candidate(id: u32, size: u64, last_use: u64, use_count: u64, kind: Kind) -> EvictionCandidate {
         let mut name = [0; 16];
         name[..4].copy_from_slice(&id.to_le_bytes());
-        EvictionCandidate { key: storage::Key::new(NamespaceId::new(0), name), size, last_use, use_count }
+        let namespace = u8::try_from(kind_index(kind)).expect("supported kind namespace");
+        EvictionCandidate { key: storage::Key::new(NamespaceId::new(namespace), name), size, last_use, use_count }
     }
 
     #[test]
     fn frequency_preserves_reused_assets() {
-        let frequent = score_candidate(candidate(1, 256 * 1024, 900, 12), 1000, 0);
-        let one_time = score_candidate(candidate(2, 256 * 1024, 900, 0), 1000, 0);
+        let frequent = score_candidate(candidate(1, 256 * 1024, 900, 12, Kind::Texture), 1000, 0);
+        let one_time = score_candidate(candidate(2, 256 * 1024, 900, 0, Kind::Texture), 1000, 0);
 
         assert!(frequent.value > one_time.value);
     }
 
     #[test]
     fn decode_cost_increases_value() {
-        let entry = candidate(3, 512 * 1024, 900, 2);
+        let entry = candidate(3, 512 * 1024, 900, 2, Kind::Texture);
         let cheap = score_candidate(entry, 1000, 0);
         let expensive = score_candidate(entry, 1000, 120_000);
 
@@ -172,8 +174,10 @@ mod tests {
 
     fn replay_trace(usefulness: bool) -> TraceResult {
         const LIMIT: u64 = 2 * 1024 * 1024;
-        let home: Vec<_> = (0..8).map(|id| TraceAsset { id, size: 96 * 1024, decode_micros: 400 }).collect();
-        let meshes: Vec<_> = (8..10).map(|id| TraceAsset { id, size: 512 * 1024, decode_micros: 120_000 }).collect();
+        let costs = Arc::new(DecodeCosts::default());
+        let policy = AssetEvictionPolicy::new(Arc::clone(&costs));
+        let home: Vec<_> = (0..8).map(|id| TraceAsset { id, size: 96 * 1024, kind: Kind::Texture, decode_micros: 400 }).collect();
+        let meshes: Vec<_> = (8..10).map(|id| TraceAsset { id, size: 512 * 1024, kind: Kind::Texture, decode_micros: 120_000 }).collect();
         let mut entries = HashMap::<u32, TraceEntry>::new();
         let mut bytes = 0u64;
         let mut now = 0u64;
@@ -182,12 +186,12 @@ mod tests {
         for session in 0..8 {
             for asset in home.iter().chain(&meshes) {
                 for _ in 0..if session == 0 { 3 } else { 1 } {
-                    request_trace_asset(*asset, usefulness, LIMIT, &mut entries, &mut bytes, &mut now, &mut result);
+                    request_trace_asset(*asset, usefulness, &policy, &costs, LIMIT, &mut entries, &mut bytes, &mut now, &mut result);
                 }
             }
             for offset in 0..12 {
-                let asset = TraceAsset { id: 1000 + session * 12 + offset, size: 128 * 1024, decode_micros: 400 };
-                request_trace_asset(asset, usefulness, LIMIT, &mut entries, &mut bytes, &mut now, &mut result);
+                let asset = TraceAsset { id: 1000 + session * 12 + offset, size: 128 * 1024, kind: Kind::Texture, decode_micros: 400 };
+                request_trace_asset(asset, usefulness, &policy, &costs, LIMIT, &mut entries, &mut bytes, &mut now, &mut result);
             }
         }
         result
@@ -196,6 +200,8 @@ mod tests {
     fn request_trace_asset(
         asset: TraceAsset,
         usefulness: bool,
+        policy: &AssetEvictionPolicy,
+        costs: &DecodeCosts,
         limit: u64,
         entries: &mut HashMap<u32, TraceEntry>,
         bytes: &mut u64,
@@ -211,13 +217,14 @@ mod tests {
             return;
         }
 
+        costs.observe(asset.kind, asset.decode_micros);
+
         while bytes.saturating_add(asset.size) > limit {
             let victim = entries
                 .iter()
                 .map(|(id, entry)| {
                     let score = if usefulness {
-                        score_candidate(candidate(*id, entry.asset.size, entry.last_use, entry.use_count), *now, entry.asset.decode_micros)
-                            .value
+                        policy.score(candidate(*id, entry.asset.size, entry.last_use, entry.use_count, entry.asset.kind), *now).value
                     } else {
                         u128::from(entry.last_use)
                     };

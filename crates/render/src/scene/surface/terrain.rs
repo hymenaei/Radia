@@ -13,6 +13,7 @@ use uuid::Uuid;
 use crate::scene::{MeshBuildError, Patch, model::Mirror};
 
 const TERRAIN_REGION_SIZE: f32 = 256.0;
+const TERRAIN_NORMAL_STRIDE: i32 = 2;
 const NOISE_XY_SCALE_INV: f32 = 1.0 / 4.9215;
 const NOISE_MAGNITUDE: f32 = 2.0;
 const NOISE_SLOPE_SQUARED: f32 = 2.25;
@@ -58,15 +59,7 @@ impl Terrain {
             }
             for x in 0..17 {
                 let Some(z) = sample(tiles, x, y) else { continue };
-                let slope = |a: Option<f64>, b: Option<f64>| match (a, b) {
-                    (Some(a), Some(b)) => (b - a) * 0.5,
-                    (Some(a), None) => z - a,
-                    (None, Some(b)) => b - z,
-                    _ => 0.0,
-                };
-                let dx = slope(sample(tiles, x - 1, y), sample(tiles, x + 1, y));
-                let dy = slope(sample(tiles, x, y - 1), sample(tiles, x, y + 1));
-                let normal = DVec3::new(-dx, -dy, 1.0).normalize().as_vec3();
+                let normal = classic_normal(x, y, |x, y| sample(tiles, x, y).unwrap_or(z));
                 let local_x = f32::from(patch_x) * 16.0 + x as f32;
                 let local_y = f32::from(patch_y) * 16.0 + y as f32;
                 let weights = self.settings.map_or([1.0, 0.0, 0.0, 0.0], |settings| {
@@ -99,6 +92,16 @@ impl Terrain {
         let count = indices.len() as u32;
         Mesh::from_parts(vertices, indices, vec![Face { slot: 0, indices: 0..count }]).map_err(MeshBuildError::from)
     }
+}
+
+fn classic_normal(x: i32, y: i32, sample: impl Fn(i32, i32) -> f64) -> Vec3 {
+    let stride = TERRAIN_NORMAL_STRIDE;
+    let point = |x, y| DVec3::new(f64::from(x), f64::from(y), sample(x, y));
+    let p00 = point(x - stride, y - stride);
+    let p01 = point(x - stride, y + stride);
+    let p10 = point(x + stride, y - stride);
+    let p11 = point(x + stride, y + stride);
+    (p11 - p00).cross(p01 - p10).normalize().as_vec3()
 }
 
 pub(super) fn affected_patches(mirror: &Mirror, region: Region, patch: TerrainPatchId) -> impl Iterator<Item = (Region, TerrainPatchId)> {
@@ -311,5 +314,80 @@ mod tests {
         let east_weights = blend_weights(&east, 0.0, 64.0, 34.5, 256.0, 64.0);
         assert_eq!(west_weights, east_weights);
         assert_ne!(west.detail_textures(), east.detail_textures());
+    }
+
+    #[test]
+    fn official_noise_fixture_at_nonzero_region_coordinates() {
+        let settings = settings([Uuid::nil(); 4], [10.0, 20.0, 30.0, 40.0], [40.0, 80.0, 120.0, 160.0]);
+        let weights = blend_weights(&settings, 128.0, 128.0, 50.0, 2048.0, 4096.0);
+        let expected = [0.039_978_027, 0.960_022, 0.0, 0.0];
+        for (actual, expected) in weights.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-6, "noise weight {actual} != {expected}");
+        }
+    }
+
+    fn terrain(center_patch_x: i32, origin_x: f64, height: impl Fn(f64, f64) -> f64) -> Terrain {
+        use crate::scene::Budget;
+        use world::TerrainPatch;
+
+        let budget = Budget::default();
+        let tiles = array::from_fn(|index| {
+            let dx = index as i32 % 3 - 1;
+            let dy = index as i32 / 3 - 1;
+            let patch_x = center_patch_x + dx;
+            let patch_y = 8 + dy;
+            let heights = Box::new(array::from_fn(|sample| {
+                let x = origin_x + f64::from(patch_x * 16 + (sample % 16) as i32);
+                let y = f64::from(patch_y * 16 + (sample / 16) as i32);
+                height(x, y) as f32
+            }));
+            let patch = TerrainPatch::new(patch_x.rem_euclid(16) as u8, patch_y as u8, heights).unwrap();
+            Some(Tile { patch: Patch::new(patch, budget.reserve(512).unwrap()), x: None, y: None })
+        });
+        Terrain {
+            tiles,
+            patch: TerrainPatchId::new(center_patch_x.rem_euclid(16) as u8, 8).unwrap(),
+            origin: DVec3::new(origin_x, 0.0, 0.0),
+            settings: None,
+        }
+    }
+
+    fn assert_edge_normals_match(west: Terrain, east: Terrain, seam_x: f64) {
+        let cancelled = AtomicBool::new(false);
+        let west_mesh = west.mesh(&cancelled).unwrap();
+        let east_mesh = east.mesh(&cancelled).unwrap();
+        let west_normal = west_mesh.vertices()[8 * 17 + 16].normal;
+        let east_normal = east_mesh.vertices()[8 * 17].normal;
+        let expected = Vec3::new(-1.0 / 5.0_f32.sqrt(), 0.0, 2.0 / 5.0_f32.sqrt());
+        assert!(west_normal.distance(expected) < 1.0e-6, "west side of edge at {seam_x}");
+        assert!(east_normal.distance(expected) < 1.0e-6, "east side of edge at {seam_x}");
+    }
+
+    #[test]
+    fn patch_edge_normals_use_neighbor_heights() {
+        let seam = 9.0 * 16.0;
+        let height = |x: f64, _y: f64| (x - seam).max(0.0);
+        assert_edge_normals_match(terrain(8, 0.0, height), terrain(9, 0.0, height), seam);
+    }
+
+    #[test]
+    fn region_edge_normals_stitch_neighbor_heights() {
+        let seam = 256.0;
+        let height = |x: f64, _y: f64| (x - seam).max(0.0);
+        assert_edge_normals_match(terrain(15, 0.0, height), terrain(0, 256.0, height), seam);
+    }
+
+    #[test]
+    fn small_heightfield_normal_matches_classic_diagonal_formula() {
+        let heights = [
+            [0.0, 2.0, 4.0, 6.0, 8.0],
+            [1.0, 3.0, 5.0, 7.0, 9.0],
+            [2.0, 4.0, 6.0, 8.0, 10.0],
+            [3.0, 5.0, 7.0, 9.0, 11.0],
+            [4.0, 6.0, 8.0, 10.0, 12.0],
+        ];
+        let normal = classic_normal(2, 2, |x, y| heights[y as usize][x as usize]);
+        let expected = Vec3::new(-2.0, -1.0, 1.0).normalize();
+        assert!(normal.distance(expected) < 1.0e-6);
     }
 }

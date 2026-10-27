@@ -629,7 +629,16 @@ fn generate_normals(vertices: &mut [Vertex], indices: &[u32], base: u32, cancell
         if cancelled() {
             return Err(AssetError::Cancelled);
         }
-        vertex.normal = if vertex.normal.length_squared() > f32::EPSILON { vertex.normal.normalize() } else { Vec3::Z };
+        if !vertex.normal.is_finite() {
+            return Err(AssetError::MalformedBlock);
+        }
+        let scale = vertex.normal.abs().max_element();
+        vertex.normal = if scale == 0.0 {
+            Vec3::Z
+        } else {
+            let scaled = vertex.normal / scale;
+            scaled / scaled.length()
+        };
     }
     Ok(())
 }
@@ -859,6 +868,20 @@ mod tests {
         assert!(mesh.vertices()[0].normal.y.abs() < 0.00002);
         assert_eq!(mesh.vertices()[0].normal.z, -1.0);
         assert_eq!(mesh.vertices()[3].normal, Vec3::NEG_X);
+    }
+
+    #[test]
+    fn small_triangle_keeps_normal() {
+        let positions = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff];
+        let triangles = [0x00, 0x00, 0x01, 0x00, 0x02, 0x00];
+        let face = map(&[
+            ("Position", sized(b'b', &positions)),
+            ("PositionDomain", domain(&[0.0, 0.0, 0.0], &[0.01, 0.0, 0.01])),
+            ("TriangleList", sized(b'b', &triangles)),
+        ]);
+        let LodGeometry::Geometry(mesh) = decode_lod(&block(&[face])).unwrap() else { panic!("geometry LOD") };
+
+        assert!(mesh.vertices().iter().all(|vertex| vertex.normal == Vec3::NEG_Y));
     }
 
     #[test]

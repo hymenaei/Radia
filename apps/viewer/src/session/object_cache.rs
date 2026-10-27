@@ -25,11 +25,11 @@ use tokio::{
     time::timeout,
 };
 use uuid::Uuid;
-use world::{OrderEvidence, Region};
+use world::{OrderEvidence, Region, UpdateSource};
 
-use crate::session::inbound::{ObjectBatch, ObjectOperation, decode_cached_object};
+use crate::session::inbound::{ObjectBatch, ObjectMediaRequest, ObjectOperation, decode_cached_object, object_media_requests};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const SQLITE_PAGE_SIZE: i64 = 4096;
 const MAX_DATABASE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DATABASE_PAGES: i64 = (MAX_DATABASE_BYTES as i64) / SQLITE_PAGE_SIZE;
@@ -308,9 +308,10 @@ impl ObjectCacheSession {
         order: OrderEvidence,
         update: &ObjectUpdateCached,
         mut batch: ObjectBatch,
-    ) -> ObjectBatch {
+    ) -> (ObjectBatch, Vec<ObjectMediaRequest>) {
         let scope = self.identities.get(&simulator_id).cloned();
         let mut stale = HashSet::new();
+        let mut media_requests = Vec::new();
         let mut invalid_fields = 0;
         for (index, operation) in batch.blocks.iter_mut().enumerate() {
             let Some(ObjectOperation::Cached { source, local_id, .. }) = operation else { continue };
@@ -339,7 +340,14 @@ impl ObjectCacheSession {
                 };
                 set_region_data(&mut payload, update.region_data);
                 let ordinal = u32::try_from(index).ok()?;
-                decode_cached_object(region, sequence, order, ordinal, reference, &payload, &mut invalid_fields)
+                let operation = decode_cached_object(region, sequence, order, ordinal, reference, &payload, &mut invalid_fields);
+                if operation.is_some() {
+                    for mut request in object_media_requests(region, sequence, order, &payload) {
+                        request.source = UpdateSource::new(region, sequence, order, ordinal);
+                        media_requests.push(request);
+                    }
+                }
+                operation
             });
             *operation = match recovered {
                 Some(operation) => Some(operation),
@@ -354,7 +362,7 @@ impl ObjectCacheSession {
             self.remove_loaded_entries(simulator_id, &stale);
             self.enqueue(make_access_submission(scope, stale, now_millis()));
         }
-        batch
+        (batch, media_requests)
     }
 
     pub(super) async fn close(mut self) {
@@ -589,12 +597,52 @@ fn migrate(connection: &mut Connection) -> Result<(), MigrationError> {
                 ) WITHOUT ROWID;
                 ",
             )?;
+            install_global_stats(connection, false)?;
+            connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        1 => {
+            install_global_stats(connection, true)?;
             connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         SCHEMA_VERSION => {}
         _ => return Err(MigrationError::SchemaMismatch),
     }
     connection.pragma_update(None, "max_page_count", MAX_DATABASE_PAGES)?;
+    Ok(())
+}
+
+fn install_global_stats(connection: &Connection, backfill: bool) -> Result<(), MigrationError> {
+    connection.execute_batch(
+        "CREATE TABLE object_cache_totals (
+            singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
+            entry_count INTEGER NOT NULL CHECK(entry_count >= 0),
+            payload_bytes INTEGER NOT NULL CHECK(payload_bytes >= 0)
+        ) WITHOUT ROWID;",
+    )?;
+    if backfill {
+        connection.execute(
+            "INSERT INTO object_cache_totals (singleton, entry_count, payload_bytes)
+             SELECT 1, COUNT(*), COALESCE(SUM(length(payload)), 0) FROM object_entries",
+            [],
+        )?;
+    } else {
+        connection.execute("INSERT INTO object_cache_totals (singleton, entry_count, payload_bytes) VALUES (1, 0, 0)", [])?;
+    }
+    connection.execute_batch(
+        "CREATE TRIGGER object_entries_totals_insert AFTER INSERT ON object_entries BEGIN
+            UPDATE object_cache_totals SET entry_count = entry_count + 1, payload_bytes = payload_bytes + length(NEW.payload)
+            WHERE singleton = 1;
+         END;
+         CREATE TRIGGER object_entries_totals_delete AFTER DELETE ON object_entries BEGIN
+            UPDATE object_cache_totals SET entry_count = entry_count - 1, payload_bytes = payload_bytes - length(OLD.payload)
+            WHERE singleton = 1;
+         END;
+         CREATE TRIGGER object_entries_totals_update AFTER UPDATE OF payload ON object_entries
+         WHEN length(OLD.payload) != length(NEW.payload) BEGIN
+            UPDATE object_cache_totals SET payload_bytes = payload_bytes + length(NEW.payload) - length(OLD.payload)
+            WHERE singleton = 1;
+         END;",
+    )?;
     Ok(())
 }
 
@@ -818,10 +866,9 @@ fn prune_scope(transaction: &Transaction<'_>, scope: &CacheScope, max_rows: usiz
 }
 
 fn prune_global_chunk(transaction: &Transaction<'_>) -> Result<(), RusqliteError> {
-    let (rows, bytes): (i64, i64) =
-        transaction.query_row("SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) FROM object_entries", [], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+    let (rows, bytes) = global_stats(transaction)?;
+    let rows = i64::try_from(rows).unwrap_or(i64::MAX);
+    let bytes = i64::try_from(bytes).unwrap_or(i64::MAX);
     if rows <= MAX_TOTAL_ENTRIES as i64 && bytes <= MAX_TOTAL_BYTES as i64 {
         return Ok(());
     }
@@ -875,6 +922,14 @@ fn prune_global_chunk(transaction: &Transaction<'_>) -> Result<(), RusqliteError
         }
     }
     Ok(())
+}
+
+fn global_stats(transaction: &Transaction<'_>) -> Result<(usize, usize), RusqliteError> {
+    let (rows, bytes): (i64, i64) =
+        transaction.query_row("SELECT entry_count, payload_bytes FROM object_cache_totals WHERE singleton = 1", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+    Ok((usize::try_from(rows).unwrap_or(usize::MAX), usize::try_from(bytes).unwrap_or(usize::MAX)))
 }
 
 fn delete_scope_chunk(transaction: &Transaction<'_>, scope: &CacheScope) -> Result<(), RusqliteError> {

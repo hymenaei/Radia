@@ -15,8 +15,8 @@ use super::{PresentationMailbox, ViewerUpdate};
 use crate::session::{
     RegionLookup, display_message,
     inbound::{
-        AvatarAppearanceMessage, ObjectBatch, ObjectOperation, SitTargetUpdate, decode_avatar_appearance_update, decode_object_message,
-        decode_sit_target_update,
+        AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation, SitTargetUpdate, decode_avatar_appearance_update,
+        decode_object_message, decode_sit_target_update,
     },
     object_cache::ObjectCacheSession,
     world::{IngestStatus, IngestSummary, RegistrationError, SessionWorld},
@@ -320,12 +320,16 @@ impl WorldHandoff {
         agent_id: Option<Uuid>,
         object_cache: &mut ObjectCacheSession,
         on_object_chunk: &mut impl FnMut(Vec<(Option<SimulatorId>, LocalAddress, protocol::messages::CacheMissType)>, Vec<LocalAddress>),
+        media_requests: &mut Vec<ObjectMediaRequest>,
     ) -> Option<SimulatorMessageOutcome> {
         let update = decode_simulator_world_update(world, simulator_id, sequence, packet_order, message)?;
+        let mut recovered_media_requests = Vec::new();
         let update = match (update, message) {
             (DecodedWorldUpdate::Object(batch), Message::ObjectUpdateCached(cached)) => {
                 let region = world.region_for(simulator_id)?;
-                let batch = object_cache.resolve_cached(simulator_id, region, sequence, order_evidence(packet_order), cached, batch);
+                let (batch, requests) =
+                    object_cache.resolve_cached(simulator_id, region, sequence, order_evidence(packet_order), cached, batch);
+                recovered_media_requests = requests;
                 DecodedWorldUpdate::Object(batch)
             }
             (update, _) => update,
@@ -342,6 +346,7 @@ impl WorldHandoff {
                 let touched_agent = agent_id.and_then(|agent_id| world.world().entity(agent_id)).is_some_and(|entity| {
                     batch_summary.touches_entity(entity) || summary.as_ref().is_some_and(|summary| summary.touches_entity(entity))
                 });
+                media_requests.extend(recovered_media_requests);
                 Some(SimulatorMessageOutcome { summary: summary.map(|summary| (simulator_id, summary)), touched_agent })
             }
             update => {

@@ -24,7 +24,7 @@ use crate::session::coordinator::tests::apply_world_event;
 use crate::session::coordinator::tests::{
     agent_observation, agent_update, fixture_packet, region_handshake, simulator_message, simulator_message_at_order,
 };
-use crate::session::inbound::{ObjectBatch, ObjectOperation};
+use crate::session::inbound::{ObjectBatch, ObjectMediaRequest, ObjectOperation};
 use crate::session::{
     object_cache::ObjectCacheSession,
     recovery::recovery_request,
@@ -93,14 +93,23 @@ async fn apply_with_cache(
     simulator: network::SimulatorId,
     sequence: u32,
     message: &Message,
-) -> Vec<(Option<network::SimulatorId>, LocalAddress, protocol::messages::CacheMissType)> {
+) -> (Vec<(Option<network::SimulatorId>, LocalAddress, protocol::messages::CacheMissType)>, Vec<ObjectMediaRequest>) {
     let mut recovery = Vec::new();
+    let mut media_requests = Vec::new();
     let _ = handoff
-        .apply_message_cooperatively(world, simulator, sequence, Ordered(u64::from(sequence)), message, None, cache, &mut |targets, _| {
-            recovery.extend(targets)
-        })
+        .apply_message_cooperatively(
+            world,
+            simulator,
+            sequence,
+            Ordered(u64::from(sequence)),
+            message,
+            None,
+            cache,
+            &mut |targets, _| recovery.extend(targets),
+            &mut media_requests,
+        )
         .await;
-    recovery
+    (recovery, media_requests)
 }
 
 #[tokio::test]
@@ -143,7 +152,7 @@ async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
         })
     };
     let cached = make_cached(&full);
-    assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 2, &cached).await.is_empty());
+    assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 2, &cached).await.0.is_empty());
     assert_public_world_invariants(&world, region);
 
     let parent_local_id = match &full {
@@ -167,7 +176,7 @@ async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
     assert_public_world_invariants(&world, region);
 
     let cached = make_cached(&full);
-    assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 5, &cached).await.is_empty());
+    assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 5, &cached).await.0.is_empty());
     assert_public_world_invariants(&world, region);
 
     let child_local_id = match &full {
@@ -182,6 +191,56 @@ async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
     object.motion.position = Vec3::new(-5.0, 7.0, 11.0);
     object.motion.rotation = Quat::IDENTITY;
     apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 6, &terse).await;
+    assert_public_world_invariants(&world, region);
+    cache.close().await;
+}
+
+#[tokio::test]
+async fn recovered_cached_object_media_reaches_session_handoff() {
+    let directory = tempfile::tempdir().expect("create isolated cache directory");
+    let simulator = simulator_id();
+    let mut cache = crate::session::object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
+    let Message::RegionHandshake(mut handshake) = fixture_packet(vectors::REGION_HANDSHAKE).into_message() else {
+        panic!("region handshake fixture should decode as a handshake");
+    };
+    handshake.region_info1.cache_id = Uuid::from_u128(0x9876);
+    let Some(info) = &mut handshake.region_info2 else { panic!("test handshake includes region identity") };
+    info.region_id = Uuid::from_u128(0x5432);
+    cache.set_region_identity(simulator, &handshake);
+
+    let region_handle = 0x2222_0000_0000_0002;
+    let mut world = SessionWorld::new(viewer_world_limits());
+    world.register_simulator(simulator, Some(RegionHandle::new(region_handle))).expect("register region");
+    let region = world.region_for(simulator).expect("region exists");
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut world, simulator, Uuid::nil());
+
+    let mut full = fixture_packet(vectors::OBJECT_UPDATE).into_message();
+    let ObjectUpdate(update) = &mut full else { panic!("full object fixture should decode as an update") };
+    update.region_data.region_handle = region_handle;
+    update.objects.truncate(1);
+    let object_id = Uuid::from_u128(0xabcde);
+    update.objects[0].pcode = 9;
+    update.objects[0].id = object_id;
+    update.objects[0].media_url = "x-mv:12/00000000-0000-0000-0000-000000000001".into();
+    cache.record_update(simulator, &full);
+    let _ = apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 1, &full).await;
+
+    let ObjectUpdate(update) = &full else { unreachable!() };
+    let cached = Message::ObjectUpdateCached(CachedUpdate {
+        region_data: update.region_data,
+        objects: update
+            .objects
+            .iter()
+            .map(|object| CachedObjectReference { local_id: object.local_id, crc: object.crc, update_flags: object.update_flags })
+            .collect(),
+    });
+    let (recovery, media_requests) = apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 2, &cached).await;
+
+    assert!(recovery.is_empty());
+    assert_eq!(media_requests.len(), 1);
+    assert_eq!(media_requests[0].object_id, object_id);
+    assert_eq!(media_requests[0].version, 12);
     assert_public_world_invariants(&world, region);
     cache.close().await;
 }

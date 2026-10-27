@@ -7,7 +7,7 @@ use protocol::{
         CachedObjectReference, ObjectUpdate as FullUpdate, ObjectUpdateCached, RegionHandshake, region::region_handshake::RegionInfo2,
     },
 };
-use rusqlite::{Transaction, params};
+use rusqlite::{Connection, Transaction, params};
 use storage::sqlite::{SqliteBatch, SqliteDb};
 use test_support::{lludp::vectors, parse_hex_fixture};
 use tokio::runtime::{Builder, Handle};
@@ -92,7 +92,7 @@ fn decoded_cached_batch(update: &ObjectUpdateCached, sequence: u32) -> super::Ob
 
 fn resolve(cache: &mut ObjectCacheSession, update: &ObjectUpdateCached, sequence: u32) -> super::ObjectBatch {
     let batch = decoded_cached_batch(update, sequence);
-    cache.resolve_cached(SIMULATOR, REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), update, batch)
+    cache.resolve_cached(SIMULATOR, REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), update, batch).0
 }
 
 async fn flush(cache: &ObjectCacheSession) {
@@ -106,6 +106,119 @@ async fn cache_count(db: &SqliteDb) -> usize {
         .read(32, |transaction| transaction.query_row("SELECT COUNT(*) FROM object_entries", [], |row| row.get::<_, i64>(0)))
         .expect("queue cache count");
     receipt.wait().await.expect("read cache count") as usize
+}
+
+async fn cache_totals(db: &SqliteDb) -> (i64, i64, i64, i64) {
+    let receipt = db
+        .read(64, |transaction| {
+            transaction.query_row(
+                "SELECT (SELECT COUNT(*) FROM object_entries),
+                        (SELECT COALESCE(SUM(length(payload)), 0) FROM object_entries),
+                        entry_count,
+                        payload_bytes
+                 FROM object_cache_totals WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+        })
+        .expect("queue cache totals");
+    receipt.wait().await.expect("read cache totals")
+}
+
+#[tokio::test]
+async fn schema_v1_migration_backfills_incremental_global_totals() {
+    let directory = tempfile::tempdir().expect("create isolated cache directory");
+    let path = directory.path().join("objects.sqlite");
+    let connection = Connection::open(&path).expect("create version one cache");
+    connection
+        .execute_batch(
+            "CREATE TABLE region_scopes (
+                grid_id TEXT NOT NULL,
+                region_id BLOB NOT NULL CHECK(length(region_id) = 16),
+                cache_id BLOB NOT NULL CHECK(length(cache_id) = 16),
+                last_used INTEGER NOT NULL,
+                PRIMARY KEY (grid_id, region_id, cache_id)
+            ) WITHOUT ROWID;
+            CREATE TABLE object_entries (
+                grid_id TEXT NOT NULL,
+                region_id BLOB NOT NULL CHECK(length(region_id) = 16),
+                cache_id BLOB NOT NULL CHECK(length(cache_id) = 16),
+                local_id INTEGER NOT NULL CHECK(local_id > 0 AND local_id <= 4294967295),
+                crc INTEGER NOT NULL CHECK(crc >= 0 AND crc <= 4294967295),
+                update_kind INTEGER NOT NULL CHECK(update_kind IN (0, 1)),
+                update_flags INTEGER NOT NULL CHECK(update_flags >= 0 AND update_flags <= 4294967295),
+                payload BLOB NOT NULL CHECK(length(payload) >= 64 AND length(payload) <= 10000),
+                PRIMARY KEY (grid_id, region_id, cache_id, local_id)
+            ) WITHOUT ROWID;",
+        )
+        .expect("create version one schema");
+    connection
+        .execute(
+            "INSERT INTO object_entries (grid_id, region_id, cache_id, local_id, crc, update_kind, update_flags, payload)
+             VALUES (?1, ?2, ?3, 7, 8, 0, 9, zeroblob(64))",
+            params![Grid::Agni.id(), REGION_ID.as_bytes().as_slice(), CACHE_ID.as_bytes().as_slice()],
+        )
+        .expect("add a version one object entry");
+    connection.pragma_update(None, "user_version", 1).expect("set version one schema marker");
+    drop(connection);
+
+    let (db, status) = open_at(&path).expect("migrate version one cache");
+    assert_eq!(cache_totals(&db).await, (1, 64, 1, 64));
+    let mut cache = ObjectCacheSession::new(Grid::Agni);
+    assert!(cache.handle_event(ObjectCacheEvent::Ready { db, status }).is_none());
+    cache.close().await;
+}
+
+#[tokio::test]
+async fn global_totals_track_payload_updates_and_deletions() {
+    let directory = tempfile::tempdir().expect("create isolated cache directory");
+    let mut cache = open_cache(directory.path().join("objects.sqlite"));
+    let full = fixture_message(vectors::OBJECT_UPDATE);
+    cache.record_update(SIMULATOR, &full);
+    flush(&cache).await;
+
+    let db = cache.db.as_ref().expect("cache database is open");
+    let before = cache_totals(db).await;
+    assert!(before.0 > 1);
+    assert_eq!(before.0, before.2);
+    assert_eq!(before.1, before.3);
+
+    let scope = cache.identities.get(&SIMULATOR).expect("simulator has a cache scope").clone();
+    let (_, references) = cached_references(&full);
+    let updated_local_id = references[0].local_id;
+    let deleted_local_id = references[1].local_id;
+    let update = SqliteBatch::new(1, 65, move |transaction| {
+        transaction.execute(
+            "UPDATE object_entries SET payload = zeroblob(65)
+             WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3 AND local_id = ?4",
+            params![
+                scope.grid_id,
+                scope.region_id.as_bytes().as_slice(),
+                scope.cache_id.as_bytes().as_slice(),
+                i64::from(updated_local_id)
+            ],
+        )?;
+        transaction.execute(
+            "DELETE FROM object_entries
+             WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3 AND local_id = ?4",
+            params![
+                scope.grid_id,
+                scope.region_id.as_bytes().as_slice(),
+                scope.cache_id.as_bytes().as_slice(),
+                i64::from(deleted_local_id)
+            ],
+        )?;
+        Ok(())
+    })
+    .expect("stats trigger batch fits SQLite limits");
+    cache.db.as_ref().expect("cache database is open").submit_batches(vec![update]).expect("queue stats trigger batch");
+    flush(&cache).await;
+    let after = cache_totals(cache.db.as_ref().expect("cache database is open")).await;
+    assert_eq!(after.0, before.0 - 1);
+    assert_ne!(after.1, before.1);
+    assert_eq!(after.0, after.2);
+    assert_eq!(after.1, after.3);
+    cache.close().await;
 }
 
 #[tokio::test]
@@ -164,6 +277,52 @@ async fn full_and_compressed_payloads_survive_restart_and_resolve_as_hits() {
 }
 
 #[tokio::test]
+async fn cached_full_and_compressed_hits_restore_media_requests() {
+    let directory = tempfile::tempdir().expect("create isolated cache directory");
+    let mut cache = open_cache(directory.path().join("objects.sqlite"));
+    assert_eq!(load_region(&mut cache).await, 7);
+    let object_id = Uuid::from_u128(0xabcde);
+
+    for (index, fixture) in [vectors::OBJECT_UPDATE, vectors::OBJECT_UPDATE_COMPRESSED_TYPED].into_iter().enumerate() {
+        let mut full = fixture_message(fixture);
+        let local_id = 20_000 + u32::try_from(index).expect("two fixture indexes fit u32");
+        match &mut full {
+            Message::ObjectUpdate(update) => {
+                update.objects.truncate(1);
+                update.objects[0].pcode = 9;
+                update.objects[0].id = object_id;
+                update.objects[0].local_id = local_id;
+                update.objects[0].media_url = "x-mv:12/00000000-0000-0000-0000-000000000001".into();
+            }
+            Message::ObjectUpdateCompressed(update) => {
+                update.objects.truncate(1);
+                update.objects[0].pcode = 9;
+                update.objects[0].id = object_id;
+                update.objects[0].local_id = local_id;
+                update.objects[0].media_url = Some("x-mv:12/00000000-0000-0000-0000-000000000001".into());
+            }
+            _ => panic!("object update fixture should be full or compressed"),
+        }
+        let (region_data, references) = cached_references(&full);
+        cache.record_update(SIMULATOR, &full);
+        flush(&cache).await;
+
+        let cached = cached_message(region_data, references);
+        let sequence = 90 + u32::try_from(index).expect("two fixture indexes fit u32");
+        let batch = decoded_cached_batch(&cached, sequence);
+        let (resolved, requests) =
+            cache.resolve_cached(SIMULATOR, REGION, sequence, OrderEvidence::Ordered(u64::from(sequence)), &cached, batch);
+
+        assert_eq!(resolved.blocks.len(), 1);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].object_id, object_id);
+        assert_eq!(requests[0].local_id.get(), local_id);
+        assert_eq!(requests[0].version, 12);
+    }
+    cache.close().await;
+}
+
+#[tokio::test]
 async fn crc_mismatch_requests_refresh_and_missing_objects_request_full_updates() {
     let directory = tempfile::tempdir().expect("create isolated cache directory");
     let mut cache = open_cache(directory.path().join("objects.sqlite"));
@@ -177,23 +336,23 @@ async fn crc_mismatch_requests_refresh_and_missing_objects_request_full_updates(
     references.push(CachedObjectReference { local_id: 0x7fff_fffe, crc: 1, update_flags: 0 });
 
     let resolved = resolve(&mut cache, &cached_message(region_data, references), 51);
-    assert!(matches!(
+    std::assert_matches!(
         resolved.blocks[0],
         Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::CrcMismatch, .. })
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         resolved.blocks.last(),
         Some(Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. }))
-    ));
+    );
 
     flush(&cache).await;
     let (region_data, mut references) = cached_references(&full);
     references.truncate(1);
     let resolved = resolve(&mut cache, &cached_message(region_data, references), 52);
-    assert!(matches!(
+    std::assert_matches!(
         resolved.blocks[0],
         Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. })
-    ));
+    );
     cache.close().await;
 }
 
@@ -260,10 +419,10 @@ async fn corrupt_entries_are_misses_and_removed() {
 
     let first = cached_message(region_data, references[..1].to_vec());
     let resolved = resolve(&mut cache, &first, 60);
-    assert!(matches!(
+    std::assert_matches!(
         resolved.blocks[0],
         Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. })
-    ));
+    );
     flush(&cache).await;
     assert_eq!(cache_count(cache.db.as_ref().expect("cache database is open")).await, references.len() - 1);
     cache.close().await;
@@ -286,10 +445,10 @@ async fn cache_id_change_invalidates_the_old_region_scope() {
     assert_eq!(load_region(&mut cache).await, 7);
     let (region_data, references) = cached_references(&full);
     let result = resolve(&mut cache, &cached_message(region_data, references[..1].to_vec()), 71);
-    assert!(matches!(
+    std::assert_matches!(
         result.blocks[0],
         Some(super::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. })
-    ));
+    );
     cache.close().await;
 }
 
@@ -335,6 +494,8 @@ fn measure_warm_and_cold_five_thousand_object_cache_arrival() {
         let template = template_update.objects[0].clone();
         let mut objects = Vec::with_capacity(255);
         let mut references = Vec::with_capacity(5_000);
+        let mut cache_write_us = 0_u128;
+        let mut cache_write_packets = 0_usize;
         for local_id in 1..=5_000_u32 {
             let mut object = template.clone();
             object.local_id = local_id;
@@ -343,15 +504,21 @@ fn measure_warm_and_cold_five_thousand_object_cache_arrival() {
             objects.push(object.clone());
             references.push(CachedObjectReference { local_id, crc: object.crc, update_flags: object.update_flags });
             if objects.len() == 255 {
+                let started = Instant::now();
                 warm_cache.record_update(
                     SIMULATOR,
                     &Message::ObjectUpdate(FullUpdate { region_data, objects: std::mem::take(&mut objects) }),
                 );
+                cache_write_us += started.elapsed().as_micros();
+                cache_write_packets += 1;
                 flush(&warm_cache).await;
             }
         }
         if !objects.is_empty() {
+            let started = Instant::now();
             warm_cache.record_update(SIMULATOR, &Message::ObjectUpdate(FullUpdate { region_data, objects }));
+            cache_write_us += started.elapsed().as_micros();
+            cache_write_packets += 1;
             flush(&warm_cache).await;
         }
         let cold_started = Instant::now();
@@ -388,6 +555,10 @@ fn measure_warm_and_cold_five_thousand_object_cache_arrival() {
             "per-packet averages: cold={cold_per_packet}us, warm={warm_per_packet}us",
             cold_per_packet = cold_us / u128::try_from(packet_count).unwrap_or(1),
             warm_per_packet = warm_us / u128::try_from(packet_count).unwrap_or(1)
+        );
+        println!(
+            "warm cache record_update intake cost: {cache_write_us}us total, {cache_write_packets} packets, {cache_write_per_packet}us per packet",
+            cache_write_per_packet = cache_write_us / u128::try_from(cache_write_packets).unwrap_or(1)
         );
         cold_cache.close().await;
         warm_cache.close().await;

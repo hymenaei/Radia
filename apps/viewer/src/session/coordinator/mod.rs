@@ -242,6 +242,7 @@ mod tests {
     async fn apply_world_cooperatively(world: &mut SessionWorld, handoff: &mut WorldHandoff, event: &Event) {
         if let Event::SimulatorMessage { simulator_id, sequence, packet_order, message, .. } = event {
             let mut object_cache = ObjectCacheSession::new(Grid::Agni);
+            let mut media_requests = Vec::new();
             let _ = handoff
                 .apply_message_cooperatively(
                     world,
@@ -252,6 +253,7 @@ mod tests {
                     None,
                     &mut object_cache,
                     &mut |_, _| {},
+                    &mut media_requests,
                 )
                 .await;
         } else {

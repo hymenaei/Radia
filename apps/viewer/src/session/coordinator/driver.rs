@@ -260,7 +260,7 @@ impl SessionDriver {
                 DriverInput::InventoryCache(None) => ControlFlow::Continue(()),
                 DriverInput::ObjectCache(Some(event)) => {
                     if let Some((simulator_id, flags)) = self.object_cache.handle_event(event) {
-                        reply_region_handshake(self.session_handle.clone(), simulator_id, flags).await;
+                        reply_region_handshake(&self.runtime, self.session_handle.clone(), simulator_id, flags);
                     }
                     ControlFlow::Continue(())
                 }
@@ -569,7 +569,7 @@ impl SessionDriver {
         if let Message::RegionHandshake(handshake) = &message {
             self.object_cache.set_region_identity(simulator_id, handshake);
             if let Some(flags) = self.object_cache.begin_region_load(simulator_id, &self.runtime) {
-                reply_region_handshake(self.session_handle.clone(), simulator_id, flags).await;
+                reply_region_handshake(&self.runtime, self.session_handle.clone(), simulator_id, flags);
             }
         }
         self.object_cache.record_update(simulator_id, &message);
@@ -582,7 +582,7 @@ impl SessionDriver {
             tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "experience environment push could not be admitted");
         }
 
-        let media_requests =
+        let mut media_requests =
             region.map(|region| object_media_requests(region, sequence, order_evidence(packet_order), &message)).unwrap_or_default();
         if let Some(region) = region {
             self.terrain.enqueue(&message, UpdateSource::new(region, sequence, order_evidence(packet_order), 0), &self.runtime);
@@ -606,6 +606,7 @@ impl SessionDriver {
                     agent_id,
                     &mut self.object_cache,
                     &mut on_object_chunk,
+                    &mut media_requests,
                 )
                 .await
         };
@@ -1165,9 +1166,31 @@ impl SessionDriver {
     }
 }
 
-async fn reply_region_handshake(session_handle: SessionHandle, simulator_id: SimulatorId, flags: u32) {
-    if let Err(error) = session_handle.reply_region_handshake(simulator_id, flags).await {
-        tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
+fn reply_region_handshake(runtime: &Handle, session_handle: SessionHandle, simulator_id: SimulatorId, flags: u32) {
+    match session_handle.try_reply_region_handshake(simulator_id, flags) {
+        Ok(response) => {
+            drop(runtime.spawn(async move {
+                match response.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
+                    }
+                    Err(_) => {
+                        tracing::warn!(simulator = simulator_id.get(), "region handshake reply ended with the network session");
+                    }
+                }
+            }));
+        }
+        Err(network::Error::CommandQueueFull) => {
+            drop(runtime.spawn(async move {
+                if let Err(error) = session_handle.reply_region_handshake(simulator_id, flags).await {
+                    tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
+                }
+            }));
+        }
+        Err(error) => {
+            tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
+        }
     }
 }
 

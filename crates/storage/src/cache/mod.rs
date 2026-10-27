@@ -793,17 +793,6 @@ fn discard_old_index_files(root: &Path) -> Result<(), StorageError> {
             Err(error) => return Err(StorageError::Io(error)),
         }
     }
-    for item in fs::read_dir(root)?.take(128) {
-        let item = item?;
-        if !item.file_type()?.is_file() {
-            continue;
-        }
-        let name = item.file_name();
-        let name = name.to_string_lossy();
-        if name.starts_with(".snapshot-tmp-") || name.starts_with(".journal-tmp-") || name.starts_with(".lock-tmp-") {
-            fs::remove_file(item.path())?;
-        }
-    }
     Ok(())
 }
 

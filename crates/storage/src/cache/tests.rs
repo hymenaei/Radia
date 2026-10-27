@@ -7,6 +7,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+
 use crate::sqlite::MAX_BATCH_ROWS;
 use proptest::{prelude::*, test_runner::RngSeed};
 use rusqlite::Connection;
@@ -158,7 +161,7 @@ fn old_index_files_are_discarded() {
         fs::write(directory.path().join(name), b"obsolete").expect("write obsolete index file");
     }
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
-    for name in ["snapshot", "journal", ".snapshot-tmp-old", ".journal-tmp-old", ".lock-tmp-old"] {
+    for name in ["snapshot", "journal"] {
         assert!(!directory.path().join(name).exists(), "{name} remained after open");
     }
     cache.flush().expect("finish bounded orphan sweep");
@@ -167,6 +170,19 @@ fn old_index_files_are_discarded() {
     }
     assert!(directory.path().join("index.sqlite").exists());
     assert!(directory.path().join("lock").exists());
+    cache.shutdown().expect("close cache");
+}
+
+#[cfg(windows)]
+#[test]
+fn locked_old_index_temp_does_not_block_open() {
+    let directory = tempdir().expect("cache directory");
+    let path = directory.path().join(".snapshot-tmp-locked");
+    fs::write(&path, b"obsolete").expect("write obsolete index temp file");
+    let locked_file = fs::OpenOptions::new().read(true).share_mode(0).open(path).expect("lock obsolete index temp file");
+
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache despite locked temp file");
+    drop(locked_file);
     cache.shutdown().expect("close cache");
 }
 

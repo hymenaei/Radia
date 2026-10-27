@@ -4,15 +4,22 @@ use crate::{Category, CategoryKey, ChangeSet, InventoryChange, InventoryNodeId, 
 use rusqlite::{Transaction, params};
 use storage::sqlite::{MAX_BATCH_BYTES, MAX_BATCH_ROWS, SqliteBatch, SqliteError};
 
-pub(super) fn bootstrap(snapshot: &InventorySnapshot) -> Result<Vec<SqliteBatch>, SqliteError> {
-    categories(snapshot.categories().cloned().collect())
+use super::{CacheIdentity, InventoryCacheError};
+
+pub(super) fn bootstrap(snapshot: &InventorySnapshot, identity: &CacheIdentity) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
+    let categories = snapshot.categories().cloned().collect::<Vec<_>>();
+    for category in &categories {
+        validate_owner(identity, category.key.owner().id())?;
+    }
+    category_batches(categories, identity)
 }
 
 pub(super) fn changeset(
     changes: &ChangeSet,
     before: &InventorySnapshot,
     after: &InventorySnapshot,
-) -> Result<Vec<SqliteBatch>, SqliteError> {
+    identity: &CacheIdentity,
+) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
     let affected = affected_categories(changes, before, after);
     let mut changed_categories = BTreeSet::new();
     let mut changed_items = BTreeSet::new();
@@ -60,14 +67,23 @@ pub(super) fn changeset(
             Some((key, category.server_version.raw(), child_count, replaced.contains(&key)))
         })
         .collect::<Vec<_>>();
+    for key in &affected {
+        validate_owner(identity, key.owner().id())?;
+    }
+    for key in &changed_categories {
+        validate_owner(identity, key.owner().id())?;
+    }
+    for key in &changed_items {
+        validate_owner(identity, key.owner().id())?;
+    }
 
     let mut batches = Vec::new();
-    batches.extend(invalidate(affected)?);
-    batches.extend(categories(category_upserts)?);
-    batches.extend(items(item_upserts)?);
-    batches.extend(delete_items(item_deletes)?);
-    batches.extend(delete_categories(category_deletes)?);
-    batches.extend(mark_complete(complete)?);
+    batches.extend(invalidate(affected, identity)?);
+    batches.extend(category_batches(category_upserts, identity)?);
+    batches.extend(item_batches(item_upserts, identity)?);
+    batches.extend(delete_items(item_deletes, identity)?);
+    batches.extend(delete_categories(category_deletes, identity)?);
+    batches.extend(mark_complete(complete, identity)?);
     Ok(batches)
 }
 
@@ -118,51 +134,52 @@ fn add_parent(affected: &mut BTreeSet<CategoryKey>, parent: Option<CategoryKey>)
     }
 }
 
-fn invalidate(keys: Vec<CategoryKey>) -> Result<Vec<SqliteBatch>, SqliteError> {
+fn invalidate(keys: Vec<CategoryKey>, identity: &CacheIdentity) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
     chunks(keys, |chunk, bytes| {
+        let grid_id = identity.grid_id.clone();
         SqliteBatch::new(chunk.len(), bytes, move |transaction| {
             let mut statement = transaction.prepare(
-                "UPDATE categories
-                 SET complete_generation=CASE WHEN complete=1 THEN complete_generation ELSE 0 END, complete=0
-                 WHERE owner_id=?1 AND category_id=?2",
+                "UPDATE categories SET complete=0
+                 WHERE scope_id=(SELECT scope_id FROM scopes WHERE grid_id=?1 AND owner_id=?2) AND id=?3",
             )?;
             for key in chunk {
-                statement.execute(params![key.owner().id().as_bytes().as_slice(), key.id().uuid().as_bytes().as_slice()])?;
+                statement.execute(params![grid_id, key.owner().id().as_bytes().as_slice(), key.id().uuid().as_bytes().as_slice()])?;
             }
             Ok(())
         })
     })
 }
 
-fn categories(values: Vec<Category>) -> Result<Vec<SqliteBatch>, SqliteError> {
+fn category_batches(values: Vec<Category>, identity: &CacheIdentity) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
     let mut batches = Vec::new();
     let mut chunk = Vec::new();
     let mut bytes = 0usize;
     for category in values {
-        let row_bytes = 96usize.saturating_add(category.name.len());
+        let row_bytes = 128usize.saturating_add(category.name.len());
         if !chunk.is_empty() && (chunk.len() >= MAX_BATCH_ROWS || bytes.saturating_add(row_bytes) > MAX_BATCH_BYTES) {
-            batches.push(category_batch(std::mem::take(&mut chunk), bytes)?);
+            batches.push(category_batch(std::mem::take(&mut chunk), bytes, identity)?);
             bytes = 0;
         }
         bytes = bytes.saturating_add(row_bytes);
         chunk.push(category);
     }
     if !chunk.is_empty() {
-        batches.push(category_batch(chunk, bytes)?);
+        batches.push(category_batch(chunk, bytes, identity)?);
     }
     Ok(batches)
 }
 
-fn category_batch(values: Vec<Category>, bytes: usize) -> Result<SqliteBatch, SqliteError> {
-    SqliteBatch::new(values.len(), bytes, move |transaction| upsert_categories(transaction, values))
+fn category_batch(values: Vec<Category>, bytes: usize, identity: &CacheIdentity) -> Result<SqliteBatch, InventoryCacheError> {
+    let grid_id = identity.grid_id.clone();
+    SqliteBatch::new(values.len(), bytes, move |transaction| upsert_categories(transaction, grid_id, values)).map_err(Into::into)
 }
 
-fn upsert_categories(transaction: &Transaction<'_>, categories: Vec<Category>) -> rusqlite::Result<()> {
+fn upsert_categories(transaction: &Transaction<'_>, grid_id: String, categories: Vec<Category>) -> rusqlite::Result<()> {
     let mut statement = transaction.prepare(
         "INSERT INTO categories
-            (owner_id, category_id, parent_id, preferred_type, name, server_version, server_descendent_count, complete, complete_generation)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0)
-         ON CONFLICT(owner_id, category_id) DO UPDATE SET
+            (scope_id, id, parent_id, preferred_type, name, server_version, server_descendent_count, complete, complete_generation)
+         VALUES ((SELECT scope_id FROM scopes WHERE grid_id=?1 AND owner_id=?2), ?3, ?4, ?5, ?6, ?7, ?8, 0, 0)
+         ON CONFLICT(scope_id, id) DO UPDATE SET
             parent_id=excluded.parent_id,
             preferred_type=excluded.preferred_type,
             name=excluded.name,
@@ -183,6 +200,7 @@ fn upsert_categories(transaction: &Transaction<'_>, categories: Vec<Category>) -
         let parent = category.parent.map(|parent| *parent.id().uuid().as_bytes());
         let parent = parent.as_ref().map(|id| id.as_slice());
         statement.execute(params![
+            grid_id,
             category.key.owner().id().as_bytes().as_slice(),
             category.key.id().uuid().as_bytes().as_slice(),
             parent,
@@ -195,37 +213,39 @@ fn upsert_categories(transaction: &Transaction<'_>, categories: Vec<Category>) -
     Ok(())
 }
 
-fn items(values: Vec<Item>) -> Result<Vec<SqliteBatch>, SqliteError> {
+fn item_batches(values: Vec<Item>, identity: &CacheIdentity) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
     let mut batches = Vec::new();
     let mut chunk = Vec::new();
     let mut bytes = 0usize;
     for item in values {
-        let row_bytes = 256usize.saturating_add(item.name.len()).saturating_add(item.description.len());
+        let row_bytes = 288usize.saturating_add(item.name.len()).saturating_add(item.description.len());
         if !chunk.is_empty() && (chunk.len() >= MAX_BATCH_ROWS || bytes.saturating_add(row_bytes) > MAX_BATCH_BYTES) {
-            batches.push(item_batch(std::mem::take(&mut chunk), bytes)?);
+            batches.push(item_batch(std::mem::take(&mut chunk), bytes, identity)?);
             bytes = 0;
         }
         bytes = bytes.saturating_add(row_bytes);
         chunk.push(item);
     }
     if !chunk.is_empty() {
-        batches.push(item_batch(chunk, bytes)?);
+        batches.push(item_batch(chunk, bytes, identity)?);
     }
     Ok(batches)
 }
 
-fn item_batch(values: Vec<Item>, bytes: usize) -> Result<SqliteBatch, SqliteError> {
-    SqliteBatch::new(values.len(), bytes, move |transaction| upsert_items(transaction, values))
+fn item_batch(values: Vec<Item>, bytes: usize, identity: &CacheIdentity) -> Result<SqliteBatch, InventoryCacheError> {
+    let grid_id = identity.grid_id.clone();
+    SqliteBatch::new(values.len(), bytes, move |transaction| upsert_items(transaction, grid_id, values)).map_err(Into::into)
 }
 
-fn upsert_items(transaction: &Transaction<'_>, items: Vec<Item>) -> rusqlite::Result<()> {
+fn upsert_items(transaction: &Transaction<'_>, grid_id: String, items: Vec<Item>) -> rusqlite::Result<()> {
     let mut statement = transaction.prepare(
         "INSERT INTO items
-            (owner_id, item_id, parent_id, asset_id, asset_type, inventory_type, flags, name, description, created_at,
+            (scope_id, id, parent_id, asset_id, asset_type, inventory_type, flags, name, description, created_at,
              creator_id, item_owner_id, group_id, last_owner_id, base_mask, owner_mask, group_mask, everyone_mask,
              next_owner_mask, sale_type, sale_price)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
-         ON CONFLICT(owner_id, item_id) DO UPDATE SET
+         VALUES ((SELECT scope_id FROM scopes WHERE grid_id=?1 AND owner_id=?2), ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                 ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+         ON CONFLICT(scope_id, id) DO UPDATE SET
             parent_id=excluded.parent_id, asset_id=excluded.asset_id, asset_type=excluded.asset_type,
             inventory_type=excluded.inventory_type, flags=excluded.flags, name=excluded.name,
             description=excluded.description, created_at=excluded.created_at, creator_id=excluded.creator_id,
@@ -236,6 +256,7 @@ fn upsert_items(transaction: &Transaction<'_>, items: Vec<Item>) -> rusqlite::Re
     )?;
     for item in items {
         statement.execute(params![
+            grid_id,
             item.key.owner().id().as_bytes().as_slice(),
             item.key.id().uuid().as_bytes().as_slice(),
             item.parent.id().uuid().as_bytes().as_slice(),
@@ -262,42 +283,49 @@ fn upsert_items(transaction: &Transaction<'_>, items: Vec<Item>) -> rusqlite::Re
     Ok(())
 }
 
-fn delete_items(keys: Vec<ItemKey>) -> Result<Vec<SqliteBatch>, SqliteError> {
+fn delete_items(keys: Vec<ItemKey>, identity: &CacheIdentity) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
     chunks(keys, |chunk, bytes| {
+        let grid_id = identity.grid_id.clone();
         SqliteBatch::new(chunk.len(), bytes, move |transaction| {
-            let mut statement = transaction.prepare("DELETE FROM items WHERE owner_id=?1 AND item_id=?2")?;
+            let mut statement = transaction
+                .prepare("DELETE FROM items WHERE scope_id=(SELECT scope_id FROM scopes WHERE grid_id=?1 AND owner_id=?2) AND id=?3")?;
             for key in chunk {
-                statement.execute(params![key.owner().id().as_bytes().as_slice(), key.id().uuid().as_bytes().as_slice()])?;
+                statement.execute(params![grid_id, key.owner().id().as_bytes().as_slice(), key.id().uuid().as_bytes().as_slice()])?;
             }
             Ok(())
         })
     })
 }
 
-fn delete_categories(keys: Vec<CategoryKey>) -> Result<Vec<SqliteBatch>, SqliteError> {
+fn delete_categories(keys: Vec<CategoryKey>, identity: &CacheIdentity) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
     chunks(keys, |chunk, bytes| {
+        let grid_id = identity.grid_id.clone();
         SqliteBatch::new(chunk.len(), bytes, move |transaction| {
-            let mut statement = transaction.prepare("DELETE FROM categories WHERE owner_id=?1 AND category_id=?2")?;
-            for key in chunk {
-                statement.execute(params![key.owner().id().as_bytes().as_slice(), key.id().uuid().as_bytes().as_slice()])?;
-            }
-            Ok(())
-        })
-    })
-}
-
-fn mark_complete(values: Vec<(CategoryKey, i32, u32, bool)>) -> Result<Vec<SqliteBatch>, SqliteError> {
-    chunks(values, |chunk, bytes| {
-        SqliteBatch::new(chunk.len(), bytes, move |transaction| {
-            let generation: i64 = transaction.query_row("SELECT cache_generation FROM meta WHERE id=1", [], |row| row.get(0))?;
             let mut statement = transaction.prepare(
-                "UPDATE categories SET complete=1, complete_generation=?1
-                 WHERE owner_id=?2 AND category_id=?3 AND server_version=?4 AND server_descendent_count=?5
-                   AND (?6=1 OR complete_generation=?1)",
+                "DELETE FROM categories WHERE scope_id=(SELECT scope_id FROM scopes WHERE grid_id=?1 AND owner_id=?2) AND id=?3",
+            )?;
+            for key in chunk {
+                statement.execute(params![grid_id, key.owner().id().as_bytes().as_slice(), key.id().uuid().as_bytes().as_slice()])?;
+            }
+            Ok(())
+        })
+    })
+}
+
+fn mark_complete(values: Vec<(CategoryKey, i32, u32, bool)>, identity: &CacheIdentity) -> Result<Vec<SqliteBatch>, InventoryCacheError> {
+    chunks(values, |chunk, bytes| {
+        let grid_id = identity.grid_id.clone();
+        SqliteBatch::new(chunk.len(), bytes, move |transaction| {
+            let mut statement = transaction.prepare(
+                "UPDATE categories SET complete=1,
+                    complete_generation=(SELECT cache_generation FROM scopes WHERE grid_id=?1 AND owner_id=?2)
+                 WHERE scope_id=(SELECT scope_id FROM scopes WHERE grid_id=?1 AND owner_id=?2)
+                   AND id=?3 AND server_version=?4 AND server_descendent_count=?5
+                   AND (?6=1 OR complete_generation=(SELECT cache_generation FROM scopes WHERE grid_id=?1 AND owner_id=?2))",
             )?;
             for (key, version, child_count, replace) in chunk {
                 statement.execute(params![
-                    generation,
+                    grid_id,
                     key.owner().id().as_bytes().as_slice(),
                     key.id().uuid().as_bytes().as_slice(),
                     version,
@@ -310,7 +338,7 @@ fn mark_complete(values: Vec<(CategoryKey, i32, u32, bool)>) -> Result<Vec<Sqlit
     })
 }
 
-fn chunks<T, F>(values: Vec<T>, mut make: F) -> Result<Vec<SqliteBatch>, SqliteError>
+fn chunks<T, F>(values: Vec<T>, mut make: F) -> Result<Vec<SqliteBatch>, InventoryCacheError>
 where
     F: FnMut(Vec<T>, usize) -> Result<SqliteBatch, SqliteError>,
 {
@@ -331,8 +359,6 @@ where
     Ok(batches)
 }
 
-impl From<rusqlite::Error> for super::InventoryCacheError {
-    fn from(error: rusqlite::Error) -> Self {
-        super::InventoryCacheError::Sqlite(SqliteError::Sqlite(error))
-    }
+fn validate_owner(identity: &CacheIdentity, owner: uuid::Uuid) -> Result<(), InventoryCacheError> {
+    if identity.owners().any(|known| known == owner) { Ok(()) } else { Err(InventoryCacheError::Inconsistent) }
 }

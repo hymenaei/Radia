@@ -7,8 +7,8 @@ use std::{
 };
 
 use ::inventory::{
-    ChangeSet, Inventory, InventoryCache, InventoryCacheLoad, InventoryCacheOpenStatus, InventoryCacheWrite, InventoryChange,
-    InventoryRevision, InventorySnapshot,
+    CategoryKey, ChangeSet, Inventory, InventoryCache, InventoryCacheOpenStatus, InventoryCacheRestore, InventoryCacheWrite,
+    InventoryChange, InventorySnapshot,
 };
 use network::Grid;
 use tokio::{runtime::Handle, sync::mpsc};
@@ -29,6 +29,12 @@ pub(super) struct InventoryCacheSession {
     open_started: bool,
     pending_overflow: bool,
     disabled: bool,
+    restore: Option<PendingRestore>,
+}
+
+struct PendingRestore {
+    restore: InventoryCacheRestore,
+    excluded: HashSet<CategoryKey>,
 }
 
 struct PendingWrite {
@@ -40,14 +46,13 @@ struct PendingWrite {
 }
 
 pub(super) enum InventoryCacheEvent {
-    Ready { cache: InventoryCache, load: InventoryCacheLoad, skeleton: InventorySnapshot, status: InventoryCacheOpenStatus },
+    Ready { cache: InventoryCache, restore: InventoryCacheRestore, status: InventoryCacheOpenStatus },
     OpenFailed(String),
-    Applied { result: Result<(Inventory, usize), String>, base_revision: InventoryRevision },
+    RestoreBatch,
 }
 
 pub(super) struct InventoryCacheEventOutcome {
     pub(super) snapshot: Option<InventorySnapshot>,
-    pub(super) startup_complete: bool,
 }
 
 impl InventoryCacheSession {
@@ -64,6 +69,7 @@ impl InventoryCacheSession {
             open_started: false,
             pending_overflow: false,
             disabled: false,
+            restore: None,
         }
     }
 
@@ -72,10 +78,7 @@ impl InventoryCacheSession {
             return;
         }
         self.open_started = true;
-        let grid_identity = match grid {
-            Grid::Agni => "agni",
-            Grid::Aditi => "aditi",
-        };
+        let grid_identity = grid.id();
         let inventory = inventory.clone();
         let skeleton = inventory.snapshot();
         let sender = self.event_sender.clone();
@@ -83,7 +86,14 @@ impl InventoryCacheSession {
             let opened = tokio::task::spawn_blocking(move || InventoryCache::open(grid_identity, agent_id, library_owner)).await;
             let event = match opened {
                 Ok(Ok((cache, status))) => match cache.load(&inventory).await {
-                    Ok(load) => InventoryCacheEvent::Ready { cache, load, skeleton, status },
+                    Ok(load) => {
+                        let prepared = tokio::task::spawn_blocking(move || load.prepare_restore(&skeleton)).await;
+                        match prepared {
+                            Ok(Ok(restore)) => InventoryCacheEvent::Ready { cache, restore, status },
+                            Ok(Err(error)) => InventoryCacheEvent::OpenFailed(error.to_string()),
+                            Err(error) => InventoryCacheEvent::OpenFailed(error.to_string()),
+                        }
+                    }
                     Err(error) => InventoryCacheEvent::OpenFailed(error.to_string()),
                 },
                 Ok(Err(error)) => InventoryCacheEvent::OpenFailed(error.to_string()),
@@ -96,12 +106,18 @@ impl InventoryCacheSession {
     }
 
     pub(super) async fn next_event(&mut self) -> Option<InventoryCacheEvent> {
+        if self.restore.is_some() {
+            return Some(InventoryCacheEvent::RestoreBatch);
+        }
         self.event_receiver.recv().await
     }
 
     pub(super) fn record_change(&mut self, runtime: &Handle, changes: ChangeSet, before: InventorySnapshot, after: InventorySnapshot) {
         if changes.is_empty() || self.disabled {
             return;
+        }
+        if let Some(restore) = &mut self.restore {
+            restore.excluded.extend(InventoryCache::affected_categories(&changes, &before, &after));
         }
         if let Some(cache) = &self.cache {
             match cache.submit_changeset(&changes, &before, &after) {
@@ -139,25 +155,32 @@ impl InventoryCacheSession {
                 self.warn_once(&error);
                 self.disabled = true;
                 self.clear_pending_writes();
-                InventoryCacheEventOutcome { snapshot: None, startup_complete: true }
+                InventoryCacheEventOutcome { snapshot: None }
             }
-            InventoryCacheEvent::Ready { cache, load, skeleton, status } => {
-                let startup_complete = self.handle_ready(runtime, cache, load, skeleton, status, inventory);
-                InventoryCacheEventOutcome { snapshot: None, startup_complete }
+            InventoryCacheEvent::Ready { cache, restore, status } => {
+                self.handle_ready(runtime, cache, restore, status, inventory);
+                InventoryCacheEventOutcome { snapshot: None }
             }
-            InventoryCacheEvent::Applied { result, base_revision } => match result {
-                Ok((cached, count)) if inventory.revision() == base_revision => {
-                    *inventory = cached;
-                    tracing::debug!(folders = count, "inventory cache folders restored");
-                    InventoryCacheEventOutcome { snapshot: Some(inventory.snapshot()), startup_complete: true }
+            InventoryCacheEvent::RestoreBatch => {
+                let before = inventory.revision();
+                let result = self.restore.as_mut().map(|restore| restore.restore.apply_next(inventory, &restore.excluded));
+                match result {
+                    Some(Ok(progress)) => {
+                        if progress.finished {
+                            self.restore = None;
+                            tracing::debug!("inventory cache restore finished");
+                        }
+                        InventoryCacheEventOutcome { snapshot: progress.changed.then(|| inventory.snapshot()) }
+                    }
+                    Some(Err(error)) => {
+                        self.restore = None;
+                        self.warn_once(&error);
+                        self.discard_cache(runtime);
+                        InventoryCacheEventOutcome { snapshot: (inventory.revision() != before).then(|| inventory.snapshot()) }
+                    }
+                    None => InventoryCacheEventOutcome { snapshot: None },
                 }
-                Ok(_) => InventoryCacheEventOutcome { snapshot: None, startup_complete: true },
-                Err(error) => {
-                    self.warn_once(&error);
-                    self.discard_cache(runtime);
-                    InventoryCacheEventOutcome { snapshot: None, startup_complete: true }
-                }
-            },
+            }
         }
     }
 
@@ -173,16 +196,15 @@ impl InventoryCacheSession {
         &mut self,
         runtime: &Handle,
         cache: InventoryCache,
-        load: InventoryCacheLoad,
-        skeleton: InventorySnapshot,
+        restore: InventoryCacheRestore,
         status: InventoryCacheOpenStatus,
         inventory: &mut Inventory,
-    ) -> bool {
+    ) {
         if self.pending_overflow {
             self.disabled = true;
             self.clear_pending_writes();
             self.discard_in_background(runtime, cache);
-            return true;
+            return;
         }
         tracing::debug!(?status, "inventory cache opened");
         let mut excluded = HashSet::new();
@@ -191,11 +213,6 @@ impl InventoryCacheSession {
         }
         self.cache = Some(cache);
         if let Some(cache) = &self.cache {
-            let snapshot = inventory.snapshot();
-            match cache.submit_bootstrap(&snapshot) {
-                Ok(receipt) => monitor_write(runtime, receipt, Arc::clone(&self.warning_emitted)),
-                Err(error) => self.warn_once(&error),
-            }
             let warning_emitted = Arc::clone(&self.warning_emitted);
             for pending in self.pending_writes.drain(..) {
                 match cache.submit_changeset(&pending.changes, &pending.before, &pending.after) {
@@ -208,23 +225,13 @@ impl InventoryCacheSession {
                 self.pending_rows = self.pending_rows.saturating_sub(pending.rows);
                 self.pending_bytes = self.pending_bytes.saturating_sub(pending.bytes);
             }
-        }
-        let candidate = inventory.clone();
-        let base_revision = inventory.revision();
-        let sender = self.event_sender.clone();
-        drop(runtime.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                let mut candidate = candidate;
-                load.apply_to(&mut candidate, &skeleton, &excluded).map(|count| (candidate, count)).map_err(|error| error.to_string())
-            })
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|result| result);
-            if let Err(send_error) = sender.send(InventoryCacheEvent::Applied { result, base_revision }) {
-                drop(send_error);
+            let snapshot = inventory.snapshot();
+            match cache.submit_bootstrap(&snapshot) {
+                Ok(receipt) => monitor_write(runtime, receipt, Arc::clone(&self.warning_emitted)),
+                Err(error) => self.warn_once(&error),
             }
-        }));
-        false
+        }
+        self.restore = Some(PendingRestore { restore, excluded });
     }
 
     fn clear_pending_writes(&mut self) {

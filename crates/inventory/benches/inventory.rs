@@ -9,8 +9,8 @@ use ::inventory as inventory_model;
 use criterion::{BatchSize, Criterion};
 use futures::executor::block_on;
 use inventory_model::{
-    AssetType, Category, CategoryKey, Inventory, InventoryCache, InventoryChild, InventoryDelta, InventoryLimits, InventoryOwner,
-    InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
+    AssetType, Category, CategoryKey, Inventory, InventoryCache, InventoryCacheLoad, InventoryChild, InventoryDelta, InventoryLimits,
+    InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
 };
 use tempfile::tempdir;
 use test_support::allocation;
@@ -67,7 +67,7 @@ fn bench_cache(criterion: &mut Criterion) {
             let mut inventory = cache_skeleton();
             let skeleton = inventory.snapshot();
             let load = block_on(cache.load(&inventory)).expect("benchmark cache read");
-            let applied = load.apply_to(&mut inventory, &skeleton, &std::collections::HashSet::new()).expect("benchmark cache apply");
+            let applied = apply_restore(load, &mut inventory, &skeleton);
             black_box((inventory, applied));
         });
     });
@@ -96,8 +96,7 @@ fn report_cache_load_times(root: &std::path::Path, path: &std::path::Path) {
     let cold_skeleton = cold_inventory.snapshot();
     let started = Instant::now();
     let cold_load = block_on(cache.load(&cold_inventory)).expect("benchmark first cache read");
-    let cold_applied =
-        cold_load.apply_to(&mut cold_inventory, &cold_skeleton, &std::collections::HashSet::new()).expect("benchmark first cache apply");
+    let cold_applied = apply_restore(cold_load, &mut cold_inventory, &cold_skeleton);
     let cold = started.elapsed();
     block_on(cache.close()).expect("benchmark first cache close");
 
@@ -108,7 +107,7 @@ fn report_cache_load_times(root: &std::path::Path, path: &std::path::Path) {
         let skeleton = inventory.snapshot();
         let started = Instant::now();
         let load = block_on(cache.load(&inventory)).expect("benchmark warm cache read");
-        let applied = load.apply_to(&mut inventory, &skeleton, &std::collections::HashSet::new()).expect("benchmark warm cache apply");
+        let applied = apply_restore(load, &mut inventory, &skeleton);
         assert_eq!(applied, 1);
         warm_times.push(started.elapsed());
     }
@@ -121,6 +120,18 @@ fn report_cache_load_times(root: &std::path::Path, path: &std::path::Path) {
         duration_millis(cold),
         duration_millis(warm),
     );
+}
+
+fn apply_restore(load: InventoryCacheLoad, inventory: &mut Inventory, skeleton: &inventory_model::InventorySnapshot) -> usize {
+    let mut restore = load.prepare_restore(skeleton).expect("benchmark cache restore preparation");
+    let mut applied = 0usize;
+    loop {
+        let progress = restore.apply_next(inventory, &std::collections::HashSet::new()).expect("benchmark cache restore batch");
+        applied = applied.saturating_add(progress.units_applied);
+        if progress.finished {
+            return applied;
+        }
+    }
 }
 
 fn duration_millis(duration: Duration) -> f64 {

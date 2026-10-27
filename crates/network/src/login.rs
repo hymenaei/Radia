@@ -182,6 +182,13 @@ pub enum Grid {
 }
 
 impl Grid {
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Agni => "agni",
+            Self::Aditi => "aditi",
+        }
+    }
+
     pub const fn label(self) -> &'static str {
         match self {
             Self::Agni => "Main grid (Agni)",

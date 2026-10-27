@@ -20,6 +20,12 @@ const AGENT_ID: &str = "00112233-4455-6677-8899-aabbccddeeff";
 const SESSION_ID: &str = "ffeeddcc-bbaa-9988-7766-554433221100";
 const FOLDER_ID: &str = "12345678-1234-5678-1234-567812345678";
 
+#[test]
+fn grid_id_is_a_stable_login_identity() {
+    assert_eq!(Grid::Agni.id(), "agni");
+    assert_eq!(Grid::Aditi.id(), "aditi");
+}
+
 async fn login_at(
     credentials: &LoginCredentials,
     mfa_token: &str,

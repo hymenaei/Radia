@@ -247,7 +247,7 @@ pub(crate) fn remove_child(state: &mut InventoryState, parent: CategoryKey, chil
     Ok(())
 }
 
-fn category_is_complete(category: &Category, child_count: usize) -> bool {
+pub(crate) fn category_is_complete(category: &Category, child_count: usize) -> bool {
     category.server_version.is_known()
         && category.server_descendent_count.and_then(|count| usize::try_from(count).ok()) == Some(child_count)
 }

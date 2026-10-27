@@ -7,7 +7,10 @@ mod types;
 
 use std::{error::Error, fmt};
 
-pub use cache::{InventoryCache, InventoryCacheError, InventoryCacheLoad, InventoryCacheOpenStatus, InventoryCacheWrite};
+pub use cache::{
+    InventoryCache, InventoryCacheError, InventoryCacheLoad, InventoryCacheOpenStatus, InventoryCacheRestore,
+    InventoryCacheRestoreProgress, InventoryCacheWrite,
+};
 pub use mutation::{InventoryChild, MAX_FOLDER_FETCH_CHILDREN};
 pub use snapshot::InventorySnapshot;
 pub use state::{Inventory, InventoryLimits, InventoryRoots};

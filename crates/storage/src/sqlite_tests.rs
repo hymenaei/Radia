@@ -67,6 +67,21 @@ fn garbage_database_is_recreated() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn remove_if_idle_keeps_an_open_database_and_removes_it_after_shutdown() -> Result<(), Box<dyn Error>> {
+    let directory = tempdir()?;
+    let path = directory.path().join("inventory.sqlite");
+    let (db, _) = SqliteDb::open(&path, migrate)?;
+
+    assert!(!SqliteDb::remove_if_idle(&path)?);
+    assert!(path.exists());
+
+    db.shutdown()?;
+    assert!(SqliteDb::remove_if_idle(&path)?);
+    assert!(!path.exists());
+    Ok(())
+}
+
+#[test]
 fn schema_mismatch_is_recreated() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let path = directory.path().join("inventory.sqlite");

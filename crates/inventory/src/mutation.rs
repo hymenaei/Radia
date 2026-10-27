@@ -4,7 +4,8 @@ use std::sync::Arc;
 use utils::FolderId;
 
 use crate::state::{
-    InventoryState, insert_child, remove_category_record, remove_child, replace_category_record, validate_category, validate_item,
+    InventoryState, category_is_complete, insert_child, remove_category_record, remove_child, replace_category_record, validate_category,
+    validate_item,
 };
 use crate::{
     Category, CategoryKey, ChangeSet, Inventory, InventoryChange, InventoryError, InventoryLimits, InventoryNodeId, InventoryNodeKey,
@@ -17,6 +18,11 @@ pub const MAX_FOLDER_FETCH_CHILDREN: usize = 100_000;
 pub enum InventoryChild {
     Category(Category),
     Item(Item),
+}
+
+pub(crate) enum CachedFolderApply {
+    Skipped,
+    Applied { conflict: bool },
 }
 
 impl InventoryChild {
@@ -36,6 +42,85 @@ impl InventoryChild {
 }
 
 impl Inventory {
+    pub(crate) fn apply_cached_folder(
+        &mut self,
+        metadata: &Category,
+        children: &[InventoryChild],
+        cached_complete: bool,
+        expected_child_count: usize,
+        final_chunk: bool,
+    ) -> Result<CachedFolderApply, InventoryError> {
+        let folder = metadata.key;
+        let Some(current_folder) = self.state.categories.get(&folder) else { return Ok(CachedFolderApply::Skipped) };
+        if category_is_complete(current_folder, self.state.children.get(&folder).map_or(0, |children| children.len()))
+            || (current_folder.server_version.is_known() && current_folder.server_version != metadata.server_version)
+        {
+            return Ok(CachedFolderApply::Skipped);
+        }
+        if children.len() > self.limits.max_folder_fetch_children {
+            return Err(InventoryError::TooManyFolderChildren);
+        }
+        let mut next = self.state.as_ref().clone();
+        let mut changes = Vec::new();
+        let mut conflict = false;
+        for child in children {
+            if child.node_key().owner() != folder.owner() || child.parent() != folder {
+                return Err(InventoryError::InvalidParent);
+            }
+            match child {
+                InventoryChild::Category(category) => {
+                    validate_category(category)?;
+                    if self.state.roots.contains(category.key) {
+                        return Err(InventoryError::FixedRoot);
+                    }
+                    match self.state.categories.get(&category.key) {
+                        Some(current) if current.parent == Some(folder) => continue,
+                        Some(_) => {
+                            conflict = true;
+                            continue;
+                        }
+                        None => {}
+                    }
+                    upsert_category_state(&mut next, category.clone(), &mut changes)?;
+                }
+                InventoryChild::Item(item) => {
+                    validate_item(item)?;
+                    match self.state.items.get(&item.key) {
+                        Some(current) if current.parent == folder => continue,
+                        Some(_) => {
+                            conflict = true;
+                            continue;
+                        }
+                        None => {}
+                    }
+                    upsert_item_state(&mut next, item.clone(), &mut changes)?;
+                }
+            }
+        }
+        if next.categories.len() > self.limits.max_categories {
+            return Err(InventoryError::TooManyCategories);
+        }
+        if next.items.len() > self.limits.max_items {
+            return Err(InventoryError::TooManyItems);
+        }
+        let child_count = next.children.get(&folder).ok_or(InventoryError::InconsistentIndex)?.len();
+        let descendent_count = if final_chunk && cached_complete && !conflict && child_count == expected_child_count {
+            u32::try_from(expected_child_count).ok()
+        } else {
+            None
+        };
+        let current = next.categories.get(&folder).ok_or(InventoryError::InconsistentIndex)?;
+        if current.server_descendent_count != descendent_count {
+            let mut updated = current.as_ref().clone();
+            updated.server_descendent_count = descendent_count;
+            replace_category_record(&mut next, updated)?;
+            let updated = next.categories.get(&folder).cloned().ok_or(InventoryError::InconsistentIndex)?;
+            changes.push(InventoryChange::CategoryUpserted(updated));
+        }
+        self.publish(next, changes)?;
+        Ok(CachedFolderApply::Applied { conflict })
+    }
+
     pub fn upsert_category(&mut self, category: Category) -> Result<ChangeSet, InventoryError> {
         validate_category(&category)?;
         let mut next = self.state.as_ref().clone();

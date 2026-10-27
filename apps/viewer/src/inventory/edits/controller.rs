@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use ::inventory::{
     CategoryKey, FolderType, InventoryNodeId, InventoryNodeKey, InventoryOwner, InventorySnapshot, ItemKey, MAX_INVENTORY_NAME_BYTES,
@@ -37,7 +37,7 @@ type Cancellation = Shared<BoxFuture<'static, ()>>;
 
 pub(crate) enum InventoryEditEvent {
     Apply { confirmation: AisDelta, applied: oneshot::Sender<bool> },
-    RefreshGone { folder: CategoryKey, refreshed: oneshot::Sender<bool> },
+    RefreshFolders { folders: Vec<CategoryKey>, refreshed: oneshot::Sender<bool> },
     MoveStarted { expectation: MoveExpectation, confirmed: oneshot::Sender<()>, registered: oneshot::Sender<()> },
     MoveAborted { expectation: MoveExpectation, removed: oneshot::Sender<()> },
     MoveTimedOut { expectation: MoveExpectation, refreshed: oneshot::Sender<bool> },
@@ -212,7 +212,10 @@ async fn process_request(
     };
     match prepared {
         PreparedEdit::Noop => InventoryEditOutcome::Applied,
-        prepared => execute_edit(client, session, transport, events, capabilities, snapshot, owner, operation, prepared).await,
+        prepared => {
+            let folders = affected_folders(&operation, &snapshot, owner);
+            execute_edit(client, session, transport, events, capabilities, snapshot, owner, operation, prepared, folders).await
+        }
     }
 }
 
@@ -344,6 +347,7 @@ async fn execute_edit(
     owner: InventoryOwner,
     operation: EditOperation,
     prepared: PreparedEdit,
+    refresh_folders: Vec<CategoryKey>,
 ) -> InventoryEditOutcome {
     match prepared {
         PreparedEdit::Move(expectation) => execute_move(transport, session, events, expectation).await,
@@ -358,23 +362,37 @@ async fn execute_edit(
                     Err(_) => return InventoryEditOutcome::ServerError,
                 };
                 let body = create_folder_body(&name, preferred_type);
-                match client.post_bytes_with_response_limit(&url, &body, MAX_EDIT_RESPONSE_BYTES).await {
-                    Ok(body) => match inventory::decode_ais_edit_response(&body, owner.id()) {
-                        Ok(response) => response,
-                        Err(_) => return InventoryEditOutcome::ServerError,
-                    },
-                    Err(error) => return request_outcome(error),
+                let response_body = match edit_response(
+                    client.post_bytes_with_response_limit(&url, &body, MAX_EDIT_RESPONSE_BYTES),
+                    events,
+                    &refresh_folders,
+                )
+                .await
+                {
+                    Ok(body) => body,
+                    Err(outcome) => return outcome,
+                };
+                match inventory::decode_ais_edit_response(&response_body, owner.id()) {
+                    Ok(response) => response,
+                    Err(_) => return InventoryEditOutcome::ServerError,
                 }
             } else {
                 let Some(legacy) = capabilities.legacy_create.as_ref() else { return InventoryEditOutcome::ServerError };
                 let folder_id = Uuid::new_v4();
                 let body = legacy_create_body(folder_id, parent, preferred_type, &name);
-                let created = match client.post_bytes_with_response_limit(legacy, &body, MAX_EDIT_RESPONSE_BYTES).await {
-                    Ok(body) => match inventory::decode_created_category_response(&body) {
-                        Ok(created) => created,
-                        Err(_) => return InventoryEditOutcome::ServerError,
-                    },
-                    Err(error) => return request_outcome(error),
+                let response_body = match edit_response(
+                    client.post_bytes_with_response_limit(legacy, &body, MAX_EDIT_RESPONSE_BYTES),
+                    events,
+                    &refresh_folders,
+                )
+                .await
+                {
+                    Ok(body) => body,
+                    Err(outcome) => return outcome,
+                };
+                let created = match inventory::decode_created_category_response(&response_body) {
+                    Ok(created) => created,
+                    Err(_) => return InventoryEditOutcome::ServerError,
                 };
                 if created.id != folder_id
                     || created.parent_id != parent.id().uuid()
@@ -414,12 +432,16 @@ async fn execute_edit(
                 Err(_) => return InventoryEditOutcome::ServerError,
             };
             let body = rename_body(&name);
-            let response = match client.patch_bytes_with_response_limit(&url, &body, MAX_EDIT_RESPONSE_BYTES).await {
-                Ok(body) => match inventory::decode_ais_edit_response(&body, owner.id()) {
-                    Ok(response) => response,
-                    Err(_) => return InventoryEditOutcome::ServerError,
-                },
-                Err(error) => return request_outcome(error),
+            let response_body =
+                match edit_response(client.patch_bytes_with_response_limit(&url, &body, MAX_EDIT_RESPONSE_BYTES), events, &refresh_folders)
+                    .await
+                {
+                    Ok(body) => body,
+                    Err(outcome) => return outcome,
+                };
+            let response = match inventory::decode_ais_edit_response(&response_body, owner.id()) {
+                Ok(response) => response,
+                Err(_) => return InventoryEditOutcome::ServerError,
             };
             let confirmation = match delta_from_ais_response(&response, &operation, &snapshot, owner) {
                 Ok(confirmation) => confirmation,
@@ -437,12 +459,16 @@ async fn execute_edit(
                 Err(_) => return InventoryEditOutcome::ServerError,
             };
             let body = rename_body(&name);
-            let response = match client.patch_bytes_with_response_limit(&url, &body, MAX_EDIT_RESPONSE_BYTES).await {
-                Ok(body) => match inventory::decode_ais_edit_response(&body, owner.id()) {
-                    Ok(response) => response,
-                    Err(_) => return InventoryEditOutcome::ServerError,
-                },
-                Err(error) => return request_outcome(error),
+            let response_body =
+                match edit_response(client.patch_bytes_with_response_limit(&url, &body, MAX_EDIT_RESPONSE_BYTES), events, &refresh_folders)
+                    .await
+                {
+                    Ok(body) => body,
+                    Err(outcome) => return outcome,
+                };
+            let response = match inventory::decode_ais_edit_response(&response_body, owner.id()) {
+                Ok(response) => response,
+                Err(_) => return InventoryEditOutcome::ServerError,
             };
             let confirmation = match delta_from_ais_response(&response, &operation, &snapshot, owner) {
                 Ok(confirmation) => confirmation,
@@ -459,18 +485,15 @@ async fn execute_edit(
                 Ok(url) => url,
                 Err(_) => return InventoryEditOutcome::ServerError,
             };
-            let response = match client.delete_bytes_with_response_limit(&url, MAX_EDIT_RESPONSE_BYTES).await {
-                Ok(body) => match inventory::decode_ais_edit_response(&body, owner.id()) {
-                    Ok(response) => response,
-                    Err(_) => return InventoryEditOutcome::ServerError,
-                },
-                Err(error) if request_is_gone(&error) => {
-                    if refresh_gone(events, trash).await {
-                        return InventoryEditOutcome::Gone;
-                    }
-                    return InventoryEditOutcome::ServerError;
-                }
-                Err(error) => return request_outcome(error),
+            let response_body =
+                match edit_response(client.delete_bytes_with_response_limit(&url, MAX_EDIT_RESPONSE_BYTES), events, &refresh_folders).await
+                {
+                    Ok(body) => body,
+                    Err(outcome) => return outcome,
+                };
+            let response = match inventory::decode_ais_edit_response(&response_body, owner.id()) {
+                Ok(response) => response,
+                Err(_) => return InventoryEditOutcome::ServerError,
             };
             let confirmation = match delta_from_ais_response(&response, &operation, &snapshot, owner) {
                 Ok(confirmation) => confirmation,
@@ -479,6 +502,39 @@ async fn execute_edit(
             apply_confirmation(events, confirmation, InventoryEditOutcome::Applied).await
         }
         PreparedEdit::Noop => InventoryEditOutcome::Applied,
+    }
+}
+
+fn affected_folders(operation: &EditOperation, snapshot: &InventorySnapshot, owner: InventoryOwner) -> Vec<CategoryKey> {
+    match operation {
+        EditOperation::CreateFolder { parent, .. } => vec![*parent],
+        EditOperation::RenameCategory { category, .. } => {
+            snapshot.category(*category).and_then(|category| category.parent).into_iter().collect()
+        }
+        EditOperation::RenameItem { item, .. } => snapshot.item(*item).map(|item| item.parent).into_iter().collect(),
+        EditOperation::EmptyTrash => trash_folder(snapshot, owner).into_iter().collect(),
+        EditOperation::MoveItem { .. }
+        | EditOperation::MoveFolder { .. }
+        | EditOperation::DeleteItem(_)
+        | EditOperation::DeleteFolder(_) => Vec::new(),
+    }
+}
+
+async fn edit_response(
+    request: impl Future<Output = Result<Vec<u8>, network::Error>>,
+    events: &mpsc::Sender<InventoryEditEvent>,
+    folders_to_refresh: &[CategoryKey],
+) -> Result<Vec<u8>, InventoryEditOutcome> {
+    match request.await {
+        Ok(body) => Ok(body),
+        Err(error) => {
+            let refresh = request_is_gone(&error) || request_has_unknown_outcome(&error);
+            let outcome = request_outcome(error);
+            if refresh && !refresh_folders(events, folders_to_refresh.to_vec()).await {
+                return Err(InventoryEditOutcome::ServerError);
+            }
+            Err(outcome)
+        }
     }
 }
 
@@ -535,9 +591,12 @@ async fn apply_confirmation(
     }
 }
 
-async fn refresh_gone(events: &mpsc::Sender<InventoryEditEvent>, folder: CategoryKey) -> bool {
+async fn refresh_folders(events: &mpsc::Sender<InventoryEditEvent>, folders: Vec<CategoryKey>) -> bool {
+    if folders.is_empty() {
+        return false;
+    }
     let (refreshed, result) = oneshot::channel();
-    if events.send(InventoryEditEvent::RefreshGone { folder, refreshed }).await.is_err() {
+    if events.send(InventoryEditEvent::RefreshFolders { folders, refreshed }).await.is_err() {
         return false;
     }
     matches!(result.await, Ok(true))
@@ -613,6 +672,10 @@ fn request_outcome(error: network::Error) -> InventoryEditOutcome {
         return InventoryEditOutcome::TimedOut;
     }
     InventoryEditOutcome::ServerError
+}
+
+fn request_has_unknown_outcome(error: &network::Error) -> bool {
+    matches!(error, network::Error::CapabilityHttp(http) if matches!(http.kind, HttpErrorKind::Timeout | HttpErrorKind::Transport))
 }
 
 fn request_is_gone(error: &network::Error) -> bool {

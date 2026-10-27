@@ -792,13 +792,14 @@ impl SessionDriver {
                     tracing::trace!("inventory edit worker stopped before apply acknowledgement");
                 }
             }
-            InventoryEditEvent::RefreshGone { folder, refreshed } => {
-                let refreshed_inventory = self.mark_inventory_folders_incomplete([folder]);
+            InventoryEditEvent::RefreshFolders { folders, refreshed } => {
+                let folder_count = folders.len();
+                let refreshed_inventory = self.mark_inventory_folders_incomplete(folders);
                 if !refreshed_inventory {
-                    tracing::debug!(folder = %folder.id().uuid(), "inventory folder refresh could not be queued after a gone response");
+                    tracing::debug!(folder_count, "inventory folder refresh could not be queued after an edit failure");
                 }
                 if refreshed.send(refreshed_inventory).is_err() {
-                    tracing::trace!("inventory edit worker stopped before gone refresh acknowledgement");
+                    tracing::trace!("inventory edit worker stopped before folder refresh acknowledgement");
                 }
             }
             InventoryEditEvent::MoveStarted { expectation, confirmed, registered } => {

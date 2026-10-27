@@ -35,6 +35,15 @@ struct PeerRequest {
 
 impl PeerRequest {
     async fn respond(self, status: u16, body: impl AsRef<[u8]>) {
+        self.write_response(status, body).await.expect("write AIS peer response");
+    }
+
+    async fn respond_after(self, delay: Duration, status: u16, body: impl AsRef<[u8]>) -> io::Result<()> {
+        tokio::time::sleep(delay).await;
+        self.write_response(status, body).await
+    }
+
+    async fn write_response(self, status: u16, body: impl AsRef<[u8]>) -> io::Result<()> {
         let body = body.as_ref();
         let reason = match status {
             200 => "OK",
@@ -48,8 +57,9 @@ impl PeerRequest {
             body.len()
         );
         let mut stream = self.stream;
-        stream.write_all(response.as_bytes()).await.expect("write test response headers");
-        stream.write_all(body).await.expect("write test response body");
+        stream.write_all(response.as_bytes()).await?;
+        stream.write_all(body).await?;
+        Ok(())
     }
 
     fn value(&self) -> Value {
@@ -432,7 +442,7 @@ async fn every_edit_path_uses_confirmation_from_its_loopback_peer() {
 #[tokio::test]
 async fn ais_failures_and_gone_refresh_do_not_apply_unconfirmed_changes() {
     let mut http = LoopbackPeer::start().await;
-    let (inventory, owner, _root, _folder, _second, trash, _, item, _, _) = inventory_fixture();
+    let (inventory, owner, _root, _folder, _second, trash, protected, item, _, _) = inventory_fixture();
     let (mut controller, _model) = start_controller(
         &http,
         &inventory,
@@ -458,15 +468,18 @@ async fn ais_failures_and_gone_refresh_do_not_apply_unconfirmed_changes() {
     let request = http.next().await;
     assert_eq!(request.method, "DELETE");
     request.respond(410, b"{}").await;
-    let Some(InventoryEditEvent::RefreshGone { folder, refreshed }) = controller.next_event().await else {
+    let Some(InventoryEditEvent::RefreshFolders { folders, refreshed }) = controller.next_event().await else {
         panic!("expected refresh request after 410");
     };
-    assert_eq!(folder, trash);
+    assert_eq!(folders, vec![trash]);
     refreshed.send(true).expect("edit worker waits for refresh scheduling");
     assert_eq!(empty.await.expect("gone result"), InventoryEditOutcome::Gone);
     assert!(inventory.snapshot().item(item).is_some());
 
-    assert_eq!(handle.rename_category(folder, "rejected").await, InventoryEditOutcome::Rejected(InventoryEditRejection::ProtectedFolder));
+    assert_eq!(
+        handle.rename_category(protected, "rejected").await,
+        InventoryEditOutcome::Rejected(InventoryEditRejection::ProtectedFolder)
+    );
     let roots = inventory.snapshot().roots();
     assert_eq!(
         handle.rename_category(roots.personal(), "rejected").await,
@@ -557,5 +570,68 @@ async fn move_confirmation_timeout_invalidates_both_folders_for_refetch() {
     model.send_replace(Some(inventory.snapshot()));
     refreshed.send(true).expect("move worker waits for refetch scheduling");
     std::assert_matches!(move_item.await.expect("timed out move result"), InventoryEditOutcome::TimedOut);
+    controller.stop().await;
+}
+
+#[tokio::test]
+async fn ais_timeout_refreshes_a_committed_rename() {
+    let mut http = LoopbackPeer::start().await;
+    let (mut inventory, owner, _root, folder, _, _, _, item_key, _, _) = inventory_fixture();
+    let (mut server_inventory, _, _, _, _, _, _, _, _, _) = inventory_fixture();
+    let (mut controller, model) = start_controller(
+        &http,
+        &inventory,
+        EditSession { agent_id: owner.id(), session_id: Uuid::from_u128(25) },
+        Arc::new(NoopMoveTransport),
+    );
+    let handle = controller.handle();
+    let started = tokio::time::Instant::now();
+    let rename = tokio::spawn(async move { handle.rename_item(item_key, "late response").await });
+    http.grant(&[("InventoryAPIv3", "/ais")]).await;
+    let request = http.next().await;
+    assert_eq!(request.method, "PATCH");
+    let item = server_inventory.snapshot().item(item_key).expect("server item").clone();
+    let mut item = item;
+    item.name = Arc::from("server committed rename");
+    server_inventory
+        .apply_delta(InventoryDelta { updated_items: vec![item], ..InventoryDelta::default() })
+        .expect("apply server-side rename");
+    let delayed_response = tokio::spawn(async move {
+        request.respond_after(Duration::from_secs(22), 200, metadata("_updated_items", &[item_key.id().uuid()])).await
+    });
+
+    let Some(InventoryEditEvent::RefreshFolders { folders, refreshed }) =
+        timeout(Duration::from_secs(25), controller.next_event()).await.expect("refresh event timeout")
+    else {
+        panic!("expected refresh after uncertain AIS result");
+    };
+    assert_eq!(folders, vec![folder]);
+    assert!(started.elapsed() >= Duration::from_secs(19));
+
+    let invalidated = inventory
+        .apply_delta(InventoryDelta { updated_category_versions: vec![(folder, ServerVersion::UNKNOWN)], ..InventoryDelta::default() })
+        .expect("mark folder incomplete");
+    assert!(invalidated.refetch_categories.contains(&folder));
+    model.send_replace(Some(inventory.snapshot()));
+    let fetched_item = server_inventory.snapshot().item(item_key).expect("refetched item").clone();
+    inventory
+        .apply_delta(InventoryDelta {
+            updated_items: vec![fetched_item],
+            updated_category_versions: vec![(folder, ServerVersion::known(2).expect("known server version"))],
+            ..InventoryDelta::default()
+        })
+        .expect("apply refreshed folder contents");
+    model.send_replace(Some(inventory.snapshot()));
+    refreshed.send(true).expect("edit worker waits for refresh scheduling");
+
+    assert_eq!(rename.await.expect("timed out rename result"), InventoryEditOutcome::TimedOut);
+    assert_eq!(
+        model.borrow().as_ref().and_then(|snapshot| snapshot.item(item_key)).map(|item| item.name.as_ref()),
+        Some("server committed rename")
+    );
+    let late_result = timeout(Duration::from_secs(3), delayed_response).await.expect("delayed AIS response task timeout");
+    if let Err(error) = late_result.expect("late response task") {
+        std::assert_matches!(error.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted);
+    }
     controller.stop().await;
 }

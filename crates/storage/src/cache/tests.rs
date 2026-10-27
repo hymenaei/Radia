@@ -728,28 +728,42 @@ proptest! {
             check_model(&cache, &model)?;
         }
 
-        let small_limit = MIN_SIZE_LIMIT + 8192;
-        cache.set_size_limit(small_limit).expect("lower cache limit");
-        reconcile_after_eviction(&cache, &mut model)?;
-        for _ in 0..160 {
-            cache.clear().expect("clear small cache");
-            model.clear();
-            prop_assert!(cache.accounted_size() <= small_limit);
-            prop_assert_eq!(cache.entry_count(), model.len());
-        }
-        for revision in 0..80u8 {
-            let bytes = vec![revision; 32];
-            cache.arm_fault(WritePoint::JournalAppended);
-            let error = cache.put(key(0), bytes.clone()).expect_err("simulated crash after journal append");
-            std::assert_matches!(error, StorageError::Io(error) if error.kind() == io::ErrorKind::Interrupted);
-            cache.simulate_crash().expect("simulate replacement crash");
-            model.insert(0, bytes);
-            cache = Cache::open(directory.path(), small_limit, &TEST_NAMESPACES).expect("reopen small cache after replacement");
-            prop_assert!(cache.accounted_size() <= small_limit);
-            check_model(&cache, &model)?;
-        }
         cache.shutdown().expect("close final cache");
     }
+}
+
+#[test]
+fn repeated_clear_and_recovery_preserve_limits() {
+    let directory = tempdir().expect("cache directory");
+    let small_limit = MIN_SIZE_LIMIT + 8192;
+    let mut cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    let mut model = HashMap::new();
+    for id in 0..12_u16 {
+        let bytes = vec![u8::try_from(id).expect("fixture id fits in a byte"); 8192];
+        cache.put(key(id), bytes.clone()).expect("seed eviction case");
+        model.insert(id, bytes);
+    }
+
+    cache.set_size_limit(small_limit).expect("lower cache limit");
+    reconcile_after_eviction(&cache, &mut model).expect("reconcile the model after eviction");
+    for _ in 0..160 {
+        cache.clear().expect("clear small cache");
+        model.clear();
+        assert!(cache.accounted_size() <= small_limit);
+        assert_eq!(cache.entry_count(), model.len());
+    }
+    for revision in 0..80_u8 {
+        let bytes = vec![revision; 32];
+        cache.arm_fault(WritePoint::JournalAppended);
+        let error = cache.put(key(0), bytes.clone()).expect_err("simulated crash after journal append");
+        std::assert_matches!(error, StorageError::Io(error) if error.kind() == io::ErrorKind::Interrupted);
+        cache.simulate_crash().expect("simulate replacement crash");
+        model.insert(0, bytes);
+        cache = Cache::open(directory.path(), small_limit, &TEST_NAMESPACES).expect("reopen small cache after replacement");
+        assert!(cache.accounted_size() <= small_limit);
+        check_model(&cache, &model).expect("recovered cache matches the model");
+    }
+    cache.shutdown().expect("close final cache");
 }
 
 fn check_model(cache: &Cache, model: &HashMap<u16, Vec<u8>>) -> Result<(), TestCaseError> {

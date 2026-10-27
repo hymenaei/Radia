@@ -73,6 +73,7 @@ pub(crate) struct SceneFeed {
     pub(crate) runtime: Handle,
     pub(crate) view: SceneView,
     pub(crate) budget: Budget,
+    pub(crate) assets: AssetHandle,
     agent_id: Uuid,
     agent: Option<Entity>,
     pub(crate) water_height: Option<f64>,
@@ -95,6 +96,7 @@ impl SceneFeed {
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
+        let assets = sources.assets.clone();
         static MEMORY: OnceLock<Budget> = OnceLock::new();
         let budget = MEMORY.get_or_init(Budget::default).clone();
         let (scene, view) = Reconciler::new(budget.clone());
@@ -113,6 +115,7 @@ impl SceneFeed {
             runtime,
             view,
             budget,
+            assets,
             agent_id,
             agent: None,
             water_height: None,
@@ -659,10 +662,12 @@ mod tests {
         let (cancel, _) = oneshot::channel();
         let (camera, _) = watch::channel(None);
         let (_agent_motion_sender, agent_motion) = watch::channel(None);
+        let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let mut feed = SceneFeed {
             runtime: Handle::current(),
             view,
             budget,
+            assets: assets.handle(),
             agent_id: agent,
             agent: None,
             water_height: None,

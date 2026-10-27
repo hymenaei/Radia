@@ -6,13 +6,20 @@ use std::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
+pub use storage::EvictionReason as CacheEvictionReason;
 use storage::{
-    Cache as StorageCache, CacheValue, Key as StorageKey, Lookup as StorageLookup, Namespace, NamespaceId, StorageError, UnavailableReason,
+    Cache as StorageCache, CacheValue, EvictionReason, Key as StorageKey, Lookup as StorageLookup, Namespace, NamespaceId, Protection,
+    StorageError, UnavailableReason,
 };
 
-use crate::{Blob, Budget, Kind, Resource, budget::Reservation};
+use crate::{
+    Blob, Budget, Kind, Resource,
+    budget::Reservation,
+    cache_policy::{AssetEvictionPolicy, DecodeCosts},
+};
 
 const MAX_IN_FLIGHT_WRITES: usize = 2;
 const TEXTURES: NamespaceId = NamespaceId::new(0);
@@ -44,6 +51,11 @@ pub struct AssetCacheStats {
     pub bytes_read: u64,
     pub bytes_written: u64,
     pub dropped_writes: u64,
+    pub size_bytes: u64,
+    pub size_limit_bytes: u64,
+    pub entries_by_kind: [usize; 4],
+    pub protected_bytes: u64,
+    pub recent_evictions: [Option<EvictionReason>; 8],
 }
 
 #[derive(Default)]
@@ -90,6 +102,7 @@ pub(crate) fn read_work_bytes(kind: Kind) -> Option<usize> {
 pub struct AssetCache {
     storage: StorageCache,
     counters: Counters,
+    decode_costs: Arc<DecodeCosts>,
 }
 
 pub struct CacheWrite {
@@ -110,8 +123,11 @@ impl AssetCache {
     pub fn open(directory: impl AsRef<Path>, size_limit: u64) -> Result<Self, AssetCacheError> {
         let directory = directory.as_ref();
         storage::discard_legacy_layout(directory).map_err(AssetCacheError::Storage)?;
-        let storage = StorageCache::open(directory.join("assets"), size_limit, &NAMESPACES).map_err(AssetCacheError::Storage)?;
-        Ok(Self { storage, counters: Counters::default() })
+        let decode_costs = Arc::new(DecodeCosts::default());
+        let policy = AssetEvictionPolicy::new(Arc::clone(&decode_costs));
+        let storage =
+            StorageCache::open_with_policy(directory.join("assets"), size_limit, &NAMESPACES, policy).map_err(AssetCacheError::Storage)?;
+        Ok(Self { storage, counters: Counters::default(), decode_costs })
     }
 
     pub fn open_default() -> Result<Self, AssetCacheError> {
@@ -158,6 +174,15 @@ impl AssetCache {
         Ok(())
     }
 
+    pub(crate) fn protect(&self, resource: Resource) -> Result<Protection, AssetCacheError> {
+        self.storage.protect(storage_key(resource)).map_err(AssetCacheError::Storage)
+    }
+
+    pub(crate) fn observe_decode(&self, kind: Kind, duration: Duration) {
+        let micros = u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+        self.decode_costs.observe(kind, micros);
+    }
+
     pub(crate) fn discard(&self, resource: Resource) {
         self.storage.discard(storage_key(resource));
     }
@@ -198,6 +223,16 @@ impl AssetCache {
             bytes_read: self.counters.bytes_read.load(Ordering::Relaxed),
             bytes_written: self.counters.bytes_written.load(Ordering::Relaxed),
             dropped_writes: self.counters.dropped_writes.load(Ordering::Relaxed),
+            size_bytes: self.storage.accounted_size(),
+            size_limit_bytes: self.storage.size_limit(),
+            entries_by_kind: [
+                self.storage.namespace_entry_count(TEXTURES),
+                self.storage.namespace_entry_count(PBR_MATERIALS),
+                self.storage.namespace_entry_count(LEGACY_MATERIALS),
+                self.storage.namespace_entry_count(ENVIRONMENTS),
+            ],
+            protected_bytes: self.storage.protected_bytes(),
+            recent_evictions: self.storage.recent_evictions(),
         }
     }
 

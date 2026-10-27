@@ -243,6 +243,7 @@ pub enum AdmissionError {
     Closed,
     Route,
     InvalidId,
+    CacheProtection,
     ConflictingRequest,
 }
 
@@ -256,6 +257,7 @@ struct Lease {
     maintenance: Arc<AtomicBool>,
     size: Option<TextureSize>,
     priority: Priority,
+    _cache_protection: Option<storage::Protection>,
     _texture: Option<TextureHandle>,
 }
 
@@ -426,7 +428,7 @@ impl Job {
 
     fn fail(self, failure: Failure) -> LoadCompletion {
         let failure = if self.is_cancelled() { Failure::Cancelled } else { failure };
-        LoadCompletion { job: self, result: Err(failure), origin: DecodeOrigin::Network }
+        LoadCompletion { job: self, result: Err(failure), origin: DecodeOrigin::Network, decode_duration: None }
     }
 }
 
@@ -449,7 +451,7 @@ impl FetchFailure {
 
 impl From<FetchFailure> for LoadCompletion {
     fn from(fetch: FetchFailure) -> Self {
-        Self { job: *fetch.job, result: Err(fetch.failure), origin: DecodeOrigin::Network }
+        Self { job: *fetch.job, result: Err(fetch.failure), origin: DecodeOrigin::Network, decode_duration: None }
     }
 }
 
@@ -537,7 +539,9 @@ impl LoadJob {
         match self {
             Self::Fetch(job) => job.job.fail(failure),
             Self::Decode(input) => input.fail(failure),
-            Self::ReadCache(job) => LoadCompletion { job: job.job, result: Err(failure), origin: DecodeOrigin::Disk },
+            Self::ReadCache(job) => {
+                LoadCompletion { job: job.job, result: Err(failure), origin: DecodeOrigin::Disk, decode_duration: None }
+            }
         }
     }
 }
@@ -586,7 +590,7 @@ impl DecodeInput {
     pub fn fail(self, failure: Failure) -> LoadCompletion {
         let failure = if self.job.is_cancelled() { Failure::Cancelled } else { failure };
         let origin = self.origin();
-        LoadCompletion { job: self.job, result: Err(failure), origin }
+        LoadCompletion { job: self.job, result: Err(failure), origin, decode_duration: None }
     }
 }
 
@@ -601,6 +605,7 @@ impl DecodeJob {
     pub fn run(self) -> LoadCompletion {
         let DecodeInput { mut job, source, .. } = self.0;
         let cancelled = &job.cancelled;
+        let started = Instant::now();
         let (result, origin) = match source {
             DecodeSource::Response(response) => (
                 crate::content::prepare_cancellable(job.request, job.size, response, &mut job.reservation, || *cancelled.borrow()),
@@ -614,7 +619,7 @@ impl DecodeJob {
                 (crate::content::prepare_cached(job.size, &source, || *cancelled.borrow()), DecodeOrigin::Memory)
             }
         };
-        LoadCompletion { job, result, origin }
+        LoadCompletion { job, result, origin, decode_duration: Some(started.elapsed()) }
     }
 
     pub fn resource(&self) -> Resource {
@@ -630,6 +635,7 @@ pub struct LoadCompletion {
     result: Result<Prepared, Failure>,
     job: Job,
     origin: DecodeOrigin,
+    decode_duration: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -760,6 +766,8 @@ impl Store {
         if resource.id.uuid().is_nil() {
             return Err(AdmissionError::InvalidId);
         }
+        let cache_protection =
+            self.cache.as_ref().map(|cache| cache.protect(resource).map_err(|_| AdmissionError::CacheProtection)).transpose()?;
         let entry = self.entries.entry(key).or_insert_with(|| AssetEntry {
             request,
             views: BTreeMap::new(),
@@ -820,6 +828,7 @@ impl Store {
             maintenance: Arc::clone(&self.maintenance_dirty),
             size: request.size(),
             priority,
+            _cache_protection: cache_protection,
             _texture: texture,
         });
         view.leases.retain(|lease| lease.strong_count() > 0);
@@ -1056,7 +1065,7 @@ impl Store {
     }
 
     pub fn complete(&mut self, completion: LoadCompletion, now: Instant) -> Vec<CacheWrite> {
-        let LoadCompletion { job, result, origin } = completion;
+        let LoadCompletion { job, result, origin, decode_duration } = completion;
         let mut writes = Vec::new();
         if self.closed || job.route.store != self.id {
             return writes;
@@ -1066,6 +1075,12 @@ impl Store {
             LoadPhase::Running { generation, stage, .. } if *generation == job.generation => *stage,
             _ => return writes,
         };
+        if stage == Stage::Decoding
+            && result.is_ok()
+            && let (Some(cache), Some(duration)) = (&self.cache, decode_duration)
+        {
+            cache.observe_decode(job.resource.kind, duration);
+        }
         match stage {
             Stage::ReadingCache | Stage::Fetching => self.running_fetches -= 1,
             Stage::Decoding => self.running_decodes -= 1,

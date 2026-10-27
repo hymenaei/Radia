@@ -35,8 +35,7 @@ fn texture_payload_uses_sharded_raw_path() {
     assert_eq!(cache.stats().bytes_read, u64::try_from(bytes.len()).expect("payload length"));
     assert_eq!(cache.stats().bytes_written, u64::try_from(bytes.len()).expect("payload length"));
     cache.shutdown().expect("close cache");
-    assert!(directory.path().join("assets/snapshot").exists());
-    assert!(directory.path().join("assets/journal").exists());
+    assert!(directory.path().join("assets/index.sqlite").exists());
     assert!(directory.path().join("assets/lock").exists());
 }
 
@@ -58,7 +57,7 @@ fn open_discards_the_previous_cache_root_and_sweeps_old_assets() {
     assert!(!directory.path().join("data").exists());
     cache.shutdown().expect("sweep old asset files");
     assert!(!old_asset.exists());
-    assert!(directory.path().join("assets/snapshot").exists());
+    assert!(directory.path().join("assets/index.sqlite").exists());
 }
 
 #[test]
@@ -158,8 +157,7 @@ fn cache_open_uses_its_assets_root_index() {
     let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
     assert_eq!(cache.lookup(resource(50, Kind::Texture)), AssetLookup::Miss);
     cache.storage.flush().expect("flush index");
-    assert!(directory.path().join("assets/snapshot").exists());
-    assert!(directory.path().join("assets/journal").exists());
+    assert!(directory.path().join("assets/index.sqlite").exists());
     assert!(!directory.path().join("snapshot").exists());
     cache.shutdown().expect("close cache");
 }

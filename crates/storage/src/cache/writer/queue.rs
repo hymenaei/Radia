@@ -165,22 +165,20 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
                     }
                 }
                 Command::Shutdown { reply } => {
-                    state.drain_invalid();
-                    state.sweep_all();
-                    reply_result(reply, state.flush());
+                    reply_result(reply, state.shutdown());
                     queue.complete(queued.bytes);
                     return;
                 }
             }
         }
-        state.drain_touches();
+        state.drain_touches_best_effort();
         state.drain_invalid();
         state.sweep_step(QUEUE_SWEEP_CHUNK);
         if batch.closed {
             state.drain_invalid();
             state.sweep_all();
             if let Err(error) = state.flush() {
-                tracing::warn!(error = %error, "cache shutdown compaction failed");
+                tracing::warn!(error = %error, "cache shutdown flush failed");
             }
             return;
         }

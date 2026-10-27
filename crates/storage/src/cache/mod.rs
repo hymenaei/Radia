@@ -1,6 +1,5 @@
 mod eviction;
-mod journal;
-mod recovery;
+mod index;
 mod writer;
 
 use std::{
@@ -24,8 +23,7 @@ use sha2::{Digest, Sha256};
 use std::sync::mpsc::SyncSender;
 
 use self::{
-    journal::{FormatError, Record},
-    recovery::{discard_index_files, recover},
+    index::{Index, Record},
     writer::{Command, WorkerState, WriteQueue, writer_loop},
 };
 
@@ -39,18 +37,18 @@ pub const MAX_QUEUED_WRITE_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_QUEUED_WRITES: usize = 1024;
 const DIRECTORY_OVERHEAD: u64 = 4096;
 const FILE_OVERHEAD: u64 = 512;
-const INDEX_OVERHEAD: u64 = 3;
+const INDEX_FILE_OVERHEAD: u64 = 2;
 const MAX_NAMESPACE_BYTES: usize = 127;
 const MAX_NAMESPACE_SEGMENTS: usize = 8;
 const MAX_NAMESPACE_SEGMENT_BYTES: usize = 32;
 const MAX_EXTENSION_BYTES: usize = 16;
-const MAX_NAMESPACE_TABLE_BYTES: u64 = 256 * (2 + MAX_NAMESPACE_BYTES as u64 + MAX_EXTENSION_BYTES as u64);
-const MIN_SIZE_LIMIT_INTERNAL: u64 =
-    DIRECTORY_OVERHEAD * 3 + FILE_OVERHEAD * 4 + journal::SNAPSHOT_BASE_HEADER_BYTES + MAX_NAMESPACE_TABLE_BYTES;
+const MAX_NAMESPACE_TABLE_BYTES: u64 = 256 * (MAX_NAMESPACE_BYTES as u64 + MAX_EXTENSION_BYTES as u64 + 32);
+const MIN_SIZE_LIMIT_INTERNAL: u64 = DIRECTORY_OVERHEAD * 3 + FILE_OVERHEAD * 4 + index::INDEX_BASE_BYTES + MAX_NAMESPACE_TABLE_BYTES;
 const LOOKUP_MAX_ATTEMPTS: usize = 3;
 const SNAPSHOT_FILE: &str = "snapshot";
 const JOURNAL_FILE: &str = "journal";
 const LOCK_FILE: &str = "lock";
+const INDEX_FILE: &str = "index.sqlite";
 const ENTRY_VALID: u8 = 0;
 const ENTRY_REPLACING: u8 = 1;
 const ENTRY_INVALID: u8 = 2;
@@ -164,6 +162,10 @@ impl NamespaceTable {
         self.entries.len()
     }
 
+    pub(super) fn definitions(&self) -> impl Iterator<Item = Namespace> + '_ {
+        self.entries.iter().map(|entry| entry.definition)
+    }
+
     fn contains(&self, id: NamespaceId) -> bool {
         self.entries.get(usize::from(id.0)).is_some()
     }
@@ -243,7 +245,7 @@ fn directory_id(directories: &mut HashMap<String, DirectoryId>, path: &str) -> R
     Ok(id)
 }
 
-fn valid_namespace(namespace: &str) -> bool {
+pub(super) fn valid_namespace(namespace: &str) -> bool {
     !namespace.is_empty()
         && namespace.len() <= MAX_NAMESPACE_BYTES
         && namespace.is_ascii()
@@ -255,7 +257,7 @@ fn valid_namespace(namespace: &str) -> bool {
         })
 }
 
-fn valid_extension(extension: &str) -> bool {
+pub(super) fn valid_extension(extension: &str) -> bool {
     !extension.is_empty()
         && extension.len() <= MAX_EXTENSION_BYTES
         && extension.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
@@ -301,6 +303,7 @@ pub enum UnavailableReason {
     ReadLimit,
     WriteQueueFull,
     WriterStopped,
+    Busy,
     Io,
     Allocation,
 }
@@ -635,7 +638,7 @@ impl Cache {
         let root = directory.to_path_buf();
         let namespaces = Arc::new(NamespaceTable::new(namespace_config)?);
         let minimum_size_limit =
-            DIRECTORY_OVERHEAD * 3 + FILE_OVERHEAD * 4 + journal::snapshot_header_size(&namespaces).ok_or(StorageError::TooLarge)?;
+            DIRECTORY_OVERHEAD * 3 + FILE_OVERHEAD * 4 + index::INDEX_BASE_BYTES + index::namespace_bytes(&namespaces)?;
         if size_limit < minimum_size_limit {
             return Err(StorageError::LimitTooSmall);
         }
@@ -646,13 +649,13 @@ impl Cache {
             Err(std::fs::TryLockError::WouldBlock) => return Err(StorageError::InUse),
             Err(std::fs::TryLockError::Error(error)) => return Err(StorageError::Io(error)),
         }
-        let (records, sequence, mut snapshot_bytes, mut journal_bytes, reset, namespace_table_changed) = recover(&root, &namespaces)?;
-        if reset {
-            discard_index_files(&root)?;
-        } else if namespace_table_changed {
-            (snapshot_bytes, journal_bytes) = writer::rewrite_namespace_table(&root, &records, sequence, &namespaces, hooks.as_ref())?;
+        discard_old_index_files(&root)?;
+        let (index, records) = Index::open(root.join(INDEX_FILE), &namespaces)?;
+        let mut entries = HashMap::new();
+        entries.try_reserve(records.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        for record in records {
+            entries.insert(record.key, Arc::new(Entry::from_record(record)));
         }
-        let entries = records;
         let max_tick = entries.values().map(|entry| entry.last_use.load(Ordering::Relaxed)).max().unwrap_or(0);
         let entries = Arc::new(RwLock::new(entries));
         let touches = Arc::new(Mutex::new(HashMap::new()));
@@ -672,7 +675,7 @@ impl Cache {
             #[cfg(test)]
             hooks: Arc::clone(&hooks),
         });
-        let worker_state = WorkerState::new(root, lock_file, Arc::clone(&read_state), sequence, snapshot_bytes, journal_bytes, hooks)?;
+        let worker_state = WorkerState::new(root, lock_file, Arc::clone(&read_state), index, hooks)?;
         let startup_queue = Arc::clone(&queue);
         let worker =
             thread::Builder::new().name("storage-cache-writer".to_owned()).spawn(move || writer_loop(worker_state, startup_queue))?;
@@ -782,14 +785,26 @@ fn receive<T>(receiver: Receiver<Result<T, StorageError>>) -> Result<T, StorageE
     receiver.recv().map_err(|_| StorageError::Unavailable(UnavailableReason::WriterStopped))?
 }
 
-fn format_error(error: FormatError) -> StorageError {
-    match error {
-        FormatError::TooLarge => StorageError::TooLarge,
-        FormatError::Allocation => StorageError::Unavailable(UnavailableReason::Allocation),
-        FormatError::Invalid | FormatError::UnsupportedVersion | FormatError::TruncatedHeader => {
-            StorageError::Io(io::Error::new(io::ErrorKind::InvalidData, "cache index encoding failed"))
+fn discard_old_index_files(root: &Path) -> Result<(), StorageError> {
+    for name in [SNAPSHOT_FILE, JOURNAL_FILE] {
+        match fs::remove_file(root.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(StorageError::Io(error)),
         }
     }
+    for item in fs::read_dir(root)?.take(128) {
+        let item = item?;
+        if !item.file_type()?.is_file() {
+            continue;
+        }
+        let name = item.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".snapshot-tmp-") || name.starts_with(".journal-tmp-") || name.starts_with(".lock-tmp-") {
+            fs::remove_file(item.path())?;
+        }
+    }
+    Ok(())
 }
 
 pub fn default_cache_dir() -> Result<PathBuf, StorageError> {

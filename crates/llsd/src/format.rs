@@ -10,14 +10,19 @@ pub fn from_slice_with_limits<T: DeserializeOwned>(input: &[u8], limits: Limits)
     if strip_header(input, b"llsd/binary").is_some() {
         binary::from_slice_with_limits(input, limits)
     } else if strip_header(input, b"llsd/notation").is_some() {
-        notation::from_slice_with_limits(input, limits)
+        notation::from_slice_with_limits(trim_text_end(input), limits)
     } else if let Some(body) = strip_header(input, b"llsd/xml") {
-        xml::from_slice_with_limits(body.trim_ascii_start(), limits)
+        xml::from_slice_with_limits(trim_text_end(body.trim_ascii_start()), limits)
     } else if input.starts_with(b"<") {
-        xml::from_slice_with_limits(input, limits)
+        xml::from_slice_with_limits(trim_text_end(input), limits)
     } else {
-        notation::from_slice_with_limits(input, limits)
+        notation::from_slice_with_limits(trim_text_end(input), limits)
     }
+}
+
+fn trim_text_end(input: &[u8]) -> &[u8] {
+    let end = input.iter().rposition(|byte| *byte != 0 && !byte.is_ascii_whitespace()).map_or(0, |index| index + 1);
+    &input[..end]
 }
 
 #[cfg(test)]
@@ -50,6 +55,19 @@ mod tests {
 <llsd><string>sky</string></llsd>";
         let limits = Limits { max_bytes: input.len() - 1, ..Limits::default() };
         std::assert_matches!(from_slice_with_limits::<Value>(input, limits), Err(Error::LimitExceeded("input bytes")));
+    }
+
+    #[test]
+    fn text_documents_ignore_trailing_terminators() {
+        let expected = decode(b"{'type':'sky'}");
+        for input in [
+            &b"<? llsd/notation ?>\n{'type':'sky'}\0"[..],
+            b"<? llsd/notation ?>\n{'type':'sky'}\n\0\0",
+            b"{'type':'sky'}\0",
+            b"<llsd><map><key>type</key><string>sky</string></map></llsd>\0",
+        ] {
+            assert_eq!(decode(input), expected, "{}", String::from_utf8_lossy(input));
+        }
     }
 
     #[test]

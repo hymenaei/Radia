@@ -51,7 +51,9 @@ impl GeometryRenderer {
         let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size);
         self.water.update(&self.queue, view, camera, projection, water_height);
         let objects = view.objects().filter_map(|object| {
-            let (Some((_, mesh)), Placement::Ready(transform)) = (object.mesh(), object.placement()) else { return None };
+            let (Some(mesh), Placement::Ready(transform)) = (object.render_mesh(), object.placement()) else { return None };
+            let flags = object.mesh_flags().unwrap_or_default();
+            let scale = transform.scale * Vec3::new(if flags.mirror { -1.0 } else { 1.0 }, 1.0, 1.0);
             let animation = object
                 .detail()
                 .texture_animation
@@ -63,7 +65,8 @@ impl GeometryRenderer {
                     mesh: mesh.clone(),
                     position: transform.pose.position,
                     rotation: transform.pose.rotation,
-                    scale: transform.scale,
+                    scale,
+                    invert_normals: flags.invert,
                     pickable: true,
                     faces: Vec::new(),
                     shading: ShadingMode::Studio,
@@ -96,6 +99,7 @@ impl GeometryRenderer {
                     position: surface.position,
                     rotation: Quat::IDENTITY,
                     scale: Vec3::ONE,
+                    invert_normals: false,
                     pickable: surface.kind != SurfaceKind::Water,
                     faces: Vec::new(),
                     shading,
@@ -239,7 +243,7 @@ impl GeometryRenderer {
                 let pipeline = match instance.shading {
                     ShadingMode::Terrain => Pipeline::Terrain,
                     ShadingMode::Water => Pipeline::Water,
-                    ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, instance.scale),
+                    ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, instance.scale, instance.invert_normals),
                 };
                 let key =
                     DrawKey { mesh: instance.mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture, terrain };
@@ -317,8 +321,8 @@ impl GeometryRenderer {
     }
 }
 
-fn surface_pipeline(blend: bool, double_sided: bool, scale: Vec3) -> Pipeline {
-    match (blend, double_sided, flips_winding(scale)) {
+fn surface_pipeline(blend: bool, double_sided: bool, scale: Vec3, invert_normals: bool) -> Pipeline {
+    match (blend, double_sided, flips_winding(scale) ^ invert_normals) {
         (true, true, _) => Pipeline::BlendDoubleSided,
         (true, false, true) => Pipeline::BlendFlipped,
         (true, false, false) => Pipeline::Blend,

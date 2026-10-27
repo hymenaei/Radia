@@ -55,13 +55,17 @@ fn pick_instances(instances: &[Instance], camera: Camera, ray: DVec3) -> Result<
         }
 
         for face in &instance.faces {
-            let indices = &mesh.indices()[face.indices.start as usize..face.indices.end as usize];
+            let Some(indices) = mesh.indices().get(face.indices.start as usize..face.indices.end as usize) else { continue };
             for triangle_indices in indices.as_chunks::<3>().0 {
                 if work == MAX_PICK_TRIANGLES {
                     return Err(PickError::TriangleLimitExceeded);
                 }
                 work += 1;
-                let triangle = triangle_indices.map(|index| mesh.vertices()[index as usize].position);
+                let [first, second, third] = *triangle_indices;
+                let Some(first) = mesh.vertices().get(first as usize).map(|vertex| vertex.position) else { continue };
+                let Some(second) = mesh.vertices().get(second as usize).map(|vertex| vertex.position) else { continue };
+                let Some(third) = mesh.vertices().get(third as usize).map(|vertex| vertex.position) else { continue };
+                let triangle = if instance.invert_normals { [first, third, second] } else { [first, second, third] };
                 let Some(distance) = ray_triangle_intersection(origin, direction, triangle, face.double_sided) else {
                     continue;
                 };
@@ -176,6 +180,7 @@ mod tests {
             position,
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
+            invert_normals: false,
             pickable: true,
             faces: vec![PickFace { indices, double_sided }],
             shading: ShadingMode::Studio,

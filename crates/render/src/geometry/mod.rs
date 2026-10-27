@@ -5,6 +5,9 @@ mod mesh;
 mod pick;
 mod storage;
 
+#[cfg(test)]
+mod asset_mesh_tests;
+
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
@@ -128,6 +131,7 @@ pub(crate) struct Instance {
     position: DVec3,
     rotation: Quat,
     scale: Vec3,
+    invert_normals: bool,
     pickable: bool,
     faces: Vec<PickFace>,
     shading: ShadingMode,

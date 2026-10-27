@@ -42,9 +42,10 @@ pub(crate) struct SurfacePipelines {
 
 impl SurfacePipelines {
     pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout, terrain_textures: &BindGroupLayout) -> Self {
+        let surface_shader_source = include_str!("../shaders/surface.wgsl");
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Scene preview"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/surface.wgsl").into()),
+            source: ShaderSource::Wgsl(surface_shader_source.into()),
         });
         let attributes = [
             VertexAttribute { format: VertexFormat::Float32x4, offset: 0, shader_location: 4 },
@@ -116,9 +117,10 @@ impl SurfacePipelines {
             cache: None,
         };
         let pipeline = device.create_render_pipeline(&descriptor);
+        let terrain_shader_source = format!("{surface_shader_source}\n{}", include_str!("../shaders/terrain.wgsl"));
         let terrain_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Legacy terrain detail blend"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/terrain.wgsl").into()),
+            source: ShaderSource::Wgsl(terrain_shader_source.into()),
         });
         let terrain_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Legacy terrain pipeline"),
@@ -130,7 +132,7 @@ impl SurfacePipelines {
             layout: Some(&terrain_layout),
             vertex: VertexState {
                 module: &terrain_shader,
-                entry_point: Some("vertex"),
+                entry_point: Some("terrain_vertex"),
                 compilation_options: Default::default(),
                 buffers: &buffers,
             },
@@ -139,7 +141,7 @@ impl SurfacePipelines {
             multisample: descriptor.multisample,
             fragment: Some(FragmentState {
                 module: &terrain_shader,
-                entry_point: Some("fragment"),
+                entry_point: Some("terrain_fragment"),
                 compilation_options: Default::default(),
                 targets: &targets,
             }),

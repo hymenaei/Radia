@@ -69,7 +69,8 @@ Derives bounded scene state from World and Assets, then renders it through GPU-o
 
 World stores texture animation as a validated appearance facet observed from full and compressed updates. Empty full blocks clear it; terse and cached updates leave it untouched. Render owns the animation clock, interprets the mode flags, and evaluates the pure UV transform only for matching visible faces before composing it with the face transform. A visible animated face keeps the viewport frame scheduler active. When no dynamic animated face is visible, rendering returns to change-driven redraws.
 
-Terrain settings belong to each World region. Render derives composition coordinates per vertex from the four handshake start heights and ranges, terrain height, and globally positioned noise. The terrain shader evaluates the legacy alpha ramp per fragment and blends the region's four detail textures. Scene asset demand publishes ready handles back with the region and uses a neutral fallback while a layer is unavailable. Terrain uses filtered texture mipmaps at distance. It does not build the legacy viewer's cached low-resolution terrain composite, so distant texture appearance still needs a live comparison.
+
+Terrain settings belong to each World region. Render derives composition coordinates per vertex from the four handshake start heights and ranges, terrain height, and globally positioned noise. The terrain shader evaluates the legacy alpha ramp per fragment, blends the region's four detail textures, and sends the albedo through the shared `shade_surface` path. Scene asset demand publishes ready handles back with the region and uses a neutral fallback while a layer is unavailable. Terrain uses filtered texture mipmaps at distance. It does not build the legacy viewer's cached low-resolution terrain composite, so distant texture appearance still needs a live comparison.
 
 ### `crates/storage`
 

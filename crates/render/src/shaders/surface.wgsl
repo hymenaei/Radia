@@ -83,21 +83,22 @@ struct Water {
     water.depth = clamp(clip.z / clip.w, 0.0, 1.0);
     return water;
 }
-fn studio(v: Output, color: vec3<f32>, front: bool) -> vec3<f32> {
-    let eye = normalize(-v.position_view);
-    var normal = normalize(v.normal);
+fn shade_surface(position_view: vec3<f32>, normal_view: vec3<f32>, color: vec3<f32>, fullbright: f32, front: bool) -> vec3<f32> {
+    let eye = normalize(-position_view);
+    var normal = normalize(normal_view);
     if !front {
         normal = -normal;
     }
     let key = max(dot(normal, camera.light.xyz), 0.0);
     let halfway = normalize(camera.light.xyz + eye);
     let specular = pow(max(dot(normal, halfway), 0.0), 48.0) * 0.25;
-    return color * (0.15 + 0.85 * key) + vec3<f32>(specular);
+    let lit = color * (0.15 + 0.85 * key) + vec3<f32>(specular);
+    return mix(lit, color, fullbright);
 }
 
 @fragment fn fragment(v: Output, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let color = textureSample(image, image_sampler, v.uv) * v.color;
     if v.params.y == 1.0 && color.a < v.params.z { discard; }
     let alpha = select(1.0, clamp(color.a, 0.0, 1.0), v.params.y == 2.0);
-    return vec4<f32>(mix(studio(v, color.rgb, front), color.rgb, v.params.x), alpha);
+    return vec4<f32>(shade_surface(v.position_view, v.normal, color.rgb, v.params.x, front), alpha);
 }

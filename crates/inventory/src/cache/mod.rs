@@ -5,25 +5,30 @@ mod write;
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
-    fmt,
+    fmt, fs,
     path::Path,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
-use rusqlite::Transaction;
-use sha2::{Digest, Sha256};
+use rusqlite::{Transaction, params};
 use storage::{
     StorageError, default_cache_dir,
-    sqlite::{SqliteBatch, SqliteDb, SqliteError, SqliteReceipt},
+    sqlite::{SqliteBatch, SqliteControl, SqliteDb, SqliteError, SqliteReceipt},
 };
-use utils::hex_lower;
 use uuid::Uuid;
 
+use crate::mutation::CachedFolderApply;
 use crate::{Category, CategoryKey, ChangeSet, Inventory, InventoryChild, InventoryError, InventoryLimits, InventorySnapshot};
 
 pub use storage::sqlite::OpenStatus as InventoryCacheOpenStatus;
 
 const MAX_READ_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_RESTORE_UNITS_PER_TURN: usize = 128;
+pub(crate) const MAX_RESTORE_ROWS_PER_TURN: usize = 512;
+static LEGACY_CLEANUP_LOGGED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
 pub enum InventoryCacheError {
@@ -75,11 +80,23 @@ impl From<InventoryError> for InventoryCacheError {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct CacheIdentity {
+    pub(super) grid_id: String,
+    pub(super) personal_owner: Uuid,
+    pub(super) library_owner: Option<Uuid>,
+}
+
+impl CacheIdentity {
+    fn owners(&self) -> impl Iterator<Item = Uuid> {
+        std::iter::once(self.personal_owner).chain(self.library_owner)
+    }
+}
+
 pub struct InventoryCache {
     db: SqliteDb,
-    agent_id: Uuid,
-    library_owner: Option<Uuid>,
-    invalidated: AtomicBool,
+    identity: CacheIdentity,
+    invalidated: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for InventoryCache {
@@ -89,16 +106,56 @@ impl fmt::Debug for InventoryCache {
 }
 
 pub struct InventoryCacheLoad {
-    folders: Vec<CachedFolder>,
+    folders: Arc<[CachedFolder]>,
     discarded: bool,
 }
 
-#[derive(Debug)]
-pub struct InventoryCacheWrite(SqliteReceipt<()>);
+pub struct InventoryCacheRestore {
+    units: Vec<InventoryCacheRestoreUnit>,
+    unit_index: usize,
+    child_offset: usize,
+    unit_conflict: bool,
+}
+
+struct InventoryCacheRestoreUnit {
+    metadata: Category,
+    children: Vec<InventoryChild>,
+    complete: bool,
+    expected_child_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InventoryCacheRestoreProgress {
+    pub units_processed: usize,
+    pub units_applied: usize,
+    pub rows_processed: usize,
+    pub changed: bool,
+    pub finished: bool,
+}
+
+pub struct InventoryCacheWrite {
+    result: Result<SqliteReceipt<()>, SqliteError>,
+    control: SqliteControl,
+    identity: CacheIdentity,
+    owners: Vec<Uuid>,
+}
+
+impl fmt::Debug for InventoryCacheWrite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("InventoryCacheWrite")
+    }
+}
 
 impl InventoryCacheWrite {
     pub async fn wait(self) -> Result<(), InventoryCacheError> {
-        self.0.wait().await.map_err(Into::into)
+        let result = match self.result {
+            Ok(receipt) => receipt.wait().await,
+            Err(error) => Err(error),
+        };
+        if result.is_err() {
+            invalidate_scopes(&self.control, &self.identity, &self.owners).await?;
+        }
+        result.map_err(Into::into)
     }
 }
 
@@ -107,93 +164,154 @@ impl InventoryCacheLoad {
         self.discarded
     }
 
-    pub fn apply_to(
-        self,
-        inventory: &mut Inventory,
-        skeleton: &InventorySnapshot,
-        excluded: &HashSet<CategoryKey>,
-    ) -> Result<usize, InventoryCacheError> {
-        if self.discarded {
-            return Ok(0);
-        }
-        let mut folders = self.folders;
+    pub fn prepare_restore(self, skeleton: &InventorySnapshot) -> Result<InventoryCacheRestore, InventoryCacheError> {
         let mut depths = HashMap::new();
         let mut ordered = Vec::new();
-        ordered.try_reserve_exact(folders.len()).map_err(|_| InventoryCacheError::Inconsistent)?;
-        for folder in folders.drain(..) {
+        ordered.try_reserve_exact(self.folders.len()).map_err(|_| InventoryCacheError::Inconsistent)?;
+        for folder in self.folders.iter() {
             if let Some(depth) = category_depth(folder.category.key, skeleton, &mut depths) {
                 ordered.push((depth, folder));
             }
         }
         ordered.sort_by_key(|(depth, folder)| (*depth, folder.category.key));
-
-        let mut candidate = inventory.clone();
-        let mut applied = 0usize;
+        let mut units = Vec::new();
+        units.try_reserve_exact(ordered.len()).map_err(|_| InventoryCacheError::Inconsistent)?;
         for (_, folder) in ordered {
             let key = folder.category.key;
-            if excluded.contains(&key) {
-                continue;
-            }
-            let Some(login_category) = matching_skeleton_category(&folder, skeleton) else {
+            let Some(login_category) = skeleton.category(key) else {
                 continue;
             };
-            let children = restore_children(folder.children, key, skeleton);
-            candidate.apply_folder_fetch(key, login_category.server_version, folder.category.server_descendent_count, children)?;
-            applied = applied.saturating_add(1);
+            let (children, children_changed) = restore_children(&folder.children, key, skeleton);
+            let version_matches =
+                login_category.server_version.is_known() && login_category.server_version == folder.category.server_version;
+            let complete = version_matches && folder.complete && !children_changed;
+            let expected_child_count = children.len();
+            units.push(InventoryCacheRestoreUnit { metadata: login_category.clone(), children, complete, expected_child_count });
         }
-        *inventory = candidate;
-        Ok(applied)
+        Ok(InventoryCacheRestore { units, unit_index: 0, child_offset: 0, unit_conflict: false })
     }
 }
 
-fn matching_skeleton_category<'a>(folder: &CachedFolder, skeleton: &'a InventorySnapshot) -> Option<&'a Category> {
-    skeleton
-        .category(folder.category.key)
-        .filter(|category| category.server_version.is_known() && category.server_version == folder.category.server_version)
+impl InventoryCacheRestore {
+    pub fn apply_next(
+        &mut self,
+        inventory: &mut Inventory,
+        excluded: &HashSet<CategoryKey>,
+    ) -> Result<InventoryCacheRestoreProgress, InventoryCacheError> {
+        let starting_revision = inventory.revision();
+        let mut progress = InventoryCacheRestoreProgress::default();
+        while self.unit_index < self.units.len()
+            && progress.units_processed < MAX_RESTORE_UNITS_PER_TURN
+            && progress.rows_processed < MAX_RESTORE_ROWS_PER_TURN
+        {
+            let unit = &self.units[self.unit_index];
+            if excluded.contains(&unit.metadata.key) {
+                self.advance_unit();
+                progress.units_processed = progress.units_processed.saturating_add(1);
+                continue;
+            }
+            let remaining_rows = MAX_RESTORE_ROWS_PER_TURN.saturating_sub(progress.rows_processed);
+            let available = unit.children.len().saturating_sub(self.child_offset);
+            let chunk_len = available.min(remaining_rows);
+            let end = self.child_offset.saturating_add(chunk_len);
+            let final_chunk = end == unit.children.len();
+            let result = inventory.apply_cached_folder(
+                &unit.metadata,
+                &unit.children[self.child_offset..end],
+                unit.complete && !self.unit_conflict,
+                unit.expected_child_count,
+                final_chunk,
+            )?;
+            match result {
+                CachedFolderApply::Skipped => {
+                    self.advance_unit();
+                    progress.units_processed = progress.units_processed.saturating_add(1);
+                }
+                CachedFolderApply::Applied { conflict } => {
+                    self.unit_conflict |= conflict;
+                    self.child_offset = end;
+                    progress.rows_processed = progress.rows_processed.saturating_add(chunk_len);
+                    if final_chunk {
+                        self.advance_unit();
+                        progress.units_processed = progress.units_processed.saturating_add(1);
+                        progress.units_applied = progress.units_applied.saturating_add(1);
+                    }
+                }
+            }
+            if chunk_len == 0 && !final_chunk {
+                return Err(InventoryCacheError::Inconsistent);
+            }
+        }
+        progress.changed = inventory.revision() != starting_revision;
+        progress.finished = self.unit_index == self.units.len();
+        Ok(progress)
+    }
+
+    fn advance_unit(&mut self) {
+        self.unit_index = self.unit_index.saturating_add(1);
+        self.child_offset = 0;
+        self.unit_conflict = false;
+    }
 }
 
-fn restore_children(children: Vec<InventoryChild>, parent: CategoryKey, skeleton: &InventorySnapshot) -> Vec<InventoryChild> {
-    children
-        .into_iter()
-        .filter_map(|child| match child {
+fn restore_children(children: &[InventoryChild], parent: CategoryKey, skeleton: &InventorySnapshot) -> (Vec<InventoryChild>, bool) {
+    let mut restored = Vec::new();
+    let mut categories = HashSet::new();
+    let mut changed = false;
+    for child in children {
+        match child {
             InventoryChild::Category(category) => {
-                skeleton.category(category.key).filter(|category| category.parent == Some(parent)).cloned().map(InventoryChild::Category)
+                if let Some(current) = skeleton.category(category.key).filter(|current| current.parent == Some(parent)) {
+                    categories.insert(current.key);
+                    restored.push(InventoryChild::Category(current.clone()));
+                } else {
+                    changed = true;
+                }
             }
-            item => Some(item),
-        })
-        .collect()
+            InventoryChild::Item(item) => restored.push(InventoryChild::Item(item.clone())),
+        }
+    }
+    for category in skeleton.categories().filter(|category| category.parent == Some(parent)) {
+        if categories.insert(category.key) {
+            restored.push(InventoryChild::Category(category.clone()));
+            changed = true;
+        }
+    }
+    (restored, changed)
 }
 
 pub(super) struct CachedFolder {
     category: Category,
     children: Vec<InventoryChild>,
+    complete: bool,
 }
 
 impl InventoryCache {
     pub fn open(
-        grid_identity: &str,
+        grid_id: &str,
         agent_id: Uuid,
         library_owner: Option<Uuid>,
     ) -> Result<(Self, InventoryCacheOpenStatus), InventoryCacheError> {
         let root = default_cache_dir()?;
-        Self::open_at_root(root, grid_identity, agent_id, library_owner)
+        Self::open_at_root(root, grid_id, agent_id, library_owner)
     }
 
     pub fn open_at_root(
         cache_root: impl AsRef<Path>,
-        grid_identity: &str,
+        grid_id: &str,
         agent_id: Uuid,
         library_owner: Option<Uuid>,
     ) -> Result<(Self, InventoryCacheOpenStatus), InventoryCacheError> {
-        if !valid_identity(grid_identity) || agent_id.is_nil() || library_owner.is_some_and(|owner| owner.is_nil()) {
+        if !valid_identity(grid_id) || agent_id.is_nil() || library_owner.is_some_and(|owner| owner.is_nil() || owner == agent_id) {
             return Err(InventoryCacheError::InvalidIdentity);
         }
-        let grid_hash = hex_lower(&Sha256::digest(grid_identity.as_bytes()));
-        let path = cache_root.as_ref().join("inventory").join(grid_hash).join(format!("{agent_id}.sqlite"));
-        let migration_identity = grid_identity.to_owned();
+        let cache_root = cache_root.as_ref();
+        discard_legacy_layout(&cache_root.join("inventory"));
+        let identity = CacheIdentity { grid_id: grid_id.to_owned(), personal_owner: agent_id, library_owner };
+        let migration_identity = identity.clone();
         let (db, status) =
-            SqliteDb::open(path, move |connection| schema::migrate(connection, &migration_identity, agent_id, library_owner))?;
-        Ok((Self { db, agent_id, library_owner, invalidated: AtomicBool::new(false) }, status))
+            SqliteDb::open(cache_root.join("inventory.sqlite"), move |connection| schema::migrate(connection, &migration_identity))?;
+        Ok((Self { db, identity, invalidated: Arc::new(AtomicBool::new(false)) }, status))
     }
 
     pub fn path(&self) -> &Path {
@@ -201,27 +319,25 @@ impl InventoryCache {
     }
 
     pub async fn load(&self, inventory: &Inventory) -> Result<InventoryCacheLoad, InventoryCacheError> {
+        if self.invalidated.load(Ordering::Relaxed) {
+            return Ok(discarded());
+        }
+        let identity = self.identity.clone();
         let roots = inventory.roots();
         let limits = inventory.limits();
-        let agent_id = self.agent_id;
-        let library_owner = self.library_owner;
-        let receipt = self.db.read(0, move |transaction| read::read_tree(transaction, roots, agent_id, library_owner, limits))?;
+        let receipt = self.db.read(0, move |transaction| read::read_tree(transaction, &identity, roots, limits))?;
         let load = receipt.wait().await?;
         if load.discarded {
-            self.discard().await?;
+            self.invalidated.store(true, Ordering::Relaxed);
+            let owners = self.identity.owners().collect::<Vec<_>>();
+            invalidate_scopes(&self.db.control_handle(), &self.identity, &owners).await?;
         }
         Ok(load)
     }
 
     pub fn submit_bootstrap(&self, snapshot: &InventorySnapshot) -> Result<InventoryCacheWrite, InventoryCacheError> {
-        let batches = match write::bootstrap(snapshot) {
-            Ok(batches) => batches,
-            Err(error) => {
-                self.mark_generation_invalid();
-                return Err(error.into());
-            }
-        };
-        self.submit(batches).map(InventoryCacheWrite)
+        let batches = write::bootstrap(snapshot, &self.identity)?;
+        Ok(self.submit(batches, Vec::new()))
     }
 
     pub fn submit_changeset(
@@ -230,14 +346,14 @@ impl InventoryCache {
         before: &InventorySnapshot,
         after: &InventorySnapshot,
     ) -> Result<InventoryCacheWrite, InventoryCacheError> {
-        let batches = match write::changeset(changes, before, after) {
-            Ok(batches) => batches,
-            Err(error) => {
-                self.mark_generation_invalid();
-                return Err(error.into());
-            }
-        };
-        self.submit(batches).map(InventoryCacheWrite)
+        let owners = write::affected_categories(changes, before, after)
+            .into_iter()
+            .map(|key| key.owner().id())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let batches = write::changeset(changes, before, after, &self.identity)?;
+        Ok(self.submit(batches, owners))
     }
 
     pub fn affected_categories(changes: &ChangeSet, before: &InventorySnapshot, after: &InventorySnapshot) -> Vec<CategoryKey> {
@@ -246,57 +362,121 @@ impl InventoryCache {
 
     pub async fn discard(&self) -> Result<(), InventoryCacheError> {
         self.invalidated.store(true, Ordering::Relaxed);
-        self.db.discard()?.wait().await?;
-        self.invalidated.store(false, Ordering::Relaxed);
+        let owners = self.identity.owners().collect::<Vec<_>>();
+        invalidate_scopes(&self.db.control_handle(), &self.identity, &owners).await?;
         Ok(())
     }
 
     pub async fn close(self) -> Result<(), InventoryCacheError> {
-        let Self { db, invalidated, .. } = self;
+        let Self { db, identity, .. } = self;
         let result = async {
-            if invalidated.load(Ordering::Relaxed) || db.had_write_failure() {
-                return Ok(());
+            let barrier = SqliteBatch::new(0, 0, |_: &Transaction<'_>| Ok(()))?;
+            db.submit_control_batch(barrier)?.wait().await?;
+            if db.had_write_failure() {
+                let owners = identity.owners().collect::<Vec<_>>();
+                invalidate_scopes(&db.control_handle(), &identity, &owners).await?;
             }
-            db.read(0, |_| Ok(()))?.wait().await?;
-            if invalidated.load(Ordering::Relaxed) || db.had_write_failure() {
-                return Ok(());
-            }
-            let batch =
-                SqliteBatch::new(1, 8, |transaction| transaction.execute("UPDATE meta SET clean_shutdown=1 WHERE id=1", []).map(|_| ()))?;
-            db.submit_batches(vec![batch])?.wait().await?;
-            Ok(())
+            Ok::<(), InventoryCacheError>(())
         }
         .await;
         db.shutdown()?;
         result
     }
 
-    fn submit(&self, batches: Vec<SqliteBatch>) -> Result<SqliteReceipt<()>, InventoryCacheError> {
-        match self.db.submit_batches(batches) {
-            Ok(receipt) => Ok(receipt),
-            Err(error) => {
-                self.mark_generation_invalid();
-                Err(InventoryCacheError::Sqlite(error))
-            }
+    fn submit(&self, batches: Vec<SqliteBatch>, owners: Vec<Uuid>) -> InventoryCacheWrite {
+        InventoryCacheWrite {
+            result: self.db.submit_batches(batches),
+            control: self.db.control_handle(),
+            identity: self.identity.clone(),
+            owners,
         }
     }
+}
 
-    fn mark_generation_invalid(&self) {
-        self.invalidated.store(true, Ordering::Relaxed);
-        let batch = SqliteBatch::new(1, 8, |transaction: &Transaction<'_>| {
-            transaction.execute("UPDATE meta SET cache_generation=cache_generation+1 WHERE id=1", []).map(|_| ())
-        });
-        match batch.and_then(|batch| self.db.submit_control_batch(batch)) {
-            Ok(receipt) => drop(receipt),
-            Err(error) => drop(error),
+async fn invalidate_scopes(control: &SqliteControl, identity: &CacheIdentity, owners: &[Uuid]) -> Result<(), InventoryCacheError> {
+    if owners.is_empty() {
+        return Ok(());
+    }
+    let grid_id = identity.grid_id.clone();
+    let rows = owners.len();
+    let bytes = rows.saturating_mul(32);
+    loop {
+        let batch_grid = grid_id.clone();
+        let batch_owners = owners.to_vec();
+        let batch = SqliteBatch::new(rows, bytes, move |transaction: &Transaction<'_>| {
+            let mut statement =
+                transaction.prepare("UPDATE scopes SET cache_generation=cache_generation+1 WHERE grid_id=?1 AND owner_id=?2")?;
+            for owner in batch_owners {
+                statement.execute(params![batch_grid, owner.as_bytes().as_slice()])?;
+            }
+            Ok(())
+        })?;
+        let receipt = match control.submit_control_batch(batch) {
+            Ok(receipt) => receipt,
+            Err(SqliteError::QueueFull) => return Err(SqliteError::QueueFull.into()),
+            Err(error) => return Err(error.into()),
+        };
+        match receipt.wait().await {
+            Ok(()) => return Ok(()),
+            Err(SqliteError::Busy) => {}
+            Err(error) => return Err(error.into()),
         }
     }
 }
 
 fn valid_identity(identity: &str) -> bool {
-    !identity.is_empty()
-        && identity.len() <= 64
-        && identity.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_'))
+    !identity.is_empty() && identity.len() <= 64 && identity.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn discard_legacy_layout(path: &Path) {
+    let Ok(grids) = fs::read_dir(path) else { return };
+    let mut skipped = false;
+    for grid in grids.flatten() {
+        let Ok(file_type) = grid.file_type() else { continue };
+        if !file_type.is_dir() || !valid_legacy_grid_dir(&grid.file_name().to_string_lossy()) {
+            continue;
+        }
+        let Ok(agents) = fs::read_dir(grid.path()) else { continue };
+        for agent in agents.flatten() {
+            let Ok(file_type) = agent.file_type() else { continue };
+            let agent_path = agent.path();
+            let Some(name) = agent_path.file_name().and_then(|name| name.to_str()) else { continue };
+            if !file_type.is_file() || !legacy_database_name(name) {
+                continue;
+            }
+            match SqliteDb::remove_if_idle(&agent_path) {
+                Ok(true) => {}
+                Ok(false) | Err(_) => skipped = true,
+            }
+        }
+        if let Err(error) = fs::remove_dir(grid.path())
+            && error.kind() != std::io::ErrorKind::NotFound
+            && has_entries(&grid.path())
+        {
+            skipped = true;
+        }
+    }
+    if let Err(error) = fs::remove_dir(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+        && has_entries(path)
+    {
+        skipped = true;
+    }
+    if skipped && !LEGACY_CLEANUP_LOGGED.swap(true, Ordering::Relaxed) {
+        tracing::debug!("old inventory cache directories remain because their maintenance locks cannot be removed safely");
+    }
+}
+
+fn has_entries(path: &Path) -> bool {
+    fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_some())
+}
+
+fn valid_legacy_grid_dir(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn legacy_database_name(name: &str) -> bool {
+    name.strip_suffix(".sqlite").is_some_and(|stem| Uuid::parse_str(stem).is_ok())
 }
 
 fn category_depth(key: CategoryKey, snapshot: &InventorySnapshot, depths: &mut HashMap<CategoryKey, usize>) -> Option<usize> {
@@ -331,6 +511,10 @@ fn category_depth(key: CategoryKey, snapshot: &InventorySnapshot, depths: &mut H
             return None;
         }
     }
+}
+
+fn discarded() -> InventoryCacheLoad {
+    InventoryCacheLoad { folders: Vec::new().into(), discarded: true }
 }
 
 #[cfg(test)]

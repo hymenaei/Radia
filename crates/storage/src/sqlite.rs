@@ -20,6 +20,7 @@ pub const MAX_QUEUED_BATCHES: usize = 64;
 pub const MAX_QUEUED_ROWS: usize = 131_072;
 pub const MAX_QUEUED_BYTES: usize = 32 * 1024 * 1024;
 const BUSY_TIMEOUT: Duration = Duration::from_millis(25);
+const MAX_CONTROL_COMMANDS: usize = MAX_QUEUED_BATCHES;
 
 pub enum SqliteError {
     Busy,
@@ -167,7 +168,7 @@ struct QueueState {
     pending_bytes: usize,
     pending_rows: usize,
     pending_batches: usize,
-    control_pending: bool,
+    control_pending: usize,
     blocked: bool,
     closed: bool,
 }
@@ -185,10 +186,10 @@ impl WorkQueue {
             return Err(SqliteError::WorkerStopped);
         }
         if queued.control {
-            if state.control_pending {
+            if state.control_pending >= MAX_CONTROL_COMMANDS {
                 return Err(SqliteError::QueueFull);
             }
-            state.control_pending = true;
+            state.control_pending += 1;
             state.blocked = true;
         } else {
             let Some(next_bytes) = state.pending_bytes.checked_add(queued.bytes) else {
@@ -221,8 +222,8 @@ impl WorkQueue {
     fn complete(&self, bytes: usize, rows: usize, control: bool) {
         let mut state = lock(&self.state);
         if control {
-            state.control_pending = false;
-            state.blocked = false;
+            state.control_pending = state.control_pending.saturating_sub(1);
+            state.blocked = state.control_pending > 0;
         } else {
             state.pending_batches = state.pending_batches.saturating_sub(1);
             state.pending_bytes = state.pending_bytes.saturating_sub(bytes);
@@ -242,6 +243,23 @@ pub struct SqliteDb {
     queue: Arc<WorkQueue>,
     worker: Option<JoinHandle<()>>,
     failed_writes: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+pub struct SqliteControl {
+    queue: Arc<WorkQueue>,
+}
+
+impl fmt::Debug for SqliteControl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SqliteControl")
+    }
+}
+
+impl SqliteControl {
+    pub fn submit_control_batch(&self, batch: SqliteBatch) -> Result<SqliteReceipt<()>, SqliteError> {
+        submit(&self.queue, vec![batch], true)
+    }
 }
 
 impl fmt::Debug for SqliteDb {
@@ -301,6 +319,23 @@ impl SqliteDb {
         &self.path
     }
 
+    pub fn control_handle(&self) -> SqliteControl {
+        SqliteControl { queue: Arc::clone(&self.queue) }
+    }
+
+    pub fn remove_if_idle(path: impl AsRef<Path>) -> Result<bool, SqliteError> {
+        let path = path.as_ref();
+        let lock = open_lock_file(path)?;
+        match lock.try_lock() {
+            Ok(()) => {
+                remove_database_files(path)?;
+                Ok(true)
+            }
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+            Err(std::fs::TryLockError::Error(error)) => Err(SqliteError::Unavailable(error)),
+        }
+    }
+
     pub fn had_write_failure(&self) -> bool {
         self.failed_writes.load(Ordering::Relaxed)
     }
@@ -314,11 +349,11 @@ impl SqliteDb {
     }
 
     pub fn submit_batches(&self, batches: Vec<SqliteBatch>) -> Result<SqliteReceipt<()>, SqliteError> {
-        self.submit(batches, false)
+        submit(&self.queue, batches, false)
     }
 
     pub fn submit_control_batch(&self, batch: SqliteBatch) -> Result<SqliteReceipt<()>, SqliteError> {
-        self.submit(vec![batch], true)
+        submit(&self.queue, vec![batch], true)
     }
 
     pub fn read<F, T>(&self, weight_bytes: usize, query: F) -> Result<SqliteReceipt<T>, SqliteError>
@@ -365,27 +400,27 @@ impl SqliteDb {
         self.queue.try_send(QueuedWork { work, completion, bytes: 0, rows: 0, control: true, write: true, reset: true })?;
         Ok(SqliteReceipt(receiver))
     }
+}
 
-    fn submit(&self, batches: Vec<SqliteBatch>, control: bool) -> Result<SqliteReceipt<()>, SqliteError> {
-        let bytes = batches.iter().try_fold(0usize, |total, batch| total.checked_add(batch.bytes)).ok_or(SqliteError::QueueFull)?;
-        let rows = batches.iter().try_fold(0usize, |total, batch| total.checked_add(batch.rows)).ok_or(SqliteError::QueueFull)?;
-        if bytes > MAX_QUEUED_BYTES {
-            return Err(SqliteError::QueueFull);
-        }
-        let (reply, receiver) = oneshot::channel();
-        let work = Box::new(move |connection: &mut Connection| {
-            let result = run_batches(connection, batches);
-            result.map(|()| Box::new(()) as Box<dyn Any + Send>)
-        });
-        let completion = Box::new(move |result: WorkResult| {
-            let result = result.map(|_| ());
-            if let Err(send_error) = reply.send(result) {
-                drop(send_error);
-            }
-        });
-        self.queue.try_send(QueuedWork { work, completion, bytes, rows, control, write: true, reset: false })?;
-        Ok(SqliteReceipt(receiver))
+fn submit(queue: &WorkQueue, batches: Vec<SqliteBatch>, control: bool) -> Result<SqliteReceipt<()>, SqliteError> {
+    let bytes = batches.iter().try_fold(0usize, |total, batch| total.checked_add(batch.bytes)).ok_or(SqliteError::QueueFull)?;
+    let rows = batches.iter().try_fold(0usize, |total, batch| total.checked_add(batch.rows)).ok_or(SqliteError::QueueFull)?;
+    if bytes > MAX_QUEUED_BYTES {
+        return Err(SqliteError::QueueFull);
     }
+    let (reply, receiver) = oneshot::channel();
+    let work = Box::new(move |connection: &mut Connection| {
+        let result = run_batches(connection, batches);
+        result.map(|()| Box::new(()) as Box<dyn Any + Send>)
+    });
+    let completion = Box::new(move |result: WorkResult| {
+        let result = result.map(|_| ());
+        if let Err(send_error) = reply.send(result) {
+            drop(send_error);
+        }
+    });
+    queue.try_send(QueuedWork { work, completion, bytes, rows, control, write: true, reset: false })?;
+    Ok(SqliteReceipt(receiver))
 }
 
 impl Drop for SqliteDb {

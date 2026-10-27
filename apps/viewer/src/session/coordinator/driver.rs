@@ -93,7 +93,6 @@ struct SessionDriver {
     active_login_data: Option<ResponseData>,
     inventory: Option<Inventory>,
     inventory_cache: InventoryCacheSession,
-    inventory_fetch_capabilities: Option<Client>,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
     rejected_inventory_blocks: u64,
     inventory_fetch: InventoryFetchController,
@@ -164,7 +163,6 @@ impl SessionDriver {
             active_login_data: None,
             inventory: None,
             inventory_cache: InventoryCacheSession::new(),
-            inventory_fetch_capabilities: None,
             inventory_changes,
             rejected_inventory_blocks: 0,
             inventory_fetch,
@@ -208,20 +206,14 @@ impl SessionDriver {
                     let before = self.inventory.as_ref().map(Inventory::snapshot);
                     let outcome =
                         self.inventory.as_mut().map(|inventory| self.inventory_cache.handle_event(&self.runtime, event, inventory));
-                    if let Some(outcome) = outcome {
-                        if let Some(snapshot) = outcome.snapshot {
-                            if let Some(before) = before {
-                                let changes = cache_restore_move_changes(&self.inventory_pending_moves, &before, &snapshot);
-                                self.process_inventory_changes(&changes, &snapshot);
-                            }
-                            self.inventory_changes.send_replace(Some(snapshot));
+                    if let Some(outcome) = outcome
+                        && let Some(snapshot) = outcome.snapshot
+                    {
+                        if let Some(before) = before {
+                            let changes = cache_restore_move_changes(&self.inventory_pending_moves, &before, &snapshot);
+                            self.process_inventory_changes(&changes, &snapshot);
                         }
-                        if outcome.startup_complete
-                            && let Some(capabilities) = self.inventory_fetch_capabilities.take()
-                        {
-                            self.start_inventory_edits(capabilities.clone());
-                            self.start_inventory_fetch(capabilities);
-                        }
+                        self.inventory_changes.send_replace(Some(snapshot));
                     }
                     ControlFlow::Continue(())
                 }
@@ -351,7 +343,6 @@ impl SessionDriver {
                                 }
                                 self.inventory_changes.send_replace(Some(inventory.snapshot()));
                                 self.inventory = Some(inventory);
-                                self.inventory_fetch_capabilities = Some(capabilities.clone());
                             }
                             Err(error) => tracing::warn!(%error, "login inventory could not be initialized"),
                         },
@@ -367,7 +358,9 @@ impl SessionDriver {
                     self.assets.register(region, capabilities.clone());
                 }
                 self.active_login_data = Some(login_data.clone());
-                self.on_primary_changed(simulator_id, *session, capabilities, Some(login_data));
+                self.on_primary_changed(simulator_id, *session, capabilities.clone(), Some(login_data));
+                self.start_inventory_edits(capabilities.clone());
+                self.start_inventory_fetch(capabilities);
                 ControlFlow::Continue(())
             }
             SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {

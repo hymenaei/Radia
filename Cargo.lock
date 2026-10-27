@@ -3954,10 +3954,10 @@ dependencies = [
  "imbl",
  "proptest",
  "rusqlite",
- "sha2 0.11.1",
  "storage",
  "tempfile",
  "test-support",
+ "tracing",
  "utils",
  "uuid",
 ]

@@ -22,12 +22,14 @@ struct VertexOutput {
 }
 
 fn scene_color(coordinate: vec2<i32>, size: vec2<u32>) -> vec3<f32> {
-    var color = textureLoad(scene_image, coordinate, 0).rgb;
+    let scene = textureLoad(scene_image, coordinate, 0);
+    var color = scene.rgb;
     let depth = textureLoad(depth_image, coordinate, 0);
+    let is_water_surface = scene.a < 0.5;
     if depth == 0.0 {
         color = srgb_to_linear(color) * settings.timing.w;
     }
-    if settings.fog.color.w < 0.5 {
+    if settings.fog.color.w < 0.5 || is_water_surface {
         return color;
     }
     let uv = (vec2<f32>(coordinate) + vec2<f32>(0.5)) / vec2<f32>(size);

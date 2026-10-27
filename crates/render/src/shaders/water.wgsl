@@ -124,7 +124,8 @@ fn pbr_punctual(
 }
 
 fn water_radiance_from_sky_without_probes(direction: vec3<f32>, atmosphere: Atmosphere) -> vec3<f32> {
-    return sky_linear_color(direction, atmosphere);
+    let sky_direction = safe_normalize(vec3<f32>(direction.xy, abs(direction.z)));
+    return sky_linear_color(sky_direction, atmosphere);
 }
 
 fn transform_water_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, sample: vec3<f32>) -> vec3<f32> {
@@ -166,7 +167,8 @@ fn shade_water(
     let view_rotation = mat3x3<f32>(world_to_eye[0].xyz, world_to_eye[1].xyz, world_to_eye[2].xyz);
     let reflected_direction = safe_normalize(transpose(view_rotation) * reflected_eye);
     let distance = length(position);
-    let fb = apply_water_fog(view_direction * 2048.0, vec4<f32>(1.0), water.fog, true);
+    let fog_sample = position + view_direction * 2048.0;
+    let fb = apply_water_fog(fog_sample, vec4<f32>(1.0), water.fog, true);
     let wavef_eye = transform_water_normal(normal_eye, tangent_eye, bitangent_eye, safe_normalize(wavef));
     let punctual_normal = safe_normalize(wavef_eye + normal_eye * (max(distance, 32.0) / 32.0 * (1.0 - view_dot_up)));
     let punctual = pbr_punctual(
@@ -181,8 +183,10 @@ fn shade_water(
     let punctual_color = clamp(punctual.nl * (punctual.diffuse + punctual.specular), vec3<f32>(0.0), vec3<f32>(10.0))
         * atmosphere_terms.sunlight * atmosphere_terms.attenuation;
     let radiance = water_radiance_from_sky_without_probes(reflected_direction, atmosphere) * fresnel.y;
-    let color = mix(fb.rgb, radiance, min(1.0, fresnel.x)) + punctual_color;
-    let specular = min(max(max(punctual_color.r, punctual_color.g), punctual_color.b), 0.0);
-    let output = min(vec4<f32>(1.0), max(vec4<f32>(color, specular), vec4<f32>(0.0)));
+    let base_color = mix(fb.rgb, radiance, min(1.0, fresnel.x));
+    let atmospheric_color = base_color * atmosphere_terms.attenuation.x
+        + srgb_to_linear(atmosphere_terms.additive * 2.0) * atmosphere.distance.z;
+    let color = atmospheric_color + punctual_color;
+    let output = min(vec4<f32>(1.0), max(vec4<f32>(color, 0.0), vec4<f32>(0.0)));
     return output;
 }

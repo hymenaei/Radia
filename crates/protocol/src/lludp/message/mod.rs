@@ -156,6 +156,7 @@ messages! {
     RegionHandshakeReply(crate::messages::RegionHandshakeReply),
     AgentMovementComplete(crate::messages::AgentMovementComplete),
     AgentUpdate(crate::messages::AgentUpdate),
+    SetAlwaysRun(crate::messages::SetAlwaysRun),
     AgentThrottle(crate::messages::AgentThrottle),
     StartPingCheck(crate::messages::StartPingCheck),
     CompletePingCheck(crate::messages::CompletePingCheck),

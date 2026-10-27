@@ -589,6 +589,7 @@ impl LoginScreen {
             &ready.assets,
             session.agent_id,
             ready.camera,
+            ready.movement,
             cx,
         );
     }

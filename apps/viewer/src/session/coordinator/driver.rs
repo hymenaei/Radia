@@ -391,6 +391,7 @@ impl SessionDriver {
                 self.handoff.simulator_connected(&mut self.session_world, simulator_id, region_handle);
                 if region_handle.is_none() {
                     self.primary_simulator = Some(simulator_id);
+                    self.camera.request_update();
                 }
                 ControlFlow::Continue(())
             }
@@ -643,6 +644,7 @@ impl SessionDriver {
         capabilities: Client,
         login_data: Option<ResponseData>,
     ) {
+        self.camera.request_update();
         self.media.set_client(simulator_id, capabilities.clone());
         self.primary_simulator = Some(simulator_id);
         self.active_session = Some(session.clone());
@@ -656,6 +658,8 @@ impl SessionDriver {
             environments: self.environment_inbox.clone(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             camera: self.camera.sender(),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            movement: self.camera.movement_sender(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             assets: self.assets.handle(),
             session: session.clone(),

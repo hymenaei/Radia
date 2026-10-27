@@ -1,6 +1,6 @@
 use std::assert_matches;
 
-use assets::mesh::{MAX_MESH_INDICES, MAX_MESH_VERTICES};
+use assets::mesh::{MAX_MESH_INDICES, MAX_MESH_VERTICES, Mesh};
 use math::{Vec2, Vec3};
 use proptest::prelude::*;
 use utils::AssetId;
@@ -30,6 +30,20 @@ fn decoded_color(red: u8, green: u8, blue: u8, mirror: bool) -> Vec3 {
 
 fn close(a: Vec3, b: Vec3) {
     assert!(a.distance(b) < 1e-5, "{a:?} != {b:?}");
+}
+
+fn assert_placeholder_normals(mesh: &Mesh, sculpt_type: SculptType) {
+    for row in 0..5 {
+        let north = mesh.vertices()[row * 5].normal;
+        let south = mesh.vertices()[row * 5 + 4].normal;
+        assert!(north.dot(Vec3::Z) > 0.99, "{sculpt_type:?} north pole normal: {north:?}");
+        assert!(south.dot(-Vec3::Z) > 0.99, "{sculpt_type:?} south pole normal: {south:?}");
+    }
+    for column in 0..5 {
+        close(mesh.vertices()[column].normal, mesh.vertices()[20 + column].normal);
+    }
+    let longitude_seam = mesh.vertices()[2].normal;
+    assert!(longitude_seam.dot(Vec3::X) > 0.9, "{sculpt_type:?} longitude seam normal: {longitude_seam:?}");
 }
 
 #[test]
@@ -130,6 +144,15 @@ fn small_maps_use_sphere_placeholder() {
 }
 
 #[test]
+fn placeholder_normals_follow_sphere_layout() {
+    let rgba = map([2, 2], |_, _| [0; 4]);
+    for sculpt_type in [SculptType::Sphere, SculptType::Torus, SculptType::Plane, SculptType::Cylinder] {
+        let mesh = tessellate_sculpt([2, 2], &rgba, sculpt_type, SculptFlags::default(), Detail::High).unwrap();
+        assert_placeholder_normals(&mesh, sculpt_type);
+    }
+}
+
+#[test]
 fn resolution_matches_detail_and_aspect_ratio() {
     let rgba = map([64, 64], |x, y| [(x * 3) as u8, (y * 3) as u8, 128, 255]);
     for (detail, sides) in [(Detail::Lowest, 6), (Detail::Low, 8), (Detail::Medium, 16), (Detail::High, 32)] {
@@ -166,6 +189,7 @@ fn resolution_matches_detail_and_aspect_ratio() {
 fn degenerate_map_uses_placeholder_above_lowest_lod() {
     let rgba = vec![127; 8 * 8 * 4];
     let mesh = tessellate_sculpt([8, 8], &rgba, SculptType::Cylinder, SculptFlags::default(), Detail::High).unwrap();
+    assert_placeholder_normals(&mesh, SculptType::Cylinder);
     close(mesh.vertices()[0].position, Vec3::new(0.0, 0.0, 0.3));
     assert!(mesh.vertices().iter().all(|vertex| vertex.position.length() <= 0.300001));
 }

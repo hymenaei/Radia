@@ -37,6 +37,7 @@ pub fn tessellate_sculpt(
     let columns = sides_t + 1;
     let vertex_count = rows.checked_mul(columns).ok_or(MeshBuildError::TooComplex)?;
     let reverse_horizontal = flags.invert ^ flags.mirror;
+    let mut used_placeholder = map_too_small;
     let mut positions = if map_too_small {
         placeholder(rows, columns)
     } else {
@@ -47,6 +48,7 @@ pub fn tessellate_sculpt(
         let area = surface_area(&positions, rows, columns);
         if !area.is_finite() || !(MIN_SURFACE_AREA..=MAX_SURFACE_AREA).contains(&area) {
             positions = placeholder(rows, columns);
+            used_placeholder = true;
         }
     }
 
@@ -72,27 +74,40 @@ pub fn tessellate_sculpt(
     }
     mesh.end_face(start)?;
 
-    if sculpt_type != SculptType::Plane {
-        for row in 0..rows {
-            let first = row * columns;
-            mesh.seam(first, first + columns - 1);
+    if used_placeholder {
+        let last_row = (rows - 1) * columns;
+        for column in 0..columns {
+            mesh.seam(column, last_row + column);
         }
-    }
-    match sculpt_type {
-        SculptType::Sphere => {
-            for column in 1..columns {
-                mesh.seam(0, column);
+        for row in 1..rows {
+            let row_start = row * columns;
+            mesh.seam(0, row_start);
+            mesh.seam(columns - 1, row_start + columns - 1);
+        }
+    } else {
+        if sculpt_type != SculptType::Plane {
+            for row in 0..rows {
+                let first = row * columns;
+                mesh.seam(first, first + columns - 1);
+            }
+        }
+
+        match sculpt_type {
+            SculptType::Sphere => {
+                for column in 1..columns {
+                    mesh.seam(0, column);
+                    let last_row = (rows - 1) * columns;
+                    mesh.seam(last_row, last_row + column);
+                }
+            }
+            SculptType::Torus => {
                 let last_row = (rows - 1) * columns;
-                mesh.seam(last_row, last_row + column);
+                for column in 0..columns {
+                    mesh.seam(column, last_row + column);
+                }
             }
+            SculptType::Plane | SculptType::Cylinder => {}
         }
-        SculptType::Torus => {
-            let last_row = (rows - 1) * columns;
-            for column in 0..columns {
-                mesh.seam(column, last_row + column);
-            }
-        }
-        SculptType::Plane | SculptType::Cylinder => {}
     }
 
     let cancelled = AtomicBool::new(false);

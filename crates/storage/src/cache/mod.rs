@@ -375,6 +375,7 @@ struct Entry {
     pub hash: [u8; 32],
     pub last_use: AtomicU64,
     pub use_count: AtomicU64,
+    persisted_use_count: AtomicU64,
     state: AtomicU8,
 }
 
@@ -386,6 +387,7 @@ impl Entry {
             hash: record.hash,
             last_use: AtomicU64::new(record.last_use),
             use_count: AtomicU64::new(record.use_count),
+            persisted_use_count: AtomicU64::new(record.use_count),
             state: AtomicU8::new(ENTRY_VALID),
         }
     }
@@ -401,6 +403,28 @@ impl Entry {
     }
 }
 
+struct PendingTouch {
+    entry: Arc<Entry>,
+    last_use: u64,
+    use_count_delta: u64,
+}
+
+impl PendingTouch {
+    fn resulting_use_count(&self) -> u64 {
+        self.entry.persisted_use_count.load(Ordering::Relaxed).saturating_add(self.use_count_delta)
+    }
+
+    fn record(&self) -> Record {
+        Record {
+            key: self.entry.key,
+            size: self.entry.size,
+            hash: self.entry.hash,
+            last_use: self.last_use,
+            use_count: self.resulting_use_count(),
+        }
+    }
+}
+
 enum EntryReadFailure {
     Corrupt,
     Unavailable(UnavailableReason),
@@ -410,7 +434,7 @@ struct ReadState {
     root: PathBuf,
     namespaces: Arc<NamespaceTable>,
     entries: Arc<RwLock<HashMap<Key, Arc<Entry>>>>,
-    touches: Arc<Mutex<HashMap<Key, Arc<Entry>>>>,
+    touches: Arc<Mutex<HashMap<Key, PendingTouch>>>,
     invalid: Arc<Mutex<HashMap<Key, Arc<Entry>>>>,
     active_reads: AtomicUsize,
     usage_clock: AtomicU64,
@@ -527,13 +551,27 @@ impl Cache {
             let stamp = saturating_increment(&self.read_state.usage_clock);
             entry.last_use.fetch_max(stamp, Ordering::Relaxed);
             let use_count = saturating_increment(&entry.use_count);
-            let mut touches = match self.read_state.touches.lock() {
-                Ok(touches) => touches,
+            let entries = match self.read_state.entries.read() {
+                Ok(entries) => entries,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if touches.try_reserve(1).is_ok() {
-                touches.insert(key, Arc::clone(&entry));
+            if entries.get(&key).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
+                let mut touches = match self.read_state.touches.lock() {
+                    Ok(touches) => touches,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if let Some(pending) = touches.get_mut(&key) {
+                    if Arc::ptr_eq(&pending.entry, &entry) {
+                        pending.last_use = pending.last_use.max(stamp);
+                        pending.use_count_delta = pending.use_count_delta.saturating_add(1);
+                    } else {
+                        *pending = PendingTouch { entry: Arc::clone(&entry), last_use: stamp, use_count_delta: 1 };
+                    }
+                } else if touches.try_reserve(1).is_ok() {
+                    touches.insert(key, PendingTouch { entry: Arc::clone(&entry), last_use: stamp, use_count_delta: 1 });
+                }
             }
+            drop(entries);
             return Lookup::Hit(CacheValue { bytes, last_use: stamp, use_count });
         }
         Lookup::Miss

@@ -20,7 +20,7 @@ use std::sync::{
 
 use super::{
     DIRECTORY_OVERHEAD, DirectoryId, ENTRY_INVALID, ENTRY_REPLACING, ENTRY_VALID, Entry, FILE_OVERHEAD, INDEX_FILE, INDEX_FILE_OVERHEAD,
-    Key, ReadState, StorageError, UnavailableReason,
+    Key, PendingTouch, ReadState, StorageError, UnavailableReason,
     index::{Index, Mutation},
 };
 use crate::{
@@ -49,6 +49,8 @@ pub(super) enum WritePoint {
     LookupEntrySelected,
     #[cfg(test)]
     LookupHashMismatch,
+    #[cfg(test)]
+    IndexTouchBusy,
 }
 
 #[cfg(test)]
@@ -412,6 +414,7 @@ impl WorkerState {
             hash: Sha256::digest(bytes).into(),
             last_use: std::sync::atomic::AtomicU64::new(stamp),
             use_count: std::sync::atomic::AtomicU64::new(0),
+            persisted_use_count: std::sync::atomic::AtomicU64::new(0),
             state: std::sync::atomic::AtomicU8::new(ENTRY_VALID),
         });
         Ok(StagedData { entry, temp })
@@ -747,25 +750,67 @@ impl WorkerState {
             return Ok(());
         }
         let entries = read_map(&self.read_state.entries);
-        let mut records = Vec::new();
-        records.try_reserve_exact(touches.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        let mut pending_touches = Vec::new();
+        if pending_touches.try_reserve_exact(touches.len()).is_err() {
+            drop(entries);
+            self.restore_touches(touches.into_values());
+            return Err(StorageError::Unavailable(UnavailableReason::Allocation));
+        }
         for (key, touched) in touches {
-            if entries.get(&key).is_some_and(|entry| Arc::ptr_eq(entry, &touched)) {
-                self.lru.insert(key, touched.last_use.load(Ordering::Relaxed));
-                records.push(touched.record());
+            if entries.get(&key).is_some_and(|entry| Arc::ptr_eq(entry, &touched.entry)) {
+                self.lru.insert(key, touched.last_use);
+                pending_touches.push(touched);
             }
         }
         drop(entries);
-        for chunk in records.chunks(MAX_BATCH_ROWS) {
+        let mut offset = 0;
+        while offset < pending_touches.len() {
+            let end = (offset + MAX_BATCH_ROWS).min(pending_touches.len());
             let mut batch = Vec::new();
-            batch.try_reserve_exact(chunk.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-            batch.extend_from_slice(chunk);
-            if let Err(error) = self.index.touch(batch) {
+            if batch.try_reserve_exact(end - offset).is_err() {
+                self.restore_touches(pending_touches.drain(offset..));
+                return Err(StorageError::Unavailable(UnavailableReason::Allocation));
+            }
+            batch.extend(pending_touches[offset..end].iter().map(PendingTouch::record));
+            #[cfg(test)]
+            let result =
+                if self.hooks.check(WritePoint::IndexTouchBusy).is_err() { Err(SqliteError::Busy) } else { self.index.touch(batch) };
+            #[cfg(not(test))]
+            let result = self.index.touch(batch);
+            if let Err(error) = result {
+                self.restore_touches(pending_touches.drain(offset..));
                 return Err(self.index_failure(error, &[]));
             }
+            for touched in &pending_touches[offset..end] {
+                touched.entry.persisted_use_count.store(touched.resulting_use_count(), Ordering::Relaxed);
+            }
+            offset = end;
         }
         self.update_accounted_size();
         Ok(())
+    }
+
+    fn restore_touches(&self, touches: impl IntoIterator<Item = PendingTouch>) {
+        let entries = read_map(&self.read_state.entries);
+        let mut pending = lock(&self.read_state.touches);
+        for touched in touches {
+            let key = touched.entry.key;
+            if !entries.get(&key).is_some_and(|entry| Arc::ptr_eq(entry, &touched.entry)) {
+                continue;
+            }
+            if let Some(current) = pending.get_mut(&key) {
+                if Arc::ptr_eq(&current.entry, &touched.entry) {
+                    current.last_use = current.last_use.max(touched.last_use);
+                    current.use_count_delta = current.use_count_delta.saturating_add(touched.use_count_delta);
+                } else {
+                    *current = touched;
+                }
+            } else {
+                pending.insert(key, touched);
+            }
+        }
+        drop(pending);
+        drop(entries);
     }
 
     fn drain_invalid(&mut self) {
@@ -1053,6 +1098,7 @@ mod tests {
             hash: [0; 32],
             last_use: AtomicU64::new(0),
             use_count: AtomicU64::new(0),
+            persisted_use_count: AtomicU64::new(0),
             state: AtomicU8::new(ENTRY_VALID),
         })
     }

@@ -283,6 +283,40 @@ fn lookup_checks_hash_and_removes_corruption() {
 }
 
 #[test]
+fn busy_usage_update_is_requeued_and_merged() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let hooks = Arc::new(writer::FaultHooks::default());
+    let cache = Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, hooks)?;
+    let cache_key = key(25);
+    cache.put(cache_key, b"usage metadata".to_vec())?;
+    let first = match cache.lookup(cache_key) {
+        Lookup::Hit(value) => value,
+        lookup => return Err(format!("expected first cache hit, got {lookup:?}").into()),
+    };
+
+    cache.arm_fault(WritePoint::IndexTouchBusy);
+    std::assert_matches!(cache.flush(), Err(StorageError::Unavailable(UnavailableReason::Busy)));
+    let newest = match cache.lookup(cache_key) {
+        Lookup::Hit(value) => value,
+        lookup => return Err(format!("expected second cache hit, got {lookup:?}").into()),
+    };
+    assert!(newest.last_use > first.last_use);
+    assert_eq!(newest.use_count, 2);
+    cache.flush()?;
+    cache.shutdown()?;
+
+    let database = Connection::open(directory.path().join("index.sqlite"))?;
+    let row: (i64, i64) = database.query_row(
+        "SELECT last_use, use_count FROM entries WHERE namespace=0 AND name=?1",
+        [cache_key.name().as_slice()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(row.0, i64::try_from(newest.last_use)?);
+    assert_eq!(row.1, 2);
+    Ok(())
+}
+
+#[test]
 fn bounded_lookup_rejects_large_entries() {
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
@@ -428,7 +462,10 @@ fn replacement_crash_never_trusts_bytes() {
             WritePoint::IndexBatchCommitted => {
                 std::assert_matches!(cache.lookup(key(23)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"replacement payload", "{point:?}");
             }
-            WritePoint::DataWriteFailure | WritePoint::LookupEntrySelected | WritePoint::LookupHashMismatch => unreachable!(),
+            WritePoint::DataWriteFailure
+            | WritePoint::LookupEntrySelected
+            | WritePoint::LookupHashMismatch
+            | WritePoint::IndexTouchBusy => unreachable!(),
         }
         cache.shutdown().expect("close recovered cache");
     }

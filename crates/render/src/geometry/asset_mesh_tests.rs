@@ -15,6 +15,7 @@ use world::{
 };
 
 use super::*;
+use crate::pipeline::VERTEX_BYTES;
 use crate::scene::{AssetChange, AssetRequest, Camera, ReadFailure, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView};
 
 fn mesh_scene() -> (Reconciler, SceneView, Camera) {
@@ -136,6 +137,93 @@ fn prepared_asset(request: Request, bytes: Vec<u8>) -> assets::Status {
     demand.status()
 }
 
+fn mesh_replacement_scene(bytes: Vec<u8>) -> (Reconciler, SceneView, World, Camera, AssetId, AssetRequest, crate::scene::MeshId) {
+    let mut world = World::new(WorldLimits {
+        max_region_registrations: 1,
+        max_entities: 1,
+        max_entities_per_region: 1,
+        max_tombstones_per_region: 1,
+        max_tombstones: 1,
+        max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(1),
+        max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(1),
+        max_journal_entries: 16,
+        max_journal_changes: 32,
+        max_region_name_bytes: 64,
+        max_recovery_targets: 1,
+    });
+    let region = Region::new(1);
+    let _adopted = world.adopt_region(region).unwrap();
+    let _metadata = world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).unwrap();
+    let asset = AssetId::new(Uuid::from_u128(803));
+    let mut object = ObjectObservation::new(
+        UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
+        Uuid::from_u128(804),
+        std::num::NonZeroU32::new(1).unwrap(),
+        Kind::Object,
+        ParentUpdate::Root,
+    );
+    object.pose = Some(Pose { position: Some(Vec3::new(2.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+    object.scale = Some(Vec3::ONE);
+    object.shape = FieldUpdate::Set(Shape::Mesh { asset_id: asset, flags: SculptFlags::default() });
+    object.appearance = FieldUpdate::Set(Appearance::Surface);
+    let _applied = world.observe_object(object).unwrap();
+
+    let camera = Camera::new(DVec3::ZERO, Vec3::X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap();
+    let (mut scene, mut view) = Reconciler::new(crate::scene::Budget::default());
+    scene.set_camera(camera);
+    let mut now = std::time::Instant::now();
+    let requested = drive_scene(&mut scene, &mut view, &world, &mut now);
+    let header = requested.iter().find(|request| matches!(request.request, Request::MeshHeader(_))).copied().unwrap();
+    scene.complete_asset(header.ticket, prepared_asset(header.request, bytes.clone()));
+    let requested = drive_scene(&mut scene, &mut view, &world, &mut now);
+    let high = requested
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshLod(block) if block.lod() == assets::mesh::MeshLod::High))
+        .copied()
+        .unwrap();
+    let medium = requested
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshLod(block) if block.lod() == assets::mesh::MeshLod::Medium))
+        .copied()
+        .unwrap();
+    scene.complete_asset(medium.ticket, prepared_asset(medium.request, bytes));
+    let _ = drive_scene(&mut scene, &mut view, &world, &mut now);
+    let fallback_id = view.objects().next().unwrap().render_mesh().unwrap().id();
+    assert_eq!(view.objects().next().unwrap().mesh_lod(), Some((asset, assets::mesh::MeshLod::Medium)));
+    (scene, view, world, camera, asset, high, fallback_id)
+}
+
+fn submit_draw(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    geometry: &mut GeometryRenderer,
+    mut encoder: wgpu::CommandEncoder,
+    color: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+) {
+    {
+        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: color,
+                depth_slice: None,
+                resolve_target: None,
+                ops: Operations { load: LoadOp::Clear(Color::BLACK), store: StoreOp::Store },
+            })],
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(Operations { load: LoadOp::Clear(0.0), store: StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+        geometry.draw(&mut pass);
+    }
+    let frame = geometry.admit().unwrap();
+    queue.submit([encoder.finish()]);
+    geometry.submitted(frame);
+    device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+}
+
 #[test]
 #[ignore = "requires a Vulkan adapter"]
 fn gpu_mesh_faces_and_alpha() {
@@ -222,4 +310,65 @@ fn gpu_mesh_faces_and_alpha() {
     assert!(red > 50, "the opaque face texture must render red: {red} pixels");
     assert!(green > 50, "the blended face texture must render green: {green} pixels");
     assert!(green_intensity < red_intensity, "the green face alpha must blend against the black clear color");
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter"]
+fn gpu_lod_reclaims_fallback() {
+    const VERTICES: usize = 20_000;
+    let bytes = test_support::mesh::asset_with_lod_vertices(&[(2, VERTICES), (3, VERTICES)]);
+    let (mut scene, mut view, world, camera, asset, high, fallback_id) = mesh_replacement_scene(bytes.clone());
+    let (device, queue) = block_on(async {
+        let instance =
+            wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
+    });
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let page_bytes = VERTICES * VERTEX_BYTES + 3 * size_of::<u32>();
+    let mesh_budget = page_bytes + page_bytes / 2;
+    let mut geometry = GeometryRenderer::new_with_mesh_budget(&device, &queue, TextureFormat::Rgba8UnormSrgb, mesh_budget);
+    let color = device.create_texture(&TextureDescriptor {
+        label: None,
+        size: Extent3d { width: 128, height: 128, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba8UnormSrgb,
+        usage: TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let color = color.create_view(&Default::default());
+    let depth = geometry.depth(&device, [128, 128]).unwrap();
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    assert!(geometry.meshes.contains_key(&fallback_id));
+    submit_draw(&device, &queue, &mut geometry, encoder, &color, &depth);
+
+    scene.complete_asset(high.ticket, prepared_asset(high.request, bytes));
+    let mut now = std::time::Instant::now();
+    let _ = drive_scene(&mut scene, &mut view, &world, &mut now);
+    let selected_id = view.objects().next().unwrap().render_mesh().unwrap().id();
+    assert_ne!(selected_id, fallback_id);
+    assert_eq!(view.objects().next().unwrap().mesh_lod(), Some((asset, assets::mesh::MeshLod::High)));
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    assert!(!geometry.meshes.contains_key(&fallback_id), "the blocked replacement retires its own fallback");
+    assert!(!geometry.meshes.contains_key(&selected_id));
+    assert_eq!(geometry.stats.pending_meshes, 1);
+    submit_draw(&device, &queue, &mut geometry, encoder, &color, &depth);
+    assert!(geometry.needs_frame(), "releasing the fallback allocation requests another preparation");
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    assert!(geometry.meshes.contains_key(&selected_id));
+    assert!(!geometry.meshes.contains_key(&fallback_id));
+    assert!(geometry.draws.iter().any(|draw| draw.mesh == selected_id));
+    assert_eq!(geometry.stats.pending_meshes, 0);
+    submit_draw(&device, &queue, &mut geometry, encoder, &color, &depth);
+    drop(geometry);
+    device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    assert!(block_on(scope.pop()).is_none());
 }

@@ -195,14 +195,11 @@ impl GeometryRenderer {
                 mesh_fallbacks.insert(selected_id, fallback.clone());
                 fallback
             };
-            if let Some((fallback_id, _)) = &fallback
-                && let Some(mesh) = self.meshes.get_mut(fallback_id)
-            {
-                mesh.used = self.epoch;
-            }
             if !self.upload_mesh(device, &instance.mesh, instance.terrain_composition.as_deref(), &mut uploaded) {
                 pending_meshes.insert(selected_id);
-                let Some((_, fallback)) = fallback else { continue };
+                let Some((fallback_id, fallback)) = fallback else { continue };
+                let Some(mesh) = self.meshes.get_mut(&fallback_id) else { continue };
+                mesh.used = self.epoch;
                 instance.mesh = fallback;
             }
             let base = instance_base(&instance, camera.position());

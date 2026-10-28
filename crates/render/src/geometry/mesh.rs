@@ -97,9 +97,7 @@ impl GeometryRenderer {
         if self.retired.len() == 4 {
             return false;
         }
-        let Some(old) =
-            self.meshes.iter().filter(|(_, mesh)| mesh.used != self.epoch).min_by_key(|(_, mesh)| mesh.used).map(|(key, _)| *key)
-        else {
+        let Some(old) = retirement_candidate(self.meshes.iter().map(|(key, mesh)| (*key, mesh.used)), self.epoch) else {
             return false;
         };
         let mesh = self.meshes.remove(&old).expect("selected resident");
@@ -111,6 +109,10 @@ impl GeometryRenderer {
         self.retired.push(mesh);
         true
     }
+}
+
+fn retirement_candidate<K: Copy>(meshes: impl Iterator<Item = (K, u64)>, epoch: u64) -> Option<K> {
+    meshes.filter(|(_, used)| *used != epoch).min_by_key(|(_, used)| *used).map(|(key, _)| key)
 }
 
 pub(super) fn within_upload_target(bytes: usize, uploaded: usize, uploaded_bytes: usize) -> bool {

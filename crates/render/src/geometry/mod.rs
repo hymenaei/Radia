@@ -61,23 +61,34 @@ pub struct Stats {
     pub omitted_faces: usize,
 }
 
-#[derive(Default)]
 struct Accounting {
     bytes: AtomicUsize,
     mesh_revision: AtomicU64,
     depth: AtomicUsize,
     peak: AtomicUsize,
     frames: AtomicUsize,
+    mesh_limit: usize,
 }
 
 impl Accounting {
+    fn with_mesh_limit(mesh_limit: usize) -> Self {
+        Self {
+            bytes: AtomicUsize::default(),
+            mesh_revision: AtomicU64::default(),
+            depth: AtomicUsize::default(),
+            peak: AtomicUsize::default(),
+            frames: AtomicUsize::default(),
+            mesh_limit,
+        }
+    }
+
     fn mesh_state(&self) -> MeshState {
         MeshState { bytes: self.bytes.load(Ordering::Acquire), revision: self.mesh_revision.load(Ordering::Acquire) }
     }
 
     fn reserve(self: &Arc<Self>, bytes: usize, resource: Resource) -> Option<Lease> {
         let (account, limit) = match resource {
-            Resource::Mesh => (&self.bytes, MESH_BYTES),
+            Resource::Mesh => (&self.bytes, self.mesh_limit),
             Resource::Depth => (&self.depth, DEPTH_BYTES),
         };
         let before =
@@ -86,6 +97,12 @@ impl Accounting {
             self.peak.fetch_max(before + bytes, Ordering::AcqRel);
         }
         Some(Lease { memory: self.clone(), bytes, resource })
+    }
+}
+
+impl Default for Accounting {
+    fn default() -> Self {
+        Self::with_mesh_limit(MESH_BYTES)
     }
 }
 
@@ -223,11 +240,20 @@ impl GeometryRenderer {
     }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
+        Self::with_memory(device, queue, format, MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone())
+    }
+
+    #[cfg(test)]
+    fn new_with_mesh_budget(device: &Device, queue: &Queue, format: TextureFormat, mesh_limit: usize) -> Self {
+        Self::with_memory(device, queue, format, Arc::new(Accounting::with_mesh_limit(mesh_limit)))
+    }
+
+    fn with_memory(device: &Device, queue: &Queue, format: TextureFormat, memory: Arc<Accounting>) -> Self {
         let textures = Textures::new(device, queue);
         let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout);
         Self {
             queue: queue.clone(),
-            memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
+            memory,
             pipelines,
             textures,
             requested_textures: HashSet::new(),

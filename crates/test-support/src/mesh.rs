@@ -7,6 +7,11 @@ pub fn asset(lods: &[usize], face_count: usize) -> Vec<u8> {
     asset_with_faces(&lods)
 }
 
+pub fn asset_with_lod_vertices(lods: &[(usize, usize)]) -> Vec<u8> {
+    let blocks = lods.iter().map(|(lod, vertex_count)| (*lod, block_with_vertices(*vertex_count))).collect();
+    asset_with_blocks(blocks)
+}
+
 pub fn asset_with_empty_lod(geometry_lods: &[usize], empty_lods: &[usize], face_count: usize) -> Vec<u8> {
     let lods: Vec<_> = (0..4)
         .filter_map(|lod| {
@@ -23,8 +28,12 @@ pub fn asset_with_empty_lod(geometry_lods: &[usize], empty_lods: &[usize], face_
 }
 
 fn asset_with_faces(lods: &[(usize, usize)]) -> Vec<u8> {
-    let fields = ["lowest_lod", "low_lod", "medium_lod", "high_lod"];
     let blocks: BTreeMap<_, _> = lods.iter().map(|(lod, face_count)| (*lod, block(*face_count))).collect();
+    asset_with_blocks(blocks)
+}
+
+fn asset_with_blocks(blocks: BTreeMap<usize, Vec<u8>>) -> Vec<u8> {
+    let fields = ["lowest_lod", "low_lod", "medium_lod", "high_lod"];
     let mut offset = 0_usize;
     let lod_entries: Vec<_> = fields
         .iter()
@@ -74,6 +83,31 @@ fn block(face_count: usize) -> Vec<u8> {
     }
     let mut payload = b"<?llsd/binary?>\n".to_vec();
     payload.extend(array(&faces));
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&payload).expect("mesh fixture compression accepts bounded bytes");
+    encoder.finish().expect("mesh fixture compression finishes")
+}
+
+fn block_with_vertices(vertex_count: usize) -> Vec<u8> {
+    const TRIANGLE_POSITIONS: [[u8; 6]; 3] = [[0x80, 0, 0, 0, 0, 0], [0x80, 0, 0, 0, 0xff, 0xff], [0x80, 0, 0xff, 0xff, 0, 0]];
+    const TRIANGLE_UVS: [[u8; 4]; 3] = [[0, 0, 0, 0], [0xff, 0xff, 0, 0], [0, 0, 0xff, 0xff]];
+    let mut position = Vec::with_capacity(vertex_count * 6);
+    let mut uv = Vec::with_capacity(vertex_count * 4);
+    for vertex in 0..vertex_count {
+        position.extend_from_slice(TRIANGLE_POSITIONS.get(vertex).unwrap_or(&[0; 6]));
+        uv.extend_from_slice(TRIANGLE_UVS.get(vertex).unwrap_or(&[0; 4]));
+    }
+    let domain = map(&[("Min", array(&[real(-0.01), real(-1.0), real(-1.0)])), ("Max", array(&[real(0.01), real(1.0), real(1.0)]))]);
+    let uv_domain = map(&[("Min", array(&[real(0.0), real(0.0)])), ("Max", array(&[real(1.0), real(1.0)]))]);
+    let face = map(&[
+        ("Position", binary(&position)),
+        ("PositionDomain", domain),
+        ("TexCoord0", binary(&uv)),
+        ("TexCoord0Domain", uv_domain),
+        ("TriangleList", binary(&[0x00, 0x00, 0x01, 0x00, 0x02, 0x00])),
+    ]);
+    let mut payload = b"<?llsd/binary?>\n".to_vec();
+    payload.extend(array(&[face]));
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&payload).expect("mesh fixture compression accepts bounded bytes");
     encoder.finish().expect("mesh fixture compression finishes")

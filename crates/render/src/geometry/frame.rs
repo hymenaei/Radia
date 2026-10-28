@@ -1,19 +1,22 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
-use assets::{Priority, TextureHandle};
-use math::{DVec3, Frustum, Quat, Vec3};
+use assets::{Priority, TextureHandle, TextureId};
+use math::{DVec3, Quat, Vec3};
 use wgpu::{CommandEncoder, Device};
-use world::{Entity, FaceAppearance, Region};
+use world::Region;
 
 use super::{FramePreparation, FramePreparationKey, GeometryRenderer, PrepareTimes, ShadingMode, Stats};
 use crate::geometry::{
-    batching::{DrawKey, MAX_FACE_INSTANCES},
-    cache::{CachedFace, CachedItem, ItemId, MeshInfo, mesh_info},
-    instance::{instance_base, is_visible, packed_instance, scene_origin},
+    batching::MAX_FACE_INSTANCES,
+    cache::{CachedFace, ItemId, draw_priority, visible_difference},
+    instance::{instance_base, packed_instance, scene_origin},
 };
 use crate::material::{FaceMaterial, FaceParams};
-use crate::pipeline::{COLOR, Pipeline};
-use crate::scene::{Camera, Object, Placement, PreparedMesh, SceneView, Surface, SurfaceKind, texture_animation};
+use crate::pipeline::COLOR;
+use crate::scene::{Camera, Object, SceneView, texture_animation};
 
 impl GeometryRenderer {
     pub(crate) fn prepare(
@@ -43,6 +46,8 @@ impl GeometryRenderer {
         }
 
         let visibility_started = Instant::now();
+        self.cache.visible_added.clear();
+        self.cache.visible_removed.clear();
         self.epoch = self.epoch.checked_add(1).expect("render frame space exhausted");
         self.stats = Stats::default();
         let previous_camera = self.cache.camera;
@@ -50,7 +55,11 @@ impl GeometryRenderer {
         let camera_position_changed = previous_camera.is_none_or(|previous| previous.position() != camera.position());
         let origin = scene_origin(camera.position());
         let transform_changed = previous_camera.is_none() || self.cache.origin != origin;
-        let mut update = self.update_cache(view);
+        let update = self.update_cache(view);
+        self.stats.full_rebuilds = usize::from(update.full_rebuilds);
+        self.stats.region_invalidations = update.region_invalidations;
+        self.stats.objects_reprepared = update.objects_reprepared;
+        self.stats.dirtied_items = update.dirtied_items;
         let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, origin);
         self.water.update(&self.queue, view, camera, projection, water_height);
         let candidates_changed = if update.full_visibility || camera_changed {
@@ -60,15 +69,28 @@ impl GeometryRenderer {
         } else {
             false
         };
-        if candidates_changed {
-            update.batch_dirty = true;
-            self.rebuild_visible_textures();
-        } else if update.batch_dirty {
-            self.rebuild_visible_textures();
-        }
         times.visibility = visibility_started.elapsed();
 
         let requests_started = Instant::now();
+        self.requested_textures.clear();
+        if update.full_rebuilds {
+            for index in 0..self.cache.candidates.len() {
+                self.request_item_textures(self.cache.candidates[index]);
+            }
+        } else {
+            for index in 0..self.cache.candidate_added.len() {
+                let id = self.cache.candidate_added[index];
+                if self.cache.candidates.binary_search(&id).is_ok() {
+                    self.request_item_textures(id);
+                }
+            }
+            for index in 0..update.texture_items.len() {
+                let id = update.texture_items[index];
+                if self.cache.candidates.binary_search(&id).is_ok() {
+                    self.request_item_textures(id);
+                }
+            }
+        }
         self.request_visible_textures();
         for entity in update.background {
             if let Some(object) = view.object(entity) {
@@ -77,11 +99,11 @@ impl GeometryRenderer {
         }
         times.requests = requests_started.elapsed();
 
-        if candidates_changed || update.mesh_dirty {
-            self.rebuild_visible_meshes(camera);
-        }
-        let mesh_progress =
-            candidates_changed || update.mesh_dirty || self.cache.mesh_state != self.memory.mesh_state() || !self.pending_meshes.is_empty();
+        let candidate_mesh_missing = if candidates_changed || update.mesh_dirty { self.rebuild_visible_meshes(camera) } else { false };
+        let mesh_progress = candidate_mesh_missing
+            || update.mesh_dirty
+            || self.cache.mesh_state != self.memory.mesh_state()
+            || !self.pending_meshes.is_empty();
         let mut uploaded = 0;
         if mesh_progress {
             self.mesh_budget_blocked.clear();
@@ -90,6 +112,10 @@ impl GeometryRenderer {
             for index in 0..self.cache.mesh_ids.len() {
                 let mesh_id = self.cache.mesh_ids[index];
                 let Some(mesh) = self.cache.mesh_representatives.get(&mesh_id).cloned() else { continue };
+                if self.meshes.contains_key(&mesh_id) {
+                    self.cache.mesh_ready.insert(mesh_id);
+                    continue;
+                }
                 let composition = self.cache.mesh_compositions.get(&mesh_id).cloned().flatten();
                 if self.upload_mesh(device, &mesh, composition.as_deref(), &mut uploaded) {
                     self.cache.mesh_ready.insert(mesh_id);
@@ -105,6 +131,22 @@ impl GeometryRenderer {
                 }
             }
             self.cache.mesh_state = self.memory.mesh_state();
+        } else {
+            self.cache.next_visible.clear();
+            for id in &self.cache.candidates {
+                let Some(item) = self.cache.items.get(id) else { continue };
+                if self.meshes.contains_key(&item.mesh.id()) && !item.faces.is_empty() {
+                    self.cache.next_visible.push(*id);
+                }
+            }
+        }
+        if self.cache.visible != self.cache.next_visible {
+            visible_difference(
+                &self.cache.visible,
+                &self.cache.next_visible,
+                &mut self.cache.visible_added,
+                &mut self.cache.visible_removed,
+            );
         }
 
         let upload_started = Instant::now();
@@ -113,17 +155,40 @@ impl GeometryRenderer {
         }
         times.textures += upload_started.elapsed();
         let texture_state = self.textures.state();
-        let visible_changed = mesh_progress && self.cache.visible != self.cache.next_visible;
+        let texture_changes = self.textures.take_changed_ids();
+        self.stats.texture_state_changes = texture_changes.len();
+        let visible_changed = self.cache.visible != self.cache.next_visible;
+        let use_next = mesh_progress || visible_changed;
+        let full_texture_refresh = !self.cache.batches_valid || update.batch_dirty;
         let batches_started = Instant::now();
-        let rebuild_batches =
-            !self.cache.batches_valid || update.batch_dirty || visible_changed || self.cache.texture_state != texture_state;
+        let rebuild_batches = full_texture_refresh || transform_changed || (visible_changed && !self.can_append_visible_batches());
+        if full_texture_refresh {
+            self.stats.texture_state_reresolves = self.refresh_texture_bindings(device, use_next);
+        } else {
+            if visible_changed {
+                self.update_visible_texture_bindings(device);
+            }
+            if !update.terrain_regions.is_empty() {
+                self.rebuild_visible_texture_demand(use_next);
+            }
+            self.stats.texture_state_reresolves =
+                self.refresh_changed_texture_bindings(device, &texture_changes, &update.terrain_regions, use_next);
+        }
         let (animated_faces, draw_commands_changed) = if rebuild_batches {
-            self.refresh_texture_bindings(device, mesh_progress);
-            let animated = self.rebuild_batches(camera, origin, animation_now, mesh_progress);
-            self.rebuild_pick_instances(mesh_progress);
+            let animated = self.rebuild_batches(camera, origin, animation_now, use_next);
+            self.rebuild_pick_instances(use_next);
             (animated, true)
         } else {
-            self.update_instances(camera, origin, transform_changed, camera_position_changed, &update.pose_items, animation_now)
+            if visible_changed {
+                self.hide_removed_instances(camera, origin);
+                let (appended_animation, appended) = self.append_visible_batches(camera, origin, animation_now, camera_position_changed);
+                self.update_pick_instances();
+                let (animated, reordered) =
+                    self.update_instances(camera, origin, transform_changed, camera_position_changed, &update.pose_items, animation_now);
+                (animated || appended_animation, appended || reordered)
+            } else {
+                self.update_instances(camera, origin, transform_changed, camera_position_changed, &update.pose_items, animation_now)
+            }
         };
         if draw_commands_changed {
             self.batches.build_draw_batches(&self.draws, &self.meshes, self.indirect_first_instance);
@@ -132,12 +197,10 @@ impl GeometryRenderer {
                 self.queue.write_buffer(&self.indirect, 0, indirect_bytes);
             }
         }
-        if mesh_progress {
-            if visible_changed {
-                std::mem::swap(&mut self.cache.visible, &mut self.cache.next_visible);
-            }
-            self.cache.next_visible.clear();
+        if visible_changed {
+            std::mem::swap(&mut self.cache.visible, &mut self.cache.next_visible);
         }
+        self.cache.next_visible.clear();
         self.cache.batches_valid = true;
         self.cache.texture_state = texture_state;
         self.cache.camera = Some(camera);
@@ -191,367 +254,32 @@ impl GeometryRenderer {
         self.record_prepare(started, times, uploaded);
     }
 
-    fn update_cache(&mut self, view: &SceneView) -> CacheUpdate {
-        let version = self.cache.version.clone();
-        let changes = version.as_ref().and_then(|version| view.changes_since(version));
-        let mut full = changes.is_none();
-        self.cache.changed_objects.clear();
-        self.cache.changed_surfaces.clear();
-        self.cache.retired_regions.clear();
-        if let Some(changes) = changes {
-            for change in changes {
-                full |= change.full || !change.regions.is_empty();
-                self.cache.changed_objects.extend(change.objects.iter().copied());
-                self.cache.changed_surfaces.extend(change.surfaces.iter().copied());
-                self.cache.retired_regions.extend(change.retired.iter().copied());
-            }
-        }
-        if full {
-            self.cache.items.clear();
-            self.cache.objects.clear();
-            self.cache.mesh_info.clear();
-            self.cache.candidates.clear();
-            self.cache.visible.clear();
-            self.cache.next_candidates.clear();
-            self.cache.next_visible.clear();
-            self.cache.changed_objects.clear();
-            self.cache.changed_surfaces.clear();
-            self.cache.retired_regions.clear();
-            self.cache.mesh_ids.clear();
-            self.cache.mesh_representatives.clear();
-            self.cache.mesh_compositions.clear();
-            self.cache.mesh_priorities.clear();
-            self.cache.mesh_ready.clear();
-            self.cache.visible_textures.clear();
-            self.cache.resident_textures.clear();
-            self.cache.animated_items.clear();
-            self.cache.batches_valid = false;
-            self.pending_meshes.clear();
-            self.pending_textures.clear();
-            self.cache.mesh_state = self.memory.mesh_state();
-            let mut update = CacheUpdate { full_visibility: true, batch_dirty: true, mesh_dirty: true, ..CacheUpdate::default() };
-            for surface in view.surfaces() {
-                if let Some(item) = self.surface_item(view, surface) {
-                    self.cache.items.insert(item.id, item);
-                }
-            }
-            for object in view.objects() {
-                update.background.push(object.detail().summary.entity);
-                if let Some(item) = self.object_item(object) {
-                    if item.source.as_ref().is_some_and(has_enabled_animation) {
-                        self.cache.animated_items.insert(item.id);
-                    }
-                    self.cache.objects.insert(object.detail().summary.entity, item.id);
-                    self.cache.items.insert(item.id, item);
-                }
-            }
-            self.cache.version = Some(view.version());
-            return update;
-        }
-
-        let mut update = CacheUpdate::default();
-        while let Some(region) = self.cache.retired_regions.iter().next().copied() {
-            self.cache.retired_regions.remove(&region);
-            let removed =
-                self.cache.items.iter().filter(|(_, item)| item.region == region).map(|(id, item)| (*id, item.entity)).collect::<Vec<_>>();
-            if !removed.is_empty() {
-                update.full_visibility = true;
-                update.batch_dirty = true;
-            }
-            for (id, entity) in removed {
-                self.cache.items.remove(&id);
-                self.cache.animated_items.remove(&id);
-                if let Some(entity) = entity {
-                    self.cache.objects.remove(&entity);
-                }
-            }
-        }
-        while let Some(entity) = self.cache.changed_objects.iter().next().copied() {
-            self.cache.changed_objects.remove(&entity);
-            update.background.push(entity);
-            self.update_object(view.object(entity), entity, &mut update);
-        }
-        while let Some((region, kind)) = self.cache.changed_surfaces.iter().next().copied() {
-            self.cache.changed_surfaces.remove(&(region, kind));
-            self.update_surface(view, view.surface(region, kind), region, kind, &mut update);
-        }
-        if update.batch_dirty {
-            self.cache.resident_textures.clear();
-        }
-        if update.full_visibility || update.batch_dirty {
-            self.prune_mesh_info();
-        }
-        self.cache.version = Some(view.version());
-        update
-    }
-
-    fn update_object(&mut self, object: Option<&Object>, entity: Entity, update: &mut CacheUpdate) {
-        let old_id = self.cache.objects.get(&entity).copied();
-        let Some(object) = object else {
-            if let Some(id) = old_id {
-                self.cache.items.remove(&id);
-                self.cache.animated_items.remove(&id);
-                self.cache.objects.remove(&entity);
-                update.full_visibility = true;
-                update.batch_dirty = true;
-            }
-            return;
-        };
-        let Some((_, mesh)) = object.mesh() else {
-            if let Some(id) = old_id {
-                self.cache.items.remove(&id);
-                self.cache.animated_items.remove(&id);
-                self.cache.objects.remove(&entity);
-                update.full_visibility = true;
-                update.batch_dirty = true;
-            }
-            return;
-        };
-        let Placement::Ready(transform) = object.placement() else {
-            if let Some(id) = old_id {
-                self.cache.items.remove(&id);
-                self.cache.animated_items.remove(&id);
-                self.cache.objects.remove(&entity);
-                update.full_visibility = true;
-                update.batch_dirty = true;
-            }
-            return;
-        };
-        let previous_mesh = old_id.and_then(|id| self.cache.items.get(&id).map(|cached| cached.mesh.id()));
-        if let Some(id) = old_id
-            && id == object_item_id(object)
-            && let Some(cached) = self.cache.items.get_mut(&id)
-            && cached.mesh.id() == mesh.id()
-            && cached.source.as_ref().is_some_and(|previous| previous.same_render_appearance(object))
-        {
-            cached.position = transform.pose.position;
-            cached.rotation = transform.pose.rotation;
-            cached.scale = transform.scale;
-            cached.parameters_dirty |=
-                cached.source.as_ref().and_then(|previous| previous.detail().texture_animation) != object.detail().texture_animation;
-            cached.source = Some(object.clone());
-            if has_enabled_animation(object) {
-                self.cache.animated_items.insert(id);
-            } else {
-                self.cache.animated_items.remove(&id);
-            }
-            update.pose_items.push(id);
-            return;
-        }
-        let item = self.object_item(object);
-        if let Some(id) = old_id {
-            self.cache.items.remove(&id);
-            self.cache.animated_items.remove(&id);
-        }
-        if let Some(item) = item {
-            let id = item.id;
-            update.mesh_dirty |= previous_mesh != Some(item.mesh.id());
-            if item.source.as_ref().is_some_and(has_enabled_animation) {
-                self.cache.animated_items.insert(id);
-            }
-            self.cache.objects.insert(entity, id);
-            self.cache.items.insert(id, item);
-            update.pose_items.push(id);
-            update.batch_dirty = true;
-            if old_id != Some(id) {
-                update.full_visibility = true;
-            }
-        } else {
-            self.cache.objects.remove(&entity);
-            update.full_visibility = true;
-            update.batch_dirty = true;
-        }
-    }
-
-    fn update_surface(&mut self, view: &SceneView, surface: Option<&Surface>, region: Region, kind: SurfaceKind, update: &mut CacheUpdate) {
-        let id = surface_item_id(region, kind);
-        let old = self.cache.items.contains_key(&id);
-        if let Some(surface) = surface
-            && let Some(item) = self.surface_item(view, surface)
-        {
-            update.mesh_dirty |= !old || self.cache.items.get(&id).is_some_and(|previous| previous.mesh.id() != item.mesh.id());
-            self.cache.items.insert(id, item);
-            update.batch_dirty = true;
-            update.pose_items.push(id);
-            if !old {
-                update.full_visibility = true;
-            }
-        } else if self.cache.items.remove(&id).is_some() {
-            update.full_visibility = true;
-            update.batch_dirty = true;
-        }
-    }
-
-    fn object_item(&mut self, object: &Object) -> Option<CachedItem> {
-        let (_, mesh) = object.mesh()?;
-        let Placement::Ready(transform) = object.placement() else { return None };
-        let id = object_item_id(object);
-        let region = object.detail().summary.address.region();
-        let info = self.cached_mesh_info(mesh);
-        let materials = object.materials();
-        let appearance = object.detail().surface_appearance.as_ref();
-        let faces = cached_faces(id, mesh, &info, materials, appearance, transform.scale, ShadingMode::Studio);
-        Some(CachedItem {
-            id,
-            entity: Some(object.detail().summary.entity),
-            region,
-            mesh: mesh.clone(),
-            info,
-            position: transform.pose.position,
-            rotation: transform.pose.rotation,
-            scale: transform.scale,
-            pickable: true,
-            shading: ShadingMode::Studio,
-            terrain_textures: None,
-            terrain_composition: None,
-            source: Some(object.clone()),
-            faces,
-            visible_index: None,
-            parameters_dirty: false,
-        })
-    }
-
-    fn surface_item(&mut self, view: &SceneView, surface: &Surface) -> Option<CachedItem> {
-        let PreparedMesh::Ready(mesh) = &surface.mesh else { return None };
-        let id = surface_item_id(surface.region, surface.kind);
-        let (scale, rotation, pickable, shading) = match surface.kind {
-            SurfaceKind::Water => (Vec3::ONE, Quat::IDENTITY, false, ShadingMode::Water),
-            SurfaceKind::Terrain(_) => (Vec3::ONE, Quat::IDENTITY, true, ShadingMode::Terrain),
-        };
-        let terrain_textures = (shading == ShadingMode::Terrain)
-            .then(|| view.region(surface.region).map_or_else(|| std::array::from_fn(|_| None), |region| region.terrain_textures().clone()));
-        let info = self.cached_mesh_info(mesh);
-        let faces = cached_faces(id, mesh, &info, None, None, scale, shading);
-        Some(CachedItem {
-            id,
-            entity: None,
-            region: surface.region,
-            mesh: mesh.clone(),
-            info,
-            position: surface.position,
-            rotation,
-            scale,
-            pickable,
-            shading,
-            terrain_textures,
-            terrain_composition: surface.terrain_composition.clone(),
-            source: None,
-            faces,
-            visible_index: None,
-            parameters_dirty: false,
-        })
-    }
-
-    fn cached_mesh_info(&mut self, mesh: &crate::scene::SharedMesh) -> std::sync::Arc<MeshInfo> {
-        self.cache.mesh_info.entry(mesh.id()).or_insert_with(|| mesh_info(mesh)).clone()
-    }
-
-    fn prune_mesh_info(&mut self) {
-        self.cache.retained_meshes.clear();
-        for item in self.cache.items.values() {
-            self.cache.retained_meshes.insert(item.mesh.id());
-        }
-        self.cache.mesh_info.retain(|id, _| self.cache.retained_meshes.contains(id));
-    }
-
-    fn rebuild_candidates(&mut self, camera: Camera, projection: math::Mat4) -> bool {
-        self.cache.next_candidates.clear();
-        let frustum = Frustum::from_clip_matrix(projection);
-        for item in self.cache.items.values() {
-            if self.is_item_visible(item, camera, &frustum) {
-                self.cache.next_candidates.push(item.id);
-            }
-        }
-        let changed = self.cache.candidates != self.cache.next_candidates;
-        if changed {
-            std::mem::swap(&mut self.cache.candidates, &mut self.cache.next_candidates);
-        }
-        self.cache.next_candidates.clear();
-        changed
-    }
-
-    fn update_candidates(&mut self, camera: Camera, projection: math::Mat4, ids: &[ItemId]) -> bool {
-        let frustum = Frustum::from_clip_matrix(projection);
-        let mut changed = false;
-        for id in ids {
-            let Some(item) = self.cache.items.get(id) else { continue };
-            let visible = self.is_item_visible(item, camera, &frustum);
-            match self.cache.candidates.binary_search(id) {
-                Ok(index) if !visible => {
-                    self.cache.candidates.remove(index);
-                    changed = true;
-                }
-                Err(index) if visible => {
-                    self.cache.candidates.insert(index, *id);
-                    changed = true;
-                }
-                _ => {}
-            }
-        }
-        changed
-    }
-
-    fn is_item_visible(&self, item: &CachedItem, camera: Camera, frustum: &Frustum) -> bool {
-        is_visible(item.position, item.rotation, item.scale, item.info.bounds, camera, frustum)
-    }
-
-    fn rebuild_visible_textures(&mut self) {
-        self.cache.visible_textures.clear();
-        self.cache.visible_texture_ids.clear();
-        for id in &self.cache.candidates {
-            if let Some(item) = self.cache.items.get(id) {
-                for face in &item.faces {
-                    if face.params.texture.is_some()
-                        && let Some(texture) = &face.texture
-                        && self.cache.visible_texture_ids.insert(texture.id())
-                    {
-                        self.cache.visible_textures.push(texture.clone());
-                    }
-                }
-                if let Some(textures) = &item.terrain_textures {
-                    for texture in textures.iter().flatten() {
-                        if self.cache.visible_texture_ids.insert(texture.id()) {
-                            self.cache.visible_textures.push(texture.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn rebuild_visible_meshes(&mut self, camera: Camera) {
-        self.cache.mesh_ids.clear();
-        self.cache.mesh_set.clear();
-        self.cache.mesh_representatives.clear();
-        self.cache.mesh_compositions.clear();
-        self.cache.mesh_priorities.clear();
-        for id in &self.cache.candidates {
-            let Some(item) = self.cache.items.get(id) else { continue };
-            let mesh_id = item.mesh.id();
-            let priority = draw_priority(item, camera);
-            if self.cache.mesh_set.insert(mesh_id) {
-                self.cache.mesh_ids.push(mesh_id);
-                self.cache.mesh_representatives.insert(mesh_id, item.mesh.clone());
-                self.cache.mesh_compositions.insert(mesh_id, item.terrain_composition.clone());
-                self.cache.mesh_priorities.insert(mesh_id, priority);
-            } else if let Some(current) = self.cache.mesh_priorities.get_mut(&mesh_id)
-                && (priority.0 > current.0 || (priority.0 == current.0 && priority.1 < current.1))
-            {
-                *current = priority;
-            }
-        }
-        self.cache.mesh_ids.sort_by(|a, b| {
-            let a_priority = self.cache.mesh_priorities[a];
-            let b_priority = self.cache.mesh_priorities[b];
-            b_priority.0.total_cmp(&a_priority.0).then_with(|| a_priority.1.total_cmp(&b_priority.1))
-        });
-    }
-
     fn request_visible_textures(&mut self) {
-        self.requested_textures.clear();
-        for texture in &self.cache.visible_textures {
-            if self.requested_textures.insert(texture.id()) {
-                self.textures.request(texture, self.epoch, Priority::Visible);
+        let epoch = self.epoch;
+        let (handles, requested, textures) = (&self.cache.visible_texture_handles, &mut self.requested_textures, &mut self.textures);
+        for texture in handles.values() {
+            if requested.insert(texture.id()) {
+                textures.request(texture, epoch, Priority::Visible);
+            }
+        }
+    }
+
+    fn request_item_textures(&mut self, id: ItemId) {
+        let epoch = self.epoch;
+        let Some(item) = self.cache.items.get(&id) else { return };
+        for face in &item.faces {
+            if face.params.texture.is_some()
+                && let Some(texture) = &face.texture
+                && self.requested_textures.insert(texture.id())
+            {
+                self.textures.request(texture, epoch, Priority::Visible);
+            }
+        }
+        if let Some(textures) = &item.terrain_textures {
+            for texture in textures.iter().flatten() {
+                if self.requested_textures.insert(texture.id()) {
+                    self.textures.request(texture, epoch, Priority::Visible);
+                }
             }
         }
     }
@@ -581,60 +309,220 @@ impl GeometryRenderer {
         }
     }
 
-    fn refresh_texture_bindings(&mut self, device: &Device, use_next: bool) {
+    fn refresh_texture_bindings(&mut self, device: &Device, use_next: bool) -> usize {
+        self.refresh_visible_texture_bindings(device, use_next, true)
+    }
+
+    fn refresh_visible_texture_bindings(&mut self, device: &Device, use_next: bool, clear_terrain: bool) -> usize {
+        self.rebuild_visible_texture_demand(use_next);
         let visible = if use_next { &self.cache.next_visible } else { &self.cache.visible };
-        self.textures.clear_terrain_bindings();
+        if clear_terrain {
+            self.textures.clear_terrain_bindings();
+        }
         self.pending_textures.clear();
         self.cache.texture_keys.clear();
         self.cache.texture_set.clear();
-        self.cache.resident_textures.clear();
+        self.cache.texture_face_counts.clear();
         for id in visible {
             if let Some(item) = self.cache.items.get(id) {
                 for face in &item.faces {
-                    if let Some(key) = face.params.texture
-                        && self.cache.texture_set.insert(key)
-                    {
-                        self.cache.texture_keys.push(key);
+                    if let Some(key) = face.params.texture {
+                        *self.cache.texture_face_counts.entry(key).or_default() += 1;
+                        if self.cache.texture_set.insert(key) {
+                            self.cache.texture_keys.push(key);
+                        }
                     }
                 }
             }
         }
         for key in self.cache.texture_keys.iter().copied() {
-            let resident = self.textures.resident(device, key);
-            self.cache.resident_textures.insert(key, resident);
-            if resident.is_none() {
+            if self.textures.resident(device, key).is_none() {
                 self.pending_textures.insert(key.id);
             }
         }
+        let mut updated_regions = HashSet::new();
         for id in visible {
-            let terrain_textures = self.cache.items.get(id).and_then(|item| item.terrain_textures.clone());
-            if let Some(textures) = terrain_textures {
-                let key = self.textures.terrain_key(&textures, self.epoch);
-                for (texture, resolved) in textures.iter().zip(key.0) {
-                    if resolved.is_none()
-                        && let Some(texture) = texture
-                    {
+            let Some(item) = self.cache.items.get_mut(id) else { continue };
+            if let Some(textures) = &item.terrain_textures {
+                if self.textures.prepare_terrain_binding(device, item.region, textures, self.epoch) {
+                    updated_regions.insert(item.region);
+                }
+                for face in &mut item.faces {
+                    face.draw.terrain = Some(item.region);
+                }
+                for texture in textures.iter().flatten() {
+                    if !self.textures.is_resident(texture.id()) {
                         self.pending_textures.insert(texture.id());
                     }
                 }
-                self.textures.prepare_terrain_binding(device, key);
-                if let Some(item) = self.cache.items.get_mut(id) {
-                    for face in &mut item.faces {
-                        face.draw.terrain = Some(key);
+            }
+        }
+        visible
+            .iter()
+            .filter_map(|id| self.cache.items.get(id))
+            .filter(|item| item.surface_kind.is_some() && updated_regions.contains(&item.region))
+            .map(|item| item.faces.len())
+            .sum::<usize>()
+    }
+
+    fn rebuild_visible_texture_demand(&mut self, use_next: bool) {
+        self.cache.visible_texture_counts.clear();
+        self.cache.visible_texture_handles.clear();
+        let count = if use_next { self.cache.next_visible.len() } else { self.cache.visible.len() };
+        for index in 0..count {
+            let id = if use_next { self.cache.next_visible[index] } else { self.cache.visible[index] };
+            self.adjust_visible_texture_demand(id, true);
+        }
+    }
+
+    fn adjust_visible_texture_demand(&mut self, id: ItemId, adding: bool) {
+        let Some(item) = self.cache.items.get(&id) else { return };
+        let (counts, handles) = (&mut self.cache.visible_texture_counts, &mut self.cache.visible_texture_handles);
+        for face in &item.faces {
+            if face.params.texture.is_some()
+                && let Some(texture) = &face.texture
+            {
+                adjust_texture_reference(counts, handles, texture, adding);
+            }
+        }
+        if let Some(terrain) = &item.terrain_textures {
+            for texture in terrain.iter().flatten() {
+                adjust_texture_reference(counts, handles, texture, adding);
+            }
+        }
+    }
+
+    fn update_visible_texture_bindings(&mut self, device: &Device) {
+        for removed_index in 0..self.cache.visible_removed.len() {
+            let id = self.cache.visible_removed[removed_index];
+            self.adjust_visible_texture_demand(id, false);
+            let face_count = self.cache.items.get(&id).map_or(0, |item| item.faces.len());
+            for index in 0..face_count {
+                let key = self.cache.items.get(&id).and_then(|item| item.faces.get(index)).and_then(|face| face.params.texture);
+                if let Some(key) = key {
+                    let empty = if let Some(count) = self.cache.texture_face_counts.get_mut(&key) {
+                        *count = count.saturating_sub(1);
+                        *count == 0
+                    } else {
+                        false
+                    };
+                    if empty {
+                        self.cache.texture_face_counts.remove(&key);
+                        self.cache.texture_set.remove(&key);
+                        self.pending_textures.remove(&key.id);
                     }
                 }
             }
-            if let Some(item) = self.cache.items.get_mut(id) {
-                for face in &mut item.faces {
-                    face.draw.texture = face.params.texture.and_then(|key| self.cache.resident_textures.get(&key).copied().flatten());
+        }
+        self.cache.texture_keys.retain(|key| self.cache.texture_face_counts.contains_key(key));
+        self.cache.changed_terrain_regions.clear();
+        for entering_index in 0..self.cache.visible_added.len() {
+            let id = self.cache.visible_added[entering_index];
+            self.adjust_visible_texture_demand(id, true);
+            let face_count = self.cache.items.get(&id).map_or(0, |item| item.faces.len());
+            for index in 0..face_count {
+                let key = self.cache.items.get(&id).and_then(|item| item.faces.get(index)).and_then(|face| face.params.texture);
+                if let Some(key) = key {
+                    let active = match self.cache.texture_face_counts.entry(key) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            *entry.get_mut() += 1;
+                            false
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(1);
+                            self.cache.texture_set.insert(key);
+                            self.cache.texture_keys.push(key);
+                            true
+                        }
+                    };
+                    if active && self.textures.resident(device, key).is_none() {
+                        self.pending_textures.insert(key.id);
+                    }
+                }
+            }
+            let Some(item) = self.cache.items.get(&id) else { continue };
+            if !item.surface_kind.is_some() || !self.cache.changed_terrain_regions.insert(item.region) {
+                continue;
+            }
+            if let Some(textures) = &item.terrain_textures {
+                if self.textures.prepare_terrain_binding(device, item.region, textures, self.epoch) {
+                    self.cache.changed_terrain_regions.insert(item.region);
+                }
+                for texture in textures.iter().flatten() {
+                    if self.textures.is_resident(texture.id()) {
+                        self.pending_textures.remove(&texture.id());
+                    } else {
+                        self.pending_textures.insert(texture.id());
+                    }
                 }
             }
         }
     }
 
+    fn refresh_changed_texture_bindings(
+        &mut self,
+        device: &Device,
+        changed: &HashSet<TextureId>,
+        regions: &[Region],
+        use_next: bool,
+    ) -> usize {
+        let visible = if use_next { &self.cache.next_visible } else { &self.cache.visible };
+        if changed.is_empty() && regions.is_empty() {
+            return 0;
+        }
+        let mut changed_faces = 0;
+        for key in self.cache.texture_keys.iter().copied().filter(|key| changed.contains(&key.id)) {
+            changed_faces += self.cache.texture_face_counts.get(&key).copied().unwrap_or(0);
+            if self.textures.resident(device, key).is_some() {
+                self.pending_textures.remove(&key.id);
+            } else {
+                self.pending_textures.insert(key.id);
+            }
+        }
+        let mut affected_regions = HashSet::new();
+        affected_regions.extend(regions.iter().copied());
+        for id in visible {
+            let Some(item) = self.cache.items.get(id) else { continue };
+            if item
+                .terrain_textures
+                .as_ref()
+                .is_some_and(|textures| textures.iter().flatten().any(|texture| changed.contains(&texture.id())))
+            {
+                affected_regions.insert(item.region);
+            }
+        }
+        let mut updated_regions = HashSet::new();
+        for id in visible {
+            let Some(item) = self.cache.items.get(id) else { continue };
+            if !affected_regions.contains(&item.region) {
+                continue;
+            }
+            if let Some(textures) = &item.terrain_textures {
+                if self.textures.prepare_terrain_binding(device, item.region, textures, self.epoch) {
+                    updated_regions.insert(item.region);
+                }
+                for texture in textures.iter().flatten() {
+                    if self.textures.is_resident(texture.id()) {
+                        self.pending_textures.remove(&texture.id());
+                    } else {
+                        self.pending_textures.insert(texture.id());
+                    }
+                }
+            }
+        }
+        changed_faces
+            + visible
+                .iter()
+                .filter_map(|id| self.cache.items.get(id))
+                .filter(|item| item.surface_kind.is_some() && updated_regions.contains(&item.region))
+                .map(|item| item.faces.len())
+                .sum::<usize>()
+    }
+
     fn rebuild_batches(&mut self, camera: Camera, origin: DVec3, now: Instant, use_next: bool) -> bool {
         self.batches.clear();
         self.cache.slots.clear();
+        self.cache.blended_items.clear();
         let mut animated = false;
         let visible = if use_next { &self.cache.next_visible } else { &self.cache.visible };
         let required_faces =
@@ -681,10 +569,13 @@ impl GeometryRenderer {
         self.omitted_faces = omitted.saturating_add(self.batches.omitted());
         self.stats.omitted_faces = self.omitted_faces;
         self.batches.finish(&mut self.draws, &mut self.instance_bytes, &mut self.cache.slots);
-        for item in self.cache.items.values_mut() {
+        for (id, item) in &mut self.cache.items {
             for face in &mut item.faces {
                 face.slot = self.cache.slots.get(&face.order).copied();
                 face.included = face.slot.is_some();
+            }
+            if item.faces.iter().any(|face| face.included && face.params.blend) {
+                self.cache.blended_items.insert(*id);
             }
         }
         if !self.instance_bytes.is_empty() {
@@ -693,8 +584,174 @@ impl GeometryRenderer {
         animated
     }
 
+    fn can_append_visible_batches(&self) -> bool {
+        let mut additional = 0;
+        for id in &self.cache.visible_added {
+            let Some(item) = self.cache.items.get(id) else { continue };
+            for face in &item.faces {
+                if !face.included {
+                    additional += 1;
+                }
+            }
+        }
+        self.batches.can_append(additional)
+    }
+
+    fn hide_removed_instances(&mut self, camera: Camera, origin: DVec3) {
+        self.cache.visibility_slots.clear();
+        for index in 0..self.cache.visible_removed.len() {
+            let id = self.cache.visible_removed[index];
+            self.cache.blended_items.remove(&id);
+            let Some(item) = self.cache.items.get_mut(&id) else { continue };
+            let base = instance_base(item.position, item.rotation, Vec3::ZERO, origin);
+            let position = item.position;
+            let rotation = item.rotation;
+            let scale = item.scale;
+            for face in &item.faces {
+                if !face.included {
+                    continue;
+                }
+                let Some(slot) = self.cache.slots.get(&face.order).copied() else { continue };
+                let bytes = packed_instance(&base, &face.params, Vec3::ZERO);
+                let offset = slot as usize * std::mem::size_of_val(&bytes);
+                if let Some(destination) = self.instance_bytes.get_mut(offset..offset + bytes.len()) {
+                    destination.copy_from_slice(&bytes);
+                    self.cache.visibility_slots.push(slot);
+                }
+                if face.params.blend {
+                    let distance = blend_distance(position, rotation, scale, face.center, camera);
+                    self.batches.update_blended(face.order, distance, bytes);
+                }
+            }
+        }
+        self.write_visibility_slots();
+    }
+
+    fn write_visibility_slots(&mut self) {
+        self.cache.visibility_slots.sort_unstable();
+        self.cache.visibility_slots.dedup();
+        let mut first = None;
+        let mut last = 0u32;
+        for slot in self.cache.visibility_slots.iter().copied() {
+            if let Some(start) = first
+                && slot != last + 1
+            {
+                self.write_instance_slots(start, last);
+                first = None;
+            }
+            if first.is_none() {
+                first = Some(slot);
+            }
+            last = slot;
+        }
+        if let Some(start) = first {
+            self.write_instance_slots(start, last);
+        }
+        self.cache.visibility_slots.clear();
+    }
+
+    fn write_instance_slots(&self, first: u32, last: u32) {
+        let start = first as usize * crate::pipeline::INSTANCE_BYTES;
+        let end = (last as usize + 1) * crate::pipeline::INSTANCE_BYTES;
+        if let Some(bytes) = self.instance_bytes.get(start..end) {
+            self.queue.write_buffer(&self.instances, start as u64, bytes);
+        }
+    }
+
+    fn append_visible_batches(&mut self, camera: Camera, origin: DVec3, now: Instant, camera_position_changed: bool) -> (bool, bool) {
+        let opaque_start = self.batches.opaque_bytes();
+        let mut animated = false;
+        let mut draw_commands_changed = false;
+        let mut blended_changed = false;
+        for entering_index in 0..self.cache.visible_added.len() {
+            let id = self.cache.visible_added[entering_index];
+            let Some(item) = self.cache.items.get_mut(&id) else { continue };
+            let entering = item.visible_index.is_none();
+            let base = instance_base(item.position, item.rotation, item.scale, origin);
+            let source = item.source.as_ref();
+            let shading = item.shading;
+            let position = item.position;
+            let rotation = item.rotation;
+            let scale = item.scale;
+            for face in &mut item.faces {
+                if face.included {
+                    if entering {
+                        let (params, animating) = current_params(source, shading, face, now);
+                        face.params = params;
+                        let bytes = packed_instance(&base, &params, scale);
+                        if params.blend {
+                            let distance = blend_distance(position, rotation, scale, face.center, camera);
+                            self.batches.update_blended(face.order, distance, bytes);
+                            blended_changed = true;
+                        } else if let Some(slot) = self.cache.slots.get(&face.order).copied() {
+                            let offset = slot as usize * std::mem::size_of_val(&bytes);
+                            if let Some(destination) = self.instance_bytes.get_mut(offset..offset + bytes.len()) {
+                                destination.copy_from_slice(&bytes);
+                                self.cache.visibility_slots.push(slot);
+                            }
+                        }
+                        animated |= animating;
+                    }
+                    continue;
+                }
+                let (params, animating) = current_params(source, shading, face, now);
+                let bytes = packed_instance(&base, &params, scale);
+                if params.blend {
+                    let distance = blend_distance(position, rotation, scale, face.center, camera);
+                    if !self.batches.append_blended(face.draw, face.order, distance, bytes) {
+                        continue;
+                    }
+                    face.slot = None;
+                    blended_changed = true;
+                } else {
+                    let Some(slot) = self.batches.append_opaque(
+                        face.draw,
+                        face.order,
+                        bytes,
+                        &mut self.draws,
+                        &mut self.instance_bytes,
+                        &mut self.cache.slots,
+                    ) else {
+                        continue;
+                    };
+                    face.slot = Some(slot);
+                }
+                face.params = params;
+                face.included = true;
+                draw_commands_changed = true;
+                animated |= animating;
+            }
+            item.parameters_dirty = false;
+            if item.faces.iter().any(|face| face.included && face.params.blend) {
+                self.cache.blended_items.insert(id);
+            }
+        }
+        self.write_visibility_slots();
+        if (draw_commands_changed || blended_changed) && self.batches.has_blended() && !camera_position_changed {
+            self.batches.sort_blended(&mut self.draws, &mut self.instance_bytes, &mut self.cache.slots);
+            blended_changed = true;
+        }
+        let opaque_end = self.batches.opaque_bytes();
+        if opaque_end > opaque_start {
+            self.queue.write_buffer(&self.instances, opaque_start as u64, &self.instance_bytes[opaque_start..opaque_end]);
+        }
+        if blended_changed && !camera_position_changed {
+            let blend_start = self.batches.blended_start();
+            if let Some(bytes) = self.instance_bytes.get(blend_start..)
+                && !bytes.is_empty()
+            {
+                self.queue.write_buffer(&self.instances, blend_start as u64, bytes);
+            }
+        }
+        if draw_commands_changed {
+            self.stats.omitted_faces = self.batches.omitted();
+        }
+        (animated, draw_commands_changed || blended_changed)
+    }
+
     fn rebuild_pick_instances(&mut self, use_next: bool) {
         self.visible.clear();
+        self.visible_ids.clear();
         for item in self.cache.items.values_mut() {
             item.visible_index = None;
         }
@@ -705,6 +762,33 @@ impl GeometryRenderer {
                 continue;
             }
             item.visible_index = Some(self.visible.len());
+            self.visible_ids.push(*id);
+            self.visible.push(item.instance(true));
+        }
+        self.visible_count = self.visible.len();
+    }
+
+    fn update_pick_instances(&mut self) {
+        for removed_index in 0..self.cache.visible_removed.len() {
+            let id = self.cache.visible_removed[removed_index];
+            let index = self.cache.items.get_mut(&id).and_then(|item| item.visible_index.take());
+            let Some(index) = index else { continue };
+            self.visible.swap_remove(index);
+            self.visible_ids.swap_remove(index);
+            if let Some(swapped_id) = self.visible_ids.get(index).copied()
+                && let Some(swapped) = self.cache.items.get_mut(&swapped_id)
+            {
+                swapped.visible_index = Some(index);
+            }
+        }
+        for added_index in 0..self.cache.visible_added.len() {
+            let id = self.cache.visible_added[added_index];
+            let Some(item) = self.cache.items.get_mut(&id) else { continue };
+            if !item.faces.iter().any(|face| face.included) {
+                continue;
+            }
+            item.visible_index = Some(self.visible.len());
+            self.visible_ids.push(id);
             self.visible.push(item.instance(true));
         }
         self.visible_count = self.visible.len();
@@ -719,25 +803,39 @@ impl GeometryRenderer {
         pose_items: &[ItemId],
         now: Instant,
     ) -> (bool, bool) {
-        let animated_visible =
-            self.cache.animated_items.iter().any(|id| self.cache.items.get(id).is_some_and(|item| item.visible_index.is_some()));
-        if camera_position_changed && !transform_changed && pose_items.is_empty() && !animated_visible && !self.batches.has_blended() {
-            return (false, false);
-        }
         self.cache.update_items.clear();
         self.cache.update_set.clear();
         self.cache.pose_set.clear();
         self.cache.pose_set.extend(pose_items.iter().copied());
-        if transform_changed || camera_position_changed {
+        if transform_changed {
             self.cache.update_items.extend(self.cache.visible.iter().copied());
         } else {
-            for id in pose_items.iter().chain(
-                self.cache.animated_items.iter().filter(|id| self.cache.items.get(id).is_some_and(|item| item.visible_index.is_some())),
-            ) {
-                if self.cache.update_set.insert(*id) {
-                    self.cache.update_items.push(*id);
+            for id in pose_items.iter().copied() {
+                if self.cache.update_set.insert(id) {
+                    self.cache.update_items.push(id);
                 }
             }
+            for id in self
+                .cache
+                .animated_items
+                .iter()
+                .copied()
+                .filter(|id| self.cache.items.get(id).is_some_and(|item| item.visible_index.is_some()))
+            {
+                if self.cache.update_set.insert(id) {
+                    self.cache.update_items.push(id);
+                }
+            }
+            if camera_position_changed {
+                for id in self.cache.blended_items.iter().copied() {
+                    if self.cache.update_set.insert(id) {
+                        self.cache.update_items.push(id);
+                    }
+                }
+            }
+        }
+        if self.cache.update_items.is_empty() {
+            return (false, false);
         }
         let mut animated = false;
         let mut blend_changed = false;
@@ -803,7 +901,7 @@ impl GeometryRenderer {
                         if let Some(destination) = self.instance_bytes.get_mut(offset..offset + bytes.len()) {
                             destination.copy_from_slice(&bytes);
                             if !transform_changed {
-                                self.queue.write_buffer(&self.instances, offset as u64, &bytes);
+                                self.cache.visibility_slots.push(slot);
                             }
                         }
                     }
@@ -811,6 +909,9 @@ impl GeometryRenderer {
                 animated |= animating;
             }
             item.parameters_dirty = false;
+        }
+        if !transform_changed {
+            self.write_visibility_slots();
         }
         if blend_changed {
             self.batches.sort_blended(&mut self.draws, &mut self.instance_bytes, &mut self.cache.slots);
@@ -846,98 +947,35 @@ impl GeometryRenderer {
                 instances = self.stats.instances,
                 pending_meshes = self.stats.pending_meshes,
                 pending_textures = self.stats.pending_textures,
+                full_rebuilds = self.stats.full_rebuilds,
+                region_invalidations = self.stats.region_invalidations,
+                texture_state_reresolves = self.stats.texture_state_reresolves,
+                texture_state_changes = self.stats.texture_state_changes,
+                objects_reprepared = self.stats.objects_reprepared,
+                dirtied_items = self.stats.dirtied_items,
                 "slow scene preparation"
             );
         }
     }
 }
 
-#[derive(Default)]
-struct CacheUpdate {
-    full_visibility: bool,
-    batch_dirty: bool,
-    mesh_dirty: bool,
-    background: Vec<Entity>,
-    pose_items: Vec<ItemId>,
-}
-
-fn object_item_id(object: &Object) -> ItemId {
-    (2, object.detail().summary.id.as_u128(), 0)
-}
-
-fn has_enabled_animation(object: &Object) -> bool {
-    object.detail().texture_animation.is_some_and(texture_animation::is_enabled)
-}
-
-fn surface_item_id(region: Region, kind: SurfaceKind) -> ItemId {
-    match kind {
-        SurfaceKind::Water => (0, u128::from(region.get()), 0),
-        SurfaceKind::Terrain(patch) => {
-            let (x, y) = patch.coordinates();
-            (1, u128::from(region.get()), u16::from(y) * 16 + u16::from(x))
+fn adjust_texture_reference(
+    counts: &mut HashMap<TextureId, usize>,
+    handles: &mut HashMap<TextureId, TextureHandle>,
+    texture: &TextureHandle,
+    adding: bool,
+) {
+    let id = texture.id();
+    if adding {
+        *counts.entry(id).or_default() += 1;
+        handles.entry(id).or_insert_with(|| texture.clone());
+    } else if let Some(count) = counts.get_mut(&id) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            counts.remove(&id);
+            handles.remove(&id);
         }
     }
-}
-
-fn cached_faces(
-    id: ItemId,
-    mesh: &crate::scene::SharedMesh,
-    info: &MeshInfo,
-    materials: Option<&[FaceMaterial]>,
-    appearance: Option<&world::SurfaceAppearance>,
-    scale: Vec3,
-    shading: ShadingMode,
-) -> Vec<CachedFace> {
-    let mut material_slots = [None; 256];
-    if let Some(materials) = materials {
-        for (index, material) in materials.iter().enumerate() {
-            material_slots[usize::from(material.slot)].get_or_insert(index);
-        }
-    }
-    let faces = mesh.mesh().faces();
-    let mut cached = Vec::with_capacity(faces.len());
-    for (index, face) in faces.iter().enumerate() {
-        if face.indices.is_empty() {
-            continue;
-        }
-        let material_index = material_slots[usize::from(face.slot)];
-        let material = materials.and_then(|materials| material_index.and_then(|index| materials.get(index)));
-        let mut params = FaceParams::new(material);
-        match shading {
-            ShadingMode::Terrain => {
-                params.color = [0.18, 0.23, 0.13, 1.0];
-                params.params[0] = 1.0;
-            }
-            ShadingMode::Water => {
-                params.color = COLOR.to_array();
-                params.params[0] = 1.0;
-            }
-            ShadingMode::Studio => {}
-        }
-        if params.blend && params.color[3] <= 0.0 {
-            continue;
-        }
-        let texture = material.and_then(|material| material.base_color_texture.as_ref()).and_then(|binding| binding.image()).cloned();
-        let pipeline =
-            if shading == ShadingMode::Water { Pipeline::Water } else { surface_pipeline(params.blend, params.double_sided, scale) };
-        cached.push(CachedFace {
-            order: (id.0, id.1, id.2, face.slot),
-            indices: face.indices.clone(),
-            center: info.centers.get(index).copied().unwrap_or(Vec3::ZERO),
-            base_params: params,
-            params,
-            texture,
-            material_index,
-            texture_entry_transform: appearance
-                .and_then(|appearance| appearance.face(face.slot))
-                .map_or_else(FaceAppearance::default, |face| *face)
-                .transform,
-            draw: DrawKey { mesh: mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture: None, terrain: None },
-            slot: None,
-            included: false,
-        });
-    }
-    cached
 }
 
 fn current_params(source: Option<&Object>, shading: ShadingMode, face: &CachedFace, now: Instant) -> (FaceParams, bool) {
@@ -970,32 +1008,25 @@ fn blend_distance(position: DVec3, rotation: Quat, scale: Vec3, center: Vec3, ca
     relative.length_squared()
 }
 
-fn draw_priority(item: &CachedItem, camera: Camera) -> (f64, f64) {
-    let center = (item.info.bounds.min.as_dvec3() + item.info.bounds.max.as_dvec3()) * 0.5 * item.scale.as_dvec3();
-    let offset = item.position - camera.position() + (item.rotation * center.as_vec3()).as_dvec3();
-    let radius = ((item.info.bounds.max.as_dvec3() - item.info.bounds.min.as_dvec3()).abs() * item.scale.as_dvec3().abs() * 0.5).length();
-    let distance = offset.length();
-    (radius / distance.max(1.0), distance)
-}
-
-fn surface_pipeline(blend: bool, double_sided: bool, scale: Vec3) -> Pipeline {
-    match (blend, double_sided, math::flips_winding(scale)) {
-        (true, true, _) => Pipeline::BlendDoubleSided,
-        (true, false, true) => Pipeline::BlendFlipped,
-        (true, false, false) => Pipeline::Blend,
-        (false, true, _) => Pipeline::DoubleSided,
-        (false, false, true) => Pipeline::FlippedWinding,
-        (false, false, false) => Pipeline::Surface,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::geometry::MeshState;
-    use crate::scene::{Budget, Reconciler};
+    use crate::geometry::cache::{cached_faces, mesh_info, object_item_id, refresh_winding_pipeline, surface_pipeline};
+    use crate::scene::{Budget, Placement, Reconciler};
     use crate::texture::TextureState;
     use math::DVec3;
+
+    #[test]
+    fn visibility_difference_tracks_only_membership_changes() {
+        let current = [(2, 1, 0), (2, 3, 0), (2, 5, 0)];
+        let next = [(2, 2, 0), (2, 3, 0), (2, 4, 0)];
+        let (mut added, mut removed) = (Vec::new(), Vec::new());
+        visible_difference(&current, &next, &mut added, &mut removed);
+
+        assert_eq!(added, [(2, 2, 0), (2, 4, 0)]);
+        assert_eq!(removed, [(2, 1, 0), (2, 5, 0)]);
+    }
 
     fn prepare_key(view: &SceneView) -> FramePreparationKey {
         FramePreparationKey {
@@ -1081,5 +1112,29 @@ mod tests {
         assert!(prepared.needs_frame(state, MeshState::default()));
         prepared.animated_faces = false;
         assert!(!prepared.needs_frame(state, MeshState::default()));
+    }
+
+    #[test]
+    fn scale_winding_change_updates_face_pipeline() {
+        let (_scene, view, _) = crate::geometry::fixtures::scene(255);
+        let object = view.objects().next().expect("fixture object");
+        let (_, mesh) = object.mesh().expect("fixture mesh");
+        let Placement::Ready(transform) = object.placement() else { panic!("fixture placement") };
+        let info = mesh_info(mesh);
+        let mut faces = cached_faces(
+            object_item_id(object),
+            mesh,
+            &info,
+            object.materials(),
+            object.detail().surface_appearance.as_ref(),
+            transform.scale,
+            ShadingMode::Studio,
+        );
+        let original = faces[0].draw.pipeline;
+        let flipped = Vec3::new(-transform.scale.x, transform.scale.y, transform.scale.z);
+        assert!(refresh_winding_pipeline(&mut faces, transform.scale, flipped));
+        assert_ne!(faces[0].draw.pipeline, original);
+        assert_eq!(faces[0].draw.pipeline, surface_pipeline(faces[0].base_params.blend, faces[0].base_params.double_sided, flipped));
+        assert!(!refresh_winding_pipeline(&mut faces, flipped, flipped));
     }
 }

@@ -18,7 +18,7 @@ use crate::geometry::{
 };
 use crate::material::FaceParams;
 use crate::pipeline::{INSTANCE_BYTES, Pipeline};
-use crate::scene::Placement;
+use crate::scene::{Camera, Placement};
 
 fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_pages: bool) {
     let scope = device.push_error_scope(ErrorFilter::Validation);
@@ -432,4 +432,65 @@ fn gpu_prim_transforms() {
     });
     check_mirrored_render(&device, &queue);
     check_planar_projection(&device, &queue);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo test -p render gpu_skip_rebuilds_scene -- --ignored"]
+fn gpu_skip_rebuilds_scene() {
+    let (device, queue) = block_on(async {
+        let instance =
+            wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
+    });
+    let (_scene, view, camera) = scene(255);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    assert!(!geometry.draws.is_empty());
+    geometry.skip();
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    assert!(!geometry.draws.is_empty());
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo test -p render gpu_camera_motion_updates_blended_visibility -- --ignored"]
+fn gpu_camera_motion_updates_blended_visibility() {
+    let (device, queue) = block_on(async {
+        let instance =
+            wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
+    });
+    let (_scene, view, _) = scene(128);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let hidden = Camera::new(DVec3::new(13.0, 0.0, 0.0), Vec3::X, 1.0, [128, 128]).unwrap();
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, hidden, [128, 128], None);
+    assert_eq!(geometry.stats.instances, 1);
+    assert!(geometry.batches.has_blended());
+    let slot_count = geometry.cache.slots.len();
+    let hidden_draw_count = geometry.draws.len();
+
+    let visible = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, visible, [128, 128], None);
+    assert_eq!(geometry.stats.instances, 2);
+    assert_eq!(geometry.cache.visible_added.len(), 1);
+    assert!(geometry.cache.slots.len() > slot_count);
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, hidden, [128, 128], None);
+    assert_eq!(geometry.stats.instances, 1);
+    assert!(geometry.draws.len() > hidden_draw_count);
+    assert_eq!(geometry.cache.visible_removed.len(), 1);
+    let removed_id = geometry.cache.visible_removed[0];
+    let item = geometry.cache.items.get(&removed_id).unwrap();
+    let face = item.faces.iter().find(|face| face.included).unwrap();
+    let slot = geometry.cache.slots[&face.order] as usize;
+    let base = instance_base(item.position, item.rotation, Vec3::ZERO, geometry.cache.origin);
+    let hidden = packed_instance(&base, &face.params, Vec3::ZERO);
+    let offset = slot * INSTANCE_BYTES;
+    assert_eq!(&geometry.instance_bytes[offset..offset + INSTANCE_BYTES], &hidden);
 }

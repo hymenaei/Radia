@@ -13,8 +13,8 @@ use math::DVec3;
 use wgpu::{
     AdapterInfo, Backends, Color, CommandEncoderDescriptor, CreateSurfaceError, CurrentSurfaceTexture, Device, DeviceDescriptor,
     ErrorFilter, InstanceDescriptor, LoadOp, Operations, PollError, PollType, PowerPreference, PresentMode, Queue,
-    RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor, RequestAdapterError, RequestAdapterOptions,
-    RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureViewDescriptor,
+    RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPassTimestampWrites, RequestAdapterError,
+    RequestAdapterOptions, RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureViewDescriptor,
 };
 
 use crate::geometry::{GeometryRenderer, PickError, Stats};
@@ -120,7 +120,7 @@ impl Renderer {
             .map_err(Error::Adapter)?;
         let info = adapter.get_info();
         let supported_features = adapter.features();
-        let timestamp_feature_mask = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        let timestamp_feature_mask = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
         let timestamp_features =
             if supported_features.contains(timestamp_feature_mask) { timestamp_feature_mask } else { wgpu::Features::empty() };
         let (device, queue) = adapter
@@ -281,9 +281,6 @@ impl Renderer {
         if depth.is_none() {
             self.geometry.skip();
         }
-        if let Some(queries) = timestamp_queries {
-            encoder.write_timestamp(queries, 0);
-        }
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("Scene geometry"),
@@ -298,15 +295,16 @@ impl Renderer {
                     depth_ops: Some(Operations { load: LoadOp::Clear(0.0), store: StoreOp::Store }),
                     stencil_ops: None,
                 }),
+                timestamp_writes: timestamp_queries.map(|query_set| RenderPassTimestampWrites {
+                    query_set,
+                    beginning_of_pass_write_index: Some(0),
+                    end_of_pass_write_index: Some(1),
+                }),
                 ..Default::default()
             });
             if depth.is_some() {
                 self.geometry.draw(&mut pass);
             }
-        }
-        if let Some(queries) = timestamp_queries {
-            encoder.write_timestamp(queries, 1);
-            encoder.write_timestamp(queries, 2);
         }
         {
             let pass = encoder.begin_render_pass(&RenderPassDescriptor {
@@ -317,15 +315,19 @@ impl Renderer {
                     resolve_target: None,
                     ops: Operations { load: LoadOp::Load, store: StoreOp::Store },
                 })],
+                timestamp_writes: timestamp_queries.map(|query_set| RenderPassTimestampWrites {
+                    query_set,
+                    beginning_of_pass_write_index: Some(2),
+                    end_of_pass_write_index: Some(3),
+                }),
                 ..Default::default()
             });
             self.overlay.render(&mut pass.forget_lifetime(), &overlay.primitives, &screen);
         }
-        if let Some(queries) = timestamp_queries {
-            encoder.write_timestamp(queries, 3);
-            if let Some(gpu_timings) = &self.gpu_timings {
-                gpu_timings.resolve(&mut encoder);
-            }
+        if timestamp_queries.is_some()
+            && let Some(gpu_timings) = &self.gpu_timings
+        {
+            gpu_timings.resolve(&mut encoder);
         }
         self.queue.submit(commands.into_iter().chain([encoder.finish()]));
         if timestamp_queries.is_some()

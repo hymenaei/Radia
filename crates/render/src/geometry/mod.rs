@@ -62,6 +62,12 @@ pub struct Stats {
     pub omitted_faces: usize,
     pub mesh_budget_blocked: usize,
     pub omission_reason: Option<OmissionReason>,
+    pub full_rebuilds: usize,
+    pub region_invalidations: usize,
+    pub texture_state_reresolves: usize,
+    pub texture_state_changes: usize,
+    pub objects_reprepared: usize,
+    pub dirtied_items: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,6 +226,7 @@ pub(crate) struct GeometryRenderer {
     omitted_faces: usize,
     mesh_budget_blocked: HashSet<MeshId>,
     visible: Vec<Instance>,
+    visible_ids: Vec<cache::ItemId>,
     visible_count: usize,
     instance_bytes: Vec<u8>,
     epoch: u64,
@@ -265,6 +272,7 @@ impl GeometryRenderer {
             omitted_faces: 0,
             mesh_budget_blocked: HashSet::new(),
             visible: Vec::new(),
+            visible_ids: Vec::new(),
             visible_count: 0,
             instance_bytes: Vec::new(),
             epoch: 0,
@@ -306,7 +314,9 @@ impl GeometryRenderer {
 
     pub(crate) fn skip(&mut self) {
         self.prepared = None;
+        self.cache.batches_valid = false;
         self.visible.clear();
+        self.visible_ids.clear();
         self.visible_count = 0;
         self.draws.clear();
         self.batches.clear();

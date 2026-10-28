@@ -51,6 +51,7 @@ impl Textures {
                     fallback: entry.fallback,
                     owner: entry.owner,
                     revision: entry.revision,
+                    state_revision: entry.state_revision,
                     evicted: false,
                     state: TextureUploadState::Uploading {
                         gpu: GpuTexture { texture, view, bindings: HashMap::new(), charge },
@@ -170,11 +171,12 @@ impl Textures {
                     fallback: None,
                     owner: entry.owner,
                     revision: entry.revision,
+                    state_revision: entry.state_revision,
                     evicted: false,
                     state: TextureUploadState::Ready(gpu),
                 },
             );
-            self.changed();
+            self.changed(id);
         }
         self.trim(epoch);
     }

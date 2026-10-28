@@ -154,6 +154,8 @@ impl Mirror {
                 {
                     if let PreparedMesh::Ready(mesh) = state {
                         object.mesh = Some((*key, mesh.clone()));
+                    } else if !matches!(state, PreparedMesh::Pending) {
+                        object.mesh = None;
                     }
                     object.preparation = Some((*key, state.clone()));
                 }

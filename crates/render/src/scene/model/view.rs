@@ -2,6 +2,7 @@ use std::{
     collections::VecDeque,
     error::Error,
     fmt::{self, Display, Formatter},
+    mem::size_of,
 };
 
 use world::{Entity, Region, WorldRevision};
@@ -10,18 +11,25 @@ use super::{Batch, Change, MeshChange, Mirror, SceneLifetime, Status};
 use crate::scene::{Object, Patch, RegionData, Surface, ViewerEnvironment, region_environment::RegionEnvironment};
 
 const CHANGE_HISTORY: usize = 64;
+const CHANGE_HISTORY_BYTES: usize = 4 * 1024 * 1024;
 
+#[derive(Default)]
 pub(crate) struct SceneChanges {
     pub(crate) objects: Vec<Entity>,
     pub(crate) surfaces: Vec<(Region, crate::scene::SurfaceKind)>,
     pub(crate) regions: Vec<Region>,
     pub(crate) retired: Vec<Region>,
     pub(crate) full: bool,
+    pub(crate) reconcile_all: bool,
 }
 
 impl SceneChanges {
     fn from_batch(batch: &Batch) -> Self {
-        let mut changes = Self { objects: Vec::new(), surfaces: Vec::new(), regions: Vec::new(), retired: Vec::new(), full: batch.replace };
+        let mut changes = Self::default();
+        if batch.replace {
+            changes.full = true;
+            return changes;
+        }
         for change in &batch.changes {
             match change {
                 Change::Object(object) => changes.objects.push(object.detail().summary.entity),
@@ -36,6 +44,14 @@ impl SceneChanges {
             }
         }
         changes
+    }
+
+    fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.objects.capacity() * size_of::<Entity>()
+            + self.surfaces.capacity() * size_of::<(Region, crate::scene::SurfaceKind)>()
+            + self.regions.capacity() * size_of::<Region>()
+            + self.retired.capacity() * size_of::<Region>()
     }
 }
 
@@ -78,6 +94,10 @@ pub struct SceneView {
     status: Status,
     mirror: Mirror,
     change_history: VecDeque<(u64, SceneChanges)>,
+    change_history_bytes: usize,
+    reconcile_marker: SceneChanges,
+    replacement_marker: SceneChanges,
+    replacement_sequence: Option<u64>,
 }
 
 impl SceneView {
@@ -93,6 +113,10 @@ impl SceneView {
             status: Status::Loading,
             mirror: Mirror::default(),
             change_history: VecDeque::with_capacity(CHANGE_HISTORY),
+            change_history_bytes: 0,
+            reconcile_marker: SceneChanges { reconcile_all: true, ..SceneChanges::default() },
+            replacement_marker: SceneChanges { full: true, ..SceneChanges::default() },
+            replacement_sequence: None,
         }
     }
 
@@ -103,7 +127,10 @@ impl SceneView {
         if self.sequence.checked_add(1) != Some(batch.sequence) {
             return Err(ApplyError::OutOfOrder);
         }
-        let changes = SceneChanges::from_batch(&batch);
+        let mut changes = SceneChanges::from_batch(&batch);
+        if changes.retained_bytes() > CHANGE_HISTORY_BYTES {
+            changes = SceneChanges { reconcile_all: true, ..SceneChanges::default() };
+        }
         if batch.replace {
             self.mirror = Mirror::default();
         }
@@ -111,11 +138,17 @@ impl SceneView {
             self.mirror.apply(change);
         }
         self.sequence = batch.sequence;
+        if batch.replace {
+            self.replacement_sequence = Some(self.sequence);
+        }
         self.revision = batch.revision;
         self.status = batch.status;
+        self.change_history_bytes += changes.retained_bytes();
         self.change_history.push_back((self.sequence, changes));
-        if self.change_history.len() > CHANGE_HISTORY {
-            self.change_history.pop_front();
+        while self.change_history.len() > CHANGE_HISTORY || self.change_history_bytes > CHANGE_HISTORY_BYTES {
+            if let Some((_, removed)) = self.change_history.pop_front() {
+                self.change_history_bytes -= removed.retained_bytes();
+            }
         }
         batch.delivery.acknowledge();
         Ok(())
@@ -174,14 +207,35 @@ impl SceneView {
     }
 
     pub(crate) fn changes_since<'a>(&'a self, version: &ViewVersion) -> Option<impl Iterator<Item = &'a SceneChanges>> {
-        if !self.session.same(&version.session) || version.sequence > self.sequence || version.status != self.status() {
+        if !self.session.same(&version.session) || version.sequence > self.sequence {
             return None;
         }
         let next = version.sequence.checked_add(1)?;
-        if next <= self.sequence && self.change_history.front().is_none_or(|(sequence, _)| *sequence > next) {
-            return None;
-        }
+        let replaced = self.replacement_sequence.is_some_and(|sequence| version.sequence < sequence);
+        let missed = !replaced && next <= self.sequence && self.change_history.front().is_none_or(|(sequence, _)| *sequence > next);
+        let status_changed = version.status != self.status();
         let sequence = version.sequence;
-        Some(self.change_history.iter().filter(move |(current, _)| *current > sequence).map(|(_, changes)| changes))
+        let marker = if replaced { Some(&self.replacement_marker) } else { (missed || status_changed).then_some(&self.reconcile_marker) };
+        let history = self.change_history.iter().filter(move |(current, _)| *current > sequence).map(|(_, changes)| changes);
+        Some(marker.into_iter().chain(history))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::Reconciler;
+
+    #[test]
+    fn status_change_requests_reconciliation_without_full_rebuild() {
+        let (_scene, mut view) = Reconciler::new(crate::scene::Budget::default());
+        let version = view.version();
+        view.status = Status::Ready;
+
+        let changes = view.changes_since(&version).unwrap().collect::<Vec<_>>();
+
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].reconcile_all);
+        assert!(!changes[0].full);
     }
 }

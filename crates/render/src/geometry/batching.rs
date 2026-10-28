@@ -8,11 +8,13 @@ use super::{INSTANCE_BUFFER_BYTES, TRANSFORM_BYTES, mesh::GpuMesh, storage::Buff
 use crate::{
     pipeline::{INSTANCE_BYTES, Pipeline},
     scene::MeshId,
-    texture::{TerrainTextureKey, TextureKey},
+    texture::TextureKey,
 };
+use world::Region;
 
 pub(super) const MAX_FACE_INSTANCES: usize = INSTANCE_BUFFER_BYTES / INSTANCE_BYTES;
 pub(super) const INDIRECT_DRAW_BYTES: usize = 20;
+const MAX_CACHED_GROUPS: usize = 65_536;
 
 pub(super) type FaceOrder = (u8, u128, u16, u8);
 
@@ -23,7 +25,7 @@ pub(super) struct DrawKey {
     pub end: u32,
     pub pipeline: Pipeline,
     pub texture: Option<TextureKey>,
-    pub terrain: Option<TerrainTextureKey>,
+    pub terrain: Option<Region>,
 }
 
 impl DrawKey {
@@ -47,14 +49,14 @@ pub(super) struct DrawCommand {
     pub count: u32,
     pub indices: Range<u32>,
     pub texture: Option<TextureKey>,
-    pub terrain: Option<TerrainTextureKey>,
+    pub terrain: Option<Region>,
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 pub(super) struct DrawBatchKey {
     pub pipeline: Pipeline,
     pub texture: Option<TextureKey>,
-    pub terrain: Option<TerrainTextureKey>,
+    pub terrain: Option<Region>,
     page: usize,
 }
 
@@ -96,6 +98,7 @@ struct Blended {
 #[derive(Default)]
 pub(super) struct Batches {
     groups: HashMap<DrawKey, Group>,
+    active_groups: Vec<DrawKey>,
     blended: Vec<Blended>,
     blend_index: HashMap<FaceOrder, usize>,
     ordered: Vec<DrawKey>,
@@ -126,7 +129,8 @@ impl Batches {
         for group in self.indirect_groups.values_mut() {
             group.commands.clear();
         }
-        for group in self.groups.values_mut() {
+        for key in self.active_groups.drain(..) {
+            let Some(group) = self.groups.get_mut(&key) else { continue };
             group.bytes.clear();
             group.orders.clear();
             group.count = 0;
@@ -152,6 +156,7 @@ impl Batches {
         } else {
             let group = self.groups.entry(key).or_insert_with(|| Group { first: order, bytes: Vec::new(), orders: Vec::new(), count: 0 });
             if group.count == 0 {
+                self.active_groups.push(key);
                 group.first = order;
             } else {
                 group.first = group.first.min(order);
@@ -167,12 +172,66 @@ impl Batches {
         self.omitted
     }
 
-    pub fn draw_batches(&self) -> &[DrawBatch] {
-        &self.draw_batches
+    pub fn can_append(&self, count: usize) -> bool {
+        self.count.checked_add(count).is_some_and(|total| total <= MAX_FACE_INSTANCES)
     }
 
     pub fn has_blended(&self) -> bool {
         !self.blended.is_empty()
+    }
+
+    pub fn append_opaque(
+        &mut self,
+        key: DrawKey,
+        order: FaceOrder,
+        encoded: [u8; INSTANCE_BYTES],
+        draws: &mut Vec<DrawCommand>,
+        bytes: &mut Vec<u8>,
+        slots: &mut HashMap<FaceOrder, u32>,
+    ) -> Option<u32> {
+        if self.count == MAX_FACE_INSTANCES {
+            self.omitted = self.omitted.saturating_add(1);
+            return None;
+        }
+        draws.truncate(self.opaque_draws);
+        bytes.truncate(self.opaque_instances * INSTANCE_BYTES);
+        let group = self.groups.entry(key).or_insert_with(|| Group { first: order, bytes: Vec::new(), orders: Vec::new(), count: 0 });
+        if group.count == 0 {
+            self.active_groups.push(key);
+            group.first = order;
+        } else {
+            group.first = group.first.min(order);
+        }
+        group.bytes.extend(encoded);
+        group.orders.push(order);
+        group.count += 1;
+        self.count += 1;
+        self.opaque_draws += 1;
+        self.opaque_instances += 1;
+        let first = self.opaque_instances as u32 - 1;
+        bytes.extend(encoded);
+        draws.push(key.command(first, 1));
+        slots.insert(order, first);
+        Some(first)
+    }
+
+    pub fn append_blended(&mut self, key: DrawKey, order: FaceOrder, distance_squared: f64, encoded: [u8; INSTANCE_BYTES]) -> bool {
+        if self.count == MAX_FACE_INSTANCES {
+            self.omitted = self.omitted.saturating_add(1);
+            return false;
+        }
+        self.blend_index.insert(order, self.blended.len());
+        self.blended.push(Blended { distance_squared, order, key, bytes: encoded });
+        self.count += 1;
+        true
+    }
+
+    pub fn opaque_bytes(&self) -> usize {
+        self.opaque_instances * INSTANCE_BYTES
+    }
+
+    pub fn draw_batches(&self) -> &[DrawBatch] {
+        &self.draw_batches
     }
 
     pub fn indirect_bytes(&self) -> &[u8] {
@@ -244,9 +303,11 @@ impl Batches {
         draws.clear();
         bytes.clear();
         slots.clear();
-        self.groups.retain(|_, group| group.count > 0);
+        if self.groups.len() > MAX_CACHED_GROUPS {
+            self.groups.retain(|_, group| group.count > 0);
+        }
         self.ordered.clear();
-        self.ordered.extend(self.groups.keys().copied());
+        self.ordered.extend(self.active_groups.iter().copied());
         self.ordered.sort_unstable_by(|a, b| self.groups[a].first.cmp(&self.groups[b].first));
         for key in &self.ordered {
             let Some(group) = self.groups.get(key) else { continue };
@@ -447,6 +508,51 @@ mod tests {
         assert_eq!(slots.get(&second), Some(&1));
         assert_eq!(&bytes[..INSTANCE_BYTES], &[1; INSTANCE_BYTES]);
         assert_eq!(&bytes[INSTANCE_BYTES..2 * INSTANCE_BYTES], &[2; INSTANCE_BYTES]);
+    }
+
+    #[test]
+    fn appending_opaque_keeps_blended_faces_after_opaque_draws() {
+        let opaque = key();
+        let blend = DrawKey { pipeline: Pipeline::Blend, ..opaque };
+        let added = DrawKey { start: 6, end: 12, ..opaque };
+        let blend_order = (2, 1, 0, 0);
+        let mut batches = Batches::default();
+        assert!(batches.push(blend, blend_order, Some(1.0), || [1; INSTANCE_BYTES]));
+        assert!(batches.push(opaque, (2, 2, 0, 0), None, || [2; INSTANCE_BYTES]));
+        let mut draws = Vec::new();
+        let mut bytes = Vec::new();
+        let mut slots = HashMap::new();
+        batches.finish(&mut draws, &mut bytes, &mut slots);
+
+        assert_eq!(batches.append_opaque(added, (2, 3, 0, 0), [3; INSTANCE_BYTES], &mut draws, &mut bytes, &mut slots), Some(1));
+        batches.sort_blended(&mut draws, &mut bytes, &mut slots);
+
+        assert_eq!(draws.iter().map(|draw| draw.pipeline).collect::<Vec<_>>(), [Pipeline::Surface, Pipeline::Surface, Pipeline::Blend]);
+        assert_eq!(slots.get(&blend_order), Some(&2));
+        assert_eq!(bytes, [2, 3, 1].into_iter().flat_map(|value| [value; INSTANCE_BYTES]).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn appending_blended_faces_keeps_back_to_front_order() {
+        let opaque = key();
+        let blend = DrawKey { pipeline: Pipeline::Blend, ..opaque };
+        let first = (2, 1, 0, 0);
+        let second = (2, 2, 0, 0);
+        let mut batches = Batches::default();
+        assert!(batches.push(opaque, (2, 3, 0, 0), None, || [3; INSTANCE_BYTES]));
+        assert!(batches.push(blend, first, Some(1.0), || [1; INSTANCE_BYTES]));
+        let mut draws = Vec::new();
+        let mut bytes = Vec::new();
+        let mut slots = HashMap::new();
+        batches.finish(&mut draws, &mut bytes, &mut slots);
+
+        assert!(batches.append_blended(blend, second, 4.0, [2; INSTANCE_BYTES]));
+        batches.sort_blended(&mut draws, &mut bytes, &mut slots);
+
+        assert_eq!(draws.iter().map(|draw| draw.pipeline).collect::<Vec<_>>(), [Pipeline::Surface, Pipeline::Blend, Pipeline::Blend]);
+        assert_eq!(slots.get(&second), Some(&1));
+        assert_eq!(slots.get(&first), Some(&2));
+        assert_eq!(bytes, [3, 2, 1].into_iter().flat_map(|value| [value; INSTANCE_BYTES]).collect::<Vec<_>>());
     }
 
     #[test]

@@ -107,5 +107,16 @@ impl GpuTimings {
 }
 
 fn elapsed_ms(start: u64, end: u64, timestamp_period_ns: f32) -> f64 {
-    end.wrapping_sub(start) as f64 * f64::from(timestamp_period_ns) / 1_000_000.0
+    end.saturating_sub(start) as f64 * f64::from(timestamp_period_ns) / 1_000_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reversed_timestamps_have_zero_duration() {
+        assert_eq!(elapsed_ms(11, 10, 1.0), 0.0);
+        assert_eq!(elapsed_ms(10, 11, 1_000_000.0), 1.0);
+    }
 }

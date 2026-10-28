@@ -36,4 +36,10 @@ impl GeometryPrepare {
     pub fn complete_texture(&mut self, completion: TextureCompletion) {
         self.0.complete_texture(completion);
     }
+
+    pub fn submitted(&mut self) {
+        if let Some(frame) = self.0.admit() {
+            self.0.submitted(frame);
+        }
+    }
 }

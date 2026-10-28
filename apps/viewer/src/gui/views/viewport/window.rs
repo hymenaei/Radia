@@ -93,6 +93,7 @@ pub(super) struct SceneWindow {
     frame_work: Duration,
     frame_intervals: FrameIntervals,
     break_interval_after_poll: bool,
+    animation_redraw_at: Option<Instant>,
     frame_interval: Duration,
     next_frame: Instant,
     dpi: f64,
@@ -153,6 +154,7 @@ impl SceneWindow {
             frame_work: Duration::ZERO,
             frame_intervals: FrameIntervals::default(),
             break_interval_after_poll: false,
+            animation_redraw_at: None,
             frame_interval,
             next_frame: now,
             dpi,
@@ -530,6 +532,11 @@ impl SceneWindow {
                         stats.objects_reprepared,
                         stats.dirtied_items
                     ));
+                    ui.label(format!(
+                        "Animated texture faces: {} visited, {} changed",
+                        stats.animated_faces_visited, stats.animated_faces_changed
+                    ));
+                    ui.label(format!("Animated texture update: {:.2} ms", stats.animation_update_ms));
                     if let Some((scene_ms, diagnostics_ms)) = gpu_timings {
                         ui.label(format!("GPU passes: scene {:.2} ms, diagnostics {:.2} ms", scene_ms, diagnostics_ms));
                     } else if gpu_timing_supported {
@@ -687,15 +694,17 @@ impl SceneWindow {
 
     pub(super) fn poll_renderer(&mut self, now: Instant) -> bool {
         let Some(renderer) = &mut self.renderer else {
+            self.animation_redraw_at = None;
             return false;
         };
         match renderer.poll() {
             Ok(progress) => {
+                self.animation_redraw_at = progress.redraw_at;
                 self.dirty |= progress.redraw;
                 if self.break_interval_after_poll {
                     if self.dirty {
                         self.break_interval_after_poll = false;
-                    } else if !progress.pending {
+                    } else if !progress.pending && progress.redraw_at.is_none() {
                         self.frame_intervals.break_sequence();
                         self.break_interval_after_poll = false;
                     }
@@ -703,6 +712,7 @@ impl SceneWindow {
                 progress.pending
             }
             Err(error) => {
+                self.animation_redraw_at = None;
                 self.break_interval_after_poll = false;
                 tracing::warn!(%error, "scene GPU failed; scheduling recovery");
                 self.retire_renderer();
@@ -739,7 +749,7 @@ impl SceneWindow {
         } else {
             let redraw = (self.dirty && can_redraw).then_some(self.next_frame.max(now + Duration::from_millis(1)));
             let poll = pending.then_some(now + self.frame_interval);
-            event_loop.set_control_flow(match redraw.into_iter().chain(poll).chain(self.next_ui).min() {
+            event_loop.set_control_flow(match redraw.into_iter().chain(poll).chain(self.animation_redraw_at).chain(self.next_ui).min() {
                 Some(at) => ControlFlow::WaitUntil(at),
                 None => ControlFlow::Wait,
             });

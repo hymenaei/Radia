@@ -28,10 +28,7 @@ pub(crate) fn bench(c: &mut Criterion) {
     }))
     .expect("benchmark GPU adapter");
     eprintln!("render prepare benchmark GPU: {:?}", adapter.get_info());
-    eprintln!(
-        "render prepare timestamp queries: {}",
-        adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES)
-    );
+    eprintln!("render prepare timestamp queries: {}", adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY));
     let (device, queue) = block_on(adapter.request_device(&DeviceDescriptor {
         required_features: adapter.features() & (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::INDIRECT_FIRST_INSTANCE),
         ..Default::default()

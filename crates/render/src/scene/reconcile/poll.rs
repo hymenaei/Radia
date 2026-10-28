@@ -205,7 +205,11 @@ impl Reconciler {
             ReconcileStep::Continue
         } else if let Some(retry_at) = self.preparation.environments.retry_at(now) {
             ReconcileStep::Wait(retry_at)
-        } else if self.preparation.assets.retry_admission() || self.preparation.environments.waiting() || self.viewer.waiting() {
+        } else if self.preparation.meshes.retry_admission()
+            || self.preparation.assets.retry_admission()
+            || self.preparation.environments.waiting()
+            || self.viewer.waiting()
+        {
             ReconcileStep::Wait(now + Duration::from_millis(200))
         } else if self.preparation.meshes.waiting() || surfaces_waiting {
             ReconcileStep::Wait(now + POLL_DELAY)

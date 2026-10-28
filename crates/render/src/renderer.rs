@@ -122,9 +122,7 @@ impl Renderer {
             .map_err(Error::Adapter)?;
         let info = adapter.get_info();
         let supported_features = adapter.features();
-        let timestamp_feature_mask = wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES;
-        let timestamp_features =
-            if supported_features.contains(timestamp_feature_mask) { timestamp_feature_mask } else { wgpu::Features::empty() };
+        let timestamp_features = supported_features & wgpu::Features::TIMESTAMP_QUERY;
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 label: Some("Radia scene"),

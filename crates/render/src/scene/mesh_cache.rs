@@ -78,6 +78,7 @@ struct Entry {
     wanted: usize,
     touched: u64,
     priority: u32,
+    priority_generation: u64,
     state: State,
     queued: Option<(Reverse<u32>, u64)>,
     blocked: Option<(Reverse<u32>, u64)>,
@@ -85,7 +86,7 @@ struct Entry {
     unused: Option<u64>,
 }
 
-const ENTRY_BYTES: usize = size_of::<MeshKey>() + size_of::<Entry>() + HASH_ENTRY_OVERHEAD_BYTES;
+pub(super) const ENTRY_BYTES: usize = size_of::<MeshKey>() + size_of::<Entry>() + HASH_ENTRY_OVERHEAD_BYTES;
 
 pub(in crate::scene) struct MeshCache {
     budget: Budget,
@@ -98,6 +99,8 @@ pub(in crate::scene) struct MeshCache {
     evicted: Vec<MeshKey>,
     updated: Vec<MeshKey>,
     bytes: usize,
+    cache_bytes: usize,
+    priority_generation: u64,
     clock: u64,
 }
 
@@ -114,8 +117,17 @@ impl MeshCache {
             evicted: Vec::new(),
             updated: Vec::new(),
             bytes: 0,
+            cache_bytes: CACHE_BYTES,
+            priority_generation: 0,
             clock: 0,
         }
+    }
+
+    #[cfg(test)]
+    pub(in crate::scene) fn new_with_cache_bytes(budget: Budget, cache_bytes: usize) -> Self {
+        let mut cache = Self::new(budget);
+        cache.cache_bytes = cache_bytes;
+        cache
     }
 
     pub(in crate::scene) fn request(&mut self, key: MeshKey, priority: u32) -> bool {
@@ -123,7 +135,12 @@ impl MeshCache {
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.wanted += 1;
             entry.touched = self.clock;
-            entry.priority = entry.priority.max(priority);
+            if entry.priority_generation != self.priority_generation {
+                entry.priority = priority;
+                entry.priority_generation = self.priority_generation;
+            } else {
+                entry.priority = entry.priority.max(priority);
+            }
             self.reindex(key);
             return true;
         }
@@ -137,6 +154,7 @@ impl MeshCache {
                 wanted: 1,
                 touched: self.clock,
                 priority,
+                priority_generation: self.priority_generation,
                 state: State::Queued,
                 queued: None,
                 blocked: None,
@@ -149,34 +167,23 @@ impl MeshCache {
         true
     }
 
-    pub(in crate::scene) fn reset_priorities(&mut self) {
-        self.queued.clear();
-        self.blocked.clear();
-        self.ready.clear();
-        self.unused.clear();
-        let mut keys = Vec::new();
-        for entry in self.entries.values_mut() {
-            entry.priority = 0;
-            entry.queued = None;
-            entry.blocked = None;
-            entry.ready = None;
-            entry.unused = None;
-        }
-        for (key, entry) in &self.entries {
-            if matches!(&entry.state, State::Queued | State::Blocked(_) | State::Ready(_)) {
-                keys.push(*key);
-            }
-        }
-        for key in keys {
-            self.reindex(key);
-        }
+    pub(in crate::scene) fn begin_priority_generation(&mut self) {
+        self.priority_generation = self.priority_generation.checked_add(1).expect("mesh cache priority generation exhausted");
     }
 
     pub(in crate::scene) fn prioritize(&mut self, key: MeshKey, priority: u32) {
-        if let Some(entry) = self.entries.get_mut(&key)
-            && priority > entry.priority
-        {
-            entry.priority = priority;
+        let mut changed = false;
+        if let Some(entry) = self.entries.get_mut(&key) {
+            if entry.priority_generation != self.priority_generation {
+                entry.priority = priority;
+                entry.priority_generation = self.priority_generation;
+                changed = true;
+            } else if priority > entry.priority {
+                entry.priority = priority;
+                changed = true;
+            }
+        }
+        if changed {
             self.reindex(key);
         }
     }
@@ -249,7 +256,7 @@ impl MeshCache {
         if entry.wanted == 0 {
             entry.priority = 0;
         }
-        let remove = entry.wanted == 0 && matches!(entry.state, State::Queued | State::Running(_) | State::Blocked(_));
+        let remove = entry.wanted == 0 && matches!(entry.state, State::Queued | State::Running(_) | State::Blocked(_) | State::Failed(_));
         if remove {
             if let Some(entry) = self.entries.get(&key)
                 && let State::Running(cancelled) = &entry.state
@@ -402,7 +409,7 @@ impl MeshCache {
     }
 
     fn has_room(&self, bytes: usize) -> bool {
-        self.bytes.checked_add(bytes).is_some_and(|used| used <= CACHE_BYTES)
+        self.bytes.checked_add(bytes).is_some_and(|used| used <= self.cache_bytes)
     }
 
     fn shrink_if_sparse(&mut self) {
@@ -426,10 +433,29 @@ impl Drop for MeshCache {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     fn key(detail: Detail) -> MeshKey {
         MeshKey { shape: PrimShape::default(), detail }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum MeshStatus {
+        Pending,
+        Ready,
+        Failed(MeshBuildError),
+        Capacity,
+    }
+
+    fn status(mesh: PreparedMesh) -> MeshStatus {
+        match mesh {
+            PreparedMesh::Pending => MeshStatus::Pending,
+            PreparedMesh::Ready(_) => MeshStatus::Ready,
+            PreparedMesh::Failed(error) => MeshStatus::Failed(error),
+            PreparedMesh::Capacity => MeshStatus::Capacity,
+        }
     }
 
     #[test]
@@ -444,16 +470,16 @@ mod tests {
         let first = meshes.start().unwrap();
         assert_eq!(first.key, key(Detail::High), "shared geometry keeps its greatest on-screen demand");
         meshes.complete(first.run());
-        meshes.reset_priorities();
+        meshes.begin_priority_generation();
         meshes.prioritize(key(Detail::Medium), 100);
         let second = meshes.start().unwrap();
-        assert_eq!(second.key, key(Detail::Medium), "camera changes replace previous priorities");
+        assert_eq!(second.key, key(Detail::Medium), "current priorities overtake stale work");
         meshes.complete(second.run());
         let third = meshes.start().unwrap();
-        assert_eq!(third.key, key(Detail::Lowest), "equal priorities retain request order");
+        assert_eq!(third.key, key(Detail::Low), "unscanned work retains its previous priority");
         meshes.complete(third.run());
         let last = meshes.start().unwrap();
-        assert_eq!(last.key, key(Detail::Low));
+        assert_eq!(last.key, key(Detail::Lowest));
         meshes.complete(last.run());
         assert!(!meshes.waiting(), "background geometry still completes");
     }
@@ -557,6 +583,37 @@ mod tests {
         assert!(matches!(meshes.get(background), PreparedMesh::Capacity));
         assert_eq!(meshes.take_evicted(), vec![background]);
         assert!(matches!(meshes.get(foreground), PreparedMesh::Pending));
+    }
+
+    #[test]
+    fn unscanned_ready_priority_survives_new_generation() {
+        let resident = key(Detail::High);
+        let cache_bytes = ENTRY_BYTES + retained_bytes(&tessellate(resident.shape, resident.detail, &AtomicBool::new(false)).unwrap());
+        let mut meshes = MeshCache::new_with_cache_bytes(Budget::default(), cache_bytes);
+        assert!(meshes.request(resident, 100));
+        let job = meshes.start().unwrap();
+        meshes.complete(job.run());
+        assert_matches!(status(meshes.get(resident)), MeshStatus::Ready);
+
+        meshes.begin_priority_generation();
+        assert!(!meshes.request(key(Detail::Low), 50));
+        assert_matches!(status(meshes.get(resident)), MeshStatus::Ready);
+    }
+
+    #[test]
+    fn releasing_failed_entry_returns_entry_charge() {
+        let failed = MeshKey { shape: PrimShape { profile_curve: 15, ..PrimShape::default() }, detail: Detail::High };
+        let mut meshes = MeshCache::new(Budget::default());
+        assert!(meshes.request(failed, 0));
+        let job = meshes.start().unwrap();
+        meshes.complete(job.run());
+        assert_matches!(status(meshes.get(failed)), MeshStatus::Failed(MeshBuildError::UnsupportedShape));
+        let bytes = meshes.bytes;
+
+        meshes.release(failed);
+
+        assert_eq!(meshes.bytes, bytes - ENTRY_BYTES);
+        assert_matches!(status(meshes.get(failed)), MeshStatus::Capacity);
     }
 
     #[test]

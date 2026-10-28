@@ -18,7 +18,7 @@ use crate::{
         views::viewport::{Viewport, ViewportError},
     },
     scene_feed::SceneSources,
-    session::EnvironmentInbox,
+    session::{EnvironmentInbox, TeleportHandle},
     world_reader::WorldReader,
 };
 
@@ -76,6 +76,7 @@ pub(crate) fn start_session(
     agent_id: Uuid,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
+    teleport: TeleportHandle,
     cx: &mut App,
 ) {
     if start_scene(generation, cx) {
@@ -85,6 +86,7 @@ pub(crate) fn start_session(
             agent_id,
             camera,
             movement,
+            teleport,
             cx,
         );
     }
@@ -152,6 +154,7 @@ fn connect_world(
     agent_id: Uuid,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
+    teleport: TeleportHandle,
     cx: &mut App,
 ) {
     let lifecycle = cx.global::<AppLifecycle>();
@@ -159,7 +162,7 @@ fn connect_world(
         && lifecycle.scene.main.is_current(generation)
         && let Some(viewport) = &lifecycle.scene.viewport
     {
-        viewport.connect_world(generation, sources, agent_id, camera, movement, service_runtime(cx));
+        viewport.connect_world(generation, sources, agent_id, camera, movement, teleport, service_runtime(cx));
     }
 }
 

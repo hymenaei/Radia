@@ -46,6 +46,7 @@ pub enum TeleportRequestError {
 pub struct TeleportSnapshot {
     pub status: TeleportStatus,
     pub crossing: CrossingState,
+    pub start_sequence: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -216,12 +217,13 @@ pub(crate) struct TeleportController {
     crossing: CrossingState,
     pending_crossing: Option<Destination>,
     active: Option<ActiveTeleport>,
+    start_sequence: u64,
 }
 
 impl TeleportController {
     pub(crate) fn new() -> Self {
         let (command_sender, commands) = mpsc::channel(COMMAND_CAPACITY);
-        let initial = TeleportSnapshot { status: TeleportStatus::Idle, crossing: CrossingState::None };
+        let initial = TeleportSnapshot { status: TeleportStatus::Idle, crossing: CrossingState::None, start_sequence: 0 };
         let (state, _) = watch::channel(initial);
         Self {
             command_sender,
@@ -231,6 +233,7 @@ impl TeleportController {
             crossing: CrossingState::None,
             pending_crossing: None,
             active: None,
+            start_sequence: 0,
         }
     }
 
@@ -366,6 +369,7 @@ impl TeleportController {
     }
 
     pub(super) fn on_start(&mut self, message: &TeleportStart, origin_region_handle: Option<u64>) {
+        self.start_sequence = self.start_sequence.wrapping_add(1);
         let active = self.active.get_or_insert_with(|| ActiveTeleport {
             started: false,
             origin_region_handle,
@@ -556,7 +560,11 @@ impl TeleportController {
     }
 
     pub(super) fn publish(&self) {
-        self.state.send_replace(TeleportSnapshot { status: self.status.clone(), crossing: self.crossing.clone() });
+        self.state.send_replace(TeleportSnapshot {
+            status: self.status.clone(),
+            crossing: self.crossing.clone(),
+            start_sequence: self.start_sequence,
+        });
     }
 }
 
@@ -743,6 +751,23 @@ mod tests {
     use super::*;
     use llsd::Map;
     use protocol::messages::TeleportStart;
+
+    #[test]
+    fn start_sequence_survives_a_fast_local_completion() {
+        let agent_id = Uuid::from_u128(1);
+        let mut controller = TeleportController::new();
+        let handle = controller.handle();
+
+        assert_eq!(handle.state().start_sequence, 0);
+        controller.on_start(&TeleportStart { teleport_flags: 4 }, Some(22));
+        assert_eq!(handle.state().start_sequence, 1);
+        assert!(controller.on_local(
+            &TeleportLocal { agent_id, location_id: 0, position: Vec3::new(10.0, 20.0, 30.0), look_at: Vec3::Y, teleport_flags: 4 },
+            Some(22),
+            agent_id,
+        ));
+        assert_eq!(handle.state().start_sequence, 1);
+    }
 
     #[test]
     fn official_failure_reason_classes_are_typed_and_keep_alert_info() {

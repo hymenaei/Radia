@@ -517,6 +517,52 @@ mod tests {
         assert_eq!(sent.get(), 4, "the current state is resent when a destination returns");
     }
 
+    #[test]
+    fn primary_change_sends_camera_relative_to_the_new_region() {
+        let old_simulator = simulator_id();
+        let new_simulator = simulator_id();
+        let agent_id = Uuid::from_u128(1);
+        let session_id = Uuid::from_u128(2);
+        let movement = crate::agent_movement::MovementObservation {
+            control_flags: 0,
+            body_rotation: Quat::IDENTITY,
+            always_run: false,
+            stop_sequence: 0,
+        };
+        let mut uplink = CameraUplink::new();
+        let mut sent = Vec::new();
+        uplink.tick_with(
+            Some((old_simulator, agent_id, session_id)),
+            Some(DVec3::ZERO),
+            Some(view(DVec3::new(12.0, 16.0, 8.0), Vec3::X)),
+            Some(movement),
+            |message, _| {
+                if let UplinkMessage::AgentUpdate(update) = message {
+                    sent.push(update);
+                }
+                Ok(())
+            },
+        );
+        uplink.tick_with(
+            Some((new_simulator, agent_id, session_id)),
+            Some(DVec3::new(256.0, 512.0, 0.0)),
+            Some(view(DVec3::new(270.0, 525.0, 8.0), Vec3::Y)),
+            Some(movement),
+            |message, _| {
+                if let UplinkMessage::AgentUpdate(update) = message {
+                    sent.push(update);
+                }
+                Ok(())
+            },
+        );
+
+        let update = sent.last().expect("primary change sends an AgentUpdate");
+        assert_eq!(update.agent_data.agent_id, agent_id);
+        assert_eq!(update.agent_data.session_id, session_id);
+        assert_eq!(update.agent_data.camera_center, Vec3::new(14.0, 13.0, 8.0));
+        assert_eq!(update.agent_data.camera_at_axis, Vec3::Y);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn camera_change_waits_for_eight_millisecond_limit() {
         let simulator = simulator_id();

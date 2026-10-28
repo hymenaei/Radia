@@ -25,7 +25,7 @@ use world::{Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PA
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::{AssetHandle, RequestError},
-    session::EnvironmentInbox,
+    session::{EnvironmentInbox, TeleportSnapshot},
     world_reader::{ReadError, WorldReader},
 };
 
@@ -44,6 +44,8 @@ pub(crate) struct SceneFeed {
     pub(crate) water_height: Option<f64>,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
+    teleport: watch::Receiver<TeleportSnapshot>,
+    teleport_start_sequence: u64,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
@@ -55,6 +57,7 @@ impl SceneFeed {
         agent_id: Uuid,
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
+        teleport: watch::Receiver<TeleportSnapshot>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
@@ -64,7 +67,12 @@ impl SceneFeed {
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
-        drop(runtime.clone().spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, wake).in_current_span()));
+        let teleport_start_sequence = teleport.borrow().start_sequence;
+        drop(
+            runtime
+                .clone()
+                .spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, teleport.clone(), wake).in_current_span()),
+        );
         Self {
             runtime,
             view,
@@ -74,6 +82,8 @@ impl SceneFeed {
             water_height: None,
             camera,
             movement,
+            teleport,
+            teleport_start_sequence,
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -93,6 +103,13 @@ impl SceneFeed {
                 true
             }
         });
+    }
+
+    pub(crate) fn take_teleport_start(&mut self) -> bool {
+        let snapshot = self.teleport.borrow_and_update();
+        let started = snapshot.start_sequence != self.teleport_start_sequence;
+        self.teleport_start_sequence = snapshot.start_sequence;
+        started
     }
 
     pub(crate) fn set_movement(&mut self, movement: MovementObservation) {
@@ -265,6 +282,7 @@ async fn run(
     runtime: Handle,
     cancelled: oneshot::Receiver<()>,
     mut camera: watch::Receiver<Option<Camera>>,
+    mut teleport: watch::Receiver<TeleportSnapshot>,
     wake: impl Fn(),
 ) {
     let SceneSources { mut reader, assets, environments } = sources;
@@ -327,6 +345,7 @@ async fn run(
             }
             .fuse();
             let moved = camera.changed().fuse();
+            let teleport_changed = teleport.changed().fuse();
             let available = assets.next().fuse();
             let released = textures.changed().fuse();
             let timer = async {
@@ -337,7 +356,7 @@ async fn run(
                 }
             }
             .fuse();
-            pin_mut!(reading, building, changed, moved, available, released, timer, pushed);
+            pin_mut!(reading, building, changed, moved, teleport_changed, available, released, timer, pushed);
             let mut asset_event = None;
             futures::select_biased! {
                 _ = cancelled => break,
@@ -362,6 +381,7 @@ async fn run(
 
                 result = released => { if result.is_err() { break; } wake(); }
                 result = moved => { if result.is_err() { break; } }
+                result = teleport_changed => { if result.is_err() { break; } wake(); }
                 result = changed => { if result.is_err() { break; } scene.notify_world_change(); }
                 _ = timer => {}
             }
@@ -379,6 +399,7 @@ async fn run(
 mod tests {
     use super::*;
     use crate::asset_coordinator::AssetCoordinator;
+    use crate::session::{CrossingState, TeleportStatus};
     use crate::world_reader::ReadRequest;
     use crate::world_reader::WorldReadHost;
     use futures::{Future, FutureExt, join};
@@ -468,6 +489,8 @@ mod tests {
             water_height: None,
             camera,
             movement: watch::channel(None).0,
+            teleport: watch::channel(TeleportSnapshot { status: TeleportStatus::Idle, crossing: CrossingState::None, start_sequence: 0 }).1,
+            teleport_start_sequence: 0,
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -553,14 +576,30 @@ mod tests {
         let mut reads = WorldReadHost::new(&world, Handle::current());
         let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
+        let (teleport_sender, teleport_receiver) =
+            watch::channel(TeleportSnapshot { status: TeleportStatus::Idle, crossing: CrossingState::None, start_sequence: 0 });
         let mut feed = SceneFeed::start(
             SceneSources { reader: reads.reader(), environments, assets: assets.handle() },
             Uuid::from_u128(2),
             watch::channel(None).0,
             watch::channel(None).0,
+            teleport_receiver,
             Handle::current(),
             || {},
         );
+        assert!(!feed.take_teleport_start());
+        teleport_sender.send_replace(TeleportSnapshot {
+            status: TeleportStatus::Started { flags: 0 },
+            crossing: CrossingState::None,
+            start_sequence: 1,
+        });
+        assert!(feed.take_teleport_start());
+        teleport_sender.send_replace(TeleportSnapshot {
+            status: TeleportStatus::Completed { region_handle: Some(2), same_region: false, flags: 0, sim_access: None },
+            crossing: CrossingState::None,
+            start_sequence: 1,
+        });
+        assert!(!feed.take_teleport_start(), "a brief teleport start is still observed after completion");
         feed.set_camera(Some(Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1000, 1000]).unwrap()));
         let receiving = async {
             loop {
@@ -610,11 +649,14 @@ mod tests {
         let reader = service.reader();
         let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (pushes, environments) = crate::session::EnvironmentInbox::channel();
+        let (_teleport_sender, teleport_receiver) =
+            watch::channel(TeleportSnapshot { status: TeleportStatus::Idle, crossing: CrossingState::None, start_sequence: 0 });
         let mut feed = SceneFeed::start(
             SceneSources { reader: reader.clone(), environments, assets: assets.handle() },
             Uuid::from_u128(1),
             watch::channel(None).0,
             watch::channel(None).0,
+            teleport_receiver,
             Handle::current(),
             || {},
         );

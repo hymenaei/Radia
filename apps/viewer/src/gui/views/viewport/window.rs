@@ -395,13 +395,26 @@ impl SceneWindow {
         let now = Instant::now();
         let pose = self.agent_pose();
         self.ensure_camera(pose);
+        let teleport_started = self.feed.as_mut().is_some_and(SceneFeed::take_teleport_start);
+        if teleport_started {
+            let rotation = self.body_rotation.update(pose.map(|pose| pose.rotation), 0.0, now);
+            let movement = self.controls.release_and_observe(rotation);
+            self.stop_clear_pending = movement.control_flags & STOP != 0;
+            if let Some(feed) = &mut self.feed {
+                feed.set_movement(movement);
+            }
+        }
         let rotation = self.body_rotation.update(pose.map(|pose| pose.rotation), self.controls.yaw(self.modifiers.shift_key()), now);
         let movement: MovementObservation = self.controls.observation(self.modifiers.shift_key(), rotation);
-        self.stop_clear_pending = movement.control_flags & STOP != 0;
+        if !teleport_started {
+            self.stop_clear_pending = movement.control_flags & STOP != 0;
+        }
         let observation = self.camera_observation(pose, now);
         if let Some(feed) = &mut self.feed {
             feed.set_camera(observation);
-            feed.set_movement(movement);
+            if !teleport_started {
+                feed.set_movement(movement);
+            }
         }
         if now < self.next_frame {
             return Ok(DrawActions::default());

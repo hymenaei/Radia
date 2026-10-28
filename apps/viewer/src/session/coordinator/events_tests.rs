@@ -30,7 +30,7 @@ use crate::session::coordinator::tests::{
 use crate::session::inbound::{ObjectBatch, ObjectOperation};
 use crate::session::{
     recovery::recovery_request,
-    teleport::{Destination, TeleportController},
+    teleport::{Destination, TeleportController, TeleportStatus},
     world::{IngestStatus, SessionWorld, viewer_world_limits},
 };
 use crate::test_helpers::simulator_id;
@@ -255,11 +255,29 @@ fn return_teleport_restores_reused_region_route_and_keeps_both_retired_scenes_em
     assert!(world.world().parcel_state(original_return_region).is_none());
 
     let mut teleport = TeleportController::new();
+    assert!(teleport.accept_lifecycle_packet(current_simulator, Ordered(1)));
     teleport.on_start(&protocol::messages::TeleportStart { teleport_flags: 0 }, Some(current_handle.get()));
     let destination = Destination { region_handle: returning_handle.get(), endpoint };
+    assert!(teleport.accept_lifecycle_packet(current_simulator, Ordered(2)));
     assert!(!teleport.on_finish(destination, 0, Some(13), HandoffEventOutcome::Accepted));
+    let stale_local = protocol::messages::TeleportLocal {
+        agent_id,
+        location_id: 0,
+        position: Vec3::new(5.0, 6.0, 7.0),
+        look_at: Vec3::Y,
+        teleport_flags: 0,
+    };
+    if teleport.accept_local_packet(current_simulator, Ordered(1)) {
+        teleport.on_local(&stale_local, Some(current_handle.get()), agent_id);
+    }
+    assert_eq!(
+        teleport.handle().state().status,
+        TeleportStatus::Connecting { region_handle: returning_handle.get() },
+        "an older local notice must not replace the accepted cross-region finish"
+    );
     let region_handle = teleport.region_handle_for_promotion(endpoint).expect("accepted return destination");
     assert!(handoff.restore_promoted_region(&mut world, returning_simulator, region_handle).is_some());
+    assert!(teleport.on_simulator_promoted(Some(region_handle), endpoint));
     handoff.teleport_completed(&mut world, returning_simulator);
 
     let returned_region = world.region_for(returning_simulator).expect("restored return region");

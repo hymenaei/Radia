@@ -6,7 +6,10 @@ use std::{
 
 use llsd::Value;
 use math::Vec3;
-use network::{AgentSession, Error as NetworkError, HandoffEventOutcome, SessionHandle, TeleportRequest as NetworkTeleportRequest};
+use network::{
+    AgentSession, Error as NetworkError, HandoffEventOutcome, PacketOrder, SessionHandle, SimulatorId,
+    TeleportRequest as NetworkTeleportRequest,
+};
 use protocol::messages::{
     AlertInfo, TeleportCancel, TeleportFailed, TeleportFinish, TeleportLandmarkRequest as ProtocolLandmarkRequest, TeleportLocal,
     TeleportLocationRequest as ProtocolLocationRequest, TeleportProgress as ProtocolProgress, TeleportStart,
@@ -20,6 +23,9 @@ use uuid::Uuid;
 const COMMAND_CAPACITY: usize = 8;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const TELEPORT_TIMEOUT: Duration = Duration::from_secs(90);
+const CANCEL_TIMEOUT: Duration = Duration::from_secs(2);
+const CANCEL_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const CANCEL_MAX_ATTEMPTS: u8 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TeleportLocationRequest {
@@ -58,11 +64,27 @@ pub enum TeleportStatus {
     Connecting { region_handle: u64 },
     Completed { region_handle: Option<u64>, same_region: bool, flags: u32, sim_access: Option<u8> },
     Failed(TeleportFailure),
+    Cancelling { outcome: TeleportCancelOutcome, attempts: u8 },
+    CancelFailed { outcome: TeleportCancelOutcome, attempts: u8, reason: TeleportCancelFailure },
     Cancelled,
     TimedOut,
     CrossingConflict { crossing_region_handle: u64, teleport_region_handle: u64 },
     HandoffConflict { active_region_handle: Option<u64>, conflicting_region_handle: u64 },
     SupersededByCrossing { region_handle: u64 },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TeleportCancelOutcome {
+    Requested,
+    TimedOut,
+    CrossingConflict { crossing_region_handle: u64, teleport_region_handle: u64 },
+    HandoffConflict { active_region_handle: Option<u64>, conflicting_region_handle: u64 },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TeleportCancelFailure {
+    QueueFull,
+    SessionUnavailable,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,6 +214,14 @@ pub(super) enum TeleportCommand {
 pub(super) enum TeleportInput {
     Command(TeleportCommand),
     Timeout,
+    CancelRetry,
+    CancelResult(TeleportCancelResult),
+}
+
+#[derive(Debug)]
+pub(super) struct TeleportCancelResult {
+    generation: u64,
+    result: Result<(), TeleportCancelFailure>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -209,31 +239,58 @@ struct ActiveTeleport {
     deadline: Instant,
 }
 
+#[derive(Clone, Copy)]
+struct PendingCrossing {
+    destination: Destination,
+    deadline: Instant,
+}
+
+struct PendingCancellation {
+    generation: u64,
+    outcome: TeleportCancelOutcome,
+    attempts: u8,
+    deadline: Instant,
+    retry_at: Instant,
+    last_error: Option<TeleportCancelFailure>,
+    in_flight: bool,
+}
+
 pub(crate) struct TeleportController {
     command_sender: mpsc::Sender<TeleportCommand>,
     commands: mpsc::Receiver<TeleportCommand>,
+    cancel_result_sender: mpsc::Sender<TeleportCancelResult>,
+    cancel_results: mpsc::Receiver<TeleportCancelResult>,
     state: watch::Sender<TeleportSnapshot>,
     status: TeleportStatus,
     crossing: CrossingState,
-    pending_crossing: Option<Destination>,
+    pending_crossing: Option<PendingCrossing>,
     active: Option<ActiveTeleport>,
+    pending_cancellation: Option<PendingCancellation>,
     start_sequence: u64,
+    last_lifecycle_order: Option<(SimulatorId, u64)>,
+    cancellation_generation: u64,
 }
 
 impl TeleportController {
     pub(crate) fn new() -> Self {
         let (command_sender, commands) = mpsc::channel(COMMAND_CAPACITY);
+        let (cancel_result_sender, cancel_results) = mpsc::channel(1);
         let initial = TeleportSnapshot { status: TeleportStatus::Idle, crossing: CrossingState::None, start_sequence: 0 };
         let (state, _) = watch::channel(initial);
         Self {
             command_sender,
             commands,
+            cancel_result_sender,
+            cancel_results,
             state,
             status: TeleportStatus::Idle,
             crossing: CrossingState::None,
             pending_crossing: None,
             active: None,
+            pending_cancellation: None,
             start_sequence: 0,
+            last_lifecycle_order: None,
+            cancellation_generation: 0,
         }
     }
 
@@ -241,15 +298,51 @@ impl TeleportController {
         TeleportHandle { commands: self.command_sender.clone(), state: self.state.subscribe() }
     }
 
+    pub(super) fn accept_lifecycle_packet(&mut self, simulator_id: SimulatorId, packet_order: PacketOrder) -> bool {
+        let PacketOrder::Ordered(order) = packet_order else { return true };
+        if self.last_lifecycle_order.is_some_and(|(last_simulator, last_order)| last_simulator == simulator_id && order <= last_order) {
+            return false;
+        }
+        self.last_lifecycle_order = Some((simulator_id, order));
+        true
+    }
+
+    pub(super) fn accept_local_packet(&mut self, simulator_id: SimulatorId, packet_order: PacketOrder) -> bool {
+        self.pending_cancellation.is_none() && self.accept_lifecycle_packet(simulator_id, packet_order)
+    }
+
     pub(super) async fn next_input(&mut self) -> TeleportInput {
-        if let Some(deadline) = self.active.as_ref().map(|active| active.deadline) {
+        if let Some(deadline) = self.next_deadline() {
             tokio::select! {
+                biased;
+                result = self.cancel_results.recv() => TeleportInput::CancelResult(result.expect("teleport cancel result channel stays open")),
                 command = self.commands.recv() => TeleportInput::Command(command.expect("teleport command channel stays open")),
-                _ = tokio::time::sleep_until(deadline) => TeleportInput::Timeout,
+                _ = tokio::time::sleep_until(deadline) => {
+                    if self.pending_cancellation.is_some() { TeleportInput::CancelRetry } else { TeleportInput::Timeout }
+                },
             }
         } else {
-            TeleportInput::Command(self.commands.recv().await.expect("teleport command channel stays open"))
+            tokio::select! {
+                biased;
+                result = self.cancel_results.recv() => TeleportInput::CancelResult(result.expect("teleport cancel result channel stays open")),
+                command = self.commands.recv() => TeleportInput::Command(command.expect("teleport command channel stays open")),
+            }
         }
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        [
+            self.active.as_ref().map(|active| active.deadline),
+            self.pending_crossing.map(|crossing| crossing.deadline),
+            self.pending_cancellation.as_ref().map(
+                |cancel| {
+                    if cancel.in_flight { cancel.deadline } else { cancel.retry_at.min(cancel.deadline) }
+                },
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub(super) async fn handle_command(
@@ -257,15 +350,15 @@ impl TeleportController {
         command: TeleportCommand,
         network: &SessionHandle,
         session: Option<&AgentSession>,
+        primary_simulator: Option<SimulatorId>,
         origin_region_handle: Option<u64>,
-        crossing_busy: bool,
     ) {
         match command {
             TeleportCommand::Request(request, completed) => {
                 if completed.is_closed() {
                     return;
                 }
-                let result = self.request(request, network, session, origin_region_handle, crossing_busy).await;
+                let result = self.request(request, network, session, origin_region_handle).await;
                 if let Err(error) = completed.send(result) {
                     drop(error);
                 }
@@ -274,7 +367,7 @@ impl TeleportController {
                 if completed.is_closed() {
                     return;
                 }
-                let result = self.cancel(network, session);
+                let result = self.cancel(network, session, primary_simulator);
                 if let Err(error) = completed.send(result) {
                     drop(error);
                 }
@@ -288,11 +381,8 @@ impl TeleportController {
         network: &SessionHandle,
         session: Option<&AgentSession>,
         origin_region_handle: Option<u64>,
-        crossing_busy: bool,
     ) -> Result<(), TeleportRequestError> {
-        if self.active.is_some() || crossing_busy || matches!(self.crossing, CrossingState::Pending { .. }) {
-            return Err(TeleportRequestError::Busy);
-        }
+        self.check_request_available()?;
         let session = session.ok_or(TeleportRequestError::SessionUnavailable)?;
         let request = match request {
             TeleportRequest::Location(request) => NetworkTeleportRequest::Location(ProtocolLocationRequest {
@@ -333,42 +423,236 @@ impl TeleportController {
         result
     }
 
-    fn cancel(&mut self, network: &SessionHandle, session: Option<&AgentSession>) -> Result<(), TeleportRequestError> {
-        if self.active.is_none() {
-            return Err(TeleportRequestError::NoActiveTeleport);
+    fn request_is_busy(&self) -> bool {
+        self.active.is_some()
+            || self.pending_cancellation.is_some()
+            || self.pending_crossing.is_some()
+            || matches!(self.crossing, CrossingState::Pending { .. })
+    }
+
+    fn check_request_available(&self) -> Result<(), TeleportRequestError> {
+        if self.request_is_busy() { Err(TeleportRequestError::Busy) } else { Ok(()) }
+    }
+
+    fn cancel(
+        &mut self,
+        network: &SessionHandle,
+        session: Option<&AgentSession>,
+        primary_simulator: Option<SimulatorId>,
+    ) -> Result<(), TeleportRequestError> {
+        if self.pending_cancellation.is_some() {
+            return Ok(());
         }
-        let session = session.ok_or(TeleportRequestError::SessionUnavailable)?;
-        network
-            .send(TeleportCancel { agent_id: session.agent_id, session_id: session.session_id }, network::Delivery::Reliable)
-            .map_err(map_network_error)?;
-        self.active = None;
-        self.status = TeleportStatus::Cancelled;
-        self.publish();
+        let Some(outcome) = self.cancellation_outcome() else {
+            return Err(TeleportRequestError::NoActiveTeleport);
+        };
+        self.begin_cancellation(outcome);
+        self.attempt_cancellation(network, primary_simulator, session);
         Ok(())
     }
 
-    pub(super) fn on_timeout(&mut self, network: &SessionHandle, session: Option<&AgentSession>) {
-        if !self.expire() {
+    pub(super) fn on_timeout(&mut self, network: &SessionHandle, primary_simulator: Option<SimulatorId>, session: Option<&AgentSession>) {
+        let now = Instant::now();
+        if !self.expire(now) {
             return;
         }
-        if let Some(session) = session
-            && let Err(error) =
-                network.send(TeleportCancel { agent_id: session.agent_id, session_id: session.session_id }, network::Delivery::Reliable)
-        {
-            tracing::warn!(%error, "teleport timeout cancellation could not be queued");
+        self.attempt_cancellation(network, primary_simulator, session);
+    }
+
+    fn expire(&mut self, now: Instant) -> bool {
+        let active_expired = self.active.as_ref().is_some_and(|active| active.deadline <= now);
+        let crossing_expired = self.pending_crossing.is_some_and(|crossing| crossing.deadline <= now);
+        if active_expired {
+            self.begin_cancellation(TeleportCancelOutcome::TimedOut);
+            return true;
+        }
+        if crossing_expired {
+            let region_handle = match self.crossing {
+                CrossingState::Pending { region_handle, .. } => region_handle,
+                _ => return false,
+            };
+            self.pending_crossing = None;
+            self.crossing = CrossingState::Failed { region_handle };
+            self.publish();
+        }
+        false
+    }
+
+    pub(super) fn on_cancel_retry(
+        &mut self,
+        network: &SessionHandle,
+        primary_simulator: Option<SimulatorId>,
+        session: Option<&AgentSession>,
+    ) {
+        let now = Instant::now();
+        let Some((deadline, last_error, in_flight)) =
+            self.pending_cancellation.as_ref().map(|cancel| (cancel.deadline, cancel.last_error.clone(), cancel.in_flight))
+        else {
+            return;
+        };
+        if now >= deadline {
+            let reason = if in_flight {
+                TeleportCancelFailure::SessionUnavailable
+            } else {
+                last_error.unwrap_or(TeleportCancelFailure::SessionUnavailable)
+            };
+            self.finish_cancellation_attempt(Err(reason), now);
+        } else {
+            self.attempt_cancellation(network, primary_simulator, session);
         }
     }
 
-    fn expire(&mut self) -> bool {
-        if self.active.take().is_none() {
+    pub(super) fn cancel_conflicted(
+        &mut self,
+        network: &SessionHandle,
+        primary_simulator: Option<SimulatorId>,
+        session: Option<&AgentSession>,
+    ) {
+        if self.pending_cancellation.is_some() {
+            return;
+        }
+        let outcome = self.cancellation_outcome().unwrap_or(TeleportCancelOutcome::Requested);
+        self.begin_cancellation(outcome);
+        self.attempt_cancellation(network, primary_simulator, session);
+    }
+
+    fn cancellation_outcome(&self) -> Option<TeleportCancelOutcome> {
+        match &self.status {
+            TeleportStatus::CrossingConflict { crossing_region_handle, teleport_region_handle } => {
+                Some(TeleportCancelOutcome::CrossingConflict {
+                    crossing_region_handle: *crossing_region_handle,
+                    teleport_region_handle: *teleport_region_handle,
+                })
+            }
+            TeleportStatus::HandoffConflict { active_region_handle, conflicting_region_handle } => {
+                Some(TeleportCancelOutcome::HandoffConflict {
+                    active_region_handle: *active_region_handle,
+                    conflicting_region_handle: *conflicting_region_handle,
+                })
+            }
+            _ if self.active.is_some() || self.pending_crossing.is_some() => Some(TeleportCancelOutcome::Requested),
+            _ => None,
+        }
+    }
+
+    pub(super) fn begin_cancellation(&mut self, outcome: TeleportCancelOutcome) {
+        self.active = None;
+        let had_pending_crossing = self.pending_crossing.take().is_some();
+        if had_pending_crossing || matches!(self.crossing, CrossingState::Pending { .. }) {
+            self.crossing = CrossingState::None;
+        }
+        let now = Instant::now();
+        self.cancellation_generation = self.cancellation_generation.wrapping_add(1);
+        self.pending_cancellation = Some(PendingCancellation {
+            generation: self.cancellation_generation,
+            outcome: outcome.clone(),
+            attempts: 0,
+            deadline: now + CANCEL_TIMEOUT,
+            retry_at: now,
+            last_error: None,
+            in_flight: false,
+        });
+        self.status = TeleportStatus::Cancelling { outcome, attempts: 0 };
+        self.publish();
+    }
+
+    fn attempt_cancellation(&mut self, network: &SessionHandle, primary_simulator: Option<SimulatorId>, session: Option<&AgentSession>) {
+        if !self.prepare_cancellation_attempt(Instant::now()) {
+            return;
+        }
+        let Some(primary_simulator) = primary_simulator else {
+            self.finish_cancellation_attempt(Err(TeleportCancelFailure::SessionUnavailable), Instant::now());
+            return;
+        };
+        let Some(session) = session else {
+            self.finish_cancellation_attempt(Err(TeleportCancelFailure::SessionUnavailable), Instant::now());
+            return;
+        };
+        let Some(cancel) = self.pending_cancellation.as_ref() else { return };
+        let generation = cancel.generation;
+        let timeout = cancel.deadline.saturating_duration_since(Instant::now());
+        let agent_id = session.agent_id;
+        let session_id = session.session_id;
+        let network = network.clone();
+        let result_sender = self.cancel_result_sender.clone();
+        tokio::spawn(async move {
+            let result = match tokio::time::timeout(
+                timeout,
+                network.send_to(primary_simulator, TeleportCancel { agent_id, session_id }, network::Delivery::Reliable),
+            )
+            .await
+            {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(map_cancel_error(error)),
+                Err(_) => Err(TeleportCancelFailure::SessionUnavailable),
+            };
+            if let Err(error) = result_sender.send(TeleportCancelResult { generation, result }).await {
+                tracing::debug!(%error, "teleport cancellation result arrived after its session ended");
+            }
+        });
+    }
+
+    fn prepare_cancellation_attempt(&mut self, now: Instant) -> bool {
+        let Some(current) = self.pending_cancellation.as_ref() else { return false };
+        if current.in_flight && now < current.deadline {
             return false;
         }
-        self.status = TeleportStatus::TimedOut;
+        if current.attempts >= CANCEL_MAX_ATTEMPTS || now >= current.deadline {
+            let reason = current.last_error.clone().unwrap_or(TeleportCancelFailure::SessionUnavailable);
+            self.finish_cancellation_attempt(Err(reason), now);
+            return false;
+        }
+        let Some(cancel) = self.pending_cancellation.as_mut() else { return false };
+        if cancel.in_flight {
+            return false;
+        }
+        cancel.attempts = cancel.attempts.saturating_add(1);
+        cancel.in_flight = true;
+        self.status = TeleportStatus::Cancelling { outcome: cancel.outcome.clone(), attempts: cancel.attempts };
         self.publish();
         true
     }
 
+    fn finish_cancellation_attempt(&mut self, result: Result<(), TeleportCancelFailure>, now: Instant) {
+        let Some(cancel) = self.pending_cancellation.as_mut() else { return };
+        cancel.in_flight = false;
+        let attempts = cancel.attempts;
+        let deadline = cancel.deadline;
+        let generation = cancel.generation;
+        match result {
+            Ok(()) => {
+                let outcome = self.pending_cancellation.take().expect("pending cancellation exists").outcome;
+                self.status = terminal_cancel_status(outcome);
+            }
+            Err(reason) => {
+                if attempts >= CANCEL_MAX_ATTEMPTS || now >= deadline {
+                    let cancel = self.pending_cancellation.take().expect("pending cancellation exists");
+                    self.status = TeleportStatus::CancelFailed { outcome: cancel.outcome, attempts: cancel.attempts, reason };
+                } else {
+                    if let Some(cancel) = self.pending_cancellation.as_mut()
+                        && cancel.generation == generation
+                    {
+                        cancel.last_error = Some(reason);
+                        cancel.retry_at = (now + CANCEL_RETRY_INTERVAL).min(deadline);
+                        self.status = TeleportStatus::Cancelling { outcome: cancel.outcome.clone(), attempts };
+                    }
+                }
+            }
+        }
+        self.publish();
+    }
+
+    pub(super) fn on_cancel_result(&mut self, result: TeleportCancelResult) {
+        let now = Instant::now();
+        if self.pending_cancellation.as_ref().is_some_and(|cancel| cancel.generation == result.generation && cancel.in_flight) {
+            self.finish_cancellation_attempt(result.result, now);
+        }
+    }
+
     pub(super) fn on_start(&mut self, message: &TeleportStart, origin_region_handle: Option<u64>) {
+        if self.pending_cancellation.is_some() {
+            return;
+        }
         self.start_sequence = self.start_sequence.wrapping_add(1);
         let active = self.active.get_or_insert_with(|| ActiveTeleport {
             started: false,
@@ -397,11 +681,11 @@ impl TeleportController {
     }
 
     pub(super) fn on_finish(&mut self, destination: Destination, flags: u32, sim_access: Option<u8>, outcome: HandoffEventOutcome) -> bool {
-        if outcome == HandoffEventOutcome::Ignored {
+        if outcome == HandoffEventOutcome::Ignored || self.pending_cancellation.is_some() {
             return false;
         }
         if let (Some(crossing), CrossingState::Pending { region_handle, .. }) = (self.pending_crossing, &self.crossing)
-            && !same_destination(crossing, destination)
+            && !same_destination(crossing.destination, destination)
         {
             let crossing_region_handle = *region_handle;
             self.active = None;
@@ -436,14 +720,14 @@ impl TeleportController {
     }
 
     pub(super) fn on_failed(&mut self, failure: TeleportFailure, outcome: HandoffEventOutcome) {
-        if outcome == HandoffEventOutcome::Accepted && self.active.take().is_some() {
+        if outcome == HandoffEventOutcome::Accepted && self.pending_cancellation.is_none() && self.active.take().is_some() {
             self.status = TeleportStatus::Failed(failure);
             self.publish();
         }
     }
 
     pub(super) fn on_local(&mut self, message: &TeleportLocal, current_region_handle: Option<u64>, agent_id: Uuid) -> bool {
-        if message.agent_id != agent_id {
+        if message.agent_id != agent_id || self.pending_cancellation.is_some() {
             return false;
         }
         let flags = message.teleport_flags;
@@ -454,7 +738,7 @@ impl TeleportController {
     }
 
     pub(super) fn on_crossed_region(&mut self, destination: Destination, outcome: HandoffEventOutcome) -> bool {
-        if outcome == HandoffEventOutcome::Ignored {
+        if outcome == HandoffEventOutcome::Ignored || self.pending_cancellation.is_some() {
             return false;
         }
         let during_teleport = self.active.as_ref().is_some_and(|active| active.started);
@@ -481,7 +765,11 @@ impl TeleportController {
             self.publish();
             return true;
         }
-        self.pending_crossing = Some(destination);
+        let deadline = self
+            .pending_crossing
+            .filter(|pending| same_destination(pending.destination, destination))
+            .map_or_else(|| Instant::now() + TELEPORT_TIMEOUT, |pending| pending.deadline);
+        self.pending_crossing = Some(PendingCrossing { destination, deadline });
         self.crossing = CrossingState::Pending { region_handle: destination.region_handle, during_teleport };
         self.publish();
         false
@@ -489,7 +777,7 @@ impl TeleportController {
 
     pub(super) fn on_simulator_connect_failed(&mut self, region_handle: u64, endpoint: Option<SocketAddr>) {
         if matches!(self.crossing, CrossingState::Pending { region_handle: current, .. } if current == region_handle)
-            && self.pending_crossing.is_some_and(|pending| endpoint.is_none_or(|endpoint| pending.endpoint == endpoint))
+            && self.pending_crossing.is_some_and(|pending| endpoint.is_none_or(|endpoint| pending.destination.endpoint == endpoint))
         {
             self.pending_crossing = None;
             self.crossing = CrossingState::Failed { region_handle };
@@ -513,7 +801,7 @@ impl TeleportController {
         let completed_crossing = if let (Some(region_handle), Some(crossing), CrossingState::Pending { region_handle: pending, .. }) =
             (region_handle, self.pending_crossing, &self.crossing)
             && *pending == region_handle
-            && crossing.endpoint == endpoint
+            && crossing.destination.endpoint == endpoint
         {
             self.pending_crossing = None;
             self.crossing = CrossingState::Complete { region_handle };
@@ -555,7 +843,9 @@ impl TeleportController {
             .filter(|destination| destination.endpoint == endpoint)
             .map(|destination| destination.region_handle)
             .or_else(|| {
-                self.pending_crossing.filter(|destination| destination.endpoint == endpoint).map(|destination| destination.region_handle)
+                self.pending_crossing
+                    .filter(|crossing| crossing.destination.endpoint == endpoint)
+                    .map(|crossing| crossing.destination.region_handle)
             })
     }
 
@@ -743,6 +1033,26 @@ fn map_network_error(error: NetworkError) -> TeleportRequestError {
         | NetworkError::LoginEnded => TeleportRequestError::SessionUnavailable,
         NetworkError::InvalidTeleportRequest => TeleportRequestError::InvalidPosition,
         _ => TeleportRequestError::SessionUnavailable,
+    }
+}
+
+fn map_cancel_error(error: NetworkError) -> TeleportCancelFailure {
+    match error {
+        NetworkError::CommandQueueFull | NetworkError::SimulatorCommandQueueFull => TeleportCancelFailure::QueueFull,
+        _ => TeleportCancelFailure::SessionUnavailable,
+    }
+}
+
+fn terminal_cancel_status(outcome: TeleportCancelOutcome) -> TeleportStatus {
+    match outcome {
+        TeleportCancelOutcome::Requested => TeleportStatus::Cancelled,
+        TeleportCancelOutcome::TimedOut => TeleportStatus::TimedOut,
+        TeleportCancelOutcome::CrossingConflict { crossing_region_handle, teleport_region_handle } => {
+            TeleportStatus::CrossingConflict { crossing_region_handle, teleport_region_handle }
+        }
+        TeleportCancelOutcome::HandoffConflict { active_region_handle, conflicting_region_handle } => {
+            TeleportStatus::HandoffConflict { active_region_handle, conflicting_region_handle }
+        }
     }
 }
 
@@ -1006,9 +1316,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn teleport_deadline_is_bounded_and_clears_the_active_state() {
+    async fn teleport_deadline_enters_bounded_cancellation_and_clears_the_active_state() {
         let mut controller = TeleportController::new();
         controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
+        let crossing = Destination { region_handle: 2, endpoint: "127.0.0.1:13002".parse().expect("crossing address") };
+        assert!(!controller.on_crossed_region(crossing, HandoffEventOutcome::Accepted));
         let input = {
             let timeout = controller.next_input();
             tokio::pin!(timeout);
@@ -1016,9 +1328,120 @@ mod tests {
             timeout.await
         };
         std::assert_matches!(input, TeleportInput::Timeout);
-        assert!(controller.expire());
+        assert!(controller.expire(Instant::now()));
+        assert!(controller.active.is_none());
+        assert!(controller.pending_crossing.is_none());
+        assert_eq!(controller.state.borrow().crossing, CrossingState::None);
+        assert!(controller.pending_cancellation.is_some());
+        assert!(controller.request_is_busy());
+        assert!(controller.prepare_cancellation_attempt(Instant::now()));
+        controller.finish_cancellation_attempt(Ok(()), Instant::now());
         std::assert_matches!(controller.state.borrow().status, TeleportStatus::TimedOut);
-        assert!(!controller.expire());
+        assert!(!controller.expire(Instant::now()));
+        assert!(!controller.request_is_busy());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn crossing_deadline_clears_a_resolved_local_busy_state() {
+        let crossing = Destination { region_handle: 2, endpoint: "127.0.0.1:13002".parse().expect("crossing address") };
+        let mut controller = TeleportController::new();
+        assert!(!controller.on_crossed_region(crossing, HandoffEventOutcome::Accepted));
+
+        let input = {
+            let timeout = controller.next_input();
+            tokio::pin!(timeout);
+            tokio::time::advance(TELEPORT_TIMEOUT).await;
+            timeout.await
+        };
+        std::assert_matches!(input, TeleportInput::Timeout);
+        assert!(!controller.expire(Instant::now()));
+        assert_eq!(controller.state.borrow().crossing, CrossingState::Failed { region_handle: crossing.region_handle });
+        assert!(controller.pending_crossing.is_none());
+        assert!(controller.pending_cancellation.is_none());
+        assert_eq!(controller.check_request_available(), Ok(()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_after_accepted_login_crossing_retries_a_full_queue_and_allows_next_teleport() {
+        let crossing = Destination { region_handle: 12, endpoint: "127.0.0.1:13012".parse().expect("login simulator") };
+        let next = Destination { region_handle: 13, endpoint: "127.0.0.1:13013".parse().expect("next simulator") };
+        let mut controller = TeleportController::new();
+
+        assert!(!controller.on_crossed_region(crossing, HandoffEventOutcome::Accepted));
+        assert_eq!(controller.check_request_available(), Err(TeleportRequestError::Busy));
+        controller.begin_cancellation(TeleportCancelOutcome::Requested);
+        assert!(controller.pending_crossing.is_none());
+        assert_eq!(controller.state.borrow().crossing, CrossingState::None);
+        assert_eq!(controller.check_request_available(), Err(TeleportRequestError::Busy));
+
+        assert!(controller.prepare_cancellation_attempt(Instant::now()));
+        controller.finish_cancellation_attempt(Err(TeleportCancelFailure::QueueFull), Instant::now());
+        std::assert_matches!(controller.state.borrow().status, TeleportStatus::Cancelling { attempts: 1, .. });
+        let retry = {
+            let retry = controller.next_input();
+            tokio::pin!(retry);
+            tokio::time::advance(CANCEL_RETRY_INTERVAL).await;
+            retry.await
+        };
+        std::assert_matches!(retry, TeleportInput::CancelRetry);
+        assert!(controller.prepare_cancellation_attempt(Instant::now()));
+        let generation = controller.pending_cancellation.as_ref().expect("cancellation pending").generation;
+        controller
+            .cancel_result_sender
+            .send(TeleportCancelResult { generation, result: Ok(()) })
+            .await
+            .expect("report cancellation send completion");
+        let TeleportInput::CancelResult(result) = controller.next_input().await else { panic!("cancel send result expected") };
+        controller.on_cancel_result(result);
+        assert_eq!(controller.state.borrow().status, TeleportStatus::Cancelled);
+        assert_eq!(controller.check_request_available(), Ok(()));
+
+        controller.on_start(&TeleportStart { teleport_flags: 1 }, Some(1));
+        assert!(!controller.on_finish(next, 1, Some(13), HandoffEventOutcome::Accepted));
+        assert!(controller.on_simulator_promoted(Some(next.region_handle), next.endpoint));
+        assert_eq!(
+            controller.state.borrow().status,
+            TeleportStatus::Completed { region_handle: Some(next.region_handle), same_region: false, flags: 1, sim_access: Some(13) }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_cancellation_is_bounded_and_leaves_the_controller_available() {
+        let next = Destination { region_handle: 13, endpoint: "127.0.0.1:13013".parse().expect("next simulator") };
+        let mut controller = TeleportController::new();
+
+        controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
+        controller.begin_cancellation(TeleportCancelOutcome::Requested);
+        for attempt in 1..=CANCEL_MAX_ATTEMPTS {
+            assert!(controller.prepare_cancellation_attempt(Instant::now()));
+            controller.finish_cancellation_attempt(Err(TeleportCancelFailure::QueueFull), Instant::now());
+            if attempt < CANCEL_MAX_ATTEMPTS {
+                let retry = {
+                    let retry = controller.next_input();
+                    tokio::pin!(retry);
+                    tokio::time::advance(CANCEL_RETRY_INTERVAL).await;
+                    retry.await
+                };
+                std::assert_matches!(retry, TeleportInput::CancelRetry);
+            }
+        }
+
+        assert_eq!(
+            controller.state.borrow().status,
+            TeleportStatus::CancelFailed {
+                outcome: TeleportCancelOutcome::Requested,
+                attempts: CANCEL_MAX_ATTEMPTS,
+                reason: TeleportCancelFailure::QueueFull,
+            }
+        );
+        assert!(controller.pending_cancellation.is_none());
+        assert!(controller.pending_crossing.is_none());
+        assert_eq!(controller.check_request_available(), Ok(()));
+
+        controller.on_start(&TeleportStart { teleport_flags: 2 }, Some(1));
+        assert!(!controller.on_finish(next, 2, Some(13), HandoffEventOutcome::Accepted));
+        assert!(controller.on_simulator_promoted(Some(next.region_handle), next.endpoint));
+        std::assert_matches!(controller.state.borrow().status, TeleportStatus::Completed { .. });
     }
 
     #[test]

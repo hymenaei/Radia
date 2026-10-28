@@ -13,8 +13,9 @@ mod test_helpers;
 pub mod world_reader;
 pub mod teleport {
     pub use crate::session::{
-        CrossingState, TeleportAlertInfo, TeleportFailure, TeleportFailureReason, TeleportHandle, TeleportLandmarkRequest,
-        TeleportLocationRequest, TeleportProgressKind, TeleportRequestError, TeleportSnapshot, TeleportStatus,
+        CrossingState, TeleportAlertInfo, TeleportCancelFailure, TeleportCancelOutcome, TeleportFailure, TeleportFailureReason,
+        TeleportHandle, TeleportLandmarkRequest, TeleportLocationRequest, TeleportProgressKind, TeleportRequestError, TeleportSnapshot,
+        TeleportStatus,
     };
 }
 

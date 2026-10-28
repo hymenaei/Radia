@@ -24,8 +24,8 @@ pub(crate) use network::{Session, SessionHandle};
 pub(crate) use outbound::CameraUplink;
 pub(crate) use region_lookup::{RegionGridCell, RegionLookup, RegionLookupError, map_request_coordinates};
 pub use teleport::{
-    CrossingState, TeleportAlertInfo, TeleportFailure, TeleportFailureReason, TeleportHandle, TeleportLandmarkRequest,
-    TeleportLocationRequest, TeleportProgressKind, TeleportRequestError, TeleportSnapshot, TeleportStatus,
+    CrossingState, TeleportAlertInfo, TeleportCancelFailure, TeleportCancelOutcome, TeleportFailure, TeleportFailureReason, TeleportHandle,
+    TeleportLandmarkRequest, TeleportLocationRequest, TeleportProgressKind, TeleportRequestError, TeleportSnapshot, TeleportStatus,
 };
 
 #[cfg(all(test, any(target_os = "windows", target_os = "linux")))]

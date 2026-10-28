@@ -1,6 +1,7 @@
 mod benchmark;
 pub mod environment;
 mod geometry;
+mod gpu_timing;
 pub mod material;
 mod pipeline;
 mod renderer;

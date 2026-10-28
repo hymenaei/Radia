@@ -14,7 +14,7 @@ use tokio::runtime::{Builder, Handle};
 use uuid::Uuid;
 use world::{OrderEvidence, Region, RegionHandle};
 
-use super::{CacheWriteWorker, ObjectCacheEvent, ObjectCacheSession, RegionLoadResult, open_at};
+use super::{CacheWriteWorker, ObjectCacheEvent, ObjectCacheSession, RegionLoadResult, migrate, open_at};
 use crate::session::inbound::decode_object_message;
 use crate::session::world::{SessionWorld, viewer_world_limits};
 
@@ -184,6 +184,21 @@ async fn schema_v1_migration_backfills_incremental_global_totals() {
     let writer = CacheWriteWorker::start(std::sync::Arc::clone(&db), Handle::current()).expect("start cache writer");
     assert!(cache.handle_event(ObjectCacheEvent::Ready { db, status, writer }).is_none());
     cache.close().await;
+}
+
+#[test]
+fn schema_v1_migration_rolls_back_after_a_partial_upgrade_failure() {
+    let mut connection = Connection::open_in_memory().expect("create isolated SQLite database");
+    connection.execute_batch("CREATE TABLE object_entries (local_id INTEGER); PRAGMA user_version = 1;").expect("create partial v1 schema");
+
+    assert!(migrate(&mut connection).is_err());
+    let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0)).expect("read schema version");
+    let totals_table_exists: bool = connection
+        .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'object_cache_totals')", [], |row| row.get(0))
+        .expect("check whether migration table remains");
+
+    assert_eq!(version, 1);
+    assert!(!totals_table_exists);
 }
 
 #[tokio::test]

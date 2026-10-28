@@ -718,7 +718,8 @@ fn migrate(connection: &mut Connection) -> Result<(), MigrationError> {
     let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match version {
         0 => {
-            connection.execute_batch(
+            let transaction = connection.transaction()?;
+            transaction.execute_batch(
                 "CREATE TABLE region_scopes (
                     grid_id TEXT NOT NULL,
                     region_id BLOB NOT NULL CHECK(length(region_id) = 16),
@@ -739,12 +740,15 @@ fn migrate(connection: &mut Connection) -> Result<(), MigrationError> {
                 ) WITHOUT ROWID;
                 ",
             )?;
-            install_global_stats(connection, false)?;
-            connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            install_global_stats(&transaction, false)?;
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            transaction.commit()?;
         }
         1 => {
-            install_global_stats(connection, true)?;
-            connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            let transaction = connection.transaction()?;
+            install_global_stats(&transaction, true)?;
+            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            transaction.commit()?;
         }
         SCHEMA_VERSION => {}
         _ => return Err(MigrationError::SchemaMismatch),

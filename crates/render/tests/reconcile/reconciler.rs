@@ -1,11 +1,11 @@
-use std::assert_matches;
+use std::{assert_matches, collections::HashSet};
 
 use world::{FaceAppearance, SurfaceAppearance, TextureMapping};
 
 use super::support::{
     BTreeMap, BTreeSet, Budget, DVec3, Detail, FieldUpdate, Instant, Kind, NonZeroU32, ObjectObservation, ObjectPatch, ParentUpdate,
     Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, RecoveryReason, Region, RegionInfo, Shape,
-    Status, Uuid, Vec3, add, camera, ids, move_root, positions, reply, settle, source, world,
+    Status, Uuid, Vec3, add, add_shaped, camera, ids, move_root, positions, reply, settle, source, world, world_with_capacity,
 };
 
 #[test]
@@ -185,50 +185,30 @@ fn camera_updates_preserve_progress() {
 }
 
 #[test]
-fn mesh_admission_recovery() {
-    let mut world = world();
-    for id in 1..=1025 {
-        add(&mut world, id, id as u32, ParentUpdate::Root, 100.0, id as u64 * 2);
-        let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
-        patch.shape = FieldUpdate::Set(Shape::Prim(world::PrimShape { profile_begin: id as u16, ..Default::default() }));
-        let _ = world.patch_object(patch).unwrap();
+fn unique_mesh_scene_settles() {
+    let mut world = world_with_capacity(3000);
+    for id in 1..=3000 {
+        let index = id - 1;
+        let twist = (index % 201) as i16;
+        let twist = if twist <= 100 { twist } else { twist - 201 };
+        let shape = world::PrimShape {
+            profile_curve: 2,
+            profile_hollow: 12_500,
+            path_scale_x: 100 + (index / 201) as u8,
+            path_twist: twist as i8,
+            ..Default::default()
+        };
+        add_shaped(&mut world, id as u128, id, ParentUpdate::Root, 100.0, id as u64, shape);
     }
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     scene.set_camera(camera(-300.0));
-    for _ in 0..30_000 {
-        match scene.poll(now) {
-            ReconcileStep::Read(job) => {
-                let result = reply(&world, &job);
-                scene.complete_read(job, result, now);
-            }
-            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
-            ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
-            ReconcileStep::Continue => {}
-            ReconcileStep::Wait(until) => now = until,
-            _ => panic!("expected bounded preparation work"),
-        }
-        if view.objects().filter(|object| object.mesh().is_some()).count() == 1024
-            && view.revision() == Some(world.revision())
-            && view.objects().any(|object| matches!(object.mesh_state(), Some((_, PreparedMesh::Capacity))))
-            && view.objects().all(|object| object.mesh().is_none() || object.materials().is_some())
-        {
-            break;
-        }
-    }
-    assert_eq!(view.objects().filter(|object| matches!(object.mesh_state(), Some((_, PreparedMesh::Capacity)))).count(), 1);
-    for _ in 0..32 {
-        match scene.poll(now) {
-            ReconcileStep::Continue => {}
-            ReconcileStep::Wait(until) => now = until,
-            _ => panic!("unchanged capacity cannot republish or regenerate"),
-        }
-    }
-    let _ = world.remove_object(source(1, 10_000), NonZeroU32::new(1).unwrap()).unwrap();
-    scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(view.object_count(), 1024);
-    assert!(view.objects().all(|object| object.mesh().is_some()));
+    assert_eq!(view.object_count(), 3000);
+    assert_eq!(view.objects().filter(|object| object.mesh().is_some()).count(), 3000);
+    assert!(view.objects().all(|object| !matches!(object.mesh_state(), Some((_, PreparedMesh::Capacity)))));
+    let meshes = view.objects().filter_map(|object| object.mesh().map(|(_, mesh)| mesh.id())).collect::<HashSet<_>>();
+    assert_eq!(meshes.len(), 3000, "each unique prim shape must have settled geometry");
 }
 
 #[test]

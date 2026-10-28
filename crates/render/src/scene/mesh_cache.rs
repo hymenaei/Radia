@@ -1,6 +1,7 @@
 use std::{
     cmp::Reverse,
     collections::HashMap,
+    mem::size_of,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
@@ -13,8 +14,8 @@ use world::{PrimShape, SculptFlags, SculptType};
 
 use crate::scene::{Budget, Detail, MeshBuildError, SharedMesh, budget::MeshWork, mesh::retained_bytes, prim::tessellate};
 
-const MAX_ENTRIES: usize = 1024;
 const CACHE_BYTES: usize = 32 * 1024 * 1024;
+const HASH_ENTRY_OVERHEAD_BYTES: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MeshKey {
@@ -75,6 +76,8 @@ struct Entry {
     state: State,
 }
 
+const ENTRY_BYTES: usize = size_of::<MeshKey>() + size_of::<Entry>() + HASH_ENTRY_OVERHEAD_BYTES;
+
 pub(in crate::scene) struct MeshCache {
     budget: Budget,
     entries: HashMap<MeshKey, Entry>,
@@ -94,10 +97,12 @@ impl MeshCache {
             entry.touched = self.clock;
             return true;
         }
-        if self.entries.len() == MAX_ENTRIES && !self.evict() {
+        while !self.has_room(ENTRY_BYTES) && self.evict() {}
+        if !self.has_room(ENTRY_BYTES) {
             return false;
         }
         self.entries.insert(key, Entry { wanted: 1, touched: self.clock, priority: 0, state: State::Queued });
+        self.bytes += ENTRY_BYTES;
         true
     }
 
@@ -126,6 +131,8 @@ impl MeshCache {
                 cancelled.store(true, Ordering::Release);
             }
             self.entries.remove(&key);
+            self.bytes -= ENTRY_BYTES;
+            self.shrink_if_sparse();
         }
     }
 
@@ -153,8 +160,8 @@ impl MeshCache {
             .filter_map(|(key, entry)| if let State::Blocked(bytes) = entry.state { Some((*key, bytes)) } else { None })
             .collect();
         for (key, bytes) in blocked {
-            while self.bytes + bytes > CACHE_BYTES && self.evict() {}
-            if self.bytes + bytes <= CACHE_BYTES {
+            while !self.has_room(bytes) && self.evict() {}
+            if self.has_room(bytes) {
                 self.entries.get_mut(&key).expect("blocked entry remains wanted").state = State::Queued;
             }
         }
@@ -187,7 +194,7 @@ impl MeshCache {
         let state = match completion.result {
             Ok(mesh) => {
                 let bytes = retained_bytes(&mesh);
-                while self.bytes + bytes > CACHE_BYTES {
+                while !self.has_room(bytes) {
                     if !self.evict() {
                         self.entries.get_mut(&completion.key).expect("matched completion").state = State::Blocked(bytes);
                         return;
@@ -210,9 +217,22 @@ impl MeshCache {
             return false;
         };
         if let State::Ready(mesh) = self.entries.remove(&key).expect("selected eviction").state {
-            self.bytes -= retained_bytes(mesh.mesh());
+            self.bytes -= ENTRY_BYTES + retained_bytes(mesh.mesh());
+        } else {
+            self.bytes -= ENTRY_BYTES;
         }
+        self.shrink_if_sparse();
         true
+    }
+
+    fn has_room(&self, bytes: usize) -> bool {
+        self.bytes.checked_add(bytes).is_some_and(|used| used <= CACHE_BYTES)
+    }
+
+    fn shrink_if_sparse(&mut self) {
+        if self.entries.capacity() > self.entries.len().saturating_mul(2) {
+            self.entries.shrink_to_fit();
+        }
     }
 }
 
@@ -335,21 +355,12 @@ mod tests {
     }
 
     #[test]
-    fn entry_limit_and_negative_cache() {
+    fn negative_cache_is_reused() {
         let mut meshes = MeshCache::new(Budget::default());
-        for begin in 0..MAX_ENTRIES {
-            assert!(
-                meshes.request(MeshKey { shape: PrimShape { profile_begin: begin as u16, ..PrimShape::default() }, detail: Detail::Low })
-            );
-        }
         let extra = MeshKey { shape: PrimShape { profile_curve: 15, ..PrimShape::default() }, detail: Detail::High };
-        assert!(!meshes.request(extra));
-        assert!(matches!(meshes.get(extra), PreparedMesh::Capacity));
-        meshes.release(key(Detail::Low));
         assert!(meshes.request(extra));
-        while let Some(job) = meshes.start() {
-            meshes.complete(job.run());
-        }
+        let job = meshes.start().expect("unsupported mesh work starts");
+        meshes.complete(job.run());
         assert!(matches!(meshes.get(extra), PreparedMesh::Failed(MeshBuildError::UnsupportedShape)));
         assert!(meshes.request(extra));
         assert!(meshes.start().is_none());

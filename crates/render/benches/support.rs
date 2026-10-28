@@ -299,7 +299,15 @@ fn scene_camera() -> Camera {
 }
 
 fn prepare_shape(index: usize) -> PrimShape {
-    PrimShape { profile_curve: 2, profile_hollow: 12_500, path_twist: index as i8, ..PrimShape::default() }
+    let twist = (index % 201) as i16;
+    let twist = if twist <= 100 { twist } else { twist - 201 };
+    PrimShape {
+        profile_curve: 2,
+        profile_hollow: 12_500,
+        path_scale_x: 100 + (index / 201) as u8,
+        path_twist: twist as i8,
+        ..PrimShape::default()
+    }
 }
 
 fn reply(world: &World, job: &ReadJob) -> Result<ReadReply, ReadFailure> {

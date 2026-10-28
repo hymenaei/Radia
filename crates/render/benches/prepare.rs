@@ -13,7 +13,7 @@ use wgpu::{DeviceDescriptor, PowerPreference, RequestAdapterOptions, TextureForm
 use crate::support;
 
 const OBJECTS: usize = 3_000;
-const DISTINCT_MESHES: [usize; 1] = [50];
+const DISTINCT_MESHES: [usize; 2] = [50, OBJECTS];
 const SIZE: [u32; 2] = [1024, 1024];
 
 pub(crate) fn bench(c: &mut Criterion) {
@@ -25,6 +25,10 @@ pub(crate) fn bench(c: &mut Criterion) {
     }))
     .expect("benchmark GPU adapter");
     eprintln!("render prepare benchmark GPU: {:?}", adapter.get_info());
+    eprintln!(
+        "render prepare timestamp queries: {}",
+        adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS)
+    );
     let (device, queue) = block_on(adapter.request_device(&DeviceDescriptor {
         required_features: adapter.features() & (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::INDIRECT_FIRST_INSTANCE),
         ..Default::default()
@@ -76,6 +80,7 @@ fn bench_scene(
     assert_eq!(prepare.stats().pending_textures, 0);
     assert!(prepare.stats().texture_count > 0);
     assert_eq!(prepare.stats().instances, OBJECTS + terrain_count);
+    assert_eq!(prepare.stats().omitted_faces, 0, "busy-region prepare must draw every supported face");
     eprintln!(
         "prepare scene: objects={OBJECTS}, meshes={mesh_count}, faces={face_count}, terrain_patches={terrain_count}, draw_submissions={}, indexed_commands={}, omitted_faces={}",
         prepare.stats().draw_calls,

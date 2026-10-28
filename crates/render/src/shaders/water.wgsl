@@ -167,7 +167,7 @@ fn shade_water(
     let view_rotation = mat3x3<f32>(world_to_eye[0].xyz, world_to_eye[1].xyz, world_to_eye[2].xyz);
     let reflected_direction = safe_normalize(transpose(view_rotation) * reflected_eye);
     let distance = length(position);
-    let fog_sample = position + view_direction * 2048.0;
+    let fog_sample = view_eye * 2048.0;
     let fb = apply_water_fog(fog_sample, vec4<f32>(1.0), water.fog, true);
     let wavef_eye = transform_water_normal(normal_eye, tangent_eye, bitangent_eye, safe_normalize(wavef));
     let punctual_normal = safe_normalize(wavef_eye + normal_eye * (max(distance, 32.0) / 32.0 * (1.0 - view_dot_up)));

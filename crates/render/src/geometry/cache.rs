@@ -724,8 +724,11 @@ pub(super) fn cached_faces(
             continue;
         }
         let texture = material.and_then(|material| material.base_color_texture.as_ref()).and_then(|binding| binding.image()).cloned();
-        let pipeline =
-            if shading == ShadingMode::Water { Pipeline::Water } else { surface_pipeline(params.blend, params.double_sided, scale) };
+        let pipeline = match shading {
+            ShadingMode::Terrain => Pipeline::Terrain,
+            ShadingMode::Water => Pipeline::Water,
+            ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, scale),
+        };
         cached.push(CachedFace {
             order: (id.0, id.1, id.2, face.slot),
             indices: face.indices.clone(),

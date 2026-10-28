@@ -1062,6 +1062,7 @@ mod tests {
     use super::*;
     use crate::geometry::MeshState;
     use crate::geometry::cache::{cached_faces, mesh_info, object_item_id, refresh_winding_pipeline, surface_pipeline};
+    use crate::pipeline::Pipeline;
     use crate::scene::{Budget, Placement, Reconciler};
     use crate::texture::TextureState;
     use math::DVec3;
@@ -1169,6 +1170,19 @@ mod tests {
         assert!(!prepared.reusable(&prepare_key(&view), state, MeshState::default(), deadline));
         prepared.animation_deadline = None;
         assert!(!prepared.needs_frame(state, MeshState::default(), deadline));
+    }
+
+    #[test]
+    fn surface_faces_use_their_shading_pipeline() {
+        let (_scene, view, _) = crate::geometry::fixtures::scene(255);
+        let object = view.objects().next().expect("fixture object");
+        let (_, mesh) = object.mesh().expect("fixture mesh");
+        let info = mesh_info(mesh);
+        for (shading, pipeline) in [(ShadingMode::Terrain, Pipeline::Terrain), (ShadingMode::Water, Pipeline::Water)] {
+            let faces = cached_faces((1, 1, 0), mesh, &info, None, None, Vec3::ONE, shading);
+            assert!(!faces.is_empty());
+            assert!(faces.iter().all(|face| face.draw.pipeline == pipeline));
+        }
     }
 
     #[test]

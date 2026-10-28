@@ -82,21 +82,37 @@ impl Reconciler {
                     let region = summary.region;
                     let bytes = size_of::<RegionSummary>() + summary.info.name.as_ref().map_or(0, String::capacity) + 32;
                     let old = self.state.mirror.regions.get(&region);
+                    let old_exists = old.is_some();
                     let origin_changed = old.is_some_and(|old| old.summary().info.resolved_origin() != summary.info.resolved_origin());
-                    let spatial_changed = old.is_none() || origin_changed;
-                    if old.is_none() && self.state.mirror.regions.len() >= MAX_REGIONS {
+                    let terrain_settings_changed = old.is_none_or(|old| old.summary().terrain_settings != summary.terrain_settings);
+                    let old_textures = old.and_then(|old| old.summary().terrain_settings).map(|settings| *settings.detail_textures());
+                    let old_handles = old.map(|old| old.terrain_textures().clone());
+                    let old_bytes = old.map_or(0, region_bytes);
+                    let spatial_changed = !old_exists || origin_changed;
+                    if !old_exists && self.state.mirror.regions.len() >= MAX_REGIONS {
                         return Err(RecoveryReason::Capacity);
                     }
-                    let old_bytes = old.map_or(0, region_bytes);
                     if origin_changed {
                         self.conservative_scan();
                     }
                     self.retain(bytes, old_bytes)?;
                     let charge = lease.split(bytes).ok_or(RecoveryReason::Capacity)?;
-                    self.state.mirror.regions.insert(region, RegionData::new(summary, charge));
+                    let new_textures = summary.terrain_settings.map(|settings| *settings.detail_textures());
+                    let textures = (old_textures == new_textures).then_some(old_handles).flatten();
+                    let mut data = RegionData::new(summary, charge);
+                    if let Some(textures) = textures {
+                        data = data.with_terrain_textures(textures);
+                    }
+                    self.state.mirror.regions.insert(region, data);
                     self.world.environments.insert(region);
                     if spatial_changed {
                         self.preparation.surfaces.regions(&self.state.mirror);
+                    }
+                    if terrain_settings_changed || origin_changed {
+                        self.preparation.assets.invalidate_region(region);
+                    }
+                    if terrain_settings_changed {
+                        self.preparation.surfaces.terrain_settings(&self.state.mirror, region);
                     }
                     self.publication.dirty.regions.insert(region);
                     if self.publication.replace || self.recovery.startup {
@@ -345,6 +361,7 @@ impl Reconciler {
         if let Some(old) = self.state.mirror.regions.remove(&region) {
             self.state.bytes -= region_bytes(&old);
         }
+        self.preparation.assets.remove_region(region);
         self.state.bytes -= self.preparation.environments.source_bytes(region);
         self.preparation.environments.retire(region);
         if let Some(old) = self.state.mirror.environments.remove(&region) {

@@ -12,8 +12,8 @@ use crate::{
     TextureAnimation, Transform,
 };
 use crate::{
-    Entity, Kind, LocalAddress, Parent, PbrMaterialOverrides, PoseError, PoseState, Region, RegionInfo, Shape, WorldRevision,
-    WorldTransformState,
+    Entity, Kind, LocalAddress, Parent, PbrMaterialOverrides, PoseError, PoseState, Region, RegionInfo, Shape, TerrainSettings,
+    WorldRevision, WorldTransformState,
 };
 use crate::{Object, World, WorldChange, WorldId};
 
@@ -72,6 +72,7 @@ pub struct ObjectPageCursor {
 pub struct RegionSummary {
     pub region: Region,
     pub info: RegionInfo,
+    pub terrain_settings: Option<TerrainSettings>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -256,7 +257,7 @@ impl World {
             }
             bytes = bytes.saturating_add(charge);
             after = Some(*region);
-            regions.push(RegionSummary { region: *region, info: info.clone() });
+            regions.push(RegionSummary { region: *region, info: info.clone(), terrain_settings: state.terrain.settings() });
         }
         let has_more = oversized_item || iter.next().is_some();
         let next = has_more.then(|| RegionPageCursor { world: self.id, after: after.expect("nonzero page limit") });

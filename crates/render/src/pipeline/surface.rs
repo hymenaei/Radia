@@ -1,5 +1,5 @@
-use math::camera::rh::{proj::directx::perspective, view::look_to_mat4};
-use math::{Mat4, Vec3};
+use math::camera::rh::view::look_to_mat4;
+use math::{Mat4, Vec3, Vec4};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
     BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
@@ -14,9 +14,11 @@ pub(crate) const INSTANCE_BYTES: usize = 192;
 pub(crate) const VERTEX_BYTES: usize = 32;
 const CAMERA_BYTES: usize = 144;
 const KEY_LIGHT: Vec3 = Vec3::new(-0.3, 0.5, 1.0);
+const CAMERA_NEAR_PLANE: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Pipeline {
+    Terrain,
     Surface,
     FlippedWinding,
     DoubleSided,
@@ -27,6 +29,7 @@ pub(crate) enum Pipeline {
 }
 
 pub(crate) struct SurfacePipelines {
+    terrain: RenderPipeline,
     pipeline: RenderPipeline,
     flipped_winding: RenderPipeline,
     double_sided: RenderPipeline,
@@ -39,24 +42,25 @@ pub(crate) struct SurfacePipelines {
 }
 
 impl SurfacePipelines {
-    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout) -> Self {
+    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout, terrain_textures: &BindGroupLayout) -> Self {
+        let surface_shader_source = include_str!("../shaders/surface.wgsl");
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Scene preview"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/surface.wgsl").into()),
+            source: ShaderSource::Wgsl(surface_shader_source.into()),
         });
         let attributes = [
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 0, shader_location: 3 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 16, shader_location: 4 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 32, shader_location: 5 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 48, shader_location: 6 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 64, shader_location: 7 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 80, shader_location: 8 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 96, shader_location: 9 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 112, shader_location: 10 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 128, shader_location: 11 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 144, shader_location: 12 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 160, shader_location: 13 },
-            VertexAttribute { format: VertexFormat::Float32x4, offset: 176, shader_location: 14 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 0, shader_location: 4 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 16, shader_location: 5 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 32, shader_location: 6 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 48, shader_location: 7 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 64, shader_location: 8 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 80, shader_location: 9 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 96, shader_location: 10 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 112, shader_location: 11 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 128, shader_location: 12 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 144, shader_location: 13 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 160, shader_location: 14 },
+            VertexAttribute { format: VertexFormat::Float32x4, offset: 176, shader_location: 15 },
         ];
         let camera_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Surface camera"),
@@ -73,7 +77,20 @@ impl SurfacePipelines {
             immediate_size: 0,
         });
         let buffers = [
-            VertexBufferLayout {
+            Some(VertexBufferLayout {
+                array_stride: VERTEX_BYTES as u64,
+                step_mode: VertexStepMode::Vertex,
+                attributes: &[
+                    VertexAttribute { format: VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+                    VertexAttribute { format: VertexFormat::Float32x3, offset: 12, shader_location: 1 },
+                    VertexAttribute { format: VertexFormat::Float32x2, offset: 24, shader_location: 2 },
+                    VertexAttribute { format: VertexFormat::Float32, offset: 28, shader_location: 3 },
+                ],
+            }),
+            Some(VertexBufferLayout { array_stride: INSTANCE_BYTES as u64, step_mode: VertexStepMode::Instance, attributes: &attributes }),
+        ];
+        let terrain_buffers = [
+            Some(VertexBufferLayout {
                 array_stride: VERTEX_BYTES as u64,
                 step_mode: VertexStepMode::Vertex,
                 attributes: &[
@@ -81,8 +98,13 @@ impl SurfacePipelines {
                     VertexAttribute { format: VertexFormat::Float32x3, offset: 12, shader_location: 1 },
                     VertexAttribute { format: VertexFormat::Float32x2, offset: 24, shader_location: 2 },
                 ],
-            },
-            VertexBufferLayout { array_stride: INSTANCE_BYTES as u64, step_mode: VertexStepMode::Instance, attributes: &attributes },
+            }),
+            Some(VertexBufferLayout {
+                array_stride: size_of::<f32>() as u64,
+                step_mode: VertexStepMode::Vertex,
+                attributes: &[VertexAttribute { format: VertexFormat::Float32, offset: 0, shader_location: 3 }],
+            }),
+            Some(VertexBufferLayout { array_stride: INSTANCE_BYTES as u64, step_mode: VertexStepMode::Instance, attributes: &attributes }),
         ];
         let targets = [Some(ColorTargetState { format, blend: None, write_mask: ColorWrites::ALL })];
         let descriptor = RenderPipelineDescriptor {
@@ -92,7 +114,7 @@ impl SurfacePipelines {
                 module: &shader,
                 entry_point: Some("vertex"),
                 compilation_options: Default::default(),
-                buffers: &buffers.map(Some),
+                buffers: &buffers,
             },
             primitive: PrimitiveState { cull_mode: Some(Face::Back), ..Default::default() },
             depth_stencil: Some(DepthStencilState {
@@ -113,6 +135,37 @@ impl SurfacePipelines {
             cache: None,
         };
         let pipeline = device.create_render_pipeline(&descriptor);
+        let terrain_shader_source = format!("{surface_shader_source}\n{}", include_str!("../shaders/terrain.wgsl"));
+        let terrain_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Legacy terrain detail blend"),
+            source: ShaderSource::Wgsl(terrain_shader_source.into()),
+        });
+        let terrain_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Legacy terrain pipeline"),
+            bind_group_layouts: &[Some(&camera_layout), Some(textures), Some(terrain_textures)],
+            immediate_size: 0,
+        });
+        let terrain = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("Legacy terrain"),
+            layout: Some(&terrain_layout),
+            vertex: VertexState {
+                module: &terrain_shader,
+                entry_point: Some("terrain_vertex"),
+                compilation_options: Default::default(),
+                buffers: &terrain_buffers,
+            },
+            primitive: descriptor.primitive,
+            depth_stencil: descriptor.depth_stencil.clone(),
+            multisample: descriptor.multisample,
+            fragment: Some(FragmentState {
+                module: &terrain_shader,
+                entry_point: Some("terrain_fragment"),
+                compilation_options: Default::default(),
+                targets: &targets,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let flipped_winding = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Flipped winding scene preview"),
             primitive: PrimitiveState { front_face: FrontFace::Cw, ..descriptor.primitive },
@@ -163,7 +216,7 @@ impl SurfacePipelines {
             entries: &[BindGroupEntry { binding: 0, resource: BindingResource::Buffer(camera.as_entire_buffer_binding()) }],
         });
 
-        Self { pipeline, flipped_winding, double_sided, blend, blend_flipped, blend_double_sided, water, camera, binding }
+        Self { terrain, pipeline, flipped_winding, double_sided, blend, blend_flipped, blend_double_sided, water, camera, binding }
     }
     pub(crate) fn update_camera_uniform(&self, queue: &Queue, camera: Camera, size: [u32; 2]) -> Mat4 {
         let projection = projection(camera, size);
@@ -181,6 +234,7 @@ impl SurfacePipelines {
     }
     pub(crate) fn bind_pipeline(&self, pass: &mut RenderPass<'_>, pipeline: Pipeline) {
         pass.set_pipeline(match pipeline {
+            Pipeline::Terrain => &self.terrain,
             Pipeline::Surface => &self.pipeline,
             Pipeline::FlippedWinding => &self.flipped_winding,
             Pipeline::DoubleSided => &self.double_sided,
@@ -194,7 +248,14 @@ impl SurfacePipelines {
 }
 
 pub(crate) fn projection(camera: Camera, size: [u32; 2]) -> Mat4 {
-    perspective(camera.vertical_fov() as f32, size[0] as f32 / size[1] as f32, camera.draw_distance() as f32, 0.05) * camera_view(camera)
+    let focal = 1.0 / (camera.vertical_fov() as f32 * 0.5).tan();
+    let aspect = size[0] as f32 / size[1] as f32;
+    Mat4::from_cols(
+        Vec4::new(focal / aspect, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, focal, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 0.0, -1.0),
+        Vec4::new(0.0, 0.0, CAMERA_NEAR_PLANE, 0.0),
+    ) * camera_view(camera)
 }
 
 fn camera_view(camera: Camera) -> Mat4 {
@@ -216,10 +277,17 @@ mod tests {
         assert!(center.x.abs() < 1e-6 && center.y.abs() < 1e-6 && (0.0..1.0).contains(&center.z));
         assert!(matrix.project_point3(Vec3::new(10.0, 0.0, 1.0)).y > 0.0);
         assert!(matrix.project_point3(Vec3::new(10.0, -1.0, 0.0)).x > 0.0);
-        assert!((matrix.project_point3(Vec3::new(0.05, 0.0, 0.0)).z - 1.0).abs() < 1e-5);
-        let close = projection(camera.with_quality(32.0, 1.0).unwrap(), [1000, 1000]);
-        assert!(close.project_point3(Vec3::new(32.0, 0.0, 0.0)).z.abs() < 1e-6);
-        assert!(close.project_point3(Vec3::new(40.0, 0.0, 0.0)).z < 0.0);
+        assert!((matrix.project_point3(Vec3::new(CAMERA_NEAR_PLANE, 0.0, 0.0)).z - 1.0).abs() < 1e-5);
+        let close_camera = camera.with_quality(64.0, 1.0).unwrap();
+        let far_camera = camera.with_quality(512.0, 1.0).unwrap();
+        let close = projection(close_camera, [1000, 1000]);
+        let far = projection(far_camera, [1000, 1000]);
+        assert_eq!(close, far);
+        assert!(close.project_point3(Vec3::new(32.0, 0.0, 0.0)).z > 0.0);
+        assert!(close.project_point3(Vec3::new(40.0, 0.0, 0.0)).z > 0.0);
+        assert!(close.project_point3(Vec3::new(1.0e9, 0.0, 0.0)).z > 0.0);
+        let frustum = math::Frustum::from_clip_matrix(close);
+        assert!(frustum.intersects_sphere(DVec3::new(1.0e9, 0.0, 0.0), 0.0));
     }
 
     #[test]

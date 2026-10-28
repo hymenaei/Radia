@@ -5,7 +5,7 @@ use std::{
 
 use math::{DVec3, ray_intersects_bounds, ray_triangle_intersection};
 
-use super::{GeometryRenderer, Instance};
+use super::{GeometryRenderer, Instance, ShadingMode};
 use crate::scene::Camera;
 
 const MAX_PICK_TRIANGLES: usize = 250_000;
@@ -34,7 +34,7 @@ fn pick_instances(instances: &[Instance], camera: Camera, ray: DVec3) -> Result<
         return Ok(None);
     }
 
-    let mut closest = camera.draw_distance() as f32;
+    let mut closest = f32::INFINITY;
     let mut found = false;
     let mut work = 0;
     for instance in instances {
@@ -48,8 +48,9 @@ fn pick_instances(instances: &[Instance], camera: Camera, ray: DVec3) -> Result<
         if !origin.is_finite() || !direction.is_finite() {
             continue;
         }
+        let distance_limit = if instance.shading == ShadingMode::Terrain { f32::INFINITY } else { camera.draw_distance() as f32 };
         let mesh = instance.mesh.mesh();
-        if !ray_intersects_bounds(origin, direction, mesh.bounds(), closest) {
+        if !ray_intersects_bounds(origin, direction, mesh.bounds(), closest.min(distance_limit)) {
             continue;
         }
 
@@ -64,7 +65,7 @@ fn pick_instances(instances: &[Instance], camera: Camera, ray: DVec3) -> Result<
                 let Some(distance) = ray_triangle_intersection(origin, direction, triangle, face.double_sided) else {
                     continue;
                 };
-                if distance >= 0.05 && distance < closest {
+                if distance >= 0.05 && distance < distance_limit && distance < closest {
                     closest = distance;
                     found = true;
                 }
@@ -127,6 +128,22 @@ mod tests {
     }
 
     #[test]
+    fn terrain_picks_past_draw_distance_but_objects_do_not() {
+        let mesh = shared_mesh();
+        let (triangle, indices) = first_triangle(&mesh);
+        let (camera, center, ray) = camera_for_triangle(triangle);
+        let camera = camera.with_quality(64.0, 1.0).unwrap();
+        let position_at = |distance| camera.position() + ray * distance - center;
+
+        let mut terrain = instance(mesh.clone(), position_at(100.0), indices.clone(), false);
+        terrain.shading = ShadingMode::Terrain;
+        assert_hit_near(&[terrain], camera, ray, camera.position() + ray * 100.0);
+
+        let object = instance(mesh, position_at(100.0), indices, false);
+        assert_eq!(pick_instances(&[object], camera, ray), Ok(None));
+    }
+
+    #[test]
     fn work_limit_follows_bounds() {
         let mesh = shared_mesh();
         let (triangle, indices) = first_triangle(&mesh);
@@ -162,6 +179,8 @@ mod tests {
             pickable: true,
             faces: vec![PickFace { indices, double_sided }],
             shading: ShadingMode::Studio,
+            terrain_textures: None,
+            terrain_composition: None,
         }
     }
 

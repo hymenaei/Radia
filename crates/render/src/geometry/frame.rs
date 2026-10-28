@@ -43,6 +43,7 @@ impl GeometryRenderer {
                 return;
             }
         }
+        self.textures.clear_terrain_bindings();
         let visibility_started = Instant::now();
         self.epoch = self.epoch.checked_add(1).expect("render frame space exhausted");
         self.stats = Stats::default();
@@ -66,6 +67,8 @@ impl GeometryRenderer {
                     pickable: true,
                     faces: Vec::new(),
                     shading: ShadingMode::Studio,
+                    terrain_textures: None,
+                    terrain_composition: None,
                 },
                 object.materials(),
                 animation,
@@ -81,6 +84,11 @@ impl GeometryRenderer {
                 }
                 SurfaceKind::Water => (0, 0, ShadingMode::Water),
             };
+            let terrain_textures = if shading == ShadingMode::Terrain {
+                Some(view.region(surface.region).map_or([None, None, None, None], |region| region.terrain_textures().clone()))
+            } else {
+                None
+            };
             Some((
                 (kind, u128::from(surface.region.get()), index),
                 Instance {
@@ -91,6 +99,8 @@ impl GeometryRenderer {
                     pickable: surface.kind != SurfaceKind::Water,
                     faces: Vec::new(),
                     shading,
+                    terrain_textures,
+                    terrain_composition: surface.terrain_composition.clone(),
                 },
                 None,
                 None,
@@ -111,6 +121,13 @@ impl GeometryRenderer {
         times.visibility = visibility_started.elapsed();
         let requests_started = Instant::now();
         self.requested_textures.clear();
+        for (_, instance, _, _, _) in &candidates {
+            if let Some(textures) = &instance.terrain_textures {
+                for texture in textures.iter().flatten() {
+                    self.request_texture(texture, Priority::Visible);
+                }
+            }
+        }
         let mut request = |face: &FaceMaterial, priority| {
             let Some(texture) = face.base_color_texture.as_ref().and_then(|binding| binding.image()) else { return };
             if self.requested_textures.contains(&texture.id()) {
@@ -126,10 +143,7 @@ impl GeometryRenderer {
             self.requested_textures.insert(texture.id());
             self.textures.request(texture, self.epoch, priority);
         };
-        for (_, instance, faces, _, _) in &candidates {
-            if let Some(mesh) = self.meshes.get_mut(&instance.mesh.id()) {
-                mesh.used = self.epoch;
-            }
+        for (_, _, faces, _, _) in &candidates {
             if let Some(faces) = faces {
                 for face in *faces {
                     request(face, Priority::Visible);
@@ -141,6 +155,12 @@ impl GeometryRenderer {
                 for face in faces {
                     request(face, Priority::Background);
                 }
+            }
+        }
+        drop(request);
+        for (_, instance, _, _, _) in &candidates {
+            if let Some(mesh) = self.meshes.get_mut(&instance.mesh.id()) {
+                mesh.used = self.epoch;
             }
         }
         times.requests = requests_started.elapsed();
@@ -156,7 +176,7 @@ impl GeometryRenderer {
         let mut pending_textures = HashSet::new();
         let mut animated_faces = false;
         for (id, mut instance, faces, animation, appearance) in candidates {
-            if !self.upload_mesh(device, &instance.mesh, &mut uploaded) {
+            if !self.upload_mesh(device, &instance.mesh, instance.terrain_composition.as_deref(), &mut uploaded) {
                 pending_meshes.insert(instance.mesh.id());
                 continue;
             }
@@ -204,12 +224,25 @@ impl GeometryRenderer {
                 {
                     pending_textures.insert(key.id);
                 }
-                let pipeline = if matches!(instance.shading, ShadingMode::Water) {
-                    Pipeline::Water
-                } else {
-                    surface_pipeline(params.blend, params.double_sided, instance.scale)
+                let terrain = instance.terrain_textures.as_ref().map(|textures| {
+                    let key = self.textures.terrain_key(textures, self.epoch);
+                    self.textures.prepare_terrain_binding(device, key);
+                    for (texture, key) in textures.iter().zip(key.0) {
+                        if key.is_none()
+                            && let Some(texture) = texture
+                        {
+                            pending_textures.insert(texture.id());
+                        }
+                    }
+                    key
+                });
+                let pipeline = match instance.shading {
+                    ShadingMode::Terrain => Pipeline::Terrain,
+                    ShadingMode::Water => Pipeline::Water,
+                    ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, instance.scale),
                 };
-                let key = DrawKey { mesh: instance.mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture };
+                let key =
+                    DrawKey { mesh: instance.mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture, terrain };
                 let order = (id.0, id.1, id.2, face.slot);
                 let distance_squared = params.blend.then(|| {
                     let center = self.meshes[&key.mesh].centers[index];
@@ -269,6 +302,18 @@ impl GeometryRenderer {
                 "slow scene preparation"
             );
         }
+    }
+
+    fn request_texture(&mut self, texture: &assets::TextureHandle, priority: Priority) {
+        if self.requested_textures.contains(&texture.id()) {
+            return;
+        }
+        if priority == Priority::Background && !texture.info().is_some_and(|info| info.size.into_iter().all(|edge| edge <= 32)) {
+            self.requested_textures.insert(texture.id());
+            return;
+        }
+        self.requested_textures.insert(texture.id());
+        self.textures.request(texture, self.epoch, priority);
     }
 }
 

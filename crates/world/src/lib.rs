@@ -63,7 +63,7 @@ pub use region::parcel::{
 };
 pub use region::terrain::{
     MAX_TERRAIN_PAGE_PATCHES, MAX_TERRAIN_PATCHES, TERRAIN_PATCH_SAMPLES, TERRAIN_PATCH_SIZE, TERRAIN_REGION_SIZE, TerrainPage,
-    TerrainPageCursor, TerrainPatch, TerrainPatchError, TerrainPatchId,
+    TerrainPageCursor, TerrainPatch, TerrainPatchError, TerrainPatchId, TerrainSettings, TerrainSettingsError,
 };
 pub use update::{
     Applied, ApplyError, ApplyOutcome, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, ObjectObservation,

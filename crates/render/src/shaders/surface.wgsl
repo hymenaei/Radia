@@ -11,18 +11,19 @@ struct Input {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
-    @location(3) x: vec4<f32>,
-    @location(4) y: vec4<f32>,
-    @location(5) z: vec4<f32>,
-    @location(6) translation: vec4<f32>,
-    @location(7) nx: vec4<f32>,
-    @location(8) ny: vec4<f32>,
-    @location(9) nz: vec4<f32>,
-    @location(10) color: vec4<f32>,
-    @location(11) u: vec4<f32>,
-    @location(12) v: vec4<f32>,
-    @location(13) params: vec4<f32>,
-    @location(14) scale: vec4<f32>,
+    @location(3) composition: f32,
+    @location(4) x: vec4<f32>,
+    @location(5) y: vec4<f32>,
+    @location(6) z: vec4<f32>,
+    @location(7) translation: vec4<f32>,
+    @location(8) nx: vec4<f32>,
+    @location(9) ny: vec4<f32>,
+    @location(10) nz: vec4<f32>,
+    @location(11) color: vec4<f32>,
+    @location(12) u: vec4<f32>,
+    @location(13) v: vec4<f32>,
+    @location(14) params: vec4<f32>,
+    @location(15) scale: vec4<f32>,
 }
 struct Output {
     @builtin(position) position: vec4<f32>,
@@ -82,21 +83,22 @@ struct Water {
     water.depth = clamp(clip.z / clip.w, 0.0, 1.0);
     return water;
 }
-fn studio(v: Output, color: vec3<f32>, front: bool) -> vec3<f32> {
-    let eye = normalize(-v.position_view);
-    var normal = normalize(v.normal);
+fn shade_surface(position_view: vec3<f32>, normal_view: vec3<f32>, color: vec3<f32>, fullbright: f32, front: bool) -> vec3<f32> {
+    let eye = normalize(-position_view);
+    var normal = normalize(normal_view);
     if !front {
         normal = -normal;
     }
     let key = max(dot(normal, camera.light.xyz), 0.0);
     let halfway = normalize(camera.light.xyz + eye);
     let specular = pow(max(dot(normal, halfway), 0.0), 48.0) * 0.25;
-    return color * (0.15 + 0.85 * key) + vec3<f32>(specular);
+    let lit = color * (0.15 + 0.85 * key) + vec3<f32>(specular);
+    return mix(lit, color, fullbright);
 }
 
 @fragment fn fragment(v: Output, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let color = textureSample(image, image_sampler, v.uv) * v.color;
     if v.params.y == 1.0 && color.a < v.params.z { discard; }
     let alpha = select(1.0, clamp(color.a, 0.0, 1.0), v.params.y == 2.0);
-    return vec4<f32>(mix(studio(v, color.rgb, front), color.rgb, v.params.x), alpha);
+    return vec4<f32>(shade_surface(v.position_view, v.normal, color.rgb, v.params.x, front), alpha);
 }

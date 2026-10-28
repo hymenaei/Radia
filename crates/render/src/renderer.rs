@@ -336,6 +336,7 @@ mod tests {
     fn shaders_validate() {
         for (name, source) in [
             ("surface", include_str!("shaders/surface.wgsl")),
+            ("terrain", concat!(include_str!("shaders/surface.wgsl"), "\n", include_str!("shaders/terrain.wgsl"))),
             ("water", include_str!("shaders/water.wgsl")),
             ("mipmap", include_str!("shaders/mipmap.wgsl")),
         ] {

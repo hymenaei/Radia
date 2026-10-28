@@ -3,7 +3,7 @@ use std::{collections::HashMap, ops::Range};
 use crate::{
     pipeline::{INSTANCE_BYTES, Pipeline},
     scene::MeshId,
-    texture::TextureKey,
+    texture::{TerrainTextureKey, TextureKey},
 };
 
 pub(super) const MAX_FACE_INSTANCES: usize = 65_536;
@@ -18,11 +18,20 @@ pub(super) struct DrawKey {
     pub end: u32,
     pub pipeline: Pipeline,
     pub texture: Option<TextureKey>,
+    pub terrain: Option<TerrainTextureKey>,
 }
 
 impl DrawKey {
     fn command(self, first: u32, count: u32) -> DrawCommand {
-        DrawCommand { mesh: self.mesh, pipeline: self.pipeline, first, count, indices: self.start..self.end, texture: self.texture }
+        DrawCommand {
+            mesh: self.mesh,
+            pipeline: self.pipeline,
+            first,
+            count,
+            indices: self.start..self.end,
+            texture: self.texture,
+            terrain: self.terrain,
+        }
     }
 }
 
@@ -33,6 +42,7 @@ pub(super) struct DrawCommand {
     pub count: u32,
     pub indices: Range<u32>,
     pub texture: Option<TextureKey>,
+    pub terrain: Option<TerrainTextureKey>,
 }
 
 struct Group {
@@ -99,6 +109,7 @@ impl Batches {
                 && last.mesh == key.mesh
                 && last.pipeline == key.pipeline
                 && last.texture == key.texture
+                && last.terrain == key.terrain
                 && last.indices.end == key.start
                 && bytes[last.first as usize * INSTANCE_BYTES..(last.first as usize + 1) * INSTANCE_BYTES] == group.bytes
             {
@@ -129,7 +140,7 @@ mod tests {
     fn key() -> DrawKey {
         let (_scene, view, _camera) = scene(255);
         let mesh = view.objects().find_map(|object| object.mesh()).expect("fixture has geometry").1;
-        DrawKey { mesh: mesh.id(), start: 0, end: 6, pipeline: Pipeline::Surface, texture: None }
+        DrawKey { mesh: mesh.id(), start: 0, end: 6, pipeline: Pipeline::Surface, texture: None, terrain: None }
     }
 
     #[test]
@@ -192,6 +203,21 @@ mod tests {
         assert_eq!(draws.iter().map(|draw| draw.indices.clone()).collect::<Vec<_>>(), [0..12, 12..18, 18..30]);
         assert_eq!(draws.iter().map(|draw| (draw.first, draw.count)).collect::<Vec<_>>(), [(0, 1), (1, 1), (2, 1)]);
         assert_eq!(bytes, [1, 2, 2].into_iter().flat_map(|value| [value; INSTANCE_BYTES]).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn adjacent_terrain_draws_keep_distinct_detail_bindings() {
+        let key = key();
+        let terrain = DrawKey { pipeline: Pipeline::Terrain, terrain: Some(TerrainTextureKey([None; 4])), ..key };
+        let other = DrawKey { start: 6, end: 12, terrain: None, ..terrain };
+        let mut batches = Batches::default();
+        assert!(batches.push(terrain, (1, 1, 0, 0), None, || [0; INSTANCE_BYTES]));
+        assert!(batches.push(other, (1, 1, 0, 1), None, || [0; INSTANCE_BYTES]));
+        let mut draws = Vec::new();
+        let _ = batches.finish(&mut draws);
+        assert_eq!(draws.len(), 2);
+        assert_eq!(draws[0].terrain, terrain.terrain);
+        assert_eq!(draws[1].terrain, other.terrain);
     }
 
     #[test]

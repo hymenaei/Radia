@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assets::TextureId;
+use assets::{TextureHandle, TextureId};
 use math::{DVec3, Quat, Vec3};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, IndexFormat, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
@@ -131,6 +131,8 @@ pub(crate) struct Instance {
     pickable: bool,
     faces: Vec<PickFace>,
     shading: ShadingMode,
+    terrain_textures: Option<[Option<TextureHandle>; 4]>,
+    terrain_composition: Option<Arc<[f32]>>,
 }
 
 pub(crate) struct PickFace {
@@ -138,6 +140,7 @@ pub(crate) struct PickFace {
     double_sided: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ShadingMode {
     Studio,
     Terrain,
@@ -218,7 +221,7 @@ impl GeometryRenderer {
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
-        let pipelines = SurfacePipelines::new(device, format, &textures.layout);
+        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout);
         Self {
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
@@ -303,9 +306,9 @@ impl GeometryRenderer {
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
         self.water.draw(pass);
-        pass.set_vertex_buffer(1, self.instances.slice(..));
         let mut pipeline = None;
         let mut texture = None;
+        let mut terrain = None;
         let mut buffers = None;
         for draw in &self.draws {
             if pipeline != Some(draw.pipeline) {
@@ -316,12 +319,26 @@ impl GeometryRenderer {
                 pass.set_bind_group(1, self.textures.binding(draw.texture), &[]);
                 texture = Some(draw.texture);
             }
+            if draw.pipeline == crate::pipeline::Pipeline::Terrain {
+                let key = draw.terrain.expect("terrain draw has detail texture bindings");
+                if terrain != Some(key) {
+                    pass.set_bind_group(2, self.textures.terrain_binding(key), &[]);
+                    terrain = Some(key);
+                }
+            }
             let mesh = &self.meshes[&draw.mesh];
             let allocation = &mesh.allocation;
             if buffers.is_none_or(|bound| !Arc::ptr_eq(bound, allocation.buffers())) {
                 pass.set_vertex_buffer(0, allocation.buffers().vertices.slice(..));
                 pass.set_index_buffer(allocation.buffers().indices.slice(..), IndexFormat::Uint32);
                 buffers = Some(allocation.buffers());
+            }
+            if draw.pipeline == crate::pipeline::Pipeline::Terrain {
+                let composition = allocation.buffers().composition.as_ref().expect("terrain mesh has a composition stream");
+                pass.set_vertex_buffer(1, composition.slice(..));
+                pass.set_vertex_buffer(2, self.instances.slice(..));
+            } else {
+                pass.set_vertex_buffer(1, self.instances.slice(..));
             }
             let index_offset = allocation.indices().start;
             let base_vertex = i32::try_from(allocation.vertices().start).expect("mesh page fits the GPU budget");

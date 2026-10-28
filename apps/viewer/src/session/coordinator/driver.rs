@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     future::pending,
     ops::ControlFlow,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use ::inventory::{
@@ -65,6 +65,42 @@ enum DriverInput {
     InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>, tokio::task::JoinError>),
 }
 
+#[derive(Default)]
+struct PendingHandshakeReplies {
+    by_simulator: HashMap<SimulatorId, PendingHandshakeReply>,
+}
+
+struct PendingHandshakeReply {
+    flags: u32,
+    remaining: usize,
+}
+
+impl PendingHandshakeReplies {
+    fn queue(&mut self, simulator_id: SimulatorId, flags: u32) -> bool {
+        match self.by_simulator.get_mut(&simulator_id) {
+            Some(reply) => {
+                reply.flags = flags;
+                reply.remaining = reply.remaining.saturating_add(1);
+                false
+            }
+            None => {
+                self.by_simulator.insert(simulator_id, PendingHandshakeReply { flags, remaining: 1 });
+                true
+            }
+        }
+    }
+
+    fn take_next(&mut self, simulator_id: SimulatorId) -> Option<u32> {
+        if self.by_simulator.get(&simulator_id).is_some_and(|reply| reply.remaining == 0) {
+            self.by_simulator.remove(&simulator_id);
+            return None;
+        }
+        let reply = self.by_simulator.get_mut(&simulator_id)?;
+        reply.remaining -= 1;
+        Some(reply.flags)
+    }
+}
+
 pub(crate) struct CredentialPersistence {
     pub(crate) grid: Grid,
     pub(crate) username: String,
@@ -101,6 +137,7 @@ struct SessionDriver {
     inventory: Option<Inventory>,
     inventory_cache: InventoryCacheSession,
     object_cache: ObjectCacheSession,
+    pending_handshake_replies: Arc<Mutex<PendingHandshakeReplies>>,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
     rejected_inventory_blocks: u64,
     inventory_fetch: InventoryFetchController,
@@ -150,6 +187,7 @@ impl SessionDriver {
         let inventory_fetch = InventoryFetchController::new(inventory_edits.handle());
         let mut object_cache = ObjectCacheSession::new(credentials.grid);
         object_cache.start(&runtime);
+        let pending_handshake_replies = Arc::new(Mutex::new(PendingHandshakeReplies::default()));
 
         Self {
             session,
@@ -179,6 +217,7 @@ impl SessionDriver {
             inventory: None,
             inventory_cache: InventoryCacheSession::new(),
             object_cache,
+            pending_handshake_replies,
             inventory_changes,
             rejected_inventory_blocks: 0,
             inventory_fetch,
@@ -260,7 +299,13 @@ impl SessionDriver {
                 DriverInput::InventoryCache(None) => ControlFlow::Continue(()),
                 DriverInput::ObjectCache(Some(event)) => {
                     if let Some((simulator_id, flags)) = self.object_cache.handle_event(event) {
-                        reply_region_handshake(&self.runtime, self.session_handle.clone(), simulator_id, flags);
+                        reply_region_handshake(
+                            &self.runtime,
+                            Arc::clone(&self.pending_handshake_replies),
+                            self.session_handle.clone(),
+                            simulator_id,
+                            flags,
+                        );
                     }
                     ControlFlow::Continue(())
                 }
@@ -569,7 +614,13 @@ impl SessionDriver {
         if let Message::RegionHandshake(handshake) = &message {
             self.object_cache.set_region_identity(simulator_id, handshake);
             if let Some(flags) = self.object_cache.begin_region_load(simulator_id, &self.runtime) {
-                reply_region_handshake(&self.runtime, self.session_handle.clone(), simulator_id, flags);
+                reply_region_handshake(
+                    &self.runtime,
+                    Arc::clone(&self.pending_handshake_replies),
+                    self.session_handle.clone(),
+                    simulator_id,
+                    flags,
+                );
             }
         }
         #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -1166,32 +1217,54 @@ impl SessionDriver {
     }
 }
 
-fn reply_region_handshake(runtime: &Handle, session_handle: SessionHandle, simulator_id: SimulatorId, flags: u32) {
-    match session_handle.try_reply_region_handshake(simulator_id, flags) {
-        Ok(response) => {
-            drop(runtime.spawn(async move {
-                match response.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
+fn reply_region_handshake(
+    runtime: &Handle,
+    pending_replies: Arc<Mutex<PendingHandshakeReplies>>,
+    session_handle: SessionHandle,
+    simulator_id: SimulatorId,
+    flags: u32,
+) {
+    let mut pending = pending_replies.lock().unwrap_or_else(|error| error.into_inner());
+    if !pending.by_simulator.contains_key(&simulator_id) {
+        match session_handle.try_reply_region_handshake(simulator_id, flags) {
+            Ok(response) => {
+                drop(pending);
+                drop(runtime.spawn(async move {
+                    match response.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
+                        }
+                        Err(_) => {
+                            tracing::warn!(simulator = simulator_id.get(), "region handshake reply ended with the network session");
+                        }
                     }
-                    Err(_) => {
-                        tracing::warn!(simulator = simulator_id.get(), "region handshake reply ended with the network session");
-                    }
-                }
-            }));
-        }
-        Err(network::Error::CommandQueueFull) => {
-            drop(runtime.spawn(async move {
-                if let Err(error) = session_handle.reply_region_handshake(simulator_id, flags).await {
-                    tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
-                }
-            }));
-        }
-        Err(error) => {
-            tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
+                }));
+                return;
+            }
+            Err(network::Error::CommandQueueFull) => {}
+            Err(error) => {
+                tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
+                return;
+            }
         }
     }
+    let should_drain = pending.queue(simulator_id, flags);
+    drop(pending);
+    if !should_drain {
+        return;
+    }
+    drop(runtime.spawn(async move {
+        loop {
+            let next_flags = pending_replies.lock().unwrap_or_else(|error| error.into_inner()).take_next(simulator_id);
+            let Some(next_flags) = next_flags else { break };
+            if let Err(error) = session_handle.reply_region_handshake(simulator_id, next_flags).await {
+                tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
+                pending_replies.lock().unwrap_or_else(|error| error.into_inner()).by_simulator.remove(&simulator_id);
+                break;
+            }
+        }
+    }));
 }
 
 pub(crate) fn resolve_pending_inventory_moves(

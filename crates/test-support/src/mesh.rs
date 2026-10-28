@@ -1,16 +1,36 @@
-use std::io::Write;
+use std::{collections::BTreeMap, io::Write};
 
 use flate2::{Compression, write::ZlibEncoder};
 
 pub fn asset(lods: &[usize], face_count: usize) -> Vec<u8> {
-    let block = block(face_count);
+    let lods: Vec<_> = lods.iter().map(|lod| (*lod, face_count)).collect();
+    asset_with_faces(&lods)
+}
+
+pub fn asset_with_empty_lod(geometry_lods: &[usize], empty_lods: &[usize], face_count: usize) -> Vec<u8> {
+    let lods: Vec<_> = (0..4)
+        .filter_map(|lod| {
+            if empty_lods.contains(&lod) {
+                Some((lod, 0))
+            } else if geometry_lods.contains(&lod) {
+                Some((lod, face_count))
+            } else {
+                None
+            }
+        })
+        .collect();
+    asset_with_faces(&lods)
+}
+
+fn asset_with_faces(lods: &[(usize, usize)]) -> Vec<u8> {
     let fields = ["lowest_lod", "low_lod", "medium_lod", "high_lod"];
+    let blocks: BTreeMap<_, _> = lods.iter().map(|(lod, face_count)| (*lod, block(*face_count))).collect();
     let mut offset = 0_usize;
     let lod_entries: Vec<_> = fields
         .iter()
         .enumerate()
         .map(|(index, field)| {
-            let (block_offset, size) = if lods.contains(&index) {
+            let (block_offset, size) = if let Some(block) = blocks.get(&index) {
                 let block_offset = i32::try_from(offset).expect("mesh fixture offset fits the wire format");
                 offset += block.len();
                 (block_offset, i32::try_from(block.len()).expect("mesh fixture block fits the wire format"))
@@ -26,9 +46,9 @@ pub fn asset(lods: &[usize], face_count: usize) -> Vec<u8> {
     entries.push(("skin", entry(-1, 0)));
     let mut bytes = b"<?llsd/binary?>\n".to_vec();
     bytes.extend(map(&entries));
-    for index in lods {
-        if *index < fields.len() {
-            bytes.extend_from_slice(&block);
+    for index in 0..fields.len() {
+        if let Some(block) = blocks.get(&index) {
+            bytes.extend_from_slice(block);
         }
     }
     bytes

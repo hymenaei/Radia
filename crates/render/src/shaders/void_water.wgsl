@@ -55,8 +55,8 @@ struct VoidWaterOutput {
     let blend = void_water.surface.fresnel.z;
     let wave1 = select(
         blend_normal(
-            linear_to_srgb(textureSampleGrad(void_water_normal_image, void_water_normal_sampler, coordinates.big, big_dx, big_dy).xyz),
-            linear_to_srgb(textureSampleGrad(void_water_normal_next_image, void_water_normal_sampler, coordinates.big, big_dx, big_dy).xyz),
+            textureSampleGrad(void_water_normal_image, void_water_normal_sampler, coordinates.big, big_dx, big_dy).xyz,
+            textureSampleGrad(void_water_normal_next_image, void_water_normal_sampler, coordinates.big, big_dx, big_dy).xyz,
             blend,
         ),
         vec3<f32>(0.0, 0.0, 1.0),
@@ -64,8 +64,8 @@ struct VoidWaterOutput {
     );
     let wave2 = select(
         blend_normal(
-            linear_to_srgb(textureSampleGrad(void_water_normal_image, void_water_normal_sampler, coordinates.first, first_dx, first_dy).xyz),
-            linear_to_srgb(textureSampleGrad(void_water_normal_next_image, void_water_normal_sampler, coordinates.first, first_dx, first_dy).xyz),
+            textureSampleGrad(void_water_normal_image, void_water_normal_sampler, coordinates.first, first_dx, first_dy).xyz,
+            textureSampleGrad(void_water_normal_next_image, void_water_normal_sampler, coordinates.first, first_dx, first_dy).xyz,
             blend,
         ),
         vec3<f32>(0.0, 0.0, 1.0),
@@ -73,8 +73,8 @@ struct VoidWaterOutput {
     );
     let wave3 = select(
         blend_normal(
-            linear_to_srgb(textureSampleGrad(void_water_normal_image, void_water_normal_sampler, coordinates.second, second_dx, second_dy).xyz),
-            linear_to_srgb(textureSampleGrad(void_water_normal_next_image, void_water_normal_sampler, coordinates.second, second_dx, second_dy).xyz),
+            textureSampleGrad(void_water_normal_image, void_water_normal_sampler, coordinates.second, second_dx, second_dy).xyz,
+            textureSampleGrad(void_water_normal_next_image, void_water_normal_sampler, coordinates.second, second_dx, second_dy).xyz,
             blend,
         ),
         vec3<f32>(0.0, 0.0, 1.0),

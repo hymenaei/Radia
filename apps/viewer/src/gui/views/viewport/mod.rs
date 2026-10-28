@@ -33,7 +33,7 @@ use self::window::{MAX_RECOVERIES, SceneWindow, SceneWindowError};
 use crate::{
     agent_movement::MovementObservation,
     scene_feed::SceneFeed,
-    session::{AcceptedSitResponse, AgentMotionSample},
+    session::{AgentMotionSample, SitResponseState},
 };
 
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -202,7 +202,7 @@ impl Viewport {
         camera: watch::Sender<Option<scene::Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
         agent_motion: watch::Receiver<Option<AgentMotionSample>>,
-        sit_response: watch::Receiver<Option<AcceptedSitResponse>>,
+        sit_response: watch::Receiver<Option<SitResponseState>>,
         runtime: Handle,
     ) {
         let requested = self.shared.requested.lock().unwrap_or_else(PoisonError::into_inner);

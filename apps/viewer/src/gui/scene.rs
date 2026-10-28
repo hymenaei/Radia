@@ -18,7 +18,7 @@ use crate::{
         views::viewport::{Viewport, ViewportError},
     },
     scene_feed::SceneSources,
-    session::{AcceptedSitResponse, AgentMotionSample, EnvironmentInbox, SessionEnd},
+    session::{AgentMotionSample, EnvironmentInbox, SessionEnd, SitResponseState},
     world_reader::WorldReader,
 };
 
@@ -78,7 +78,7 @@ pub(crate) fn start_session(
     movement: watch::Sender<Option<MovementObservation>>,
     agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<network::CircuitMotionStatus>)>>,
-    sit_response: watch::Receiver<Option<AcceptedSitResponse>>,
+    sit_response: watch::Receiver<Option<SitResponseState>>,
     cx: &mut App,
 ) {
     if start_scene(generation, cx) {
@@ -160,7 +160,7 @@ fn connect_world(
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
     agent_motion: watch::Receiver<Option<AgentMotionSample>>,
-    sit_response: watch::Receiver<Option<AcceptedSitResponse>>,
+    sit_response: watch::Receiver<Option<SitResponseState>>,
     cx: &mut App,
 ) {
     let lifecycle = cx.global::<AppLifecycle>();

@@ -30,7 +30,7 @@ use world::{
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::{AssetHandle, RequestError},
-    session::{AcceptedSitResponse, AgentMotionSample, EnvironmentInbox, SitCameraOverride},
+    session::{AgentMotionSample, EnvironmentInbox, SitCameraOverride, SitResponseState},
     world_reader::{ReadError, WorldReader},
 };
 
@@ -132,7 +132,7 @@ pub(crate) struct SceneFeed {
     motion_source_seated: Option<bool>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pose_seed: u64,
-    sit_response: watch::Receiver<Option<AcceptedSitResponse>>,
+    sit_response: watch::Receiver<Option<SitResponseState>>,
     accepted_sit_response: Option<Uuid>,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
@@ -146,7 +146,7 @@ impl SceneFeed {
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
         mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
-        sit_response: watch::Receiver<Option<AcceptedSitResponse>>,
+        sit_response: watch::Receiver<Option<SitResponseState>>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
@@ -160,7 +160,7 @@ impl SceneFeed {
         let observations = camera.subscribe();
         let agent_motions = agent_motion.clone();
         let sit_response_updates = sit_response.clone();
-        let accepted_sit_response = (*sit_response.borrow()).map(|response| response.object_id);
+        let accepted_sit_response = (*sit_response.borrow()).filter(|response| response.accepted).map(|response| response.object_id);
         let mut dead_reckoning = DeadReckoning::default();
         dead_reckoning.replace(*agent_motion.borrow_and_update());
         drop(
@@ -414,7 +414,8 @@ impl SceneFeed {
 
     fn update_sit_response(&mut self) {
         if self.sit_response.has_changed().is_ok_and(|changed| changed) {
-            self.accepted_sit_response = (*self.sit_response.borrow_and_update()).map(|response| response.object_id);
+            self.accepted_sit_response =
+                (*self.sit_response.borrow_and_update()).filter(|response| response.accepted).map(|response| response.object_id);
         }
         if self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_))) {
             self.accepted_sit_response = None;
@@ -546,7 +547,7 @@ async fn run(
     cancelled: oneshot::Receiver<()>,
     mut camera: watch::Receiver<Option<Camera>>,
     mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
-    mut sit_response: watch::Receiver<Option<AcceptedSitResponse>>,
+    mut sit_response: watch::Receiver<Option<SitResponseState>>,
     wake: impl Fn(),
 ) {
     let SceneSources { mut reader, assets, environments, motion_circuits } = sources;

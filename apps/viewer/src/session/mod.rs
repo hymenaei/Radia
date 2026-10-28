@@ -14,8 +14,8 @@ mod terrain;
 mod world;
 
 pub(crate) use agent_motion::{AgentMotionPublisher, AgentMotionSample};
-pub(crate) use agent_control::{AcceptedSitResponse, AgentControlEvent, AgentControlState, SitCameraOverride};
 pub use agent_control::{AgentControlError, AgentControlHandle, SitOutcome};
+pub(crate) use agent_control::{AgentControlEvent, AgentControlState, SitCameraOverride, SitResponseState};
 pub(crate) use coordinator::{
     AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd,
     SessionReadyUpdate, ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,

@@ -101,8 +101,9 @@ pub(crate) struct SitCameraOverride {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct AcceptedSitResponse {
+pub(crate) struct SitResponseState {
     pub(crate) object_id: Uuid,
+    pub(crate) accepted: bool,
     pub(crate) camera_override: Option<SitCameraOverride>,
 }
 
@@ -129,11 +130,11 @@ struct PendingSit {
 pub(crate) struct AgentControlState {
     commands: mpsc::Receiver<Command>,
     pending_sit: Option<PendingSit>,
-    sit_response: watch::Sender<Option<AcceptedSitResponse>>,
+    sit_response: watch::Sender<Option<SitResponseState>>,
 }
 
 impl AgentControlState {
-    pub(crate) fn new() -> (AgentControlHandle, Self, watch::Receiver<Option<AcceptedSitResponse>>) {
+    pub(crate) fn new() -> (AgentControlHandle, Self, watch::Receiver<Option<SitResponseState>>) {
         let (sender, commands) = mpsc::channel(COMMAND_CAPACITY);
         let (sit_response, sit_updates) = watch::channel(None);
         (AgentControlHandle { commands: sender }, Self { commands, pending_sit: None, sit_response }, sit_updates)
@@ -182,7 +183,7 @@ impl AgentControlState {
         if !self.pending_sit.as_ref().is_some_and(|pending| pending.simulator == simulator && pending.object_id == object_id) {
             return false;
         }
-        self.set_sit_response(Some(AcceptedSitResponse { object_id, camera_override }));
+        self.set_sit_response(Some(SitResponseState { object_id, accepted: true, camera_override }));
         if let Some(pending) = self.pending_sit.take()
             && pending.reply.send(Ok(SitOutcome::Accepted { auto_pilot, force_mouselook })).is_err()
         {
@@ -223,8 +224,16 @@ impl AgentControlState {
         }
     }
 
-    pub(crate) fn clear_sit_response(&self) {
-        self.set_sit_response(None);
+    pub(crate) fn clear_sit_acceptance(&self) {
+        self.sit_response.send_if_modified(|previous| {
+            let Some(mut response) = *previous else { return false };
+            if !response.accepted {
+                return false;
+            }
+            response.accepted = false;
+            *previous = response.camera_override.is_some().then_some(response);
+            true
+        });
     }
 
     fn complete_sit(&mut self, simulator: SimulatorId, outcome: Result<SitOutcome, AgentControlError>) -> bool {
@@ -239,7 +248,7 @@ impl AgentControlState {
         true
     }
 
-    fn set_sit_response(&self, response: Option<AcceptedSitResponse>) {
+    fn set_sit_response(&self, response: Option<SitResponseState>) {
         self.sit_response.send_if_modified(|previous| {
             if *previous == response {
                 false
@@ -311,7 +320,7 @@ pub(super) fn process_agent_control_command<T: SitTransport>(
                 return;
             }
             agent_control.cancel_sit(SitOutcome::Cancelled);
-            agent_control.clear_sit_response();
+            agent_control.clear_sit_acceptance();
             camera.request_action(MovementAction::SitOnGround);
             if reply.send(Ok(())).is_err() {
                 tracing::trace!("ground-sit caller stopped before receiving the queued outcome");
@@ -325,7 +334,7 @@ pub(super) fn process_agent_control_command<T: SitTransport>(
                 return;
             }
             agent_control.cancel_sit(SitOutcome::Cancelled);
-            agent_control.clear_sit_response();
+            agent_control.clear_sit_acceptance();
             camera.request_action(MovementAction::StandUp);
             if reply.send(Ok(())).is_err() {
                 tracing::trace!("stand-up caller stopped before receiving the queued outcome");
@@ -397,7 +406,7 @@ mod tests {
 
     use crate::test_helpers::simulator_id;
 
-    use super::{AgentControlEvent, AgentControlState, Command, SIT_RESPONSE_TIMEOUT, SitOutcome};
+    use super::{AgentControlEvent, AgentControlState, Command, SIT_RESPONSE_TIMEOUT, SitCameraOverride, SitOutcome, SitResponseState};
 
     #[tokio::test(start_paused = true)]
     async fn sit_request_times_out() {
@@ -434,6 +443,21 @@ mod tests {
         assert!(reply.send(Ok(())).is_ok());
         assert_eq!(sit.await.expect("sit task"), Ok(SitOutcome::Cancelled));
         assert_eq!(stand.await.expect("stand task"), Ok(()));
+    }
+
+    #[test]
+    fn stand_keeps_camera_override() {
+        let (_, mut state, response) = AgentControlState::new();
+        let (reply, _result) = oneshot::channel();
+        let simulator = simulator_id();
+        let object_id = Uuid::from_u128(3);
+        let camera_override = SitCameraOverride { eye_offset: Vec3::X, at_offset: Vec3::Y };
+        state.begin_sit(object_id, simulator, reply);
+        assert!(state.accept_sit(simulator, object_id, true, false, Some(camera_override)));
+
+        assert_eq!(*response.borrow(), Some(SitResponseState { object_id, accepted: true, camera_override: Some(camera_override) }));
+        state.clear_sit_acceptance();
+        assert_eq!(*response.borrow(), Some(SitResponseState { object_id, accepted: false, camera_override: Some(camera_override) }));
     }
 
     #[test]

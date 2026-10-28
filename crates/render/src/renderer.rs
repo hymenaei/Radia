@@ -4,7 +4,7 @@ use std::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use egui::{ClippedPrimitive, TexturesDelta};
@@ -14,10 +14,12 @@ use wgpu::{
     AdapterInfo, Backends, Color, CommandEncoderDescriptor, CreateSurfaceError, CurrentSurfaceTexture, Device, DeviceDescriptor,
     ErrorFilter, InstanceDescriptor, LoadOp, Operations, PollError, PollType, PowerPreference, PresentMode, Queue,
     RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor, RequestAdapterError, RequestAdapterOptions,
-    RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureViewDescriptor,
+    RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureFormat, TextureViewDescriptor,
 };
 
+use crate::environment::Evaluated;
 use crate::geometry::{GeometryRenderer, PickError, Stats};
+use crate::pipeline::{PostProcess, projection};
 use crate::scene::{Camera, SceneView};
 use crate::texture::{TextureCompletion, TextureJob};
 
@@ -80,6 +82,8 @@ pub struct Renderer {
     failure: Arc<Mutex<Option<wgpu::Error>>>,
     overlay: egui_wgpu::Renderer,
     geometry: GeometryRenderer,
+    postprocess: PostProcess,
+    last_frame: Instant,
 }
 
 impl Renderer {
@@ -98,7 +102,7 @@ impl Renderer {
         if self.lost.load(Ordering::Acquire) {
             return Err(Error::DeviceLost);
         }
-        Ok(Progress { redraw: self.geometry.needs_frame(), pending: !status.is_queue_empty() })
+        Ok(Progress { redraw: self.geometry.needs_frame() || self.postprocess.needs_frame(), pending: !status.is_queue_empty() })
     }
     pub async fn new(target: impl Into<SurfaceTarget<'static>>, width: u32, height: u32) -> Result<Self, Error> {
         let instance =
@@ -142,11 +146,25 @@ impl Renderer {
         config.desired_maximum_frame_latency = 2;
         let scope = device.push_error_scope(ErrorFilter::Validation);
         let overlay = egui_wgpu::Renderer::new(&device, config.format, RendererOptions::default());
-        let geometry = GeometryRenderer::new(&device, &queue, config.format);
+        let geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float);
+        let postprocess = PostProcess::new(&device, &queue, config.format);
         if let Some(error) = scope.pop().await {
             return Err(Error::Gpu(error));
         }
-        let mut renderer = Self { surface, device, queue, config, size: [0, 0], info, lost, failure, overlay, geometry };
+        let mut renderer = Self {
+            surface,
+            device,
+            queue,
+            config,
+            size: [0, 0],
+            info,
+            lost,
+            failure,
+            overlay,
+            geometry,
+            postprocess,
+            last_frame: Instant::now(),
+        };
         renderer.resize(width, height);
         Ok(renderer)
     }
@@ -187,13 +205,16 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        self.postprocess.resize(&self.device, self.size);
+        let depth = self.geometry.depth(&self.device, self.size);
+        self.postprocess.set_depth_view(&self.device, depth.as_ref());
     }
 
     pub fn draw(
         &mut self,
         mut overlay: Overlay,
         scene: Option<(&SceneView, Camera)>,
-        water_height: Option<f64>,
+        frame_input: FrameInput<'_>,
         before_present: impl FnOnce(),
     ) -> Result<bool, Error> {
         for (id, deltas) in overlay.textures.set.drain() {
@@ -201,7 +222,7 @@ impl Renderer {
                 self.overlay.update_texture(&self.device, &self.queue, id, &delta);
             }
         }
-        let result = self.draw_frame(&overlay, scene, water_height, before_present);
+        let result = self.draw_frame(&overlay, scene, frame_input, before_present);
         for id in overlay.textures.free.drain() {
             self.overlay.free_texture(&id);
         }
@@ -212,7 +233,7 @@ impl Renderer {
         &mut self,
         overlay: &Overlay,
         scene: Option<(&SceneView, Camera)>,
-        water_height: Option<f64>,
+        frame_input: FrameInput<'_>,
         before_present: impl FnOnce(),
     ) -> Result<bool, Error> {
         self.poll()?;
@@ -239,12 +260,15 @@ impl Renderer {
         };
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("Scene frame") });
+        let now = Instant::now();
+        let delta_seconds = now.duration_since(self.last_frame).as_secs_f32();
+        self.last_frame = now;
         let screen = ScreenDescriptor { size_in_pixels: self.size, pixels_per_point: overlay.pixels_per_point };
         let commands = self.overlay.update_buffers(&self.device, &self.queue, &mut encoder, &overlay.primitives, &screen);
         let depth = if let Some((scene, camera)) = scene {
             let depth = self.geometry.depth(&self.device, self.size);
             if depth.is_some() {
-                self.geometry.prepare(&self.device, &mut encoder, scene, camera, self.size, water_height);
+                self.geometry.prepare(&self.device, &mut encoder, scene, camera, self.size, frame_input);
             }
             depth
         } else {
@@ -257,7 +281,7 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("Scene geometry"),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &view,
+                    view: self.postprocess.scene_view(),
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations { load: LoadOp::Clear(Color { r: 0.012, g: 0.012, b: 0.012, a: 1.0 }), store: StoreOp::Store },
@@ -273,6 +297,21 @@ impl Renderer {
                 self.geometry.draw(&mut pass);
             }
         }
+        let inverse_view_projection = scene.map_or(math::Mat4::IDENTITY, |(_, camera)| projection(camera, self.size).inverse());
+        let camera_position = scene.map(|(_, camera)| camera.position());
+        let scene_version = scene.map_or(0, |(view, _)| view.sequence());
+        self.postprocess.render(
+            &self.queue,
+            &mut encoder,
+            &view,
+            frame_input.environment,
+            delta_seconds,
+            camera_position,
+            frame_input.water_height,
+            inverse_view_projection,
+            scene_version,
+            self.geometry.texture_revision(),
+        );
         {
             let pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("Diagnostics"),
@@ -303,6 +342,15 @@ pub struct Overlay {
     pub pixels_per_point: f32,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct FrameInput<'a> {
+    pub water_height: Option<f64>,
+    pub environment: Option<&'a Evaluated>,
+    pub cloud_scroll: [f32; 2],
+    pub animation_time: f32,
+    pub water_scroll: [f32; 4],
+}
+
 pub struct Progress {
     pub redraw: bool,
     pub pending: bool,
@@ -327,20 +375,121 @@ impl Retirement {
 
 #[cfg(test)]
 mod tests {
+    use crate::geometry::GeometryRenderer;
+    use crate::pipeline::PostProcess;
     use wgpu::naga::{
+        AddressSpace, ImageClass, TypeInner,
         front::wgsl,
+        proc::Layouter,
         valid::{Capabilities, ValidationFlags, Validator},
     };
 
     #[test]
     fn shaders_validate() {
         for (name, source) in [
-            ("surface", include_str!("shaders/surface.wgsl")),
-            ("water", include_str!("shaders/water.wgsl")),
+            ("atmosphere", include_str!("shaders/atmosphere.wgsl")),
+            (
+                "region water and surfaces",
+                concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/surface.wgsl")),
+            ),
+            (
+                "void water",
+                concat!(
+                    include_str!("shaders/atmosphere.wgsl"),
+                    include_str!("shaders/water.wgsl"),
+                    include_str!("shaders/void_water.wgsl")
+                ),
+            ),
+            ("sky", concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/sky.wgsl"))),
+            ("stars", include_str!("shaders/stars.wgsl")),
             ("mipmap", include_str!("shaders/mipmap.wgsl")),
+            (
+                "exposure",
+                concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/exposure.wgsl")),
+            ),
+            (
+                "tonemap",
+                concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/tonemap.wgsl")),
+            ),
         ] {
             let module = wgsl::parse_str(source).unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
             Validator::new(ValidationFlags::all(), Capabilities::all()).validate(&module).unwrap_or_else(|error| panic!("{name}: {error}"));
+            validate_default_limits(name, &module);
         }
+    }
+
+    fn validate_default_limits(name: &str, module: &wgpu::naga::Module) {
+        let limits = wgpu::Limits::default();
+        let mut bindings_per_group = vec![0_u32; limits.max_bind_groups as usize];
+        let mut sampled_textures = 0_u32;
+        let mut samplers = 0_u32;
+        let mut layouter = Layouter::default();
+        layouter.update(module.to_ctx()).unwrap_or_else(|error| panic!("{name}: {error}"));
+        for (_, global) in module.global_variables.iter() {
+            if let Some(binding) = global.binding.as_ref() {
+                assert!(
+                    binding.group < limits.max_bind_groups,
+                    "{name}: bind group {} reaches the default limit {}",
+                    binding.group,
+                    limits.max_bind_groups
+                );
+                let Some(group_count) = bindings_per_group.get_mut(binding.group as usize) else {
+                    panic!("{name}: group {} is not represented by default limits", binding.group);
+                };
+                *group_count += 1;
+                assert!(
+                    binding.binding < limits.max_bindings_per_bind_group,
+                    "{name}: binding {} reaches the default per-group limit {}",
+                    binding.binding,
+                    limits.max_bindings_per_bind_group
+                );
+            }
+            if global.space == AddressSpace::Uniform {
+                let size = layouter[global.ty].size;
+                assert!(
+                    u64::from(size) <= limits.max_uniform_buffer_binding_size,
+                    "{name}: uniform is {size} bytes; default limit is {}",
+                    limits.max_uniform_buffer_binding_size
+                );
+            }
+            if global.space == AddressSpace::Handle {
+                match module.types[global.ty].inner {
+                    TypeInner::Image { class: ImageClass::Sampled { .. } | ImageClass::Depth { .. }, .. } => sampled_textures += 1,
+                    TypeInner::Sampler { .. } => samplers += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(bindings_per_group.into_iter().all(|count| count <= limits.max_bindings_per_bind_group));
+        assert!(
+            sampled_textures <= limits.max_sampled_textures_per_shader_stage,
+            "{name}: {sampled_textures} sampled textures; default stage limit is {}",
+            limits.max_sampled_textures_per_shader_stage
+        );
+        assert!(
+            samplers <= limits.max_samplers_per_shader_stage,
+            "{name}: {samplers} samplers; default stage limit is {}",
+            limits.max_samplers_per_shader_stage
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan adapter"]
+    fn gpu_render_pipelines_validate() {
+        use futures::executor::block_on;
+        use wgpu::{Backends, DeviceDescriptor, ErrorFilter, InstanceDescriptor, PollType, TextureFormat};
+
+        let (device, queue) = block_on(async {
+            let instance =
+                wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+            let adapter = instance.request_adapter(&Default::default()).await.expect("Vulkan adapter is available");
+            adapter.request_device(&DeviceDescriptor::default()).await.expect("Vulkan device is available")
+        });
+        let scope = device.push_error_scope(ErrorFilter::Validation);
+        let _overlay = egui_wgpu::Renderer::new(&device, TextureFormat::Rgba8UnormSrgb, egui_wgpu::RendererOptions::default());
+        let _geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba16Float);
+        let _postprocess = PostProcess::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+        device.poll(PollType::Wait { submission_index: None, timeout: None }).expect("GPU pipeline creation completes");
+        assert!(block_on(scope.pop()).is_none(), "all render pipelines must satisfy wgpu validation");
     }
 }

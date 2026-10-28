@@ -1,19 +1,33 @@
-use math::camera::rh::{proj::directx::perspective, view::look_to_mat4};
-use math::{Mat4, Vec3};
+use math::camera::rh::view::look_to_mat4;
+use math::{DVec3, Mat4, Vec3, Vec4};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource,
     BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompareFunction,
     DepthStencilState, Device, Face, FragmentState, FrontFace, MultisampleState, PipelineLayoutDescriptor, PrimitiveState, Queue,
-    RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat,
-    VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
+    RenderPass, RenderPipeline, RenderPipelineDescriptor, SamplerBindingType, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    TextureFormat, TextureSampleType, TextureViewDimension, VertexAttribute, VertexBufferLayout, VertexFormat, VertexState, VertexStepMode,
 };
 
 use crate::scene::Camera;
 
+use crate::{
+    environment::Evaluated,
+    texture::{TextureKey, TextureViewState, Textures},
+};
+
+use super::TexturePair;
+
+use super::{
+    atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values},
+    water::water_surface_values,
+};
+
 pub(crate) const INSTANCE_BYTES: usize = 192;
 pub(crate) const VERTEX_BYTES: usize = 32;
-const CAMERA_BYTES: usize = 144;
-const KEY_LIGHT: Vec3 = Vec3::new(-0.3, 0.5, 1.0);
+const CAMERA_BYTES: usize = 128;
+const ATMOSPHERE_BYTES: usize = ATMOSPHERE_FLOATS * 4;
+const WATER_BYTES: usize = 32 * 4;
+pub(crate) const CAMERA_NEAR_PLANE: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Pipeline {
@@ -23,7 +37,7 @@ pub(crate) enum Pipeline {
     Blend,
     BlendFlipped,
     BlendDoubleSided,
-    Water,
+    RegionWater,
 }
 
 pub(crate) struct SurfacePipelines {
@@ -33,16 +47,28 @@ pub(crate) struct SurfacePipelines {
     blend: RenderPipeline,
     blend_flipped: RenderPipeline,
     blend_double_sided: RenderPipeline,
-    water: RenderPipeline,
+    region_water: RenderPipeline,
+    frame_environment_layout: BindGroupLayout,
     camera: Buffer,
     binding: BindGroup,
+    atmosphere: Buffer,
+    region_water_uniform: Buffer,
+    region_water_normal_keys: [Option<TextureKey>; 2],
+    region_water_normal_states: [Option<TextureViewState>; 2],
 }
 
 impl SurfacePipelines {
-    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout) -> Self {
+    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout, texture_store: &Textures) -> Self {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Scene preview"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/surface.wgsl").into()),
+            source: ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../shaders/atmosphere.wgsl"),
+                    include_str!("../shaders/water.wgsl"),
+                    include_str!("../shaders/surface.wgsl")
+                )
+                .into(),
+            ),
         });
         let attributes = [
             VertexAttribute { format: VertexFormat::Float32x4, offset: 0, shader_location: 3 },
@@ -58,18 +84,25 @@ impl SurfacePipelines {
             VertexAttribute { format: VertexFormat::Float32x4, offset: 160, shader_location: 13 },
             VertexAttribute { format: VertexFormat::Float32x4, offset: 176, shader_location: 14 },
         ];
-        let camera_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Surface camera"),
-            entries: &[BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::VERTEX_FRAGMENT,
-                ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                count: None,
-            }],
+        let frame_environment_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Frame environment"),
+            entries: &[
+                uniform_entry(0, ShaderStages::VERTEX_FRAGMENT),
+                uniform_entry(1, ShaderStages::FRAGMENT),
+                uniform_entry(2, ShaderStages::FRAGMENT),
+                texture_entry(3),
+                texture_entry(4),
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
         let plain_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Surface pipelines"),
-            bind_group_layouts: &[Some(&camera_layout), Some(textures)],
+            bind_group_layouts: &[Some(&frame_environment_layout), Some(textures)],
             immediate_size: 0,
         });
         let buffers = [
@@ -141,10 +174,15 @@ impl SurfacePipelines {
             primitive: PrimitiveState { cull_mode: None, ..blended.primitive },
             ..blended
         });
-        let water = device.create_render_pipeline(&RenderPipelineDescriptor {
+        let region_water = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Region water"),
-            vertex: VertexState { entry_point: Some("water_vertex"), ..descriptor.vertex.clone() },
-            fragment: Some(FragmentState { entry_point: Some("water_fragment"), ..descriptor.fragment.clone().expect("scene fragment") }),
+            layout: Some(&plain_layout),
+            vertex: VertexState { entry_point: Some("vertex"), ..descriptor.vertex.clone() },
+            fragment: Some(FragmentState {
+                entry_point: Some("region_water_fragment"),
+                ..descriptor.fragment.clone().expect("scene fragment")
+            }),
+            primitive: PrimitiveState { cull_mode: None, ..descriptor.primitive },
             depth_stencil: Some(DepthStencilState {
                 depth_compare: Some(CompareFunction::GreaterEqual),
                 ..descriptor.depth_stencil.clone().expect("scene depth")
@@ -157,21 +195,40 @@ impl SurfacePipelines {
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let atmosphere = uniform_buffer(device, "Surface atmosphere", ATMOSPHERE_BYTES);
+        let region_water_uniform = uniform_buffer(device, "Region water", WATER_BYTES);
         let binding = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("Camera"),
-            layout: &camera_layout,
-            entries: &[BindGroupEntry { binding: 0, resource: BindingResource::Buffer(camera.as_entire_buffer_binding()) }],
+            label: Some("Frame environment"),
+            layout: &frame_environment_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: BindingResource::Buffer(camera.as_entire_buffer_binding()) },
+                BindGroupEntry { binding: 1, resource: BindingResource::Buffer(atmosphere.as_entire_buffer_binding()) },
+                BindGroupEntry { binding: 2, resource: BindingResource::Buffer(region_water_uniform.as_entire_buffer_binding()) },
+                BindGroupEntry { binding: 3, resource: BindingResource::TextureView(texture_store.view(None)) },
+                BindGroupEntry { binding: 4, resource: BindingResource::TextureView(texture_store.view(None)) },
+                BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&texture_store.default_sampler) },
+            ],
         });
-
-        Self { pipeline, flipped_winding, double_sided, blend, blend_flipped, blend_double_sided, water, camera, binding }
+        Self {
+            pipeline,
+            flipped_winding,
+            double_sided,
+            blend,
+            blend_flipped,
+            blend_double_sided,
+            region_water,
+            frame_environment_layout,
+            camera,
+            binding,
+            atmosphere,
+            region_water_uniform,
+            region_water_normal_keys: [None, None],
+            region_water_normal_states: [None, None],
+        }
     }
     pub(crate) fn update_camera_uniform(&self, queue: &Queue, camera: Camera, size: [u32; 2]) -> Mat4 {
         let projection = projection(camera, size);
-        let values = projection
-            .to_cols_array()
-            .into_iter()
-            .chain(camera_view(camera).to_cols_array())
-            .chain(KEY_LIGHT.normalize().extend(0.0).to_array());
+        let values = projection.to_cols_array().into_iter().chain(camera_view(camera).to_cols_array());
         let mut bytes = [0; CAMERA_BYTES];
         for (dest, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
             *dest = value.to_le_bytes();
@@ -187,17 +244,106 @@ impl SurfacePipelines {
             Pipeline::Blend => &self.blend,
             Pipeline::BlendFlipped => &self.blend_flipped,
             Pipeline::BlendDoubleSided => &self.blend_double_sided,
-            Pipeline::Water => &self.water,
+            Pipeline::RegionWater => &self.region_water,
         });
         pass.set_bind_group(0, &self.binding, &[]);
     }
+
+    pub(crate) fn update_environment(
+        &mut self,
+        device: &Device,
+        textures: &Textures,
+        queue: &Queue,
+        camera_position: DVec3,
+        environment: Option<&Evaluated>,
+        normal_map: TexturePair,
+        water_height: Option<f64>,
+        scroll: [f32; 4],
+    ) {
+        let atmosphere = atmosphere_values(environment);
+        let mut atmosphere_bytes = [0; ATMOSPHERE_BYTES];
+        write_floats(queue, &self.atmosphere, &mut atmosphere_bytes, &atmosphere);
+        let region_water_values = water_surface_values(
+            environment,
+            camera_position,
+            water_height,
+            scroll,
+            normal_map.factor,
+            normal_map.current.is_some() || normal_map.next.is_some(),
+        );
+        let mut region_water_bytes = [0; WATER_BYTES];
+        write_floats(queue, &self.region_water_uniform, &mut region_water_bytes, &region_water_values);
+        let keys = [normal_map.current, normal_map.next];
+        let states = keys.map(|key| textures.view_state(key));
+        if keys != self.region_water_normal_keys || states != self.region_water_normal_states {
+            self.binding = device.create_bind_group(&BindGroupDescriptor {
+                label: Some("Frame environment"),
+                layout: &self.frame_environment_layout,
+                entries: &[
+                    BindGroupEntry { binding: 0, resource: BindingResource::Buffer(self.camera.as_entire_buffer_binding()) },
+                    BindGroupEntry { binding: 1, resource: BindingResource::Buffer(self.atmosphere.as_entire_buffer_binding()) },
+                    BindGroupEntry { binding: 2, resource: BindingResource::Buffer(self.region_water_uniform.as_entire_buffer_binding()) },
+                    BindGroupEntry { binding: 3, resource: BindingResource::TextureView(textures.water_view(normal_map.current)) },
+                    BindGroupEntry { binding: 4, resource: BindingResource::TextureView(textures.water_view(normal_map.next)) },
+                    BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&textures.water_sampler) },
+                ],
+            });
+            self.region_water_normal_keys = keys;
+            self.region_water_normal_states = states;
+        }
+    }
+}
+
+fn uniform_entry(binding: u32, visibility: ShaderStages) -> BindGroupLayoutEntry {
+    BindGroupLayoutEntry {
+        binding,
+        visibility,
+        ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+        count: None,
+    }
+}
+
+fn texture_entry(binding: u32) -> BindGroupLayoutEntry {
+    BindGroupLayoutEntry {
+        binding,
+        visibility: ShaderStages::FRAGMENT,
+        ty: BindingType::Texture {
+            sample_type: TextureSampleType::Float { filterable: true },
+            view_dimension: TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn uniform_buffer(device: &Device, label: &str, bytes: usize) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some(label),
+        size: bytes as u64,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn write_floats(queue: &Queue, buffer: &Buffer, bytes: &mut [u8], values: &[f32]) {
+    for (target, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
+        target.copy_from_slice(&value.to_le_bytes());
+    }
+    queue.write_buffer(buffer, 0, bytes);
 }
 
 pub(crate) fn projection(camera: Camera, size: [u32; 2]) -> Mat4 {
-    perspective(camera.vertical_fov() as f32, size[0] as f32 / size[1] as f32, camera.draw_distance() as f32, 0.05) * camera_view(camera)
+    let focal = 1.0 / (camera.vertical_fov() as f32 * 0.5).tan();
+    let aspect = size[0] as f32 / size[1] as f32;
+    Mat4::from_cols(
+        Vec4::new(focal / aspect, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, focal, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 0.0, -1.0),
+        Vec4::new(0.0, 0.0, CAMERA_NEAR_PLANE, 0.0),
+    ) * camera_view(camera)
 }
 
-fn camera_view(camera: Camera) -> Mat4 {
+pub(crate) fn camera_view(camera: Camera) -> Mat4 {
     let direction = camera.direction();
     let up = if direction.dot(Vec3::Z).abs() > 0.999 { Vec3::Y } else { Vec3::Z };
     look_to_mat4(Vec3::ZERO, direction, up)
@@ -218,8 +364,11 @@ mod tests {
         assert!(matrix.project_point3(Vec3::new(10.0, -1.0, 0.0)).x > 0.0);
         assert!((matrix.project_point3(Vec3::new(0.05, 0.0, 0.0)).z - 1.0).abs() < 1e-5);
         let close = projection(camera.with_quality(32.0, 1.0).unwrap(), [1000, 1000]);
-        assert!(close.project_point3(Vec3::new(32.0, 0.0, 0.0)).z.abs() < 1e-6);
-        assert!(close.project_point3(Vec3::new(40.0, 0.0, 0.0)).z < 0.0);
+        let distant = projection(camera.with_quality(1024.0, 1.0).unwrap(), [1000, 1000]);
+        assert_eq!(close, distant);
+        assert!(close.project_point3(Vec3::new(32.0, 0.0, 0.0)).z > 0.0);
+        assert!(close.project_point3(Vec3::new(1_000_000.0, 0.0, 0.0)).z > 0.0);
+        assert!(math::Frustum::from_clip_matrix(close).intersects_sphere(DVec3::new(1.0e9, 0.0, 0.0), 0.0));
     }
 
     #[test]

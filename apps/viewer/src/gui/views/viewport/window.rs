@@ -5,11 +5,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ::inventory::{InventoryOwner, ItemKey};
 use egui::{Context, DragValue, Slider, ViewportId};
 use futures::executor::block_on;
 use render::scene;
-use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
+use render::{CompressionQuality, FrameInput, Overlay, Renderer, Retirement, TextureCompletion};
 use tracing::Instrument;
+use utils::ItemId;
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
@@ -80,6 +82,9 @@ pub(super) struct SceneWindow {
     egui: Context,
     platform: egui_winit::State,
     next_ui: Option<Instant>,
+    next_environment: Option<Instant>,
+    next_sky: Option<Instant>,
+    next_water: Option<Instant>,
     window: Arc<Window>,
     generation: u64,
     frame_work: Duration,
@@ -135,6 +140,9 @@ impl SceneWindow {
             egui,
             platform,
             next_ui: None,
+            next_environment: None,
+            next_sky: None,
+            next_water: None,
             window,
             generation,
             frame_work: Duration::ZERO,
@@ -279,6 +287,9 @@ impl SceneWindow {
             && generation == self.generation
         {
             self.feed = Some(feed);
+            self.next_environment = None;
+            self.next_sky = None;
+            self.next_water = None;
             self.dirty = true;
         }
         if let Some(feed) = &mut self.feed {
@@ -410,6 +421,12 @@ impl SceneWindow {
         if !self.ensure_renderer(now)? {
             return Ok(DrawActions::default());
         }
+        if let Some(feed) = &mut self.feed {
+            feed.update_environment(now);
+            self.next_environment = feed.next_environment();
+        } else {
+            self.next_environment = None;
+        }
         self.complete_texture_jobs();
         let debug_ui = self.draw_debug_ui(now);
         Ok(self.submit_frame(observation, now, debug_ui))
@@ -473,6 +490,77 @@ impl SceneWindow {
                     }
                 }
                 ui.label(format!("Camera: {} (V)", self.camera_mode.label()));
+                let current_environment = self.feed.as_ref().map_or_else(scene::EnvironmentChoice::default, SceneFeed::environment_choice);
+                let mut selected_environment = current_environment.clone();
+                let selected_text = match &selected_environment {
+                    scene::EnvironmentChoice::Shared => "Shared environment".to_owned(),
+                    scene::EnvironmentChoice::Local(scene::LocalChoice::Preset(preset)) => preset.label().to_owned(),
+                    scene::EnvironmentChoice::Local(scene::LocalChoice::Inventory { owner_id, item_id, .. }) => self
+                        .feed
+                        .as_ref()
+                        .and_then(|feed| {
+                            let crate::inventory::environments::EnvironmentItems::Ready(items) = feed.environment_items() else {
+                                return None;
+                            };
+                            let key = ItemKey::new(InventoryOwner::new(*owner_id), ItemId::new(*item_id));
+                            items.label(key).map(str::to_owned)
+                        })
+                        .unwrap_or_else(|| "Saved environment".into()),
+                };
+                let environment_items = self.feed.as_ref().map(SceneFeed::environment_items);
+                let can_select_environment = self.feed.as_ref().is_some_and(|feed| feed.agent().is_some());
+                ui.add_enabled_ui(can_select_environment, |ui| {
+                    egui::ComboBox::from_label("Environment").selected_text(selected_text).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected_environment, scene::EnvironmentChoice::Shared, "Shared environment");
+                        for preset in scene::EnvironmentPreset::ALL {
+                            ui.selectable_value(
+                                &mut selected_environment,
+                                scene::EnvironmentChoice::Local(scene::LocalChoice::Preset(preset)),
+                                preset.label(),
+                            );
+                        }
+                        ui.separator();
+                        match environment_items {
+                            Some(crate::inventory::environments::EnvironmentItems::Ready(items)) => {
+                                if items.items().is_empty() {
+                                    ui.label("No saved environments");
+                                } else {
+                                    let rows = items.items();
+                                    let row_height = ui.text_style_height(&egui::TextStyle::Button);
+                                    egui::ScrollArea::vertical().max_height(320.0).show_rows(ui, row_height, rows.len(), |ui, visible| {
+                                        for index in visible {
+                                            let Some(item) = rows.get(index) else { continue };
+                                            let choice = scene::EnvironmentChoice::Local(scene::LocalChoice::Inventory {
+                                                owner_id: item.key.owner().id(),
+                                                item_id: item.key.id().uuid(),
+                                                asset_id: item.asset_id,
+                                            });
+                                            ui.add_enabled_ui(!item.asset_id.uuid().is_nil(), |ui| {
+                                                ui.selectable_value(&mut selected_environment, choice, &*item.label);
+                                            });
+                                        }
+                                    });
+                                }
+                            }
+                            Some(crate::inventory::environments::EnvironmentItems::Failed) => {
+                                ui.label("Saved environments unavailable");
+                            }
+                            Some(crate::inventory::environments::EnvironmentItems::Loading) | None => {
+                                ui.label("Loading saved environments…");
+                            }
+                        }
+                    });
+                });
+                if selected_environment != current_environment
+                    && let Some(feed) = &self.feed
+                {
+                    feed.set_environment_choice(selected_environment);
+                }
+                if let Some(failure) =
+                    self.feed.as_ref().and_then(|feed| feed.view.viewer_environment()).and_then(|environment| environment.local_error())
+                {
+                    ui.colored_label(egui::Color32::LIGHT_RED, local_environment_failure(failure));
+                }
                 ui.label(format!("CPU frame: {:.2} ms", self.frame_work.as_secs_f64() * 1000.0));
                 ui.label(format!("Draws: {}, instances: {}", stats.draw_calls, stats.instances));
                 ui.collapsing("Diagnostics", |ui| {
@@ -540,11 +628,17 @@ impl SceneWindow {
 
     fn submit_frame(&mut self, observation: Option<scene::Camera>, now: Instant, ui: DebugUiFrame) -> DrawActions {
         let scene = self.feed.as_ref().zip(observation).map(|(feed, camera)| (&feed.view, camera));
-        let water_height = self.feed.as_ref().and_then(|feed| feed.water_height);
+        let frame_input = self.feed.as_ref().map_or_else(FrameInput::default, |feed| FrameInput {
+            water_height: feed.water_height,
+            environment: feed.evaluated(),
+            cloud_scroll: feed.cloud_scroll(),
+            animation_time: feed.animation_time(),
+            water_scroll: feed.water_scroll(),
+        });
         let result = {
             let renderer = self.renderer.as_mut().expect("renderer ensured before frame submission");
             renderer.set_texture_soft_cap(self.texture_soft_cap);
-            renderer.draw(ui.overlay, scene, water_height, || self.window.pre_present_notify())
+            renderer.draw(ui.overlay, scene, frame_input, || self.window.pre_present_notify())
         };
         self.dispatch_texture_jobs();
         self.next_frame = Instant::now();
@@ -563,7 +657,20 @@ impl SceneWindow {
                     if self.dirty {
                         self.next_frame += FRAME_INTERVAL;
                     }
+                    self.next_sky = sky_frame_deadline(
+                        observation,
+                        self.feed.as_ref().is_some_and(|feed| feed.clouds_animate() || feed.stars_animate()),
+                        Instant::now(),
+                    );
+                    self.next_water = water_frame_deadline(
+                        observation,
+                        self.feed.as_ref().and_then(|feed| feed.water_height),
+                        self.feed.as_ref().is_some_and(SceneFeed::water_animate),
+                        Instant::now(),
+                    );
                 } else {
+                    self.next_sky = None;
+                    self.next_water = None;
                     self.next_frame += FRAME_INTERVAL;
                 }
                 let first_frame = presented && !self.ready;
@@ -641,6 +748,18 @@ impl SceneWindow {
             return;
         }
         let now = Instant::now();
+        if deadline_passed(self.next_environment, now) {
+            self.next_environment = None;
+            self.dirty = true;
+        }
+        if deadline_passed(self.next_sky, now) {
+            self.next_sky = None;
+            self.dirty = true;
+        }
+        if deadline_passed(self.next_water, now) {
+            self.next_water = None;
+            self.dirty = true;
+        }
         if self.next_ui.is_some_and(|at| now >= at) {
             self.next_ui = None;
             self.dirty = true;
@@ -651,10 +770,20 @@ impl SceneWindow {
         } else {
             let redraw = (self.dirty && can_redraw).then_some(self.next_frame.max(now + Duration::from_millis(1)));
             let poll = pending.then_some(now + FRAME_INTERVAL);
-            event_loop.set_control_flow(match redraw.into_iter().chain(poll).chain(self.next_ui).min() {
-                Some(at) => ControlFlow::WaitUntil(at),
-                None => ControlFlow::Wait,
-            });
+            event_loop.set_control_flow(
+                match redraw
+                    .into_iter()
+                    .chain(poll)
+                    .chain(self.next_ui)
+                    .chain(self.next_environment)
+                    .chain(self.next_sky)
+                    .chain(self.next_water)
+                    .min()
+                {
+                    Some(at) => ControlFlow::WaitUntil(at),
+                    None => ControlFlow::Wait,
+                },
+            );
         }
     }
 
@@ -663,6 +792,58 @@ impl SceneWindow {
             self.retired = Some(renderer.retire());
         }
     }
+}
+
+fn deadline_passed(deadline: Option<Instant>, now: Instant) -> bool {
+    deadline.is_some_and(|deadline| now >= deadline)
+}
+
+fn local_environment_failure(failure: assets::Failure) -> String {
+    match failure {
+        assets::Failure::MissingCapability => "The environment asset capability is unavailable.".into(),
+        assets::Failure::NotFound => "The environment asset was not found.".into(),
+        assets::Failure::Denied => "Access to the environment asset was denied.".into(),
+        assets::Failure::HttpStatus { status } => format!("The environment request failed with HTTP status {status}."),
+        assets::Failure::Network => "The environment server could not be reached.".into(),
+        assets::Failure::TooLarge => "The environment asset is too large.".into(),
+        assets::Failure::Malformed => "The environment settings could not be decoded.".into(),
+        assets::Failure::Unsupported => "The environment settings type is unsupported.".into(),
+        assets::Failure::RouteClosed | assets::Failure::SessionClosed | assets::Failure::Cancelled => {
+            "The environment request ended before it completed.".into()
+        }
+        assets::Failure::Deadline => "The environment request timed out.".into(),
+        assets::Failure::Transient { .. } => "The environment request failed temporarily.".into(),
+        assets::Failure::MissingLod(_) | assets::Failure::MalformedBlock | assets::Failure::UnsupportedVersion(_) => {
+            "The environment asset is malformed or unsupported.".into()
+        }
+    }
+}
+
+fn sky_frame_deadline(camera: Option<scene::Camera>, animating: bool, now: Instant) -> Option<Instant> {
+    let visible = camera.is_some_and(camera_sees_sky);
+    (visible && animating).then(|| now + FRAME_INTERVAL)
+}
+
+fn water_frame_deadline(camera: Option<scene::Camera>, height: Option<f64>, animating: bool, now: Instant) -> Option<Instant> {
+    let visible = camera.zip(height).is_some_and(|(camera, height)| camera_sees_water(camera, height));
+    (visible && animating).then(|| now + FRAME_INTERVAL)
+}
+
+fn camera_sees_sky(camera: scene::Camera) -> bool {
+    let direction = camera.direction();
+    let half_fov = camera.vertical_fov() as f32 * 0.5;
+    let maximum_vertical = direction.z * half_fov.cos() + (1.0 - direction.z * direction.z).max(0.0).sqrt() * half_fov.sin();
+    maximum_vertical > 0.0
+}
+
+fn camera_sees_water(camera: scene::Camera, height: f64) -> bool {
+    if !height.is_finite() || camera.position().z <= height {
+        return false;
+    }
+    let direction = camera.direction();
+    let half_fov = camera.vertical_fov() as f32 * 0.5;
+    let minimum_vertical = direction.z * half_fov.cos() - (1.0 - direction.z * direction.z).max(0.0).sqrt() * half_fov.sin();
+    minimum_vertical < 0.0
 }
 
 impl Drop for SceneWindow {
@@ -746,6 +927,9 @@ mod tests {
     };
 
     use super::{PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError};
+    use super::{deadline_passed, local_environment_failure, sky_frame_deadline, water_frame_deadline};
+    use math::{DVec3, Vec3};
+    use render::scene::Camera;
 
     #[test]
     fn presentation_resets_recovery_limit() {
@@ -782,9 +966,51 @@ mod tests {
     }
 
     #[test]
+    fn local_environment_failure_shows_http_status_and_network_errors() {
+        assert_eq!(
+            local_environment_failure(assets::Failure::HttpStatus { status: 503 }),
+            "The environment request failed with HTTP status 503."
+        );
+        assert_eq!(local_environment_failure(assets::Failure::Network), "The environment server could not be reached.");
+    }
+
+    #[test]
     fn renderer_creation_error_has_source() {
         let error = SceneWindowError::Renderer(render::Error::UnsupportedSurface);
         let source = Error::source(&error).expect("renderer creation error must retain its source");
         assert!(source.downcast_ref::<render::Error>().is_some());
+    }
+
+    #[test]
+    fn sky_redraws_require_visible_sky_and_animation() {
+        let now = Instant::now();
+        let sky = Camera::new(DVec3::ZERO, Vec3::Z, 1.0, [1280, 720]).unwrap();
+        let ground = Camera::new(DVec3::ZERO, Vec3::NEG_Z, 1.0, [1280, 720]).unwrap();
+        assert_eq!(sky_frame_deadline(Some(sky), true, now), Some(now + super::FRAME_INTERVAL));
+        assert_eq!(sky_frame_deadline(Some(sky), false, now), None);
+        assert_eq!(sky_frame_deadline(Some(ground), true, now), None);
+        assert_eq!(sky_frame_deadline(None, true, now), None);
+    }
+
+    #[test]
+    fn water_redraws_require_visible_water_and_nonzero_waves() {
+        let now = Instant::now();
+        let water = Camera::new(DVec3::new(0.0, 0.0, 10.0), Vec3::NEG_Z, 1.0, [1280, 720]).unwrap();
+        let sky = Camera::new(DVec3::new(0.0, 0.0, 10.0), Vec3::Z, 1.0, [1280, 720]).unwrap();
+        let below = Camera::new(DVec3::new(0.0, 0.0, -1.0), Vec3::NEG_Z, 1.0, [1280, 720]).unwrap();
+        assert_eq!(water_frame_deadline(Some(water), Some(0.0), true, now), Some(now + super::FRAME_INTERVAL));
+        assert_eq!(water_frame_deadline(Some(water), Some(0.0), false, now), None);
+        assert_eq!(water_frame_deadline(Some(sky), Some(0.0), true, now), None);
+        assert_eq!(water_frame_deadline(Some(below), Some(0.0), true, now), None);
+        assert_eq!(water_frame_deadline(Some(water), None, true, now), None);
+    }
+
+    #[test]
+    fn environment_deadline_only_invalidates_after_it_passes() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(16);
+        assert!(!deadline_passed(Some(deadline), now));
+        assert!(deadline_passed(Some(deadline), deadline));
+        assert!(!deadline_passed(None, now));
     }
 }

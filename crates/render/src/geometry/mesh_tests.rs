@@ -34,7 +34,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     });
     let mut encoder = device.create_command_encoder(&Default::default());
     let depth = geometry.depth(device, [128, 128]).unwrap();
-    geometry.prepare(device, &mut encoder, &view, camera, [128, 128], None);
+    geometry.prepare(device, &mut encoder, &view, camera, [128, 128], crate::FrameInput::default());
     let mut meshes: Vec<_> = geometry.meshes.values().collect();
     meshes.sort_by_key(|mesh| mesh.allocation.vertices().start);
     assert_eq!(meshes.len(), 2);
@@ -71,7 +71,8 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
                 scale: transform.scale,
                 pickable: true,
                 faces: Vec::new(),
-                shading: ShadingMode::Studio,
+                shading: ShadingMode::Surface,
+                region_water_id: None,
             };
             let params = FaceParams::new(Some(&object.materials().unwrap()[0]));
             let packed = packed_instance(&instance_base(&instance, camera.position()), &params, instance.scale);
@@ -260,7 +261,7 @@ fn check_mirrored_render(device: &wgpu::Device, queue: &wgpu::Queue) {
     let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba8UnormSrgb);
     let mut prepare = device.create_command_encoder(&Default::default());
     let depth = geometry.depth(device, size).unwrap();
-    geometry.prepare(device, &mut prepare, &view, camera, size, None);
+    geometry.prepare(device, &mut prepare, &view, camera, size, crate::FrameInput::default());
     queue.submit([prepare.finish()]);
     assert_eq!(geometry.stats.instances, 2, "the public scene view submits both visible prims");
     let pixels = render_pixels(device, queue, size, &depth, |pass| geometry.draw(pass));
@@ -308,7 +309,8 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
             scale: transform.scale,
             pickable: true,
             faces: Vec::new(),
-            shading: ShadingMode::Studio,
+            shading: ShadingMode::Surface,
+            region_water_id: None,
         };
         instances.extend_from_slice(&packed_instance(&instance_base(&instance, camera.position()), &params, instance.scale));
     }

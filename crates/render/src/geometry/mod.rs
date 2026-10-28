@@ -15,8 +15,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assets::TextureId;
-use math::{DVec3, Quat, Vec3};
+use assets::{TextureHandle, TextureId};
+use math::{DVec3, Quat, Vec3, Vec4};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, IndexFormat, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
@@ -25,10 +25,10 @@ use wgpu::{
 use self::batching::{DrawCommand, MAX_FACE_INSTANCES};
 use self::mesh::GpuMesh;
 use self::storage::Storage;
-use crate::scene::{Camera, MeshId, SharedMesh, ViewVersion};
+use crate::scene::{Camera, MAX_REGIONS, MeshId, SharedMesh, ViewVersion};
 use crate::{
-    pipeline::{INSTANCE_BYTES, SurfacePipelines, Water},
-    texture::{TextureCompletion, TextureJob, TextureState, Textures},
+    pipeline::{INSTANCE_BYTES, Sky, SurfacePipelines, VoidWater},
+    texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
 
 pub use pick::PickError;
@@ -131,6 +131,7 @@ pub(crate) struct Instance {
     pickable: bool,
     faces: Vec<PickFace>,
     shading: ShadingMode,
+    region_water_id: Option<u128>,
 }
 
 pub(crate) struct PickFace {
@@ -139,9 +140,9 @@ pub(crate) struct PickFace {
 }
 
 enum ShadingMode {
-    Studio,
+    Surface,
     Terrain,
-    Water,
+    RegionWater,
 }
 
 struct Depth {
@@ -156,24 +157,28 @@ struct FramePreparationKey {
     version: ViewVersion,
     camera: Camera,
     size: [u32; 2],
-    water_height: Option<f64>,
 }
 
 struct FramePreparation {
     key: FramePreparationKey,
     textures: TextureState,
+    geometry_textures: GeometryTextureState,
     meshes: MeshState,
     more_meshes: bool,
     animated_faces: bool,
 }
 
 impl FramePreparation {
-    fn needs_frame(&self, textures: TextureState, meshes: MeshState) -> bool {
-        self.animated_faces || self.more_meshes || self.textures != textures || self.meshes != meshes
+    fn needs_frame(&self, textures: TextureState, geometry_textures: GeometryTextureState, meshes: MeshState) -> bool {
+        self.animated_faces
+            || self.more_meshes
+            || self.textures != textures
+            || self.geometry_textures != geometry_textures
+            || self.meshes != meshes
     }
 
-    fn reusable(&self, key: &FramePreparationKey, textures: TextureState, meshes: MeshState) -> bool {
-        self.key == *key && self.textures == textures && self.meshes == meshes && !self.more_meshes && !self.animated_faces
+    fn reusable(&self, key: &FramePreparationKey, textures: GeometryTextureState, meshes: MeshState) -> bool {
+        self.key == *key && self.geometry_textures == textures && self.meshes == meshes && !self.more_meshes && !self.animated_faces
     }
 }
 
@@ -190,9 +195,15 @@ pub(crate) struct GeometryRenderer {
     queue: Queue,
     memory: Arc<Accounting>,
     pipelines: SurfacePipelines,
-    water: Water,
+    void_water: VoidWater,
+    sky: Sky,
     textures: Textures,
     requested_textures: HashSet<TextureId>,
+    visible_textures: HashSet<TextureId>,
+    visible_texture_requests: Vec<TextureHandle>,
+    region_water_bounds: [Vec4; MAX_REGIONS],
+    region_water_ids: [u128; MAX_REGIONS],
+    region_water_count: usize,
     instances: Buffer,
     depth: Option<Depth>,
     meshes: HashMap<MeshId, GpuMesh>,
@@ -212,20 +223,34 @@ impl GeometryRenderer {
     }
 
     pub(crate) fn needs_frame(&self) -> bool {
-        self.prepared.as_ref().is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.memory.mesh_state()))
+        self.prepared
+            .as_ref()
+            .is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.textures.geometry_state(), self.memory.mesh_state()))
             || self.textures.uploading()
+    }
+
+    pub(crate) fn texture_revision(&self) -> u64 {
+        self.textures.state().revision
     }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
-        let pipelines = SurfacePipelines::new(device, format, &textures.layout);
+        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures);
+        let void_water = VoidWater::new(device, format, &textures);
+        let sky = Sky::new(device, format, &textures);
         Self {
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
             pipelines,
             textures,
             requested_textures: HashSet::new(),
-            water: Water::new(device, format),
+            visible_textures: HashSet::new(),
+            visible_texture_requests: Vec::new(),
+            region_water_bounds: [Vec4::ZERO; MAX_REGIONS],
+            region_water_ids: [0; MAX_REGIONS],
+            region_water_count: 0,
+            void_water,
+            sky,
             instances: buffer(device, "Face instances", MAX_FACE_INSTANCES * INSTANCE_BYTES, BufferUsages::VERTEX),
             depth: None,
             meshes: HashMap::new(),
@@ -260,7 +285,7 @@ impl GeometryRenderer {
                 sample_count: 1,
                 dimension: TextureDimension::D2,
                 format: TextureFormat::Depth32Float,
-                usage: TextureUsages::RENDER_ATTACHMENT,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             let view = texture.create_view(&TextureViewDescriptor::default());
@@ -302,7 +327,8 @@ impl GeometryRenderer {
         self.textures.set_soft_cap(mib);
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
-        self.water.draw(pass);
+        self.sky.draw(pass);
+        self.void_water.draw(pass);
         pass.set_vertex_buffer(1, self.instances.slice(..));
         let mut pipeline = None;
         let mut texture = None;
@@ -384,3 +410,6 @@ mod tests {
         assert_eq!(memory.depth.load(Ordering::Acquire), 0);
     }
 }
+
+#[cfg(test)]
+mod water_distance_tests;

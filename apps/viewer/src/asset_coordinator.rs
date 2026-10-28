@@ -1287,6 +1287,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn known_sky_settings_use_viewer_asset_and_decode_through_store() {
+        use assets::{Content, EnvironmentSettings, Status};
+
+        let asset = AssetId::new(Uuid::from_u128(0xc46226b40e435a569708d27ca1df3292));
+        let peer = Peer::new(2, move |index, request, base| {
+            if index == 0 {
+                return (200, grants(base));
+            }
+            let header = String::from_utf8_lossy(request);
+            assert!(header.starts_with(&format!("GET /content/?settings_id={} HTTP/1.1", asset.uuid())));
+            (200, b"{'type':'sky','sunlight_color':[r1,r0,r0]}".to_vec())
+        });
+        let client = Client::new(peer.url.join("seed").unwrap()).unwrap();
+        let (cancel, cancelled) = oneshot::channel();
+        let service = AssetCoordinator::with_budget(
+            Handle::current(),
+            async move {
+                let _ = cancelled.await;
+            },
+            Budget::default(),
+            None,
+        );
+        let region = Region::new(1);
+        service.register(region, client);
+        let mut demand = service.handle().request(region, assets::Request::Environment(asset), Priority::Visible).await.unwrap();
+        let sky = loop {
+            match demand.status() {
+                Status::Ready(Content::Environment(environment)) => break environment,
+                Status::Failed { failure, .. } => panic!("unexpected environment failure: {failure:?}"),
+                Status::StaleSession | Status::Ready(_) => panic!("unexpected environment content"),
+                _ => {
+                    demand.changed().await;
+                }
+            }
+        };
+        let EnvironmentSettings::Sky(sky) = &sky.settings else { panic!("decoded asset is not sky settings") };
+        assert_eq!(sky.sunlight, Some([1.0, 0.0, 0.0]));
+        cancel.send(()).unwrap();
+        service.stop().await;
+        assert_eq!(peer.finish().len(), 2);
+    }
+
+    #[tokio::test]
     async fn pending_route_closes_with_session() {
         let service = AssetCoordinator::with_budget(Handle::current(), pending(), Budget::default(), None);
         let handle = service.handle();

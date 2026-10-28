@@ -43,7 +43,10 @@ pub fn flips_winding(scale: Vec3) -> bool {
 }
 
 pub fn srgb8_to_linear(value: u8) -> f32 {
-    let value = f32::from(value) / 255.0;
+    srgb_to_linear(f32::from(value) / 255.0)
+}
+
+pub fn srgb_to_linear(value: f32) -> f32 {
     if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
 }
 
@@ -62,6 +65,7 @@ mod tests {
             assert!((srgb8_to_linear(encoded) - linear).abs() < 1e-7, "sRGB channel {encoded}");
             assert_eq!(linear_to_srgb8(linear), encoded, "linear channel {linear}");
         }
+        assert!((srgb_to_linear(0.25) - 0.05087609).abs() < 1e-7);
     }
 
     #[test]

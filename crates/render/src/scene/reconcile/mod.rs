@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use utils::AssetId;
 use uuid::Uuid;
 use world::{
     Entity, EnvironmentRead, LocalAddress, MAX_OBJECT_DETAIL_BATCH_ITEMS, MAX_OBJECT_PAGE_ITEMS, ObjectDetailBatch, ObjectListPage,
@@ -17,12 +18,13 @@ use world::{
 };
 
 use crate::scene::{
-    AssetChange, AssetTicket, Batch, Budget, Camera, EnvironmentPush, EnvironmentPushError, MeshCompletion, MeshJob, Object, Patch,
-    RecoveryReason, RegionData, SceneView, Status, SurfaceKind,
+    AssetChange, AssetTicket, Batch, Budget, Camera, EnvironmentChoice, EnvironmentPush, EnvironmentPushError, MeshCompletion, MeshJob,
+    Object, Patch, RecoveryReason, RegionData, SceneView, Status, SurfaceKind,
     asset_demand::AssetDemand,
     budget::Lease,
     dependencies::{Dependencies, DependencyTraversal},
     environment::ViewerEnvironments,
+    environment_textures::EnvironmentTextures,
     model::{Change, DeliveryState, MeshChange, Mirror, Receipt, SceneLifetime},
     planning::{Completion, MeshPlanner, Work},
     region_environment::{ReadyCandidate, ReadyValue, RegionEnvironment, RegionEnvironmentResolver, Resolution},
@@ -33,7 +35,7 @@ pub const MAX_OBJECTS: usize = 65_536;
 pub const MAX_REGIONS: usize = 33;
 pub const MAX_RETAINED_BYTES: usize = 96 * 1024 * 1024;
 const MAX_PATCHES: usize = MAX_REGIONS * 256;
-pub const MAX_BATCH_CHANGES: usize = 2 * MAX_OBJECTS + 2 * MAX_PATCHES + 5 * MAX_REGIONS + 1;
+pub const MAX_BATCH_CHANGES: usize = 2 * MAX_OBJECTS + 2 * MAX_PATCHES + 5 * MAX_REGIONS + 65;
 const MAX_PENDING: usize = MAX_OBJECTS + MAX_OBJECT_PAGE_ITEMS;
 const READ_BYTES: usize = 1024 * 1024 + 16 * 1024;
 const WORK: usize = 128;
@@ -104,6 +106,7 @@ struct DirtySet {
     patches: BTreeSet<(Region, TerrainPatchId)>,
     water: BTreeSet<Region>,
     surfaces: BTreeSet<(Region, SurfaceKind)>,
+    environment_textures: BTreeSet<utils::AssetId>,
 }
 
 impl DirtySet {
@@ -116,6 +119,7 @@ impl DirtySet {
             && self.patches.is_empty()
             && self.water.is_empty()
             && self.surfaces.is_empty()
+            && self.environment_textures.is_empty()
     }
 }
 
@@ -134,6 +138,7 @@ pub struct Reconciler {
     publication: PublicationState,
     recovery: RecoveryState,
     viewer: ViewerEnvironments,
+    active_environment_textures: BTreeMap<AssetId, Region>,
     environment_identity: u64,
 }
 
@@ -149,11 +154,13 @@ impl Reconciler {
                 meshes: MeshPlanner::new(budget.clone()),
                 assets: AssetDemand::new(budget.clone()),
                 environments: RegionEnvironmentResolver::new(budget.clone()),
+                environment_textures: EnvironmentTextures::new(),
                 surfaces: SurfaceJobs::new(budget.clone()),
                 expansion: DependencyTraversal::default(),
                 scan: VecDeque::new(),
             },
             viewer: ViewerEnvironments::new(budget.clone()),
+            active_environment_textures: BTreeMap::new(),
             publication: PublicationState {
                 viewer_version: 0,
                 sequence: 0,
@@ -188,7 +195,33 @@ impl Reconciler {
         if !self.session.is_active() {
             return Err(EnvironmentPushError::Invalid);
         }
-        self.viewer.push(region, push)
+        let version = self.viewer.version();
+        self.viewer.push(region, push)?;
+        if version != self.viewer.version() {
+            self.sync_environment_textures();
+        }
+        Ok(())
+    }
+
+    pub fn set_local_environment(&mut self, choice: EnvironmentChoice, agent_region: Region) -> Result<(), EnvironmentPushError> {
+        if !self.session.is_active() {
+            return Err(EnvironmentPushError::Invalid);
+        }
+        let version = self.viewer.version();
+        self.viewer.set_local(choice, agent_region)?;
+        if version != self.viewer.version() {
+            self.sync_environment_textures();
+        }
+        Ok(())
+    }
+
+    pub fn set_active_environment_textures(&mut self, region: Option<Region>, textures: BTreeSet<AssetId>) {
+        let desired = region.map_or_else(BTreeMap::new, |region| textures.into_iter().map(|id| (id, region)).collect());
+        if self.active_environment_textures == desired {
+            return;
+        }
+        self.active_environment_textures = desired;
+        self.sync_environment_textures();
     }
 
     pub fn complete_asset(&mut self, ticket: AssetTicket, status: assets::Status) {
@@ -200,7 +233,17 @@ impl Reconciler {
                 return;
             }
         }
+        let viewer_version = self.viewer.version();
         if self.viewer.complete(ticket, &status) {
+            if viewer_version != self.viewer.version() {
+                self.sync_environment_textures();
+            }
+            return;
+        }
+        if let Some(changed) = self.preparation.environment_textures.complete(ticket, &status) {
+            if changed {
+                self.collect_environment_texture_changes();
+            }
             return;
         }
         for entity in self.preparation.assets.complete(ticket, status) {
@@ -229,13 +272,14 @@ impl Reconciler {
 
     pub fn close(&mut self) {
         self.session.close();
-        self.viewer = ViewerEnvironments::new(self.budget.clone());
+        self.viewer.close();
         self.reset();
         self.recovery.status = Status::Closed;
     }
 
     fn reset(&mut self) {
         self.preparation.reset(self.budget.clone());
+        self.active_environment_textures.clear();
         self.world.restart();
         self.state = SceneState::default();
         self.publication.dirty = DirtySet::default();
@@ -249,7 +293,29 @@ impl Reconciler {
             self.state.bytes -= environment.retained_bytes();
             self.publication.dirty.environments.insert(region);
             self.publication.publish = true;
+            self.sync_environment_textures();
         }
+    }
+
+    fn sync_environment_textures(&mut self) {
+        let viewer = self.viewer.current();
+        self.preparation.environment_textures.update(&self.state.mirror.environments, viewer.as_ref(), &self.active_environment_textures);
+        self.collect_environment_texture_changes();
+    }
+
+    fn collect_environment_texture_changes(&mut self) {
+        for (id, handle) in self.preparation.environment_textures.take_dirty() {
+            match handle {
+                Some(handle) => {
+                    self.state.mirror.environment_textures.insert(id, handle);
+                }
+                None => {
+                    self.state.mirror.environment_textures.remove(&id);
+                }
+            }
+            self.publication.dirty.environment_textures.insert(id);
+        }
+        self.publication.publish |= !self.publication.dirty.environment_textures.is_empty();
     }
 
     fn resolve_environment(&mut self, resolution: Resolution) {
@@ -295,6 +361,7 @@ impl Reconciler {
         self.state.mirror.environments.insert(candidate.region, environment);
         self.publication.dirty.environments.insert(candidate.region);
         self.publication.publish = true;
+        self.sync_environment_textures();
     }
 
     fn retain_environment(&mut self, new: usize, old: usize) -> Result<(), RecoveryReason> {
@@ -385,6 +452,7 @@ struct Preparation {
     meshes: MeshPlanner,
     assets: AssetDemand,
     environments: RegionEnvironmentResolver,
+    environment_textures: EnvironmentTextures,
     surfaces: SurfaceJobs,
     expansion: DependencyTraversal,
     scan: VecDeque<Entity>,
@@ -395,6 +463,7 @@ impl Preparation {
         self.meshes.reset(budget.clone());
         self.assets.reset();
         self.environments.reset();
+        self.environment_textures.reset();
         self.surfaces = SurfaceJobs::new(budget);
         self.expansion.clear();
         self.scan.clear();

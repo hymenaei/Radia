@@ -14,6 +14,8 @@ use std::{
     },
 };
 
+use assets::TextureHandle;
+use utils::AssetId;
 use world::{Entity, Region, RegionSummary, TerrainPatch, TerrainPatchId, WorldRevision};
 
 use crate::scene::region_environment::RegionEnvironment;
@@ -101,6 +103,7 @@ pub(in crate::scene) enum Change {
     Remove(Entity),
     Region(RegionData),
     Environment(Region, Option<RegionEnvironment>),
+    EnvironmentTexture(AssetId, Option<TextureHandle>),
     Retire(Region),
     Patch(Region, Patch),
     Water(Region, Option<f32>),
@@ -133,6 +136,7 @@ pub(in crate::scene) struct Mirror {
     pub(in crate::scene) objects: HashMap<Entity, Object>,
     pub(in crate::scene) regions: BTreeMap<Region, RegionData>,
     pub(in crate::scene) environments: BTreeMap<Region, RegionEnvironment>,
+    pub(in crate::scene) environment_textures: BTreeMap<AssetId, TextureHandle>,
     pub(in crate::scene) patches: BTreeMap<(Region, TerrainPatchId), Patch>,
     pub(in crate::scene) water: BTreeMap<Region, Option<f32>>,
     pub(in crate::scene) surfaces: BTreeMap<(Region, SurfaceKind), Surface>,
@@ -206,6 +210,14 @@ impl Mirror {
                 }
                 None => {
                     self.environments.remove(&region);
+                }
+            },
+            Change::EnvironmentTexture(id, handle) => match handle {
+                Some(handle) => {
+                    self.environment_textures.insert(id, handle);
+                }
+                None => {
+                    self.environment_textures.remove(&id);
                 }
             },
             Change::Water(region, height) => {

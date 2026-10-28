@@ -44,6 +44,10 @@ const GREEN_SKY: &[u8] = br#"<?llsd/notation?>
 {'type':'sky','sunlight_color':[r0,r1,r0]}
 "#;
 
+const YELLOW_SKY: &[u8] = br#"<?llsd/notation?>
+{'type':'sky','sunlight_color':[r1,r1,r0]}
+"#;
+
 const HAZE_SKY: &[u8] = br#"<?llsd/notation?>
 {'type':'sky','ambient':[r0.1,r0.2,r0.3],'blue_density':[r0.11,r0.12,r0.13],
  'blue_horizon':[r0.2,r0.3,r0.4],'density_multiplier':r0.15,
@@ -85,6 +89,7 @@ fn sources<'a>(base: Option<&'a EnvironmentDescription>) -> Sources<'a> {
         experience_water: None,
         sky_override: None,
         water_override: None,
+        local: None,
     }
 }
 
@@ -98,6 +103,7 @@ fn evaluated(environment: &Environment, utc: f64, altitude: f64, schedule: Sched
             experience_water: None,
             sky_override: None,
             water_override: None,
+            local: None,
         },
         utc,
         altitude,
@@ -195,6 +201,7 @@ fn source_precedence_overrides() {
             experience_water: None,
             sky_override: None,
             water_override: None,
+            local: None,
         },
         0.0,
         0.0,
@@ -210,6 +217,7 @@ fn source_precedence_overrides() {
             experience_water: None,
             sky_override: None,
             water_override: None,
+            local: None,
         },
         0.0,
         0.0,
@@ -225,6 +233,7 @@ fn source_precedence_overrides() {
             experience_water: Some(&water),
             sky_override: None,
             water_override: None,
+            local: None,
         },
         0.0,
         0.0,
@@ -232,6 +241,23 @@ fn source_precedence_overrides() {
     assert_eq!(explicit_water.sky.sunlight, [0.0, 1.0, 0.0]);
     assert_eq!(explicit_water.water.fog_density, 7.0);
     assert_eq!(explicit_water.water.normal_map.current, None);
+}
+
+#[test]
+fn local_sky_overrides_experience_and_shared_sources() {
+    let region = environment(GREEN_SKY);
+    let parcel = environment(YELLOW_SKY);
+    let experience = environment(RED_SKY);
+    let local = environment(BLUE_SKY);
+    let EnvironmentSettings::Sky(local) = &local.settings else { panic!("sky setting expected") };
+    let retained_water = super::water_defaults(0.0);
+    for (source_name, base) in [("region", &region), ("parcel", &parcel)] {
+        let mut input = sources(Some(base));
+        input.experience_sky = Some(&experience);
+        input.local = Some(super::Local::Sky { sky: local, water: &retained_water });
+        let result = evaluate(&input, 0.0, 0.0);
+        assert_eq!(result.sky.sunlight, [0.0, 0.0, 1.0], "local sky takes priority over {source_name} and experience settings");
+    }
 }
 
 #[test]
@@ -258,7 +284,7 @@ fn defaults_match_viewer() {
     let result = evaluate(&sources(None), 0.0, 0.0);
     assert_eq!(result.sky.clouds.color, [0.4099, 0.4099, 0.4099]);
     assert_eq!(result.sky.sun.texture.current, None);
-    assert_eq!(result.sky.moon.texture.current, Some(AssetId::new(Uuid::from_u128(0xd07f6eedb96a47cdb51d400ad4a1c428))));
+    assert_eq!(result.sky.moon.texture.current, super::DEFAULT_MOON_TEXTURE);
     assert_eq!(result.water.fog_density, 2.0);
     assert_eq!(result.water.normal_scale, [1.75; 3]);
     assert_eq!(result.sky.haze.ambient, [0.25; 3]);

@@ -3,6 +3,8 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
+use assets::TextureHandle;
+use utils::AssetId;
 use world::{Entity, Region, WorldRevision};
 
 use super::{Batch, Mirror, SceneLifetime, Status};
@@ -43,6 +45,7 @@ impl Eq for ViewVersion {}
 pub struct SceneView {
     session: SceneLifetime,
     sequence: u64,
+    geometry_sequence: u64,
     revision: Option<WorldRevision>,
     status: Status,
     mirror: Mirror,
@@ -54,7 +57,7 @@ impl SceneView {
     }
 
     pub(in crate::scene) fn new(session: SceneLifetime) -> Self {
-        Self { session, sequence: 0, revision: None, status: Status::Loading, mirror: Mirror::default() }
+        Self { session, sequence: 0, geometry_sequence: 0, revision: None, status: Status::Loading, mirror: Mirror::default() }
     }
 
     pub fn apply(&mut self, batch: Batch) -> Result<(), ApplyError> {
@@ -64,6 +67,7 @@ impl SceneView {
         if self.sequence.checked_add(1) != Some(batch.sequence) {
             return Err(ApplyError::OutOfOrder);
         }
+        let geometry_changed = batch.replace || batch.changes.iter().any(change_affects_geometry);
         if batch.replace {
             self.mirror = Mirror::default();
         }
@@ -71,6 +75,9 @@ impl SceneView {
             self.mirror.apply(change);
         }
         self.sequence = batch.sequence;
+        if geometry_changed {
+            self.geometry_sequence = self.geometry_sequence.checked_add(1).expect("scene geometry version space exhausted");
+        }
         self.revision = batch.revision;
         self.status = batch.status;
         batch.delivery.acknowledge();
@@ -82,6 +89,9 @@ impl SceneView {
     }
     pub fn version(&self) -> ViewVersion {
         ViewVersion { session: self.session.clone(), sequence: self.sequence, status: self.status() }
+    }
+    pub(crate) fn geometry_version(&self) -> ViewVersion {
+        ViewVersion { session: self.session.clone(), sequence: self.geometry_sequence, status: self.status() }
     }
     pub fn revision(&self) -> Option<WorldRevision> {
         self.revision
@@ -114,6 +124,9 @@ impl SceneView {
     pub fn environment(&self, region: Region) -> Option<&RegionEnvironment> {
         if self.session.is_active() { self.mirror.environments.get(&region) } else { None }
     }
+    pub fn environment_texture(&self, id: AssetId) -> Option<&TextureHandle> {
+        if self.session.is_active() { self.mirror.environment_textures.get(&id) } else { None }
+    }
     pub fn patches(&self) -> impl Iterator<Item = (Region, &Patch)> {
         self.mirror.patches.iter().filter(|_| self.session.is_active()).map(|((region, _), patch)| (*region, patch))
     }
@@ -124,4 +137,19 @@ impl SceneView {
     pub fn surfaces(&self) -> impl Iterator<Item = &Surface> {
         self.mirror.surfaces.values().filter(|_| self.session.is_active())
     }
+}
+
+fn change_affects_geometry(change: &super::Change) -> bool {
+    matches!(
+        change,
+        super::Change::Object(_)
+            | super::Change::Mesh(_)
+            | super::Change::Material(_)
+            | super::Change::Remove(_)
+            | super::Change::Region(_)
+            | super::Change::Retire(_)
+            | super::Change::Patch(_, _)
+            | super::Change::Surface(_)
+            | super::Change::RemoveSurface(_, _)
+    )
 }

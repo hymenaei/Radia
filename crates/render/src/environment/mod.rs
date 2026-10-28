@@ -1,3 +1,5 @@
+mod runtime;
+mod stars;
 mod transition;
 
 use std::f32::consts::PI;
@@ -7,6 +9,8 @@ use math::{Quat, Vec3};
 use utils::AssetId;
 use uuid::Uuid;
 
+pub use runtime::ActiveEnvironment;
+pub(crate) use stars::{STAR_COUNT, star_brightness, stars};
 pub use transition::Transition;
 
 const DEFAULT_DAY_LENGTH: f64 = 14_400.0;
@@ -15,10 +19,13 @@ const MAX_DAY_LENGTH: f64 = 604_800.0;
 const DEFAULT_DAY_OFFSET: f64 = 57_600.0;
 const MAX_DAY_OFFSET: f64 = 86_400.0;
 
-const DEFAULT_SUN_TEXTURE: Option<AssetId> = None;
-const DEFAULT_MOON_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0xd07f6eedb96a47cdb51d400ad4a1c428)));
-const DEFAULT_CLOUD_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x1dc1368fe8fef02da08d9d9f11c1af6b)));
-const DEFAULT_WATER_NORMAL_MAP: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x822ded499a6cf61ccb896df54f42cdf4)));
+pub(crate) const DEFAULT_SUN_TEXTURE: Option<AssetId> = None;
+pub(crate) const DEFAULT_MOON_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0xd07f6eedb96a47cdb51d400ad4a1c428)));
+pub(crate) const DEFAULT_CLOUD_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x1dc1368fe8fef02da08d9d9f11c1af6b)));
+pub(crate) const DEFAULT_WATER_NORMAL_MAP: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x822ded499a6cf61ccb896df54f42cdf4)));
+pub(crate) const DEFAULT_BLOOM_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x3c59f7fe9dc847f98aafa9dd1fbc3bef)));
+pub(crate) const DEFAULT_RAINBOW_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x11b4c57c56b304ed1f822004363882e4)));
+pub(crate) const DEFAULT_HALO_TEXTURE: Option<AssetId> = Some(AssetId::new(Uuid::from_u128(0x12149143f59991a777acb52a3c0f59cd)));
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Schedule {
@@ -60,6 +67,13 @@ pub struct Sources<'a> {
     pub experience_water: Option<&'a EnvironmentDescription>,
     pub sky_override: Option<&'a Sky>,
     pub water_override: Option<&'a Water>,
+    pub local: Option<Local<'a>>,
+}
+
+pub enum Local<'a> {
+    Sky { sky: &'a Sky, water: &'a WaterState },
+    Water { water: &'a Water, sky: &'a SkyState },
+    DayCycle(&'a DayCycle),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,8 +121,15 @@ pub struct SkyState {
     pub sunlight: [f32; 3],
     pub moon_brightness: f32,
     pub star_brightness: f32,
+    pub reflection_probe_ambiance: Option<f32>,
     pub clouds: CloudsState,
     pub haze: HazeState,
+    pub bloom: TextureBlend,
+    pub rainbow: TextureBlend,
+    pub halo: TextureBlend,
+    pub moisture: f32,
+    pub droplet_radius: f32,
+    pub ice: f32,
     pub gamma: f32,
     pub glow: [f32; 3],
     pub max_y: f32,
@@ -144,18 +165,47 @@ pub fn evaluate(sources: &Sources<'_>, utc_seconds: f64, altitude: f64) -> Evalu
     let inherited = sources.experience_day.or(sources.base);
     let sky_source = sources.experience_sky.or(inherited);
     let water_source = sources.experience_water.or(inherited);
-    let (sky, sky_track, sky_cycles) = sky_source
+    let (mut sky, mut sky_track, mut sky_cycles) = sky_source
         .and_then(|source| sample_sky(source, day_position, altitude, schedule.altitudes))
         .unwrap_or_else(|| (sky_defaults(0.0), None, false));
-    let (water, water_cycles) =
+    let (mut water, mut water_cycles) =
         water_source.and_then(|source| sample_water(source, day_position)).unwrap_or_else(|| (water_defaults(0.0), false));
-    let mut sky = sky;
-    let mut water = water;
     if let Some(override_sky) = sources.sky_override {
         overlay(&mut sky, override_sky);
     }
     if let Some(override_water) = sources.water_override {
         overlay_water(&mut water, override_water);
+    }
+    if let Some(local) = &sources.local {
+        match local {
+            Local::Sky { sky: source, water: retained_water } => {
+                sky = sky_state(source, 0.0);
+                water = (*retained_water).clone();
+                sky_track = None;
+                sky_cycles = false;
+                water_cycles = false;
+            }
+            Local::Water { water: source, sky: retained_sky } => {
+                sky = (*retained_sky).clone();
+                water = water_state(source, 0.0);
+                sky_track = None;
+                sky_cycles = false;
+                water_cycles = false;
+            }
+            Local::DayCycle(day) => {
+                if let Some((track_number, track)) = selected_sky_track(day, selected_track(altitude, schedule.altitudes))
+                    && let Some(local_sky) = sample_sky_track(track, day_position as f32)
+                {
+                    sky = local_sky;
+                    sky_track = Some(track_number);
+                    sky_cycles = track.len() > 1;
+                }
+                if let Some(local_water) = sample_water_track(day.water(), day_position as f32) {
+                    water = local_water;
+                    water_cycles = day.water().len() > 1;
+                }
+            }
+        }
     }
     Evaluated { sky, water, sky_track, day_position, cycle_length: (sky_cycles || water_cycles).then_some(schedule.day_length) }
 }
@@ -280,6 +330,9 @@ fn overlay(state: &mut SkyState, sky: &Sky) {
     if let Some(value) = sky.star_brightness {
         state.star_brightness = value;
     }
+    if let Some(value) = sky.reflection_probe_ambiance {
+        state.reflection_probe_ambiance = Some(value);
+    }
     if let Some(value) = sky.clouds.color {
         state.clouds.color = value;
     }
@@ -310,6 +363,18 @@ fn overlay(state: &mut SkyState, sky: &Sky) {
     }
     if let Some(value) = sky.max_y {
         state.max_y = value;
+    }
+    overlay_texture(&mut state.bloom, sky.bloom);
+    overlay_texture(&mut state.rainbow, sky.rainbow);
+    overlay_texture(&mut state.halo, sky.halo);
+    if let Some(value) = sky.atmosphere.moisture {
+        state.moisture = value;
+    }
+    if let Some(value) = sky.atmosphere.droplet_radius {
+        state.droplet_radius = value;
+    }
+    if let Some(value) = sky.atmosphere.ice {
+        state.ice = value;
     }
     state.sun_direction = direction(state.sun.rotation);
     state.moon_direction = direction(state.moon.rotation);
@@ -414,6 +479,7 @@ fn sky_defaults(position: f32) -> SkyState {
         sunlight: [0.7342, 0.7815, 0.8999],
         moon_brightness: 0.5,
         star_brightness: 250.0,
+        reflection_probe_ambiance: None,
         clouds: CloudsState {
             color: [0.4099, 0.4099, 0.4099],
             density: [[1.0, 0.526, 1.0]; 2],
@@ -424,6 +490,12 @@ fn sky_defaults(position: f32) -> SkyState {
             texture: TextureBlend { current: DEFAULT_CLOUD_TEXTURE, next: None, factor: 0.0 },
         },
         haze: default_haze(),
+        bloom: TextureBlend { current: DEFAULT_BLOOM_TEXTURE, next: None, factor: 0.0 },
+        rainbow: TextureBlend { current: DEFAULT_RAINBOW_TEXTURE, next: None, factor: 0.0 },
+        halo: TextureBlend { current: DEFAULT_HALO_TEXTURE, next: None, factor: 0.0 },
+        moisture: 0.0,
+        droplet_radius: 800.0,
+        ice: 0.0,
         gamma: 1.0,
         glow: [5.0, 0.001, -0.4799],
         max_y: 1605.0,
@@ -521,8 +593,18 @@ fn blend_sky(start: &SkyState, end: &SkyState, factor: f32) -> SkyState {
         sunlight: blend_array(start.sunlight, end.sunlight, factor),
         moon_brightness: lerp(start.moon_brightness, end.moon_brightness, factor),
         star_brightness: lerp(start.star_brightness, end.star_brightness, factor),
+        reflection_probe_ambiance: match (start.reflection_probe_ambiance, end.reflection_probe_ambiance) {
+            (None, None) => None,
+            (start, end) => Some(lerp(start.unwrap_or(0.0), end.unwrap_or(0.0), factor)),
+        },
         clouds,
         haze: blend_haze(&start.haze, &end.haze, factor),
+        bloom: blend_texture(start.bloom, end.bloom, factor),
+        rainbow: blend_texture(start.rainbow, end.rainbow, factor),
+        halo: blend_texture(start.halo, end.halo, factor),
+        moisture: lerp(start.moisture, end.moisture, factor),
+        droplet_radius: lerp(start.droplet_radius, end.droplet_radius, factor),
+        ice: lerp(start.ice, end.ice, factor),
         gamma: lerp(start.gamma, end.gamma, factor),
         glow: blend_array(start.glow, end.glow, factor),
         max_y: lerp(start.max_y, end.max_y, factor),

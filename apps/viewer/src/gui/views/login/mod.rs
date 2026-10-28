@@ -566,6 +566,8 @@ impl LoginScreen {
 
         let username = self.username.read(cx).value();
         self.favorites.prepare_session(session.grid, session.agent_id, &username, Some(mailbox), cx);
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let scene_inventory_updates = inventory_updates.clone();
         if let Some(active) = &mut self.active_session {
             active.ready = Some(ReadySession { session: session.clone(), inventory_updates, inventory_fetch });
         }
@@ -586,6 +588,7 @@ impl LoginScreen {
             self.session_generation,
             &ready.world_reader,
             ready.environments,
+            scene_inventory_updates,
             &ready.assets,
             session.agent_id,
             ready.camera,

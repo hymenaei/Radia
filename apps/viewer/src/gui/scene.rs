@@ -72,6 +72,7 @@ pub(crate) fn start_session(
     generation: u64,
     reader: &WorldReader,
     environments: EnvironmentInbox,
+    inventory_updates: watch::Receiver<Option<::inventory::InventorySnapshot>>,
     assets: &AssetHandle,
     agent_id: Uuid,
     camera: watch::Sender<Option<Camera>>,
@@ -81,7 +82,7 @@ pub(crate) fn start_session(
     if start_scene(generation, cx) {
         connect_world(
             generation,
-            SceneSources { reader: reader.clone(), environments, assets: assets.clone() },
+            SceneSources { reader: reader.clone(), environments, assets: assets.clone(), inventory_updates },
             agent_id,
             camera,
             movement,

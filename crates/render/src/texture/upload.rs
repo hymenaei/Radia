@@ -2,7 +2,8 @@ use super::{
     BindGroupDescriptor, BindGroupEntry, BindingResource, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, Color,
     CommandEncoder, Device, Extent3d, GpuCharge, GpuTexture, HashMap, LoadOp, Operations, Origin3d, RenderPassColorAttachment,
     RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureDescriptor, TextureDimension,
-    TextureEntry, TextureUploadState, TextureUsages, TextureViewDescriptor, Textures, UPLOAD_BYTES, Upload, UploadData, mip_count,
+    TextureEntry, TextureFormat, TextureUploadState, TextureUsages, TextureViewDescriptor, Textures, UPLOAD_BYTES, Upload, UploadData,
+    mip_count, raw_channel_view_format, raw_channel_view_formats,
 };
 
 impl Textures {
@@ -29,21 +30,24 @@ impl Textures {
         for (id, size) in prepared {
             let entry = self.entries.remove(&id).expect("prepared texture");
             let TextureUploadState::Prepared(pixels) = entry.state else { unreachable!("prepared texture") };
+            let format = pixels.format();
             let descriptor = TextureDescriptor {
                 label: Some("Scene image"),
                 size: Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
                 mip_level_count: mip_count(size),
                 sample_count: 1,
                 dimension: TextureDimension::D2,
-                format: pixels.format(),
+                format,
                 usage: TextureUsages::TEXTURE_BINDING
                     | TextureUsages::COPY_DST
                     | if matches!(pixels.data, UploadData::Rgba(_)) { TextureUsages::RENDER_ATTACHMENT } else { TextureUsages::empty() },
-                view_formats: &[],
+                view_formats: raw_channel_view_formats(format),
             };
             let charge = GpuCharge::new(self.memory.clone(), self.cap_bytes.clone(), &descriptor);
             let texture = device.create_texture(&descriptor);
             let view = texture.create_view(&TextureViewDescriptor::default());
+            let water_view =
+                texture.create_view(&TextureViewDescriptor { format: Some(raw_channel_view_format(format)), ..Default::default() });
             self.entries.insert(
                 id,
                 TextureEntry {
@@ -52,8 +56,9 @@ impl Textures {
                     owner: entry.owner,
                     revision: entry.revision,
                     evicted: false,
+                    geometry: entry.geometry,
                     state: TextureUploadState::Uploading {
-                        gpu: GpuTexture { texture, view, bindings: HashMap::new(), charge },
+                        gpu: GpuTexture { texture, view, water_view, bindings: HashMap::new(), charge },
                         pixels,
                         row: 0,
                         mip: 0,
@@ -120,11 +125,13 @@ impl Textures {
                     break;
                 }
                 let source = gpu.texture.create_view(&TextureViewDescriptor {
+                    format: Some(TextureFormat::Rgba8Unorm),
                     base_mip_level: *mip - 1,
                     mip_level_count: Some(1),
                     ..Default::default()
                 });
                 let dest = gpu.texture.create_view(&TextureViewDescriptor {
+                    format: Some(TextureFormat::Rgba8Unorm),
                     base_mip_level: *mip,
                     mip_level_count: Some(1),
                     ..Default::default()
@@ -171,10 +178,11 @@ impl Textures {
                     owner: entry.owner,
                     revision: entry.revision,
                     evicted: false,
+                    geometry: entry.geometry,
                     state: TextureUploadState::Ready(gpu),
                 },
             );
-            self.changed();
+            self.changed(id);
         }
         self.trim(epoch);
     }
@@ -237,36 +245,36 @@ mod tests {
         assert!(handles.iter().all(|texture| texture.image().is_none()), "render-only pixels are released after successful submission");
         textures.request(&handles[0], 2, Priority::Visible);
         textures.request(&handles[1], 3, Priority::Visible);
-        textures.soft_cap = 2 * bytes;
+        textures.touch(handles[0].id(), 4);
+        textures.soft_cap = bytes;
         let real_stats = textures.memory.gpu.swap(usize::MAX, Ordering::AcqRel);
-        textures.trim(3);
+        textures.trim(4);
         textures.memory.gpu.store(real_stats, Ordering::Release);
         assert!(
             matches!(textures.entries[&handles[0].id()].state, TextureUploadState::Ready(_)),
-            "the newest unused resource survives LRU selection"
+            "a texture used by the current cached draw list survives LRU selection"
         );
-        assert!(matches!(textures.entries[&handles[1].id()].state, TextureUploadState::Ready(_)), "the current frame is protected");
-        assert!(handles[2..].iter().all(|texture| matches!(textures.entries[&texture.id()].state, TextureUploadState::Dormant)));
+        assert!(handles[1..].iter().all(|texture| matches!(textures.entries[&texture.id()].state, TextureUploadState::Dormant)));
         assert_eq!(textures.count(), 8, "deferred resources stay in statistics before synchronization");
-        submit(&mut textures, &device, &queue, 3);
-        assert_eq!((textures.count(), textures.bytes()), (2, 2 * bytes));
+        submit(&mut textures, &device, &queue, 4);
+        assert_eq!((textures.count(), textures.bytes()), (1, bytes));
         assert!(handles[2].image().is_none());
-        textures.request(&handles[2], 4, Priority::Visible);
+        textures.request(&handles[2], 5, Priority::Visible);
         let job = textures.next_conversion_job().unwrap();
         assert!(matches!(job.input, PixelSource::Decode(_)), "an evicted render-only handle reloads from its encoded source");
         assert!(textures.resident(&device, TextureKey { id: handles[2].id(), sampler: Sampler::default() }).is_none());
         textures.complete(job.run(CompressionQuality::Fast));
-        submit(&mut textures, &device, &queue, 4);
+        submit(&mut textures, &device, &queue, 5);
         assert!(textures.resident(&device, TextureKey { id: handles[2].id(), sampler: Sampler::default() }).is_some());
         textures.soft_cap = 0;
-        textures.request(&handles[2], 5, Priority::Visible);
-        submit(&mut textures, &device, &queue, 5);
+        textures.request(&handles[2], 6, Priority::Visible);
+        submit(&mut textures, &device, &queue, 6);
         assert_eq!(textures.count(), 1, "a current-frame texture may exceed the soft cap");
         drop(handles);
         textures.releases();
         assert!(textures.entries.is_empty(), "final owners retire their textures without cache eviction");
         assert_eq!(textures.count(), 1, "GPU disposal is deferred");
-        submit(&mut textures, &device, &queue, 6);
+        submit(&mut textures, &device, &queue, 7);
         assert_eq!((textures.count(), textures.bytes()), (0, 0), "dropping all N handles releases every world GPU texture and binding");
 
         let pending = loaded(99, true);

@@ -9,10 +9,21 @@ impl Reconciler {
         if let Some(event) = self.preparation.environments.event() {
             return ReconcileStep::Asset(event);
         }
+        if let Some(event) = self.preparation.environment_textures.event() {
+            return ReconcileStep::Asset(event);
+        }
+        if let Some(event) = self.viewer.event() {
+            return ReconcileStep::Asset(event);
+        }
         if !self.session.is_active() {
             return ReconcileStep::Closed;
         }
+        let viewer_version = self.viewer.version();
         self.viewer.advance();
+        if viewer_version != self.viewer.version() {
+            self.sync_environment_textures();
+        }
+        self.viewer.retry_local_route();
         if let Some(event) = self.viewer.event() {
             return ReconcileStep::Asset(event);
         }

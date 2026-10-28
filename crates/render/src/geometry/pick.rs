@@ -161,7 +161,8 @@ mod tests {
             scale: Vec3::ONE,
             pickable: true,
             faces: vec![PickFace { indices, double_sided }],
-            shading: ShadingMode::Studio,
+            shading: ShadingMode::Surface,
+            region_water_id: None,
         }
     }
 

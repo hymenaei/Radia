@@ -18,7 +18,10 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-use super::{FRAME_INTERVAL, InputCapture, SharedWindowState};
+use super::{
+    FRAME_INTERVAL, InputCapture, SharedWindowState,
+    timing::{FrameIntervals, next_frame_deadline, refresh_interval},
+};
 use crate::{
     DEFAULT_DRAW_DISTANCE,
     agent_movement::{BodyRotation, HeldControls, KeyBinding, MovementObservation, STOP},
@@ -28,6 +31,11 @@ use crate::{
 
 const RECOVERY_DELAY: Duration = Duration::from_millis(500);
 pub(super) const MAX_RECOVERIES: u32 = 3;
+
+fn display_refresh_interval(window: &Window) -> Duration {
+    let millihertz = window.current_monitor().and_then(|monitor| monitor.refresh_rate_millihertz());
+    refresh_interval(millihertz, FRAME_INTERVAL)
+}
 
 #[derive(Debug)]
 pub(crate) enum SceneWindowError {
@@ -83,6 +91,8 @@ pub(super) struct SceneWindow {
     window: Arc<Window>,
     generation: u64,
     frame_work: Duration,
+    frame_intervals: FrameIntervals,
+    frame_interval: Duration,
     next_frame: Instant,
     dpi: f64,
     occluded: bool,
@@ -121,6 +131,7 @@ impl SceneWindow {
         tracing::info!(backend = ?info.backend, gpu = %info.name, driver = %info.driver, driver_info = %info.driver_info, "scene GPU initialized");
         window.set_visible(true);
         let now = Instant::now();
+        let frame_interval = display_refresh_interval(&window);
         let texture_soft_cap = renderer.texture_soft_cap_mib();
         let (texture_sender, texture_receiver) = mpsc::sync_channel(2);
         Ok(Self {
@@ -138,6 +149,8 @@ impl SceneWindow {
             window,
             generation,
             frame_work: Duration::ZERO,
+            frame_intervals: FrameIntervals::default(),
+            frame_interval,
             next_frame: now,
             dpi,
             occluded: false,
@@ -456,7 +469,11 @@ impl SceneWindow {
     }
 
     fn draw_debug_ui(&mut self, now: Instant) -> DebugUiFrame {
-        let stats = self.renderer.as_ref().expect("renderer ensured before debug UI").stats();
+        let renderer = self.renderer.as_ref().expect("renderer ensured before debug UI");
+        let stats = renderer.stats();
+        let gpu_timings = renderer.gpu_timings();
+        let gpu_timing_supported = renderer.gpu_timing_supported();
+        let frame_intervals = self.frame_intervals.summary(now);
         self.dpi = self.window.scale_factor();
         let input = self.platform.take_egui_input(&self.window);
         let mut request_chat = false;
@@ -474,6 +491,16 @@ impl SceneWindow {
                 }
                 ui.label(format!("Camera: {} (V)", self.camera_mode.label()));
                 ui.label(format!("CPU frame: {:.2} ms", self.frame_work.as_secs_f64() * 1000.0));
+                if let Some(intervals) = &frame_intervals {
+                    ui.label(format!(
+                        "Frame interval (last second): p50 {:.2} ms, p95 {:.2} ms, max {:.2} ms",
+                        intervals.p50.as_secs_f64() * 1000.0,
+                        intervals.p95.as_secs_f64() * 1000.0,
+                        intervals.max.as_secs_f64() * 1000.0
+                    ));
+                } else {
+                    ui.label("Frame interval (last second): no samples");
+                }
                 ui.label(format!(
                     "Draw submissions: {}, indexed commands: {}, instances: {}",
                     stats.draw_calls, stats.draw_commands, stats.instances
@@ -485,6 +512,11 @@ impl SceneWindow {
                         ui.label("Texture soft cap");
                     });
                     ui.label(format!("CPU prepare: {:.2} ms", stats.prepare_ms));
+                    if let Some((scene_ms, diagnostics_ms)) = gpu_timings {
+                        ui.label(format!("GPU passes: scene {:.2} ms, diagnostics {:.2} ms", scene_ms, diagnostics_ms));
+                    } else if gpu_timing_supported {
+                        ui.label("GPU pass timings: collecting");
+                    }
                     ui.label(format!("GPU meshes: {:.1} MiB, pending: {}", stats.mesh_bytes as f64 / 1048576.0, stats.pending_meshes));
                     ui.label(format!(
                         "GPU textures: {}, {:.1} MiB, pending: {}",
@@ -557,6 +589,7 @@ impl SceneWindow {
     }
 
     fn submit_frame(&mut self, observation: Option<scene::Camera>, now: Instant, ui: DebugUiFrame) -> DrawActions {
+        let scheduled_deadline = self.next_frame;
         let scene = self.feed.as_ref().zip(observation).map(|(feed, camera)| (&feed.view, camera));
         let water_height = self.feed.as_ref().and_then(|feed| feed.water_height);
         let result = {
@@ -565,8 +598,8 @@ impl SceneWindow {
             renderer.draw(ui.overlay, scene, water_height, || self.window.pre_present_notify())
         };
         self.dispatch_texture_jobs();
-        self.next_frame = Instant::now();
-        self.frame_work = self.next_frame.duration_since(now);
+        let completed = Instant::now();
+        self.frame_work = completed.saturating_duration_since(now);
         match result {
             Ok(presented) => {
                 let active_motion = self.controls.active() || self.stop_clear_pending;
@@ -576,13 +609,19 @@ impl SceneWindow {
                         && self.camera.as_ref().is_some_and(|camera| camera.moving(Instant::now())));
                 self.dirty |= self.camera_observation(self.agent_pose(), Instant::now()) != observation;
                 if presented {
+                    self.frame_intervals.record(completed);
+                    if !self.dirty {
+                        self.frame_intervals.break_sequence();
+                    }
                     self.last_camera = observation;
                     self.recovery.presented();
                     if self.dirty {
-                        self.next_frame += FRAME_INTERVAL;
+                        self.next_frame = next_frame_deadline(scheduled_deadline, completed, self.frame_interval);
+                    } else {
+                        self.next_frame = completed;
                     }
                 } else {
-                    self.next_frame += FRAME_INTERVAL;
+                    self.next_frame = next_frame_deadline(scheduled_deadline, completed, self.frame_interval);
                 }
                 let first_frame = presented && !self.ready;
                 self.ready |= presented;
@@ -655,9 +694,14 @@ impl SceneWindow {
 
     pub(super) fn schedule_redraw(&mut self, event_loop: &ActiveEventLoop, pending: bool, can_redraw: bool) {
         if self.occluded || self.window.inner_size().width == 0 || self.window.inner_size().height == 0 {
-            event_loop.set_control_flow(if pending { ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL) } else { ControlFlow::Wait });
+            event_loop.set_control_flow(if pending {
+                ControlFlow::WaitUntil(Instant::now() + self.frame_interval)
+            } else {
+                ControlFlow::Wait
+            });
             return;
         }
+        self.frame_interval = display_refresh_interval(&self.window);
         let now = Instant::now();
         if self.next_ui.is_some_and(|at| now >= at) {
             self.next_ui = None;
@@ -668,7 +712,7 @@ impl SceneWindow {
             event_loop.set_control_flow(ControlFlow::Wait);
         } else {
             let redraw = (self.dirty && can_redraw).then_some(self.next_frame.max(now + Duration::from_millis(1)));
-            let poll = pending.then_some(now + FRAME_INTERVAL);
+            let poll = pending.then_some(now + self.frame_interval);
             event_loop.set_control_flow(match redraw.into_iter().chain(poll).chain(self.next_ui).min() {
                 Some(at) => ControlFlow::WaitUntil(at),
                 None => ControlFlow::Wait,

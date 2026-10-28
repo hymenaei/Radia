@@ -121,6 +121,13 @@ impl GeometryRenderer {
         times.visibility = visibility_started.elapsed();
         let requests_started = Instant::now();
         self.requested_textures.clear();
+        for (_, instance, _, _, _) in &candidates {
+            if let Some(textures) = &instance.terrain_textures {
+                for texture in textures.iter().flatten() {
+                    self.request_texture(texture, Priority::Visible);
+                }
+            }
+        }
         let mut request = |face: &FaceMaterial, priority| {
             let Some(texture) = face.base_color_texture.as_ref().and_then(|binding| binding.image()) else { return };
             if self.requested_textures.contains(&texture.id()) {
@@ -136,15 +143,7 @@ impl GeometryRenderer {
             self.requested_textures.insert(texture.id());
             self.textures.request(texture, self.epoch, priority);
         };
-        for (_, instance, faces, _, _) in &candidates {
-            if let Some(mesh) = self.meshes.get_mut(&instance.mesh.id()) {
-                mesh.used = self.epoch;
-            }
-            if let Some(textures) = &instance.terrain_textures {
-                for texture in textures.iter().flatten() {
-                    self.request_texture(texture, Priority::Visible);
-                }
-            }
+        for (_, _, faces, _, _) in &candidates {
             if let Some(faces) = faces {
                 for face in *faces {
                     request(face, Priority::Visible);
@@ -156,6 +155,12 @@ impl GeometryRenderer {
                 for face in faces {
                     request(face, Priority::Background);
                 }
+            }
+        }
+        drop(request);
+        for (_, instance, _, _, _) in &candidates {
+            if let Some(mesh) = self.meshes.get_mut(&instance.mesh.id()) {
+                mesh.used = self.epoch;
             }
         }
         times.requests = requests_started.elapsed();

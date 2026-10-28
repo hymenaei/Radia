@@ -20,7 +20,7 @@ use winit::{
 
 use super::{
     FRAME_INTERVAL, InputCapture, SharedWindowState,
-    timing::{FrameIntervals, next_frame_deadline, refresh_interval},
+    timing::{FrameIntervals, next_frame_deadline, redraw_interval, refresh_interval},
 };
 use crate::{
     DEFAULT_DRAW_DISTANCE,
@@ -92,10 +92,12 @@ pub(super) struct SceneWindow {
     generation: u64,
     frame_work: Duration,
     frame_intervals: FrameIntervals,
+    break_interval_after_poll: bool,
     frame_interval: Duration,
     next_frame: Instant,
     dpi: f64,
     occluded: bool,
+    focused: bool,
     ready: bool,
     recoveries: u32,
     recovery: PresentationRecovery,
@@ -150,10 +152,12 @@ impl SceneWindow {
             generation,
             frame_work: Duration::ZERO,
             frame_intervals: FrameIntervals::default(),
+            break_interval_after_poll: false,
             frame_interval,
             next_frame: now,
             dpi,
             occluded: false,
+            focused: true,
             ready: false,
             recoveries: 0,
             recovery: PresentationRecovery::default(),
@@ -203,6 +207,7 @@ impl SceneWindow {
                 }
             }
             WindowEvent::Focused(false) => {
+                self.focused = false;
                 self.release_drag(false);
                 self.modifiers = ModifiersState::empty();
                 let rotation = self.body_rotation.update(self.agent_pose().map(|pose| pose.rotation), 0.0, Instant::now());
@@ -211,6 +216,10 @@ impl SceneWindow {
                 if let Some(feed) = &mut self.feed {
                     feed.set_movement(movement);
                 }
+                self.dirty = true;
+            }
+            WindowEvent::Focused(true) => {
+                self.focused = true;
                 self.dirty = true;
             }
             WindowEvent::CursorMoved { position, .. } => self.cursor = *position,
@@ -512,6 +521,15 @@ impl SceneWindow {
                         ui.label("Texture soft cap");
                     });
                     ui.label(format!("CPU prepare: {:.2} ms", stats.prepare_ms));
+                    ui.label(format!(
+                        "Prepare causes: full {}, regions {}, texture IDs {} / faces {}, objects {}, dirtied items {}",
+                        stats.full_rebuilds,
+                        stats.region_invalidations,
+                        stats.texture_state_changes,
+                        stats.texture_state_reresolves,
+                        stats.objects_reprepared,
+                        stats.dirtied_items
+                    ));
                     if let Some((scene_ms, diagnostics_ms)) = gpu_timings {
                         ui.label(format!("GPU passes: scene {:.2} ms, diagnostics {:.2} ms", scene_ms, diagnostics_ms));
                     } else if gpu_timing_supported {
@@ -610,9 +628,7 @@ impl SceneWindow {
                 self.dirty |= self.camera_observation(self.agent_pose(), Instant::now()) != observation;
                 if presented {
                     self.frame_intervals.record(completed);
-                    if !self.dirty {
-                        self.frame_intervals.break_sequence();
-                    }
+                    self.break_interval_after_poll = !self.dirty;
                     self.last_camera = observation;
                     self.recovery.presented();
                     if self.dirty {
@@ -676,9 +692,18 @@ impl SceneWindow {
         match renderer.poll() {
             Ok(progress) => {
                 self.dirty |= progress.redraw;
+                if self.break_interval_after_poll {
+                    if self.dirty {
+                        self.break_interval_after_poll = false;
+                    } else if !progress.pending {
+                        self.frame_intervals.break_sequence();
+                        self.break_interval_after_poll = false;
+                    }
+                }
                 progress.pending
             }
             Err(error) => {
+                self.break_interval_after_poll = false;
                 tracing::warn!(%error, "scene GPU failed; scheduling recovery");
                 self.retire_renderer();
                 self.schedule_recovery(now);
@@ -701,7 +726,8 @@ impl SceneWindow {
             });
             return;
         }
-        self.frame_interval = display_refresh_interval(&self.window);
+        let display_interval = display_refresh_interval(&self.window);
+        self.frame_interval = redraw_interval(display_interval, self.focused, self.controls.active() || self.stop_clear_pending);
         let now = Instant::now();
         if self.next_ui.is_some_and(|at| now >= at) {
             self.next_ui = None;

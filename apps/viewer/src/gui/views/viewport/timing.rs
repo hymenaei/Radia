@@ -66,6 +66,10 @@ pub(super) fn refresh_interval(millihertz: Option<u32>, fallback: Duration) -> D
     millihertz.filter(|rate| *rate > 0).map(|rate| Duration::from_nanos(1_000_000_000_000 / u64::from(rate))).unwrap_or(fallback)
 }
 
+pub(super) fn redraw_interval(display: Duration, focused: bool, movement_pending: bool) -> Duration {
+    if focused || movement_pending { display } else { display.max(Duration::from_millis(16) + Duration::from_micros(667)) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +118,15 @@ mod tests {
         assert_eq!(refresh_interval(Some(144_000), fallback), Duration::from_nanos(6_944_444));
         assert_eq!(refresh_interval(Some(0), fallback), fallback);
         assert_eq!(refresh_interval(None, fallback), fallback);
+    }
+
+    #[test]
+    fn background_animation_is_capped_without_delaying_movement_stop() {
+        let refresh = Duration::from_nanos(6_944_444);
+        let slow_refresh = Duration::from_millis(33);
+        assert_eq!(redraw_interval(refresh, false, false), Duration::from_micros(16_667));
+        assert_eq!(redraw_interval(slow_refresh, false, false), slow_refresh);
+        assert_eq!(redraw_interval(refresh, false, true), refresh);
+        assert_eq!(redraw_interval(refresh, true, false), refresh);
     }
 }

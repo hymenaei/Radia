@@ -108,8 +108,10 @@ impl Reconciler {
                     if spatial_changed {
                         self.preparation.surfaces.regions(&self.state.mirror);
                     }
-                    if terrain_settings_changed {
+                    if terrain_settings_changed || origin_changed {
                         self.preparation.assets.invalidate_region(region);
+                    }
+                    if terrain_settings_changed {
                         self.preparation.surfaces.terrain_settings(&self.state.mirror, region);
                     }
                     self.publication.dirty.regions.insert(region);

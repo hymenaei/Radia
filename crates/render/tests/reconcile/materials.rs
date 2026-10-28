@@ -3,11 +3,13 @@ use std::assert_matches;
 use assets::{TextureHandle, TextureSize};
 use render::material::{AlphaBehavior, FaceMaterial, Resolution};
 use test_support::texture::{GRAY_4096_J2C, RGBA_J2C};
-use world::{FaceAppearance, PbrAlphaMode, PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, SurfaceAppearance};
+use world::{
+    FaceAppearance, PbrAlphaMode, PbrMaterialAssignments, PbrMaterialOverride, PbrMaterialOverrides, SurfaceAppearance, TerrainSettings,
+};
 
 use super::support::{
     AssetId, Budget, Camera, DVec3, FieldUpdate, Instant, NonZeroU32, ObjectPatch, ParentUpdate, Pose, Priority, ReconcileStep, Reconciler,
-    Request, Uuid, Vec3, add, camera, prepared_asset, settle_materials, source, world,
+    Region, Request, Uuid, Vec3, add, camera, prepared_asset, settle_materials, source, world,
 };
 
 fn color_image(face: &FaceMaterial) -> &TextureHandle {
@@ -80,6 +82,39 @@ fn unseen_objects_get_baselines() {
         object.materials().unwrap().iter().all(|face| color_image(face).info().unwrap().size == [32; 2]),
         "newly visible faces retain the regional baseline during refinement"
     );
+}
+
+#[test]
+fn terrain_demand_refines_when_region_origin_arrives() {
+    let region = Region::new(2);
+    let textures = std::array::from_fn(|index| Uuid::from_u128(700 + index as u128));
+    let settings = TerrainSettings::new(textures, [0.0; 4], [64.0; 4]).unwrap();
+    let mut world = world();
+    let _ = world.adopt_region(region).unwrap();
+    let _ = world.observe_terrain_settings(source(2, 1), settings).unwrap();
+
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    let camera = Camera::new(DVec3::new(384.0, 128.0, 32.0), Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap();
+    scene.set_camera(camera);
+    let baseline = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(baseline.requested.len(), 4);
+    assert!(baseline.requested.iter().all(|request| {
+        let Request::Texture { id, size } = request.request else { return false };
+        textures.contains(&id.uuid()) && size == TextureSize::new(128) && request.priority == Priority::Background
+    }));
+
+    let _ = world
+        .patch_region(region, world::RegionInfo { origin: Some(DVec3::new(256.0, 0.0, 0.0)), ..world::RegionInfo::default() })
+        .unwrap();
+    scene.notify_world_change();
+    let refined = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(refined.released.len(), 4, "the four background tickets are superseded by refined demand");
+    assert_eq!(refined.requested.len(), 4);
+    assert!(refined.requested.iter().all(|request| {
+        let Request::Texture { size, .. } = request.request else { return false };
+        request.priority == Priority::Visible && size.edge() > 128
+    }));
 }
 
 #[test]

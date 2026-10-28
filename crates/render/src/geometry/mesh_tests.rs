@@ -1,4 +1,7 @@
-use std::sync::{Arc, mpsc};
+use std::{
+    sync::{Arc, mpsc},
+    time::Instant,
+};
 
 use futures::executor::block_on;
 use math::{DVec3, Vec3};
@@ -192,7 +195,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     geometry.submitted(frame);
     device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
     assert_eq!(geometry.memory.mesh_state().bytes, charged);
-    assert!(geometry.needs_frame(), "retirement must unblock preparation without freeing a whole page");
+    assert!(geometry.needs_frame(Instant::now()), "retirement must unblock preparation without freeing a whole page");
     let reused = geometry.storage.allocate(device, old_vertices.len(), old_indices.len(), false, &geometry.memory).unwrap();
     assert_eq!((reused.vertices(), reused.indices()), (old_vertices, old_indices));
     assert!(Arc::ptr_eq(reused.buffers(), &old_buffers));

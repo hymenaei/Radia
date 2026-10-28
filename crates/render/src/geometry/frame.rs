@@ -37,7 +37,11 @@ impl GeometryRenderer {
             let upload_started = Instant::now();
             self.textures.upload(device, encoder, self.epoch);
             times.textures = upload_started.elapsed();
-            if self.prepared.as_ref().is_some_and(|prepared| prepared.reusable(&key, self.textures.state(), self.memory.mesh_state())) {
+            if self
+                .prepared
+                .as_ref()
+                .is_some_and(|prepared| prepared.reusable(&key, self.textures.state(), self.memory.mesh_state(), started))
+            {
                 self.stats.uploaded_bytes = 0;
                 self.memory_stats();
                 self.record_prepare(started, times, 0);
@@ -174,18 +178,18 @@ impl GeometryRenderer {
             self.stats.texture_state_reresolves =
                 self.refresh_changed_texture_bindings(device, &texture_changes, &update.terrain_regions, use_next);
         }
-        let (animated_faces, draw_commands_changed) = if rebuild_batches {
-            let animated = self.rebuild_batches(camera, origin, animation_now, use_next);
+        let draw_commands_changed = if rebuild_batches {
+            self.rebuild_batches(camera, origin, animation_now, use_next);
             self.rebuild_pick_instances(use_next);
-            (animated, true)
+            true
         } else {
             if visible_changed {
                 self.hide_removed_instances(camera, origin);
-                let (appended_animation, appended) = self.append_visible_batches(camera, origin, animation_now, camera_position_changed);
+                let appended = self.append_visible_batches(camera, origin, animation_now, camera_position_changed);
                 self.update_pick_instances();
-                let (animated, reordered) =
+                let reordered =
                     self.update_instances(camera, origin, transform_changed, camera_position_changed, &update.pose_items, animation_now);
-                (animated || appended_animation, appended || reordered)
+                appended || reordered
             } else {
                 self.update_instances(camera, origin, transform_changed, camera_position_changed, &update.pose_items, animation_now)
             }
@@ -208,6 +212,8 @@ impl GeometryRenderer {
         self.cache.size = size;
         self.cache.version = Some(view.version());
         self.cache.next_candidates.clear();
+        let animation_deadline =
+            self.cache.visible.iter().filter_map(|id| self.cache.items.get(id).and_then(|item| item.animation_deadline)).min();
         times.faces = batches_started.elapsed();
 
         let instances_started = Instant::now();
@@ -248,7 +254,7 @@ impl GeometryRenderer {
             textures: self.textures.state(),
             meshes: self.memory.mesh_state(),
             more_meshes: !self.pending_meshes.is_empty() && uploaded > 0,
-            animated_faces,
+            animation_deadline,
         });
         times.instances = instances_started.elapsed();
         self.record_prepare(started, times, uploaded);
@@ -519,11 +525,10 @@ impl GeometryRenderer {
                 .sum::<usize>()
     }
 
-    fn rebuild_batches(&mut self, camera: Camera, origin: DVec3, now: Instant, use_next: bool) -> bool {
+    fn rebuild_batches(&mut self, camera: Camera, origin: DVec3, now: Instant, use_next: bool) {
         self.batches.clear();
         self.cache.slots.clear();
         self.cache.blended_items.clear();
-        let mut animated = false;
         let visible = if use_next { &self.cache.next_visible } else { &self.cache.visible };
         let required_faces =
             visible.iter().filter_map(|id| self.cache.items.get(id)).fold(0usize, |count, item| count.saturating_add(item.faces.len()));
@@ -557,12 +562,11 @@ impl GeometryRenderer {
             let scale = item.scale;
             for face in &mut item.faces {
                 face.included = false;
-                let (params, animating) = current_params(source, shading, face, now);
+                let params = current_params(source, shading, face, now);
                 face.params = params;
                 let bytes = packed_instance(&base, &params, scale);
                 let distance = params.blend.then(|| blend_distance(position, rotation, scale, face.center, camera));
                 face.included = self.batches.push(face.draw, face.order, distance, || bytes);
-                animated |= animating && face.included;
             }
             item.parameters_dirty = false;
         }
@@ -577,11 +581,11 @@ impl GeometryRenderer {
             if item.faces.iter().any(|face| face.included && face.params.blend) {
                 self.cache.blended_items.insert(*id);
             }
+            item.animation_deadline = next_animation_deadline(item, now);
         }
         if !self.instance_bytes.is_empty() {
             self.queue.write_buffer(&self.instances, 0, &self.instance_bytes);
         }
-        animated
     }
 
     fn can_append_visible_batches(&self) -> bool {
@@ -658,9 +662,8 @@ impl GeometryRenderer {
         }
     }
 
-    fn append_visible_batches(&mut self, camera: Camera, origin: DVec3, now: Instant, camera_position_changed: bool) -> (bool, bool) {
+    fn append_visible_batches(&mut self, camera: Camera, origin: DVec3, now: Instant, camera_position_changed: bool) -> bool {
         let opaque_start = self.batches.opaque_bytes();
-        let mut animated = false;
         let mut draw_commands_changed = false;
         let mut blended_changed = false;
         for entering_index in 0..self.cache.visible_added.len() {
@@ -676,7 +679,7 @@ impl GeometryRenderer {
             for face in &mut item.faces {
                 if face.included {
                     if entering {
-                        let (params, animating) = current_params(source, shading, face, now);
+                        let params = current_params(source, shading, face, now);
                         face.params = params;
                         let bytes = packed_instance(&base, &params, scale);
                         if params.blend {
@@ -690,11 +693,10 @@ impl GeometryRenderer {
                                 self.cache.visibility_slots.push(slot);
                             }
                         }
-                        animated |= animating;
                     }
                     continue;
                 }
-                let (params, animating) = current_params(source, shading, face, now);
+                let params = current_params(source, shading, face, now);
                 let bytes = packed_instance(&base, &params, scale);
                 if params.blend {
                     let distance = blend_distance(position, rotation, scale, face.center, camera);
@@ -719,9 +721,9 @@ impl GeometryRenderer {
                 face.params = params;
                 face.included = true;
                 draw_commands_changed = true;
-                animated |= animating;
             }
             item.parameters_dirty = false;
+            item.animation_deadline = next_animation_deadline(item, now);
             if item.faces.iter().any(|face| face.included && face.params.blend) {
                 self.cache.blended_items.insert(id);
             }
@@ -746,7 +748,7 @@ impl GeometryRenderer {
         if draw_commands_changed {
             self.stats.omitted_faces = self.batches.omitted();
         }
-        (animated, draw_commands_changed || blended_changed)
+        draw_commands_changed || blended_changed
     }
 
     fn rebuild_pick_instances(&mut self, use_next: bool) {
@@ -802,7 +804,7 @@ impl GeometryRenderer {
         camera_position_changed: bool,
         pose_items: &[ItemId],
         now: Instant,
-    ) -> (bool, bool) {
+    ) -> bool {
         self.cache.update_items.clear();
         self.cache.update_set.clear();
         self.cache.pose_set.clear();
@@ -815,13 +817,12 @@ impl GeometryRenderer {
                     self.cache.update_items.push(id);
                 }
             }
-            for id in self
-                .cache
-                .animated_items
-                .iter()
-                .copied()
-                .filter(|id| self.cache.items.get(id).is_some_and(|item| item.visible_index.is_some()))
-            {
+            for id in self.cache.animated_items.iter().copied().filter(|id| {
+                self.cache
+                    .items
+                    .get(id)
+                    .is_some_and(|item| item.visible_index.is_some() && item.animation_deadline.is_some_and(|deadline| deadline <= now))
+            }) {
                 if self.cache.update_set.insert(id) {
                     self.cache.update_items.push(id);
                 }
@@ -835,10 +836,10 @@ impl GeometryRenderer {
             }
         }
         if self.cache.update_items.is_empty() {
-            return (false, false);
+            return false;
         }
-        let mut animated = false;
-        let mut blend_changed = false;
+        let mut blend_order_changed = false;
+        let mut blend_bytes_changed = false;
         for id in &self.cache.update_items {
             let pose_changed = self.cache.pose_set.contains(id);
             let Some(item) = self.cache.items.get_mut(id) else { continue };
@@ -859,42 +860,65 @@ impl GeometryRenderer {
             let scale = item.scale;
             let animation =
                 source.and_then(|object| object.detail().texture_animation).filter(|animation| texture_animation::is_enabled(*animation));
+            let animation_due = item.animation_deadline.is_some_and(|deadline| deadline <= now);
+            let animation_started = animation_due.then(Instant::now);
             let parameters_dirty = item.parameters_dirty;
-            let base = (transform_changed || pose_changed || parameters_dirty || animation.is_some())
+            let animation_only = animation_due && !pose_changed && !transform_changed && !parameters_dirty;
+            let base = (transform_changed || pose_changed || parameters_dirty || animation_due)
                 .then(|| instance_base(position, rotation, scale, origin));
-            for face in &mut item.faces {
+            let animated_faces = &item.animated_faces;
+            let faces = &mut item.faces;
+            let face_count = if animation_only { animated_faces.len() } else { faces.len() };
+            let mut face_cursor = 0;
+            while face_cursor < face_count {
+                let face_index = if animation_only { animated_faces[face_cursor] } else { face_cursor };
+                face_cursor += 1;
+                let Some(face) = faces.get_mut(face_index) else { continue };
                 if !face.included {
                     continue;
                 }
                 let refresh_params = parameters_dirty
-                    || animation.is_some_and(|animation| animation.targets_face(face.order.3) && face.base_params.texture.is_some());
-                let (params, animating) = if refresh_params {
-                    let (params, animating) = current_params(source, shading, face, now);
+                    || (animation_due
+                        && animation.is_some_and(|animation| animation.targets_face(face.order.3) && face.base_params.texture.is_some()));
+                let previous_params = face.params;
+                let params = if refresh_params { current_params(source, shading, face, now) } else { face.params };
+                let params_changed = params != previous_params;
+                if refresh_params {
                     face.params = params;
-                    (params, animating)
-                } else {
-                    (face.params, false)
-                };
+                }
+                if animation_due
+                    && face.base_params.texture.is_some()
+                    && animation.is_some_and(|animation| animation.targets_face(face.order.3))
+                {
+                    self.stats.animated_faces_visited += 1;
+                    self.stats.animated_faces_changed += usize::from(params_changed);
+                }
                 if params.blend {
                     let distance_changed = camera_position_changed || transform_changed || pose_changed;
-                    let distance =
-                        (distance_changed || refresh_params).then(|| blend_distance(position, rotation, scale, face.center, camera));
-                    if refresh_params {
+                    if params_changed {
                         if let Some(base) = base.as_ref() {
                             let bytes = packed_instance(base, &params, scale);
-                            self.batches.update_blended(face.order, distance.unwrap_or(0.0), bytes);
+                            if distance_changed {
+                                let distance = blend_distance(position, rotation, scale, face.center, camera);
+                                self.batches.update_blended(face.order, distance, bytes);
+                                blend_order_changed = true;
+                            } else {
+                                self.batches.update_blended_bytes(face.order, bytes);
+                                blend_bytes_changed = true;
+                            }
                         }
-                    } else if let Some(distance) = distance {
+                    } else if distance_changed {
+                        let distance = blend_distance(position, rotation, scale, face.center, camera);
                         if let Some(base) = base.as_ref().filter(|_| transform_changed || pose_changed) {
                             self.batches.update_blended_transform(face.order, distance, base);
                         } else {
                             self.batches.update_blended_distance(face.order, distance);
                         }
+                        blend_order_changed = true;
                     }
-                    blend_changed |= distance.is_some() || refresh_params;
                 } else if let Some(slot) = face.slot {
                     let offset = slot as usize * crate::pipeline::INSTANCE_BYTES;
-                    if (refresh_params || transform_changed || pose_changed)
+                    if (params_changed || transform_changed || pose_changed)
                         && let Some(base) = base.as_ref()
                     {
                         let bytes = packed_instance(base, &params, scale);
@@ -906,14 +930,19 @@ impl GeometryRenderer {
                         }
                     }
                 }
-                animated |= animating;
             }
             item.parameters_dirty = false;
+            if animation_due || parameters_dirty {
+                item.animation_deadline = next_animation_deadline(item, now);
+            }
+            if let Some(animation_started) = animation_started {
+                self.stats.animation_update_ms += animation_started.elapsed().as_secs_f64() * 1000.0;
+            }
         }
         if !transform_changed {
             self.write_visibility_slots();
         }
-        if blend_changed {
+        if blend_order_changed {
             self.batches.sort_blended(&mut self.draws, &mut self.instance_bytes, &mut self.cache.slots);
             if !transform_changed {
                 let start = self.batches.blended_start();
@@ -923,11 +952,19 @@ impl GeometryRenderer {
                     self.queue.write_buffer(&self.instances, start as u64, bytes);
                 }
             }
+        } else if blend_bytes_changed {
+            self.batches.write_blended_bytes(&mut self.instance_bytes);
+            let start = self.batches.blended_start();
+            if let Some(bytes) = self.instance_bytes.get(start..)
+                && !bytes.is_empty()
+            {
+                self.queue.write_buffer(&self.instances, start as u64, bytes);
+            }
         }
         if transform_changed && !self.instance_bytes.is_empty() {
             self.queue.write_buffer(&self.instances, 0, &self.instance_bytes);
         }
-        (animated, blend_changed)
+        blend_order_changed
     }
 
     fn record_prepare(&mut self, started: Instant, times: PrepareTimes, uploaded: usize) {
@@ -953,6 +990,9 @@ impl GeometryRenderer {
                 texture_state_changes = self.stats.texture_state_changes,
                 objects_reprepared = self.stats.objects_reprepared,
                 dirtied_items = self.stats.dirtied_items,
+                animated_faces_visited = self.stats.animated_faces_visited,
+                animated_faces_changed = self.stats.animated_faces_changed,
+                animation_update_ms = self.stats.animation_update_ms,
                 "slow scene preparation"
             );
         }
@@ -978,13 +1018,13 @@ fn adjust_texture_reference(
     }
 }
 
-fn current_params(source: Option<&Object>, shading: ShadingMode, face: &CachedFace, now: Instant) -> (FaceParams, bool) {
-    let Some(object) = source else { return (face.base_params, false) };
-    let Some(animation) = object.detail().texture_animation else { return (face.base_params, false) };
+fn current_params(source: Option<&Object>, shading: ShadingMode, face: &CachedFace, now: Instant) -> FaceParams {
+    let Some(object) = source else { return face.base_params };
+    let Some(animation) = object.detail().texture_animation else { return face.base_params };
     if !texture_animation::is_enabled(animation) || !animation.targets_face(face.order.3) {
-        return (face.base_params, false);
+        return face.base_params;
     }
-    let Some((elapsed, offset)) = object.animation_timing(now) else { return (face.base_params, false) };
+    let Some((elapsed, offset)) = object.animation_timing(now) else { return face.base_params };
     let transform = texture_animation::transform_at(animation, elapsed, offset, face.texture_entry_transform);
     let material = object.materials().and_then(|materials| face.material_index.and_then(|index| materials.get(index)));
     let mut params = FaceParams::with_texture_entry_transform(material, Some(transform));
@@ -999,8 +1039,17 @@ fn current_params(source: Option<&Object>, shading: ShadingMode, face: &CachedFa
         }
         ShadingMode::Studio => {}
     }
-    let changing = texture_animation::is_changing_at(animation, elapsed, offset) && params.texture.is_some();
-    (params, changing)
+    params
+}
+
+fn next_animation_deadline(item: &super::cache::CachedItem, now: Instant) -> Option<Instant> {
+    if !item.animated_faces.iter().any(|index| item.faces.get(*index).is_some_and(|face| face.included)) {
+        return None;
+    }
+    let source = item.source.as_ref()?;
+    let animation = source.detail().texture_animation?;
+    let (elapsed, offset) = source.animation_timing(now)?;
+    texture_animation::next_update_after(animation, elapsed, offset).and_then(|delay| now.checked_add(delay))
 }
 
 fn blend_distance(position: DVec3, rotation: Quat, scale: Vec3, center: Vec3, camera: Camera) -> f64 {
@@ -1050,24 +1099,25 @@ mod tests {
             textures: texture_state(),
             meshes: MeshState::default(),
             more_meshes: false,
-            animated_faces: false,
+            animation_deadline: None,
         };
-        assert!(prepared.reusable(&prepare_key(&view), texture_state(), MeshState::default()));
+        let now = Instant::now();
+        assert!(prepared.reusable(&prepare_key(&view), texture_state(), MeshState::default(), now));
         let mut moved = prepare_key(&view);
         moved.camera = Camera::new(DVec3::X, Vec3::X, 1.0, [720, 720]).unwrap();
-        assert!(!prepared.reusable(&moved, texture_state(), MeshState::default()));
+        assert!(!prepared.reusable(&moved, texture_state(), MeshState::default(), now));
         let mut resized = prepare_key(&view);
         resized.size[0] = 1600;
-        assert!(!prepared.reusable(&resized, texture_state(), MeshState::default()));
+        assert!(!prepared.reusable(&resized, texture_state(), MeshState::default(), now));
         let mut quality = prepare_key(&view);
         quality.camera = quality.camera.with_quality(128.0, 2.0).unwrap();
-        assert!(!prepared.reusable(&quality, texture_state(), MeshState::default()));
+        assert!(!prepared.reusable(&quality, texture_state(), MeshState::default(), now));
         let mut water = prepare_key(&view);
         water.water_height = Some(21.0);
-        assert!(!prepared.reusable(&water, texture_state(), MeshState::default()));
-        assert!(!prepared.reusable(&prepare_key(&other), texture_state(), MeshState::default()));
+        assert!(!prepared.reusable(&water, texture_state(), MeshState::default(), now));
+        assert!(!prepared.reusable(&prepare_key(&other), texture_state(), MeshState::default(), now));
         scene.close();
-        assert!(!prepared.reusable(&prepare_key(&view), texture_state(), MeshState::default()));
+        assert!(!prepared.reusable(&prepare_key(&view), texture_state(), MeshState::default(), now));
     }
 
     #[test]
@@ -1079,8 +1129,9 @@ mod tests {
             textures: state,
             meshes: MeshState::default(),
             more_meshes: false,
-            animated_faces: false,
+            animation_deadline: None,
         };
+        let now = Instant::now();
         for (reason, changed) in [
             ("image readiness or cancellation", TextureState { revision: 1, ..state }),
             ("handle release or asset change", TextureState { lifecycle: 1, ..state }),
@@ -1088,30 +1139,36 @@ mod tests {
             ("conversion admission", TextureState { jobs: 1, ..state }),
             ("soft cap change", TextureState { cap: 64 * 1024 * 1024, ..state }),
         ] {
-            assert!(!prepared.reusable(&prepare_key(&view), changed, MeshState::default()), "{reason} must allow preparation to progress");
+            assert!(
+                !prepared.reusable(&prepare_key(&view), changed, MeshState::default(), now),
+                "{reason} must allow preparation to progress"
+            );
         }
-        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState { bytes: 4, revision: 0 }));
-        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState { bytes: 0, revision: 1 }));
+        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState { bytes: 4, revision: 0 }, now));
+        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState { bytes: 0, revision: 1 }, now));
         prepared.more_meshes = true;
-        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState::default()));
+        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState::default(), now));
     }
 
     #[test]
-    fn redraw_stops_without_visible_animation() {
+    fn stepped_animation_waits_until_its_next_update_deadline() {
         let (_scene, view) = Reconciler::new(Budget::default());
         let state = texture_state();
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(500);
         let mut prepared = FramePreparation {
             key: prepare_key(&view),
             textures: state,
             meshes: MeshState::default(),
             more_meshes: false,
-            animated_faces: false,
+            animation_deadline: Some(deadline),
         };
-        assert!(!prepared.needs_frame(state, MeshState::default()));
-        prepared.animated_faces = true;
-        assert!(prepared.needs_frame(state, MeshState::default()));
-        prepared.animated_faces = false;
-        assert!(!prepared.needs_frame(state, MeshState::default()));
+        assert!(!prepared.needs_frame(state, MeshState::default(), now));
+        assert!(prepared.reusable(&prepare_key(&view), state, MeshState::default(), now));
+        assert!(prepared.needs_frame(state, MeshState::default(), deadline));
+        assert!(!prepared.reusable(&prepare_key(&view), state, MeshState::default(), deadline));
+        prepared.animation_deadline = None;
+        assert!(!prepared.needs_frame(state, MeshState::default(), deadline));
     }
 
     #[test]

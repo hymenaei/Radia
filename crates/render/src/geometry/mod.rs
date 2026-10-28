@@ -68,6 +68,9 @@ pub struct Stats {
     pub texture_state_changes: usize,
     pub objects_reprepared: usize,
     pub dirtied_items: usize,
+    pub animated_faces_visited: usize,
+    pub animated_faces_changed: usize,
+    pub animation_update_ms: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,16 +184,23 @@ struct FramePreparation {
     textures: TextureState,
     meshes: MeshState,
     more_meshes: bool,
-    animated_faces: bool,
+    animation_deadline: Option<Instant>,
 }
 
 impl FramePreparation {
-    fn needs_frame(&self, textures: TextureState, meshes: MeshState) -> bool {
-        self.animated_faces || self.more_meshes || self.textures != textures || self.meshes != meshes
+    fn needs_frame(&self, textures: TextureState, meshes: MeshState, now: Instant) -> bool {
+        self.animation_deadline.is_some_and(|deadline| deadline <= now)
+            || self.more_meshes
+            || self.textures != textures
+            || self.meshes != meshes
     }
 
-    fn reusable(&self, key: &FramePreparationKey, textures: TextureState, meshes: MeshState) -> bool {
-        self.key == *key && self.textures == textures && self.meshes == meshes && !self.more_meshes && !self.animated_faces
+    fn reusable(&self, key: &FramePreparationKey, textures: TextureState, meshes: MeshState, now: Instant) -> bool {
+        self.key == *key
+            && self.textures == textures
+            && self.meshes == meshes
+            && !self.more_meshes
+            && self.animation_deadline.is_none_or(|deadline| deadline > now)
     }
 }
 
@@ -240,9 +250,13 @@ impl GeometryRenderer {
         self.textures.release_resources();
     }
 
-    pub(crate) fn needs_frame(&self) -> bool {
-        self.prepared.as_ref().is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.memory.mesh_state()))
+    pub(crate) fn needs_frame(&self, now: Instant) -> bool {
+        self.prepared.as_ref().is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.memory.mesh_state(), now))
             || self.textures.uploading()
+    }
+
+    pub(crate) fn animation_deadline(&self) -> Option<Instant> {
+        self.prepared.as_ref().and_then(|prepared| prepared.animation_deadline)
     }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use math::UvTransform;
 use world::TextureAnimation;
 
@@ -128,12 +130,24 @@ pub(crate) fn is_changing_at(animation: TextureAnimation, elapsed_seconds: f64, 
     frame.is_finite() && frame < full_length - 1.0
 }
 
+pub(crate) fn next_update_after(animation: TextureAnimation, elapsed_seconds: f64, smooth_frame_offset: f64) -> Option<Duration> {
+    if !is_changing_at(animation, elapsed_seconds, smooth_frame_offset) {
+        return None;
+    }
+    if is_smooth(animation) {
+        return Some(Duration::ZERO);
+    }
+    Duration::try_from_secs_f64(1.0 / f64::from(animation.rate().abs())).ok()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use math::UvTransform;
     use world::TextureAnimation;
 
-    use super::{is_changing_at, transform_at};
+    use super::{is_changing_at, next_update_after, transform_at};
 
     fn animation(mode: u8, size: [u8; 2], start: f32, length: f32, rate: f32) -> TextureAnimation {
         let mut bytes = vec![mode, 0xff, size[0], size[1]];
@@ -193,5 +207,17 @@ mod tests {
         assert!(is_changing_at(animation(0x03, [2, 2], 0.0, 0.0, 1.0), 400.0, 0.0));
         assert!(!is_changing_at(animation(0x01, [2, 2], 0.0, 0.0, 1.0), 4.0, 0.0));
         assert!(!is_changing_at(animation(0x01, [2, 2], 0.0, 0.0, 0.0), 0.0, 0.0));
+    }
+
+    #[test]
+    fn stepped_animation_requests_its_next_frame_rate() {
+        assert_eq!(next_update_after(animation(0x03, [2, 2], 0.0, 0.0, 0.5), 1.0, 0.0), Some(Duration::from_secs(2)));
+        assert_eq!(next_update_after(animation(0x03, [2, 2], 0.0, 0.0, 0.0), 1.0, 0.0), None);
+        assert_eq!(next_update_after(animation(0x01, [2, 2], 0.0, 0.0, 1.0), 4.0, 0.0), None);
+    }
+
+    #[test]
+    fn smooth_animation_requests_continuous_updates() {
+        assert_eq!(next_update_after(animation(0x13, [0, 0], 0.0, 1.0, 0.5), 1.0, 0.0), Some(Duration::ZERO));
     }
 }

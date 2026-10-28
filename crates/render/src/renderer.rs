@@ -4,7 +4,7 @@ use std::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use egui::{ClippedPrimitive, TexturesDelta};
@@ -103,7 +103,9 @@ impl Renderer {
         if self.lost.load(Ordering::Acquire) {
             return Err(Error::DeviceLost);
         }
-        Ok(Progress { redraw: self.geometry.needs_frame(), pending: !status.is_queue_empty() })
+        let now = Instant::now();
+        let redraw_at = self.geometry.animation_deadline().filter(|deadline| *deadline > now);
+        Ok(Progress { redraw: self.geometry.needs_frame(now), pending: !status.is_queue_empty(), redraw_at })
     }
     pub async fn new(target: impl Into<SurfaceTarget<'static>>, width: u32, height: u32) -> Result<Self, Error> {
         let instance =
@@ -354,6 +356,7 @@ pub struct Overlay {
 pub struct Progress {
     pub redraw: bool,
     pub pending: bool,
+    pub redraw_at: Option<Instant>,
 }
 
 pub struct Retirement {

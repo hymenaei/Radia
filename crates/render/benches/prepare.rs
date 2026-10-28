@@ -16,6 +16,7 @@ const OBJECTS: usize = 3_000;
 const DISTINCT_MESHES: [usize; 2] = [50, OBJECTS];
 const LIVE_TEXTURES: usize = 512;
 const OBJECT_TEXTURES: usize = LIVE_TEXTURES - 4;
+const ANIMATED_OBJECTS: usize = 500;
 const SIZE: [u32; 2] = [1024, 1024];
 
 pub(crate) fn bench(c: &mut Criterion) {
@@ -37,12 +38,67 @@ pub(crate) fn bench(c: &mut Criterion) {
     }))
     .expect("benchmark GPU device");
     let mut group = c.benchmark_group("render/geometry_prepare");
+    bench_animated_textures(&mut group, &device, &queue);
     for meshes in DISTINCT_MESHES {
         bench_scene(&mut group, &device, &queue, meshes);
     }
     bench_live_like(&mut group, &device, &queue, 50);
     bench_live_like(&mut group, &device, &queue, OBJECTS);
     group.finish();
+}
+
+fn bench_animated_textures(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) {
+    let (mut world, rows) = support::live_prepare_world(OBJECTS, 50, LIVE_TEXTURES);
+    support::animate_objects(&mut world, &rows, ANIMATED_OBJECTS, 4.0, true);
+    let textures = support::benchmark_textures(LIVE_TEXTURES);
+    let camera = support::prepare_camera();
+    let (_reconciler, view, _now) = support::settle_with_textures(&world, OBJECTS, camera, &textures.textures);
+    let animated_objects = view.objects().filter(|object| object.detail().texture_animation.is_some()).count();
+    assert_eq!(animated_objects, ANIMATED_OBJECTS);
+    let mesh_count = view.objects().filter_map(|object| object.mesh().map(|(_, mesh)| mesh.id())).collect::<HashSet<_>>().len();
+    let mut prepare = GeometryPrepare::new(device, queue, TextureFormat::Rgba8UnormSrgb);
+    for _ in 0..LIVE_TEXTURES + 32 {
+        prepare_sample(&mut prepare, device, queue, &view, camera);
+        while let Some(job) = prepare.next_texture_job() {
+            prepare.complete_texture(job.run(render::CompressionQuality::Fast));
+        }
+        if prepare.stats().pending_meshes == 0 && prepare.stats().pending_textures == 0 {
+            break;
+        }
+    }
+    assert_eq!(prepare.stats().pending_meshes, 0);
+    assert_eq!(prepare.stats().pending_textures, 0);
+    assert_eq!(prepare.stats().omitted_faces, 0);
+    prepare_sample(&mut prepare, device, queue, &view, camera);
+    assert!(prepare.stats().animated_faces_visited > 0, "visible animated texture faces must reach the prepare path");
+    eprintln!(
+        "animated-texture fixture: objects={OBJECTS}, meshes={mesh_count}, animated_objects={ANIMATED_OBJECTS}, blended_faces={}, textures={LIVE_TEXTURES}, draws={}, omitted_faces={}, smooth_rate_hz=4",
+        prepare.stats().animated_faces_visited,
+        prepare.stats().draw_calls,
+        prepare.stats().omitted_faces
+    );
+    let mut latest = (0usize, 0usize, 0.0_f64);
+    group.bench_function("animated_smooth_500_of_3000", |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            let mut visited = 0usize;
+            let mut changed = 0usize;
+            let mut animation_update_ms = 0.0;
+            for _ in 0..iters {
+                elapsed += prepare_sample(&mut prepare, device, queue, &view, camera);
+                visited += prepare.stats().animated_faces_visited;
+                changed += prepare.stats().animated_faces_changed;
+                animation_update_ms += prepare.stats().animation_update_ms;
+            }
+            latest = (visited / iters.max(1) as usize, changed / iters.max(1) as usize, animation_update_ms / iters.max(1) as f64);
+            elapsed
+        });
+    });
+    eprintln!("animated-texture faces per prepare: visited={}, changed={}, update_cpu={:.3} ms", latest.0, latest.1, latest.2);
 }
 
 fn bench_live_like(

@@ -345,6 +345,12 @@ impl Batches {
         blended.bytes = bytes;
     }
 
+    pub fn update_blended_bytes(&mut self, order: FaceOrder, bytes: [u8; INSTANCE_BYTES]) {
+        let Some(index) = self.blend_index.get(&order).copied() else { return };
+        let Some(blended) = self.blended.get_mut(index) else { return };
+        blended.bytes = bytes;
+    }
+
     pub fn update_blended_transform(&mut self, order: FaceOrder, distance_squared: f64, transform: &[u8; TRANSFORM_BYTES]) {
         let Some(index) = self.blend_index.get(&order).copied() else { return };
         let Some(blended) = self.blended.get_mut(index) else { return };
@@ -360,6 +366,13 @@ impl Batches {
 
     pub fn sort_blended(&mut self, draws: &mut Vec<DrawCommand>, bytes: &mut Vec<u8>, slots: &mut HashMap<FaceOrder, u32>) {
         self.write_blended(draws, bytes, slots);
+    }
+
+    pub fn write_blended_bytes(&self, bytes: &mut Vec<u8>) {
+        bytes.truncate(self.opaque_bytes());
+        for blended in &self.blended {
+            bytes.extend_from_slice(&blended.bytes);
+        }
     }
 
     pub fn blended_start(&self) -> usize {
@@ -465,6 +478,28 @@ mod tests {
             assert_matches!(draw.pipeline, Pipeline::Blend);
         }
         assert_eq!(bytes, [40, 20, 30, 10].into_iter().flat_map(|value| [value; INSTANCE_BYTES]).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn updating_blended_instance_bytes_keeps_the_existing_order() {
+        let blend = DrawKey { pipeline: Pipeline::Blend, ..key() };
+        let first = (2, 1, 0, 0);
+        let second = (2, 2, 0, 0);
+        let mut batches = Batches::default();
+        assert!(batches.push(blend, first, Some(1.0), || [1; INSTANCE_BYTES]));
+        assert!(batches.push(blend, second, Some(2.0), || [2; INSTANCE_BYTES]));
+        let mut draws = Vec::new();
+        let mut bytes = Vec::new();
+        let mut slots = HashMap::new();
+        batches.finish(&mut draws, &mut bytes, &mut slots);
+
+        batches.update_blended_bytes(first, [9; INSTANCE_BYTES]);
+        batches.write_blended_bytes(&mut bytes);
+
+        assert_eq!(slots.get(&first), Some(&1));
+        assert_eq!(slots.get(&second), Some(&0));
+        assert_eq!(&bytes[..INSTANCE_BYTES], &[2; INSTANCE_BYTES]);
+        assert_eq!(&bytes[INSTANCE_BYTES..2 * INSTANCE_BYTES], &[9; INSTANCE_BYTES]);
     }
 
     #[test]

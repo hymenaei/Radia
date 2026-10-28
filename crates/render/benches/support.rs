@@ -9,7 +9,8 @@ use utils::AssetId;
 use uuid::Uuid;
 use world::{
     Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate, Pose, PrimShape,
-    Region, RegionInfo, Shape, SurfaceAppearance, TerrainPatch, TerrainSettings, UpdateSource, World, WorldLimits, WorldReadError,
+    Region, RegionInfo, Shape, SurfaceAppearance, TerrainPatch, TerrainSettings, TextureAnimation, UpdateSource, World, WorldLimits,
+    WorldReadError,
 };
 
 const INITIAL_ORDER: u64 = 100_000;
@@ -18,6 +19,7 @@ const DEFAULT_TEXTURE_ID: u128 = 9_999_999;
 pub struct Row {
     region: Region,
     local_id: NonZeroU32,
+    entity: world::Entity,
 }
 
 pub struct BenchmarkTextures {
@@ -48,6 +50,40 @@ pub fn live_prepare_world(count: usize, mesh_count: usize, texture_count: usize)
         let _applied = world.patch_object(patch).expect("benchmark object layout");
     }
     (world, rows)
+}
+
+pub fn animate_objects(world: &mut World, rows: &[Row], count: usize, rate: f32, smooth: bool) {
+    let mut bytes = [0; 16];
+    bytes[0] = 0x03 | if smooth { 0x10 } else { 0 };
+    bytes[1] = u8::MAX;
+    bytes[2] = if smooth { 0 } else { 2 };
+    bytes[3] = if smooth { 0 } else { 2 };
+    bytes[8..12].copy_from_slice(&1.0_f32.to_le_bytes());
+    bytes[12..16].copy_from_slice(&rate.to_le_bytes());
+    let animation = TextureAnimation::from_wire(&bytes).expect("benchmark texture animation");
+    let order_base = INITIAL_ORDER + rows.len() as u64 * 2 + 100;
+    for (index, row) in rows.iter().take(count).enumerate() {
+        let order = order_base + index as u64;
+        let mut patch = ObjectPatch::new(UpdateSource::new(row.region, order as u32, Ordered(order), 0), row.local_id);
+        patch.texture_animation = FieldUpdate::Set(animation);
+        let mut default_face = *world
+            .object_detail(row.entity)
+            .expect("animated benchmark object detail")
+            .surface_appearance
+            .as_ref()
+            .expect("animated benchmark object appearance")
+            .default_face();
+        default_face.color[3] = 160;
+        patch.surface_appearance = Some(SurfaceAppearance::new(default_face, Vec::new()).expect("blended benchmark appearance"));
+        let applied = world.patch_object(patch).expect("benchmark texture animation update");
+        match applied.outcome {
+            world::ApplyOutcome::Updated(entity) => {
+                assert_eq!(world.object(entity).expect("animated object").texture_animation(), Some(animation));
+                assert_eq!(world.object_detail(entity).expect("animated object detail").texture_animation, Some(animation));
+            }
+            outcome => panic!("benchmark texture animation update was not applied: {outcome:?}"),
+        }
+    }
 }
 
 fn scene_world_with(
@@ -116,8 +152,9 @@ fn scene_world_with(
             )
             .expect("benchmark surface appearance"),
         );
-        let _applied = world.observe_object(observation).expect("benchmark object introduction");
-        rows.push(Row { region, local_id });
+        let applied = world.observe_object(observation).expect("benchmark object introduction");
+        let world::ApplyOutcome::Introduced(entity) = applied.outcome else { panic!("benchmark object was not introduced") };
+        rows.push(Row { region, local_id, entity });
     }
     if terrain {
         let region = regions[0];

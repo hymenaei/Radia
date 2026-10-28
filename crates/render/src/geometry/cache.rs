@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::Range,
     sync::Arc,
+    time::Instant,
 };
 
 use assets::{TextureHandle, TextureId};
@@ -55,6 +56,8 @@ pub(super) struct CachedItem {
     pub surface_kind: Option<crate::scene::SurfaceKind>,
     pub source: Option<Object>,
     pub faces: Vec<CachedFace>,
+    pub animated_faces: Vec<usize>,
+    pub animation_deadline: Option<Instant>,
     pub visible_index: Option<usize>,
     pub parameters_dirty: bool,
 }
@@ -214,7 +217,7 @@ impl GeometryRenderer {
                 update.background.push(object.detail().summary.entity);
                 if let Some(item) = self.object_item(object) {
                     update.objects_reprepared += 1;
-                    if item.source.as_ref().is_some_and(has_enabled_animation) {
+                    if !item.animated_faces.is_empty() {
                         self.cache.animated_items.insert(item.id);
                     }
                     self.cache.objects.insert(object.detail().summary.entity, item.id);
@@ -365,6 +368,10 @@ impl GeometryRenderer {
             let parameters_dirty =
                 cached.source.as_ref().and_then(|previous| previous.detail().texture_animation) != object.detail().texture_animation;
             update.dirtied_items += usize::from(pose_changed || parameters_dirty);
+            if parameters_dirty {
+                cached.animated_faces = animated_face_indices(object, &cached.faces);
+                cached.animation_deadline = (!cached.animated_faces.is_empty()).then(Instant::now);
+            }
             let winding_changed = refresh_winding_pipeline(&mut cached.faces, cached.scale, transform.scale);
             cached.position = transform.pose.position;
             cached.rotation = transform.pose.rotation;
@@ -372,12 +379,12 @@ impl GeometryRenderer {
             update.batch_dirty |= winding_changed;
             cached.parameters_dirty |= parameters_dirty;
             cached.source = Some(object.clone());
-            if has_enabled_animation(object) {
+            if !cached.animated_faces.is_empty() {
                 self.cache.animated_items.insert(id);
             } else {
                 self.cache.animated_items.remove(&id);
             }
-            if pose_changed {
+            if pose_changed || parameters_dirty {
                 update.pose_items.push(id);
             }
             return;
@@ -393,7 +400,7 @@ impl GeometryRenderer {
         if let Some(item) = item {
             let id = item.id;
             update.mesh_dirty |= previous_mesh != Some(item.mesh.id());
-            if item.source.as_ref().is_some_and(has_enabled_animation) {
+            if !item.animated_faces.is_empty() {
                 self.cache.animated_items.insert(id);
             }
             self.cache.objects.insert(entity, id);
@@ -456,6 +463,7 @@ impl GeometryRenderer {
         let materials = object.materials();
         let appearance = object.detail().surface_appearance.as_ref();
         let faces = cached_faces(id, mesh, &info, materials, appearance, transform.scale, ShadingMode::Studio);
+        let animated_faces = animated_face_indices(object, &faces);
         Some(CachedItem {
             id,
             entity: Some(object.detail().summary.entity),
@@ -472,6 +480,8 @@ impl GeometryRenderer {
             surface_kind: None,
             source: Some(object.clone()),
             faces,
+            animation_deadline: (!animated_faces.is_empty()).then(Instant::now),
+            animated_faces,
             visible_index: None,
             parameters_dirty: false,
         })
@@ -509,6 +519,8 @@ impl GeometryRenderer {
             surface_kind: Some(surface.kind),
             source: None,
             faces,
+            animated_faces: Vec::new(),
+            animation_deadline: None,
             visible_index: None,
             parameters_dirty: false,
         })
@@ -650,8 +662,17 @@ pub(super) fn visible_difference(current: &[ItemId], next: &[ItemId], added: &mu
     added.extend_from_slice(&next[next_index..]);
 }
 
-fn has_enabled_animation(object: &Object) -> bool {
-    object.detail().texture_animation.is_some_and(texture_animation::is_enabled)
+fn animated_face_indices(object: &Object, faces: &[CachedFace]) -> Vec<usize> {
+    let Some(animation) =
+        object.detail().texture_animation.filter(|animation| texture_animation::is_enabled(*animation) && animation.rate() != 0.0)
+    else {
+        return Vec::new();
+    };
+    faces
+        .iter()
+        .enumerate()
+        .filter_map(|(index, face)| (animation.targets_face(face.order.3) && face.base_params.texture.is_some()).then_some(index))
+        .collect()
 }
 
 fn surface_item_id(region: Region, kind: SurfaceKind) -> ItemId {

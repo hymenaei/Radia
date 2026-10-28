@@ -10,10 +10,11 @@ pub(super) fn model(instance: &Instance, origin: DVec3) -> Mat4 {
 pub(super) fn instance_base(instance: &Instance, origin: DVec3) -> [u8; TRANSFORM_BYTES] {
     let mut bytes = [0; TRANSFORM_BYTES];
     let normal = normal_matrix(instance.rotation, instance.scale);
+    let normal_sign = if instance.invert_normals { -1.0 } else { 1.0 };
     let values = model(instance, origin)
         .to_cols_array()
         .into_iter()
-        .chain([normal.x_axis, normal.y_axis, normal.z_axis].into_iter().flat_map(|column| column.extend(0.0).to_array()));
+        .chain([normal.x_axis, normal.y_axis, normal.z_axis].into_iter().flat_map(|column| (column * normal_sign).extend(0.0).to_array()));
     for (dest, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         *dest = value.to_le_bytes();
     }
@@ -51,6 +52,7 @@ pub(super) fn is_visible(instance: &Instance, camera: Camera, frustum: &Frustum)
 
 #[cfg(test)]
 mod tests {
+    use crate::geometry::ShadingMode;
     use math::{Mat3, Quat};
 
     use super::*;
@@ -85,6 +87,7 @@ mod tests {
             position: DVec3::ZERO,
             rotation,
             scale,
+            invert_normals: false,
             pickable: true,
             faces: Vec::new(),
             shading: ShadingMode::Studio,
@@ -110,7 +113,6 @@ mod tests {
         let world_tangent = rotation * (scale * local_tangent);
         assert!(world_normal.dot(world_tangent).abs() < 1e-5);
     }
-
     #[test]
     fn terrain_visibility_ignores_draw_distance_but_objects_do_not() {
         let (_scene, view, _) = fixtures::scene(255);
@@ -121,6 +123,7 @@ mod tests {
             position: DVec3::new(100.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
+            invert_normals: false,
             pickable: true,
             faces: Vec::new(),
             shading,

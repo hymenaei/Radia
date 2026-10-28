@@ -176,6 +176,7 @@ impl Mirror {
                     if old.geometry() == object.geometry() && object.preparation.is_none() {
                         object.preparation = old.preparation.clone();
                         object.mesh = old.mesh.clone();
+                        object.asset_mesh = old.asset_mesh.clone();
                         if object.same_appearance(old) {
                             object.materials = old.materials.clone();
                         }
@@ -189,6 +190,7 @@ impl Mirror {
                     && object.same_appearance(&change.source)
                 {
                     object.materials = change.materials;
+                    object.asset_mesh = change.mesh;
                 }
             }
             Change::Remove(entity) => {

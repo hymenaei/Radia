@@ -1,4 +1,4 @@
-use criterion::{BatchSize, Criterion};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
 
 use crate::support;
 
@@ -34,4 +34,25 @@ pub(crate) fn bench(c: &mut Criterion) {
         });
     });
     incremental.finish();
+
+    let mut mesh_lod = c.benchmark_group("scene/mesh_lod_lookup");
+    mesh_lod.sample_size(10);
+    for count in [16, 128, 1024] {
+        mesh_lod.throughput(Throughput::Elements(count as u64));
+        mesh_lod.bench_with_input(BenchmarkId::new("camera_change_distinct_assets", count), &count, |b, &count| {
+            b.iter_batched(
+                || support::ready_distinct_mesh_scene(count),
+                |(mut reconciler, mut view, world, mut now)| {
+                    let work = support::request_distinct_mesh_refinement(&mut reconciler, &mut view, &world, &mut now);
+                    std::hint::black_box((
+                        work.requested.len(),
+                        work.released.len(),
+                        view.objects().filter(|object| object.mesh_lod().is_some()).count(),
+                    ));
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    mesh_lod.finish();
 }

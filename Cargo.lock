@@ -8117,6 +8117,9 @@ dependencies = [
 [[package]]
 name = "test-support"
 version = "0.0.1"
+dependencies = [
+ "flate2",
+]
 
 [[package]]
 name = "thiserror"

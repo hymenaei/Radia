@@ -1,6 +1,9 @@
 use math::Vec3;
 use wgpu::Device;
 
+use assets::mesh::MeshLod;
+use utils::AssetId;
+
 use super::{GeometryRenderer, MAX_MESH_UPLOADS, MAX_MESHES, UPLOAD_BYTES};
 use crate::geometry::storage::Allocation;
 use crate::pipeline::VERTEX_BYTES;
@@ -10,6 +13,8 @@ pub(super) struct GpuMesh {
     pub(super) allocation: Allocation,
     pub(super) centers: Vec<Vec3>,
     pub(super) used: u64,
+    pub(super) asset_lod: Option<(AssetId, MeshLod)>,
+    pub(super) shared: Option<SharedMesh>,
 }
 
 impl GeometryRenderer {
@@ -31,7 +36,7 @@ impl GeometryRenderer {
         else {
             return false;
         };
-        if *uploaded >= MAX_MESH_UPLOADS || bytes > UPLOAD_BYTES.saturating_sub(self.stats.uploaded_bytes) {
+        if !within_upload_target(bytes, *uploaded, self.stats.uploaded_bytes) {
             return false;
         }
         if self.meshes.len() >= MAX_MESHES && !self.retire_mesh() {
@@ -78,7 +83,11 @@ impl GeometryRenderer {
                 min * 0.5 + max * 0.5
             })
             .collect();
-        self.meshes.insert(key, GpuMesh { allocation, centers, used: self.epoch });
+        let asset_lod = shared.asset_lod();
+        self.meshes.insert(key, GpuMesh { allocation, centers, used: self.epoch, asset_lod, shared: asset_lod.map(|_| shared.clone()) });
+        if let Some(asset_lod) = asset_lod {
+            self.asset_meshes.insert(asset_lod, key);
+        }
         self.stats.uploaded_bytes += bytes;
         *uploaded += 1;
         true
@@ -88,13 +97,51 @@ impl GeometryRenderer {
         if self.retired.len() == 4 {
             return false;
         }
-        let Some(old) =
-            self.meshes.iter().filter(|(_, mesh)| mesh.used != self.epoch).min_by_key(|(_, mesh)| mesh.used).map(|(key, _)| *key)
-        else {
+        let Some(old) = retirement_candidate(self.meshes.iter().map(|(key, mesh)| (*key, mesh.used)), self.epoch) else {
             return false;
         };
-        self.retired.push(self.meshes.remove(&old).expect("selected resident"));
+        let mesh = self.meshes.remove(&old).expect("selected resident");
+        if let Some(asset_lod) = mesh.asset_lod
+            && self.asset_meshes.get(&asset_lod) == Some(&old)
+        {
+            self.asset_meshes.remove(&asset_lod);
+        }
+        self.retired.push(mesh);
         true
+    }
+}
+
+fn retirement_candidate<K: Copy>(meshes: impl Iterator<Item = (K, u64)>, epoch: u64) -> Option<K> {
+    meshes.filter(|(_, used)| *used != epoch).min_by_key(|(_, used)| *used).map(|(key, _)| key)
+}
+
+pub(super) fn within_upload_target(bytes: usize, uploaded: usize, uploaded_bytes: usize) -> bool {
+    uploaded < MAX_MESH_UPLOADS && (uploaded == 0 || uploaded_bytes.checked_add(bytes).is_some_and(|total| total <= UPLOAD_BYTES))
+}
+
+pub(super) fn resident_mesh_fallback<K: Copy + Eq>(
+    meshes: &std::collections::HashMap<(AssetId, MeshLod), K>,
+    asset: AssetId,
+    desired: MeshLod,
+    selected: K,
+) -> Option<K> {
+    [MeshLod::Lowest, MeshLod::Low, MeshLod::Medium, MeshLod::High]
+        .into_iter()
+        .filter_map(|lod| meshes.get(&(asset, lod)).copied().map(|id| (id, lod)))
+        .filter(|(id, _)| *id != selected)
+        .min_by_key(|(_, lod)| {
+            let index = lod_index(*lod);
+            (index.abs_diff(lod_index(desired)), usize::from(index > lod_index(desired)))
+        })
+        .map(|(id, _)| id)
+}
+
+fn lod_index(lod: MeshLod) -> usize {
+    match lod {
+        MeshLod::Lowest => 0,
+        MeshLod::Low => 1,
+        MeshLod::Medium => 2,
+        MeshLod::High => 3,
     }
 }
 

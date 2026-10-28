@@ -3,13 +3,17 @@ use std::{
     fmt::{self, Display, Formatter},
     mem::size_of,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicU64, Ordering},
     },
 };
 
-use assets::mesh::Mesh;
 use assets::mesh::MeshError;
+use assets::{
+    MeshAsset,
+    mesh::{LodGeometry, Mesh, MeshLod},
+};
+use utils::AssetId;
 
 use crate::scene::budget::Lease;
 
@@ -73,26 +77,85 @@ pub struct SharedMesh(Arc<Retained>);
 
 impl SharedMesh {
     pub(in crate::scene) fn new(mesh: Mesh, lease: Lease) -> Self {
+        Self::retain(MeshSource::Owned(mesh), lease)
+    }
+
+    pub(in crate::scene) fn from_asset(asset_id: AssetId, asset: MeshAsset, lease: Lease) -> Option<Self> {
+        if !matches!(asset.geometry(), LodGeometry::Geometry(_)) {
+            return None;
+        }
+        let lod = asset.lod();
+        Some(Self::retain_asset(MeshSource::Asset(asset), Some((asset_id, lod)), lease))
+    }
+
+    fn retain(source: MeshSource, lease: Lease) -> Self {
+        Self::retain_asset(source, None, lease)
+    }
+
+    fn retain_asset(source: MeshSource, asset_lod: Option<(AssetId, MeshLod)>, lease: Lease) -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1)).expect("mesh IDs exhausted");
-        Self(Arc::new(Retained { id: MeshId(id), mesh, _lease: lease }))
+        Self(Arc::new(Retained { id: MeshId(id), source, asset_lod, _lease: lease }))
     }
 
     pub fn id(&self) -> MeshId {
         self.0.id
     }
 
-    pub fn mesh(&self) -> &Mesh {
-        &self.0.mesh
+    pub(crate) fn asset_lod(&self) -> Option<(AssetId, MeshLod)> {
+        self.0.asset_lod
     }
+
+    pub(in crate::scene) fn downgrade(&self) -> WeakMesh {
+        WeakMesh(Arc::downgrade(&self.0))
+    }
+
+    pub fn mesh(&self) -> &Mesh {
+        match &self.0.source {
+            MeshSource::Owned(mesh) => mesh,
+            MeshSource::Asset(asset) => match asset.geometry() {
+                LodGeometry::Geometry(mesh) => mesh,
+                LodGeometry::Empty { .. } => unreachable!(),
+            },
+        }
+    }
+}
+
+pub(in crate::scene) struct WeakMesh(Weak<Retained>);
+
+impl WeakMesh {
+    pub(in crate::scene) fn upgrade(&self) -> Option<SharedMesh> {
+        self.0.upgrade().map(SharedMesh)
+    }
+
+    pub(in crate::scene) fn is_alive(&self) -> bool {
+        self.0.strong_count() > 0
+    }
+}
+
+enum MeshSource {
+    Owned(Mesh),
+    Asset(MeshAsset),
 }
 
 struct Retained {
     id: MeshId,
-    mesh: Mesh,
+    source: MeshSource,
+    asset_lod: Option<(AssetId, MeshLod)>,
     _lease: Lease,
 }
 
 pub(super) fn retained_bytes(mesh: &Mesh) -> usize {
     mesh.owned_bytes() + size_of::<Retained>() - size_of::<Mesh>() + 32
+}
+
+pub(in crate::scene) fn asset_mesh_bytes() -> usize {
+    size_of::<Retained>() + 32
+}
+
+#[derive(Clone)]
+pub(in crate::scene) struct MeshBinding {
+    pub asset: utils::AssetId,
+    pub lod: MeshLod,
+    pub mesh: SharedMesh,
 }

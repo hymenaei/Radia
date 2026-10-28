@@ -4,7 +4,7 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
-use assets::TextureSize;
+use assets::{TextureSize, mesh::MeshLod};
 use math::{DVec3, Vec3};
 
 use super::mesh::Detail;
@@ -153,6 +153,36 @@ impl Camera {
         }
         Some(detail_from_index(index))
     }
+
+    pub(in crate::scene) fn mesh_lod(self, center: DVec3, scale: Vec3) -> Option<MeshLod> {
+        if !center.is_finite() || !scale.is_finite() {
+            return None;
+        }
+        let radius = (scale.as_dvec3().abs() * 0.5).length();
+        if !radius.is_finite() || radius <= 0.0 {
+            return None;
+        }
+        let distance = (center - self.position).length();
+        if !distance.is_finite() || distance - radius > self.draw_distance {
+            return None;
+        }
+        let ramp_distance = self.lod_factor * 2.0;
+        let distance = if distance < ramp_distance { distance * distance / ramp_distance } else { distance } * PI / 3.0;
+        let distance = round_hundredth(distance);
+        let radius = round_hundredth(radius);
+        let lod_factor = self.lod_factor * (PI / 3.0) / self.vertical_fov;
+        let tangent = round_hundredth(lod_factor * radius / distance);
+        Some(match tangent {
+            value if value <= 0.03 => MeshLod::Lowest,
+            value if value <= 0.06 => MeshLod::Low,
+            value if value <= 0.24 => MeshLod::Medium,
+            _ => MeshLod::High,
+        })
+    }
+}
+
+fn round_hundredth(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
 }
 
 fn detail_from_index(index: usize) -> Detail {
@@ -193,6 +223,20 @@ mod tests {
         assert_eq!(camera.detail(-DVec3::X * 10.0, 2.0, None), None);
         let translated = Camera::new(DVec3::splat(1e12), Vec3::X, PI / 2.0, [1000, 1000]).unwrap();
         assert_eq!(translated.detail(DVec3::splat(1e12) + center, 20.0, None), Some(Detail::Medium));
+    }
+
+    #[test]
+    fn mesh_lod_uses_viewer_thresholds() {
+        let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 3.0, [1000, 1000]).unwrap();
+        let scale = Vec3::ONE;
+        assert_eq!(camera.mesh_lod(DVec3::X * 50.0, scale), Some(MeshLod::Lowest));
+        assert_eq!(camera.mesh_lod(DVec3::X * 20.0, scale), Some(MeshLod::Low));
+        assert_eq!(camera.mesh_lod(DVec3::X * 10.0, scale), Some(MeshLod::Medium));
+        assert_eq!(camera.mesh_lod(DVec3::X * 2.0, scale), Some(MeshLod::High));
+        assert_eq!(camera.mesh_lod(DVec3::X * 900.0, scale), None);
+        let zoomed = Camera::new(DVec3::ZERO, Vec3::X, PI / 2.0, [1000, 1000]).unwrap();
+        assert_eq!(zoomed.mesh_lod(DVec3::X * 20.0, scale), Some(MeshLod::Lowest));
+        assert_eq!(camera.mesh_lod(DVec3::X * 20.0, Vec3::new(-1.0, 1.0, 1.0)), Some(MeshLod::Low));
     }
 
     #[test]

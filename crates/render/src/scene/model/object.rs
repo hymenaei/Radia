@@ -1,16 +1,18 @@
 use std::{sync::Arc, time::Instant};
 
 use math::Vec3;
-use world::{Kind, ObjectDetail, PrimShape, Shape, WorldTransform, WorldTransformState};
+use utils::AssetId;
+use world::{Kind, ObjectDetail, PrimShape, SculptFlags, Shape, WorldTransform, WorldTransformState};
 
 use crate::material::FaceMaterial;
-use crate::scene::{MeshKey, PreparedMesh, SharedMesh, asset_demand::Materials, budget::Lease, texture_animation};
+use crate::scene::{MeshKey, PreparedMesh, SharedMesh, asset_demand::Materials, budget::Lease, mesh::MeshBinding, texture_animation};
 
 #[derive(Clone)]
 pub struct Object {
     data: Arc<ObjectData>,
     pub(super) preparation: Option<(MeshKey, PreparedMesh)>,
     pub(super) mesh: Option<(MeshKey, SharedMesh)>,
+    pub(super) asset_mesh: Option<MeshBinding>,
     pub(super) materials: Option<Materials>,
     animation_clock: Option<AnimationClock>,
 }
@@ -18,7 +20,14 @@ pub struct Object {
 impl Object {
     pub(in crate::scene) fn new(source: ObjectDetail, lease: Lease) -> Self {
         let animation_clock = source.texture_animation.map(|_| AnimationClock { started_at: Instant::now(), frame_offset: 0.0 });
-        Self { data: Arc::new(ObjectData { source, _lease: lease }), preparation: None, mesh: None, materials: None, animation_clock }
+        Self {
+            data: Arc::new(ObjectData { source, _lease: lease }),
+            preparation: None,
+            mesh: None,
+            asset_mesh: None,
+            materials: None,
+            animation_clock,
+        }
     }
 
     pub fn detail(&self) -> &ObjectDetail {
@@ -27,6 +36,28 @@ impl Object {
 
     pub fn mesh(&self) -> Option<(MeshKey, &SharedMesh)> {
         self.mesh.as_ref().map(|(key, mesh)| (*key, mesh))
+    }
+
+    pub fn render_mesh(&self) -> Option<&SharedMesh> {
+        match self.geometry() {
+            Geometry::Prim(_) => self.mesh.as_ref().map(|(_, mesh)| mesh),
+            Geometry::Mesh(asset) => self.asset_mesh.as_ref().filter(|binding| binding.asset == asset).map(|binding| &binding.mesh),
+            Geometry::Unsupported(_) | Geometry::Missing => None,
+        }
+    }
+
+    pub fn mesh_lod(&self) -> Option<(AssetId, assets::mesh::MeshLod)> {
+        self.asset_mesh.as_ref().and_then(|binding| match self.geometry() {
+            Geometry::Mesh(asset) if asset == binding.asset => Some((binding.asset, binding.lod)),
+            _ => None,
+        })
+    }
+
+    pub fn mesh_flags(&self) -> Option<SculptFlags> {
+        match self.detail().shape {
+            Some(Shape::Mesh { flags, .. }) => Some(flags),
+            _ => None,
+        }
     }
 
     pub fn materials(&self) -> Option<&[FaceMaterial]> {
@@ -97,6 +128,7 @@ impl Object {
         }
         match self.detail().shape {
             Some(Shape::Prim(shape)) => Geometry::Prim(shape),
+            Some(Shape::Mesh { asset_id, .. }) => Geometry::Mesh(asset_id),
             Some(shape) => Geometry::Unsupported(shape),
             None => Geometry::Missing,
         }
@@ -140,6 +172,7 @@ pub enum Placement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Geometry {
     Prim(PrimShape),
+    Mesh(AssetId),
     Unsupported(Shape),
     Missing,
 }

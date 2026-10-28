@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -12,10 +12,11 @@ use super::{FramePreparation, FramePreparationKey, GeometryRenderer, Instance, M
 use crate::geometry::{
     batching::{Batches, DrawKey},
     instance::{instance_base, is_visible, packed_instance},
+    mesh::resident_mesh_fallback,
 };
 use crate::material::{FaceMaterial, FaceParams};
 use crate::pipeline::{COLOR, Pipeline};
-use crate::scene::{Camera, Placement, PreparedMesh, SceneView, SurfaceKind, texture_animation};
+use crate::scene::{Camera, MeshId, Placement, PreparedMesh, SceneView, SharedMesh, SurfaceKind, texture_animation};
 
 impl GeometryRenderer {
     pub(crate) fn prepare(
@@ -51,7 +52,9 @@ impl GeometryRenderer {
         let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size);
         self.water.update(&self.queue, view, camera, projection, water_height);
         let objects = view.objects().filter_map(|object| {
-            let (Some((_, mesh)), Placement::Ready(transform)) = (object.mesh(), object.placement()) else { return None };
+            let (Some(mesh), Placement::Ready(transform)) = (object.render_mesh(), object.placement()) else { return None };
+            let flags = object.mesh_flags().unwrap_or_default();
+            let scale = transform.scale * Vec3::new(if flags.mirror { -1.0 } else { 1.0 }, 1.0, 1.0);
             let animation = object
                 .detail()
                 .texture_animation
@@ -63,7 +66,8 @@ impl GeometryRenderer {
                     mesh: mesh.clone(),
                     position: transform.pose.position,
                     rotation: transform.pose.rotation,
-                    scale: transform.scale,
+                    scale,
+                    invert_normals: flags.invert,
                     pickable: true,
                     faces: Vec::new(),
                     shading: ShadingMode::Studio,
@@ -96,6 +100,7 @@ impl GeometryRenderer {
                     position: surface.position,
                     rotation: Quat::IDENTITY,
                     scale: Vec3::ONE,
+                    invert_normals: false,
                     pickable: surface.kind != SurfaceKind::Water,
                     faces: Vec::new(),
                     shading,
@@ -172,13 +177,30 @@ impl GeometryRenderer {
         let faces_started = Instant::now();
         let mut batches = Batches::default();
         let mut uploaded = 0;
+        let mut mesh_fallbacks: HashMap<MeshId, Option<(MeshId, SharedMesh)>> = HashMap::new();
         let mut pending_meshes = HashSet::new();
         let mut pending_textures = HashSet::new();
         let mut animated_faces = false;
         for (id, mut instance, faces, animation, appearance) in candidates {
+            let selected_id = instance.mesh.id();
+            let fallback = if self.meshes.contains_key(&selected_id) {
+                None
+            } else if let Some(fallback) = mesh_fallbacks.get(&selected_id) {
+                fallback.clone()
+            } else {
+                let fallback = instance.mesh.asset_lod().and_then(|(asset, lod)| {
+                    let fallback_id = resident_mesh_fallback(&self.asset_meshes, asset, lod, selected_id)?;
+                    self.meshes.get(&fallback_id)?.shared.clone().map(|mesh| (fallback_id, mesh))
+                });
+                mesh_fallbacks.insert(selected_id, fallback.clone());
+                fallback
+            };
             if !self.upload_mesh(device, &instance.mesh, instance.terrain_composition.as_deref(), &mut uploaded) {
-                pending_meshes.insert(instance.mesh.id());
-                continue;
+                pending_meshes.insert(selected_id);
+                let Some((fallback_id, fallback)) = fallback else { continue };
+                let Some(mesh) = self.meshes.get_mut(&fallback_id) else { continue };
+                mesh.used = self.epoch;
+                instance.mesh = fallback;
             }
             let base = instance_base(&instance, camera.position());
             for (index, face) in instance.mesh.mesh().faces().iter().enumerate() {
@@ -239,7 +261,7 @@ impl GeometryRenderer {
                 let pipeline = match instance.shading {
                     ShadingMode::Terrain => Pipeline::Terrain,
                     ShadingMode::Water => Pipeline::Water,
-                    ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, instance.scale),
+                    ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, instance.scale, instance.invert_normals),
                 };
                 let key =
                     DrawKey { mesh: instance.mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture, terrain };
@@ -317,8 +339,8 @@ impl GeometryRenderer {
     }
 }
 
-fn surface_pipeline(blend: bool, double_sided: bool, scale: Vec3) -> Pipeline {
-    match (blend, double_sided, flips_winding(scale)) {
+fn surface_pipeline(blend: bool, double_sided: bool, scale: Vec3, invert_normals: bool) -> Pipeline {
+    match (blend, double_sided, flips_winding(scale) ^ invert_normals) {
         (true, true, _) => Pipeline::BlendDoubleSided,
         (true, false, true) => Pipeline::BlendFlipped,
         (true, false, false) => Pipeline::Blend,

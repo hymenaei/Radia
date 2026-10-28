@@ -12,7 +12,7 @@ use wgpu::{
 
 use super::*;
 use crate::geometry::{
-    Instance, ShadingMode,
+    Instance,
     fixtures::{scene, scene_with_mapping, scene_with_scales},
     instance::{instance_base, packed_instance},
 };
@@ -44,7 +44,11 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
         assert_eq!(meshes[0].allocation.indices().end, meshes[1].allocation.indices().start);
     }
     if alpha == 255 {
-        assert_eq!(geometry.stats.draw_calls, 2, "identical material parameters combine adjacent faces within each mesh");
+        let grouped_calls = if separate_pages { 2 } else { 1 };
+        let expected_calls = if geometry.indirect_first_instance { grouped_calls } else { geometry.stats.draw_commands };
+        assert_eq!(geometry.stats.draw_calls, expected_calls, "draw submissions match the available indirect features");
+        geometry.batches.build_draw_batches(&geometry.draws, &geometry.meshes, geometry.indirect_first_instance);
+        assert_eq!(geometry.batches.draw_batches().len(), grouped_calls, "rebuilding retained indirect groups keeps submissions");
     }
     let mut objects: Vec<_> = view.objects().collect();
     objects.sort_by_key(|object| object.detail().summary.id);
@@ -71,12 +75,13 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
                 scale: transform.scale,
                 pickable: true,
                 faces: Vec::new(),
-                shading: ShadingMode::Studio,
-                terrain_textures: None,
-                terrain_composition: None,
             };
             let params = FaceParams::new(Some(&object.materials().unwrap()[0]));
-            let packed = packed_instance(&instance_base(&instance, camera.position()), &params, instance.scale);
+            let packed = packed_instance(
+                &instance_base(instance.position, instance.rotation, instance.scale, camera.position()),
+                &params,
+                instance.scale,
+            );
             (
                 device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &vertices, usage: BufferUsages::VERTEX }),
                 device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &indices, usage: BufferUsages::INDEX }),
@@ -158,7 +163,14 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     complete.recv().unwrap().unwrap();
     let pixels = readback.get_mapped_range(..).unwrap();
     let (shared_pixels, reference_pixels) = pixels.split_at(128 * 128 * 4);
-    assert!(shared_pixels == reference_pixels, "batched pages must match independently drawn complete source meshes");
+    let mismatched_pixels = shared_pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(reference_pixels.as_chunks::<4>().0)
+        .filter(|(shared, reference)| shared != reference)
+        .count();
+    assert_eq!(mismatched_pixels, 0, "batched pages must match independently drawn complete source meshes");
     let mut red = 0;
     let mut green = 0;
     for pixel in shared_pixels.as_chunks::<4>().0 {
@@ -276,8 +288,8 @@ fn check_mirrored_render(device: &wgpu::Device, queue: &wgpu::Queue) {
             green.push(pixel[1]);
         }
     }
-    assert!(red.len() > 100, "unmirrored prim remains visible after back-face culling");
-    assert!(green.len() > 100, "mirrored prim remains visible after back-face culling");
+    assert!(red.len() > 100, "unmirrored prim remains visible after back-face culling: {} pixels", red.len());
+    assert!(green.len() > 100, "mirrored prim remains visible after back-face culling: {} pixels", green.len());
     let average = |values: &[u8]| values.iter().map(|value| u32::from(*value)).sum::<u32>() / values.len() as u32;
     assert!(average(&red).abs_diff(average(&green)) < 30, "mirroring keeps front-face normals outward for studio lighting");
     drop(geometry);
@@ -291,7 +303,7 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
     let size = [256, 256];
     let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba8UnormSrgb);
     let depth = geometry.depth(device, size).unwrap();
-    let projection = geometry.pipelines.update_camera_uniform(queue, camera, size);
+    let projection = geometry.pipelines.update_camera_uniform(queue, camera, size, camera.position());
     let mut objects: Vec<_> = view.objects().collect();
     objects.sort_by_key(|object| object.detail().summary.id);
     let mut instances = Vec::new();
@@ -310,11 +322,12 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
             scale: transform.scale,
             pickable: true,
             faces: Vec::new(),
-            shading: ShadingMode::Studio,
-            terrain_textures: None,
-            terrain_composition: None,
         };
-        instances.extend_from_slice(&packed_instance(&instance_base(&instance, camera.position()), &params, instance.scale));
+        instances.extend_from_slice(&packed_instance(
+            &instance_base(instance.position, instance.rotation, instance.scale, camera.position()),
+            &params,
+            instance.scale,
+        ));
     }
     let vertices: Vec<u8> = [Vec3::new(0.0, -0.5, -0.5), Vec3::new(0.0, 0.5, -0.5), Vec3::new(0.0, 0.5, 0.5), Vec3::new(0.0, -0.5, 0.5)]
         .into_iter()
@@ -395,7 +408,13 @@ fn gpu_mesh_pages() {
         let instance =
             wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
+        adapter
+            .request_device(&DeviceDescriptor {
+                required_features: adapter.features() & wgpu::Features::INDIRECT_FIRST_INSTANCE,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
     });
     for (alpha, separate_pages) in [(255, false), (128, true)] {
         check_pages(&device, &queue, alpha, separate_pages);

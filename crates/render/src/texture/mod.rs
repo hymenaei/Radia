@@ -233,7 +233,7 @@ struct TextureEntry {
     fallback: Option<GpuTexture>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TextureState {
     pub(crate) revision: u64,
     pub(crate) staging: usize,

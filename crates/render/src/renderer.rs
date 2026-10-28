@@ -117,7 +117,7 @@ impl Renderer {
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 label: Some("Radia scene"),
-                required_features: adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC,
+                required_features: adapter.features() & (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::INDIRECT_FIRST_INSTANCE),
                 ..Default::default()
             })
             .await

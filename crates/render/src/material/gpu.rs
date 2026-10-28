@@ -4,6 +4,7 @@ use math::UvTransform;
 use super::{AlphaBehavior, FaceMaterial};
 use crate::texture::TextureKey;
 
+#[derive(Clone, Copy)]
 pub(crate) struct FaceParams {
     pub(crate) color: [f32; 4],
     pub(crate) uv: [[f32; 4]; 2],

@@ -1,5 +1,6 @@
 use std::{f64::consts::PI, num::NonZeroU32, time::Instant};
 
+use assets::{Budget as AssetBudget, Content, LoadJob, Priority, Request, Status as AssetStatus, Store, TextureSize};
 use math::{DVec3, Quat, Vec3};
 use render::scene::{
     AssetChange, Budget, Camera, Detail, MeshJob, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView, Status,
@@ -8,7 +9,7 @@ use utils::AssetId;
 use uuid::Uuid;
 use world::{
     Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate, Pose, PrimShape,
-    Region, RegionInfo, Shape, SurfaceAppearance, UpdateSource, World, WorldLimits, WorldReadError,
+    Region, RegionInfo, Shape, SurfaceAppearance, TerrainPatch, UpdateSource, World, WorldLimits, WorldReadError,
 };
 
 const INITIAL_ORDER: u64 = 100_000;
@@ -20,6 +21,14 @@ pub struct Row {
 }
 
 pub fn scene_world(count: usize, region_count: usize) -> (World, Vec<Row>) {
+    scene_world_with(count, region_count, prim_shape, false)
+}
+
+pub fn prepare_world(count: usize, mesh_count: usize) -> (World, Vec<Row>) {
+    scene_world_with(count, 1, |index| prepare_shape(index % mesh_count), true)
+}
+
+fn scene_world_with(count: usize, region_count: usize, shape: impl Fn(usize) -> PrimShape, terrain: bool) -> (World, Vec<Row>) {
     let mut world = World::new(WorldLimits {
         max_region_registrations: 8,
         max_entities: 65_536,
@@ -65,11 +74,23 @@ pub fn scene_world(count: usize, region_count: usize) -> (World, Vec<Row>) {
             rotation: Some(Quat::IDENTITY),
         });
         observation.scale = Some(Vec3::ONE);
-        observation.shape = FieldUpdate::Set(Shape::Prim(prim_shape(index)));
+        observation.shape = FieldUpdate::Set(Shape::Prim(shape(index)));
         observation.appearance = FieldUpdate::Set(Appearance::Surface);
         observation.surface_appearance = Some(appearance.clone());
         let _applied = world.observe_object(observation).expect("benchmark object introduction");
         rows.push(Row { region, local_id });
+    }
+    if terrain {
+        let region = regions[0];
+        let mut order = INITIAL_ORDER + count as u64;
+        for y in 0..6 {
+            for x in 0..6 {
+                let source = UpdateSource::new(region, order as u32, Ordered(order), 0);
+                let patch = TerrainPatch::new(x, y, Box::new([0.0; 256])).expect("benchmark terrain patch");
+                let _applied = world.observe_terrain_patch(source, patch).expect("benchmark terrain observation");
+                order += 1;
+            }
+        }
     }
     (world, rows)
 }
@@ -84,6 +105,7 @@ pub fn prim_job(shape: PrimShape, detail: Detail) -> (Reconciler, MeshJob) {
     let (mut reconciler, mut view) = Reconciler::new(Budget::default());
     reconciler.set_camera(camera);
     let mut now = Instant::now();
+    let texture = benchmark_texture();
     for _ in 0..100_000 {
         match reconciler.poll(now) {
             ReconcileStep::Read(job) => {
@@ -94,12 +116,31 @@ pub fn prim_job(shape: PrimShape, detail: Detail) -> (Reconciler, MeshJob) {
             ReconcileStep::Publish(batch) => view.apply(batch).expect("benchmark scene publication"),
             ReconcileStep::Continue => {}
             ReconcileStep::Wait(until) => now = until,
+            ReconcileStep::Asset(AssetChange::Request(request)) if request.request.resource().kind == assets::Kind::Texture => {
+                reconciler.complete_asset(request.ticket, AssetStatus::Ready(Content::Texture(texture.clone())));
+            }
             ReconcileStep::Asset(_) => {}
             ReconcileStep::Idle => panic!("prim benchmark has no mesh work"),
             ReconcileStep::Closed => panic!("benchmark scene closed"),
         }
     }
     panic!("prim benchmark did not produce mesh work");
+}
+
+fn benchmark_texture() -> assets::TextureHandle {
+    let now = Instant::now();
+    let mut store = Store::new(AssetBudget::default());
+    let route = store.register_route().expect("benchmark texture route");
+    let id = AssetId::new(Uuid::from_u128(DEFAULT_TEXTURE_ID));
+    let demand = store
+        .request(route, Request::Texture { id, size: TextureSize::new(64) }, Priority::Visible, now)
+        .expect("benchmark texture request");
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("benchmark texture fetch") else { panic!("texture cache is empty") };
+    let input = fetch.complete(Ok(test_support::texture::RGB_J2C.to_vec())).expect("benchmark texture response");
+    let decode = store.start_decode(input).expect("benchmark texture decode");
+    store.complete(decode.run(), now);
+    let AssetStatus::Ready(Content::Texture(texture)) = demand.status() else { panic!("benchmark texture did not decode") };
+    texture
 }
 
 pub fn first_full_view_batch(world: &World, expected_objects: usize) {
@@ -143,9 +184,14 @@ pub fn first_full_view_batch(world: &World, expected_objects: usize) {
 }
 
 pub fn settle(world: &World, expected_objects: usize) -> (Reconciler, SceneView, Instant) {
+    settle_with_camera(world, expected_objects, scene_camera())
+}
+
+pub fn settle_with_camera(world: &World, expected_objects: usize, camera: Camera) -> (Reconciler, SceneView, Instant) {
     let (mut reconciler, mut view) = Reconciler::new(Budget::default());
-    reconciler.set_camera(scene_camera());
+    reconciler.set_camera(camera);
     let mut now = Instant::now();
+    let texture = benchmark_texture();
     for _ in 0..100_000 {
         match reconciler.poll(now) {
             ReconcileStep::Read(job) => {
@@ -156,6 +202,9 @@ pub fn settle(world: &World, expected_objects: usize) -> (Reconciler, SceneView,
             ReconcileStep::Build(job) => reconciler.complete_mesh(job.run()),
             ReconcileStep::Continue => {}
             ReconcileStep::Wait(until) => now = until,
+            ReconcileStep::Asset(AssetChange::Request(request)) if request.request.resource().kind == assets::Kind::Texture => {
+                reconciler.complete_asset(request.ticket, AssetStatus::Ready(Content::Texture(texture.clone())));
+            }
             ReconcileStep::Asset(_) => {}
             ReconcileStep::Idle => {
                 assert_eq!(view.object_count(), expected_objects);
@@ -179,6 +228,18 @@ pub fn update_one_percent(world: &mut World, rows: &[Row], order: &mut u64, gene
             Some(Pose { position: Some(Vec3::new(100.0 + offset + index as f32 / 100.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
         let _applied = world.patch_object(patch).expect("benchmark object update");
     }
+}
+
+pub fn update_one(world: &mut World, row: &Row, order: &mut u64, generation: u64) {
+    let current = *order;
+    *order += 1;
+    let mut patch = ObjectPatch::new(UpdateSource::new(row.region, current as u32, Ordered(current), 0), row.local_id);
+    let offset = (generation % 2) as f32;
+    patch.pose = Some(Pose {
+        position: Some(Vec3::new((row.local_id.get() % 100) as f32 + offset, (row.local_id.get() / 100) as f32, 0.0)),
+        rotation: Some(Quat::IDENTITY),
+    });
+    let _applied = world.patch_object(patch).expect("benchmark object update");
 }
 
 pub fn first_publish(reconciler: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) {
@@ -223,11 +284,22 @@ fn prim_shape(index: usize) -> PrimShape {
     }
 }
 
+pub fn prepare_camera() -> Camera {
+    Camera::new(DVec3::new(50.0, 15.0, 120.0), -Vec3::Z, PI / 2.0, [1024, 1024])
+        .expect("benchmark prepare camera")
+        .with_quality(512.0, 1.0)
+        .expect("benchmark camera quality")
+}
+
 fn scene_camera() -> Camera {
     Camera::new(DVec3::new(128.0, 12.0, 200.0), -Vec3::Z, PI / 2.0, [1024, 1024])
         .expect("benchmark scene camera")
         .with_quality(512.0, 1.0)
         .expect("benchmark camera quality")
+}
+
+fn prepare_shape(index: usize) -> PrimShape {
+    PrimShape { profile_curve: 2, profile_hollow: 12_500, path_twist: index as i8, ..PrimShape::default() }
 }
 
 fn reply(world: &World, job: &ReadJob) -> Result<ReadReply, ReadFailure> {

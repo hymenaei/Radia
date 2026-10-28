@@ -32,7 +32,7 @@ use protocol::{
     login::ResponseData,
     messages::{
         AgentMovementComplete, CacheMissType, ChatFromViewer, CompletePingCheck, ObjectRequest, PacketAck, PingId, RequestAgentData,
-        RequestMultipleObjects, StartPingCheck, TeleportCancel, TeleportFinish,
+        RequestMultipleObjects, StartPingCheck, TeleportCancel, TeleportFinish, TeleportStart,
         agent::agent_movement_complete::{AgentData, Data, SimData},
         chat::chat_from_viewer,
         chat::chat_from_viewer::ChatData,

@@ -249,6 +249,7 @@ struct PendingCrossing {
 struct PendingCancellation {
     generation: u64,
     handoff_generation: Option<HandoffGeneration>,
+    allow_handoff_rebind: bool,
     outcome: TeleportCancelOutcome,
     attempts: u8,
     deadline: Instant,
@@ -270,6 +271,7 @@ pub(crate) struct TeleportController {
     active: Option<ActiveTeleport>,
     handoff_generation: Option<HandoffGeneration>,
     handoff_destination: Option<Destination>,
+    handoff_packet_order: Option<(SimulatorId, u64)>,
     pending_cancellation: Option<PendingCancellation>,
     awaiting_handoff_event: bool,
     latest_handoff_generation: Option<HandoffGeneration>,
@@ -297,6 +299,7 @@ impl TeleportController {
             active: None,
             handoff_generation: None,
             handoff_destination: None,
+            handoff_packet_order: None,
             pending_cancellation: None,
             awaiting_handoff_event: false,
             latest_handoff_generation: None,
@@ -318,6 +321,20 @@ impl TeleportController {
         }
         self.last_lifecycle_order = Some((simulator_id, order));
         true
+    }
+
+    fn clear_superseded_packet_handoff(&mut self) {
+        let Some((simulator_id, latest_order)) = self.last_lifecycle_order else { return };
+        let Some((handoff_simulator, handoff_order)) = self.handoff_packet_order else { return };
+        if simulator_id != handoff_simulator || latest_order <= handoff_order {
+            return;
+        }
+        self.handoff_generation = None;
+        self.handoff_destination = None;
+        self.handoff_packet_order = None;
+        if let Some(active) = self.active.as_mut() {
+            active.destination = None;
+        }
     }
 
     pub(super) fn accept_capability_order(&mut self, simulator_id: SimulatorId, incarnation: u64, batch: u64, index: usize) -> bool {
@@ -570,10 +587,12 @@ impl TeleportController {
     pub(super) fn begin_cancellation(&mut self, outcome: TeleportCancelOutcome) {
         self.active = None;
         let now = Instant::now();
+        let handoff_generation = self.handoff_generation;
         self.cancellation_generation = self.cancellation_generation.wrapping_add(1);
         self.pending_cancellation = Some(PendingCancellation {
             generation: self.cancellation_generation,
-            handoff_generation: self.handoff_generation,
+            handoff_generation,
+            allow_handoff_rebind: handoff_generation.is_none(),
             outcome: outcome.clone(),
             attempts: 0,
             deadline: now + CANCEL_TIMEOUT,
@@ -692,16 +711,39 @@ impl TeleportController {
 
     pub(super) fn finish_cancellation(&mut self, handoff_result: Result<HandoffCancellationOutcome, TeleportCancelFailure>) {
         let Some(cancel) = self.pending_cancellation.take() else { return };
-        let Some(send_result) = cancel.final_result else {
+        let Some(send_result) = cancel.final_result.clone() else {
             self.pending_cancellation = Some(cancel);
             return;
         };
         self.status = match handoff_result {
-            Ok(HandoffCancellationOutcome::Stale) => {
+            Ok(HandoffCancellationOutcome::Stale { generation }) if cancel.allow_handoff_rebind => {
+                self.latest_handoff_generation = Some(
+                    self.latest_handoff_generation
+                        .map_or(generation, |latest| if generation.get() > latest.get() { generation } else { latest }),
+                );
+                self.handoff_generation = Some(generation);
+                self.handoff_destination = None;
+                self.handoff_packet_order = None;
+                let mut cancel = cancel;
+                cancel.handoff_generation = Some(generation);
+                cancel.allow_handoff_rebind = false;
+                cancel.final_result = Some(send_result);
+                self.pending_cancellation = Some(cancel);
+                self.awaiting_handoff_event = false;
+                self.publish();
+                return;
+            }
+            Ok(HandoffCancellationOutcome::Stale { .. }) => {
                 self.awaiting_handoff_event = true;
                 TeleportStatus::AwaitingHandoffUpdate
             }
-            Ok(HandoffCancellationOutcome::Cancelled) => {
+            Ok(HandoffCancellationOutcome::Cancelled { generation }) => {
+                if let Some(generation) = generation {
+                    self.latest_handoff_generation = Some(
+                        self.latest_handoff_generation
+                            .map_or(generation, |latest| if generation.get() > latest.get() { generation } else { latest }),
+                    );
+                }
                 self.finish_cancelled_state(&cancel.outcome);
                 match send_result {
                     Ok(()) => terminal_cancel_status(cancel.outcome),
@@ -719,6 +761,7 @@ impl TeleportController {
     fn finish_cancelled_state(&mut self, outcome: &TeleportCancelOutcome) {
         self.handoff_generation = None;
         self.handoff_destination = None;
+        self.handoff_packet_order = None;
         self.awaiting_handoff_event = false;
         if let Some(crossing) = self.pending_crossing.take() {
             self.crossing = if matches!(outcome, TeleportCancelOutcome::TimedOut) {
@@ -744,12 +787,16 @@ impl TeleportController {
             self.handoff_generation = Some(generation);
         }
         self.awaiting_handoff_event = false;
-        if self
-            .pending_cancellation
-            .as_ref()
-            .is_some_and(|cancel| outcome.generation().is_some_and(|generation| Some(generation) != cancel.handoff_generation))
-        {
+        if self.pending_cancellation.as_ref().is_some_and(|cancel| {
+            outcome.generation().is_some_and(|generation| cancel.handoff_generation.is_some_and(|current| current != generation))
+        }) {
             self.pending_cancellation = None;
+        } else if let Some(generation) = outcome.generation()
+            && let Some(cancel) = self.pending_cancellation.as_mut()
+            && cancel.handoff_generation.is_none()
+        {
+            cancel.handoff_generation = Some(generation);
+            cancel.allow_handoff_rebind = false;
         }
     }
 
@@ -776,6 +823,7 @@ impl TeleportController {
         if self.pending_cancellation.is_some() || self.awaiting_handoff_event {
             return;
         }
+        self.clear_superseded_packet_handoff();
         self.start_sequence = self.start_sequence.wrapping_add(1);
         let active = self.active.get_or_insert_with(|| ActiveTeleport {
             started: false,
@@ -804,10 +852,40 @@ impl TeleportController {
     }
 
     pub(super) fn on_finish(&mut self, destination: Destination, flags: u32, sim_access: Option<u8>, outcome: HandoffEventOutcome) -> bool {
+        self.on_finish_with_packet_order(destination, flags, sim_access, outcome, None)
+    }
+
+    pub(super) fn on_finish_packet(
+        &mut self,
+        simulator_id: SimulatorId,
+        packet_order: PacketOrder,
+        destination: Destination,
+        flags: u32,
+        sim_access: Option<u8>,
+        outcome: HandoffEventOutcome,
+    ) -> bool {
+        let packet_order = match packet_order {
+            PacketOrder::Ordered(order) => Some((simulator_id, order)),
+            PacketOrder::Ambiguous | PacketOrder::Degraded => None,
+        };
+        self.on_finish_with_packet_order(destination, flags, sim_access, outcome, packet_order)
+    }
+
+    fn on_finish_with_packet_order(
+        &mut self,
+        destination: Destination,
+        flags: u32,
+        sim_access: Option<u8>,
+        outcome: HandoffEventOutcome,
+        packet_order: Option<(SimulatorId, u64)>,
+    ) -> bool {
         if !self.accept_handoff_outcome(outcome) {
             return false;
         }
         self.observe_handoff_outcome(destination, outcome);
+        if outcome.is_accepted() {
+            self.handoff_packet_order = None;
+        }
         if self.pending_cancellation.is_some() {
             return false;
         }
@@ -841,6 +919,7 @@ impl TeleportController {
         active.destination = Some(destination);
         active.flags = flags;
         active.sim_access = sim_access;
+        self.handoff_packet_order = packet_order;
         self.status = TeleportStatus::Connecting { region_handle: destination.region_handle };
         self.publish();
         false
@@ -848,6 +927,14 @@ impl TeleportController {
 
     pub(super) fn on_failed(&mut self, failure: TeleportFailure, outcome: HandoffEventOutcome) {
         if !outcome.is_accepted() || !self.accept_handoff_outcome(outcome) {
+            return;
+        }
+        if outcome.generation().is_none()
+            && (self.handoff_generation.is_some()
+                || self.pending_crossing.is_some()
+                || self.pending_cancellation.is_some()
+                || self.awaiting_handoff_event)
+        {
             return;
         }
         if let Some(generation) = outcome.generation() {
@@ -869,6 +956,7 @@ impl TeleportController {
         self.awaiting_handoff_event = false;
         self.handoff_generation = None;
         self.handoff_destination = None;
+        self.handoff_packet_order = None;
         if self.active.take().is_some() || was_awaiting {
             self.status = TeleportStatus::Failed(failure);
             self.publish();
@@ -879,6 +967,7 @@ impl TeleportController {
         if message.agent_id != agent_id || self.pending_cancellation.is_some() || self.awaiting_handoff_event {
             return false;
         }
+        self.clear_superseded_packet_handoff();
         let flags = message.teleport_flags;
         self.active = None;
         self.status = TeleportStatus::Completed { region_handle: current_region_handle, same_region: true, flags, sim_access: None };
@@ -895,6 +984,9 @@ impl TeleportController {
             .as_ref()
             .is_some_and(|cancel| outcome.generation().is_some_and(|generation| Some(generation) != cancel.handoff_generation));
         self.observe_handoff_outcome(destination, outcome);
+        if outcome.is_accepted() {
+            self.handoff_packet_order = None;
+        }
         if self.pending_cancellation.is_some() {
             return false;
         }
@@ -962,6 +1054,7 @@ impl TeleportController {
             self.pending_cancellation = None;
             self.handoff_generation = None;
             self.handoff_destination = None;
+            self.handoff_packet_order = None;
             self.awaiting_handoff_event = false;
         }
         self.publish();
@@ -992,6 +1085,7 @@ impl TeleportController {
             self.pending_cancellation = None;
             self.handoff_generation = None;
             self.handoff_destination = None;
+            self.handoff_packet_order = None;
             self.awaiting_handoff_event = false;
             self.status = TeleportStatus::Completed {
                 region_handle: Some(destination.region_handle),
@@ -1007,6 +1101,7 @@ impl TeleportController {
             self.pending_cancellation = None;
             self.handoff_generation = None;
             self.handoff_destination = None;
+            self.handoff_packet_order = None;
             self.awaiting_handoff_event = false;
             self.status = TeleportStatus::SupersededByCrossing { region_handle };
             self.publish();
@@ -1015,6 +1110,7 @@ impl TeleportController {
             self.pending_cancellation = None;
             self.handoff_generation = None;
             self.handoff_destination = None;
+            self.handoff_packet_order = None;
             self.awaiting_handoff_event = false;
             if let Some(region_handle) = region_handle {
                 self.status = TeleportStatus::SupersededByCrossing { region_handle };
@@ -1269,7 +1365,7 @@ mod tests {
     }
 
     fn cancelled_handoff() -> Result<HandoffCancellationOutcome, TeleportCancelFailure> {
-        Ok(HandoffCancellationOutcome::Cancelled)
+        Ok(HandoffCancellationOutcome::Cancelled { generation: None })
     }
 
     #[test]
@@ -1785,6 +1881,57 @@ mod tests {
         assert_eq!(controller.latest_handoff_generation, Some(handoff_generation(2)));
     }
 
+    #[test]
+    fn newer_start_clears_an_older_packet_handoff() {
+        let simulator = SimulatorId::new(1);
+        let destination = model_destination(2);
+        let mut controller = TeleportController::new();
+
+        assert!(controller.accept_lifecycle_packet(simulator, PacketOrder::Ordered(10)));
+        controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
+        assert!(controller.accept_lifecycle_packet(simulator, PacketOrder::Ordered(20)));
+        assert!(!controller.on_finish_packet(
+            simulator,
+            PacketOrder::Ordered(20),
+            destination,
+            7,
+            Some(13),
+            HandoffEventOutcome::accepted(Some(handoff_generation(1))),
+        ));
+        assert_eq!(controller.handoff_generation, Some(handoff_generation(1)));
+
+        assert!(controller.accept_lifecycle_packet(simulator, PacketOrder::Ordered(30)));
+        controller.on_start(&TeleportStart { teleport_flags: 1 }, Some(1));
+
+        assert_eq!(controller.handoff_generation, None);
+        assert_eq!(controller.handoff_destination, None);
+        assert_eq!(controller.active.as_ref().and_then(|active| active.destination), None);
+        assert_eq!(controller.state.borrow().status, TeleportStatus::Started { flags: 1 });
+        assert!(!controller.accept_lifecycle_packet(simulator, PacketOrder::Ordered(20)));
+    }
+
+    #[test]
+    fn unscoped_failure_preserves_active_handoff() {
+        let simulator = SimulatorId::new(1);
+        let destination = model_destination(2);
+        let mut controller = TeleportController::new();
+
+        assert!(controller.accept_lifecycle_packet(simulator, PacketOrder::Ordered(10)));
+        controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
+        assert!(controller.accept_lifecycle_packet(simulator, PacketOrder::Ordered(20)));
+        assert!(!controller.on_finish(destination, 7, Some(13), HandoffEventOutcome::accepted(Some(handoff_generation(2)))));
+        let active_state = controller.state.borrow().clone();
+
+        assert!(controller.accept_capability_order(simulator, 1, 1, 0));
+        controller.on_failed(failure(b"timeout_tport\0".to_vec(), Vec::new()), HandoffEventOutcome::accepted(None));
+
+        assert_eq!(*controller.state.borrow(), active_state);
+        assert_eq!(controller.handoff_generation, Some(handoff_generation(2)));
+        assert_eq!(controller.check_request_available(), Err(TeleportRequestError::Busy));
+        assert!(controller.on_simulator_promoted(Some(destination.region_handle), destination.endpoint));
+        assert!(matches!(controller.state.borrow().status, TeleportStatus::Completed { .. }));
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum ModelOrder {
         Packet(u64),
@@ -1817,6 +1964,7 @@ mod tests {
         pending: Option<ModelHandoff>,
         conflicted: bool,
         latest_generation: u64,
+        latest_packet_order: Option<(SimulatorId, u64)>,
     }
 
     impl HandoffModel {
@@ -1827,6 +1975,26 @@ mod tests {
                 pending: None,
                 conflicted: false,
                 latest_generation: 0,
+                latest_packet_order: None,
+            }
+        }
+
+        fn accept_lifecycle_packet(&mut self, source: SimulatorId, order: ModelOrder) -> bool {
+            let ModelOrder::Packet(order) = order else { return true };
+            if self.latest_packet_order.is_some_and(|(current_source, current_order)| current_source == source && order <= current_order) {
+                return false;
+            }
+            self.latest_packet_order = Some((source, order));
+            true
+        }
+
+        fn supersede_older_packet_finish(&mut self, order: ModelOrder) {
+            let ModelOrder::Packet(order) = order else { return };
+            if self.pending.is_some_and(|pending| {
+                !pending.crossed_region && matches!(pending.finish_order, Some(ModelOrder::Packet(finish_order)) if finish_order < order)
+            }) {
+                self.pending = None;
+                self.conflicted = false;
             }
         }
 
@@ -1901,14 +2069,14 @@ mod tests {
         fn cancel(&mut self, generation: Option<HandoffGeneration>) -> HandoffCancellationOutcome {
             let Some(current) = self.pending else {
                 self.conflicted = false;
-                return HandoffCancellationOutcome::Cancelled;
+                return HandoffCancellationOutcome::Cancelled { generation };
             };
             if generation != Some(current.generation) {
-                return HandoffCancellationOutcome::Stale;
+                return HandoffCancellationOutcome::Stale { generation: current.generation };
             }
             self.pending = None;
             self.conflicted = false;
-            HandoffCancellationOutcome::Cancelled
+            HandoffCancellationOutcome::Cancelled { generation: Some(current.generation) }
         }
 
         fn disconnect(&mut self, simulator: SimulatorId) {
@@ -1976,6 +2144,40 @@ mod tests {
         }
     }
 
+    fn model_handoff_notice_pending(notices: &[ModelNotice], generation: HandoffGeneration) -> bool {
+        notices.iter().any(|notice| match notice {
+            ModelNotice::Finish { outcome, .. } | ModelNotice::Failed { outcome, .. } | ModelNotice::Crossed { outcome, .. } => {
+                outcome.generation() == Some(generation)
+            }
+            ModelNotice::Start { .. } | ModelNotice::Local { .. } => false,
+        })
+    }
+
+    fn model_notice_source_order(notice: ModelNotice) -> (SimulatorId, ModelOrder) {
+        match notice {
+            ModelNotice::Start { source, order, .. }
+            | ModelNotice::Local { source, order, .. }
+            | ModelNotice::Finish { source, order, .. }
+            | ModelNotice::Failed { source, order, .. }
+            | ModelNotice::Crossed { source, order, .. } => (source, order),
+        }
+    }
+
+    fn model_delivery_allowed(notices: &[ModelNotice], index: usize) -> bool {
+        let Some(notice) = notices.get(index).copied() else { return false };
+        let (source, order) = model_notice_source_order(notice);
+        let ModelOrder::EventQueue(batch) = order else { return true };
+        !notices.iter().enumerate().any(|(other_index, other)| {
+            if other_index == index {
+                false
+            } else if let (other_source, ModelOrder::EventQueue(other_batch)) = model_notice_source_order(*other) {
+                other_source == source && other_batch < batch
+            } else {
+                false
+            }
+        })
+    }
+
     fn model_begin_cancellation(controller: &mut TeleportController) {
         if controller.pending_cancellation.is_none()
             && let Some(outcome) = controller.cancellation_outcome()
@@ -1986,24 +2188,21 @@ mod tests {
     }
 
     fn model_finish_cancellation(controller: &mut TeleportController, handoffs: &mut HandoffModel) {
-        if !controller.handoff_cancellation_ready() {
-            return;
+        for _ in 0..2 {
+            if !controller.handoff_cancellation_ready() {
+                return;
+            }
+            let outcome = handoffs.cancel(controller.cancellation_handoff_generation());
+            controller.finish_cancellation(Ok(outcome));
         }
-        let outcome = handoffs.cancel(controller.cancellation_handoff_generation());
-        controller.finish_cancellation(Ok(outcome));
     }
 
-    fn model_retry_or_finish_cancellation(
-        controller: &mut TeleportController,
-        handoffs: &mut HandoffModel,
-        result: Result<(), TeleportCancelFailure>,
-    ) {
+    fn model_retry_or_finish_cancellation(controller: &mut TeleportController, result: Result<(), TeleportCancelFailure>) {
         if controller.pending_cancellation.as_ref().is_some_and(|cancel| !cancel.in_flight && cancel.final_result.is_none()) {
             controller.prepare_cancellation_attempt(Instant::now() + CANCEL_RETRY_INTERVAL);
         }
         if controller.pending_cancellation.as_ref().is_some_and(|cancel| cancel.in_flight) {
             controller.finish_cancellation_attempt(result, Instant::now());
-            model_finish_cancellation(controller, handoffs);
         }
     }
 
@@ -2037,20 +2236,30 @@ mod tests {
                 }
             }
             ModelNotice::Finish { source, order, destination, outcome } => {
-                if source != handoffs.primary
-                    || !model_order_is_accepted(controller, source, order)
-                    || !controller.accept_handoff_outcome(outcome)
-                {
+                let order_accepted = match order {
+                    ModelOrder::Packet(_) if !outcome.is_accepted() => true,
+                    _ => model_order_is_accepted(controller, source, order),
+                };
+                if source != handoffs.primary || !order_accepted || !controller.accept_handoff_outcome(outcome) {
                     stale = true;
-                } else if controller.on_finish(destination, 1, Some(13), outcome) {
-                    model_begin_cancellation(controller);
+                } else {
+                    let conflict = match order {
+                        ModelOrder::Packet(order) => {
+                            controller.on_finish_packet(source, PacketOrder::Ordered(order), destination, 1, Some(13), outcome)
+                        }
+                        ModelOrder::EventQueue(_) => controller.on_finish(destination, 1, Some(13), outcome),
+                    };
+                    if conflict {
+                        model_begin_cancellation(controller);
+                    }
                 }
             }
             ModelNotice::Failed { source, order, outcome } => {
-                if source != handoffs.primary
-                    || !model_order_is_accepted(controller, source, order)
-                    || !controller.accept_handoff_outcome(outcome)
-                {
+                let order_accepted = match order {
+                    ModelOrder::Packet(_) if !outcome.is_accepted() => true,
+                    _ => model_order_is_accepted(controller, source, order),
+                };
+                if source != handoffs.primary || !order_accepted || !controller.accept_handoff_outcome(outcome) {
                     stale = true;
                 } else {
                     controller.on_failed(failure(b"timeout_tport\0".to_vec(), Vec::new()), outcome);
@@ -2087,8 +2296,19 @@ mod tests {
             let operation_pending = controller.active.is_some()
                 || controller.pending_crossing.is_some()
                 || controller.pending_cancellation.is_some()
+                || (controller.handoff_generation.is_some() && handoffs.pending.is_some())
                 || (controller.awaiting_handoff_event && (handoffs.pending.is_some() || !notices.is_empty()));
-            prop_assert!(operation_pending, "busy teleport state has no deadline or operation that can resolve it");
+            prop_assert!(
+                operation_pending,
+                "busy teleport state has no deadline or operation that can resolve it: status={:?}, active={}, crossing={}, cancellation={}, handoff={:?}, network_pending={}, awaiting={}",
+                controller.status,
+                controller.active.is_some(),
+                controller.pending_crossing.is_some(),
+                controller.pending_cancellation.is_some(),
+                controller.handoff_generation,
+                handoffs.pending.is_some(),
+                controller.awaiting_handoff_event
+            );
         }
 
         prop_assert!(controller.latest_handoff_generation.is_none_or(|generation| generation.get() <= handoffs.latest_generation));
@@ -2131,7 +2351,7 @@ mod tests {
         assert!(!controller.on_crossed_region(destination, refreshed));
 
         let stale_cleanup = handoffs.cancel(Some(first_generation));
-        assert_eq!(stale_cleanup, HandoffCancellationOutcome::Stale);
+        assert_eq!(stale_cleanup, HandoffCancellationOutcome::Stale { generation: refreshed.generation().expect("refreshed generation") });
         controller.finish_cancellation(Ok(stale_cleanup));
         assert_eq!(controller.handoff_generation, refreshed.generation());
         assert_eq!(handoffs.pending.map(|pending| pending.generation), refreshed.generation());
@@ -2144,6 +2364,36 @@ mod tests {
         assert_eq!(controller.check_request_available(), Ok(()));
     }
 
+    #[test]
+    fn cancellation_without_a_generation_retries_an_interleaved_handoff_once() {
+        let mut controller = TeleportController::new();
+        let mut handoffs = HandoffModel::new();
+        let mut notices = Vec::new();
+        let destination = model_destination(1);
+        let primary = handoffs.primary;
+
+        controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(handoffs.primary_destination.region_handle));
+        controller.begin_cancellation(TeleportCancelOutcome::Requested);
+        assert!(controller.cancellation_handoff_generation().is_none());
+        assert!(controller.prepare_cancellation_attempt(Instant::now()));
+        controller.finish_cancellation_attempt(Ok(()), Instant::now());
+
+        let crossed = handoffs.announce(primary, destination, None, true);
+        let generation = crossed.generation().expect("crossing accepted while cleanup was pending");
+        notices.push(ModelNotice::Crossed { source: primary, order: ModelOrder::EventQueue(1), destination, outcome: crossed });
+
+        model_finish_cancellation(&mut controller, &mut handoffs);
+        assert!(handoffs.pending.is_none());
+        assert!(controller.pending_cancellation.is_none());
+        assert_eq!(controller.latest_handoff_generation, Some(generation));
+        assert_eq!(controller.state.borrow().status, TeleportStatus::Cancelled);
+        model_deliver(&mut controller, &mut handoffs, &mut notices, 0);
+        assert!(notices.is_empty());
+        assert!(handoffs.pending.is_none());
+        assert_eq!(controller.state.borrow().status, TeleportStatus::Cancelled);
+        assert_eq!(controller.check_request_available(), Ok(()));
+    }
+
     fn run_teleport_handoff_model(operations: &[u8]) -> Result<(), TestCaseError> {
         let mut controller = TeleportController::new();
         let mut handoffs = HandoffModel::new();
@@ -2152,9 +2402,9 @@ mod tests {
         for (step, raw) in operations.iter().copied().enumerate() {
             let source = if raw & 1 == 0 { handoffs.primary } else { SimulatorId::new(99) };
             let destination = model_destination((raw >> 1) & 3);
-            let packet_order = ModelOrder::Packet(1 + u64::from(raw >> 4));
+            let packet_order = ModelOrder::Packet((u64::from(raw >> 4) * 128) + step as u64 + 1);
             let event_order = ModelOrder::EventQueue(step as u64 + 1);
-            match raw % 14 {
+            match raw % 15 {
                 0 => {
                     if controller.check_request_available().is_ok() && handoffs.accepts_teleport_request() {
                         controller.active = Some(ActiveTeleport {
@@ -2169,16 +2419,34 @@ mod tests {
                         controller.publish();
                     }
                 }
-                1 => notices.push(ModelNotice::Start { source, order: packet_order, flags: u32::from(raw >> 3) }),
-                2 => notices.push(ModelNotice::Local { source, order: packet_order, flags: u32::from(raw >> 3) }),
+                1 => {
+                    if source == handoffs.primary && handoffs.accept_lifecycle_packet(source, packet_order) {
+                        handoffs.supersede_older_packet_finish(packet_order);
+                    }
+                    notices.push(ModelNotice::Start { source, order: packet_order, flags: u32::from(raw >> 3) });
+                }
+                2 => {
+                    if source == handoffs.primary && handoffs.accept_lifecycle_packet(source, packet_order) {
+                        handoffs.supersede_older_packet_finish(packet_order);
+                    }
+                    notices.push(ModelNotice::Local { source, order: packet_order, flags: u32::from(raw >> 3) });
+                }
                 3 => {
                     let order = if raw & 0x80 == 0 { packet_order } else { event_order };
-                    let outcome = handoffs.announce(source, destination, Some(order), false);
+                    let outcome = if source == handoffs.primary && handoffs.accept_lifecycle_packet(source, order) {
+                        handoffs.announce(source, destination, Some(order), false)
+                    } else {
+                        HandoffEventOutcome::Ignored
+                    };
                     notices.push(ModelNotice::Finish { source, order, destination, outcome });
                 }
                 4 => {
                     let order = if raw & 0x80 == 0 { packet_order } else { event_order };
-                    let outcome = handoffs.fail(source, order);
+                    let outcome = if source == handoffs.primary && handoffs.accept_lifecycle_packet(source, order) {
+                        handoffs.fail(source, order)
+                    } else {
+                        HandoffEventOutcome::Ignored
+                    };
                     notices.push(ModelNotice::Failed { source, order, outcome });
                 }
                 5 => {
@@ -2186,15 +2454,15 @@ mod tests {
                     notices.push(ModelNotice::Crossed { source, order: event_order, destination, outcome });
                 }
                 6 => {
-                    let notice_count = notices.len();
-                    if notice_count != 0 {
-                        model_deliver(&mut controller, &mut handoffs, &mut notices, usize::from(raw) % notice_count);
+                    let deliverable = (0..notices.len()).filter(|index| model_delivery_allowed(&notices, *index)).collect::<Vec<_>>();
+                    if !deliverable.is_empty() {
+                        model_deliver(&mut controller, &mut handoffs, &mut notices, deliverable[usize::from(raw) % deliverable.len()]);
                     }
                 }
                 7 => model_begin_cancellation(&mut controller),
-                8 => model_retry_or_finish_cancellation(&mut controller, &mut handoffs, Ok(())),
-                9 => model_retry_or_finish_cancellation(&mut controller, &mut handoffs, Err(TeleportCancelFailure::QueueFull)),
-                10 => model_retry_or_finish_cancellation(&mut controller, &mut handoffs, Err(TeleportCancelFailure::SessionUnavailable)),
+                8 => model_retry_or_finish_cancellation(&mut controller, Ok(())),
+                9 => model_retry_or_finish_cancellation(&mut controller, Err(TeleportCancelFailure::QueueFull)),
+                10 => model_retry_or_finish_cancellation(&mut controller, Err(TeleportCancelFailure::SessionUnavailable)),
                 11 => {
                     if let Some(cancel) = controller.pending_cancellation.as_ref() {
                         let now = cancel.deadline + Duration::from_millis(1);
@@ -2204,34 +2472,41 @@ mod tests {
                             cancel.last_error.clone().unwrap_or(TeleportCancelFailure::SessionUnavailable)
                         };
                         controller.finish_cancellation_attempt(Err(reason), now);
-                        model_finish_cancellation(&mut controller, &mut handoffs);
                     } else if controller.expire(Instant::now() + TELEPORT_TIMEOUT + Duration::from_secs(1)) {
                         controller.prepare_cancellation_attempt(Instant::now());
                     }
                 }
                 12 => {
-                    let target = handoffs.pending.map_or_else(|| SimulatorId::new(99), |pending| pending.target);
-                    let disconnected = if raw & 0x08 == 0 { target } else { SimulatorId::new(99) };
-                    let pending_destination =
-                        handoffs.pending.filter(|pending| pending.target == disconnected).map(|pending| pending.destination);
-                    handoffs.disconnect(disconnected);
-                    if let Some(destination) = pending_destination {
-                        controller.on_simulator_connect_failed(destination.region_handle, Some(destination.endpoint));
+                    if !handoffs.pending.is_some_and(|pending| model_handoff_notice_pending(&notices, pending.generation)) {
+                        let target = handoffs.pending.map_or_else(|| SimulatorId::new(99), |pending| pending.target);
+                        let disconnected = if raw & 0x08 == 0 { target } else { SimulatorId::new(99) };
+                        let pending_destination =
+                            handoffs.pending.filter(|pending| pending.target == disconnected).map(|pending| pending.destination);
+                        handoffs.disconnect(disconnected);
+                        if let Some(destination) = pending_destination {
+                            controller.on_simulator_connect_failed(destination.region_handle, Some(destination.endpoint));
+                        }
                     }
                 }
                 13 => {
-                    if let Some(destination) = handoffs.promote() {
+                    if !handoffs.pending.is_some_and(|pending| model_handoff_notice_pending(&notices, pending.generation))
+                        && let Some(destination) = handoffs.promote()
+                    {
                         controller.on_simulator_promoted(Some(destination.region_handle), destination.endpoint);
                     }
                 }
+                14 => model_finish_cancellation(&mut controller, &mut handoffs),
                 _ => unreachable!(),
             }
             model_invariants(&controller, &handoffs, &notices)?;
         }
 
         while !notices.is_empty() {
-            let last_notice = notices.len() - 1;
-            model_deliver(&mut controller, &mut handoffs, &mut notices, last_notice);
+            let next_notice = (0..notices.len())
+                .rev()
+                .find(|index| model_delivery_allowed(&notices, *index))
+                .expect("at least one event-queue notice is deliverable");
+            model_deliver(&mut controller, &mut handoffs, &mut notices, next_notice);
             model_invariants(&controller, &handoffs, &notices)?;
         }
         model_invariants(&controller, &handoffs, &notices)

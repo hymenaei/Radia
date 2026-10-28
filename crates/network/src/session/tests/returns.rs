@@ -427,6 +427,120 @@ async fn run_return_handoff_reuses_root_connection() {
     harness.shutdown().await;
 }
 
+async fn run_older_finish_after_newer_start_is_ignored() {
+    let mut harness = Box::pin(connected_neighbor()).await;
+    let session = login_session(harness.primary.local_addr().expect("primary simulator address"));
+    let start = Packet::new(70, Message::TeleportStart(TeleportStart { teleport_flags: 0 }))
+        .with_reliable()
+        .encode()
+        .expect("encode newer teleport start");
+    harness.primary.send_to(&start, harness.primary_peer).await.expect("send newer teleport start");
+    timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorMessage { message: Message::TeleportStart(_), .. } = next_raw_event(&mut harness.events).await {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("viewer receives the newer teleport start");
+
+    let stale_finish = Packet::new(
+        69,
+        teleport_finish_to(
+            session.agent_id,
+            harness.neighbor.local_addr().expect("neighbor address"),
+            0x1000_0000_0000_1000,
+            session.seed_capability.as_str(),
+        ),
+    )
+    .with_reliable()
+    .encode()
+    .expect("encode older teleport finish");
+    harness.primary.send_to(&stale_finish, harness.primary_peer).await.expect("send older teleport finish");
+    timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorMessage { message: Message::TeleportFinish(_), handoff_outcome, .. } =
+                next_raw_event(&mut harness.events).await
+            {
+                assert_eq!(handoff_outcome, Some(crate::event::HandoffEventOutcome::Ignored));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("network ignores an older finish after a newer lifecycle packet");
+
+    harness
+        .handle
+        .request_teleport(crate::TeleportRequest::Location(protocol::messages::TeleportLocationRequest {
+            agent_id: session.agent_id,
+            session_id: session.session_id,
+            region_handle: 0x1000_0000_0000_2000,
+            position: math::Vec3::new(10.0, 20.0, 30.0),
+            look_at: math::Vec3::Y,
+        }))
+        .await
+        .expect("an ignored finish must not leave a network handoff pending");
+    let sent = receive_message(&harness.primary, |message| matches!(message, Message::TeleportLocationRequest(_))).await;
+    harness.primary.send_to(&ack(71, sent.sequence()), harness.primary_peer).await.expect("ack the next teleport request");
+
+    let pending_finish = Packet::new(
+        72,
+        teleport_finish_to(
+            session.agent_id,
+            harness.neighbor.local_addr().expect("neighbor address"),
+            0x1000_0000_0000_1000,
+            session.seed_capability.as_str(),
+        ),
+    )
+    .with_reliable()
+    .encode()
+    .expect("encode accepted finish before newer start");
+    harness.primary.send_to(&pending_finish, harness.primary_peer).await.expect("send finish before newer start");
+    timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorMessage { message: Message::TeleportFinish(_), handoff_outcome, .. } =
+                next_raw_event(&mut harness.events).await
+            {
+                assert!(handoff_outcome.is_some_and(crate::event::HandoffEventOutcome::is_accepted));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("network accepts the finish before its newer lifecycle packet arrives");
+
+    let newer_start =
+        Packet::new(73, Message::TeleportStart(TeleportStart { teleport_flags: 0 })).with_reliable().encode().expect("encode newer start");
+    harness.primary.send_to(&newer_start, harness.primary_peer).await.expect("send newer start");
+    timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorMessage { message: Message::TeleportStart(_), .. } = next_raw_event(&mut harness.events).await {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("network processes the newer lifecycle packet");
+
+    harness
+        .handle
+        .request_teleport(crate::TeleportRequest::Location(protocol::messages::TeleportLocationRequest {
+            agent_id: session.agent_id,
+            session_id: session.session_id,
+            region_handle: 0x1000_0000_0000_3000,
+            position: math::Vec3::new(10.0, 20.0, 30.0),
+            look_at: math::Vec3::Y,
+        }))
+        .await
+        .expect("newer start must clear the older pending handoff");
+    let sent = receive_message(&harness.primary, |message| matches!(message, Message::TeleportLocationRequest(_))).await;
+    harness.primary.send_to(&ack(74, sent.sequence()), harness.primary_peer).await.expect("ack teleport after stale handoff cleanup");
+
+    harness.shutdown().await;
+}
+
 async fn run_stale_cancel() {
     use llsd::{Map, xml};
 
@@ -620,6 +734,24 @@ async fn run_stale_handoff_cancellation_preserves_refreshed_crossing() {
     .await
     .expect("network should accept the region crossing");
 
+    assert_eq!(
+        harness.handle.cancel_pending_handoff(None).await.expect("unscoped cleanup reports the current handoff generation"),
+        HandoffCancellationOutcome::Stale { generation: first_generation }
+    );
+    std::assert_matches!(
+        harness
+            .handle
+            .request_teleport(crate::TeleportRequest::Location(protocol::messages::TeleportLocationRequest {
+                agent_id: session.agent_id,
+                session_id: session.session_id,
+                region_handle: region_handle + 1,
+                position: math::Vec3::new(10.0, 20.0, 30.0),
+                look_at: math::Vec3::Y,
+            }))
+            .await,
+        Err(crate::Error::SimulatorHandoffInProgress)
+    );
+
     let refresh_body = body(2);
     release_refresh.send(response(200, "OK", "application/llsd+xml", None, &refresh_body)).expect("deliver refreshed crossing event");
     let refreshed_generation = timeout(WAIT, async {
@@ -669,13 +801,13 @@ async fn run_stale_handoff_cancellation_preserves_refreshed_crossing() {
 
     assert_eq!(
         harness.handle.cancel_pending_handoff(Some(first_generation)).await.expect("reject stale local handoff cleanup"),
-        HandoffCancellationOutcome::Stale
+        HandoffCancellationOutcome::Stale { generation: refreshed_generation }
     );
     std::assert_matches!(harness.handle.request_teleport(request.clone()).await, Err(crate::Error::SimulatorHandoffInProgress));
 
     assert_eq!(
         harness.handle.cancel_pending_handoff(Some(refreshed_generation)).await.expect("clear the matching local handoff"),
-        HandoffCancellationOutcome::Cancelled
+        HandoffCancellationOutcome::Cancelled { generation: Some(refreshed_generation) }
     );
     harness.handle.request_teleport(request).await.expect("new teleport should not be blocked by the old crossing");
     let sent = receive_message(&harness.primary, |message| matches!(message, Message::TeleportLocationRequest(_))).await;
@@ -796,6 +928,11 @@ fn crossing_to_current_primary_is_forwarded_as_ignored() {
 #[test]
 fn return_handoff_reuses_root_connection() {
     run_large_stack_test(run_return_handoff_reuses_root_connection);
+}
+
+#[test]
+fn older_finish_after_newer_start_is_ignored() {
+    run_large_stack_test(run_older_finish_after_newer_start_is_ignored);
 }
 
 #[test]

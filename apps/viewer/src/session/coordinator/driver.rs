@@ -61,6 +61,7 @@ use crate::{
 use crate::session::experience_environment::{EnvironmentInbox, EnvironmentSender};
 
 type Cancellation = Shared<BoxFuture<'static, ()>>;
+const HANDOFF_CLEANUP_ATTEMPTS: usize = 2;
 
 enum DriverInput {
     Session(Input),
@@ -329,7 +330,10 @@ impl SessionDriver {
     }
 
     async fn finish_teleport_cancellation_if_ready(&mut self) {
-        if self.teleport.handoff_cancellation_ready() {
+        for _ in 0..HANDOFF_CLEANUP_ATTEMPTS {
+            if !self.teleport.handoff_cancellation_ready() {
+                return;
+            }
             let result = self
                 .session_handle
                 .cancel_pending_handoff(self.teleport.cancellation_handoff_generation())
@@ -387,7 +391,14 @@ impl SessionDriver {
                 if outcome != HandoffEventOutcome::Ignored
                     && self.teleport.accept_lifecycle_packet(simulator_id, packet_order)
                     && let Some(destination) = destination_from_udp(message)
-                    && self.teleport.on_finish(destination, message.teleport_flags.unwrap_or_default(), message.sim_access, outcome)
+                    && self.teleport.on_finish_packet(
+                        simulator_id,
+                        packet_order,
+                        destination,
+                        message.teleport_flags.unwrap_or_default(),
+                        message.sim_access,
+                        outcome,
+                    )
                 {
                     self.cancel_conflicted_teleport();
                 }

@@ -227,6 +227,7 @@ impl SessionRuntime {
                     coverage_losses,
                     outbound_budget: Some(outbound_budget),
                     handoff_generation: Some(0),
+                    latest_teleport_packet_order: None,
                 },
                 runtime_inputs: RuntimeInputs { neighbor_event_receiver, neighbor_request_receiver, root_connection_workers },
             }))

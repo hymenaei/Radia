@@ -117,8 +117,8 @@ impl HandoffEventOutcome {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HandoffCancellationOutcome {
-    Cancelled,
-    Stale,
+    Cancelled { generation: Option<HandoffGeneration> },
+    Stale { generation: HandoffGeneration },
 }
 
 impl fmt::Debug for CapabilityEvent {

@@ -39,7 +39,7 @@ use crate::{
     },
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource, record_coverage_loss, record_event_envelope_loss},
     error::Error,
-    event::{Event, EventEnvelope, HandoffEventOutcome, SimulatorId},
+    event::{Event, EventEnvelope, HandoffEventOutcome, PacketOrder, SimulatorId},
 };
 
 #[cfg(test)]
@@ -174,6 +174,7 @@ pub(super) struct SessionState {
     pub(super) coverage_losses: CoverageLossLedger,
     pub(super) outbound_budget: Option<OutboundBudget>,
     pub(super) handoff_generation: Option<u64>,
+    pub(super) latest_teleport_packet_order: Option<(SimulatorId, u64)>,
 }
 
 pub(super) struct RuntimeInputs {
@@ -205,6 +206,18 @@ impl Drop for SessionState {
 }
 
 impl SessionState {
+    pub(super) fn accept_teleport_packet_order(&mut self, simulator_id: SimulatorId, packet_order: PacketOrder) -> bool {
+        let PacketOrder::Ordered(order) = packet_order else { return true };
+        if self
+            .latest_teleport_packet_order
+            .is_some_and(|(last_simulator, last_order)| last_simulator == simulator_id && order <= last_order)
+        {
+            return false;
+        }
+        self.latest_teleport_packet_order = Some((simulator_id, order));
+        true
+    }
+
     pub(super) fn promote_primary(&mut self, next: PrimaryRoute, role_generation: u64) {
         self.primary.memory.promote_to(&next.memory);
         self.primary.state.send_replace(PrimaryState::Neighbor { generation: role_generation });

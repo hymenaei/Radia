@@ -26,7 +26,7 @@ use crate::{
     event::{Event, EventEnvelope, SimulatorId},
 };
 
-use super::{handoff::matches_pending_promotion, teleport::is_handoff_message};
+use super::{handoff::matches_pending_promotion, teleport::is_teleport_lifecycle_message};
 
 impl SessionState {
     pub(super) async fn start_neighbor(
@@ -347,7 +347,7 @@ impl SessionDispatcher<'_> {
             }
         }
         let handoff_outcome = if let Event::SimulatorMessage { simulator_id, packet_order, message, .. } = &event
-            && is_handoff_message(message)
+            && is_teleport_lifecycle_message(message)
             && self.run_state.logout_deadline.is_none()
         {
             let mut setup = PromotionSetup {

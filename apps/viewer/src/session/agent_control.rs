@@ -1,12 +1,21 @@
 use std::{error::Error, fmt, future::pending, time::Duration};
 
 use math::Vec3;
-use network::SimulatorId;
+use network::{Delivery, SessionHandle, SimulatorId};
+use protocol::{
+    lludp::{FieldValue, Message},
+    messages::{
+        AgentRequestSit, AgentSit,
+        agent::agent_request_sit::{AgentData as SitAgentData, TargetObject},
+    },
+};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     time::{Instant, sleep_until},
 };
 use uuid::Uuid;
+
+use crate::{agent_movement::MovementAction, session::inbound::decode_sit_response};
 
 const COMMAND_CAPACITY: usize = 16;
 pub(crate) const SIT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -240,6 +249,144 @@ impl AgentControlState {
             }
         });
     }
+}
+
+pub(super) trait SitTransport {
+    async fn send_request(&self, simulator: SimulatorId, request: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error>;
+
+    async fn send_sit(&self, simulator: SimulatorId, sit: AgentSit, delivery: Delivery) -> Result<(), network::Error>;
+}
+
+impl SitTransport for SessionHandle {
+    async fn send_request(&self, simulator: SimulatorId, request: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error> {
+        self.send_to(simulator, request, delivery).await
+    }
+
+    async fn send_sit(&self, simulator: SimulatorId, sit: AgentSit, delivery: Delivery) -> Result<(), network::Error> {
+        self.send_to(simulator, sit, delivery).await
+    }
+}
+
+pub(super) async fn process_agent_control_command<T: SitTransport>(
+    transport: &T,
+    agent_control: &mut AgentControlState,
+    camera: &mut crate::session::CameraUplink,
+    primary_simulator: Option<SimulatorId>,
+    active_agent: Option<(Uuid, Uuid)>,
+    command: Command,
+) {
+    match command {
+        Command::SitOnObject { object_id, offset, reply } => {
+            if agent_control.has_pending_sit() {
+                if reply.send(Err(AgentControlError::Busy)).is_err() {
+                    tracing::trace!("sit caller stopped before receiving the busy outcome");
+                }
+                return;
+            }
+            let (Some(simulator), Some((agent_id, session_id))) = (primary_simulator, active_agent) else {
+                if reply.send(Err(AgentControlError::SimulatorUnavailable)).is_err() {
+                    tracing::trace!("sit caller stopped before receiving the simulator outcome");
+                }
+                return;
+            };
+            let request = AgentRequestSit {
+                agent_data: SitAgentData { agent_id, session_id },
+                target_object: TargetObject { target_id: object_id, offset },
+            };
+            match transport.send_request(simulator, request, Delivery::Reliable).await {
+                Ok(()) => agent_control.begin_sit(object_id, simulator, reply),
+                Err(error) => {
+                    tracing::debug!(simulator = simulator.get(), %error, "sit request could not be queued");
+                    if reply.send(Err(AgentControlError::SendFailed)).is_err() {
+                        tracing::trace!("sit caller stopped before receiving the send outcome");
+                    }
+                }
+            }
+        }
+        Command::SitOnGround { reply } => {
+            if primary_simulator.is_none() || active_agent.is_none() {
+                if reply.send(Err(AgentControlError::SimulatorUnavailable)).is_err() {
+                    tracing::trace!("ground-sit caller stopped before receiving the simulator outcome");
+                }
+                return;
+            }
+            agent_control.cancel_sit(SitOutcome::Cancelled);
+            agent_control.clear_sit_response();
+            camera.request_action(MovementAction::SitOnGround);
+            if reply.send(Ok(())).is_err() {
+                tracing::trace!("ground-sit caller stopped before receiving the queued outcome");
+            }
+        }
+        Command::StandUp { reply } => {
+            if primary_simulator.is_none() || active_agent.is_none() {
+                if reply.send(Err(AgentControlError::SimulatorUnavailable)).is_err() {
+                    tracing::trace!("stand-up caller stopped before receiving the simulator outcome");
+                }
+                return;
+            }
+            agent_control.cancel_sit(SitOutcome::Cancelled);
+            agent_control.clear_sit_response();
+            camera.request_action(MovementAction::StandUp);
+            if reply.send(Ok(())).is_err() {
+                tracing::trace!("stand-up caller stopped before receiving the queued outcome");
+            }
+        }
+    }
+}
+
+pub(super) async fn process_sit_response<T: SitTransport>(
+    transport: &T,
+    agent_control: &mut AgentControlState,
+    simulator: SimulatorId,
+    active_agent: Option<(Uuid, Uuid)>,
+    message: &Message,
+) {
+    let Some(response) = decode_sit_response(message) else { return };
+    if !agent_control.expects_response(simulator, response.object_id) {
+        return;
+    }
+    let Some((agent_id, session_id)) = active_agent else {
+        agent_control.fail_sit(AgentControlError::SimulatorUnavailable);
+        return;
+    };
+    let sit = AgentSit { agent_id, session_id };
+    match transport.send_sit(simulator, sit, Delivery::Reliable).await {
+        Ok(()) => {
+            agent_control.accept_sit(
+                simulator,
+                response.object_id,
+                response.auto_pilot,
+                response.force_mouselook,
+                response.camera_override,
+            );
+        }
+        Err(error) => {
+            tracing::debug!(simulator = simulator.get(), %error, "sit acceptance could not be queued");
+            agent_control.fail_sit(AgentControlError::SendFailed);
+        }
+    }
+}
+
+pub(super) fn is_sit_refusal_alert(message: &Message) -> bool {
+    let Message::Schema(alert) = message else { return false };
+    if message.name() != "AlertMessage" {
+        return false;
+    }
+    let Some(FieldValue::Bytes(message)) =
+        alert.blocks().first().and_then(|block| block.instances.first()).and_then(|instance| instance.fields.first())
+    else {
+        return false;
+    };
+    std::str::from_utf8(message).is_ok_and(|message| message.trim_end_matches('\0') == "SitFailed")
+}
+
+pub(super) fn handle_sit_alert(
+    agent_control: &mut AgentControlState,
+    primary_simulator: Option<SimulatorId>,
+    simulator: SimulatorId,
+    message: &Message,
+) -> bool {
+    primary_simulator == Some(simulator) && is_sit_refusal_alert(message) && agent_control.refuse_sit(simulator)
 }
 
 #[cfg(test)]

@@ -68,7 +68,7 @@ fn unexpected_primary_disconnect_fails() {
     assert_eq!(network_end_after_stream_close(false, None, true), SessionEnd::Failed("The primary simulator disconnected.".into()));
 }
 
-use super::{SitTransport, handle_sit_alert, process_agent_control_command, process_sit_response};
+use crate::session::agent_control::{SitTransport, handle_sit_alert, process_agent_control_command, process_sit_response};
 
 struct LoopbackSitTransport<'a> {
     socket: &'a tokio::net::UdpSocket,

@@ -7,9 +7,9 @@ use tokio::{
 
 use super::handoff::HandoffState;
 use super::{
-    CLIENT_EVENT_CAPACITY, ConnectionTaskResult, HANDOFF_COMMAND_RETRY_INTERVAL, LOGOUT_TIMEOUT, RunState, RuntimeInputs, SESSION_TIMEOUT,
-    SessionError, SessionStartup, SessionState, SimulatorCapabilitySession, SimulatorEvent, SimulatorRequest,
-    retry_pending_handoff_commands,
+    CLIENT_EVENT_CAPACITY, ConnectionTaskResult, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffCancellationCommand, LOGOUT_TIMEOUT, RunState,
+    RuntimeInputs, SESSION_TIMEOUT, SessionError, SessionStartup, SessionState, SimulatorCapabilitySession, SimulatorEvent,
+    SimulatorRequest, retry_pending_handoff_commands,
 };
 use crate::{
     capabilities::{EventQueueRoleHandle, EventQueueTask},
@@ -20,6 +20,8 @@ use crate::{
 pub(super) struct SessionDispatcher<'a> {
     pub(super) state: &'a mut SessionState,
     pub(super) commands: mpsc::Receiver<Command>,
+    pub(super) handoff_cancellations: mpsc::Receiver<HandoffCancellationCommand>,
+    pub(super) handoff_cancellations_closed: bool,
     pub(super) events: mpsc::Sender<EventEnvelope>,
     pub(super) disconnect_requested: watch::Receiver<bool>,
     pub(super) capability_events: mpsc::Sender<EventEnvelope>,
@@ -52,6 +54,7 @@ impl<'a> SessionDispatcher<'a> {
         state: &'a mut SessionState,
         runtime_inputs: RuntimeInputs,
         commands: mpsc::Receiver<Command>,
+        handoff_cancellations: mpsc::Receiver<HandoffCancellationCommand>,
         events: mpsc::Sender<EventEnvelope>,
         disconnect_requested: watch::Receiver<bool>,
     ) -> Result<Self, SessionError> {
@@ -93,6 +96,8 @@ impl<'a> SessionDispatcher<'a> {
         Ok(Self {
             state,
             commands,
+            handoff_cancellations,
+            handoff_cancellations_closed: false,
             events,
             disconnect_requested,
             capability_events,
@@ -179,6 +184,17 @@ impl<'a> SessionDispatcher<'a> {
                     self.handle_root_connection_join(joined).await?
                 }
                 joined = self.run_state.neighbors.join_next(), if !self.run_state.neighbors.is_empty() => self.handle_neighbor_task_join(joined),
+                handoff_cancellation = self.handoff_cancellations.recv(), if !self.handoff_cancellations_closed => {
+                    if let Some(completed) = handoff_cancellation {
+                        self.cancel_pending_handoff();
+                        if let Err(error) = completed.send(Ok(())) {
+                            drop(error);
+                        }
+                    } else {
+                        self.handoff_cancellations_closed = true;
+                    }
+                    RuntimeAction::Continue
+                }
                 command = self.commands.recv(), if self.run_state.logout_deadline.is_none() => self.handle_command(command).await?,
             };
             match action {

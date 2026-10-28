@@ -74,6 +74,7 @@ pub(crate) use tests::run_session as run_test_session;
 pub(crate) use tests::{connect_test_connection, connect_test_primary_with_state};
 
 pub(crate) const COMMAND_CAPACITY: usize = 256;
+const HANDOFF_CANCELLATION_CAPACITY: usize = 1;
 const NETWORK_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
 pub const DEFAULT_UPSTREAM_BYTES_PER_SECOND: NonZeroU64 = NonZeroU64::new(64_000).unwrap();
 const MAX_OUTBOUND_CHAT_MESSAGE_BYTES: usize = 8 * 1024 - 6 - 4 - 40 - (1 + u8::MAX as usize * 4);
@@ -337,6 +338,7 @@ impl Drop for Session {
 #[derive(Clone)]
 pub struct SessionHandle {
     commands: Sender<Command>,
+    handoff_cancellations: Sender<HandoffCancellationCommand>,
     disconnect_requested: watch::Sender<bool>,
     command_admission_closed: Arc<Mutex<bool>>,
     worker_finished: watch::Receiver<bool>,
@@ -420,6 +422,28 @@ impl SessionHandle {
         }
     }
 
+    pub async fn cancel_pending_handoff(&self) -> Result<(), Error> {
+        let mut disconnect_requested = self.disconnect_requested.subscribe();
+        let (completed, response) = oneshot::channel();
+        {
+            let admission_closed = self.command_admission_closed.lock().unwrap_or_else(|error| error.into_inner());
+            if *admission_closed || *self.disconnect_requested.borrow() || *self.worker_finished.borrow() {
+                return Err(Error::SessionClosed);
+            }
+        }
+        let sent = tokio::select! {
+            biased;
+            _ = disconnect_requested.changed() => return Err(Error::SessionClosed),
+            sent = self.handoff_cancellations.send(completed) => sent,
+        };
+        sent.map_err(|_| Error::SessionClosed)?;
+        tokio::select! {
+            biased;
+            _ = disconnect_requested.changed() => Err(Error::SessionClosed),
+            result = response => result.map_err(|_| Error::SessionClosed)?,
+        }
+    }
+
     pub async fn disconnect(&self) {
         self.request_disconnect();
         let mut worker_finished = self.worker_finished.clone();
@@ -437,6 +461,8 @@ pub(crate) enum Command {
     SendTo { simulator_id: SimulatorId, message: Message, delivery: Delivery, completed: oneshot::Sender<Result<(), Error>> },
     RequestTeleport { message: Message, completed: oneshot::Sender<Result<(), Error>> },
 }
+
+pub(crate) type HandoffCancellationCommand = oneshot::Sender<Result<(), Error>>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TeleportRequest {

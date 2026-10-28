@@ -13,7 +13,14 @@ fn object_request() -> RequestMultipleObjects {
 
 pub(super) fn targeted_send_handle(commands: mpsc::Sender<Command>, disconnect_requested: watch::Sender<bool>) -> SessionHandle {
     let (_, worker_finished) = watch::channel(false);
-    SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished }
+    let (handoff_cancellations, _) = mpsc::channel(1);
+    SessionHandle {
+        commands,
+        handoff_cancellations,
+        disconnect_requested,
+        command_admission_closed: Arc::new(Mutex::new(false)),
+        worker_finished,
+    }
 }
 
 fn chat_message_with_size(size: usize) -> ChatFromViewer {
@@ -111,7 +118,8 @@ async fn run_stalled_logout_is_unavailable() {
     let terminal_event = events.clone().reserve_owned().await.expect("reserve terminal event");
     let (_disconnect, disconnect_requested) = watch::channel(true);
 
-    let result = runtime.run(command_receiver, events, disconnect_requested, terminal_event).await;
+    let (_, handoff_cancellations) = mpsc::channel(1);
+    let result = runtime.run(command_receiver, handoff_cancellations, events, disconnect_requested, terminal_event).await;
 
     assert!(result.is_ok());
 }
@@ -121,7 +129,14 @@ async fn disconnect_waits() {
     let (commands, _command_receiver) = mpsc::channel(1);
     let (disconnect_requested, mut disconnect_state) = watch::channel(false);
     let (worker_finished_sender, worker_finished) = watch::channel(false);
-    let handle = SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished };
+    let (handoff_cancellations, _) = mpsc::channel(1);
+    let handle = SessionHandle {
+        commands,
+        handoff_cancellations,
+        disconnect_requested,
+        command_admission_closed: Arc::new(Mutex::new(false)),
+        worker_finished,
+    };
     let first_handle = handle.clone();
     let second_handle = handle.clone();
     let mut first_disconnect = spawn(async move { first_handle.disconnect().await });
@@ -256,7 +271,14 @@ async fn targeted_send_reports_finished_worker() {
     let (commands, mut command_receiver) = mpsc::channel(1);
     let (disconnect_requested, _) = watch::channel(false);
     let (worker_finished_sender, worker_finished) = watch::channel(false);
-    let handle = SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished };
+    let (handoff_cancellations, _) = mpsc::channel(1);
+    let handle = SessionHandle {
+        commands,
+        handoff_cancellations,
+        disconnect_requested,
+        command_admission_closed: Arc::new(Mutex::new(false)),
+        worker_finished,
+    };
     let request = RequestMultipleObjects {
         agent_data: RequestAgentData { agent_id: Uuid::nil(), session_id: Uuid::nil() },
         objects: vec![ObjectRequest { cache_miss_type: CacheMissType::Full, local_id: 7 }],
@@ -371,7 +393,14 @@ fn session_drop_requests_disconnect() {
     let (commands, _command_receiver) = mpsc::channel(1);
     let (disconnect_requested, disconnect_observed) = watch::channel(false);
     let (_worker_finished_sender, worker_finished) = watch::channel(false);
-    let handle = SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished };
+    let (handoff_cancellations, _) = mpsc::channel(1);
+    let handle = SessionHandle {
+        commands,
+        handoff_cancellations,
+        disconnect_requested,
+        command_admission_closed: Arc::new(Mutex::new(false)),
+        worker_finished,
+    };
     let session = test_session(handle, mpsc::channel(1).1);
 
     drop(session);

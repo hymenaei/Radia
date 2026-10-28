@@ -181,7 +181,8 @@ async fn full_decode_slots_do_not_block_primary_retry_timers() {
     let (events, _received) = mpsc::channel(TEST_EVENT_CAPACITY);
     let terminal_event_permit = events.clone().reserve_owned().await.expect("reserve terminal event slot");
     let (_disconnect, disconnect_requested) = watch::channel(false);
-    let client = spawn(connection.run(command_receiver, events, disconnect_requested, terminal_event_permit));
+    let (_, handoff_cancellations) = mpsc::channel(1);
+    let client = spawn(connection.run(command_receiver, handoff_cancellations, events, disconnect_requested, terminal_event_permit));
 
     let (initial, peer) = receive(&simulator).await;
     std::assert_matches!(Packet::decode(&initial).expect("decode initial circuit packet").message(), Message::UseCircuitCode(_));
@@ -321,7 +322,8 @@ async fn full_queue_keeps_control_responsive() {
     events.try_send(EventEnvelope::new(Event::Failed("fill event queue".into()))).expect("fill event queue");
     let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (disconnect, disconnect_requested) = watch::channel(false);
-    let run = spawn(connection.run(command_receiver, events, disconnect_requested, terminal_event_permit));
+    let (_, handoff_cancellations) = mpsc::channel(1);
+    let run = spawn(connection.run(command_receiver, handoff_cancellations, events, disconnect_requested, terminal_event_permit));
 
     let mut chat = test_fixture("chat_from_simulator.hex");
     chat[0] |= 0x40;

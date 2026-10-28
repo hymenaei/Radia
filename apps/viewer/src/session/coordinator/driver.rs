@@ -48,8 +48,8 @@ use crate::{
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
         recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error, warn_unrecovered},
         teleport::{
-            TeleportCommand, TeleportController, TeleportInput, crossed_region_from_event, destination_from_udp, failure_from_event,
-            failure_from_udp, finish_metadata_from_event,
+            TeleportCancelFailure, TeleportCommand, TeleportController, TeleportInput, crossed_region_from_event, destination_from_udp,
+            failure_from_event, failure_from_udp, finish_metadata_from_event,
         },
         terrain::{DecodedTerrain, TerrainDecodeQueue},
         world::{IngestSummary, SessionWorld, viewer_world_limits},
@@ -266,18 +266,22 @@ impl SessionDriver {
                     }
                     Input::Teleport(TeleportInput::Command(command)) => {
                         self.handle_teleport_command(command).await;
+                        self.finish_teleport_cancellation_if_ready().await;
                         ControlFlow::Continue(())
                     }
                     Input::Teleport(TeleportInput::Timeout) => {
                         self.teleport.on_timeout(&self.session_handle, self.primary_simulator, self.active_session.as_ref());
+                        self.finish_teleport_cancellation_if_ready().await;
                         ControlFlow::Continue(())
                     }
                     Input::Teleport(TeleportInput::CancelRetry) => {
                         self.teleport.on_cancel_retry(&self.session_handle, self.primary_simulator, self.active_session.as_ref());
+                        self.finish_teleport_cancellation_if_ready().await;
                         ControlFlow::Continue(())
                     }
                     Input::Teleport(TeleportInput::CancelResult(result)) => {
                         self.teleport.on_cancel_result(result);
+                        self.finish_teleport_cancellation_if_ready().await;
                         ControlFlow::Continue(())
                     }
                 },
@@ -322,6 +326,13 @@ impl SessionDriver {
         self.teleport
             .handle_command(command, &self.session_handle, active_session.as_ref(), self.primary_simulator, origin_region_handle)
             .await;
+    }
+
+    async fn finish_teleport_cancellation_if_ready(&mut self) {
+        if self.teleport.handoff_cancellation_ready() {
+            let result = self.session_handle.cancel_pending_handoff().await.map_err(|_| TeleportCancelFailure::SessionUnavailable);
+            self.teleport.finish_cancellation(result);
+        }
     }
 
     fn current_region_handle(&self, simulator_id: Option<SimulatorId>) -> Option<u64> {
@@ -452,7 +463,9 @@ impl SessionDriver {
             self.mailbox.publish(ViewerUpdate::Failed("The network session ended.".into()));
             return ControlFlow::Break(());
         };
-        self.handle_event(event).await
+        let flow = self.handle_event(event).await;
+        self.finish_teleport_cancellation_if_ready().await;
+        flow
     }
 
     async fn handle_event(&mut self, event: Event) -> ControlFlow<()> {

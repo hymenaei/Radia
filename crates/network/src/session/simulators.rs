@@ -238,20 +238,23 @@ impl SessionRuntime {
     pub(super) async fn run(
         self,
         commands: mpsc::Receiver<Command>,
+        handoff_cancellations: mpsc::Receiver<super::HandoffCancellationCommand>,
         events: mpsc::Sender<EventEnvelope>,
         disconnect_requested: watch::Receiver<bool>,
         terminal_event_permit: mpsc::OwnedPermit<EventEnvelope>,
     ) -> Result<(), SessionError> {
         let Self { mut state, runtime_inputs } = self;
         let simulator_id = state.simulator_id;
-        let result = match SessionDispatcher::start(&mut state, runtime_inputs, commands, events, disconnect_requested).await {
-            Ok(mut runtime) => {
-                let result = runtime.run().await;
-                runtime.shutdown().await;
-                result
-            }
-            Err(error) => Err(error),
-        };
+        let result =
+            match SessionDispatcher::start(&mut state, runtime_inputs, commands, handoff_cancellations, events, disconnect_requested).await
+            {
+                Ok(mut runtime) => {
+                    let result = runtime.run().await;
+                    runtime.shutdown().await;
+                    result
+                }
+                Err(error) => Err(error),
+            };
         if let Some(outbound_budget) = state.outbound_budget.take() {
             outbound_budget.shutdown().await;
         }

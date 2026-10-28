@@ -431,6 +431,25 @@ impl SessionState {
 }
 
 impl SessionDispatcher<'_> {
+    pub(super) fn cancel_pending_handoff(&mut self) {
+        let Some(cancellation) = self.handoff_state.cancellation() else { return };
+        if self.handoff_state.clear_conflict(cancellation) {
+            return;
+        }
+        let Some(pending) = self.handoff_state.cancel_matching(cancellation) else { return };
+        cancel_pending_handoff(
+            pending,
+            "session canceled a pending simulator handoff",
+            self.state.simulator_id,
+            &mut self.run_state.neighbor_connections,
+            &mut self.run_state.retiring_simulators,
+            &mut self.run_state.preconnect_events,
+            &mut self.run_state.connected_simulators,
+            &mut self.run_state.simulator_capabilities,
+            &self.state.coverage_losses,
+        );
+    }
+
     pub(super) fn handle_handoff_command_retry(&mut self) -> RuntimeAction {
         RuntimeAction::Continue
     }

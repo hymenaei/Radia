@@ -253,6 +253,7 @@ struct PendingCancellation {
     retry_at: Instant,
     last_error: Option<TeleportCancelFailure>,
     in_flight: bool,
+    final_result: Option<Result<(), TeleportCancelFailure>>,
 }
 
 pub(crate) struct TeleportController {
@@ -331,18 +332,16 @@ impl TeleportController {
     }
 
     fn next_deadline(&self) -> Option<Instant> {
-        [
-            self.active.as_ref().map(|active| active.deadline),
-            self.pending_crossing.map(|crossing| crossing.deadline),
-            self.pending_cancellation.as_ref().map(
-                |cancel| {
-                    if cancel.in_flight { cancel.deadline } else { cancel.retry_at.min(cancel.deadline) }
-                },
-            ),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
+        if let Some(cancel) = &self.pending_cancellation {
+            if cancel.final_result.is_some() {
+                return None;
+            }
+            return Some(if cancel.in_flight { cancel.deadline } else { cancel.retry_at.min(cancel.deadline) });
+        }
+        [self.active.as_ref().map(|active| active.deadline), self.pending_crossing.map(|crossing| crossing.deadline)]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     pub(super) async fn handle_command(
@@ -460,20 +459,18 @@ impl TeleportController {
     }
 
     fn expire(&mut self, now: Instant) -> bool {
+        if self.pending_cancellation.is_some() {
+            return false;
+        }
         let active_expired = self.active.as_ref().is_some_and(|active| active.deadline <= now);
         let crossing_expired = self.pending_crossing.is_some_and(|crossing| crossing.deadline <= now);
         if active_expired {
             self.begin_cancellation(TeleportCancelOutcome::TimedOut);
             return true;
         }
-        if crossing_expired {
-            let region_handle = match self.crossing {
-                CrossingState::Pending { region_handle, .. } => region_handle,
-                _ => return false,
-            };
-            self.pending_crossing = None;
-            self.crossing = CrossingState::Failed { region_handle };
-            self.publish();
+        if crossing_expired && matches!(self.crossing, CrossingState::Pending { .. }) {
+            self.begin_cancellation(TeleportCancelOutcome::TimedOut);
+            return true;
         }
         false
     }
@@ -485,11 +482,16 @@ impl TeleportController {
         session: Option<&AgentSession>,
     ) {
         let now = Instant::now();
-        let Some((deadline, last_error, in_flight)) =
-            self.pending_cancellation.as_ref().map(|cancel| (cancel.deadline, cancel.last_error.clone(), cancel.in_flight))
+        let Some((deadline, last_error, in_flight, final_result)) = self
+            .pending_cancellation
+            .as_ref()
+            .map(|cancel| (cancel.deadline, cancel.last_error.clone(), cancel.in_flight, cancel.final_result.is_some()))
         else {
             return;
         };
+        if final_result {
+            return;
+        }
         if now >= deadline {
             let reason = if in_flight {
                 TeleportCancelFailure::SessionUnavailable
@@ -537,10 +539,6 @@ impl TeleportController {
 
     pub(super) fn begin_cancellation(&mut self, outcome: TeleportCancelOutcome) {
         self.active = None;
-        let had_pending_crossing = self.pending_crossing.take().is_some();
-        if had_pending_crossing || matches!(self.crossing, CrossingState::Pending { .. }) {
-            self.crossing = CrossingState::None;
-        }
         let now = Instant::now();
         self.cancellation_generation = self.cancellation_generation.wrapping_add(1);
         self.pending_cancellation = Some(PendingCancellation {
@@ -551,6 +549,7 @@ impl TeleportController {
             retry_at: now,
             last_error: None,
             in_flight: false,
+            final_result: None,
         });
         self.status = TeleportStatus::Cancelling { outcome, attempts: 0 };
         self.publish();
@@ -594,6 +593,9 @@ impl TeleportController {
 
     fn prepare_cancellation_attempt(&mut self, now: Instant) -> bool {
         let Some(current) = self.pending_cancellation.as_ref() else { return false };
+        if current.final_result.is_some() {
+            return false;
+        }
         if current.in_flight && now < current.deadline {
             return false;
         }
@@ -615,19 +617,20 @@ impl TeleportController {
 
     fn finish_cancellation_attempt(&mut self, result: Result<(), TeleportCancelFailure>, now: Instant) {
         let Some(cancel) = self.pending_cancellation.as_mut() else { return };
+        if cancel.final_result.is_some() {
+            return;
+        }
         cancel.in_flight = false;
         let attempts = cancel.attempts;
         let deadline = cancel.deadline;
         let generation = cancel.generation;
         match result {
             Ok(()) => {
-                let outcome = self.pending_cancellation.take().expect("pending cancellation exists").outcome;
-                self.status = terminal_cancel_status(outcome);
+                cancel.final_result = Some(Ok(()));
             }
             Err(reason) => {
                 if attempts >= CANCEL_MAX_ATTEMPTS || now >= deadline {
-                    let cancel = self.pending_cancellation.take().expect("pending cancellation exists");
-                    self.status = TeleportStatus::CancelFailed { outcome: cancel.outcome, attempts: cancel.attempts, reason };
+                    cancel.final_result = Some(Err(reason));
                 } else {
                     if let Some(cancel) = self.pending_cancellation.as_mut()
                         && cancel.generation == generation
@@ -640,6 +643,38 @@ impl TeleportController {
             }
         }
         self.publish();
+    }
+
+    pub(super) fn handoff_cancellation_ready(&self) -> bool {
+        self.pending_cancellation.as_ref().is_some_and(|cancel| cancel.final_result.is_some())
+    }
+
+    pub(super) fn finish_cancellation(&mut self, handoff_result: Result<(), TeleportCancelFailure>) {
+        let Some(cancel) = self.pending_cancellation.take() else { return };
+        let Some(send_result) = cancel.final_result else {
+            self.pending_cancellation = Some(cancel);
+            return;
+        };
+        self.finish_cancelled_state(&cancel.outcome);
+        self.status = match (send_result, handoff_result) {
+            (Ok(()), Ok(())) => terminal_cancel_status(cancel.outcome),
+            (Err(reason), Ok(())) | (_, Err(reason)) => {
+                TeleportStatus::CancelFailed { outcome: cancel.outcome, attempts: cancel.attempts, reason }
+            }
+        };
+        self.publish();
+    }
+
+    fn finish_cancelled_state(&mut self, outcome: &TeleportCancelOutcome) {
+        if let Some(crossing) = self.pending_crossing.take() {
+            self.crossing = if matches!(outcome, TeleportCancelOutcome::TimedOut) {
+                CrossingState::Failed { region_handle: crossing.destination.region_handle }
+            } else {
+                CrossingState::None
+            };
+        } else if matches!(self.crossing, CrossingState::Conflict { .. } | CrossingState::Pending { .. }) {
+            self.crossing = CrossingState::None;
+        }
     }
 
     pub(super) fn on_cancel_result(&mut self, result: TeleportCancelResult) {
@@ -1316,7 +1351,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn teleport_deadline_enters_bounded_cancellation_and_clears_the_active_state() {
+    async fn teleport_deadline_keeps_crossing_until_cancellation_finishes() {
         let mut controller = TeleportController::new();
         controller.on_start(&TeleportStart { teleport_flags: 0 }, Some(1));
         let crossing = Destination { region_handle: 2, endpoint: "127.0.0.1:13002".parse().expect("crossing address") };
@@ -1330,19 +1365,26 @@ mod tests {
         std::assert_matches!(input, TeleportInput::Timeout);
         assert!(controller.expire(Instant::now()));
         assert!(controller.active.is_none());
-        assert!(controller.pending_crossing.is_none());
-        assert_eq!(controller.state.borrow().crossing, CrossingState::None);
+        assert!(controller.pending_crossing.is_some());
+        assert_eq!(
+            controller.state.borrow().crossing,
+            CrossingState::Pending { region_handle: crossing.region_handle, during_teleport: true }
+        );
         assert!(controller.pending_cancellation.is_some());
         assert!(controller.request_is_busy());
         assert!(controller.prepare_cancellation_attempt(Instant::now()));
         controller.finish_cancellation_attempt(Ok(()), Instant::now());
+        assert!(controller.request_is_busy());
+        controller.finish_cancellation(Ok(()));
+        assert!(controller.pending_crossing.is_none());
+        assert_eq!(controller.state.borrow().crossing, CrossingState::Failed { region_handle: crossing.region_handle });
         std::assert_matches!(controller.state.borrow().status, TeleportStatus::TimedOut);
         assert!(!controller.expire(Instant::now()));
         assert!(!controller.request_is_busy());
     }
 
     #[tokio::test(start_paused = true)]
-    async fn crossing_deadline_clears_a_resolved_local_busy_state() {
+    async fn expired_crossing_cancels_before_a_new_request_is_allowed() {
         let crossing = Destination { region_handle: 2, endpoint: "127.0.0.1:13002".parse().expect("crossing address") };
         let mut controller = TeleportController::new();
         assert!(!controller.on_crossed_region(crossing, HandoffEventOutcome::Accepted));
@@ -1354,7 +1396,87 @@ mod tests {
             timeout.await
         };
         std::assert_matches!(input, TeleportInput::Timeout);
-        assert!(!controller.expire(Instant::now()));
+        assert!(controller.expire(Instant::now()));
+        assert_eq!(
+            controller.state.borrow().crossing,
+            CrossingState::Pending { region_handle: crossing.region_handle, during_teleport: false }
+        );
+        assert!(controller.pending_crossing.is_some());
+        assert!(controller.pending_cancellation.is_some());
+        assert_eq!(controller.check_request_available(), Err(TeleportRequestError::Busy));
+
+        assert!(controller.prepare_cancellation_attempt(Instant::now()));
+        controller.finish_cancellation_attempt(Err(TeleportCancelFailure::QueueFull), Instant::now());
+        assert_eq!(
+            controller.state.borrow().crossing,
+            CrossingState::Pending { region_handle: crossing.region_handle, during_teleport: false }
+        );
+        assert_eq!(controller.check_request_available(), Err(TeleportRequestError::Busy));
+
+        let retry = {
+            let retry = controller.next_input();
+            tokio::pin!(retry);
+            tokio::time::advance(CANCEL_RETRY_INTERVAL).await;
+            retry.await
+        };
+        std::assert_matches!(retry, TeleportInput::CancelRetry);
+        assert!(controller.prepare_cancellation_attempt(Instant::now()));
+        controller.finish_cancellation_attempt(Ok(()), Instant::now());
+        assert_eq!(
+            controller.state.borrow().crossing,
+            CrossingState::Pending { region_handle: crossing.region_handle, during_teleport: false }
+        );
+        assert_eq!(controller.check_request_available(), Err(TeleportRequestError::Busy));
+        controller.finish_cancellation(Ok(()));
+        assert_eq!(controller.state.borrow().crossing, CrossingState::Failed { region_handle: crossing.region_handle });
+        assert!(controller.pending_crossing.is_none());
+        assert!(controller.pending_cancellation.is_none());
+        assert_eq!(controller.check_request_available(), Ok(()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_crossing_failure_releases_terminal_state() {
+        let crossing = Destination { region_handle: 2, endpoint: "127.0.0.1:13002".parse().expect("crossing address") };
+        let mut controller = TeleportController::new();
+        assert!(!controller.on_crossed_region(crossing, HandoffEventOutcome::Accepted));
+
+        let timeout = {
+            let timeout = controller.next_input();
+            tokio::pin!(timeout);
+            tokio::time::advance(TELEPORT_TIMEOUT).await;
+            timeout.await
+        };
+        std::assert_matches!(timeout, TeleportInput::Timeout);
+        assert!(controller.expire(Instant::now()));
+
+        for attempt in 1..=CANCEL_MAX_ATTEMPTS {
+            assert_eq!(
+                controller.state.borrow().crossing,
+                CrossingState::Pending { region_handle: crossing.region_handle, during_teleport: false }
+            );
+            assert!(controller.prepare_cancellation_attempt(Instant::now()));
+            controller.finish_cancellation_attempt(Err(TeleportCancelFailure::QueueFull), Instant::now());
+            if attempt < CANCEL_MAX_ATTEMPTS {
+                let retry = {
+                    let retry = controller.next_input();
+                    tokio::pin!(retry);
+                    tokio::time::advance(CANCEL_RETRY_INTERVAL).await;
+                    retry.await
+                };
+                std::assert_matches!(retry, TeleportInput::CancelRetry);
+            }
+        }
+
+        assert_eq!(
+            controller.state.borrow().crossing,
+            CrossingState::Pending { region_handle: crossing.region_handle, during_teleport: false }
+        );
+        assert_eq!(controller.check_request_available(), Err(TeleportRequestError::Busy));
+        controller.finish_cancellation(Ok(()));
+        std::assert_matches!(
+            controller.state.borrow().status,
+            TeleportStatus::CancelFailed { outcome: TeleportCancelOutcome::TimedOut, attempts: CANCEL_MAX_ATTEMPTS, .. }
+        );
         assert_eq!(controller.state.borrow().crossing, CrossingState::Failed { region_handle: crossing.region_handle });
         assert!(controller.pending_crossing.is_none());
         assert!(controller.pending_cancellation.is_none());
@@ -1370,8 +1492,11 @@ mod tests {
         assert!(!controller.on_crossed_region(crossing, HandoffEventOutcome::Accepted));
         assert_eq!(controller.check_request_available(), Err(TeleportRequestError::Busy));
         controller.begin_cancellation(TeleportCancelOutcome::Requested);
-        assert!(controller.pending_crossing.is_none());
-        assert_eq!(controller.state.borrow().crossing, CrossingState::None);
+        assert!(controller.pending_crossing.is_some());
+        assert_eq!(
+            controller.state.borrow().crossing,
+            CrossingState::Pending { region_handle: crossing.region_handle, during_teleport: false }
+        );
         assert_eq!(controller.check_request_available(), Err(TeleportRequestError::Busy));
 
         assert!(controller.prepare_cancellation_attempt(Instant::now()));
@@ -1393,7 +1518,12 @@ mod tests {
             .expect("report cancellation send completion");
         let TeleportInput::CancelResult(result) = controller.next_input().await else { panic!("cancel send result expected") };
         controller.on_cancel_result(result);
+        assert!(controller.pending_crossing.is_some());
+        assert_eq!(controller.check_request_available(), Err(TeleportRequestError::Busy));
+        controller.finish_cancellation(Ok(()));
         assert_eq!(controller.state.borrow().status, TeleportStatus::Cancelled);
+        assert!(controller.pending_crossing.is_none());
+        assert_eq!(controller.state.borrow().crossing, CrossingState::None);
         assert_eq!(controller.check_request_available(), Ok(()));
 
         controller.on_start(&TeleportStart { teleport_flags: 1 }, Some(1));
@@ -1426,6 +1556,7 @@ mod tests {
             }
         }
 
+        controller.finish_cancellation(Ok(()));
         assert_eq!(
             controller.state.borrow().status,
             TeleportStatus::CancelFailed {

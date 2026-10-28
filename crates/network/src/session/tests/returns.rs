@@ -548,6 +548,89 @@ async fn run_stale_cancel() {
     assert_eq!(server.finish().len(), 3);
 }
 
+async fn run_cancel_pending_handoff_unblocks_request() {
+    use llsd::{Map, Value, xml};
+
+    use crate::fixtures::http::{EventQueueTestServer, EventServerResponse, response};
+
+    let (release, poll_response) = sync::mpsc::channel();
+    let server = EventQueueTestServer::start(|base| {
+        let seed = format!("<llsd><map><key>EventQueueGet</key><uri>{base}events</uri></map></llsd>");
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed)),
+            EventServerResponse::Controlled(poll_response),
+            EventServerResponse::Hold,
+        ]
+    });
+    let mut harness = Box::pin(connected_neighbor_with_seed(server.url("/seed"))).await;
+    let session = login_session(harness.primary.local_addr().expect("primary simulator address"));
+    let SocketAddr::V4(target) = harness.neighbor.local_addr().expect("crossing simulator address") else {
+        panic!("test simulator must use IPv4")
+    };
+    let region_handle = 0x1000_0000_0000_1000_u64;
+    let crossing = Value::Map(Map::from([
+        (
+            "AgentData".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("AgentID".into(), Value::Uuid(session.agent_id)),
+                ("SessionID".into(), Value::Uuid(session.session_id)),
+            ]))]),
+        ),
+        (
+            "RegionData".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("RegionHandle".into(), Value::Binary(region_handle.to_be_bytes().to_vec().into())),
+                ("SimIP".into(), Value::Binary(target.ip().octets().to_vec().into())),
+                ("SimPort".into(), Value::Integer(i32::from(target.port()))),
+                ("SeedCapability".into(), Value::Uri(session.seed_capability.to_string().into())),
+            ]))]),
+        ),
+        ("Info".into(), Value::Array(vec![Value::Map(Map::new())])),
+    ]));
+    let body = xml::to_string(&Value::Map(Map::from([
+        ("id".into(), Value::Integer(1)),
+        (
+            "events".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("message".into(), Value::String("CrossedRegion".into())),
+                ("body".into(), crossing),
+            ]))]),
+        ),
+    ])))
+    .expect("encode CrossedRegion event");
+    release.send(response(200, "OK", "application/llsd+xml", None, &body)).expect("deliver crossing event");
+
+    timeout(WAIT, async {
+        loop {
+            if let Event::CapabilityEventBatch { events, .. } = next_raw_event(&mut harness.events).await
+                && let Some(event) = events.iter().find(|event| event.message == "CrossedRegion")
+            {
+                assert_eq!(event.handoff_outcome, Some(crate::event::HandoffEventOutcome::Accepted));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("network should accept the region crossing");
+
+    let request = crate::TeleportRequest::Location(protocol::messages::TeleportLocationRequest {
+        agent_id: session.agent_id,
+        session_id: session.session_id,
+        region_handle: region_handle + 1,
+        position: math::Vec3::new(10.0, 20.0, 30.0),
+        look_at: math::Vec3::Y,
+    });
+    std::assert_matches!(harness.handle.request_teleport(request.clone()).await, Err(crate::Error::SimulatorHandoffInProgress));
+
+    harness.handle.cancel_pending_handoff().await.expect("clear the expired local handoff");
+    harness.handle.request_teleport(request).await.expect("new teleport should not be blocked by the old crossing");
+    let sent = receive_message(&harness.primary, |message| matches!(message, Message::TeleportLocationRequest(_))).await;
+    harness.primary.send_to(&ack(63, sent.sequence()), harness.primary_peer).await.expect("ack the next teleport request");
+
+    harness.shutdown().await;
+    assert_eq!(server.finish().len(), 3);
+}
+
 async fn run_disconnect_logs_out_promoted_primary() {
     use crate::event::Event::SimulatorMessage;
     use protocol::lludp::Message::RegionHandshake;
@@ -664,6 +747,11 @@ fn return_handoff_reuses_root_connection() {
 #[test]
 fn stale_cancel_keeps_new_handoff() {
     run_large_stack_test(run_stale_cancel);
+}
+
+#[test]
+fn local_handoff_cancellation_unblocks_teleport_request() {
+    run_large_stack_test(run_cancel_pending_handoff_unblocks_request);
 }
 
 #[test]

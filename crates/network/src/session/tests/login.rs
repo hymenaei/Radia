@@ -213,8 +213,10 @@ pub(super) fn spawn_session_client_with_event_sender(
     let coverage_changed = coverage_losses.subscribe();
     let (disconnect_requested, disconnect_signal) = watch::channel(false);
     let (worker_finished_sender, worker_finished) = watch::channel(false);
+    let (handoff_cancellations, handoff_cancellation_receiver) = mpsc::channel(1);
     let handle = SessionHandle {
         commands: commands.clone(),
+        handoff_cancellations,
         disconnect_requested,
         command_admission_closed: Arc::new(Mutex::new(false)),
         worker_finished,
@@ -234,6 +236,7 @@ pub(super) fn spawn_session_client_with_event_sender(
             Channels {
                 commands: command_receiver,
                 command_sender: commands,
+                handoff_cancellations: handoff_cancellation_receiver,
                 events,
                 terminal_event_permit,
                 disconnect_requested: disconnect_signal,
@@ -260,8 +263,10 @@ pub(super) fn spawn_network_thread_session(
     let coverage_changed = coverage_losses.subscribe();
     let (disconnect_requested, disconnect_signal) = watch::channel(false);
     let (worker_finished_sender, worker_finished) = watch::channel(false);
+    let (handoff_cancellations, handoff_cancellation_receiver) = mpsc::channel(1);
     let handle = SessionHandle {
         commands: commands.clone(),
+        handoff_cancellations,
         disconnect_requested,
         command_admission_closed: Arc::new(Mutex::new(false)),
         worker_finished,
@@ -283,6 +288,7 @@ pub(super) fn spawn_network_thread_session(
             let channels = Channels {
                 commands: command_receiver,
                 command_sender: commands,
+                handoff_cancellations: handoff_cancellation_receiver,
                 events: events.clone(),
                 terminal_event_permit,
                 disconnect_requested: disconnect_signal.clone(),

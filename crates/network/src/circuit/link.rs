@@ -33,15 +33,15 @@ pub(crate) struct HandoffTarget {
     pub(crate) seed_capability: Url,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) struct HandoffGeneration(NonZeroU64);
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct HandoffGeneration(NonZeroU64);
 
 impl HandoffGeneration {
-    pub(crate) fn new(value: NonZeroU64) -> Self {
+    pub const fn new(value: NonZeroU64) -> Self {
         Self(value)
     }
 
-    pub(crate) const fn get(self) -> u64 {
+    pub const fn get(self) -> u64 {
         self.0.get()
     }
 }

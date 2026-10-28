@@ -259,7 +259,7 @@ fn return_teleport_restores_reused_region_route_and_keeps_both_retired_scenes_em
     teleport.on_start(&protocol::messages::TeleportStart { teleport_flags: 0 }, Some(current_handle.get()));
     let destination = Destination { region_handle: returning_handle.get(), endpoint };
     assert!(teleport.accept_lifecycle_packet(current_simulator, Ordered(2)));
-    assert!(!teleport.on_finish(destination, 0, Some(13), HandoffEventOutcome::Accepted));
+    assert!(!teleport.on_finish(destination, 0, Some(13), HandoffEventOutcome::accepted(None)));
     let stale_local = protocol::messages::TeleportLocal {
         agent_id,
         location_id: 0,

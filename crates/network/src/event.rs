@@ -11,7 +11,8 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::{mpsc, watch};
 
 use crate::{
-    AgentSession, capabilities::Client, circuit::admission::PacketMemoryReservation, coverage::CoverageWatermark, session::MfaChallenge,
+    AgentSession, HandoffGeneration, capabilities::Client, circuit::admission::PacketMemoryReservation, coverage::CoverageWatermark,
+    session::MfaChallenge,
 };
 
 pub(crate) const CLIENT_EVENT_CAPACITY: usize = 32;
@@ -83,9 +84,41 @@ pub struct CapabilityEvent {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HandoffEventOutcome {
-    Accepted,
+    Accepted { generation: Option<HandoffGeneration> },
     Ignored,
-    Conflict,
+    Conflict { generation: HandoffGeneration },
+}
+
+impl HandoffEventOutcome {
+    pub const fn accepted(generation: Option<HandoffGeneration>) -> Self {
+        Self::Accepted { generation }
+    }
+
+    pub const fn conflict(generation: HandoffGeneration) -> Self {
+        Self::Conflict { generation }
+    }
+
+    pub const fn generation(self) -> Option<HandoffGeneration> {
+        match self {
+            Self::Accepted { generation } => generation,
+            Self::Conflict { generation } => Some(generation),
+            Self::Ignored => None,
+        }
+    }
+
+    pub const fn is_accepted(self) -> bool {
+        matches!(self, Self::Accepted { .. })
+    }
+
+    pub const fn is_conflict(self) -> bool {
+        matches!(self, Self::Conflict { .. })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HandoffCancellationOutcome {
+    Cancelled,
+    Stale,
 }
 
 impl fmt::Debug for CapabilityEvent {

@@ -581,6 +581,7 @@ impl SessionState {
             Ok(()) => {
                 let matching = handoff_state.pending().is_none()
                     || teleport_failure_matches(handoff_state.pending(), order.unwrap_or(HandoffOrder::Unavailable));
+                let generation = handoff_state.pending().map(|pending| pending.generation);
                 if matching && let Some(pending) = handoff_state.take_pending() {
                     cancel_pending_handoff(
                         pending,
@@ -594,7 +595,7 @@ impl SessionState {
                         &self.coverage_losses,
                     );
                 }
-                Ok(if matching { HandoffEventOutcome::Accepted } else { HandoffEventOutcome::Ignored })
+                Ok(if matching { HandoffEventOutcome::accepted(generation) } else { HandoffEventOutcome::Ignored })
             }
             Err(_reason) => Ok(HandoffEventOutcome::Ignored),
         }

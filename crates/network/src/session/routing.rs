@@ -188,6 +188,22 @@ impl SessionDispatcher<'_> {
                     drop(error);
                 }
             }
+            Some(Command::SendTeleportCancel { simulator_id, message, delivery, generation, completed }) => {
+                let cancel_target = self.handoff_state.cancellation().filter(|cancellation| Some(cancellation.generation) == generation);
+                let result = if simulator_id != self.state.primary.simulator_id {
+                    Err(ConnectionQueueFailure { error: Error::SimulatorUnavailable, completion: Some(completed) })
+                } else if !self.startup.is_ready() {
+                    Err(ConnectionQueueFailure { error: Error::SimulatorNotReady, completion: Some(completed) })
+                } else {
+                    queue_connection_message(&self.state.primary.commands, message, delivery, Some(completed), cancel_target, false)
+                };
+                if let Err(failure) = result
+                    && let Some(completion) = failure.completion
+                    && let Err(error) = completion.send(Err(failure.error))
+                {
+                    drop(error);
+                }
+            }
             None => {
                 self.state.graceful_disconnect(self.state.logout_request_sent).await?;
                 return Ok(RuntimeAction::Exit(Ok(())));

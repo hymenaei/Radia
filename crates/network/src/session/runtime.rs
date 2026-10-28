@@ -185,9 +185,9 @@ impl<'a> SessionDispatcher<'a> {
                 }
                 joined = self.run_state.neighbors.join_next(), if !self.run_state.neighbors.is_empty() => self.handle_neighbor_task_join(joined),
                 handoff_cancellation = self.handoff_cancellations.recv(), if !self.handoff_cancellations_closed => {
-                    if let Some(completed) = handoff_cancellation {
-                        self.cancel_pending_handoff();
-                        if let Err(error) = completed.send(Ok(())) {
+                    if let Some(command) = handoff_cancellation {
+                        let outcome = self.cancel_pending_handoff(command.generation);
+                        if let Err(error) = command.completed.send(Ok(outcome)) {
                             drop(error);
                         }
                     } else {

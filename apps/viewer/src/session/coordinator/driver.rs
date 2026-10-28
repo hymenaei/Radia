@@ -330,7 +330,11 @@ impl SessionDriver {
 
     async fn finish_teleport_cancellation_if_ready(&mut self) {
         if self.teleport.handoff_cancellation_ready() {
-            let result = self.session_handle.cancel_pending_handoff().await.map_err(|_| TeleportCancelFailure::SessionUnavailable);
+            let result = self
+                .session_handle
+                .cancel_pending_handoff(self.teleport.cancellation_handoff_generation())
+                .await
+                .map_err(|_| TeleportCancelFailure::SessionUnavailable);
             self.teleport.finish_cancellation(result);
         }
     }
@@ -363,7 +367,7 @@ impl SessionDriver {
             Message::TeleportProgress(message) => self.teleport.on_progress(message, agent_id),
             Message::TeleportFailed(message) if message.agent_id == agent_id => {
                 let outcome = handoff_outcome.unwrap_or(HandoffEventOutcome::Ignored);
-                if outcome == HandoffEventOutcome::Accepted && self.teleport.accept_lifecycle_packet(simulator_id, packet_order) {
+                if outcome.is_accepted() && self.teleport.accept_lifecycle_packet(simulator_id, packet_order) {
                     self.teleport.on_failed(failure_from_udp(message), outcome);
                 }
             }
@@ -398,8 +402,15 @@ impl SessionDriver {
         message: &str,
         body: &llsd::Value,
         handoff_outcome: Option<HandoffEventOutcome>,
+        capability_order: Option<(u64, u64, usize)>,
     ) {
         if self.primary_simulator != Some(simulator_id) {
+            return;
+        }
+        if matches!(message, "CrossedRegion" | "TeleportFinish" | "TeleportFailed")
+            && let Some((incarnation, batch, index)) = capability_order
+            && !self.teleport.accept_capability_order(simulator_id, incarnation, batch, index)
+        {
             return;
         }
         let Some((agent_id, session_id)) = self.active_session.as_ref().map(|session| (session.agent_id, session.session_id)) else {
@@ -611,14 +622,20 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             CapabilityEvent { simulator_id, message, body, handoff_outcome, .. } => {
-                self.handle_teleport_capability_event(simulator_id, &message, &body, handoff_outcome);
+                self.handle_teleport_capability_event(simulator_id, &message, &body, handoff_outcome, None);
                 self.handle_inventory_event_queue(&message, &body);
                 self.environments.capability(&mut self.session_world, simulator_id, &message, &body, self.primary_simulator);
                 ControlFlow::Continue(())
             }
-            CapabilityEventBatch { simulator_id, events, .. } => {
-                for event in &events {
-                    self.handle_teleport_capability_event(simulator_id, &event.message, &event.body, event.handoff_outcome);
+            CapabilityEventBatch { simulator_id, order, events, .. } => {
+                for (index, event) in events.iter().enumerate() {
+                    self.handle_teleport_capability_event(
+                        simulator_id,
+                        &event.message,
+                        &event.body,
+                        event.handoff_outcome,
+                        Some((order.incarnation, order.ordinal, index)),
+                    );
                     self.handle_inventory_event_queue(&event.message, &event.body);
                 }
                 self.environments.capability_batch(

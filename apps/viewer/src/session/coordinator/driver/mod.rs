@@ -344,7 +344,7 @@ impl SessionDriver {
                 }
                 DriverInput::InventoryEdit(None) => ControlFlow::Continue(()),
                 DriverInput::AgentControl(event) => {
-                    self.handle_agent_control_event(event).await;
+                    self.handle_agent_control_event(event);
                     ControlFlow::Continue(())
                 }
                 DriverInput::Session(input) => match input {
@@ -422,15 +422,15 @@ impl SessionDriver {
             .and_then(|info| info.resolved_origin())
     }
 
-    async fn handle_agent_control_event(&mut self, event: AgentControlEvent) {
+    fn handle_agent_control_event(&mut self, event: AgentControlEvent) {
         match event {
-            AgentControlEvent::Command(Some(command)) => self.handle_agent_control_command(command).await,
+            AgentControlEvent::Command(Some(command)) => self.handle_agent_control_command(command),
             AgentControlEvent::Command(None) => {}
             AgentControlEvent::SitTimedOut => self.agent_control.timeout_sit(),
         }
     }
 
-    async fn handle_agent_control_command(&mut self, command: AgentControlCommand) {
+    fn handle_agent_control_command(&mut self, command: AgentControlCommand) {
         agent_control::process_agent_control_command(
             &self.session_handle,
             &mut self.agent_control,
@@ -438,19 +438,17 @@ impl SessionDriver {
             self.primary_simulator,
             self.active_session.as_ref().map(|session| (session.agent_id, session.session_id)),
             command,
-        )
-        .await;
+        );
     }
 
-    async fn handle_sit_response(&mut self, simulator: SimulatorId, message: &Message) {
+    fn handle_sit_response(&mut self, simulator: SimulatorId, message: &Message) {
         agent_control::process_sit_response(
             &self.session_handle,
             &mut self.agent_control,
             simulator,
             self.active_session.as_ref().map(|session| (session.agent_id, session.session_id)),
             message,
-        )
-        .await;
+        );
     }
 
     fn handle_media_result(&mut self, result: Option<ObjectMediaResult>) {
@@ -751,7 +749,7 @@ impl SessionDriver {
                 tracing::debug!(simulator = simulator_id.get(), "sit request was refused");
             }
         } else {
-            self.handle_sit_response(simulator_id, &message).await;
+            self.handle_sit_response(simulator_id, &message);
         }
 
         if let Message::AgentMovementComplete(movement) = &message {

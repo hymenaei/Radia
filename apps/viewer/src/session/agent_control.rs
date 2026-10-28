@@ -252,22 +252,22 @@ impl AgentControlState {
 }
 
 pub(super) trait SitTransport {
-    async fn send_request(&self, simulator: SimulatorId, request: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error>;
+    fn send_request(&self, request: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error>;
 
-    async fn send_sit(&self, simulator: SimulatorId, sit: AgentSit, delivery: Delivery) -> Result<(), network::Error>;
+    fn send_sit(&self, sit: AgentSit, delivery: Delivery) -> Result<(), network::Error>;
 }
 
 impl SitTransport for SessionHandle {
-    async fn send_request(&self, simulator: SimulatorId, request: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error> {
-        self.send_to(simulator, request, delivery).await
+    fn send_request(&self, request: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error> {
+        self.send(request, delivery)
     }
 
-    async fn send_sit(&self, simulator: SimulatorId, sit: AgentSit, delivery: Delivery) -> Result<(), network::Error> {
-        self.send_to(simulator, sit, delivery).await
+    fn send_sit(&self, sit: AgentSit, delivery: Delivery) -> Result<(), network::Error> {
+        self.send(sit, delivery)
     }
 }
 
-pub(super) async fn process_agent_control_command<T: SitTransport>(
+pub(super) fn process_agent_control_command<T: SitTransport>(
     transport: &T,
     agent_control: &mut AgentControlState,
     camera: &mut crate::session::CameraUplink,
@@ -293,7 +293,7 @@ pub(super) async fn process_agent_control_command<T: SitTransport>(
                 agent_data: SitAgentData { agent_id, session_id },
                 target_object: TargetObject { target_id: object_id, offset },
             };
-            match transport.send_request(simulator, request, Delivery::Reliable).await {
+            match transport.send_request(request, Delivery::Reliable) {
                 Ok(()) => agent_control.begin_sit(object_id, simulator, reply),
                 Err(error) => {
                     tracing::debug!(simulator = simulator.get(), %error, "sit request could not be queued");
@@ -334,7 +334,7 @@ pub(super) async fn process_agent_control_command<T: SitTransport>(
     }
 }
 
-pub(super) async fn process_sit_response<T: SitTransport>(
+pub(super) fn process_sit_response<T: SitTransport>(
     transport: &T,
     agent_control: &mut AgentControlState,
     simulator: SimulatorId,
@@ -350,7 +350,7 @@ pub(super) async fn process_sit_response<T: SitTransport>(
         return;
     };
     let sit = AgentSit { agent_id, session_id };
-    match transport.send_sit(simulator, sit, Delivery::Reliable).await {
+    match transport.send_sit(sit, Delivery::Reliable) {
         Ok(()) => {
             agent_control.accept_sit(
                 simulator,

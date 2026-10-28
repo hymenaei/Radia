@@ -5,7 +5,7 @@ use ::inventory::{
     InventoryOwner, InventoryType, Item, ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
 };
 use math::{Quat, Vec3};
-use network::{Delivery, SimulatorId};
+use network::Delivery;
 use protocol::{
     lludp::{BlockValues, FieldValue, Message, Packet, SchemaMessage},
     messages::{
@@ -73,27 +73,25 @@ use crate::session::agent_control::{SitTransport, handle_sit_alert, process_agen
 struct LoopbackSitTransport<'a> {
     socket: &'a tokio::net::UdpSocket,
     destination: std::net::SocketAddr,
-    simulator: SimulatorId,
     sequence: std::sync::atomic::AtomicU32,
 }
 
 impl LoopbackSitTransport<'_> {
-    async fn send(&self, simulator: SimulatorId, delivery: Delivery, message: Message) -> Result<(), network::Error> {
-        assert_eq!(simulator, self.simulator);
+    fn send(&self, delivery: Delivery, message: Message) -> Result<(), network::Error> {
         assert_eq!(delivery, Delivery::Reliable);
         let sequence = self.sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let bytes = Packet::new(sequence, message).encode().map_err(|_| network::Error::SessionClosed)?;
-        self.socket.send_to(&bytes, self.destination).await.map(|_| ()).map_err(|_| network::Error::SessionClosed)
+        self.socket.try_send_to(&bytes, self.destination).map(|_| ()).map_err(|_| network::Error::SessionClosed)
     }
 }
 
 impl SitTransport for LoopbackSitTransport<'_> {
-    async fn send_request(&self, simulator: SimulatorId, request: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error> {
-        self.send(simulator, delivery, Message::AgentRequestSit(request)).await
+    fn send_request(&self, request: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error> {
+        self.send(delivery, Message::AgentRequestSit(request))
     }
 
-    async fn send_sit(&self, simulator: SimulatorId, sit: AgentSit, delivery: Delivery) -> Result<(), network::Error> {
-        self.send(simulator, delivery, Message::AgentSit(sit)).await
+    fn send_sit(&self, sit: AgentSit, delivery: Delivery) -> Result<(), network::Error> {
+        self.send(delivery, Message::AgentSit(sit))
     }
 }
 
@@ -355,12 +353,10 @@ async fn unrelated_alert_preserves_pending_sit() {
     let transport = LoopbackSitTransport {
         socket: &viewer_socket,
         destination: simulator_socket.local_addr().expect("simulator address"),
-        simulator,
         sequence: std::sync::atomic::AtomicU32::new(1),
     };
     let mut camera = CameraUplink::new();
-    process_agent_control_command(&transport, &mut agent_control, &mut camera, Some(simulator), Some((agent_id, session_id)), command)
-        .await;
+    process_agent_control_command(&transport, &mut agent_control, &mut camera, Some(simulator), Some((agent_id, session_id)), command);
 
     let expected_request =
         AgentRequestSit { agent_data: SitAgentData { agent_id, session_id }, target_object: TargetObject { target_id: object_id, offset } };
@@ -373,7 +369,7 @@ async fn unrelated_alert_preserves_pending_sit() {
 
     send_loopback_message(&simulator_socket, viewer_address, sit_response(object_id)).await;
     let response = receive_loopback_message(&viewer_socket).await;
-    process_sit_response(&transport, &mut agent_control, simulator, Some((agent_id, session_id)), &response).await;
+    process_sit_response(&transport, &mut agent_control, simulator, Some((agent_id, session_id)), &response);
     assert_eq!(receive_loopback_message(&simulator_socket).await, Message::AgentSit(AgentSit { agent_id, session_id }));
     assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: true, force_mouselook: false }));
     assert_eq!(
@@ -404,7 +400,6 @@ async fn sit_failure_alert_returns_refused() {
     let transport = LoopbackSitTransport {
         socket: &viewer_socket,
         destination: simulator_socket.local_addr().expect("simulator address"),
-        simulator,
         sequence: std::sync::atomic::AtomicU32::new(1),
     };
     process_agent_control_command(
@@ -414,8 +409,7 @@ async fn sit_failure_alert_returns_refused() {
         Some(simulator),
         Some((agent_id, session_id)),
         command,
-    )
-    .await;
+    );
     let Message::AgentRequestSit(request) = receive_loopback_message(&simulator_socket).await else { panic!("AgentRequestSit") };
     assert_eq!(request.target_object.target_id, object_id);
 
@@ -423,4 +417,68 @@ async fn sit_failure_alert_returns_refused() {
     let alert = receive_loopback_message(&viewer_socket).await;
     std::assert_matches!(handle_sit_alert(&mut agent_control, Some(simulator), simulator, &alert), true);
     assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::Refused));
+}
+
+#[tokio::test]
+async fn queue_full_send_keeps_sit_intake_live() {
+    use crate::{
+        session::{AgentControlEvent, AgentControlState, CameraUplink, SitOutcome},
+        test_helpers::simulator_id,
+    };
+
+    struct FullFirstRequest {
+        requests: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SitTransport for FullFirstRequest {
+        fn send_request(&self, _: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error> {
+            assert_eq!(delivery, Delivery::Reliable);
+            if self.requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                Err(network::Error::SimulatorCommandQueueFull)
+            } else {
+                Ok(())
+            }
+        }
+
+        fn send_sit(&self, _: AgentSit, delivery: Delivery) -> Result<(), network::Error> {
+            assert_eq!(delivery, Delivery::Reliable);
+            Ok(())
+        }
+    }
+
+    let transport = FullFirstRequest { requests: std::sync::atomic::AtomicUsize::new(0) };
+    let simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x81);
+    let session_id = Uuid::from_u128(0x82);
+    let (handle, mut agent_control, _) = AgentControlState::new();
+
+    let failed = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.sit_on_object(Uuid::from_u128(0x83), Vec3::ZERO).await }
+    });
+    let AgentControlEvent::Command(Some(command)) = agent_control.next_event().await else { panic!("sit command") };
+    process_agent_control_command(
+        &transport,
+        &mut agent_control,
+        &mut CameraUplink::new(),
+        Some(simulator),
+        Some((agent_id, session_id)),
+        command,
+    );
+    assert_eq!(failed.await.expect("failed sit task"), Err(crate::session::AgentControlError::SendFailed));
+
+    let pending = tokio::spawn(async move { handle.sit_on_object(Uuid::from_u128(0x84), Vec3::ZERO).await });
+    let AgentControlEvent::Command(Some(command)) = agent_control.next_event().await else { panic!("next sit command") };
+    process_agent_control_command(
+        &transport,
+        &mut agent_control,
+        &mut CameraUplink::new(),
+        Some(simulator),
+        Some((agent_id, session_id)),
+        command,
+    );
+
+    let next_simulator_event = alert_message(b"SitFailed");
+    assert!(handle_sit_alert(&mut agent_control, Some(simulator), simulator, &next_simulator_event));
+    assert_eq!(pending.await.expect("pending sit task"), Ok(SitOutcome::Refused));
 }

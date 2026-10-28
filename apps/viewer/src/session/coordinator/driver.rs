@@ -284,11 +284,15 @@ impl SessionDriver {
 
     fn handle_camera_tick(&mut self) {
         let simulator = self.primary_simulator;
-        let origin = simulator
+        let origin = self.primary_region_origin();
+        self.camera.tick(&self.session_handle, simulator, self.active_session.as_ref(), origin);
+    }
+
+    fn primary_region_origin(&self) -> Option<math::DVec3> {
+        self.primary_simulator
             .and_then(|simulator| self.session_world.region_for(simulator))
             .and_then(|region| self.session_world.world().region(region))
-            .and_then(|info| info.resolved_origin());
-        self.camera.tick(&self.session_handle, simulator, self.active_session.as_ref(), origin);
+            .and_then(|info| info.resolved_origin())
     }
 
     fn handle_media_result(&mut self, result: Option<ObjectMediaResult>) {
@@ -388,10 +392,14 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             SimulatorConnected { simulator_id, region_handle, .. } => {
+                let primary_origin_before = (self.primary_simulator == Some(simulator_id)).then(|| self.primary_region_origin()).flatten();
                 self.handoff.simulator_connected(&mut self.session_world, simulator_id, region_handle);
                 if region_handle.is_none() {
                     self.primary_simulator = Some(simulator_id);
                     self.camera.request_update();
+                }
+                if self.primary_simulator == Some(simulator_id) {
+                    self.camera.region_origin_changed(primary_origin_before, self.primary_region_origin());
                 }
                 ControlFlow::Continue(())
             }
@@ -416,6 +424,7 @@ impl SessionDriver {
             SimulatorDisconnected { simulator_id, .. } | SimulatorFailed { simulator_id, .. } => {
                 let region = self.session_world.region_for(simulator_id).map(|region| region.get());
                 tracing::info!(simulator = simulator_id.get(), region, "simulator disconnected");
+                self.camera.simulator_disconnected(simulator_id);
                 self.environments.simulator_disconnected(&mut self.session_world, simulator_id);
                 if let Some(region) = self.session_world.region_for(simulator_id) {
                     self.assets.retire(region);
@@ -425,6 +434,7 @@ impl SessionDriver {
                 self.media.forget_simulator(simulator_id);
                 if Some(simulator_id) == self.primary_simulator {
                     self.primary_simulator = None;
+                    self.camera.request_update();
                 }
                 ControlFlow::Continue(())
             }
@@ -515,6 +525,7 @@ impl SessionDriver {
         source: std::net::SocketAddr,
         message: Message,
     ) {
+        let primary_origin_before = (self.primary_simulator == Some(simulator_id)).then(|| self.primary_region_origin()).flatten();
         let region = self.session_world.region_for(simulator_id);
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         if matches!(packet_order, PacketOrder::Ordered(_))
@@ -563,13 +574,7 @@ impl SessionDriver {
         }
 
         if let Message::AgentMovementComplete(movement) = &message {
-            self.camera.on_movement_complete(
-                &self.session_handle,
-                self.primary_simulator,
-                simulator_id,
-                self.active_session.as_ref(),
-                movement,
-            );
+            self.camera.on_movement_complete(self.primary_simulator, simulator_id, self.active_session.as_ref(), movement);
         }
         let scope = if Some(simulator_id) == self.primary_simulator { SimulatorScope::Primary } else { SimulatorScope::Neighbor };
         let region_name = region.and_then(|region| self.session_world.world().region(region)).and_then(|info| info.name.as_deref());
@@ -582,6 +587,9 @@ impl SessionDriver {
             region_name,
             &self.mailbox,
         );
+        if self.primary_simulator == Some(simulator_id) {
+            self.camera.region_origin_changed(primary_origin_before, self.primary_region_origin());
+        }
     }
 
     fn handle_inventory_udp(&mut self, message: &Message) {
@@ -644,6 +652,7 @@ impl SessionDriver {
         capabilities: Client,
         login_data: Option<ResponseData>,
     ) {
+        self.camera.clear_arrival_pose();
         self.camera.request_update();
         self.media.set_client(simulator_id, capabilities.clone());
         self.primary_simulator = Some(simulator_id);
@@ -660,6 +669,8 @@ impl SessionDriver {
             camera: self.camera.sender(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             movement: self.camera.movement_sender(),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            arrival_pose: self.camera.arrival_pose_receiver(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             assets: self.assets.handle(),
             session: session.clone(),

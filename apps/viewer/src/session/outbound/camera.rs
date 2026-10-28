@@ -9,6 +9,7 @@ use tokio::{
     time::{Instant, sleep_until},
 };
 use uuid::Uuid;
+use world::WorldPose;
 
 use super::agent;
 use crate::agent_movement::{BODY_ROTATION_DOT_THRESHOLD, MovementObservation};
@@ -23,8 +24,12 @@ pub(crate) struct CameraUplink {
     observations: watch::Receiver<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
     movements: watch::Receiver<Option<MovementObservation>>,
+    arrival_pose: watch::Sender<Option<WorldPose>>,
+    pending_arrival: Option<PendingArrival>,
+    arrival_pose_destination: Option<(SimulatorId, Uuid, Uuid)>,
     last_sent: Option<SentState>,
     last_camera: Option<LastCamera>,
+    availability: Option<MovementAvailability>,
     last_sent_at: Option<Instant>,
     pending_at: Option<Instant>,
     followup_at: Option<Instant>,
@@ -37,8 +42,8 @@ struct SentState {
     simulator: SimulatorId,
     agent_id: Uuid,
     session_id: Uuid,
-    origin: DVec3,
-    camera: Camera,
+    origin: Option<DVec3>,
+    camera: Option<Camera>,
     movement: MovementObservation,
 }
 
@@ -51,6 +56,20 @@ struct LastCamera {
     camera: Camera,
 }
 
+#[derive(Clone)]
+struct PendingArrival {
+    simulator: SimulatorId,
+    agent_id: Uuid,
+    session_id: Uuid,
+    movement: AgentMovementComplete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MovementAvailability {
+    Available,
+    Blocked(&'static str),
+}
+
 enum UplinkMessage {
     AgentUpdate(AgentUpdate),
     SetAlwaysRun(SetAlwaysRun),
@@ -60,13 +79,18 @@ impl CameraUplink {
     pub(crate) fn new() -> Self {
         let (camera, observations) = watch::channel(None);
         let (movement, movements) = watch::channel(None);
+        let (arrival_pose, _) = watch::channel(None);
         Self {
             camera,
             observations,
             movement,
             movements,
+            arrival_pose,
+            pending_arrival: None,
+            arrival_pose_destination: None,
             last_sent: None,
             last_camera: None,
+            availability: None,
             last_sent_at: None,
             pending_at: None,
             followup_at: None,
@@ -83,8 +107,27 @@ impl CameraUplink {
         self.movement.clone()
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn arrival_pose_receiver(&self) -> watch::Receiver<Option<WorldPose>> {
+        self.arrival_pose.subscribe()
+    }
+
+    pub(crate) fn clear_arrival_pose(&mut self) {
+        let had_pending = self.pending_arrival.take().is_some();
+        let had_pose = self.arrival_pose_destination.take().is_some();
+        if had_pending || had_pose {
+            self.arrival_pose.send_replace(None);
+        }
+    }
+
     pub(crate) fn request_update(&self) {
         self.movement.send_modify(|_| {});
+    }
+
+    pub(crate) fn region_origin_changed(&self, previous: Option<DVec3>, current: Option<DVec3>) {
+        if previous != current {
+            self.request_update();
+        }
     }
 
     pub(crate) async fn next_tick(&mut self) -> Instant {
@@ -121,22 +164,36 @@ impl CameraUplink {
     }
 
     pub(crate) fn on_movement_complete(
-        &self,
-        session_handle: &SessionHandle,
+        &mut self,
         primary_simulator: Option<SimulatorId>,
         simulator_id: SimulatorId,
         session: Option<&AgentSession>,
         movement: &AgentMovementComplete,
     ) {
-        if primary_simulator != Some(simulator_id) || self.observations.borrow().is_some() {
+        self.on_movement_complete_with(
+            primary_simulator,
+            simulator_id,
+            session.map(|session| (session.agent_id, session.session_id)),
+            movement,
+        );
+    }
+
+    fn on_movement_complete_with(
+        &mut self,
+        primary_simulator: Option<SimulatorId>,
+        simulator_id: SimulatorId,
+        session: Option<(Uuid, Uuid)>,
+        movement: &AgentMovementComplete,
+    ) {
+        if primary_simulator != Some(simulator_id) {
             return;
         }
-        let Some(session) = session else { return };
-        if let Some(update) = agent::arrival(session.agent_id, session.session_id, movement)
-            && let Err(error) = session_handle.send(update, Delivery::Reliable)
-        {
-            tracing::debug!(%error, "arrival camera update deferred");
+        let Some((agent_id, session_id)) = session else { return };
+        if movement.agent_data.agent_id != agent_id || movement.agent_data.session_id != session_id {
+            return;
         }
+        self.pending_arrival = Some(PendingArrival { simulator: simulator_id, agent_id, session_id, movement: movement.clone() });
+        self.request_update();
     }
 
     fn next_deadline(&self) -> Option<Instant> {
@@ -153,10 +210,28 @@ impl CameraUplink {
         mut send: impl FnMut(UplinkMessage, Delivery) -> Result<(), Error>,
     ) {
         let Some((simulator, agent_id, session_id)) = destination else {
+            self.report_availability(MovementAvailability::Blocked("no simulator"));
             self.clear_destination();
             return;
         };
         let now = Instant::now();
+        if self
+            .pending_arrival
+            .as_ref()
+            .is_some_and(|arrival| arrival.simulator != simulator || arrival.agent_id != agent_id || arrival.session_id != session_id)
+        {
+            self.pending_arrival = None;
+        }
+        if let Some(origin) = origin
+            && let Some(arrival) = &self.pending_arrival
+        {
+            let pose = agent::pose_from_arrival(agent_id, session_id, &arrival.movement, origin);
+            self.pending_arrival = None;
+            if let Some(pose) = pose {
+                self.arrival_pose_destination = Some((simulator, agent_id, session_id));
+                self.arrival_pose.send_replace(Some(pose));
+            }
+        }
         if let Some(movement) = movement {
             let state = (simulator, agent_id, session_id, movement.always_run);
             let retry_ready = self.always_run_retry_at.is_none_or(|deadline| now >= deadline);
@@ -184,32 +259,33 @@ impl CameraUplink {
             self.last_camera = Some(LastCamera { simulator, agent_id, session_id, origin, camera });
         }
         let previous = self.last_sent;
-        let movement_changed = previous.is_none_or(|previous| {
-            previous.movement.control_flags != movement.control_flags
-                || previous.movement.stop_sequence != movement.stop_sequence
-                || rotation_changed(previous.movement.body_rotation, movement.body_rotation)
-        });
         let last_camera =
             self.last_camera.filter(|last| last.simulator == simulator && last.agent_id == agent_id && last.session_id == session_id);
-        let camera = camera.or_else(|| movement_changed.then(|| last_camera.map(|last| last.camera)).flatten());
-        let origin = origin.or_else(|| movement_changed.then(|| last_camera.map(|last| last.origin)).flatten());
-        let (Some(camera), Some(origin)) = (camera, origin) else {
-            self.last_sent_at = None;
-            self.pending_at = None;
-            self.followup_at = None;
-            return;
+        let camera = camera.or_else(|| last_camera.map(|last| last.camera));
+        let origin = origin.or_else(|| last_camera.map(|last| last.origin));
+        let (camera, origin) = match (camera, origin) {
+            (Some(camera), Some(origin)) => (camera, origin),
+            _ => {
+                let reason = if camera.is_none() { "no agent object" } else { "no region" };
+                self.report_availability(MovementAvailability::Blocked(reason));
+                self.last_sent_at = None;
+                self.pending_at = None;
+                self.followup_at = None;
+                return;
+            }
         };
-        let current = SentState { simulator, agent_id, session_id, origin, camera, movement };
+        self.report_availability(MovementAvailability::Available);
+        let current = SentState { simulator, agent_id, session_id, origin: Some(origin), camera: Some(camera), movement };
         let context_changed = previous.is_none_or(|previous| {
             previous.simulator != simulator
                 || previous.agent_id != agent_id
                 || previous.session_id != session_id
-                || previous.origin != origin
+                || previous.origin != Some(origin)
         });
         let control_changed = previous.is_none_or(|previous| {
             previous.movement.control_flags != movement.control_flags || previous.movement.stop_sequence != movement.stop_sequence
         });
-        let camera_changed = previous.is_none_or(|previous| camera_changed(previous.camera, camera));
+        let camera_changed = previous.is_none_or(|previous| previous.camera.is_none_or(|previous| camera_changed(previous, camera)));
         let body_changed = previous.is_none_or(|previous| rotation_changed(previous.movement.body_rotation, movement.body_rotation));
         let any_change = context_changed || camera_changed || body_changed;
         let keepalive_due = self.last_sent_at.is_none_or(|sent| now.saturating_duration_since(sent) >= KEEPALIVE_INTERVAL);
@@ -225,15 +301,17 @@ impl CameraUplink {
             return;
         }
         self.pending_at = None;
-        if let Some(update) = agent::movement_camera(agent_id, session_id, camera, origin, movement) {
+        let update = agent::movement_camera(agent_id, session_id, camera, origin, movement);
+        if let Some(update) = update {
             match send(UplinkMessage::AgentUpdate(update), Delivery::Unreliable) {
                 Ok(()) => {
                     self.last_sent = Some(current);
                     self.last_sent_at = Some(now);
                     self.followup_at = control_changed.then_some(now + MIN_UPDATE_INTERVAL);
-                    if previous
-                        .is_none_or(|previous| previous.simulator != simulator || previous.camera.draw_distance() != camera.draw_distance())
-                    {
+                    if previous.is_none_or(|previous| {
+                        previous.simulator != simulator
+                            || previous.camera.is_none_or(|previous| previous.draw_distance() != camera.draw_distance())
+                    }) {
                         tracing::debug!(draw_distance = camera.draw_distance(), "simulator viewing distance updated");
                     }
                 }
@@ -247,14 +325,47 @@ impl CameraUplink {
         }
     }
 
+    fn report_availability(&mut self, availability: MovementAvailability) {
+        if self.availability != Some(availability) {
+            self.availability = Some(availability);
+            match availability {
+                MovementAvailability::Available => tracing::info!(available = true, "movement controls available"),
+                MovementAvailability::Blocked(reason) => tracing::info!(available = false, reason, "movement controls unavailable"),
+            }
+        }
+    }
+
     fn clear_destination(&mut self) {
         self.last_sent = None;
         self.last_camera = None;
+        self.clear_arrival_pose();
         self.last_sent_at = None;
         self.pending_at = None;
         self.followup_at = None;
         self.last_always_run = None;
         self.always_run_retry_at = None;
+    }
+
+    pub(crate) fn simulator_disconnected(&mut self, simulator: SimulatorId) {
+        if self.pending_arrival.as_ref().is_some_and(|arrival| arrival.simulator == simulator) {
+            self.pending_arrival = None;
+        }
+        if self.arrival_pose_destination.is_some_and(|(arrival_simulator, ..)| arrival_simulator == simulator) {
+            self.clear_arrival_pose();
+        }
+        if self.last_camera.is_some_and(|camera| camera.simulator == simulator) {
+            self.last_camera = None;
+        }
+        if self.last_sent.is_some_and(|sent| sent.simulator == simulator) {
+            self.last_sent = None;
+            self.last_sent_at = None;
+            self.pending_at = None;
+            self.followup_at = None;
+        }
+        if self.last_always_run.is_some_and(|(sent_simulator, ..)| sent_simulator == simulator) {
+            self.last_always_run = None;
+            self.always_run_retry_at = None;
+        }
     }
 }
 
@@ -279,23 +390,36 @@ fn rotation_changed(previous: Quat, current: Quat) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, net::UdpSocket, time::Duration};
+    use std::{cell::Cell, time::Duration};
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    use std::net::UdpSocket;
+
+    use crate::test_helpers::simulator_id;
     use futures::FutureExt;
     use math::{DVec3, Quat, Vec3};
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     use network::Delivery;
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     use protocol::lludp::{Message, Packet};
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     use protocol::messages::SetAlwaysRun;
     use render::scene::Camera;
-    use tokio::{
-        net::UdpSocket as TokioUdpSocket,
-        time::{Instant, advance},
-    };
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    use tokio::net::UdpSocket as TokioUdpSocket;
+    use tokio::time::{Instant, advance};
     use uuid::Uuid;
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    use winit::{event::ElementState, keyboard::Key};
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    use world::RegionHandle;
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     use crate::{
         agent_movement::{HeldControls, KeyBinding, MovementKey},
-        test_helpers::simulator_id,
+        camera::FollowCamera,
+        session::world::{SessionWorld, viewer_world_limits},
     };
 
     use super::{CameraUplink, KEEPALIVE_INTERVAL, MIN_UPDATE_INTERVAL, UplinkMessage, camera_changed};
@@ -304,6 +428,7 @@ mod tests {
         Camera::new(position, direction, 1.0, [720, 720]).expect("valid camera").with_quality(64.0, 1.0).expect("valid quality")
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn send_as_packet(
         socket: &UdpSocket,
         destination: std::net::SocketAddr,
@@ -318,12 +443,14 @@ mod tests {
         socket.send_to(&bytes, destination).map(|_| ()).map_err(|_| network::Error::SessionClosed)
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     async fn receive_packet(socket: &TokioUdpSocket) -> Message {
         let mut bytes = [0; 2048];
         let (length, _) = socket.recv_from(&mut bytes).await.expect("loopback update");
         Packet::decode(&bytes[..length]).expect("valid LLUDP packet").message().clone()
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn send_loopback(
         uplink: &mut CameraUplink,
         simulator: network::SimulatorId,
@@ -347,6 +474,7 @@ mod tests {
         });
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[tokio::test]
     async fn loopback_simulator_receives_action_flags_camera_fields_and_focus_stop() {
         let receiver = TokioUdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
@@ -430,6 +558,184 @@ mod tests {
         assert_eq!(update.agent_data.control_flags, 0x0000_2000);
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn movement_complete_does_not_send_a_duplicate_idle_update() {
+        let simulator = simulator_id();
+        let bytes = test_support::parse_hex_fixture(test_support::lludp::vectors::AGENT_MOVEMENT_COMPLETE)
+            .expect("valid movement-complete fixture");
+        let packet = Packet::decode(&bytes).expect("valid movement-complete packet");
+        let Message::AgentMovementComplete(arrival) = packet.message() else { panic!("movement-complete fixture") };
+        let (agent_id, session_id) = (arrival.agent_data.agent_id, arrival.agent_data.session_id);
+        let origin = DVec3::new(256.0, 512.0, 0.0);
+        let movement = crate::agent_movement::MovementObservation {
+            control_flags: 0,
+            body_rotation: Quat::IDENTITY,
+            always_run: false,
+            stop_sequence: 0,
+        };
+        let mut uplink = CameraUplink::new();
+        let mut arrival_pose = uplink.arrival_pose_receiver();
+        let mut sent = Vec::new();
+
+        uplink.on_movement_complete_with(Some(simulator), simulator, Some((agent_id, session_id)), arrival);
+        uplink.tick_with(Some((simulator, agent_id, session_id)), Some(origin), None, Some(movement), |message, _| {
+            if let UplinkMessage::AgentUpdate(update) = message {
+                sent.push(update);
+            }
+            Ok(())
+        });
+        assert!(sent.is_empty(), "arrival waits for the viewport camera instead of sending an idle update");
+        let pose = (*arrival_pose.borrow_and_update()).expect("arrival pose seeds the viewport camera");
+        let camera = FollowCamera::scene_camera(pose, [720, 720], 64.0, 1.0).expect("seeded follow camera");
+
+        uplink.tick_with(Some((simulator, agent_id, session_id)), Some(origin), Some(camera), Some(movement), |message, _| {
+            if let UplinkMessage::AgentUpdate(update) = message {
+                sent.push(update);
+            }
+            Ok(())
+        });
+        assert_eq!(sent.len(), 1, "the live camera path sends the first idle update exactly once");
+        assert_eq!(sent[0].agent_data.control_flags, 0);
+
+        uplink.tick_with(Some((simulator, agent_id, session_id)), Some(origin), Some(camera), Some(movement), |message, _| {
+            if let UplinkMessage::AgentUpdate(update) = message {
+                sent.push(update);
+            }
+            Ok(())
+        });
+        assert_eq!(sent.len(), 1, "arrival must not cause a duplicate idle update");
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[tokio::test(start_paused = true)]
+    async fn visible_region_origin_wakes_live_camera_and_forwards_held_key_at_protocol_cadence() {
+        let receiver = TokioUdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind loopback viewer");
+        let destination = receiver.local_addr().expect("simulator address");
+        let simulator = simulator_id();
+        let mut world = SessionWorld::new(viewer_world_limits());
+        let region = world.register_simulator(simulator, None).expect("register primary simulator region");
+        assert_eq!(world.world().region(region).and_then(|info| info.resolved_origin()), None);
+
+        let bytes = test_support::parse_hex_fixture(test_support::lludp::vectors::AGENT_MOVEMENT_COMPLETE)
+            .expect("valid movement-complete fixture");
+        let packet = Packet::decode(&bytes).expect("valid movement-complete packet");
+        let Message::AgentMovementComplete(arrival) = packet.message() else { panic!("movement-complete fixture") };
+        let (agent_id, session_id) = (arrival.agent_data.agent_id, arrival.agent_data.session_id);
+        assert_eq!(world.world().entity(agent_id), None, "the self avatar has not resolved in World");
+
+        let mut controls = HeldControls::default();
+        let (binding, changed) =
+            controls.keyboard_event(&Key::Character("w".into()), ElementState::Pressed, false, false).expect("forward key binding");
+        assert_eq!(binding, KeyBinding::Movement(MovementKey::Forward));
+        assert!(changed);
+        let movement = controls.observation(false, Quat::IDENTITY);
+        let mut uplink = CameraUplink::new();
+        let mut arrival_pose = uplink.arrival_pose_receiver();
+        let mut sequence = 1;
+        uplink.on_movement_complete_with(Some(simulator), simulator, Some((agent_id, session_id)), arrival);
+        uplink.tick_with(Some((simulator, agent_id, session_id)), None, None, Some(movement), |message, delivery| {
+            let current = sequence;
+            sequence += 1;
+            assert_eq!(
+                delivery,
+                match &message {
+                    UplinkMessage::AgentUpdate(_) => Delivery::Unreliable,
+                    UplinkMessage::SetAlwaysRun(_) => Delivery::Reliable,
+                }
+            );
+            send_as_packet(&sender, destination, current, message)
+        });
+        let Message::SetAlwaysRun(_) = receive_packet(&receiver).await else { panic!("initial always-run state") };
+        assert!(!arrival_pose.has_changed().unwrap(), "the seed waits for the region origin");
+        let _ = uplink.next_tick().await;
+        let _ = uplink.movements.borrow_and_update();
+
+        let handle = RegionHandle::new((256_u64 << 32) | 512);
+        world.register_simulator(simulator, Some(handle)).expect("resolve visible region handle");
+        let resolved_origin = world.world().region(region).and_then(|info| info.resolved_origin()).expect("visible region origin");
+        let origin = DVec3::new(256.0, 512.0, 0.0);
+        assert_eq!(resolved_origin, origin);
+        uplink.region_origin_changed(None, Some(resolved_origin));
+        uplink.next_tick().await;
+        uplink.tick_with(Some((simulator, agent_id, session_id)), Some(resolved_origin), None, Some(movement), |message, _| {
+            if let UplinkMessage::AgentUpdate(update) = message {
+                panic!("movement cannot be sent before the viewport consumes its camera seed: {update:?}");
+            }
+            Ok(())
+        });
+
+        assert_eq!(world.world().entity(agent_id), None, "the visible region still has no self-avatar World pose");
+        let pose = (*arrival_pose.borrow_and_update()).expect("arrival pose seeds follow mode before World resolves");
+        let expected_position = origin + arrival.data.position.as_dvec3();
+        assert_eq!(pose.position, expected_position);
+        let camera = FollowCamera::scene_camera(pose, [720, 720], 64.0, 1.0).expect("seeded follow camera");
+        uplink.camera.send_replace(Some(camera));
+
+        let mut sent = Vec::new();
+        let camera = *uplink.observations.borrow_and_update();
+        uplink.tick_with(Some((simulator, agent_id, session_id)), Some(resolved_origin), camera, Some(movement), |message, delivery| {
+            if let UplinkMessage::AgentUpdate(update) = &message {
+                assert_eq!(delivery, Delivery::Unreliable);
+                sent.push(update.clone());
+            }
+            let current = sequence;
+            sequence += 1;
+            send_as_packet(&sender, destination, current, message)
+        });
+        let Message::AgentUpdate(update) = receive_packet(&receiver).await else { panic!("held-forward AgentUpdate") };
+        assert_eq!(update.agent_data.control_flags & 0x0000_0001, 0x0000_0001);
+        assert_eq!(update.agent_data.camera_center, (camera.expect("published follow camera").position() - resolved_origin).as_vec3());
+        assert_eq!(update.agent_data.camera_at_axis, camera.expect("published follow camera").direction());
+        assert_eq!(sent.len(), 1);
+
+        advance(MIN_UPDATE_INTERVAL).await;
+        uplink.tick_with(Some((simulator, agent_id, session_id)), Some(resolved_origin), camera, Some(movement), |message, delivery| {
+            if let UplinkMessage::AgentUpdate(update) = &message {
+                assert_eq!(delivery, Delivery::Unreliable);
+                sent.push(update.clone());
+            }
+            let current = sequence;
+            sequence += 1;
+            send_as_packet(&sender, destination, current, message)
+        });
+        let Message::AgentUpdate(follow_up) = receive_packet(&receiver).await else { panic!("cadence follow-up AgentUpdate") };
+        assert_eq!(follow_up.agent_data.control_flags & 0x0000_0001, 0x0000_0001);
+        assert_eq!(sent.len(), 2);
+
+        let (_, changed) =
+            controls.keyboard_event(&Key::Character("w".into()), ElementState::Released, false, false).expect("forward key release");
+        assert!(changed);
+        let released = controls.observation(false, Quat::IDENTITY);
+        assert_eq!(released.control_flags, 0);
+        uplink.tick_with(Some((simulator, agent_id, session_id)), Some(resolved_origin), camera, Some(released), |message, delivery| {
+            if let UplinkMessage::AgentUpdate(update) = &message {
+                assert_eq!(delivery, Delivery::Unreliable);
+                sent.push(update.clone());
+            }
+            let current = sequence;
+            sequence += 1;
+            send_as_packet(&sender, destination, current, message)
+        });
+        let Message::AgentUpdate(release) = receive_packet(&receiver).await else { panic!("neutral release AgentUpdate") };
+        assert_eq!(release.agent_data.control_flags, 0);
+        assert_eq!(sent.len(), 3);
+
+        advance(MIN_UPDATE_INTERVAL).await;
+        uplink.tick_with(Some((simulator, agent_id, session_id)), Some(resolved_origin), camera, Some(released), |message, delivery| {
+            if let UplinkMessage::AgentUpdate(update) = &message {
+                assert_eq!(delivery, Delivery::Unreliable);
+                sent.push(update.clone());
+            }
+            let current = sequence;
+            sequence += 1;
+            send_as_packet(&sender, destination, current, message)
+        });
+        let Message::AgentUpdate(release_follow_up) = receive_packet(&receiver).await else { panic!("neutral release follow-up") };
+        assert_eq!(release_follow_up.agent_data.control_flags, 0);
+        assert_eq!(sent.len(), 4);
+    }
     #[tokio::test(start_paused = true)]
     async fn controls_send_on_change_and_keepalive_after_one_second() {
         let simulator = simulator_id();

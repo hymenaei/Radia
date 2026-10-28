@@ -20,7 +20,7 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 use uuid::Uuid;
-use world::{Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS};
+use world::{Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, WorldPose};
 
 use crate::{
     agent_movement::MovementObservation,
@@ -44,6 +44,9 @@ pub(crate) struct SceneFeed {
     pub(crate) water_height: Option<f64>,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
+    arrival_pose: watch::Receiver<Option<WorldPose>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    arrival_pose_pending: bool,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
@@ -55,6 +58,7 @@ impl SceneFeed {
         agent_id: Uuid,
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
+        arrival_pose: watch::Receiver<Option<WorldPose>>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
@@ -64,7 +68,12 @@ impl SceneFeed {
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
-        drop(runtime.clone().spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, wake).in_current_span()));
+        let arrival_poses = arrival_pose.clone();
+        drop(
+            runtime
+                .clone()
+                .spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, arrival_poses, wake).in_current_span()),
+        );
         Self {
             runtime,
             view,
@@ -74,6 +83,9 @@ impl SceneFeed {
             water_height: None,
             camera,
             movement,
+            arrival_pose,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            arrival_pose_pending: true,
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -82,6 +94,23 @@ impl SceneFeed {
 
     pub(crate) fn agent(&self) -> Option<&Object> {
         self.agent.and_then(|entity| self.view.object(entity))
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn camera_pose(&mut self) -> Option<WorldPose> {
+        if self.arrival_pose.has_changed().is_ok_and(|changed| changed) {
+            self.arrival_pose_pending = self.arrival_pose.borrow_and_update().is_some();
+        }
+        let world_pose = self.agent().and_then(|agent| agent.detail().world_transform.ok()).and_then(|transform| match transform {
+            world::WorldTransformState::Resolved(transform) => Some(transform.pose),
+            world::WorldTransformState::MissingScale(pose) => Some(pose),
+            world::WorldTransformState::Provisional { .. } | world::WorldTransformState::Unresolved(_) => None,
+        });
+        if world_pose.is_some() {
+            self.arrival_pose_pending = false;
+            return world_pose;
+        }
+        self.arrival_pose_pending.then(|| *self.arrival_pose.borrow()).flatten()
     }
 
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {
@@ -265,6 +294,7 @@ async fn run(
     runtime: Handle,
     cancelled: oneshot::Receiver<()>,
     mut camera: watch::Receiver<Option<Camera>>,
+    mut arrival_pose: watch::Receiver<Option<WorldPose>>,
     wake: impl Fn(),
 ) {
     let SceneSources { mut reader, assets, environments } = sources;
@@ -327,6 +357,7 @@ async fn run(
             }
             .fuse();
             let moved = camera.changed().fuse();
+            let arrived = arrival_pose.changed().fuse();
             let available = assets.next().fuse();
             let released = textures.changed().fuse();
             let timer = async {
@@ -337,7 +368,7 @@ async fn run(
                 }
             }
             .fuse();
-            pin_mut!(reading, building, changed, moved, available, released, timer, pushed);
+            pin_mut!(reading, building, changed, moved, arrived, available, released, timer, pushed);
             let mut asset_event = None;
             futures::select_biased! {
                 _ = cancelled => break,
@@ -361,6 +392,7 @@ async fn run(
                 event = available => asset_event = event,
 
                 result = released => { if result.is_err() { break; } wake(); }
+                result = arrived => { if result.is_err() { break; } wake(); }
                 result = moved => { if result.is_err() { break; } }
                 result = changed => { if result.is_err() { break; } scene.notify_world_change(); }
                 _ = timer => {}
@@ -431,6 +463,38 @@ mod tests {
         })
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[tokio::test]
+    async fn arrival_pose_seeds_follow_camera_before_the_avatar_resolves() {
+        let agent_id = Uuid::from_u128(1);
+        let pose = WorldPose { position: DVec3::new(270.0, 520.0, 24.0), rotation: Quat::IDENTITY };
+        let budget = Budget::default();
+        let (_, view) = Reconciler::new(budget.clone());
+        let (sender, incoming) = mpsc::channel(1);
+        let (cancel, _) = oneshot::channel();
+        let (arrival_pose, arrival_poses) = watch::channel(Some(pose));
+        let mut feed = SceneFeed {
+            runtime: Handle::current(),
+            view,
+            budget,
+            agent_id,
+            agent: None,
+            water_height: None,
+            camera: watch::channel(None).0,
+            movement: watch::channel(None).0,
+            arrival_pose: arrival_poses,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            arrival_pose_pending: true,
+            last_movement: None,
+            incoming,
+            _cancel: cancel,
+        };
+        drop((sender, arrival_pose));
+
+        assert!(feed.agent().is_none(), "the self avatar has not entered World yet");
+        assert_eq!(feed.camera_pose(), Some(pose), "follow mode uses the arrival pose until World resolves the avatar");
+    }
+
     #[tokio::test]
     async fn water_height_follows_agent_region() {
         let mut world = world();
@@ -459,6 +523,7 @@ mod tests {
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, _) = oneshot::channel();
         let (camera, _) = watch::channel(None);
+        let (_, arrival_pose) = watch::channel(None);
         let mut feed = SceneFeed {
             runtime: Handle::current(),
             view,
@@ -468,6 +533,9 @@ mod tests {
             water_height: None,
             camera,
             movement: watch::channel(None).0,
+            arrival_pose,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            arrival_pose_pending: true,
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -550,11 +618,13 @@ mod tests {
         let mut reads = WorldReadHost::new(&world, Handle::current());
         let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
+        let (_arrival_pose_sender, arrival_pose) = watch::channel(None);
         let mut feed = SceneFeed::start(
             SceneSources { reader: reads.reader(), environments, assets: assets.handle() },
             Uuid::from_u128(2),
             watch::channel(None).0,
             watch::channel(None).0,
+            arrival_pose,
             Handle::current(),
             || {},
         );
@@ -607,11 +677,13 @@ mod tests {
         let reader = service.reader();
         let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (pushes, environments) = crate::session::EnvironmentInbox::channel();
+        let (_arrival_pose_sender, arrival_pose) = watch::channel(None);
         let mut feed = SceneFeed::start(
             SceneSources { reader: reader.clone(), environments, assets: assets.handle() },
             Uuid::from_u128(1),
             watch::channel(None).0,
             watch::channel(None).0,
+            arrival_pose,
             Handle::current(),
             || {},
         );

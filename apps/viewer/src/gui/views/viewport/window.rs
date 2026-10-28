@@ -10,12 +10,14 @@ use futures::executor::block_on;
 use render::scene;
 use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
 use tracing::Instrument;
+#[cfg(target_os = "linux")]
+use winit::platform::startup_notify::{EventLoopExtStartupNotify, WindowAttributesExtStartupNotify, reset_activation_token_env};
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow},
     keyboard::{Key, ModifiersState, NamedKey},
-    window::{CursorGrabMode, Window, WindowId},
+    window::{CursorGrabMode, UserAttentionType, Window, WindowId},
 };
 
 use super::{
@@ -112,25 +114,42 @@ pub(super) struct SceneWindow {
 }
 
 impl SceneWindow {
-    pub(super) fn new(event_loop: &ActiveEventLoop, generation: u64, wake: Arc<SharedWindowState>) -> Result<Self, SceneWindowError> {
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("Radia")
-                        .with_inner_size(LogicalSize::new(1280, 720))
-                        .with_min_inner_size(LogicalSize::new(460, 300))
-                        .with_visible(false),
-                )
-                .map_err(SceneWindowError::WindowCreation)?,
-        );
+    pub(super) fn new(
+        event_loop: &ActiveEventLoop,
+        generation: u64,
+        activate: bool,
+        wake: Arc<SharedWindowState>,
+    ) -> Result<Self, SceneWindowError> {
+        let attributes = Window::default_attributes()
+            .with_title("Radia")
+            .with_inner_size(LogicalSize::new(1280, 720))
+            .with_min_inner_size(LogicalSize::new(460, 300));
+        #[cfg(target_os = "linux")]
+        let attributes = {
+            let token = event_loop.read_token_from_env();
+            reset_activation_token_env();
+            if activate {
+                match token {
+                    Some(token) => attributes.with_activation_token(token),
+                    None => attributes,
+                }
+            } else {
+                attributes
+            }
+        };
+        let window = Arc::new(event_loop.create_window(attributes).map_err(SceneWindowError::WindowCreation)?);
+        if activate {
+            window.focus_window();
+        }
         let (egui, platform) = debug_ui(&window);
         let dpi = window.scale_factor();
         let size = window.inner_size();
         let renderer = block_on(Renderer::new(Arc::clone(&window), size.width, size.height)).map_err(SceneWindowError::Renderer)?;
         let info = renderer.adapter_info();
         tracing::info!(backend = ?info.backend, gpu = %info.name, driver = %info.driver, driver_info = %info.driver_info, "scene GPU initialized");
-        window.set_visible(true);
+        if !window.has_focus() {
+            window.request_user_attention(Some(UserAttentionType::Informational));
+        }
         let now = Instant::now();
         let frame_interval = display_refresh_interval(&window);
         let texture_soft_cap = renderer.texture_soft_cap_mib();
@@ -204,20 +223,20 @@ impl SceneWindow {
                     self.dirty = true;
                 }
             }
-            WindowEvent::Focused(false) => {
-                self.focused = false;
-                self.release_drag(false);
-                self.modifiers = ModifiersState::empty();
-                let rotation = self.body_rotation.update(self.agent_pose().map(|pose| pose.rotation), 0.0, Instant::now());
-                let movement = self.controls.release_and_observe(rotation);
-                self.stop_clear_pending = movement.control_flags & STOP != 0;
-                if let Some(feed) = &mut self.feed {
-                    feed.set_movement(movement);
+            WindowEvent::Focused(focused) => {
+                tracing::info!(focused, "viewport focus changed");
+                self.focused = *focused;
+                if !focused {
+                    self.release_drag(false);
+                    self.modifiers = ModifiersState::empty();
+                    let pose = self.agent_pose();
+                    let rotation = self.body_rotation.update(pose.map(|pose| pose.rotation), 0.0, Instant::now());
+                    let movement = self.controls.release_and_observe(rotation);
+                    self.stop_clear_pending = movement.control_flags & STOP != 0;
+                    if let Some(feed) = &mut self.feed {
+                        feed.set_movement(movement);
+                    }
                 }
-                self.dirty = true;
-            }
-            WindowEvent::Focused(true) => {
-                self.focused = true;
                 self.dirty = true;
             }
             WindowEvent::CursorMoved { position, .. } => self.cursor = *position,
@@ -225,7 +244,8 @@ impl SceneWindow {
                 self.handle_left_click(*state, capture);
             }
             WindowEvent::MouseWheel { delta, .. } if !capture.consumed && !capture.pointer => {
-                if self.camera_mode == CameraMode::Inspection
+                self.enter_free_camera();
+                if self.camera_mode == CameraMode::Free
                     && let Some(camera) = &mut self.camera
                 {
                     let clicks = match delta {
@@ -242,42 +262,25 @@ impl SceneWindow {
                     && !capture.keyboard =>
             {
                 self.release_drag(true);
-                if let Some(camera) = &mut self.camera {
-                    camera.reset();
-                }
+                self.camera_mode.return_to_follow();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                let Some(binding) = KeyBinding::from_key(&event.logical_key) else { return false };
-                if event.state == ElementState::Released {
-                    if let KeyBinding::Movement(key) = binding
-                        && self.controls.set_pressed(key, false)
-                    {
-                        self.dirty = true;
-                    }
-                    return true;
-                }
-                if event.repeat {
-                    return true;
-                }
-                if capture.consumed || capture.keyboard {
+                let Some(changed) = handle_keyboard_input(
+                    &mut self.controls,
+                    &mut self.camera_mode,
+                    &event.logical_key,
+                    event.state,
+                    event.repeat,
+                    capture.consumed || capture.keyboard,
+                ) else {
                     return false;
+                };
+                if changed {
+                    self.dirty = true;
                 }
-                match binding {
-                    KeyBinding::Movement(key) => {
-                        self.controls.set_pressed(key, true);
-                    }
-                    KeyBinding::ToggleFlying => self.controls.toggle_flying(),
-                    KeyBinding::ToggleRun => self.controls.toggle_run(),
-                    KeyBinding::ToggleCamera => {
-                        self.release_drag(true);
-                        self.camera_mode = match self.camera_mode {
-                            CameraMode::Follow => CameraMode::Inspection,
-                            CameraMode::Inspection => CameraMode::Follow,
-                        };
-                    }
-                    KeyBinding::Stop => self.controls.stop(),
+                if self.camera_mode == CameraMode::Follow {
+                    self.release_drag(true);
                 }
-                self.dirty = true;
             }
             _ => return false,
         }
@@ -334,53 +337,81 @@ impl SceneWindow {
             self.release_drag(true);
             return;
         }
-        if self.camera_mode != CameraMode::Inspection || !self.modifiers.alt_key() || capture.consumed || capture.pointer {
+        if capture.consumed || capture.pointer {
             return;
         }
-        let (Some(renderer), Some(observation), Some(camera)) = (&self.renderer, self.last_camera, &mut self.camera) else {
+
+        if !self.modifiers.alt_key() {
+            self.start_drag();
             return;
-        };
-        let size = self.window.inner_size();
-        match renderer.pick(observation, observation.ray([self.cursor.x, self.cursor.y], [size.width, size.height])) {
-            Ok(Some(point)) => {
-                camera.focus(point, Instant::now());
-                let origin = self.cursor;
-                let center = PhysicalPosition::new(f64::from(size.width) * 0.5, f64::from(size.height) * 0.5);
-                match self.window.set_cursor_grab(CursorGrabMode::Confined) {
-                    Ok(()) => {
-                        self.window.set_cursor_visible(false);
-                        self.drag = Some(DragState { origin, travel: [0.0; 2] });
-                        if let Err(error) = self.window.set_cursor_position(center) {
-                            self.release_drag(false);
-                            tracing::warn!(%error, "could not position scene cursor");
-                        }
-                    }
-                    Err(error) => tracing::warn!(%error, "could not capture scene cursor"),
+        }
+
+        let point = {
+            let (Some(renderer), Some(observation)) = (&self.renderer, self.last_camera) else {
+                return;
+            };
+            let size = self.window.inner_size();
+            match renderer.pick(observation, observation.ray([self.cursor.x, self.cursor.y], [size.width, size.height])) {
+                Ok(point) => point,
+                Err(error) => {
+                    tracing::debug!(%error, "scene focus pick exceeded its work limit");
+                    return;
                 }
             }
-            Ok(None) => {}
-            Err(error) => tracing::debug!(%error, "scene focus pick exceeded its work limit"),
+        };
+        let Some(point) = point else { return };
+        self.enter_free_camera();
+        if let Some(camera) = &mut self.camera {
+            camera.focus(point, Instant::now());
+            self.start_drag();
         }
     }
 
     pub(super) fn drag_camera(&mut self, (dx, dy): (f64, f64)) {
-        if self.camera_mode != CameraMode::Inspection {
-            return;
-        }
-        let (Some(drag), Some(camera)) = (&mut self.drag, &mut self.camera) else {
+        let Some(drag) = &mut self.drag else {
             return;
         };
         drag.travel[0] += dx.abs() / self.dpi;
         drag.travel[1] += dy.abs() / self.dpi;
         if drag.travel[0] >= 4.0 || drag.travel[1] >= 4.0 {
             self.dirty = true;
-            camera.drag(
-                [dx, if drag.travel[1] >= 4.0 { dy } else { 0.0 }],
-                f64::from(self.window.inner_size().width),
-                self.modifiers.control_key(),
-                self.modifiers.shift_key(),
-            );
+            let dy = if drag.travel[1] >= 4.0 { dy } else { 0.0 };
+            self.enter_free_camera();
+            if let Some(camera) = &mut self.camera {
+                camera.drag([dx, dy], f64::from(self.window.inner_size().width), self.modifiers.control_key(), self.modifiers.shift_key());
+            }
         }
+    }
+
+    fn start_drag(&mut self) {
+        if self.drag.is_some() {
+            return;
+        }
+        let origin = self.cursor;
+        let size = self.window.inner_size();
+        let center = PhysicalPosition::new(f64::from(size.width) * 0.5, f64::from(size.height) * 0.5);
+        match self.window.set_cursor_grab(CursorGrabMode::Confined) {
+            Ok(()) => {
+                self.window.set_cursor_visible(false);
+                self.drag = Some(DragState { origin, travel: [0.0; 2] });
+                if let Err(error) = self.window.set_cursor_position(center) {
+                    self.release_drag(false);
+                    tracing::warn!(%error, "could not position scene cursor");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "could not capture scene cursor"),
+        }
+    }
+
+    fn enter_free_camera(&mut self) {
+        if self.camera_mode == CameraMode::Free {
+            return;
+        }
+        let Some(pose) = self.agent_pose() else { return };
+        let (draw_distance, lod_factor) =
+            self.camera.as_ref().map_or((DEFAULT_DRAW_DISTANCE, 1.0), |camera| (camera.draw_distance, camera.lod_factor));
+        self.camera = Some(OrbitCamera::from_follow_pose(pose, draw_distance, lod_factor));
+        self.camera_mode.detach_for_mouse();
     }
 
     fn ensure_camera(&mut self, pose: Option<world::WorldPose>) {
@@ -391,12 +422,8 @@ impl SceneWindow {
         }
     }
 
-    fn agent_pose(&self) -> Option<world::WorldPose> {
-        self.feed.as_ref()?.agent()?.detail().world_transform.ok().and_then(|transform| match transform {
-            world::WorldTransformState::Resolved(transform) => Some(transform.pose),
-            world::WorldTransformState::MissingScale(pose) => Some(pose),
-            world::WorldTransformState::Provisional { .. } | world::WorldTransformState::Unresolved(_) => None,
-        })
+    fn agent_pose(&mut self) -> Option<world::WorldPose> {
+        self.feed.as_mut()?.camera_pose()
     }
 
     fn camera_observation(&self, pose: Option<world::WorldPose>, now: Instant) -> Option<scene::Camera> {
@@ -407,7 +434,7 @@ impl SceneWindow {
                     self.camera.as_ref().map_or((DEFAULT_DRAW_DISTANCE, 1.0), |camera| (camera.draw_distance, camera.lod_factor));
                 FollowCamera::scene_camera(pose, viewport, draw_distance, lod_factor)
             }),
-            CameraMode::Inspection => self.camera.as_ref().and_then(|camera| camera.scene_camera(viewport, now)),
+            CameraMode::Free => self.camera.as_ref().and_then(|camera| camera.scene_camera(viewport, now)),
         }
     }
 
@@ -496,7 +523,7 @@ impl SceneWindow {
                         camera.lod_factor = 1.0;
                     }
                 }
-                ui.label(format!("Camera: {} (V)", self.camera_mode.label()));
+                ui.label(format!("Camera: {}", self.camera_mode.label()));
                 if let Some(times) = &frame_times {
                     ui.label(format!(
                         "Frametime: p50 {:.2} ms, p95 {:.2} ms",
@@ -618,9 +645,9 @@ impl SceneWindow {
                 let active_motion = self.controls.active() || self.stop_clear_pending;
                 self.dirty |= !presented
                     || active_motion
-                    || (self.camera_mode == CameraMode::Inspection
-                        && self.camera.as_ref().is_some_and(|camera| camera.moving(Instant::now())));
-                self.dirty |= self.camera_observation(self.agent_pose(), Instant::now()) != observation;
+                    || (self.camera_mode == CameraMode::Free && self.camera.as_ref().is_some_and(|camera| camera.moving(Instant::now())));
+                let pose = self.agent_pose();
+                self.dirty |= self.camera_observation(pose, Instant::now()) != observation;
                 if presented {
                     self.frame_times.record(frame_work);
                     self.last_camera = observation;
@@ -750,16 +777,50 @@ impl Drop for SceneWindow {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CameraMode {
     Follow,
-    Inspection,
+    Free,
 }
 
 impl CameraMode {
     fn label(self) -> &'static str {
         match self {
             Self::Follow => "Follow",
-            Self::Inspection => "Inspection",
+            Self::Free => "Free",
         }
     }
+
+    fn detach_for_mouse(&mut self) {
+        *self = Self::Free;
+    }
+
+    fn return_to_follow(&mut self) {
+        *self = Self::Follow;
+    }
+
+    fn on_movement_key(&mut self, binding: KeyBinding, state: ElementState, repeat: bool, captured: bool) {
+        if state == ElementState::Pressed
+            && !repeat
+            && !captured
+            && matches!(binding, KeyBinding::Movement(_) | KeyBinding::ToggleFlying | KeyBinding::ToggleRun | KeyBinding::Stop)
+        {
+            self.return_to_follow();
+        }
+    }
+}
+
+fn handle_keyboard_input(
+    controls: &mut HeldControls,
+    camera_mode: &mut CameraMode,
+    key: &Key,
+    state: ElementState,
+    repeat: bool,
+    captured: bool,
+) -> Option<bool> {
+    if state == ElementState::Pressed && !repeat && KeyBinding::from_key(key).is_some() {
+        tracing::debug!(?key, captured, "viewport movement key received");
+    }
+    let (binding, changed) = controls.keyboard_event(key, state, repeat, captured)?;
+    camera_mode.on_movement_key(binding, state, repeat, captured);
+    Some(changed)
 }
 
 struct DragState {
@@ -821,7 +882,73 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError};
+    use winit::{
+        event::ElementState,
+        keyboard::{Key, NamedKey},
+    };
+
+    use crate::agent_movement::{HeldControls, KeyBinding, MovementKey};
+
+    use super::{CameraMode, PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError, handle_keyboard_input};
+
+    #[test]
+    fn mouse_camera_edits_detach_and_escape_returns_to_follow() {
+        let mut mode = CameraMode::Follow;
+        mode.detach_for_mouse();
+        assert_eq!(mode, CameraMode::Free, "the same detach transition is used before drag and zoom");
+
+        mode.return_to_follow();
+        assert_eq!(mode, CameraMode::Follow);
+    }
+
+    #[test]
+    fn uncaptured_movement_returns_to_follow() {
+        let mut mode = CameraMode::Free;
+        let mut controls = HeldControls::default();
+
+        assert_eq!(
+            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, false),
+            Some(true)
+        );
+        assert_eq!(mode, CameraMode::Follow);
+        assert_eq!(controls.observation(false, math::Quat::IDENTITY).control_flags & 0x0000_0001, 0x0000_0001);
+    }
+
+    #[test]
+    fn egui_captured_movement_does_not_return_to_follow() {
+        let mut mode = CameraMode::Free;
+        let mut controls = HeldControls::default();
+
+        assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, true), None);
+        assert_eq!(mode, CameraMode::Free);
+        assert_eq!(controls.observation(false, math::Quat::IDENTITY).control_flags, 0);
+    }
+
+    #[test]
+    fn flight_run_and_stop_keys_return_to_follow() {
+        for key in [Key::Character("f".into()), Key::Character("r".into()), Key::Named(NamedKey::Space)] {
+            let mut mode = CameraMode::Free;
+            let mut controls = HeldControls::default();
+
+            let binding = KeyBinding::from_key(&key).expect("mapped camera-return key");
+            assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &key, ElementState::Pressed, false, false), Some(true));
+            assert!(matches!(binding, KeyBinding::ToggleFlying | KeyBinding::ToggleRun | KeyBinding::Stop));
+            assert_eq!(mode, CameraMode::Follow);
+        }
+    }
+
+    #[test]
+    fn movement_key_release_does_not_change_camera_mode() {
+        let mut mode = CameraMode::Free;
+        let mut controls = HeldControls::default();
+        controls.set_pressed(MovementKey::Forward, true);
+
+        assert_eq!(
+            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Released, false, false),
+            Some(true)
+        );
+        assert_eq!(mode, CameraMode::Free);
+    }
 
     #[test]
     fn presentation_resets_recovery_limit() {

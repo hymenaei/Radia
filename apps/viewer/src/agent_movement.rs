@@ -1,26 +1,46 @@
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::time::{Duration, Instant};
 
 use math::Quat;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-use winit::keyboard::{Key, NamedKey};
+use winit::{
+    event::ElementState,
+    keyboard::{Key, NamedKey},
+};
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const AT_POS: u32 = 0x0000_0001;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const AT_NEG: u32 = 0x0000_0002;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const LEFT_POS: u32 = 0x0000_0004;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const LEFT_NEG: u32 = 0x0000_0008;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const UP_POS: u32 = 0x0000_0010;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const UP_NEG: u32 = 0x0000_0020;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const YAW_POS: u32 = 0x0000_0100;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const YAW_NEG: u32 = 0x0000_0200;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const FAST_AT: u32 = 0x0000_0400;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const FAST_LEFT: u32 = 0x0000_0800;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const FAST_UP: u32 = 0x0000_1000;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const FLY: u32 = 0x0000_2000;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) const STOP: u32 = 0x0000_4000;
 pub(crate) const BODY_ROTATION_DOT_THRESHOLD: f32 = 0.9997;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const TURN_RATE: f32 = std::f32::consts::FRAC_PI_2;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const MAX_TURN_STEP: Duration = Duration::from_millis(100);
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MovementKey {
     Forward,
@@ -37,12 +57,12 @@ pub(crate) enum MovementKey {
     DownPage,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KeyBinding {
     Movement(MovementKey),
     ToggleFlying,
     ToggleRun,
-    ToggleCamera,
     Stop,
 }
 
@@ -54,6 +74,7 @@ pub(crate) struct MovementObservation {
     pub(crate) stop_sequence: u64,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[derive(Default)]
 pub(crate) struct HeldControls {
     pressed: u16,
@@ -63,18 +84,21 @@ pub(crate) struct HeldControls {
     stop_sequence: u64,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) struct BodyRotation {
     authoritative: Option<Quat>,
     current: Quat,
     updated_at: Option<Instant>,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl Default for BodyRotation {
     fn default() -> Self {
         Self { authoritative: None, current: Quat::IDENTITY, updated_at: None }
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl KeyBinding {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn from_key(key: &Key) -> Option<Self> {
@@ -87,7 +111,6 @@ impl KeyBinding {
             Key::Character(character) if character.as_str().eq_ignore_ascii_case("c") => Some(Self::Movement(MovementKey::Down)),
             Key::Character(character) if character.as_str().eq_ignore_ascii_case("f") => Some(Self::ToggleFlying),
             Key::Character(character) if character.as_str().eq_ignore_ascii_case("r") => Some(Self::ToggleRun),
-            Key::Character(character) if character.as_str().eq_ignore_ascii_case("v") => Some(Self::ToggleCamera),
             Key::Named(NamedKey::ArrowUp) => Some(Self::Movement(MovementKey::ForwardArrow)),
             Key::Named(NamedKey::ArrowDown) => Some(Self::Movement(MovementKey::BackwardArrow)),
             Key::Named(NamedKey::ArrowLeft) => Some(Self::Movement(MovementKey::TurnLeftArrow)),
@@ -101,12 +124,14 @@ impl KeyBinding {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl MovementKey {
     fn mask(self) -> u16 {
         1 << (self as u8)
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl HeldControls {
     pub(crate) fn set_pressed(&mut self, key: MovementKey, pressed: bool) -> bool {
         let mask = key.mask();
@@ -117,6 +142,40 @@ impl HeldControls {
             self.pressed &= !mask;
         }
         self.pressed != previous
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn keyboard_event(&mut self, key: &Key, state: ElementState, repeat: bool, captured: bool) -> Option<(KeyBinding, bool)> {
+        let binding = KeyBinding::from_key(key)?;
+        if state == ElementState::Released {
+            let changed = match binding {
+                KeyBinding::Movement(key) => self.set_pressed(key, false),
+                _ => false,
+            };
+            return Some((binding, changed));
+        }
+        if repeat {
+            return Some((binding, false));
+        }
+        if captured {
+            return None;
+        }
+        let changed = match binding {
+            KeyBinding::Movement(key) => self.set_pressed(key, true),
+            KeyBinding::ToggleFlying => {
+                self.toggle_flying();
+                true
+            }
+            KeyBinding::ToggleRun => {
+                self.toggle_run();
+                true
+            }
+            KeyBinding::Stop => {
+                self.stop();
+                true
+            }
+        };
+        Some((binding, changed))
     }
 
     pub(crate) fn toggle_flying(&mut self) {
@@ -208,6 +267,7 @@ impl HeldControls {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl BodyRotation {
     pub(crate) fn update(&mut self, authoritative: Option<Quat>, yaw: f32, now: Instant) -> Quat {
         if let Some(rotation) = authoritative {
@@ -234,7 +294,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use math::Quat;
-    use winit::keyboard::Key;
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    use winit::{event::ElementState, keyboard::Key};
 
     use super::{AT_NEG, AT_POS, FAST_AT, FAST_LEFT, FAST_UP, FLY, LEFT_NEG, LEFT_POS, STOP, UP_NEG, UP_POS, YAW_NEG, YAW_POS};
     use super::{BodyRotation, HeldControls, KeyBinding, MovementKey};
@@ -265,6 +326,24 @@ mod tests {
         controls.set_pressed(MovementKey::Forward, true);
         controls.set_pressed(MovementKey::BackwardArrow, true);
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, AT_POS | AT_NEG | FAST_AT);
+    }
+
+    #[test]
+    fn v_is_not_a_camera_mode_toggle() {
+        assert_eq!(KeyBinding::from_key(&Key::Character("v".into())), None);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn captured_press_does_not_move() {
+        let mut controls = HeldControls::default();
+        let key = Key::Character("w".into());
+        assert_eq!(controls.keyboard_event(&key, ElementState::Pressed, false, true), None);
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
+
+        controls.keyboard_event(&key, ElementState::Pressed, false, false).expect("forward press");
+        controls.keyboard_event(&key, ElementState::Released, false, true).expect("forward release");
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
     }
 
     #[test]

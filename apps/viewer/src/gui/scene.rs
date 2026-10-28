@@ -7,6 +7,8 @@ use gpui_component::{Root, Theme};
 use render::scene::Camera;
 use tokio::sync::watch;
 use uuid::Uuid;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use world::WorldPose;
 
 use crate::{
     agent_movement::MovementObservation,
@@ -76,6 +78,7 @@ pub(crate) fn start_session(
     agent_id: Uuid,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
+    arrival_pose: watch::Receiver<Option<WorldPose>>,
     cx: &mut App,
 ) {
     if start_scene(generation, cx) {
@@ -85,6 +88,7 @@ pub(crate) fn start_session(
             agent_id,
             camera,
             movement,
+            arrival_pose,
             cx,
         );
     }
@@ -113,6 +117,8 @@ fn start_scene(generation: u64, cx: &mut App) -> bool {
     if !cx.has_global::<AppLifecycle>() || cx.global::<AppLifecycle>().scene.main.blocks_start(generation) {
         return false;
     }
+    let login_window = cx.global::<AppLifecycle>().login_window;
+    let activate = login_window.is_some_and(|window| window.update(cx, |_, window, _| window.is_window_active()).unwrap_or(false));
     if cx.global::<AppLifecycle>().scene.viewport.is_none() {
         match Viewport::start() {
             Ok((viewport, mut events)) => {
@@ -139,7 +145,7 @@ fn start_scene(generation: u64, cx: &mut App) -> bool {
     }
     let lifecycle = cx.global_mut::<AppLifecycle>();
     lifecycle.scene.main = MainWindow::Starting(generation);
-    if !lifecycle.scene.viewport.as_ref().is_some_and(|viewport| viewport.show(generation)) {
+    if !lifecycle.scene.viewport.as_ref().is_some_and(|viewport| viewport.show(generation, activate)) {
         cx.defer(move |cx| scene_failed(generation, ViewportError::WorkerUnavailable, cx));
         return false;
     }
@@ -152,6 +158,7 @@ fn connect_world(
     agent_id: Uuid,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
+    arrival_pose: watch::Receiver<Option<WorldPose>>,
     cx: &mut App,
 ) {
     let lifecycle = cx.global::<AppLifecycle>();
@@ -159,7 +166,7 @@ fn connect_world(
         && lifecycle.scene.main.is_current(generation)
         && let Some(viewport) = &lifecycle.scene.viewport
     {
-        viewport.connect_world(generation, sources, agent_id, camera, movement, service_runtime(cx));
+        viewport.connect_world(generation, sources, agent_id, camera, movement, arrival_pose, service_runtime(cx));
     }
 }
 

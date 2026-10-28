@@ -20,7 +20,6 @@ struct Transition {
 pub(crate) struct OrbitCamera {
     focus: DVec3,
     offset: DVec3,
-    home: DVec3,
     minimum: f64,
     transition: Option<Transition>,
     pub(crate) draw_distance: f32,
@@ -52,12 +51,16 @@ impl OrbitCamera {
         Self {
             focus: position,
             offset: DVec3::new(-4.0, 0.0, 2.0),
-            home: position,
             minimum: 0.5,
             transition: None,
             draw_distance: DEFAULT_DRAW_DISTANCE,
             lod_factor: 1.0,
         }
+    }
+
+    pub(crate) fn from_follow_pose(pose: WorldPose, draw_distance: f32, lod_factor: f32) -> Self {
+        let (position, focus) = FollowCamera::position_and_focus(pose);
+        Self { focus, offset: position - focus, minimum: 0.5, transition: None, draw_distance, lod_factor }
     }
 
     pub(crate) fn scene_camera(&self, viewport: [u32; 2], now: Instant) -> Option<scene::Camera> {
@@ -89,13 +92,6 @@ impl OrbitCamera {
             self.offset = offset;
             self.minimum = 0.02;
         }
-    }
-
-    pub(crate) fn reset(&mut self) {
-        let (draw_distance, lod_factor) = (self.draw_distance, self.lod_factor);
-        *self = Self::new(self.home);
-        self.draw_distance = draw_distance;
-        self.lod_factor = lod_factor;
     }
 
     pub(crate) fn drag(&mut self, delta: [f64; 2], width: f64, control: bool, shift: bool) {
@@ -142,6 +138,18 @@ mod tests {
         let (position, focus) = FollowCamera::position_and_focus(pose);
         assert!((position - (pose.position + DVec3::new(0.0, -3.0, 0.75))).length() < 1e-6);
         assert!((focus - (pose.position + DVec3::new(0.0, 1.0, 1.0))).length() < 1e-6);
+    }
+
+    #[test]
+    fn detaching_from_follow_preserves_the_live_view() {
+        let pose = WorldPose { position: DVec3::new(1280.0, -256.0, 45.0), rotation: math::Quat::from_rotation_z(0.7) };
+        let now = Instant::now();
+        let follow = FollowCamera::scene_camera(pose, [1280, 720], 512.0, 1.5).expect("valid follow camera");
+        let free = OrbitCamera::from_follow_pose(pose, 512.0, 1.5).scene_camera([1280, 720], now).expect("valid free camera");
+
+        assert!(free.position().distance(follow.position()) < 1e-9);
+        assert!(free.direction().distance(follow.direction()) < 1e-6);
+        assert_eq!(free.draw_distance(), follow.draw_distance());
     }
 
     #[test]
@@ -214,7 +222,5 @@ mod tests {
         camera.lod_factor = 2.0;
         camera.zoom(1e6);
         assert!((camera.offset.length() - 31.0).abs() < 1e-10);
-        camera.reset();
-        assert_eq!((camera.draw_distance, camera.lod_factor), (32.0, 2.0));
     }
 }

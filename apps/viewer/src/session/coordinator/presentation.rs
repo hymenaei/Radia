@@ -11,6 +11,8 @@ use network::{AgentSession, Grid, MfaChallenge};
 use render::scene::Camera;
 use tokio::sync::watch;
 use uuid::Uuid;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use world::WorldPose;
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::{
@@ -146,6 +148,8 @@ pub(crate) struct SessionReadyUpdate {
     pub(crate) camera: watch::Sender<Option<Camera>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) movement: watch::Sender<Option<MovementObservation>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) arrival_pose: watch::Receiver<Option<WorldPose>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,

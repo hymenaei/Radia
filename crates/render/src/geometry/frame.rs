@@ -16,9 +16,8 @@ use crate::geometry::{
     instance::{instance_base, is_visible, packed_instance},
 };
 use crate::material::{FaceMaterial, FaceParams};
-use crate::pipeline::{COLOR, Pipeline, TexturePair, blend_keys};
+use crate::pipeline::{Pipeline, TexturePair, blend_keys};
 use crate::scene::{Camera, Placement, PreparedMesh, SceneView, SurfaceKind, texture_animation};
-use crate::texture::TextureKey;
 
 #[derive(Clone, Copy, Default)]
 struct EnvironmentPairs {
@@ -508,7 +507,10 @@ mod tests {
             ("conversion admission", TextureState { jobs: 1, ..state }),
             ("soft cap change", TextureState { cap: 64 * 1024 * 1024, ..state }),
         ] {
-            assert!(prepared.needs_frame(changed, crate::texture::GeometryTextureState::default(), MeshState::default()), "{reason} must allow preparation to progress");
+            assert!(
+                prepared.needs_frame(changed, crate::texture::GeometryTextureState::default(), MeshState::default()),
+                "{reason} must allow preparation to progress"
+            );
             assert!(prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default()));
         }
         assert!(
@@ -547,10 +549,19 @@ mod tests {
             animated_faces: false,
         };
 
-        assert!(!prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default()), "a static scene needs no frame after preparation");
+        assert!(
+            !prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default()),
+            "a static scene needs no frame after preparation"
+        );
         prepared.animated_faces = true;
-        assert!(prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default()), "a visible animated face keeps the frame scheduler active");
+        assert!(
+            prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default()),
+            "a visible animated face keeps the frame scheduler active"
+        );
         prepared.animated_faces = false;
-        assert!(!prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default()), "removing the final visible animated face stops redraws");
+        assert!(
+            !prepared.needs_frame(state, crate::texture::GeometryTextureState::default(), MeshState::default()),
+            "removing the final visible animated face stops redraws"
+        );
     }
 }

@@ -278,7 +278,7 @@ impl SceneWindow {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let was_free = self.camera_mode == CameraMode::Free;
-                let seated = self.feed.as_ref().is_some_and(SceneFeed::agent_is_seated);
+                let seated = self.feed.as_mut().is_some_and(SceneFeed::agent_is_seated);
                 let Some(changed) = handle_keyboard_input(
                     &mut self.controls,
                     &mut self.camera_mode,
@@ -489,7 +489,7 @@ impl SceneWindow {
         let now = Instant::now();
         let (pose, seed) = self.agent_pose_and_seed_at(now);
         self.ensure_camera(pose);
-        let seated = self.feed.as_ref().is_some_and(SceneFeed::agent_is_seated);
+        let seated = self.feed.as_mut().is_some_and(SceneFeed::agent_is_seated);
         let body_rotation = self.body_rotation.update(seed, if seated { 0.0 } else { self.controls.yaw(self.modifiers.shift_key()) }, now);
         let rotation = if seated { pose.map_or(body_rotation, |pose| pose.rotation) } else { body_rotation };
         let movement: MovementObservation = self.controls.observation(self.modifiers.shift_key(), rotation);
@@ -741,7 +741,7 @@ impl SceneWindow {
                 let active_motion = self.controls.active() || self.stop_clear_pending;
                 self.dirty |= !presented
                     || active_motion
-                    || self.feed.as_ref().is_some_and(|feed| feed.agent_motion_active(Instant::now()))
+                    || self.feed.as_mut().is_some_and(|feed| feed.agent_motion_active(Instant::now()))
                     || (self.camera_mode == CameraMode::Follow
                         && agent_pose.is_some_and(|agent_pose| self.follow_camera.moving(agent_pose, Instant::now())))
                     || (self.camera_mode == CameraMode::Free && self.camera.as_ref().is_some_and(|camera| camera.moving(Instant::now())));

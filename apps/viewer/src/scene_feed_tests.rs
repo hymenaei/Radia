@@ -521,11 +521,11 @@ async fn pending_parent_does_not_block_flight() {
 
     let camera = SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) };
     sit_response_sender.send_replace(Some(SitResponseState { object_id: seat_id, accepted: true, camera_override: Some(camera) }));
-    feed.drain().unwrap();
     assert!(feed.agent_is_seated(), "an accepted response blocks flight until World confirms the parent");
     let mut seated_controls = HeldControls::default();
     assert!(!seated_controls.toggle_flying(feed.agent_is_seated()));
     assert_eq!(seated_controls.observation(false, Quat::IDENTITY).control_flags, 0);
+    feed.drain().unwrap();
     assert_eq!(feed.sit_camera_pose(), None, "an unresolved parent does not produce a seat camera pose");
 
     let mut seat = ObjectObservation::new(

@@ -254,12 +254,13 @@ impl SceneFeed {
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    pub(crate) fn agent_motion_active(&self, now: Instant) -> bool {
+    pub(crate) fn agent_motion_active(&mut self, now: Instant) -> bool {
         !self.agent_is_seated() && self.dead_reckoning.active(now)
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    pub(crate) fn agent_is_seated(&self) -> bool {
+    pub(crate) fn agent_is_seated(&mut self) -> bool {
+        self.update_sit_response();
         self.accepted_sit_response.is_some()
             || self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_)))
     }

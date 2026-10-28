@@ -95,11 +95,8 @@ pub(crate) fn decode_sit_response(message: &Message) -> Option<SitResponseUpdate
         (position.is_finite() && rotation.is_finite() && rotation.length_squared() > 0.0).then_some(SitTarget { position, rotation })
     });
     let camera_override = transform.camera_eye_offset.zip(transform.camera_at_offset).and_then(|(eye_offset, at_offset)| {
-        (eye_offset.is_finite() && at_offset.is_finite() && eye_offset.distance(at_offset) > 0.001).then_some(SitCameraOverride {
-            object_id,
-            eye_offset,
-            at_offset,
-        })
+        (eye_offset.is_finite() && at_offset.is_finite() && eye_offset.distance(at_offset) > 0.001)
+            .then_some(SitCameraOverride { eye_offset, at_offset })
     });
 
     Some(SitResponseUpdate {
@@ -214,7 +211,9 @@ mod tests {
         .expect("sit response");
         assert!(response.auto_pilot);
         assert!(response.force_mouselook);
-        assert_eq!(response.camera_override.unwrap().object_id, Uuid::from_u128(7));
+        let camera = response.camera_override.unwrap();
+        assert_eq!(camera.eye_offset, Vec3::X);
+        assert_eq!(camera.at_offset, Vec3::Y);
     }
 
     #[test]

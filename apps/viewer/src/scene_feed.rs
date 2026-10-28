@@ -30,7 +30,7 @@ use world::{
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::{AssetHandle, RequestError},
-    session::{AgentMotionSample, EnvironmentInbox, SitCameraOverride},
+    session::{AcceptedSitResponse, AgentMotionSample, EnvironmentInbox, SitCameraOverride},
     world_reader::{ReadError, WorldReader},
 };
 
@@ -132,7 +132,8 @@ pub(crate) struct SceneFeed {
     motion_source_seated: Option<bool>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pose_seed: u64,
-    sit_camera: watch::Receiver<Option<SitCameraOverride>>,
+    sit_response: watch::Receiver<Option<AcceptedSitResponse>>,
+    accepted_sit_response: Option<Uuid>,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
@@ -145,7 +146,7 @@ impl SceneFeed {
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
         mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
-        sit_camera: watch::Receiver<Option<SitCameraOverride>>,
+        sit_response: watch::Receiver<Option<AcceptedSitResponse>>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
@@ -158,7 +159,8 @@ impl SceneFeed {
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
         let agent_motions = agent_motion.clone();
-        let camera_updates = sit_camera.clone();
+        let sit_response_updates = sit_response.clone();
+        let accepted_sit_response = (*sit_response.borrow()).map(|response| response.object_id);
         let mut dead_reckoning = DeadReckoning::default();
         dead_reckoning.replace(*agent_motion.borrow_and_update());
         drop(
@@ -173,7 +175,7 @@ impl SceneFeed {
                         cancelled,
                         observations,
                         agent_motions,
-                        camera_updates,
+                        sit_response_updates,
                         wake,
                     )
                     .in_current_span(),
@@ -201,7 +203,8 @@ impl SceneFeed {
             motion_source_seated: None,
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             pose_seed: 0,
-            sit_camera,
+            sit_response,
+            accepted_sit_response,
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -255,10 +258,13 @@ impl SceneFeed {
         !self.agent_is_seated() && self.dead_reckoning.active(now)
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn agent_is_seated(&self) -> bool {
-        self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_) | Parent::Pending { .. }))
+        self.accepted_sit_response.is_some()
+            || self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_)))
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     fn agent(&self) -> Option<&Object> {
         self.agent.and_then(|entity| self.view.object(entity))
     }
@@ -328,12 +334,14 @@ impl SceneFeed {
         self.motion_active.retain(|region, _| regions.contains(region));
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn sit_camera_pose(&self) -> Option<(SitCameraOverride, WorldPose)> {
-        let camera = (*self.sit_camera.borrow())?;
+        let response = (*self.sit_response.borrow())?;
+        let camera = response.camera_override?;
         let agent = self.agent()?;
         let Parent::Resolved(seat_entity) = agent.detail().summary.parent else { return None };
         let seat = self.view.object(seat_entity)?;
-        if seat.detail().summary.id != camera.object_id {
+        if seat.detail().summary.id != response.object_id {
             return None;
         }
         let pose = match seat.detail().world_transform.ok()? {
@@ -379,6 +387,7 @@ impl SceneFeed {
     pub(crate) fn drain(&mut self) -> Result<(), ApplyError> {
         if self.view.status() == render::scene::Status::Closed {
             self.agent = None;
+            self.accepted_sit_response = None;
             self.water_height = None;
             self.incoming.close();
             while let Ok(batch) = self.incoming.try_recv() {
@@ -399,7 +408,17 @@ impl SceneFeed {
                 tracing::info!(status = ?self.view.status(), objects = self.view.object_count(), regions = self.view.region_count(), patches = self.view.patch_count(), revision = self.view.revision().map(|r| r.get()), "scene reconciliation status changed");
             }
         }
+        self.update_sit_response();
         Ok(())
+    }
+
+    fn update_sit_response(&mut self) {
+        if self.sit_response.has_changed().is_ok_and(|changed| changed) {
+            self.accepted_sit_response = (*self.sit_response.borrow_and_update()).map(|response| response.object_id);
+        }
+        if self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_))) {
+            self.accepted_sit_response = None;
+        }
     }
 }
 
@@ -527,7 +546,7 @@ async fn run(
     cancelled: oneshot::Receiver<()>,
     mut camera: watch::Receiver<Option<Camera>>,
     mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
-    mut sit_camera: watch::Receiver<Option<SitCameraOverride>>,
+    mut sit_response: watch::Receiver<Option<AcceptedSitResponse>>,
     wake: impl Fn(),
 ) {
     let SceneSources { mut reader, assets, environments, motion_circuits } = sources;
@@ -593,7 +612,7 @@ async fn run(
             let moved = camera.changed().fuse();
             let motion_updated = agent_motion.changed().fuse();
             let circuit_transition = motion_circuits.wait_for_transition().fuse();
-            let camera_overridden = sit_camera.changed().fuse();
+            let camera_overridden = sit_response.changed().fuse();
             let available = assets.next().fuse();
             let released = textures.changed().fuse();
             let timer = async {

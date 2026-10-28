@@ -45,8 +45,8 @@ use crate::{
     inventory::{InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError, MoveExpectation},
     remembered_login::{self, RememberedLogin},
     session::{
-        AgentControlEvent, AgentControlHandle, AgentControlState, AgentMotionPublisher, CameraUplink, RegionLookup, Session,
-        SessionHandle, SitCameraOverride, SitOutcome,
+        AcceptedSitResponse, AgentControlEvent, AgentControlHandle, AgentControlState, AgentMotionPublisher, CameraUplink, RegionLookup,
+        Session, SessionHandle, SitOutcome,
         agent_control::{AgentControlError, Command as AgentControlCommand},
         environment::{Completion, EnvironmentIntake},
         inbound::{decode_sit_response, object_media_requests},
@@ -193,7 +193,7 @@ struct SessionDriver {
     region_motion_sender: watch::Sender<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
     agent_control: AgentControlState,
     agent_control_handle: AgentControlHandle,
-    sit_camera: watch::Receiver<Option<SitCameraOverride>>,
+    sit_response: watch::Receiver<Option<AcceptedSitResponse>>,
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
     recovery: RecoveryIntake,
@@ -225,7 +225,7 @@ impl SessionDriver {
         let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone(), cache);
         let camera = CameraUplink::new();
         let (region_motion_sender, _) = watch::channel(Vec::new());
-        let (agent_control_handle, agent_control, sit_camera) = AgentControlState::new();
+        let (agent_control_handle, agent_control, sit_response) = AgentControlState::new();
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
         let (inventory_changes, _) = watch::channel(None);
@@ -283,7 +283,7 @@ impl SessionDriver {
             region_motion_sender,
             agent_control,
             agent_control_handle,
-            sit_camera,
+            sit_response,
             region_lookup: None,
             media,
             recovery,
@@ -887,7 +887,7 @@ impl SessionDriver {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             world_reader: self.reads.reader(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
-            sit_camera: self.sit_camera.clone(),
+            sit_response: self.sit_response.clone(),
         }));
     }
 
@@ -1117,7 +1117,7 @@ async fn process_agent_control_command<T: SitTransport>(
                 return;
             }
             agent_control.cancel_sit(SitOutcome::Cancelled);
-            agent_control.clear_camera_override();
+            agent_control.clear_sit_response();
             camera.request_action(crate::agent_movement::MovementAction::SitOnGround);
             if reply.send(Ok(())).is_err() {
                 tracing::trace!("ground-sit caller stopped before receiving the queued outcome");
@@ -1131,7 +1131,7 @@ async fn process_agent_control_command<T: SitTransport>(
                 return;
             }
             agent_control.cancel_sit(SitOutcome::Cancelled);
-            agent_control.clear_camera_override();
+            agent_control.clear_sit_response();
             camera.request_action(crate::agent_movement::MovementAction::StandUp);
             if reply.send(Ok(())).is_err() {
                 tracing::trace!("stand-up caller stopped before receiving the queued outcome");

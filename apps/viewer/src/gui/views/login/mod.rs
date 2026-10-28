@@ -607,7 +607,7 @@ impl LoginScreen {
             ready.movement,
             ready.agent_motion,
             ready.motion_circuits,
-            ready.sit_camera,
+            ready.sit_response,
             cx,
         );
     }

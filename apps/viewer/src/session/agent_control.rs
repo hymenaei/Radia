@@ -87,9 +87,14 @@ impl AgentControlHandle {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SitCameraOverride {
-    pub(crate) object_id: Uuid,
     pub(crate) eye_offset: Vec3,
     pub(crate) at_offset: Vec3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AcceptedSitResponse {
+    pub(crate) object_id: Uuid,
+    pub(crate) camera_override: Option<SitCameraOverride>,
 }
 
 #[derive(Debug)]
@@ -115,14 +120,14 @@ struct PendingSit {
 pub(crate) struct AgentControlState {
     commands: mpsc::Receiver<Command>,
     pending_sit: Option<PendingSit>,
-    camera_override: watch::Sender<Option<SitCameraOverride>>,
+    sit_response: watch::Sender<Option<AcceptedSitResponse>>,
 }
 
 impl AgentControlState {
-    pub(crate) fn new() -> (AgentControlHandle, Self, watch::Receiver<Option<SitCameraOverride>>) {
+    pub(crate) fn new() -> (AgentControlHandle, Self, watch::Receiver<Option<AcceptedSitResponse>>) {
         let (sender, commands) = mpsc::channel(COMMAND_CAPACITY);
-        let (camera_override, camera_updates) = watch::channel(None);
-        (AgentControlHandle { commands: sender }, Self { commands, pending_sit: None, camera_override }, camera_updates)
+        let (sit_response, sit_updates) = watch::channel(None);
+        (AgentControlHandle { commands: sender }, Self { commands, pending_sit: None, sit_response }, sit_updates)
     }
 
     pub(crate) async fn next_event(&mut self) -> AgentControlEvent {
@@ -168,12 +173,12 @@ impl AgentControlState {
         if !self.pending_sit.as_ref().is_some_and(|pending| pending.simulator == simulator && pending.object_id == object_id) {
             return false;
         }
+        self.set_sit_response(Some(AcceptedSitResponse { object_id, camera_override }));
         if let Some(pending) = self.pending_sit.take()
             && pending.reply.send(Ok(SitOutcome::Accepted { auto_pilot, force_mouselook })).is_err()
         {
             tracing::trace!("sit caller stopped before receiving acceptance");
         }
-        self.set_camera_override(camera_override);
         true
     }
 
@@ -209,8 +214,8 @@ impl AgentControlState {
         }
     }
 
-    pub(crate) fn clear_camera_override(&self) {
-        self.set_camera_override(None);
+    pub(crate) fn clear_sit_response(&self) {
+        self.set_sit_response(None);
     }
 
     fn complete_sit(&mut self, simulator: SimulatorId, outcome: Result<SitOutcome, AgentControlError>) -> bool {
@@ -225,12 +230,12 @@ impl AgentControlState {
         true
     }
 
-    fn set_camera_override(&self, camera_override: Option<SitCameraOverride>) {
-        self.camera_override.send_if_modified(|previous| {
-            if *previous == camera_override {
+    fn set_sit_response(&self, response: Option<AcceptedSitResponse>) {
+        self.sit_response.send_if_modified(|previous| {
+            if *previous == response {
                 false
             } else {
-                *previous = camera_override;
+                *previous = response;
                 true
             }
         });

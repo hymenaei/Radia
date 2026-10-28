@@ -335,7 +335,7 @@ async fn cache_restore_move_resolves_pending_inventory_edit() {
 #[tokio::test]
 async fn unrelated_alert_preserves_pending_sit() {
     use crate::{
-        session::{AgentControlEvent, AgentControlState, CameraUplink, SitCameraOverride, SitOutcome},
+        session::{AcceptedSitResponse, AgentControlEvent, AgentControlState, CameraUplink, SitCameraOverride, SitOutcome},
         test_helpers::simulator_id,
     };
 
@@ -378,7 +378,10 @@ async fn unrelated_alert_preserves_pending_sit() {
     assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: true, force_mouselook: false }));
     assert_eq!(
         *camera_updates.borrow(),
-        Some(SitCameraOverride { object_id, eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) })
+        Some(AcceptedSitResponse {
+            object_id,
+            camera_override: Some(SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) }),
+        })
     );
 }
 

@@ -12,7 +12,7 @@ use render::scene::Camera;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::session::agent_control::{AgentControlHandle, SitCameraOverride};
+use crate::session::agent_control::{AcceptedSitResponse, AgentControlHandle};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::{
     agent_movement::MovementObservation,
@@ -181,7 +181,7 @@ pub(crate) struct SessionReadyUpdate {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) world_reader: WorldReader,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    pub(crate) sit_camera: watch::Receiver<Option<SitCameraOverride>>,
+    pub(crate) sit_response: watch::Receiver<Option<AcceptedSitResponse>>,
 }
 
 pub(crate) struct FavoritesUpdate {

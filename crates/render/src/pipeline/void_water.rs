@@ -187,6 +187,9 @@ fn append<const N: usize>(target: &mut [f32; VOID_WATER_UNIFORM_FLOATS], offset:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use math::{DVec3, Vec3};
+
+    use crate::pipeline::projection;
 
     #[test]
     fn relative_height_keeps_both_sides() {
@@ -194,5 +197,15 @@ mod tests {
         assert_eq!(relative_water_height(Some(5.0), 10.0), Some(-5.0));
         assert_eq!(relative_water_height(Some(10.0), 10.0), None);
         assert_eq!(relative_water_height(None, 10.0), None);
+    }
+
+    #[test]
+    fn inverse_view_projection_returns_world_space_water_ray() {
+        let direction = Vec3::new(1.0, 0.25, -1.0).normalize();
+        let camera = Camera::new(DVec3::new(128.0, 64.0, 60.0), direction, 1.0, [1280, 720]).unwrap();
+        let inverse = projection(camera, [1280, 720]).inverse();
+        let near = inverse * Vec4::new(0.0, 0.0, 1.0, 1.0);
+        let world_direction = (near.truncate() / near.w).normalize();
+        assert!((world_direction - camera.direction()).length() < 0.00001);
     }
 }

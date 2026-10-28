@@ -30,7 +30,30 @@ const DEFAULT_SOFT_CAP: usize = 1024 * 1024 * 1024;
 const STAGING_BYTES: usize = 48 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_JOBS: usize = 2;
-const MIP_VIEW_FORMATS: [TextureFormat; 1] = [TextureFormat::Rgba8Unorm];
+const RGBA8_VIEW_FORMATS: [TextureFormat; 1] = [TextureFormat::Rgba8Unorm];
+const BC1_VIEW_FORMATS: [TextureFormat; 1] = [TextureFormat::Bc1RgbaUnorm];
+const BC3_VIEW_FORMATS: [TextureFormat; 1] = [TextureFormat::Bc3RgbaUnorm];
+const BC7_VIEW_FORMATS: [TextureFormat; 1] = [TextureFormat::Bc7RgbaUnorm];
+
+fn raw_channel_view_format(format: TextureFormat) -> TextureFormat {
+    match format {
+        TextureFormat::Rgba8UnormSrgb => TextureFormat::Rgba8Unorm,
+        TextureFormat::Bc1RgbaUnormSrgb => TextureFormat::Bc1RgbaUnorm,
+        TextureFormat::Bc3RgbaUnormSrgb => TextureFormat::Bc3RgbaUnorm,
+        TextureFormat::Bc7RgbaUnormSrgb => TextureFormat::Bc7RgbaUnorm,
+        format => format,
+    }
+}
+
+fn raw_channel_view_formats(format: TextureFormat) -> &'static [TextureFormat] {
+    match format {
+        TextureFormat::Rgba8UnormSrgb => &RGBA8_VIEW_FORMATS,
+        TextureFormat::Bc1RgbaUnormSrgb => &BC1_VIEW_FORMATS,
+        TextureFormat::Bc3RgbaUnormSrgb => &BC3_VIEW_FORMATS,
+        TextureFormat::Bc7RgbaUnormSrgb => &BC7_VIEW_FORMATS,
+        _ => &[],
+    }
+}
 
 #[derive(Default)]
 struct Accounting {
@@ -202,6 +225,7 @@ pub(crate) struct TextureKey {
 struct GpuTexture {
     texture: Texture,
     view: TextureView,
+    water_view: TextureView,
     bindings: HashMap<Sampler, BindGroup>,
     charge: GpuCharge,
 }
@@ -278,6 +302,7 @@ pub(crate) struct Textures {
     pub(crate) water_sampler: wgpu::Sampler,
     fallback: BindGroup,
     fallback_view: TextureView,
+    fallback_water_view: TextureView,
     mip_layout: BindGroupLayout,
     mip_pipeline: RenderPipeline,
     pub(crate) uploaded: usize,
@@ -360,7 +385,7 @@ impl Textures {
             dimension: TextureDimension::D2,
             format: TextureFormat::Rgba8UnormSrgb,
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-            view_formats: &[],
+            view_formats: raw_channel_view_formats(TextureFormat::Rgba8UnormSrgb),
         });
         queue.write_texture(
             texture.as_image_copy(),
@@ -369,6 +394,10 @@ impl Textures {
             Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
         let fallback_view = texture.create_view(&TextureViewDescriptor::default());
+        let fallback_water_view = texture.create_view(&TextureViewDescriptor {
+            format: Some(raw_channel_view_format(TextureFormat::Rgba8UnormSrgb)),
+            ..Default::default()
+        });
         let fallback = binding_with_sampler(device, &layout, &fallback_view, &default_sampler);
         let mip_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Mipmap source"),
@@ -431,6 +460,7 @@ impl Textures {
             water_sampler,
             fallback,
             fallback_view,
+            fallback_water_view,
             mip_layout,
             mip_pipeline,
             uploaded: 0,
@@ -640,6 +670,18 @@ impl Textures {
         .unwrap_or(&self.fallback_view)
     }
 
+    pub(crate) fn water_view(&self, key: Option<TextureKey>) -> &TextureView {
+        key.and_then(|key| {
+            let entry = self.entries.get(&key.id)?;
+            let gpu = match &entry.state {
+                TextureUploadState::Ready(gpu) => gpu,
+                _ => entry.fallback.as_ref()?,
+            };
+            Some(&gpu.water_view)
+        })
+        .unwrap_or(&self.fallback_water_view)
+    }
+
     pub(crate) fn view_state(&self, key: Option<TextureKey>) -> Option<TextureViewState> {
         let key = key?;
         Some(self.entries.get(&key.id).map_or(TextureViewState::default(), |entry| TextureViewState {
@@ -650,11 +692,11 @@ impl Textures {
     }
 
     pub(crate) fn pair_binding(&self, device: &Device, first: Option<TextureKey>, second: Option<TextureKey>) -> BindGroup {
-        self.pair_binding_with_sampler(device, first, second, &self.default_sampler)
+        self.pair_binding_with_sampler(device, first, second, &self.default_sampler, false)
     }
 
     pub(crate) fn water_pair_binding(&self, device: &Device, first: Option<TextureKey>, second: Option<TextureKey>) -> BindGroup {
-        self.pair_binding_with_sampler(device, first, second, &self.water_sampler)
+        self.pair_binding_with_sampler(device, first, second, &self.water_sampler, true)
     }
 
     fn pair_binding_with_sampler(
@@ -663,13 +705,16 @@ impl Textures {
         first: Option<TextureKey>,
         second: Option<TextureKey>,
         sampler: &wgpu::Sampler,
+        raw_channels: bool,
     ) -> BindGroup {
+        let first_view = if raw_channels { self.water_view(first) } else { self.view(first) };
+        let second_view = if raw_channels { self.water_view(second) } else { self.view(second) };
         device.create_bind_group(&BindGroupDescriptor {
             label: Some("Texture pair"),
             layout: &self.pair_layout,
             entries: &[
-                BindGroupEntry { binding: 0, resource: BindingResource::TextureView(self.view(first)) },
-                BindGroupEntry { binding: 1, resource: BindingResource::TextureView(self.view(second)) },
+                BindGroupEntry { binding: 0, resource: BindingResource::TextureView(first_view) },
+                BindGroupEntry { binding: 1, resource: BindingResource::TextureView(second_view) },
                 BindGroupEntry { binding: 2, resource: BindingResource::Sampler(sampler) },
             ],
         })
@@ -909,6 +954,18 @@ mod tests {
         assert_eq!(allocation_bytes(&array), Some(1020));
         array.sample_count = 4;
         assert_eq!(allocation_bytes(&array), Some(4080));
+    }
+
+    #[test]
+    fn normal_maps_use_raw_channel_views() {
+        for (srgb, raw) in [
+            (TextureFormat::Rgba8UnormSrgb, TextureFormat::Rgba8Unorm),
+            (TextureFormat::Bc1RgbaUnormSrgb, TextureFormat::Bc1RgbaUnorm),
+            (TextureFormat::Bc3RgbaUnormSrgb, TextureFormat::Bc3RgbaUnorm),
+            (TextureFormat::Bc7RgbaUnormSrgb, TextureFormat::Bc7RgbaUnorm),
+        ] {
+            assert_eq!(raw_channel_view_format(srgb), raw);
+        }
     }
 
     #[test]

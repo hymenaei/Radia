@@ -283,8 +283,8 @@ impl SurfacePipelines {
                     BindGroupEntry { binding: 0, resource: BindingResource::Buffer(self.camera.as_entire_buffer_binding()) },
                     BindGroupEntry { binding: 1, resource: BindingResource::Buffer(self.atmosphere.as_entire_buffer_binding()) },
                     BindGroupEntry { binding: 2, resource: BindingResource::Buffer(self.region_water_uniform.as_entire_buffer_binding()) },
-                    BindGroupEntry { binding: 3, resource: BindingResource::TextureView(textures.view(normal_map.current)) },
-                    BindGroupEntry { binding: 4, resource: BindingResource::TextureView(textures.view(normal_map.next)) },
+                    BindGroupEntry { binding: 3, resource: BindingResource::TextureView(textures.water_view(normal_map.current)) },
+                    BindGroupEntry { binding: 4, resource: BindingResource::TextureView(textures.water_view(normal_map.next)) },
                     BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&textures.water_sampler) },
                 ],
             });

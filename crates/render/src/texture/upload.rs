@@ -1,9 +1,9 @@
 use super::{
     BindGroupDescriptor, BindGroupEntry, BindingResource, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, Color,
-    CommandEncoder, Device, Extent3d, GpuCharge, GpuTexture, HashMap, LoadOp, MIP_VIEW_FORMATS, Operations, Origin3d,
-    RenderPassColorAttachment, RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo,
-    TextureDescriptor, TextureDimension, TextureEntry, TextureFormat, TextureUploadState, TextureUsages, TextureViewDescriptor, Textures,
-    UPLOAD_BYTES, Upload, UploadData, mip_count,
+    CommandEncoder, Device, Extent3d, GpuCharge, GpuTexture, HashMap, LoadOp, Operations, Origin3d, RenderPassColorAttachment,
+    RenderPassDescriptor, StoreOp, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, TextureDescriptor, TextureDimension,
+    TextureEntry, TextureFormat, TextureUploadState, TextureUsages, TextureViewDescriptor, Textures, UPLOAD_BYTES, Upload, UploadData,
+    mip_count, raw_channel_view_format, raw_channel_view_formats,
 };
 
 impl Textures {
@@ -30,21 +30,24 @@ impl Textures {
         for (id, size) in prepared {
             let entry = self.entries.remove(&id).expect("prepared texture");
             let TextureUploadState::Prepared(pixels) = entry.state else { unreachable!("prepared texture") };
+            let format = pixels.format();
             let descriptor = TextureDescriptor {
                 label: Some("Scene image"),
                 size: Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
                 mip_level_count: mip_count(size),
                 sample_count: 1,
                 dimension: TextureDimension::D2,
-                format: pixels.format(),
+                format,
                 usage: TextureUsages::TEXTURE_BINDING
                     | TextureUsages::COPY_DST
                     | if matches!(pixels.data, UploadData::Rgba(_)) { TextureUsages::RENDER_ATTACHMENT } else { TextureUsages::empty() },
-                view_formats: if matches!(&pixels.data, UploadData::Rgba(_)) { &MIP_VIEW_FORMATS } else { &[] },
+                view_formats: raw_channel_view_formats(format),
             };
             let charge = GpuCharge::new(self.memory.clone(), self.cap_bytes.clone(), &descriptor);
             let texture = device.create_texture(&descriptor);
             let view = texture.create_view(&TextureViewDescriptor::default());
+            let water_view =
+                texture.create_view(&TextureViewDescriptor { format: Some(raw_channel_view_format(format)), ..Default::default() });
             self.entries.insert(
                 id,
                 TextureEntry {
@@ -55,7 +58,7 @@ impl Textures {
                     evicted: false,
                     geometry: entry.geometry,
                     state: TextureUploadState::Uploading {
-                        gpu: GpuTexture { texture, view, bindings: HashMap::new(), charge },
+                        gpu: GpuTexture { texture, view, water_view, bindings: HashMap::new(), charge },
                         pixels,
                         row: 0,
                         mip: 0,

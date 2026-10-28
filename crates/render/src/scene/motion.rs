@@ -186,7 +186,12 @@ fn linear_position(sample: MotionSample, state: MotionState, now: Instant, regio
     let time_dilation = f64::from(sample.time_dilation);
     let effective = effective_elapsed(elapsed, time_dilation);
     let predicted = position_at_effective(sample, effective);
-    let Some(mut bounds) = regions.iter().copied().find(|bounds| bounds.region == sample.region) else { return predicted };
+    let assigned_bounds = regions.iter().copied().find(|bounds| bounds.region == sample.region);
+    let Some(mut bounds) =
+        assigned_bounds.filter(|bounds| bounds.contains(start)).or_else(|| regions.iter().copied().find(|bounds| bounds.contains(start)))
+    else {
+        return if assigned_bounds.is_some() { start } else { predicted };
+    };
     let mut after_effective = 0.0;
     let mut allowed_effective = effective;
     let mut last_boundary = start;
@@ -591,7 +596,7 @@ mod tests {
             let (_scene, view) = child_scene(scale);
             let root = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("root is published");
             let child = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(2)).expect("child is published");
-            assert!(matches!(root.placement(), crate::scene::Placement::Hidden(_)));
+            std::assert_matches!(root.placement(), crate::scene::Placement::Hidden(_));
             let child_entity = child.detail().summary.entity;
             let at = root.motion_state().sampled_at + Duration::from_millis(500);
             let mut placements = HashMap::new();
@@ -632,6 +637,19 @@ mod tests {
     fn loaded_neighbor_still_clips_at_the_next_missing_region() {
         let now = Instant::now();
         let moving = sample(DVec3::new(255.0, 20.0, 0.0), Vec3::X * 300.0, Vec3::ZERO, Vec3::ZERO, false);
+        let state = MotionState::new(now);
+        let regions = [
+            RegionBounds { region: Region::new(1), origin: DVec3::ZERO },
+            RegionBounds { region: Region::new(2), origin: DVec3::new(256.0, 0.0, 0.0) },
+        ];
+
+        close_vec(linear_position(moving, state, now + Duration::from_millis(900), &regions), DVec3::new(512.0, 20.0, 0.0));
+    }
+
+    #[test]
+    fn sample_outside_assigned_region_starts_from_loaded_neighbor() {
+        let now = Instant::now();
+        let moving = sample(DVec3::new(300.0, 20.0, 0.0), Vec3::X * 300.0, Vec3::ZERO, Vec3::ZERO, false);
         let state = MotionState::new(now);
         let regions = [
             RegionBounds { region: Region::new(1), origin: DVec3::ZERO },

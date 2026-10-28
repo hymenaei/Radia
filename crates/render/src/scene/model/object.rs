@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use math::Vec3;
 use world::{Kind, ObjectDetail, PrimShape, Shape, WorldTransform, WorldTransformState};
 
 use crate::material::FaceMaterial;
-use crate::scene::{MeshKey, PreparedMesh, SharedMesh, asset_demand::Materials, budget::Lease};
+use crate::scene::{MeshKey, PreparedMesh, SharedMesh, asset_demand::Materials, budget::Lease, texture_animation};
 
 #[derive(Clone)]
 pub struct Object {
@@ -12,11 +12,13 @@ pub struct Object {
     pub(super) preparation: Option<(MeshKey, PreparedMesh)>,
     pub(super) mesh: Option<(MeshKey, SharedMesh)>,
     pub(super) materials: Option<Materials>,
+    animation_clock: Option<AnimationClock>,
 }
 
 impl Object {
     pub(in crate::scene) fn new(source: ObjectDetail, lease: Lease) -> Self {
-        Self { data: Arc::new(ObjectData { source, _lease: lease }), preparation: None, mesh: None, materials: None }
+        let animation_clock = source.texture_animation.map(|_| AnimationClock { started_at: Instant::now(), frame_offset: 0.0 });
+        Self { data: Arc::new(ObjectData { source, _lease: lease }), preparation: None, mesh: None, materials: None, animation_clock }
     }
 
     pub fn detail(&self) -> &ObjectDetail {
@@ -29,6 +31,32 @@ impl Object {
 
     pub fn materials(&self) -> Option<&[FaceMaterial]> {
         self.materials.as_ref().map(Materials::faces)
+    }
+
+    pub(crate) fn animation_timing(&self, now: Instant) -> Option<(f64, f64)> {
+        self.animation_clock.map(|clock| (now.saturating_duration_since(clock.started_at).as_secs_f64(), clock.frame_offset))
+    }
+
+    pub(super) fn inherit_animation_timing(&mut self, old: &Self, now: Instant) {
+        let Some(animation) = self.detail().texture_animation else {
+            self.animation_clock = None;
+            return;
+        };
+        let Some(previous) = old.detail().texture_animation else {
+            return;
+        };
+        if animation == previous {
+            self.animation_clock = old.animation_clock;
+            return;
+        }
+        let frame_offset = if texture_animation::is_smooth(animation) && texture_animation::is_smooth(previous) {
+            old.animation_timing(now)
+                .and_then(|(elapsed, offset)| texture_animation::smooth_frame_counter(previous, elapsed, offset))
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        self.animation_clock = Some(AnimationClock { started_at: now, frame_offset });
     }
 
     pub(super) fn same_appearance(&self, other: &Self) -> bool {
@@ -83,6 +111,12 @@ fn placeholder_avatar_transform(transform: WorldTransformState) -> Option<WorldT
     };
     transform.scale = Vec3::new(0.6, 0.45, 1.9);
     Some(transform)
+}
+
+#[derive(Clone, Copy)]
+struct AnimationClock {
+    started_at: Instant,
+    frame_offset: f64,
 }
 
 struct ObjectData {

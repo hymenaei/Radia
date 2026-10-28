@@ -12,6 +12,7 @@ mod reconcile;
 mod region_environment;
 mod sculpt;
 mod surface;
+pub(crate) mod texture_animation;
 
 pub use asset_demand::{AssetChange, AssetRequest, AssetTicket};
 pub use budget::{Budget, MEMORY_BYTES};

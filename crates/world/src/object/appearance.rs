@@ -12,10 +12,106 @@ use crate::FieldUpdate;
 pub const MAX_SURFACE_FACES: usize = 45;
 pub const MAX_PBR_MATERIAL_BINDINGS: usize = MAX_SURFACE_FACES;
 
+const TEXTURE_ANIMATION_BYTES: usize = 16;
+const TEXTURE_ANIMATION_SMOOTH: u8 = 0x10;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Appearance {
     Surface,
     Avatar,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextureAnimation {
+    mode: u8,
+    face: i8,
+    size_x: u8,
+    size_y: u8,
+    start: f32,
+    length: f32,
+    rate: f32,
+}
+
+impl TextureAnimation {
+    pub fn from_wire(bytes: &[u8]) -> Result<Self, TextureAnimationError> {
+        if bytes.len() != TEXTURE_ANIMATION_BYTES {
+            return Err(TextureAnimationError::InvalidLength);
+        }
+        let mode = *bytes.first().ok_or(TextureAnimationError::InvalidLength)?;
+        let face = i8::from_ne_bytes([*bytes.get(1).ok_or(TextureAnimationError::InvalidLength)?]);
+        if face < -1 || face >= MAX_SURFACE_FACES as i8 {
+            return Err(TextureAnimationError::InvalidFace);
+        }
+        let raw_size_x = *bytes.get(2).ok_or(TextureAnimationError::InvalidLength)?;
+        let raw_size_y = *bytes.get(3).ok_or(TextureAnimationError::InvalidLength)?;
+        let (size_x, size_y) =
+            if mode & TEXTURE_ANIMATION_SMOOTH == 0 { (raw_size_x.max(1), raw_size_y.max(1)) } else { (raw_size_x, raw_size_y) };
+        let value =
+            Self { mode, face, size_x, size_y, start: wire_f32(bytes, 4)?, length: wire_f32(bytes, 8)?, rate: wire_f32(bytes, 12)? };
+        if ![value.start, value.length, value.rate].into_iter().all(f32::is_finite) {
+            return Err(TextureAnimationError::NonFiniteValue);
+        }
+        if value.length < 0.0 {
+            return Err(TextureAnimationError::InvalidFrameCount);
+        }
+        Ok(value)
+    }
+
+    pub const fn mode(self) -> u8 {
+        self.mode
+    }
+
+    pub const fn face(self) -> i8 {
+        self.face
+    }
+
+    pub const fn size(self) -> [u8; 2] {
+        [self.size_x, self.size_y]
+    }
+
+    pub const fn start(self) -> f32 {
+        self.start
+    }
+
+    pub const fn length(self) -> f32 {
+        self.length
+    }
+
+    pub const fn rate(self) -> f32 {
+        self.rate
+    }
+
+    pub fn targets_face(self, face: u8) -> bool {
+        self.face == -1 || u8::try_from(self.face).is_ok_and(|target| target == face)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextureAnimationError {
+    InvalidLength,
+    InvalidFace,
+    NonFiniteValue,
+    InvalidFrameCount,
+}
+
+impl Display for TextureAnimationError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::InvalidLength => "texture animation block must contain 16 bytes",
+            Self::InvalidFace => "texture animation face must be -1 or a supported face index",
+            Self::NonFiniteValue => "texture animation contains a non-finite value",
+            Self::InvalidFrameCount => "texture animation length must be non-negative",
+        })
+    }
+}
+
+impl Error for TextureAnimationError {}
+
+fn wire_f32(bytes: &[u8], offset: usize) -> Result<f32, TextureAnimationError> {
+    let end = offset.checked_add(4).ok_or(TextureAnimationError::InvalidLength)?;
+    let raw: [u8; 4] =
+        bytes.get(offset..end).ok_or(TextureAnimationError::InvalidLength)?.try_into().map_err(|_| TextureAnimationError::InvalidLength)?;
+    Ok(f32::from_le_bytes(raw))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

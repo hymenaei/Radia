@@ -20,7 +20,7 @@ use uuid::Uuid;
 use world::{
     Appearance, AttachmentPoint, FaceAppearance, FieldUpdate, Kind, LinearMotion, LocalAddress, ObjectObservation, ObjectPatch,
     OrderEvidence, ParentUpdate, PbrMaterialAssignments, Pose, PrimShape, Region, RegionHandle, SculptFlags, SculptType, Shape,
-    SurfaceAppearance, TextureMapping, UpdateSource,
+    SurfaceAppearance, TextureAnimation, TextureMapping, UpdateSource,
 };
 
 use crate::session::object_media::media_version;
@@ -275,6 +275,8 @@ fn full_observation(block: &ObjectData, source: UpdateSource, invalid_fields: &m
         None
     };
     let pbr_materials = pbr_materials(block.pcode, &block.extra_parameters, invalid_fields);
+    let texture_animation =
+        if block.pcode == VOLUME_PCODE { decoded_texture_animation(Some(&block.texture_anim), invalid_fields) } else { FieldUpdate::Clear };
     Ok(ObjectOperation::Observe(ObjectObservation {
         source,
         id,
@@ -289,6 +291,7 @@ fn full_observation(block: &ObjectData, source: UpdateSource, invalid_fields: &m
         shape: classification.shape,
         appearance: classification.appearance,
         surface_appearance,
+        texture_animation,
         pbr_materials,
     }))
 }
@@ -311,6 +314,11 @@ fn compressed_observation(
         None
     };
     let pbr_materials = pbr_materials(block.pcode, &block.extra_parameters, invalid_fields);
+    let texture_animation = if block.pcode == VOLUME_PCODE {
+        decoded_texture_animation(block.texture_animation.as_deref(), invalid_fields)
+    } else {
+        FieldUpdate::Clear
+    };
     Ok(ObjectOperation::Observe(ObjectObservation {
         source,
         id,
@@ -325,6 +333,7 @@ fn compressed_observation(
         shape: classification.shape,
         appearance: classification.appearance,
         surface_appearance,
+        texture_animation,
         pbr_materials,
     }))
 }
@@ -356,6 +365,19 @@ fn decoded_surface_appearance<E>(decoded: Result<Option<TextureEntry>, E>) -> (O
         }
         Ok(None) => (None, false),
         Err(_) => (None, true),
+    }
+}
+
+fn decoded_texture_animation(bytes: Option<&[u8]>, invalid_fields: &mut usize) -> FieldUpdate<TextureAnimation> {
+    match bytes.filter(|bytes| !bytes.is_empty()) {
+        None => FieldUpdate::Clear,
+        Some(bytes) => match TextureAnimation::from_wire(bytes) {
+            Ok(animation) => FieldUpdate::Set(animation),
+            Err(_) => {
+                *invalid_fields += 1;
+                FieldUpdate::Keep
+            }
+        },
     }
 }
 

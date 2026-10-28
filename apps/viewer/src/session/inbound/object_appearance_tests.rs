@@ -1,4 +1,5 @@
 use super::*;
+use world::TextureAnimation;
 
 #[test]
 fn texture_entries_apply_to_volumes_only() {
@@ -37,6 +38,74 @@ fn texture_entries_apply_to_volumes_only() {
     let avatar_batch = decode_object_message(REGION, 33, OrderEvidence::Ordered(33), &terse_avatar).expect("terse avatar batch");
     let Some(ObjectOperation::Patch(patch)) = avatar_batch.blocks[0].as_ref() else { panic!("expected terse avatar patch") };
     assert_eq!(patch.surface_appearance, None);
+}
+
+#[test]
+fn texture_animation_updates_clear_and_preserve_by_path() {
+    let mut wire = vec![0x01, 0xff, 2, 2];
+    wire.extend_from_slice(&0.0_f32.to_le_bytes());
+    wire.extend_from_slice(&0.0_f32.to_le_bytes());
+    wire.extend_from_slice(&1.0_f32.to_le_bytes());
+    let expected = TextureAnimation::from_wire(&wire).expect("valid texture animation block");
+
+    let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
+    if let ObjectUpdate(update) = &mut full {
+        update.objects[0].texture_anim = wire.clone();
+        update.objects[0].texture_entry = valid_texture_entry();
+    } else {
+        panic!("expected full object fixture");
+    }
+    let batch = decode_object_message(REGION, 35, OrderEvidence::Ordered(35), &full).expect("full object batch");
+    let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
+    assert_eq!(object.texture_animation, FieldUpdate::Set(expected));
+
+    if let ObjectUpdate(update) = &mut full {
+        update.objects[0].texture_anim.clear();
+    } else {
+        panic!("expected full object fixture");
+    }
+    let batch = decode_object_message(REGION, 36, OrderEvidence::Ordered(36), &full).expect("full clear batch");
+    let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
+    assert_eq!(object.texture_animation, FieldUpdate::Clear);
+
+    if let ObjectUpdate(update) = &mut full {
+        update.objects[0].texture_anim = wire[..15].to_vec();
+    } else {
+        panic!("expected full object fixture");
+    }
+    let batch = decode_object_message(REGION, 37, OrderEvidence::Ordered(37), &full).expect("malformed field batch");
+    let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected full observation") };
+    assert_eq!(batch.invalid_blocks, 0);
+    assert_eq!(batch.invalid_fields, 1);
+    assert_eq!(object.texture_animation, FieldUpdate::Keep);
+
+    let mut compressed = packet(vectors::OBJECT_UPDATE_COMPRESSED_TYPED).message().clone();
+    if let ObjectUpdateCompressed(update) = &mut compressed {
+        update.objects[0].texture_animation = Some(wire.clone());
+    } else {
+        panic!("expected compressed object fixture");
+    }
+    let batch = decode_object_message(REGION, 38, OrderEvidence::Ordered(38), &compressed).expect("compressed object batch");
+    let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
+    assert_eq!(object.texture_animation, FieldUpdate::Set(expected));
+
+    if let ObjectUpdateCompressed(update) = &mut compressed {
+        update.objects[0].texture_animation = None;
+    } else {
+        panic!("expected compressed object fixture");
+    }
+    let batch = decode_object_message(REGION, 39, OrderEvidence::Ordered(39), &compressed).expect("compressed clear batch");
+    let Some(ObjectOperation::Observe(object)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
+    assert_eq!(object.texture_animation, FieldUpdate::Clear);
+
+    let terse = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();
+    let batch = decode_object_message(REGION, 40, OrderEvidence::Ordered(40), &terse).expect("terse object batch");
+    let Some(ObjectOperation::Patch(patch)) = batch.blocks[0].as_ref() else { panic!("expected terse patch") };
+    assert_eq!(patch.texture_animation, FieldUpdate::Keep);
+
+    let cached = packet(vectors::OBJECT_UPDATE_CACHED).message().clone();
+    let batch = decode_object_message(REGION, 41, OrderEvidence::Ordered(41), &cached).expect("cached object batch");
+    std::assert_matches!(batch.blocks[0], Some(ObjectOperation::Cached { .. }));
 }
 
 #[test]
@@ -107,6 +176,7 @@ fn malformed_texture_entries_are_field_local() {
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].texture_entry = vec![0];
+    update.objects[0].texture_anim.clear();
 
     let batch = decode_object_message(REGION, 34, OrderEvidence::Ordered(34), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
@@ -341,6 +411,7 @@ fn repeated_material_params_replace_in_order() {
     let mut full = packet(vectors::OBJECT_UPDATE).message().clone();
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].texture_entry = valid_texture_entry();
+    update.objects[0].texture_anim.clear();
     update.objects[0].extra_parameters = vec![
         render_material_parameter(&[(0, Uuid::from_u128(0x313))]),
         ExtraParameter { parameter_type: 0x0080, data: vec![1] },
@@ -357,6 +428,7 @@ fn repeated_material_params_replace_in_order() {
     let ObjectUpdate(update) = &mut full else { panic!("expected full object fixture") };
     update.objects[0].extra_parameters =
         vec![render_material_parameter(&[(0, Uuid::from_u128(0x313))]), ExtraParameter { parameter_type: 0x0080, data: vec![1] }];
+    update.objects[0].texture_anim.clear();
     let batch = decode_object_message(REGION, 47, OrderEvidence::Ordered(47), &full).expect("full object batch");
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected volume observation") };
     assert_eq!(batch.invalid_fields, 1);

@@ -13,7 +13,7 @@ use crate::AvatarAppearanceUpdate;
 use crate::ObjectMediaUpdate;
 use crate::{
     Appearance, AttachmentPoint, Entity, Kind, LinearMotion, LocalAddress, ParentUpdate, PbrMaterialAssignments, PbrMaterialOverrides,
-    Pose, Region, Shape, SurfaceAppearance,
+    Pose, Region, Shape, SurfaceAppearance, TextureAnimation,
 };
 use OrderEvidence::{Ambiguous, Degraded, Ordered};
 
@@ -100,6 +100,7 @@ pub enum FieldGroup {
     Shape,
     Appearance,
     TextureEntry,
+    TextureAnimation,
     PbrMaterials,
     ObjectMedia,
     SitTarget,
@@ -189,6 +190,7 @@ pub struct ObjectObservation {
     pub shape: FieldUpdate<Shape>,
     pub appearance: FieldUpdate<Appearance>,
     pub surface_appearance: Option<SurfaceAppearance>,
+    pub texture_animation: FieldUpdate<TextureAnimation>,
     pub pbr_materials: Option<PbrMaterialAssignments>,
 }
 
@@ -208,6 +210,7 @@ impl ObjectObservation {
             shape: FieldUpdate::Keep,
             appearance: FieldUpdate::Keep,
             surface_appearance: None,
+            texture_animation: FieldUpdate::Keep,
             pbr_materials: None,
         }
     }
@@ -226,6 +229,7 @@ pub struct ObjectPatch {
     pub shape: FieldUpdate<Shape>,
     pub appearance: FieldUpdate<Appearance>,
     pub surface_appearance: Option<SurfaceAppearance>,
+    pub texture_animation: FieldUpdate<TextureAnimation>,
     pub pbr_materials: Option<PbrMaterialAssignments>,
     pub pbr_material_overrides: Option<PbrMaterialOverrides>,
     pub object_media: Option<ObjectMediaUpdate>,
@@ -246,6 +250,7 @@ impl ObjectPatch {
             shape: FieldUpdate::Keep,
             appearance: FieldUpdate::Keep,
             surface_appearance: None,
+            texture_animation: FieldUpdate::Keep,
             pbr_materials: None,
             pbr_material_overrides: None,
             object_media: None,

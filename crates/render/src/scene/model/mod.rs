@@ -164,14 +164,14 @@ impl Mirror {
         match change {
             Change::ViewerEnvironment(environment) => self.viewer_environment = environment,
             Change::Object(mut object) => {
-                if let Some(old) = self.objects.get(&object.detail().summary.entity)
-                    && old.geometry() == object.geometry()
-                    && object.preparation.is_none()
-                {
-                    object.preparation = old.preparation.clone();
-                    object.mesh = old.mesh.clone();
-                    if object.same_appearance(old) {
-                        object.materials = old.materials.clone();
+                if let Some(old) = self.objects.get(&object.detail().summary.entity) {
+                    object.inherit_animation_timing(old, std::time::Instant::now());
+                    if old.geometry() == object.geometry() && object.preparation.is_none() {
+                        object.preparation = old.preparation.clone();
+                        object.mesh = old.mesh.clone();
+                        if object.same_appearance(old) {
+                            object.materials = old.materials.clone();
+                        }
                     }
                 }
                 self.objects.insert(object.detail().summary.entity, object);

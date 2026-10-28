@@ -8,7 +8,7 @@ use crate::object::components::{Fenced, RegionalStamp, newer_field, newer_region
 use crate::update::{FieldStamp, Stamp};
 use crate::{
     Appearance, AvatarAppearance, FieldGroup, FieldRejectionReason, Kind, ObjectMedia, PbrMaterialAssignments, PbrMaterialOverrides,
-    Rejections, Shape, SitTarget, SurfaceAppearance, UpdateAuthority, UpdateSource,
+    Rejections, Shape, SitTarget, SurfaceAppearance, TextureAnimation, UpdateAuthority, UpdateSource,
 };
 
 #[derive(Clone, Copy)]
@@ -227,6 +227,7 @@ define_facets! {
     shape: Shape,
     appearance: Appearance,
     surface_appearance: Arc<SurfaceAppearance>,
+    texture_animation: TextureAnimation,
     pbr_materials: Arc<PbrMaterialAssignments>,
     pbr_material_overrides: Arc<PbrMaterialOverrides>,
     avatar_appearance: Arc<AvatarAppearance>,

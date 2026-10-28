@@ -114,6 +114,7 @@ async fn apply_with_cache(
 }
 
 async fn load_object_cache(cache: &mut ObjectCacheSession, simulator: network::SimulatorId) {
+    await_cache_write(cache).await;
     if cache.begin_region_load(simulator, &Handle::current()).is_some() {
         return;
     }
@@ -128,7 +129,7 @@ async fn load_object_cache(cache: &mut ObjectCacheSession, simulator: network::S
 async fn await_cache_write(cache: &mut ObjectCacheSession) {
     loop {
         let event = cache.next_event().await.expect("cache worker returns the write result");
-        let is_write = matches!(&event, ObjectCacheEvent::WriteApplied { .. });
+        let is_write = matches!(&event, ObjectCacheEvent::WriteApplied { .. } | ObjectCacheEvent::WriteDropped);
         let _ = cache.handle_event(event);
         if is_write {
             return;

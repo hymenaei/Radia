@@ -704,7 +704,7 @@ pub(super) fn handle_simulator_message(
 
     if matches!(scope, SimulatorScope::Primary) {
         if let Some(region_lookup) = region_lookup {
-            region_lookup.handle_message(source, &message);
+            region_lookup.handle_message(source, message);
         }
         if matches!(&message, RegionHandshake(_))
             && let Some(name) = region_name

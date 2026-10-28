@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -12,10 +12,11 @@ use super::{FramePreparation, FramePreparationKey, GeometryRenderer, Instance, M
 use crate::geometry::{
     batching::{Batches, DrawKey},
     instance::{instance_base, is_visible, packed_instance},
+    mesh::resident_mesh_fallback,
 };
 use crate::material::{FaceMaterial, FaceParams};
 use crate::pipeline::{COLOR, Pipeline};
-use crate::scene::{Camera, Placement, PreparedMesh, SceneView, SurfaceKind, texture_animation};
+use crate::scene::{Camera, MeshId, Placement, PreparedMesh, SceneView, SharedMesh, SurfaceKind, texture_animation};
 
 impl GeometryRenderer {
     pub(crate) fn prepare(
@@ -176,13 +177,33 @@ impl GeometryRenderer {
         let faces_started = Instant::now();
         let mut batches = Batches::default();
         let mut uploaded = 0;
+        let mut mesh_fallbacks: HashMap<MeshId, Option<(MeshId, SharedMesh)>> = HashMap::new();
         let mut pending_meshes = HashSet::new();
         let mut pending_textures = HashSet::new();
         let mut animated_faces = false;
         for (id, mut instance, faces, animation, appearance) in candidates {
+            let selected_id = instance.mesh.id();
+            let fallback = if self.meshes.contains_key(&selected_id) {
+                None
+            } else if let Some(fallback) = mesh_fallbacks.get(&selected_id) {
+                fallback.clone()
+            } else {
+                let fallback = instance.mesh.asset_lod().and_then(|(asset, lod)| {
+                    let fallback_id = resident_mesh_fallback(&self.asset_meshes, asset, lod, selected_id)?;
+                    self.meshes.get(&fallback_id)?.shared.clone().map(|mesh| (fallback_id, mesh))
+                });
+                mesh_fallbacks.insert(selected_id, fallback.clone());
+                fallback
+            };
+            if let Some((fallback_id, _)) = &fallback
+                && let Some(mesh) = self.meshes.get_mut(fallback_id)
+            {
+                mesh.used = self.epoch;
+            }
             if !self.upload_mesh(device, &instance.mesh, instance.terrain_composition.as_deref(), &mut uploaded) {
-                pending_meshes.insert(instance.mesh.id());
-                continue;
+                pending_meshes.insert(selected_id);
+                let Some((_, fallback)) = fallback else { continue };
+                instance.mesh = fallback;
             }
             let base = instance_base(&instance, camera.position());
             for (index, face) in instance.mesh.mesh().faces().iter().enumerate() {

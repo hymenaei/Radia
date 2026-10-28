@@ -13,6 +13,7 @@ use assets::{
     MeshAsset,
     mesh::{LodGeometry, Mesh, MeshLod},
 };
+use utils::AssetId;
 
 use crate::scene::budget::Lease;
 
@@ -79,18 +80,30 @@ impl SharedMesh {
         Self::retain(MeshSource::Owned(mesh), lease)
     }
 
-    pub(in crate::scene) fn from_asset(asset: MeshAsset, lease: Lease) -> Option<Self> {
-        matches!(asset.geometry(), LodGeometry::Geometry(_)).then(|| Self::retain(MeshSource::Asset(asset), lease))
+    pub(in crate::scene) fn from_asset(asset_id: AssetId, asset: MeshAsset, lease: Lease) -> Option<Self> {
+        if !matches!(asset.geometry(), LodGeometry::Geometry(_)) {
+            return None;
+        }
+        let lod = asset.lod();
+        Some(Self::retain_asset(MeshSource::Asset(asset), Some((asset_id, lod)), lease))
     }
 
     fn retain(source: MeshSource, lease: Lease) -> Self {
+        Self::retain_asset(source, None, lease)
+    }
+
+    fn retain_asset(source: MeshSource, asset_lod: Option<(AssetId, MeshLod)>, lease: Lease) -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1)).expect("mesh IDs exhausted");
-        Self(Arc::new(Retained { id: MeshId(id), source, _lease: lease }))
+        Self(Arc::new(Retained { id: MeshId(id), source, asset_lod, _lease: lease }))
     }
 
     pub fn id(&self) -> MeshId {
         self.0.id
+    }
+
+    pub(crate) fn asset_lod(&self) -> Option<(AssetId, MeshLod)> {
+        self.0.asset_lod
     }
 
     pub(in crate::scene) fn downgrade(&self) -> WeakMesh {
@@ -128,6 +141,7 @@ enum MeshSource {
 struct Retained {
     id: MeshId,
     source: MeshSource,
+    asset_lod: Option<(AssetId, MeshLod)>,
     _lease: Lease,
 }
 

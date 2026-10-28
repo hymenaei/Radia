@@ -20,6 +20,32 @@ use crate::material::FaceParams;
 use crate::pipeline::{INSTANCE_BYTES, Pipeline};
 use crate::scene::Placement;
 
+#[test]
+fn first_mesh_can_exceed_the_frame_upload_target() {
+    assert!(super::within_upload_target(UPLOAD_BYTES + 1, 0, 0));
+    assert!(!super::within_upload_target(1, 1, UPLOAD_BYTES));
+    assert!(super::within_upload_target(UPLOAD_BYTES / 2, 1, UPLOAD_BYTES / 2));
+    assert!(!super::within_upload_target(1, MAX_MESH_UPLOADS, 0));
+}
+
+#[test]
+fn resident_mesh_fallback_uses_nearest_available_lod() {
+    let asset = utils::AssetId::new(uuid::Uuid::from_u128(901));
+    let other_asset = utils::AssetId::new(uuid::Uuid::from_u128(902));
+    let fallback = super::resident_mesh_fallback(
+        &std::collections::HashMap::from([
+            ((asset, assets::mesh::MeshLod::High), 1),
+            ((asset, assets::mesh::MeshLod::Low), 2),
+            ((asset, assets::mesh::MeshLod::Medium), 3),
+            ((other_asset, assets::mesh::MeshLod::High), 4),
+        ]),
+        asset,
+        assets::mesh::MeshLod::High,
+        1,
+    );
+    assert_eq!(fallback, Some(3));
+}
+
 fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_pages: bool) {
     let scope = device.push_error_scope(ErrorFilter::Validation);
     let (_scene, view, camera) = scene(alpha);

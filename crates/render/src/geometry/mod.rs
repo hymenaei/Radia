@@ -5,9 +5,6 @@ mod mesh;
 mod pick;
 mod storage;
 
-#[cfg(test)]
-mod asset_mesh_tests;
-
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
@@ -18,8 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assets::{TextureHandle, TextureId};
+use assets::{TextureHandle, TextureId, mesh::MeshLod};
 use math::{DVec3, Quat, Vec3};
+use utils::AssetId;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, IndexFormat, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
@@ -203,6 +201,7 @@ pub(crate) struct GeometryRenderer {
     instances: Buffer,
     depth: Option<Depth>,
     meshes: HashMap<MeshId, GpuMesh>,
+    asset_meshes: HashMap<(AssetId, MeshLod), MeshId>,
     storage: Storage,
     retired: Vec<GpuMesh>,
     draws: Vec<DrawCommand>,
@@ -236,6 +235,7 @@ impl GeometryRenderer {
             instances: buffer(device, "Face instances", MAX_FACE_INSTANCES * INSTANCE_BYTES, BufferUsages::VERTEX),
             depth: None,
             meshes: HashMap::new(),
+            asset_meshes: HashMap::new(),
             storage: Storage::default(),
             retired: Vec::new(),
             draws: Vec::new(),
@@ -405,3 +405,6 @@ mod tests {
         assert_eq!(memory.depth.load(Ordering::Acquire), 0);
     }
 }
+
+#[cfg(test)]
+mod asset_mesh_tests;

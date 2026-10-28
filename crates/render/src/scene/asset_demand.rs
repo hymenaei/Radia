@@ -137,6 +137,7 @@ pub(in crate::scene) struct AssetDemand {
     dirty: BTreeMap<Uuid, Entity>,
     entries: HashMap<AssetKey, Entry>,
     meshes: HashMap<(Resource, MeshLod), WeakMesh>,
+    ready_mesh_entries: HashMap<(AssetId, MeshLod), HashSet<AssetKey>>,
     mesh_users: HashMap<Resource, HashMap<Entity, usize>>,
     tickets: HashMap<AssetTicket, AssetKey>,
     targets: HashMap<Entity, ObjectDemand>,
@@ -161,6 +162,7 @@ impl AssetDemand {
             dirty: BTreeMap::new(),
             entries: HashMap::new(),
             meshes: HashMap::new(),
+            ready_mesh_entries: HashMap::new(),
             mesh_users: HashMap::new(),
             tickets: HashMap::new(),
             targets: HashMap::new(),
@@ -252,9 +254,12 @@ impl AssetDemand {
                 status = Status::Failed { failure: Failure::Malformed, retry_at: None };
             }
         }
-        let Some(entry) = self.entries.get_mut(&key) else { return Vec::new() };
-        entry.status = Some(status.retaining(entry.status.as_ref().and_then(Status::content)));
-        let users: Vec<_> = entry.users.keys().copied().collect();
+        let users = {
+            let Some(entry) = self.entries.get_mut(&key) else { return Vec::new() };
+            entry.status = Some(status.retaining(entry.status.as_ref().and_then(Status::content)));
+            entry.users.keys().copied().collect::<Vec<_>>()
+        };
+        self.update_ready_mesh_entry(key);
         self.terrain_changes.extend(users.iter().filter_map(|user| match user {
             AssetUser::Terrain(region) => Some(*region),
             AssetUser::Object(_) => None,
@@ -293,6 +298,7 @@ impl AssetDemand {
             if self.tickets.remove(&entry.ticket).is_some() {
                 self.events.push_back(AssetChange::Release(entry.ticket));
             }
+            self.remove_ready_mesh_entry(key);
         }
         self.refresh(key);
     }
@@ -339,6 +345,35 @@ impl AssetDemand {
             request: entry.request,
             priority,
         }));
+    }
+
+    fn update_ready_mesh_entry(&mut self, key: AssetKey) {
+        let AssetUnit::MeshLod(lod) = key.unit else { return };
+        let ready = self
+            .entries
+            .get(&key)
+            .and_then(|entry| entry.status.as_ref())
+            .and_then(Status::content)
+            .is_some_and(|content| matches!(content, Content::Mesh(_)));
+        if ready {
+            self.ready_mesh_entries.entry((key.resource.id, lod)).or_default().insert(key);
+        } else {
+            self.remove_ready_mesh_entry(key);
+        }
+    }
+
+    fn remove_ready_mesh_entry(&mut self, key: AssetKey) {
+        let AssetUnit::MeshLod(lod) = key.unit else { return };
+        let index = (key.resource.id, lod);
+        let empty = if let Some(keys) = self.ready_mesh_entries.get_mut(&index) {
+            keys.remove(&key);
+            keys.is_empty()
+        } else {
+            false
+        };
+        if empty {
+            self.ready_mesh_entries.remove(&index);
+        }
     }
 
     fn resolve_terrain(&mut self, camera: Camera, mirror: &Mirror, region: Region) {
@@ -406,6 +441,7 @@ impl AssetDemand {
         }
         self.entries.clear();
         self.meshes.clear();
+        self.ready_mesh_entries.clear();
         self.mesh_users.clear();
         self.tickets.clear();
         self.targets.clear();
@@ -481,7 +517,11 @@ impl AssetDemand {
             }
             _ => false,
         };
-        let is_mesh_object = matches!(object.geometry(), crate::scene::Geometry::Mesh(_));
+        let mesh_asset = match object.geometry() {
+            crate::scene::Geometry::Mesh(asset) => Some(asset),
+            _ => None,
+        };
+        let is_mesh_object = mesh_asset.is_some();
         let priority =
             if interested && (is_mesh_object || object.render_mesh().is_some()) { Priority::Visible } else { Priority::Background };
         let region = object.detail().summary.address.region();
@@ -505,7 +545,14 @@ impl AssetDemand {
             MeshResolution::NotMesh | MeshResolution::Waiting => object.render_mesh(),
         };
         let slots: BTreeSet<_> = if priority == Priority::Visible && mesh.is_some() {
-            mesh.into_iter().flat_map(|mesh| mesh.mesh().faces().iter().map(|face| face.slot)).collect()
+            let mut slots: BTreeSet<_> = mesh.into_iter().flat_map(|mesh| mesh.mesh().faces().iter().map(|face| face.slot)).collect();
+            if let Some(asset) = mesh_asset {
+                slots.extend(self.ready_mesh_face_slots(asset));
+            }
+            if let Some(previous) = previous_mesh.as_ref().filter(|mesh| Some(mesh.asset) == mesh_asset) {
+                slots.extend(previous.mesh.mesh().faces().iter().map(|face| face.slot));
+            }
+            slots
         } else {
             let source = object.detail();
             let mut slots = BTreeSet::new();
@@ -622,9 +669,7 @@ impl AssetDemand {
     }
 
     fn mesh_content(&mut self, resource: AssetId, lod: MeshLod) -> MeshContent {
-        let resource = Resource { id: resource, kind: Kind::Mesh };
-        let keys: Vec<_> =
-            self.entries.keys().filter(|key| key.resource == resource && key.unit == AssetUnit::MeshLod(lod)).copied().collect();
+        let keys = self.ready_mesh_keys(resource, lod);
         let mut ready = None;
         for key in keys {
             match self.mesh_for(key) {
@@ -634,6 +679,26 @@ impl AssetDemand {
             }
         }
         ready.map_or(MeshContent::Pending, MeshContent::Geometry)
+    }
+
+    fn ready_mesh_keys(&self, asset: AssetId, lod: MeshLod) -> Vec<AssetKey> {
+        self.ready_mesh_entries.get(&(asset, lod)).map(|keys| keys.iter().copied().collect()).unwrap_or_default()
+    }
+
+    fn ready_mesh_face_slots(&self, asset: AssetId) -> BTreeSet<u8> {
+        let mut slots = BTreeSet::new();
+        for lod in [MeshLod::Lowest, MeshLod::Low, MeshLod::Medium, MeshLod::High] {
+            for key in self.ready_mesh_keys(asset, lod) {
+                let Some(Content::Mesh(mesh)) = self.entries.get(&key).and_then(|entry| entry.status.as_ref()).and_then(Status::content)
+                else {
+                    continue;
+                };
+                if let assets::mesh::LodGeometry::Geometry(mesh) = mesh.geometry() {
+                    slots.extend(mesh.faces().iter().map(|face| face.slot));
+                }
+            }
+        }
+        slots
     }
 
     fn nearest_ready_mesh(

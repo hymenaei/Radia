@@ -27,6 +27,10 @@ pub fn asset_with_empty_lod(geometry_lods: &[usize], empty_lods: &[usize], face_
     asset_with_faces(&lods)
 }
 
+pub fn asset_with_lod_faces(lods: &[(usize, usize)]) -> Vec<u8> {
+    asset_with_faces(lods)
+}
+
 fn asset_with_faces(lods: &[(usize, usize)]) -> Vec<u8> {
     let blocks: BTreeMap<_, _> = lods.iter().map(|(lod, face_count)| (*lod, block(*face_count))).collect();
     asset_with_blocks(blocks)

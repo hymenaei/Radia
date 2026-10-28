@@ -11,6 +11,7 @@ use protocol::{
     messages::{CacheMissType::Full, CachedObjectReference, ObjectUpdateCached as CachedUpdate, RequestAgentData, object::kill_object},
 };
 use test_support::lludp::vectors;
+use tokio::runtime::Handle;
 use uuid::Uuid;
 use world::{
     Applied,
@@ -26,7 +27,7 @@ use crate::session::coordinator::tests::{
 };
 use crate::session::inbound::{ObjectBatch, ObjectMediaRequest, ObjectOperation};
 use crate::session::{
-    object_cache::ObjectCacheSession,
+    object_cache::{ObjectCacheEvent, ObjectCacheSession},
     recovery::recovery_request,
     world::{IngestStatus, SessionWorld, viewer_world_limits},
 };
@@ -112,6 +113,29 @@ async fn apply_with_cache(
     (recovery, media_requests)
 }
 
+async fn load_object_cache(cache: &mut ObjectCacheSession, simulator: network::SimulatorId) {
+    if cache.begin_region_load(simulator, &Handle::current()).is_some() {
+        return;
+    }
+    loop {
+        let event = cache.next_event().await.expect("region cache load completes");
+        if cache.handle_event(event).is_some() {
+            return;
+        }
+    }
+}
+
+async fn await_cache_write(cache: &mut ObjectCacheSession) {
+    loop {
+        let event = cache.next_event().await.expect("cache worker returns the write result");
+        let is_write = matches!(&event, ObjectCacheEvent::WriteApplied { .. });
+        let _ = cache.handle_event(event);
+        if is_write {
+            return;
+        }
+    }
+}
+
 #[tokio::test]
 async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
     let directory = tempfile::tempdir().expect("create isolated cache directory");
@@ -135,9 +159,9 @@ async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
     let ObjectUpdate(update) = &mut full else { panic!("full object fixture should decode as an update") };
     update.region_data.region_handle = region_handle;
     update.objects[1].parent_local_id = update.objects[0].local_id;
-    cache.record_update(simulator, &full);
-
     apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 1, &full).await;
+    cache.record_update(simulator, full.clone());
+    load_object_cache(&mut cache, simulator).await;
     assert_public_world_invariants(&world, region);
 
     let make_cached = |message: &Message| {
@@ -171,8 +195,9 @@ async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
 
     let Message::ObjectUpdate(update) = &mut full else { unreachable!() };
     update.objects[0].crc = update.objects[0].crc.wrapping_add(1);
-    cache.record_update(simulator, &full);
     apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 4, &full).await;
+    cache.record_update(simulator, full.clone());
+    await_cache_write(&mut cache).await;
     assert_public_world_invariants(&world, region);
 
     let cached = make_cached(&full);
@@ -223,8 +248,9 @@ async fn recovered_cached_object_media_reaches_session_handoff() {
     update.objects[0].pcode = 9;
     update.objects[0].id = object_id;
     update.objects[0].media_url = "x-mv:12/00000000-0000-0000-0000-000000000001".into();
-    cache.record_update(simulator, &full);
     let _ = apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 1, &full).await;
+    cache.record_update(simulator, full.clone());
+    load_object_cache(&mut cache, simulator).await;
 
     let ObjectUpdate(update) = &full else { unreachable!() };
     let cached = Message::ObjectUpdateCached(CachedUpdate {

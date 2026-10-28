@@ -694,7 +694,7 @@ pub(super) fn order_evidence(packet_order: PacketOrder) -> OrderEvidence {
 pub(super) fn handle_simulator_message(
     scope: SimulatorScope,
     source: SocketAddr,
-    message: Message,
+    message: &Message,
     session: Option<&AgentSession>,
     region_lookup: Option<&RegionLookup>,
     region_name: Option<&str>,
@@ -713,7 +713,7 @@ pub(super) fn handle_simulator_message(
         }
     }
     if let ChatFromSimulator(message) = message
-        && let Some(chat_message) = display_message(message.chat_data, session)
+        && let Some(chat_message) = display_message(message.chat_data.clone(), session)
     {
         mailbox.publish(ViewerUpdate::ChatMessage(chat_message));
     }

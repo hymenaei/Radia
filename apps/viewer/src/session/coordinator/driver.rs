@@ -572,7 +572,6 @@ impl SessionDriver {
                 reply_region_handshake(&self.runtime, self.session_handle.clone(), simulator_id, flags);
             }
         }
-        self.object_cache.record_update(simulator_id, &message);
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         if matches!(packet_order, PacketOrder::Ordered(_))
             && Some(simulator_id) == self.primary_simulator
@@ -645,12 +644,13 @@ impl SessionDriver {
         handle_simulator_message(
             scope,
             source,
-            message,
+            &message,
             self.active_session.as_ref(),
             self.region_lookup.as_ref(),
             region_name,
             &self.mailbox,
         );
+        self.object_cache.record_update(simulator_id, message);
         if self.primary_simulator == Some(simulator_id) {
             self.camera.region_origin_changed(primary_origin_before, self.primary_region_origin());
         }

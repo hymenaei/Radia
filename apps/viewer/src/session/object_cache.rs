@@ -1,23 +1,24 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    sync::Arc,
+    sync::{Arc, mpsc as std_mpsc},
+    thread::JoinHandle,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use network::{Grid, SimulatorId};
 use protocol::{
-    lludp::{Message, Packet},
+    lludp::{MAX_PACKET_RETAINED_CAPACITY_BYTES, Message, Packet},
     messages::{
         CacheMissType::{CrcMismatch, Full},
-        CachedObjectReference, ObjectUpdate, ObjectUpdateCached, ObjectUpdateCompressed, RegionHandshake,
+        ObjectUpdate, ObjectUpdateCached, ObjectUpdateCompressed, RegionHandshake,
         object::RegionData,
     },
 };
 use rusqlite::{Connection, Error as RusqliteError, OptionalExtension, Transaction, params};
 use storage::{
     default_cache_dir,
-    sqlite::{MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError},
+    sqlite::{MAX_BATCH_BYTES, MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError},
 };
 use tokio::{
     runtime::Handle,
@@ -35,18 +36,19 @@ const MAX_DATABASE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_DATABASE_PAGES: i64 = (MAX_DATABASE_BYTES as i64) / SQLITE_PAGE_SIZE;
 const MAX_OBJECT_CACHE_ENTRY_BYTES: usize = 10_000;
 const MIN_OBJECT_CACHE_ENTRY_BYTES: usize = 64;
+const MAX_ENTRY_BATCH_ROWS: usize = MAX_BATCH_BYTES / (MAX_OBJECT_CACHE_ENTRY_BYTES + 64);
 const MAX_REGION_ENTRIES: usize = 10_000;
 const MAX_REGION_BYTES: usize = 32 * 1024 * 1024;
 const MAX_TOTAL_ENTRIES: usize = 50_000;
 const MAX_TOTAL_BYTES: usize = 192 * 1024 * 1024;
 const MAX_GLOBAL_PRUNE_ROWS: usize = 255;
 const MAX_REGION_DELETE_BATCHES: usize = MAX_REGION_ENTRIES.div_ceil(255);
-const MAX_PENDING_SUBMISSIONS: usize = 16;
+const MAX_PENDING_SUBMISSIONS: usize = 10;
 const MAX_PENDING_ROWS: usize = 65_536;
-const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const HANDSHAKE_CACHE_LOAD_TIMEOUT: Duration = Duration::from_millis(50);
 const MAX_PENDING_REGION_LOADS: usize = 2;
-const CACHE_EVENT_CAPACITY: usize = 16;
+const CACHE_EVENT_CAPACITY: usize = MAX_PENDING_SUBMISSIONS + MAX_PENDING_REGION_LOADS + 1;
 const CACHE_SUPPORT_FLAG: u32 = 1;
 const EMPTY_CACHE_FLAG: u32 = 2;
 const SELF_APPEARANCE_FLAG: u32 = 4;
@@ -65,7 +67,7 @@ pub(super) struct StoredEntry {
     update_kind: i64,
     update_flags: i64,
     payload_bytes: i64,
-    payload: Option<Vec<u8>>,
+    payload: Option<Arc<[u8]>>,
 }
 
 struct LoadedRegion {
@@ -77,12 +79,12 @@ struct LoadedRegion {
 }
 
 #[derive(Clone)]
-struct EncodedEntry {
+pub(super) struct EncodedEntry {
     local_id: u32,
     crc: u32,
     update_kind: i64,
     update_flags: u32,
-    payload: Vec<u8>,
+    payload: Arc<[u8]>,
 }
 
 struct PendingSubmission {
@@ -91,10 +93,25 @@ struct PendingSubmission {
     bytes: usize,
 }
 
+struct CacheWriteJob {
+    simulator_id: SimulatorId,
+    scope: CacheScope,
+    message: Message,
+    last_used: i64,
+    permit: mpsc::OwnedPermit<ObjectCacheEvent>,
+}
+
+pub(super) struct CacheWriteWorker {
+    sender: std_mpsc::SyncSender<CacheWriteJob>,
+    thread: JoinHandle<()>,
+}
+
 pub(super) enum ObjectCacheEvent {
-    Ready { db: SqliteDb, status: OpenStatus },
+    Ready { db: Arc<SqliteDb>, status: OpenStatus, writer: CacheWriteWorker },
     OpenFailed(String),
     RegionLoaded { simulator_id: SimulatorId, scope: CacheScope, result: RegionLoadResult, _permit: OwnedSemaphorePermit },
+    WriteApplied { simulator_id: SimulatorId, scope: CacheScope, entries: Arc<[EncodedEntry]> },
+    WriteDropped,
 }
 
 pub(super) enum RegionLoadResult {
@@ -110,16 +127,39 @@ pub(super) struct ObjectCacheSession {
     loaded_entries: usize,
     loaded_bytes: usize,
     use_clock: u64,
-    db: Option<SqliteDb>,
+    db: Option<Arc<SqliteDb>>,
+    write_worker: Option<CacheWriteWorker>,
     event_sender: mpsc::Sender<ObjectCacheEvent>,
     event_receiver: mpsc::Receiver<ObjectCacheEvent>,
     load_slots: Arc<Semaphore>,
     pending: Vec<PendingSubmission>,
     pending_rows: usize,
     pending_bytes: usize,
+    pending_writes: Vec<CacheWriteJob>,
+    pending_write_bytes: usize,
+    outstanding_writes: usize,
     started: bool,
     disabled: bool,
     warned: bool,
+    dropped_writes: u64,
+}
+
+impl CacheWriteWorker {
+    fn start(db: Arc<SqliteDb>, runtime: Handle) -> std::io::Result<Self> {
+        let (sender, receiver) = std_mpsc::sync_channel(MAX_PENDING_SUBMISSIONS);
+        let thread = std::thread::Builder::new().name("object-cache-write".to_owned()).spawn(move || {
+            while let Ok(job) = receiver.recv() {
+                process_write_job(Arc::clone(&db), runtime.clone(), job);
+            }
+        })?;
+        Ok(Self { sender, thread })
+    }
+
+    fn shutdown(self) -> Result<(), String> {
+        let Self { sender, thread } = self;
+        drop(sender);
+        thread.join().map_err(|_| "object cache write worker stopped unexpectedly".to_owned())
+    }
 }
 
 impl ObjectCacheSession {
@@ -133,15 +173,20 @@ impl ObjectCacheSession {
             loaded_bytes: 0,
             use_clock: 0,
             db: None,
+            write_worker: None,
             event_sender,
             event_receiver,
             load_slots: Arc::new(Semaphore::new(MAX_PENDING_REGION_LOADS)),
             pending: Vec::new(),
             pending_rows: 0,
             pending_bytes: 0,
+            pending_writes: Vec::new(),
+            pending_write_bytes: 0,
+            outstanding_writes: 0,
             started: false,
             disabled: false,
             warned: false,
+            dropped_writes: 0,
         }
     }
 
@@ -151,10 +196,18 @@ impl ObjectCacheSession {
         }
         self.started = true;
         let sender = self.event_sender.clone();
+        let task_runtime = runtime.clone();
         drop(runtime.spawn(async move {
-            let result = tokio::task::spawn_blocking(open_default).await;
+            let open_runtime = task_runtime.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let (db, status) = open_default()?;
+                let db = Arc::new(db);
+                let writer = CacheWriteWorker::start(Arc::clone(&db), open_runtime).map_err(|error| error.to_string())?;
+                Ok::<_, String>((db, status, writer))
+            })
+            .await;
             let event = match result {
-                Ok(Ok((db, status))) => ObjectCacheEvent::Ready { db, status },
+                Ok(Ok((db, status, writer))) => ObjectCacheEvent::Ready { db, status, writer },
                 Ok(Err(error)) => ObjectCacheEvent::OpenFailed(error),
                 Err(error) => ObjectCacheEvent::OpenFailed(error.to_string()),
             };
@@ -170,16 +223,22 @@ impl ObjectCacheSession {
 
     pub(super) fn handle_event(&mut self, event: ObjectCacheEvent) -> Option<(SimulatorId, u32)> {
         match event {
-            ObjectCacheEvent::Ready { db, status } => {
+            ObjectCacheEvent::Ready { db, status, writer } => {
                 if matches!(status, OpenStatus::Recreated(_)) {
                     tracing::warn!(?status, "object cache database was recreated; cached objects will be refetched");
                 }
                 self.db = Some(db);
+                self.write_worker = Some(writer);
                 let pending = std::mem::take(&mut self.pending);
                 self.pending_rows = 0;
                 self.pending_bytes = 0;
                 for submission in pending {
                     self.submit_to_db(submission);
+                }
+                let pending_writes = std::mem::take(&mut self.pending_writes);
+                self.pending_write_bytes = 0;
+                for job in pending_writes {
+                    self.submit_to_write_worker(job);
                 }
                 None
             }
@@ -189,6 +248,9 @@ impl ObjectCacheSession {
                 self.pending.clear();
                 self.pending_rows = 0;
                 self.pending_bytes = 0;
+                self.dropped_writes = self.dropped_writes.saturating_add(u64::try_from(self.pending_writes.len()).unwrap_or(u64::MAX));
+                self.pending_writes.clear();
+                self.pending_write_bytes = 0;
                 None
             }
             ObjectCacheEvent::RegionLoaded { simulator_id, scope, result, _permit } => {
@@ -208,6 +270,18 @@ impl ObjectCacheSession {
                     CACHE_SUPPORT_FLAG | SELF_APPEARANCE_FLAG | EMPTY_CACHE_FLAG
                 };
                 Some((simulator_id, flags))
+            }
+            ObjectCacheEvent::WriteApplied { simulator_id, scope, entries } => {
+                self.outstanding_writes = self.outstanding_writes.saturating_sub(1);
+                if self.identities.get(&simulator_id) == Some(&scope) {
+                    self.remember_entries(simulator_id, scope, &entries);
+                }
+                None
+            }
+            ObjectCacheEvent::WriteDropped => {
+                self.outstanding_writes = self.outstanding_writes.saturating_sub(1);
+                self.count_dropped_write();
+                None
             }
         }
     }
@@ -250,20 +324,46 @@ impl ObjectCacheSession {
         CACHE_SUPPORT_FLAG | SELF_APPEARANCE_FLAG | if has_cache { 0 } else { EMPTY_CACHE_FLAG }
     }
 
-    pub(super) fn record_update(&mut self, simulator_id: SimulatorId, message: &Message) {
+    pub(super) fn record_update(&mut self, simulator_id: SimulatorId, message: Message) {
         let Some(scope) = self.identities.get(&simulator_id).cloned() else { return };
-        let entries = encode_entries(message);
-        if entries.is_empty() {
+        if self.disabled {
             return;
         }
-        self.remember_entries(simulator_id, scope.clone(), &entries);
-        if !self.disabled {
-            self.enqueue(make_write_submission(scope, entries, now_millis()));
+        let row_count = match &message {
+            Message::ObjectUpdate(update) => update.objects.len(),
+            Message::ObjectUpdateCompressed(update) => update.objects.len(),
+            _ => 0,
+        };
+        if row_count == 0 {
+            return;
         }
+        let permit = match self.event_sender.clone().try_reserve_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                self.count_dropped_write();
+                return;
+            }
+        };
+        let job = CacheWriteJob { simulator_id, scope, message, last_used: now_millis(), permit };
+        if self.write_worker.is_some() {
+            self.submit_to_write_worker(job);
+            return;
+        }
+        let bytes = self.pending_write_bytes.saturating_add(MAX_PACKET_RETAINED_CAPACITY_BYTES);
+        if self.pending_writes.len() >= MAX_PENDING_SUBMISSIONS || bytes > MAX_PENDING_BYTES {
+            self.warn("object cache write queue is full; some objects will be refetched");
+            self.count_dropped_write();
+            return;
+        }
+        self.pending_write_bytes = bytes;
+        self.pending_writes.push(job);
     }
 
     pub(super) fn begin_region_load(&mut self, simulator_id: SimulatorId, runtime: &Handle) -> Option<u32> {
         let Some(scope) = self.identities.get(&simulator_id).cloned() else { return Some(self.region_handshake_flags(simulator_id)) };
+        if !self.disabled && self.db.is_some() {
+            self.enqueue(make_access_submission(scope.clone(), HashSet::new(), now_millis()));
+        }
         if self.loaded_regions.get(&simulator_id).is_some_and(|region| region.scope == scope && region.complete) {
             return Some(self.region_handshake_flags(simulator_id));
         }
@@ -334,7 +434,7 @@ impl ObjectCacheSession {
                     cache_miss_type = CrcMismatch;
                     return None;
                 }
-                let Some(mut payload) = decode_entry(entry, reference, local_id.get()) else {
+                let Some(mut payload) = decode_entry(entry, local_id.get()) else {
                     stale.insert(local_id.get());
                     return None;
                 };
@@ -360,24 +460,47 @@ impl ObjectCacheSession {
         {
             self.touch_loaded_region(simulator_id, &scope);
             self.remove_loaded_entries(simulator_id, &stale);
-            self.enqueue(make_access_submission(scope, stale, now_millis()));
+            if !stale.is_empty() {
+                self.enqueue(make_access_submission(scope, stale, now_millis()));
+            }
         }
         (batch, media_requests)
     }
 
     pub(super) async fn close(mut self) {
-        while !self.pending.is_empty() && self.db.is_none() && !self.disabled {
+        while (!self.pending.is_empty() || !self.pending_writes.is_empty()) && self.db.is_none() && !self.disabled {
             let Some(event) = self.event_receiver.recv().await else { break };
-            assert!(self.handle_event(event).is_none());
+            let _ = self.handle_event(event);
         }
         let Some(db) = self.db.take() else { return };
+        if let Some(writer) = self.write_worker.take() {
+            match tokio::task::spawn_blocking(move || writer.shutdown()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => self.warn(&error),
+                Err(error) => self.warn(&error.to_string()),
+            }
+        }
+        while self.outstanding_writes > 0 {
+            let Some(event) = self.event_receiver.recv().await else { break };
+            let _ = self.handle_event(event);
+        }
         if db.had_write_failure() {
             self.warn("SQLite worker reported a failed object-cache write");
         }
-        match tokio::task::spawn_blocking(move || db.shutdown()).await {
+        let shutdown = tokio::task::spawn_blocking(move || {
+            Arc::try_unwrap(db)
+                .map_err(|_| "object cache writer still owns the SQLite worker".to_owned())?
+                .shutdown()
+                .map_err(|error| error.to_string())
+        })
+        .await;
+        match shutdown {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => self.warn(&error.to_string()),
+            Ok(Err(error)) => self.warn(&error),
             Err(error) => self.warn(&error.to_string()),
+        }
+        if self.dropped_writes > 0 {
+            tracing::warn!(dropped = self.dropped_writes, "object cache writes were dropped under bounded queue pressure");
         }
     }
 
@@ -420,6 +543,25 @@ impl ObjectCacheSession {
         }
         self.warned = true;
         tracing::warn!(%error, "object cache is unavailable; simulator updates will be fetched normally");
+    }
+
+    fn count_dropped_write(&mut self) {
+        self.dropped_writes = self.dropped_writes.saturating_add(1);
+    }
+
+    fn submit_to_write_worker(&mut self, job: CacheWriteJob) {
+        let Some(writer) = self.write_worker.as_ref() else {
+            self.count_dropped_write();
+            return;
+        };
+        match writer.sender.try_send(job) {
+            Ok(()) => self.outstanding_writes = self.outstanding_writes.saturating_add(1),
+            Err(error) => {
+                self.warn("object cache write queue is full; some objects will be refetched");
+                self.count_dropped_write();
+                drop(error);
+            }
+        }
     }
 
     fn remember_entries(&mut self, simulator_id: SimulatorId, scope: CacheScope, entries: &[EncodedEntry]) {
@@ -650,7 +792,9 @@ fn install_global_stats(connection: &Connection, backfill: bool) -> Result<(), M
 pub(super) fn open_for_test(path: impl AsRef<Path>, grid: Grid) -> ObjectCacheSession {
     let (db, status) = open_at(path).expect("open isolated object cache database");
     let mut cache = ObjectCacheSession::new(grid);
-    assert!(cache.handle_event(ObjectCacheEvent::Ready { db, status }).is_none());
+    let db = Arc::new(db);
+    let writer = CacheWriteWorker::start(Arc::clone(&db), Handle::current()).expect("start isolated cache writer");
+    assert!(cache.handle_event(ObjectCacheEvent::Ready { db, status, writer }).is_none());
     cache
 }
 
@@ -679,7 +823,7 @@ fn queue_scope_load(db: &SqliteDb, scope: CacheScope) -> Result<storage::sqlite:
                     update_kind: row.get(2)?,
                     update_flags: row.get(3)?,
                     payload_bytes: row.get(4)?,
-                    payload: row.get(5)?,
+                    payload: row.get::<_, Option<Vec<u8>>>(5)?.map(Arc::from),
                 })
             },
         )?;
@@ -694,98 +838,152 @@ fn queue_scope_load(db: &SqliteDb, scope: CacheScope) -> Result<storage::sqlite:
     })
 }
 
+fn process_write_job(db: Arc<SqliteDb>, runtime: Handle, job: CacheWriteJob) {
+    let CacheWriteJob { simulator_id, scope, message, last_used, permit } = job;
+    let entries: Arc<[EncodedEntry]> = encode_entries(&message).into();
+    if entries.is_empty() {
+        drop(permit.send(ObjectCacheEvent::WriteApplied { simulator_id, scope, entries }));
+        return;
+    }
+    let batches = match make_write_batches(scope.clone(), Arc::clone(&entries), last_used) {
+        Ok(batches) => batches,
+        Err(_) => {
+            drop(permit.send(ObjectCacheEvent::WriteDropped));
+            return;
+        }
+    };
+    match db.submit_batches(batches) {
+        Ok(receipt) => {
+            drop(runtime.spawn(async move {
+                match receipt.wait().await {
+                    Ok(()) => drop(permit.send(ObjectCacheEvent::WriteApplied { simulator_id, scope, entries })),
+                    Err(_) => drop(permit.send(ObjectCacheEvent::WriteDropped)),
+                }
+            }));
+        }
+        Err(_) => drop(permit.send(ObjectCacheEvent::WriteDropped)),
+    }
+}
+
 fn encode_entries(message: &Message) -> Vec<EncodedEntry> {
     match message {
-        Message::ObjectUpdate(update) => {
-            update
-                .objects
-                .iter()
-                .filter_map(|object| {
-                    let local_id = object.local_id;
-                    if local_id == 0 {
-                        return None;
-                    }
-                    let payload = Packet::new(
-                        0,
-                        Message::ObjectUpdate(ObjectUpdate { region_data: update.region_data, objects: vec![object.clone()] }),
-                    )
-                    .encode()
-                    .ok()?;
-                    (payload.len() >= MIN_OBJECT_CACHE_ENTRY_BYTES && payload.len() <= MAX_OBJECT_CACHE_ENTRY_BYTES)
-                        .then_some(EncodedEntry { local_id, crc: object.crc, update_kind: 0, update_flags: object.update_flags, payload })
+        Message::ObjectUpdate(update) => update
+            .objects
+            .iter()
+            .filter_map(|object| {
+                let local_id = object.local_id;
+                if local_id == 0 {
+                    return None;
+                }
+                let payload =
+                    Packet::new(0, Message::ObjectUpdate(ObjectUpdate { region_data: update.region_data, objects: vec![object.clone()] }))
+                        .encode()
+                        .ok()?;
+                (payload.len() >= MIN_OBJECT_CACHE_ENTRY_BYTES && payload.len() <= MAX_OBJECT_CACHE_ENTRY_BYTES).then_some(EncodedEntry {
+                    local_id,
+                    crc: object.crc,
+                    update_kind: 0,
+                    update_flags: object.update_flags,
+                    payload: Arc::from(payload),
                 })
-                .collect()
-        }
-        Message::ObjectUpdateCompressed(update) => {
-            update
-                .objects
-                .iter()
-                .filter_map(|object| {
-                    let local_id = object.local_id;
-                    if local_id == 0 {
-                        return None;
-                    }
-                    let payload = Packet::new(
-                        0,
-                        Message::ObjectUpdateCompressed(ObjectUpdateCompressed {
-                            region_data: update.region_data,
-                            objects: vec![object.clone()],
-                        }),
-                    )
-                    .encode()
-                    .ok()?;
-                    (payload.len() >= MIN_OBJECT_CACHE_ENTRY_BYTES && payload.len() <= MAX_OBJECT_CACHE_ENTRY_BYTES)
-                        .then_some(EncodedEntry { local_id, crc: object.crc, update_kind: 1, update_flags: object.update_flags, payload })
+            })
+            .collect(),
+        Message::ObjectUpdateCompressed(update) => update
+            .objects
+            .iter()
+            .filter_map(|object| {
+                let local_id = object.local_id;
+                if local_id == 0 {
+                    return None;
+                }
+                let payload = Packet::new(
+                    0,
+                    Message::ObjectUpdateCompressed(ObjectUpdateCompressed {
+                        region_data: update.region_data,
+                        objects: vec![object.clone()],
+                    }),
+                )
+                .encode()
+                .ok()?;
+                (payload.len() >= MIN_OBJECT_CACHE_ENTRY_BYTES && payload.len() <= MAX_OBJECT_CACHE_ENTRY_BYTES).then_some(EncodedEntry {
+                    local_id,
+                    crc: object.crc,
+                    update_kind: 1,
+                    update_flags: object.update_flags,
+                    payload: Arc::from(payload),
                 })
-                .collect()
-        }
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
 
-fn make_write_submission(scope: CacheScope, entries: Vec<EncodedEntry>, last_used: i64) -> PendingSubmission {
-    let payload_bytes = entries.iter().map(|entry| entry.payload.len()).sum::<usize>();
-    let submission_rows = entries.len().saturating_add(1 + 256 + MAX_GLOBAL_PRUNE_ROWS * 2);
-    let submission_bytes = payload_bytes.saturating_add(entries.len().saturating_mul(64)).saturating_add(512);
-    let scope_for_write = scope.clone();
-    let scope_batch = SqliteBatch::new(1, 64, move |transaction| upsert_scope(transaction, &scope_for_write, last_used))
-        .expect("scope batch fits SQLite limits");
-    let scope_for_entries = scope.clone();
-    let entries_batch = SqliteBatch::new(entries.len(), payload_bytes, move |transaction| {
-        for entry in entries {
-            transaction.execute(
-                "INSERT INTO object_entries (grid_id, region_id, cache_id, local_id, crc, update_kind, update_flags, payload)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT (grid_id, region_id, cache_id, local_id) DO UPDATE SET
-                    crc = excluded.crc,
-                    update_kind = excluded.update_kind,
-                    update_flags = excluded.update_flags,
-                    payload = excluded.payload",
-                params![
-                    scope_for_entries.grid_id.clone(),
-                    scope_for_entries.region_id.as_bytes().as_slice(),
-                    scope_for_entries.cache_id.as_bytes().as_slice(),
-                    i64::from(entry.local_id),
-                    i64::from(entry.crc),
-                    entry.update_kind,
-                    i64::from(entry.update_flags),
-                    entry.payload,
-                ],
-            )?;
-        }
-        Ok(())
-    })
-    .expect("object entries batch fits SQLite limits");
-    let region_prune =
-        SqliteBatch::new(256, 256, move |transaction| prune_scope(transaction, &scope, MAX_REGION_ENTRIES, MAX_REGION_BYTES))
-            .expect("region prune batch fits SQLite limits");
-    let global_prune_first = SqliteBatch::new(256, 256, prune_global_chunk).expect("global prune batch fits SQLite limits");
-    let global_prune_second = SqliteBatch::new(256, 256, prune_global_chunk).expect("global prune batch fits SQLite limits");
-    PendingSubmission {
-        batches: vec![scope_batch, entries_batch, region_prune, global_prune_first, global_prune_second],
-        rows: submission_rows,
-        bytes: submission_bytes,
+fn make_write_batches(scope: CacheScope, entries: Arc<[EncodedEntry]>, last_used: i64) -> Result<Vec<SqliteBatch>, SqliteError> {
+    let chunk_count = entries.len().div_ceil(MAX_ENTRY_BATCH_ROWS);
+    let mut batches = Vec::with_capacity(chunk_count + 3);
+    for chunk_index in 0..chunk_count {
+        let start = chunk_index * MAX_ENTRY_BATCH_ROWS;
+        let chunk_rows = entries.len().saturating_sub(start).min(MAX_ENTRY_BATCH_ROWS);
+        let include_scope = chunk_index == 0;
+        let bytes = entries
+            .iter()
+            .skip(start)
+            .take(chunk_rows)
+            .map(|entry| entry.payload.len().saturating_add(64))
+            .sum::<usize>()
+            .saturating_add(usize::from(include_scope) * 64);
+        let rows = chunk_rows.saturating_add(usize::from(include_scope));
+        let entries_for_batch = Arc::clone(&entries);
+        let scope_for_batch = scope.clone();
+        let batch = SqliteBatch::new(rows, bytes, move |transaction| {
+            if include_scope {
+                upsert_scope(transaction, &scope_for_batch, last_used)?;
+            }
+            write_entry_chunk(transaction, &scope_for_batch, &entries_for_batch, start, chunk_rows)
+        })?;
+        batches.push(batch);
     }
+    let region_prune =
+        SqliteBatch::new(256, 256, move |transaction| prune_scope(transaction, &scope, MAX_REGION_ENTRIES, MAX_REGION_BYTES))?;
+    let global_prune_first = SqliteBatch::new(256, 256, prune_global_chunk)?;
+    let global_prune_second = SqliteBatch::new(256, 256, prune_global_chunk)?;
+    batches.extend([region_prune, global_prune_first, global_prune_second]);
+    Ok(batches)
+}
+
+fn write_entry_chunk(
+    transaction: &Transaction<'_>,
+    scope: &CacheScope,
+    entries: &[EncodedEntry],
+    start: usize,
+    count: usize,
+) -> Result<(), RusqliteError> {
+    for entry in entries.iter().skip(start).take(count) {
+        transaction.execute(
+            "INSERT INTO object_entries (grid_id, region_id, cache_id, local_id, crc, update_kind, update_flags, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (grid_id, region_id, cache_id, local_id) DO UPDATE SET
+                crc = excluded.crc,
+                update_kind = excluded.update_kind,
+                update_flags = excluded.update_flags,
+                payload = excluded.payload
+             WHERE object_entries.crc != excluded.crc
+                OR object_entries.update_kind != excluded.update_kind
+                OR object_entries.update_flags != excluded.update_flags
+                OR object_entries.payload != excluded.payload",
+            params![
+                scope.grid_id.as_str(),
+                scope.region_id.as_bytes().as_slice(),
+                scope.cache_id.as_bytes().as_slice(),
+                i64::from(entry.local_id),
+                i64::from(entry.crc),
+                entry.update_kind,
+                i64::from(entry.update_flags),
+                entry.payload.as_ref(),
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn make_scope_delete_submission(scope: CacheScope) -> PendingSubmission {
@@ -984,10 +1182,9 @@ fn stored_entry(entry: &EncodedEntry) -> StoredEntry {
     }
 }
 
-fn decode_entry(entry: &StoredEntry, reference: CachedObjectReference, local_id: u32) -> Option<Message> {
+fn decode_entry(entry: &StoredEntry, local_id: u32) -> Option<Message> {
     let payload_bytes = usize::try_from(entry.payload_bytes).ok()?;
     if entry.local_id != i64::from(local_id)
-        || u32::try_from(entry.crc).ok()? != reference.crc
         || u32::try_from(entry.update_flags).is_err()
         || !(MIN_OBJECT_CACHE_ENTRY_BYTES..=MAX_OBJECT_CACHE_ENTRY_BYTES).contains(&payload_bytes)
     {
@@ -1013,7 +1210,10 @@ fn decode_entry(entry: &StoredEntry, reference: CachedObjectReference, local_id:
         }
         _ => return None,
     };
-    (entry.update_kind == kind && object_local_id == local_id && crc == reference.crc && i64::from(update_flags) == entry.update_flags)
+    (entry.update_kind == kind
+        && object_local_id == local_id
+        && i64::from(crc) == entry.crc
+        && i64::from(update_flags) == entry.update_flags)
         .then_some(message)
 }
 

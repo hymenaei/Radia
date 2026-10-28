@@ -269,7 +269,7 @@ mod tests {
         for (order, name) in [(10, "Initial"), (20, "Renamed"), (15, "Stale")] {
             let message = region_handshake(name);
             decode_simulator_world_update(&mut world, simulator, order, Ordered(u64::from(order)), &message);
-            handle_simulator_message(SimulatorScope::Primary, address, message, None, None, world.region_name(simulator), &mailbox);
+            handle_simulator_message(SimulatorScope::Primary, address, &message, None, None, world.region_name(simulator), &mailbox);
         }
         let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");
         assert_eq!(snapshot.region_name.as_deref(), Some("Renamed"));
@@ -285,23 +285,23 @@ mod tests {
             handle_simulator_message(
                 SimulatorScope::Neighbor,
                 source,
-                region_handshake(&format!("Neighbor {index}")),
+                &region_handshake(&format!("Neighbor {index}")),
                 None,
                 None,
                 Some("Neighbor"),
                 &mailbox,
             );
-            handle_simulator_message(SimulatorScope::Neighbor, source, chat_message("Neighbor"), None, None, None, &mailbox);
+            handle_simulator_message(SimulatorScope::Neighbor, source, &chat_message("Neighbor"), None, None, None, &mailbox);
             handle_simulator_message(
                 SimulatorScope::Primary,
                 source,
-                region_handshake("Unaccepted"),
+                &region_handshake("Unaccepted"),
                 None,
                 None,
                 Some(&format!("Primary {index}")),
                 &mailbox,
             );
-            handle_simulator_message(SimulatorScope::Primary, source, chat_message("Primary"), None, None, None, &mailbox);
+            handle_simulator_message(SimulatorScope::Primary, source, &chat_message("Primary"), None, None, None, &mailbox);
         }
 
         let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");

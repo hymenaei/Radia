@@ -85,20 +85,18 @@ pub(in crate::session) fn decode_cached_object(
     let source = UpdateSource::new(region, sequence, order, block_ordinal);
     match message {
         ObjectUpdate(update) if update.objects.len() == 1 => {
-            let mut object = update.objects[0].clone();
+            let [object] = update.objects.as_slice() else { return None };
             if object.local_id != reference.local_id || object.crc != reference.crc {
                 return None;
             }
-            object.update_flags = reference.update_flags;
-            full_observation(&object, source, invalid_fields).ok()
+            full_observation(object, source, invalid_fields).ok()
         }
         ObjectUpdateCompressed(update) if update.objects.len() == 1 => {
-            let mut object = update.objects[0].clone();
+            let [object] = update.objects.as_slice() else { return None };
             if object.local_id != reference.local_id || object.crc != reference.crc {
                 return None;
             }
-            object.update_flags = reference.update_flags;
-            compressed_observation(&object, source, invalid_fields).ok()
+            compressed_observation(object, source, invalid_fields).ok()
         }
         _ => None,
     }

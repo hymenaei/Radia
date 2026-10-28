@@ -1,50 +1,38 @@
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-const WINDOW: Duration = Duration::from_secs(1);
+const FRAME_WORK_SAMPLES: usize = 120;
 
-#[derive(Default)]
-pub(super) struct FrameIntervals {
-    previous: Option<Instant>,
-    samples: VecDeque<(Instant, Duration)>,
-    ordered: Vec<Duration>,
+pub(super) struct FrameTimes {
+    samples: [Duration; FRAME_WORK_SAMPLES],
+    next: usize,
+    len: usize,
+}
+
+impl Default for FrameTimes {
+    fn default() -> Self {
+        Self { samples: [Duration::ZERO; FRAME_WORK_SAMPLES], next: 0, len: 0 }
+    }
 }
 
 pub(super) struct Summary {
     pub(super) p50: Duration,
     pub(super) p95: Duration,
-    pub(super) max: Duration,
 }
 
-impl FrameIntervals {
-    pub(super) fn record(&mut self, at: Instant) {
-        if let Some(previous) = self.previous.replace(at) {
-            let interval = at.saturating_duration_since(previous);
-            if interval > Duration::ZERO {
-                self.samples.push_back((at, interval));
-            }
+impl FrameTimes {
+    pub(super) fn record(&mut self, frame_work: Duration) {
+        self.samples[self.next] = frame_work;
+        self.next = (self.next + 1) % FRAME_WORK_SAMPLES;
+        self.len = (self.len + 1).min(FRAME_WORK_SAMPLES);
+    }
+
+    pub(super) fn summary(&self) -> Option<Summary> {
+        if self.len == 0 {
+            return None;
         }
-        self.prune(at);
-    }
-
-    pub(super) fn break_sequence(&mut self) {
-        self.previous = None;
-    }
-
-    pub(super) fn summary(&mut self, now: Instant) -> Option<Summary> {
-        self.prune(now);
-        self.ordered.clear();
-        self.ordered.extend(self.samples.iter().map(|(_, interval)| *interval));
-        self.ordered.sort_unstable();
-        Some(Summary { p50: percentile(&self.ordered, 50)?, p95: percentile(&self.ordered, 95)?, max: *self.ordered.last()? })
-    }
-
-    fn prune(&mut self, now: Instant) {
-        while self.samples.front().is_some_and(|(at, _)| now.saturating_duration_since(*at) > WINDOW) {
-            self.samples.pop_front();
-        }
+        let mut ordered = self.samples;
+        ordered[..self.len].sort_unstable();
+        Some(Summary { p50: percentile(&ordered[..self.len], 50)?, p95: percentile(&ordered[..self.len], 95)? })
     }
 }
 
@@ -75,18 +63,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn frame_intervals_report_nearest_rank_percentiles_for_one_second() {
-        let start = Instant::now();
-        let mut intervals = FrameIntervals::default();
-        intervals.record(start);
-        for millis in [16, 33, 53, 83, 183] {
-            intervals.record(start + Duration::from_millis(millis));
+    fn empty_before_first_frame() {
+        assert!(FrameTimes::default().summary().is_none());
+    }
+
+    #[test]
+    fn percentiles_use_nearest_rank() {
+        let mut times = FrameTimes::default();
+        for millis in 1..=20 {
+            times.record(Duration::from_millis(millis));
         }
-        let summary = intervals.summary(start + Duration::from_millis(183)).unwrap();
-        assert_eq!(summary.p50, Duration::from_millis(20));
-        assert_eq!(summary.p95, Duration::from_millis(100));
-        assert_eq!(summary.max, Duration::from_millis(100));
-        assert!(intervals.summary(start + WINDOW + Duration::from_millis(184)).is_none());
+        let summary = times.summary().expect("recorded frame work has a summary");
+        assert_eq!(summary.p50, Duration::from_millis(10));
+        assert_eq!(summary.p95, Duration::from_millis(19));
+    }
+
+    #[test]
+    fn ring_keeps_latest_120_frames() {
+        let mut times = FrameTimes::default();
+        for millis in 1..=121 {
+            times.record(Duration::from_millis(millis));
+        }
+        let summary = times.summary().expect("recorded frame work has a summary");
+        assert_eq!(summary.p50, Duration::from_millis(61));
+        assert_eq!(summary.p95, Duration::from_millis(115));
     }
 
     #[test]
@@ -96,19 +96,6 @@ mod tests {
         assert_eq!(next_frame_deadline(start, start + Duration::from_millis(5), interval), start + interval);
         assert_eq!(next_frame_deadline(start, start + Duration::from_millis(37), interval), start + interval * 3);
         assert_eq!(next_frame_deadline(start + interval, start, interval), start + interval);
-    }
-
-    #[test]
-    fn frame_intervals_include_active_stalls_but_break_after_idle() {
-        let start = Instant::now();
-        let mut intervals = FrameIntervals::default();
-        intervals.record(start);
-        intervals.record(start + Duration::from_millis(1500));
-        let summary = intervals.summary(start + Duration::from_millis(1500)).unwrap();
-        assert_eq!(summary.max, Duration::from_millis(1500));
-        intervals.break_sequence();
-        intervals.record(start + Duration::from_secs(4));
-        assert!(intervals.summary(start + Duration::from_secs(4)).is_none());
     }
 
     #[test]

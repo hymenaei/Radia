@@ -20,7 +20,7 @@ use winit::{
 
 use super::{
     FRAME_INTERVAL, InputCapture, SharedWindowState,
-    timing::{FrameIntervals, next_frame_deadline, redraw_interval, refresh_interval},
+    timing::{FrameTimes, next_frame_deadline, redraw_interval, refresh_interval},
 };
 use crate::{
     DEFAULT_DRAW_DISTANCE,
@@ -90,9 +90,7 @@ pub(super) struct SceneWindow {
     next_ui: Option<Instant>,
     window: Arc<Window>,
     generation: u64,
-    frame_work: Duration,
-    frame_intervals: FrameIntervals,
-    break_interval_after_poll: bool,
+    frame_times: FrameTimes,
     animation_redraw_at: Option<Instant>,
     frame_interval: Duration,
     next_frame: Instant,
@@ -151,9 +149,7 @@ impl SceneWindow {
             next_ui: None,
             window,
             generation,
-            frame_work: Duration::ZERO,
-            frame_intervals: FrameIntervals::default(),
-            break_interval_after_poll: false,
+            frame_times: FrameTimes::default(),
             animation_redraw_at: None,
             frame_interval,
             next_frame: now,
@@ -484,7 +480,7 @@ impl SceneWindow {
         let stats = renderer.stats();
         let gpu_timings = renderer.gpu_timings();
         let gpu_timing_supported = renderer.gpu_timing_supported();
-        let frame_intervals = self.frame_intervals.summary(now);
+        let frame_times = self.frame_times.summary();
         self.dpi = self.window.scale_factor();
         let input = self.platform.take_egui_input(&self.window);
         let mut request_chat = false;
@@ -501,16 +497,14 @@ impl SceneWindow {
                     }
                 }
                 ui.label(format!("Camera: {} (V)", self.camera_mode.label()));
-                ui.label(format!("CPU frame: {:.2} ms", self.frame_work.as_secs_f64() * 1000.0));
-                if let Some(intervals) = &frame_intervals {
+                if let Some(times) = &frame_times {
                     ui.label(format!(
-                        "Frame interval (last second): p50 {:.2} ms, p95 {:.2} ms, max {:.2} ms",
-                        intervals.p50.as_secs_f64() * 1000.0,
-                        intervals.p95.as_secs_f64() * 1000.0,
-                        intervals.max.as_secs_f64() * 1000.0
+                        "Frametime: p50 {:.2} ms, p95 {:.2} ms",
+                        times.p50.as_secs_f64() * 1000.0,
+                        times.p95.as_secs_f64() * 1000.0
                     ));
                 } else {
-                    ui.label("Frame interval (last second): no samples");
+                    ui.label("Frametime: no samples");
                 }
                 ui.label(format!(
                     "Draw submissions: {}, indexed commands: {}, instances: {}",
@@ -624,7 +618,7 @@ impl SceneWindow {
         };
         self.dispatch_texture_jobs();
         let completed = Instant::now();
-        self.frame_work = completed.saturating_duration_since(now);
+        let frame_work = completed.saturating_duration_since(now);
         match result {
             Ok(presented) => {
                 let active_motion = self.controls.active() || self.stop_clear_pending;
@@ -634,8 +628,7 @@ impl SceneWindow {
                         && self.camera.as_ref().is_some_and(|camera| camera.moving(Instant::now())));
                 self.dirty |= self.camera_observation(self.agent_pose(), Instant::now()) != observation;
                 if presented {
-                    self.frame_intervals.record(completed);
-                    self.break_interval_after_poll = !self.dirty;
+                    self.frame_times.record(frame_work);
                     self.last_camera = observation;
                     self.recovery.presented();
                     if self.dirty {
@@ -701,19 +694,10 @@ impl SceneWindow {
             Ok(progress) => {
                 self.animation_redraw_at = progress.redraw_at;
                 self.dirty |= progress.redraw;
-                if self.break_interval_after_poll {
-                    if self.dirty {
-                        self.break_interval_after_poll = false;
-                    } else if !progress.pending && progress.redraw_at.is_none() {
-                        self.frame_intervals.break_sequence();
-                        self.break_interval_after_poll = false;
-                    }
-                }
                 progress.pending
             }
             Err(error) => {
                 self.animation_redraw_at = None;
-                self.break_interval_after_poll = false;
                 tracing::warn!(%error, "scene GPU failed; scheduling recovery");
                 self.retire_renderer();
                 self.schedule_recovery(now);

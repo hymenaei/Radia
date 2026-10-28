@@ -45,7 +45,7 @@ impl MotionState {
         }
         let physical_velocity_changed = next.is_physical && previous.angular_velocity != next.angular_velocity;
         let angular_offset = if previous.local_rotation == next.local_rotation && !physical_velocity_changed {
-            next.local_rotation.inverse() * local_rotation(previous, previous_state, at)
+            local_rotation(previous, previous_state, at) * next.local_rotation.inverse()
         } else {
             Quat::IDENTITY
         };
@@ -164,7 +164,7 @@ pub(crate) fn should_redraw(visible: bool, current: WorldTransform, next: WorldT
 
 fn local_rotation(sample: MotionSample, state: MotionState, now: Instant) -> Quat {
     let elapsed = state.elapsed(now) * f64::from(sample.time_dilation);
-    sample.local_rotation * state.angular_offset * rotation_delta(sample.angular_velocity, elapsed)
+    rotation_delta(sample.angular_velocity, elapsed) * state.angular_offset * sample.local_rotation
 }
 
 fn rotation_delta(angular_velocity: Vec3, elapsed: f64) -> Quat {
@@ -421,17 +421,45 @@ mod tests {
     }
 
     #[test]
+    fn omega_uses_parent_frame() {
+        let now = Instant::now();
+        let mut sample = sample(DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z * 2.0, false);
+        sample.local_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let state = MotionState::new(now);
+        let actual = state.local_rotation(sample, now + Duration::from_millis(250));
+        let expected = Quat::from_xyzw(0.685_124_5, 0.174_941, 0.174_941, 0.685_124_5);
+        close_rotation(actual, expected);
+    }
+
+    #[test]
+    fn negative_omega_reverses_rotation() {
+        let now = Instant::now();
+        let mut sample = sample(DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z * -2.0, false);
+        sample.local_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let state = MotionState::new(now);
+        let actual = state.local_rotation(sample, now + Duration::from_millis(250));
+        let expected = Quat::from_xyzw(0.685_124_5, -0.174_941, -0.174_941, 0.685_124_5);
+        close_rotation(actual, expected);
+    }
+
+    #[test]
     fn update_rebases_position_and_keeps_target_spin() {
         let now = Instant::now();
-        let old = sample(DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::Z, false);
+        let mut old = sample(DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::Z * 2.0, false);
+        old.local_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
         let old_state = MotionState::new(now);
         let update_at = now + Duration::from_millis(500);
         let old_position = position_at_effective(old, old_state.elapsed(update_at));
         close_vec(old_position, DVec3::X);
-        let next = sample(DVec3::X * 5.0, Vec3::X * 4.0, Vec3::ZERO, Vec3::Z, false);
+        let mut next = sample(DVec3::X * 5.0, Vec3::X * 4.0, Vec3::ZERO, Vec3::Z * 2.0, false);
+        next.local_rotation = old.local_rotation;
         let next_state = MotionState::updated(old_state, old, next, update_at);
         close_vec(position_at_effective(next, next_state.elapsed(update_at) + 0.5), DVec3::X * 7.0);
-        close_rotation(next_state.local_rotation(next, update_at), Quat::from_rotation_z(0.5));
+        close_rotation(next_state.local_rotation(next, update_at), Quat::from_xyzw(0.620_544_6, 0.339_005_1, 0.339_005_1, 0.620_544_6));
+        close_rotation(
+            next_state.local_rotation(next, update_at + Duration::from_millis(500)),
+            Quat::from_xyzw(0.382_051_4, 0.595_009_8, 0.595_009_8, 0.382_051_4),
+        );
     }
 
     #[test]
@@ -539,6 +567,22 @@ mod tests {
         let child_transform = child_transform(root_transform, child, MotionState::new(now), child_time);
         close_vec(child_transform.pose.position, DVec3::new(2.0, 2.0, 0.0));
         close_rotation(child_transform.pose.rotation, Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
+    }
+
+    #[test]
+    fn child_spin_uses_parent_frame() {
+        let now = Instant::now();
+        let parent = WorldTransform {
+            pose: WorldPose { position: DVec3::new(10.0, 20.0, 30.0), rotation: Quat::from_rotation_x(std::f32::consts::FRAC_PI_2) },
+            scale: Vec3::ONE,
+        };
+        let mut child = sample(DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z * 2.0, false);
+        child.local_position = Vec3::Y * 2.0;
+        child.local_rotation = Quat::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let transform = child_transform(parent, child, MotionState::new(now), now + Duration::from_millis(250));
+
+        close_vec(transform.pose.position, DVec3::new(10.0, 20.0, 32.0));
+        close_rotation(transform.pose.rotation, Quat::from_xyzw(0.968_912_4, 0.0, 0.247_404, 0.0));
     }
 
     #[test]

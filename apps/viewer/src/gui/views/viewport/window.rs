@@ -474,7 +474,10 @@ impl SceneWindow {
                 }
                 ui.label(format!("Camera: {} (V)", self.camera_mode.label()));
                 ui.label(format!("CPU frame: {:.2} ms", self.frame_work.as_secs_f64() * 1000.0));
-                ui.label(format!("Draws: {}, instances: {}", stats.draw_calls, stats.instances));
+                ui.label(format!(
+                    "Draw submissions: {}, indexed commands: {}, instances: {}",
+                    stats.draw_calls, stats.draw_commands, stats.instances
+                ));
                 ui.collapsing("Diagnostics", |ui| {
                     ui.horizontal(|ui| {
                         ui.add(DragValue::new(&mut self.texture_soft_cap).speed(16).suffix(" MiB"))
@@ -495,7 +498,22 @@ impl SceneWindow {
                         stats.texture_upload_bytes as f64 / 1048576.0
                     ));
                     if stats.omitted_faces > 0 {
-                        ui.label(format!("Faces over draw budget: {}", stats.omitted_faces));
+                        let reason = match stats.omission_reason {
+                            Some(render::OmissionReason::InstanceBufferBudget) => {
+                                "GPU instance buffer budget; nearest and largest objects kept first"
+                            }
+                            Some(render::OmissionReason::MeshMemoryBudget) => {
+                                "GPU mesh memory budget; nearest and largest meshes kept first"
+                            }
+                            Some(render::OmissionReason::CombinedBudgets) => {
+                                "GPU mesh and instance budgets; nearest and largest content kept first"
+                            }
+                            None => "unknown renderer limit",
+                        };
+                        ui.label(format!("Faces omitted: {} ({reason})", stats.omitted_faces));
+                    }
+                    if stats.mesh_budget_blocked > 0 {
+                        ui.label(format!("Meshes blocked by GPU memory budget: {}", stats.mesh_budget_blocked));
                     }
                     ui.label(format!("GPU depth: {:.1} MiB", stats.depth_bytes as f64 / 1048576.0));
                     if let Some(feed) = &self.feed {

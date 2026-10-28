@@ -123,6 +123,7 @@ mod tests {
             position: DVec3::new(100.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
+            invert_normals: false,
             pickable: true,
             faces: Vec::new(),
             shading,

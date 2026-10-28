@@ -260,10 +260,7 @@ impl AssetDemand {
             AssetUser::Object(_) => None,
         }));
         if matches!(key.unit, AssetUnit::MeshLod(_)) {
-            self.mesh_users
-                .get(&key.resource)
-                .map(|users| users.keys().copied().map(AssetUser::Object).collect())
-                .unwrap_or_default()
+            self.mesh_users.get(&key.resource).map(|users| users.keys().copied().map(AssetUser::Object).collect()).unwrap_or_default()
         } else {
             users
         }

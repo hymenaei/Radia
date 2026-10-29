@@ -48,10 +48,10 @@ async fn wait_for_acknowledgement(simulator: &UdpSocket, sequence: u32, duration
 async fn ping_reacks_recent_duplicate() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (_, peer) = receive(&simulator).await;
     simulator.send_to(&server_ack_many(20, &[1]), peer).await.expect("ack circuit establishment");
@@ -86,7 +86,7 @@ async fn shutdown_preempts_chat() {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
@@ -145,10 +145,10 @@ async fn shutdown_preempts_chat() {
 async fn backpressure_keeps_acks() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
@@ -189,10 +189,10 @@ async fn backpressure_keeps_acks() {
 async fn ping_survives_backpressure() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
@@ -266,13 +266,13 @@ async fn ping_survives_backpressure() {
 async fn region_arrival_object_burst_survives_slow_consumer() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
     let coverage_losses = CoverageLossLedger::new();
     let mut options = test_options();
     options.coverage_losses = coverage_losses.clone();
-    let client = spawn(run_session_with_options(session, command_receiver, event_sender, disconnect_requested, options));
+    let client = spawn(run_session_with_options(session, commands.clone(), command_receiver, event_sender, disconnect_requested, options));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
@@ -306,7 +306,8 @@ async fn region_arrival_object_burst_survives_slow_consumer() {
         }
     }
 
-    const OBJECT_COUNT: usize = crate::circuit::admission::SESSION_APPLICATION_EVENT_CAPACITY;
+    const OBJECT_COUNT: usize =
+        crate::circuit::admission::SESSION_APPLICATION_EVENT_CAPACITY + SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY;
     let first_sequence = 24;
     let last_sequence = first_sequence + OBJECT_COUNT as u32 - 1;
     let mut chunk_start = first_sequence;
@@ -383,12 +384,12 @@ async fn region_arrival_object_burst_survives_slow_consumer() {
 async fn sustained_application_pressure_disconnects() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
     let mut options = test_options();
     options.application_event_capacity = 0;
-    let client = spawn(run_session_with_options(session, command_receiver, event_sender, disconnect_requested, options));
+    let client = spawn(run_session_with_options(session, commands.clone(), command_receiver, event_sender, disconnect_requested, options));
 
     let (_, peer) = receive(&simulator).await;
     simulator.send_to(&server_ack_many(20, &[1]), peer).await.expect("ack circuit establishment");
@@ -415,7 +416,7 @@ async fn sustained_application_pressure_disconnects() {
     })
     .await
     .expect("sustained pressure should send logout after the grace period");
-    assert!(matches!(logout.message(), Message::LogoutRequest(_)));
+    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
     std::assert_matches!(
         timeout(SIMULATOR_TIMEOUT, client).await.expect("pressure disconnect should finish").expect("session task should not panic"),
         Err(crate::session::SessionError::SustainedApplicationEventPressure)
@@ -451,10 +452,10 @@ async fn retry_resends_then_expires() {
 async fn lost_packet_retries() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, _events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (original, peer) = receive(&simulator).await;
     assert_eq!(original, expected_fixture("use_circuit_code.hex", 1, true));
@@ -543,10 +544,10 @@ async fn packet_piggybacks_ack() {
 async fn timer_acks_recover_loss() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, _events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));

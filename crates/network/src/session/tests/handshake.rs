@@ -13,7 +13,7 @@ async fn handshake_chat_logout() {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
@@ -97,7 +97,10 @@ async fn handshake_chat_logout() {
     assert_eq!(message.chat_data.from_name, "Ada");
     assert_eq!(message.chat_data.message, "Hi");
     yield_now().await;
-    assert!(matches!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    match events.try_recv() {
+        Err(mpsc::error::TryRecvError::Empty) => {}
+        _ => panic!("event queue should be empty"),
+    }
 
     disconnect_signal.send_replace(true);
     let (logout, logout_peer) = receive(&simulator).await;
@@ -178,10 +181,10 @@ fn region_handshake_reply_reports_a_full_command_queue_without_waiting() {
 async fn handshake_survives_application_backlog() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
@@ -248,10 +251,10 @@ async fn handshake_survives_application_backlog() {
 async fn closed_receiver_logs_out() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (_disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
@@ -273,7 +276,14 @@ async fn closed_receiver_logs_out() {
     set_sequence(&mut movement_complete, 23);
     drop(events);
     simulator.send_to(&movement_complete, peer).await.expect("send packet as receiver closes");
-    assert_eq!(receive(&simulator).await.0, expected_fixture("logout_request.hex", 4, true));
+    let throttle = Packet::decode(&receive(&simulator).await.0).expect("decode agent throttle");
+    assert_eq!(throttle.sequence(), 4);
+    std::assert_matches!(throttle.message(), Message::AgentThrottle(_));
+    assert!(throttle.appended_acks().contains(&23));
+    let logout = Packet::decode(&receive(&simulator).await.0).expect("decode logout request");
+    assert_eq!(logout.sequence(), 5);
+    assert!(logout.is_reliable());
+    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
 
     assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_ok());
     assert_no_datagram(&simulator);
@@ -283,10 +293,10 @@ async fn closed_receiver_logs_out() {
 async fn disconnect_blocks_movement() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, _events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));

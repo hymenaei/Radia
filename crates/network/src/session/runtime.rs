@@ -9,7 +9,7 @@ use super::handoff::HandoffState;
 use super::{
     APPLICATION_EVENT_PRESSURE_GRACE_PERIOD, CLIENT_EVENT_CAPACITY, ConnectionTaskResult, HANDOFF_COMMAND_RETRY_INTERVAL, LOGOUT_TIMEOUT,
     RunState, RuntimeInputs, SESSION_TIMEOUT, SessionError, SessionStartup, SessionState, SimulatorCapabilitySession, SimulatorEvent,
-    SimulatorRequest, retry_pending_handoff_commands,
+    SimulatorRequest,
 };
 use crate::{
     capabilities::{EventQueueRoleHandle, EventQueueTask},
@@ -140,6 +140,7 @@ impl<'a> SessionDispatcher<'a> {
         }
         let mut application_pressure_changed = self.state.packet_memory.application_events().subscribe_pressure();
         loop {
+            self.flush_pending_handshake_replies();
             let pressure_deadline = (*application_pressure_changed.borrow()).map(|since| since + APPLICATION_EVENT_PRESSURE_GRACE_PERIOD);
             let application_pressure = async {
                 if let Some(deadline) = pressure_deadline {
@@ -172,8 +173,9 @@ impl<'a> SessionDispatcher<'a> {
                     self.handle_logout_deadline().await?
                 }
                 _ = self.events.closed(), if self.run_state.logout_deadline.is_none() => self.handle_event_receiver_closed().await?,
-                _ = retry_pending_handoff_commands(&mut self.handoff_command_retry, &mut self.run_state.neighbor_connections),
-                    if self.run_state.neighbor_connections.values().any(|connection| connection.pending_handoff_command.is_some()) => {
+                _ = self.handoff_command_retry.tick(),
+                    if !self.run_state.pending_region_handshake_replies.is_empty()
+                        || self.run_state.neighbor_connections.values().any(|connection| connection.pending_handoff_command.is_some()) => {
                         self.handle_handoff_command_retry()
                     }
                 capability_event = self.capability_event_rx.recv(), if !self.capability_events_closed => self.handle_capability_event(capability_event).await?,

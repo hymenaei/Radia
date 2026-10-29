@@ -97,6 +97,31 @@ const WAIT: Duration = Duration::from_secs(2);
 const SESSION_EVENT_CAPACITY: usize = 2;
 const TEST_EVENT_CAPACITY: usize = CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY;
 
+pub(super) fn relay_handshake_events(
+    events: mpsc::Sender<EventEnvelope>,
+    commands: mpsc::Sender<Command>,
+    capacity: usize,
+) -> (mpsc::Sender<EventEnvelope>, JoinHandle<()>) {
+    let commands = commands.downgrade();
+    let (runtime_events, mut incoming) = mpsc::channel::<EventEnvelope>(capacity);
+    let relay = spawn(async move {
+        while let Some(event) = incoming.recv().await {
+            if let Event::SimulatorMessage { simulator_id, message: Message::RegionHandshake(_), .. } = &event.event {
+                let (completed, response) = oneshot::channel();
+                if let Some(commands) = commands.upgrade()
+                    && commands.send(Command::ReplyRegionHandshake { simulator_id: *simulator_id, flags: 0, completed }).await.is_ok()
+                {
+                    drop(response);
+                }
+            }
+            if events.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
+    (runtime_events, relay)
+}
+
 struct NeighborHarness {
     primary: UdpSocket,
     neighbor: UdpSocket,
@@ -124,15 +149,17 @@ impl NeighborHarness {
 
 pub(crate) async fn run_session(
     session: AgentSession,
+    command_sender: mpsc::Sender<Command>,
     commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<EventEnvelope>,
     disconnect_requested: watch::Receiver<bool>,
 ) -> Result<(), crate::session::SessionError> {
-    run_session_with_options(session, commands, events, disconnect_requested, test_options()).await
+    run_session_with_options(session, command_sender, commands, events, disconnect_requested, test_options()).await
 }
 
 pub(crate) async fn run_session_with_options(
     session: AgentSession,
+    command_sender: mpsc::Sender<Command>,
     commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<EventEnvelope>,
     disconnect_requested: watch::Receiver<bool>,
@@ -140,14 +167,16 @@ pub(crate) async fn run_session_with_options(
 ) -> Result<(), crate::session::SessionError> {
     let failure_events = events.clone();
     let mut failure_shutdown = disconnect_requested.clone();
-    let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
+    let (session_events, relay) = relay_handshake_events(events, command_sender, SESSION_EVENT_CAPACITY);
+    let terminal_event_permit = session_events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
     let result = async {
         let connection = SessionRuntime::connect(session, ResponseData::default(), options)
             .await?
             .ok_or(crate::session::SessionError::PrimaryConnectionStoppedDuringStartup)?;
-        connection.run(commands, events, disconnect_requested, terminal_event_permit).await
+        connection.run(commands, session_events, disconnect_requested, terminal_event_permit).await
     }
     .await;
+    drop(relay);
     if let Err(error) = &result {
         send_failure_event(&failure_events, error.to_string(), &mut failure_shutdown).await;
     }
@@ -388,8 +417,10 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
     .await
     .expect("connect primary simulator");
     let packet_memory = connection.packet_memory.clone();
-    let terminal = event_sender.clone().reserve_owned().await.expect("reserve terminal event");
-    let client = spawn(connection.run(command_receiver, event_sender, disconnect_requested, terminal));
+    let (session_events, relay) = relay_handshake_events(event_sender.clone(), commands.clone(), TEST_EVENT_CAPACITY);
+    let terminal = session_events.clone().reserve_owned().await.expect("reserve terminal event");
+    let client = spawn(connection.run(command_receiver, session_events, disconnect_requested, terminal));
+    drop(relay);
 
     let (_, primary_peer) = receive(&primary).await;
     primary.send_to(&ack(20, 1), primary_peer).await.expect("ack primary circuit");

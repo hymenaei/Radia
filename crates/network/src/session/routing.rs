@@ -3,12 +3,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use protocol::lludp::Message;
 use tokio::{sync::mpsc, time::Instant};
 
+use super::simulators::MAX_PENDING_REGION_HANDSHAKE_REPLIES;
 use super::teleport::is_teleport_cancel;
 use super::{
     ConnectionQueueFailure, EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_PENDING_LIFECYCLE_EVENTS,
     MAX_PENDING_SESSION_EVENTS, MAX_PRECONNECT_EVENTS, RuntimeAction, SessionDispatcher, SessionError, SimulatorCommand,
-    queue_connection_message,
-    queue_primary_message,
+    queue_connection_message, queue_primary_message,
 };
 use crate::{
     error::Error,
@@ -91,6 +91,35 @@ pub(super) enum EventQueueOutcome {
 }
 
 impl SessionDispatcher<'_> {
+    pub(super) fn flush_pending_handshake_replies(&mut self) {
+        if self.run_state.pending_region_handshake_replies.is_empty() {
+            return;
+        }
+        let mut pending = std::mem::take(&mut self.run_state.pending_region_handshake_replies);
+        flush_handshake_reply_queue(&mut pending, |simulator_id| self.simulator_commands(simulator_id));
+        self.run_state.pending_region_handshake_replies = pending;
+    }
+
+    fn simulator_commands(&self, simulator_id: SimulatorId) -> Option<mpsc::Sender<SimulatorCommand>> {
+        if simulator_id == self.state.primary.simulator_id && !self.state.root_connection_failed {
+            return Some(self.state.primary.commands.clone());
+        }
+        self.run_state
+            .neighbor_connections
+            .values()
+            .find(|connection| connection.simulator_id == simulator_id)
+            .map(|connection| connection.commands.clone())
+    }
+
+    fn has_pending_handshake_reply(&self, simulator_id: SimulatorId) -> bool {
+        self.run_state.pending_region_handshake_replies.iter().any(|(pending_id, _)| *pending_id == simulator_id)
+    }
+
+    fn queue_handshake_reply(&mut self, simulator_id: SimulatorId, command: SimulatorCommand) {
+        let commands = self.simulator_commands(simulator_id);
+        queue_handshake_reply(commands.as_ref(), &mut self.run_state.pending_region_handshake_replies, simulator_id, command);
+    }
+
     pub(super) async fn handle_pending_application_event(
         &mut self,
         permit: Result<mpsc::OwnedPermit<EventEnvelope>, mpsc::error::SendError<()>>,
@@ -133,6 +162,12 @@ impl SessionDispatcher<'_> {
                         .await?;
                     return Ok(RuntimeAction::Continue);
                 }
+                if self.has_pending_handshake_reply(self.state.primary.simulator_id) {
+                    self.state
+                        .publish_event(&self.events, &mut self.run_state, Event::SendFailed(Error::SimulatorCommandQueueFull.to_string()))
+                        .await?;
+                    return Ok(RuntimeAction::Continue);
+                }
 
                 let result = queue_primary_message(
                     &self.state.primary.commands,
@@ -162,6 +197,8 @@ impl SessionDispatcher<'_> {
                 let mut completion = Some(completed);
                 let result = if simulator_id == self.state.simulator_id && !self.startup.is_ready() {
                     Err(ConnectionQueueFailure { error: Error::SimulatorNotReady, completion: completion.take() })
+                } else if self.has_pending_handshake_reply(simulator_id) {
+                    Err(ConnectionQueueFailure { error: Error::SimulatorCommandQueueFull, completion: completion.take() })
                 } else if let Some(commands) = commands {
                     queue_connection_message(commands, message, delivery, completion.take(), cancel_target, false)
                 } else {
@@ -182,24 +219,8 @@ impl SessionDispatcher<'_> {
                     },
                     region_info: protocol::messages::region::region_handshake_reply::RegionInfo { flags },
                 });
-                let commands = if simulator_id == self.state.primary.simulator_id && !self.state.root_connection_failed {
-                    Some(&self.state.primary.commands)
-                } else {
-                    self.run_state
-                        .neighbor_connections
-                        .values()
-                        .find(|connection| connection.simulator_id == simulator_id)
-                        .map(|connection| &connection.commands)
-                };
                 let command = SimulatorCommand::ReplyRegionHandshake { message, completed };
-                let result =
-                    if let Some(commands) = commands { commands.send(command).await.map_err(|error| error.0) } else { Err(command) };
-                if let Err(SimulatorCommand::ReplyRegionHandshake { completed, .. }) = result
-                    && let Err(error) =
-                        completed.send(Err(if commands.is_some() { Error::SimulatorConnectionClosed } else { Error::SimulatorUnavailable }))
-                {
-                    drop(error);
-                }
+                self.queue_handshake_reply(simulator_id, command);
             }
             None => {
                 self.state.graceful_disconnect(self.state.logout_request_sent).await?;
@@ -207,6 +228,74 @@ impl SessionDispatcher<'_> {
             }
         }
         Ok(RuntimeAction::Continue)
+    }
+}
+
+fn complete_handshake_reply(command: SimulatorCommand, error: Error) {
+    if let SimulatorCommand::ReplyRegionHandshake { completed, .. } = command
+        && let Err(error) = completed.send(Err(error))
+    {
+        drop(error);
+    }
+}
+
+fn queue_handshake_reply(
+    commands: Option<&mpsc::Sender<SimulatorCommand>>,
+    pending: &mut VecDeque<(SimulatorId, SimulatorCommand)>,
+    simulator_id: SimulatorId,
+    command: SimulatorCommand,
+) {
+    if pending.iter().any(|(pending_id, _)| *pending_id == simulator_id) {
+        defer_handshake_reply(pending, simulator_id, command);
+        return;
+    }
+    let Some(commands) = commands else {
+        complete_handshake_reply(command, Error::SimulatorUnavailable);
+        return;
+    };
+    match commands.try_send(command) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(command)) => defer_handshake_reply(pending, simulator_id, command),
+        Err(mpsc::error::TrySendError::Closed(command)) => {
+            complete_handshake_reply(command, Error::SimulatorConnectionClosed);
+        }
+    }
+}
+
+fn defer_handshake_reply(pending: &mut VecDeque<(SimulatorId, SimulatorCommand)>, simulator_id: SimulatorId, command: SimulatorCommand) {
+    if pending.len() < MAX_PENDING_REGION_HANDSHAKE_REPLIES {
+        pending.push_back((simulator_id, command));
+    } else {
+        complete_handshake_reply(command, Error::SimulatorCommandQueueFull);
+    }
+}
+
+fn flush_handshake_reply_queue(
+    pending: &mut VecDeque<(SimulatorId, SimulatorCommand)>,
+    mut simulator_commands: impl FnMut(SimulatorId) -> Option<mpsc::Sender<SimulatorCommand>>,
+) {
+    let pending_count = pending.len();
+    let mut blocked = HashSet::new();
+    for _ in 0..pending_count {
+        let Some((simulator_id, command)) = pending.pop_front() else { break };
+        if blocked.contains(&simulator_id) {
+            pending.push_back((simulator_id, command));
+            continue;
+        }
+        let Some(commands) = simulator_commands(simulator_id) else {
+            complete_handshake_reply(command, Error::SimulatorUnavailable);
+            continue;
+        };
+        match commands.try_send(command) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(command)) => {
+                blocked.insert(simulator_id);
+                pending.push_back((simulator_id, command));
+            }
+            Err(mpsc::error::TrySendError::Closed(command)) => {
+                complete_handshake_reply(command, Error::SimulatorConnectionClosed);
+            }
+        }
     }
 }
 
@@ -278,14 +367,16 @@ mod tests {
 
     use llsd::Value;
 
+    use crate::circuit::SimulatorCommand;
     use crate::event::{Event, EventEnvelope, SimulatorId};
     use tokio::{
-        sync::{Semaphore, mpsc},
+        sync::{Semaphore, mpsc, oneshot},
         time::Instant,
     };
 
     use super::{
-        MAX_PENDING_LIFECYCLE_EVENTS, MAX_PENDING_SESSION_EVENTS, PrimaryEventBacklog, primary_event_queue_size, queue_simulator_event,
+        MAX_PENDING_LIFECYCLE_EVENTS, MAX_PENDING_REGION_HANDSHAKE_REPLIES, MAX_PENDING_SESSION_EVENTS, PrimaryEventBacklog,
+        flush_handshake_reply_queue, primary_event_queue_size, queue_handshake_reply, queue_simulator_event,
     };
     use crate::session::EVENT_BACKLOG_WARNING_THRESHOLD;
 
@@ -380,6 +471,72 @@ mod tests {
 
         assert_eq!(credits.available_permits(), 1);
         assert_application_event(&received.try_recv().expect("event remains in the viewer channel").event, 0);
+    }
+
+    #[tokio::test]
+    async fn handshake_backlog_preserves_order() {
+        let simulator_id = SimulatorId::new(1);
+        let (commands, mut received) = mpsc::channel(1);
+        commands.try_send(SimulatorCommand::CancelHandoff).expect("fill the simulator command queue");
+        let mut pending = VecDeque::new();
+        let (first_completed, first_response) = oneshot::channel();
+        let (second_completed, second_response) = oneshot::channel();
+
+        queue_handshake_reply(Some(&commands), &mut pending, simulator_id, handshake_reply(first_completed));
+        queue_handshake_reply(Some(&commands), &mut pending, simulator_id, handshake_reply(second_completed));
+        assert_eq!(pending.len(), 2);
+
+        let Ok(SimulatorCommand::CancelHandoff) = received.try_recv() else {
+            panic!("expected queued handoff cancellation");
+        };
+        flush_handshake_reply_queue(&mut pending, |id| (id == simulator_id).then(|| commands.clone()));
+        assert_eq!(pending.len(), 1, "one reply fits in the freed queue slot");
+        let SimulatorCommand::ReplyRegionHandshake { completed, .. } = received.try_recv().expect("first reply keeps its place") else {
+            panic!("expected first handshake reply");
+        };
+        completed.send(Ok(())).expect("first reply receiver remains open");
+        first_response.await.expect("first reply completes").expect("first reply succeeds");
+
+        flush_handshake_reply_queue(&mut pending, |id| (id == simulator_id).then(|| commands.clone()));
+        let SimulatorCommand::ReplyRegionHandshake { completed, .. } = received.try_recv().expect("second reply follows first") else {
+            panic!("expected second handshake reply");
+        };
+        completed.send(Ok(())).expect("second reply receiver remains open");
+        second_response.await.expect("second reply completes").expect("second reply succeeds");
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handshake_backlog_is_bounded() {
+        let simulator_id = SimulatorId::new(1);
+        let (commands, _received) = mpsc::channel(1);
+        commands.try_send(SimulatorCommand::CancelHandoff).expect("fill the simulator command queue");
+        let mut pending = VecDeque::new();
+        let mut overflow = None;
+
+        for index in 0..=MAX_PENDING_REGION_HANDSHAKE_REPLIES {
+            let (completed, response) = oneshot::channel();
+            queue_handshake_reply(Some(&commands), &mut pending, simulator_id, handshake_reply(completed));
+            if index == MAX_PENDING_REGION_HANDSHAKE_REPLIES {
+                overflow = Some(response);
+            }
+        }
+
+        assert_eq!(pending.len(), MAX_PENDING_REGION_HANDSHAKE_REPLIES);
+        std::assert_matches!(overflow.expect("the extra reply is rejected").await, Ok(Err(crate::error::Error::SimulatorCommandQueueFull)));
+    }
+
+    fn handshake_reply(completed: oneshot::Sender<Result<(), crate::error::Error>>) -> SimulatorCommand {
+        SimulatorCommand::ReplyRegionHandshake {
+            message: protocol::lludp::Message::RegionHandshakeReply(protocol::messages::RegionHandshakeReply {
+                agent_data: protocol::messages::region::region_handshake_reply::AgentData {
+                    agent_id: uuid::Uuid::nil(),
+                    session_id: uuid::Uuid::nil(),
+                },
+                region_info: protocol::messages::region::region_handshake_reply::RegionInfo { flags: 0 },
+            }),
+            completed,
+        }
     }
 
     fn application_event(index: usize) -> Event {

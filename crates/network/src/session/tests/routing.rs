@@ -174,13 +174,16 @@ fn preconnect_buffer_is_bounded() {
     let simulator_id = test_simulator_id(51);
     let mut pending = PreconnectEvents::default();
     for _ in 0..MAX_PRECONNECT_EVENTS {
-        assert!(matches!(
-            queue_until_connected(&HashSet::new(), &mut pending, simulator_id, EventEnvelope::new(Event::Failed("pending".into()))),
-            PreconnectOutcome::Buffered
-        ));
+        match queue_until_connected(&HashSet::new(), &mut pending, simulator_id, EventEnvelope::new(Event::Failed("pending".into()))) {
+            PreconnectOutcome::Buffered => {}
+            _ => panic!("event should be buffered before overflow"),
+        }
     }
     let overflow = queue_until_connected(&HashSet::new(), &mut pending, simulator_id, EventEnvelope::new(Event::Failed("overflow".into())));
-    assert!(matches!(overflow, PreconnectOutcome::Full));
+    match overflow {
+        PreconnectOutcome::Full => {}
+        _ => panic!("preconnect event queue should report full"),
+    }
     assert_eq!(pending.take(simulator_id).len(), MAX_PRECONNECT_EVENTS);
 }
 

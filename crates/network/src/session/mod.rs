@@ -54,13 +54,14 @@ use neighbors::{neighbor_completion_event, neighbor_event_queue_failure};
 #[cfg(test)]
 use routing::{EventQueueOutcome, PreconnectEvents, PreconnectOutcome, queue_simulator_event, queue_until_connected};
 use runtime::{RuntimeAction, SessionDispatcher};
+#[cfg(test)]
+use simulators::retry_pending_handoff_commands;
 use simulators::{
     APPLICATION_EVENT_PRESSURE_GRACE_PERIOD, ConnectionQueueFailure, ConnectionTaskResult, EVENT_BACKLOG_WARNING_INTERVAL,
     EVENT_BACKLOG_WARNING_THRESHOLD, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffCommand, MAX_PENDING_LIFECYCLE_EVENTS,
     MAX_PENDING_SESSION_EVENTS, NEIGHBOR_COMMAND_CAPACITY, NeighborEventQueueJoin, PrimaryRoute, RunState, RuntimeInputs, SESSION_TIMEOUT,
     SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession, SimulatorConnectionState, is_current_simulator,
-    queue_connection_message, queue_primary_message, remove_simulator_capability, retry_pending_handoff_commands,
-    track_capability_requests,
+    queue_connection_message, queue_primary_message, remove_simulator_capability, track_capability_requests,
 };
 use startup::SessionStartup;
 #[cfg(test)]

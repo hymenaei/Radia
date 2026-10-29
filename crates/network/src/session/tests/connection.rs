@@ -469,10 +469,10 @@ async fn foreign_ids_are_unavailable() {
 async fn stray_logout_reply_keeps_session_running() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let session = login_session(primary.local_addr().expect("primary simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (_, primary_peer) = receive(&primary).await;
     primary.send_to(&ack(20, 1), primary_peer).await.expect("ack primary circuit");

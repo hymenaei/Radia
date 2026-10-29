@@ -1,16 +1,20 @@
-use super::{FramePreparation, FramePreparationKey, GeometryRenderer, PrepareTimes, ShadingMode, Stats};
+use std::time::{Duration, Instant};
+
+use wgpu::{CommandEncoder, Device};
+
 use crate::{
     geometry::{
-        cache::{CacheUpdate, CachedFace, ItemId},
+        cache::CacheUpdate,
         draw_list::MAX_FACE_INSTANCES,
         instance::{instance_base, parameter_part, scene_origin},
+        items::{CachedFace, ItemIndex},
     },
     material::FaceParams,
     pipeline::COLOR,
     scene::{Camera, Object, SceneView, texture_animation},
 };
-use std::time::{Duration, Instant};
-use wgpu::{CommandEncoder, Device};
+
+use super::{FramePreparation, FramePreparationKey, GeometryRenderer, PrepareTimes, ShadingMode, Stats};
 
 impl GeometryRenderer {
     pub(crate) fn prepare(
@@ -73,8 +77,8 @@ impl GeometryRenderer {
         };
         times.visibility = visibility_started.elapsed();
 
-        let meshes_started = Instant::now();
         let previous_mesh_state = self.cache.mesh_state;
+        let meshes_started = Instant::now();
         let candidate_mesh_missing = if candidates_changed || update.mesh_dirty { self.rebuild_visible_meshes(camera) } else { false };
         let mesh_progress = candidate_mesh_missing
             || update.mesh_dirty
@@ -108,7 +112,7 @@ impl GeometryRenderer {
         if rebuild_visible {
             self.cache.next_visible.clear();
             for id in &self.cache.candidates {
-                let Some(item) = self.cache.items.get(id) else { continue };
+                let Some(item) = self.cache.items.get(*id) else { continue };
                 let mesh_ready =
                     if mesh_progress { self.cache.mesh_ready.contains(&item.mesh.id()) } else { self.meshes.contains_key(&item.mesh.id()) };
                 if mesh_ready && !item.faces.is_empty() {
@@ -122,7 +126,7 @@ impl GeometryRenderer {
 
         let draw_list_started = Instant::now();
         if origin_rebased {
-            for item in self.cache.items.values_mut() {
+            for (_, item) in self.cache.items.iter_mut() {
                 item.transform = instance_base(item.position, item.rotation, item.scale, origin);
             }
         }
@@ -143,7 +147,7 @@ impl GeometryRenderer {
 
         let draw_updates_started = Instant::now();
         self.prepare_face_patches(&update, layout, visible_changed, animation_now);
-        let pose_items: &[ItemId] = if layout { &[] } else { &update.pose_items };
+        let pose_items: &[ItemIndex] = if layout { &[] } else { &update.pose_items };
         let patch_stats = self.draw_list.patch(&mut self.cache.items, &self.cache.patch_faces, pose_items, camera);
         self.stats.faces_patched = patch_stats.faces_patched;
         let blended_sorted = if layout {
@@ -190,13 +194,23 @@ impl GeometryRenderer {
         self.cache.size = size;
         self.cache.version = Some(view.version());
         self.cache.next_candidates.clear();
-        let animation_deadline =
-            self.cache.visible.iter().filter_map(|id| self.cache.items.get(id).and_then(|item| item.animation_deadline)).min();
+        let animation_deadline = self
+            .cache
+            .animated_items
+            .iter()
+            .filter_map(|index| {
+                let item = self.cache.items.get(*index)?;
+                let visible = self.cache.visible.binary_search_by(|visible| {
+                    self.cache.items.get(*visible).map_or(std::cmp::Ordering::Less, |visible| visible.id.cmp(&item.id))
+                });
+                visible.ok().and(item.animation_deadline)
+            })
+            .min();
         let instances_started = Instant::now();
         let mesh_omitted_faces = if self.mesh_budget_blocked.is_empty() {
             0
         } else {
-            self.cache.candidates.iter().filter_map(|id| self.cache.items.get(id)).fold(0usize, |count, item| {
+            self.cache.candidates.iter().filter_map(|index| self.cache.items.get(*index)).fold(0usize, |count, item| {
                 if self.mesh_budget_blocked.contains(&item.mesh.id()) { count.saturating_add(item.faces.len()) } else { count }
             })
         };
@@ -248,9 +262,11 @@ impl GeometryRenderer {
             patch_items.extend(update.parameter_items.iter().copied());
         }
         for id in self.cache.animated_items.iter().copied() {
-            if visible.binary_search(&id).is_ok()
-                && items.get(&id).is_some_and(|item| item.animation_deadline.is_some_and(|deadline| deadline <= now))
-            {
+            let Some(item) = items.get(id) else { continue };
+            let visible_item = visible
+                .binary_search_by(|index| items.get(*index).map_or(std::cmp::Ordering::Less, |visible| visible.id.cmp(&item.id)))
+                .is_ok();
+            if visible_item && item.animation_deadline.is_some_and(|deadline| deadline <= now) {
                 patch_items.push(id);
             }
         }
@@ -259,7 +275,7 @@ impl GeometryRenderer {
         self.cache.patch_faces.clear();
         for id in patch_items.iter().copied() {
             let pose_changed = !layout && update.pose_items.binary_search(&id).is_ok();
-            let Some(item) = items.get_mut(&id) else { continue };
+            let Some(item) = items.get_mut(id) else { continue };
             let parameters_dirty = item.parameters_dirty;
             let animation_due = item.animation_deadline.is_some_and(|deadline| deadline <= now);
             let animation = item
@@ -365,7 +381,7 @@ fn current_params(source: Option<&Object>, shading: ShadingMode, face: &CachedFa
     params
 }
 
-fn next_animation_deadline(item: &super::cache::CachedItem, now: Instant) -> Option<Instant> {
+fn next_animation_deadline(item: &super::items::CachedItem, now: Instant) -> Option<Instant> {
     if !item.animated_faces.iter().any(|index| item.faces.get(*index).is_some_and(|face| face.slot.is_some())) {
         return None;
     }
@@ -381,8 +397,9 @@ mod tests {
     use crate::{
         geometry::{
             MeshState,
-            cache::{cached_faces, mesh_info, object_item_id, refresh_winding_pipeline, surface_pipeline},
-            draw_list::DrawInterner,
+            cache::object_item_id,
+            draw_list::DrawList,
+            items::{CachedFaceContext, cached_faces, mesh_info, surface_pipeline},
         },
         pipeline::Pipeline,
         scene::{Budget, Placement, Reconciler},
@@ -490,11 +507,24 @@ mod tests {
         let object = view.objects().next().expect("fixture object");
         let (_, mesh) = object.mesh().expect("fixture mesh");
         let info = mesh_info(mesh);
-        let mut interner = DrawInterner::default();
+        let mut draw_list = DrawList::default();
         for (shading, pipeline) in [(ShadingMode::Terrain, Pipeline::Terrain), (ShadingMode::Water, Pipeline::Water)] {
-            let faces = cached_faces((1, 1, 0), mesh, &info, None, None, Vec3::ONE, shading, None, None, &mut interner);
+            let faces = cached_faces(
+                CachedFaceContext {
+                    id: (1, 1, 0),
+                    mesh,
+                    info: &info,
+                    materials: None,
+                    appearance: None,
+                    scale: Vec3::ONE,
+                    shading,
+                    terrain: None,
+                    terrain_textures: None,
+                },
+                &mut draw_list,
+            );
             assert!(!faces.is_empty());
-            assert!(faces.iter().all(|face| interner.key(face.group).is_some_and(|key| key.pipeline == pipeline)));
+            assert!(faces.iter().all(|face| draw_list.face_key(face.group).is_some_and(|key| key.pipeline == pipeline)));
         }
     }
 
@@ -505,25 +535,27 @@ mod tests {
         let (_, mesh) = object.mesh().expect("fixture mesh");
         let Placement::Ready(transform) = object.placement() else { panic!("fixture placement") };
         let info = mesh_info(mesh);
-        let mut interner = DrawInterner::default();
+        let mut draw_list = DrawList::default();
         let mut faces = cached_faces(
-            object_item_id(object),
-            mesh,
-            &info,
-            object.materials(),
-            object.detail().surface_appearance.as_ref(),
-            transform.scale,
-            ShadingMode::Studio,
-            None,
-            None,
-            &mut interner,
+            CachedFaceContext {
+                id: object_item_id(object),
+                mesh,
+                info: &info,
+                materials: object.materials(),
+                appearance: object.detail().surface_appearance.as_ref(),
+                scale: transform.scale,
+                shading: ShadingMode::Studio,
+                terrain: None,
+                terrain_textures: None,
+            },
+            &mut draw_list,
         );
-        let original = interner.key(faces[0].group).expect("fixture draw group").pipeline;
+        let original = draw_list.face_key(faces[0].group).expect("fixture draw group").pipeline;
         let flipped = Vec3::new(-transform.scale.x, transform.scale.y, transform.scale.z);
-        assert!(refresh_winding_pipeline(&mut faces, transform.scale, flipped, &mut interner));
-        let key = interner.key(faces[0].group).expect("flipped draw group");
+        assert!(draw_list.refresh_winding(&mut faces, transform.scale, flipped));
+        let key = draw_list.face_key(faces[0].group).expect("flipped draw group");
         assert_ne!(key.pipeline, original);
         assert_eq!(key.pipeline, surface_pipeline(faces[0].base_params.blend, faces[0].base_params.double_sided, flipped));
-        assert!(!refresh_winding_pipeline(&mut faces, flipped, flipped, &mut interner));
+        assert!(!draw_list.refresh_winding(&mut faces, flipped, flipped));
     }
 }

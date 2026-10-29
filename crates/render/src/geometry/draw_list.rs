@@ -11,8 +11,8 @@ use world::Region;
 
 use super::{
     INSTANCE_BUFFER_BYTES, TRANSFORM_BYTES,
-    cache::{CachedFace, CachedItem, ItemId, draw_priority},
     instance::PARAMETER_BYTES,
+    items::{CachedFace, CachedItem, ItemIndex, ItemSlab, draw_priority, surface_pipeline},
     mesh::GpuMesh,
     storage::Buffers,
     texture_bindings::{TerrainDemand, TextureDemand},
@@ -115,7 +115,7 @@ struct DrawGroup {
 }
 
 #[derive(Default)]
-pub(super) struct DrawInterner {
+struct DrawInterner {
     by_key: HashMap<DrawKey, u32>,
     groups: Vec<Option<DrawGroup>>,
     free: Vec<u32>,
@@ -270,7 +270,7 @@ impl DrawInterner {
 struct BlendedFace {
     distance_squared: f64,
     order: FaceOrder,
-    item: ItemId,
+    item: ItemIndex,
     face: usize,
     group: u32,
 }
@@ -289,7 +289,7 @@ pub(super) struct PatchStats {
 
 #[derive(Default)]
 pub(super) struct DrawList {
-    pub(super) groups: DrawInterner,
+    groups: DrawInterner,
     draws: Vec<DrawCommand>,
     instance_bytes: Vec<u8>,
     active_groups: Vec<u32>,
@@ -300,8 +300,8 @@ pub(super) struct DrawList {
     group_counts: Vec<usize>,
     group_offsets: Vec<usize>,
     group_cursors: Vec<usize>,
-    layout_items: Vec<ItemId>,
-    priority_items: Vec<ItemId>,
+    layout_items: Vec<ItemIndex>,
+    priority_items: Vec<ItemIndex>,
     blended: Vec<BlendedFace>,
     dirty_slots: Vec<u32>,
     opaque_draws: usize,
@@ -317,15 +317,9 @@ pub(super) struct DrawList {
 }
 
 impl DrawList {
-    pub(super) fn layout(
-        &mut self,
-        previous: &[ItemId],
-        visible: &[ItemId],
-        items: &mut HashMap<ItemId, CachedItem>,
-        camera: Camera,
-    ) -> LayoutStats {
+    pub(super) fn layout(&mut self, previous: &[ItemIndex], visible: &[ItemIndex], items: &mut ItemSlab, camera: Camera) -> LayoutStats {
         self.draws.clear();
-        self.clear_group_counts();
+        self.active_groups.clear();
         self.active_textures.clear();
         self.active_terrain.clear();
         self.texture_seen.clear();
@@ -341,8 +335,10 @@ impl DrawList {
         self.omitted = 0;
 
         if previous != visible {
-            for id in previous.iter().filter(|id| visible.binary_search(id).is_err()) {
-                if let Some(item) = items.get_mut(id) {
+            for index in previous {
+                if !contains_item(visible, items, *index)
+                    && let Some(item) = items.get_mut(*index)
+                {
                     for face in &mut item.faces {
                         face.slot = None;
                         face.blended_index = None;
@@ -356,21 +352,9 @@ impl DrawList {
         self.group_cursors.resize(self.groups.groups.len(), 0);
         let mut required = 0usize;
         for id in visible {
-            let Some(item) = items.get(id) else { continue };
+            let Some(item) = items.get(*id) else { continue };
             required = required.saturating_add(item.faces.len());
-            let mut drawable = false;
-            for face in &item.faces {
-                let index = face.group as usize;
-                let Some(count) = self.group_counts.get_mut(index) else {
-                    self.omitted = self.omitted.saturating_add(1);
-                    continue;
-                };
-                if *count == 0 {
-                    self.active_groups.push(face.group);
-                }
-                *count += 1;
-                drawable = true;
-            }
+            let drawable = self.count_item_faces(item);
             self.visible_items += usize::from(drawable);
         }
         if required > MAX_FACE_INSTANCES {
@@ -379,19 +363,23 @@ impl DrawList {
             self.clear_group_counts();
             self.priority_items.extend_from_slice(visible);
             self.priority_items.sort_unstable_by(|a, b| {
-                let a_priority = items.get(a).map_or((0.0, f64::INFINITY), |item| draw_priority(item, camera));
-                let b_priority = items.get(b).map_or((0.0, f64::INFINITY), |item| draw_priority(item, camera));
-                b_priority.0.total_cmp(&a_priority.0).then_with(|| a_priority.1.total_cmp(&b_priority.1)).then_with(|| a.cmp(b))
+                let a_priority = items.get(*a).map_or((0.0, f64::INFINITY), |item| draw_priority(item, camera));
+                let b_priority = items.get(*b).map_or((0.0, f64::INFINITY), |item| draw_priority(item, camera));
+                b_priority
+                    .0
+                    .total_cmp(&a_priority.0)
+                    .then_with(|| a_priority.1.total_cmp(&b_priority.1))
+                    .then_with(|| items.get(*a).map(|item| item.id).cmp(&items.get(*b).map(|item| item.id)))
             });
             let mut remaining = MAX_FACE_INSTANCES;
             for id in &self.priority_items {
-                let count = items.get(id).map_or(0, |item| item.faces.len());
+                let count = items.get(*id).map_or(0, |item| item.faces.len());
                 if count <= remaining {
                     remaining -= count;
                     self.layout_items.push(*id);
                 } else {
                     self.omitted = self.omitted.saturating_add(count);
-                    if let Some(item) = items.get_mut(id) {
+                    if let Some(item) = items.get_mut(*id) {
                         for face in &mut item.faces {
                             face.slot = None;
                             face.blended_index = None;
@@ -401,20 +389,8 @@ impl DrawList {
             }
             for index in 0..self.layout_items.len() {
                 let id = self.layout_items[index];
-                let Some(item) = items.get(&id) else { continue };
-                let mut drawable = false;
-                for face in &item.faces {
-                    let index = face.group as usize;
-                    let Some(count) = self.group_counts.get_mut(index) else {
-                        self.omitted = self.omitted.saturating_add(1);
-                        continue;
-                    };
-                    if *count == 0 {
-                        self.active_groups.push(face.group);
-                    }
-                    *count += 1;
-                    drawable = true;
-                }
+                let Some(item) = items.get(id) else { continue };
+                let drawable = self.count_item_faces(item);
                 self.visible_items += usize::from(drawable);
             }
         }
@@ -423,7 +399,8 @@ impl DrawList {
         let mut opaque_count = 0usize;
         for group_id in &self.active_groups {
             let index = *group_id as usize;
-            let Some(group) = self.groups.group(*group_id) else { continue };
+            let count = std::mem::take(&mut self.group_counts[index]);
+            let Some(group) = self.groups.groups[index].as_ref() else { continue };
             if let Some(key) = group.key.texture
                 && self.texture_seen.insert(key)
             {
@@ -438,13 +415,8 @@ impl DrawList {
                 });
             }
             if !group.key.blended() {
-                let count = self.group_counts.get(index).copied().unwrap_or(0);
-                if let Some(offset) = self.group_offsets.get_mut(index) {
-                    *offset = opaque_count;
-                }
-                if let Some(cursor) = self.group_cursors.get_mut(index) {
-                    *cursor = 0;
-                }
+                self.group_offsets[index] = opaque_count;
+                self.group_cursors[index] = 0;
                 opaque_count = opaque_count.saturating_add(count);
                 if count > 0
                     && let (Ok(first), Ok(count)) = (u32::try_from(opaque_count - count), u32::try_from(count))
@@ -453,12 +425,13 @@ impl DrawList {
                 }
             }
         }
+        self.active_groups.clear();
         self.opaque_draws = self.draws.len();
         self.opaque_instances = opaque_count;
         self.instance_bytes.resize(opaque_count.saturating_mul(INSTANCE_BYTES), 0);
 
         for id in layout_items {
-            let Some(item) = items.get_mut(id) else { continue };
+            let Some(item) = items.get_mut(*id) else { continue };
             for (face_index, face) in item.faces.iter_mut().enumerate() {
                 if face.blended {
                     self.blended.push(BlendedFace {
@@ -470,8 +443,8 @@ impl DrawList {
                     });
                 } else {
                     let group_index = face.group as usize;
-                    let Some(cursor) = self.group_cursors.get_mut(group_index) else { continue };
-                    let offset = self.group_offsets.get(group_index).copied().unwrap_or(0).saturating_add(*cursor);
+                    let cursor = &mut self.group_cursors[group_index];
+                    let offset = self.group_offsets[group_index].saturating_add(*cursor);
                     let Ok(slot) = u32::try_from(offset) else { continue };
                     if write_instance(&mut self.instance_bytes, slot, &item.transform, &face.parameter_bytes) {
                         face.slot = Some(slot);
@@ -480,24 +453,37 @@ impl DrawList {
                 }
             }
         }
-
         self.reorder_blended(items);
         self.instance_count = self.instance_bytes.len() / INSTANCE_BYTES;
         self.valid = true;
         LayoutStats { omitted_faces: self.omitted, blended: !self.blended.is_empty() }
     }
 
+    fn count_item_faces(&mut self, item: &CachedItem) -> bool {
+        let mut drawable = false;
+        for face in &item.faces {
+            let index = face.group as usize;
+            let count = &mut self.group_counts[index];
+            if *count == 0 {
+                self.active_groups.push(face.group);
+            }
+            *count += 1;
+            drawable = true;
+        }
+        drawable
+    }
+
     pub(super) fn patch(
         &mut self,
-        items: &mut HashMap<ItemId, CachedItem>,
-        faces: &[(ItemId, usize)],
-        pose_items: &[ItemId],
+        items: &mut ItemSlab,
+        faces: &[(ItemIndex, usize)],
+        pose_items: &[ItemIndex],
         camera: Camera,
     ) -> PatchStats {
         self.dirty_slots.clear();
         let mut stats = PatchStats::default();
         for (item_id, face_index) in faces {
-            let Some(item) = items.get_mut(item_id) else { continue };
+            let Some(item) = items.get_mut(*item_id) else { continue };
             let Some(face) = item.faces.get_mut(*face_index) else { continue };
             let Some(slot) = face.slot else { continue };
             if !write_instance(&mut self.instance_bytes, slot, &item.transform, &face.parameter_bytes) {
@@ -518,12 +504,12 @@ impl DrawList {
         stats
     }
 
-    pub(super) fn sort_blended(&mut self, items: &mut HashMap<ItemId, CachedItem>, camera: Camera) -> bool {
+    pub(super) fn sort_blended(&mut self, items: &mut ItemSlab, camera: Camera) -> bool {
         if self.blended.is_empty() {
             return false;
         }
         for blended in &mut self.blended {
-            if let Some(item) = items.get(&blended.item)
+            if let Some(item) = items.get(blended.item)
                 && let Some(face) = item.faces.get(blended.face)
             {
                 blended.distance_squared = blend_distance(item.position, item.rotation, item.scale, face.center, camera);
@@ -533,13 +519,13 @@ impl DrawList {
         true
     }
 
-    pub(super) fn reorder_blended(&mut self, items: &mut HashMap<ItemId, CachedItem>) {
+    pub(super) fn reorder_blended(&mut self, items: &mut ItemSlab) {
         self.blended.sort_unstable_by(|a, b| b.distance_squared.total_cmp(&a.distance_squared).then_with(|| a.order.cmp(&b.order)));
         self.draws.truncate(self.opaque_draws);
         self.instance_bytes.truncate(self.opaque_instances.saturating_mul(INSTANCE_BYTES));
         for (index, blended) in self.blended.iter().enumerate() {
             let Ok(slot) = u32::try_from(self.opaque_instances.saturating_add(index)) else { continue };
-            let Some(item) = items.get_mut(&blended.item) else { continue };
+            let Some(item) = items.get_mut(blended.item) else { continue };
             let Some(face) = item.faces.get_mut(blended.face) else { continue };
             face.slot = Some(slot);
             face.blended_index = Some(index);
@@ -593,6 +579,45 @@ impl DrawList {
         if let Some(bytes) = self.instance_bytes.get(start..end) {
             queue.write_buffer(buffer, start as u64, bytes);
         }
+    }
+
+    pub(super) fn intern_face(
+        &mut self,
+        key: DrawKey,
+        texture: Option<&TextureHandle>,
+        terrain_textures: Option<&[Option<TextureHandle>; 4]>,
+    ) -> Option<u32> {
+        self.groups.intern(key, texture, terrain_textures)
+    }
+
+    #[cfg(test)]
+    pub(super) fn face_key(&self, group: u32) -> Option<DrawKey> {
+        self.groups.key(group)
+    }
+
+    pub(super) fn clear_groups(&mut self) {
+        self.groups.clear();
+    }
+
+    pub(super) fn refresh_winding(&mut self, faces: &mut [CachedFace], old_scale: Vec3, scale: Vec3) -> bool {
+        if math::flips_winding(old_scale) == math::flips_winding(scale) {
+            return false;
+        }
+        let mut changed = false;
+        for face in faces {
+            let Some(mut key) = self.groups.key(face.group) else { continue };
+            let previous_pipeline = key.pipeline;
+            key.pipeline = surface_pipeline(face.base_params.blend, face.base_params.double_sided, scale);
+            if key.pipeline == previous_pipeline {
+                continue;
+            }
+            if let Some(group) = self.groups.intern(key, face.texture.as_ref(), None) {
+                self.groups.release(face.group);
+                face.group = group;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub(super) fn release_faces(&mut self, faces: &[CachedFace]) {
@@ -740,13 +765,17 @@ impl DrawList {
 }
 
 fn write_instance(bytes: &mut [u8], slot: u32, transform: &[u8; TRANSFORM_BYTES], parameters: &[u8; PARAMETER_BYTES]) -> bool {
-    let Some(start) = (slot as usize).checked_mul(INSTANCE_BYTES) else { return false };
-    let Some(end) = start.checked_add(INSTANCE_BYTES) else { return false };
-    let Some(destination) = bytes.get_mut(start..end) else { return false };
+    let start = slot as usize * INSTANCE_BYTES;
+    let Some(destination) = bytes.get_mut(start..start + INSTANCE_BYTES) else { return false };
     let (transform_destination, parameter_destination) = destination.split_at_mut(TRANSFORM_BYTES);
     transform_destination.copy_from_slice(transform);
     parameter_destination.copy_from_slice(parameters);
     true
+}
+
+fn contains_item(visible: &[ItemIndex], items: &ItemSlab, index: ItemIndex) -> bool {
+    let Some(id) = items.get(index).map(|item| item.id) else { return false };
+    visible.binary_search_by(|visible| items.get(*visible).map_or(std::cmp::Ordering::Less, |item| item.id.cmp(&id))).is_ok()
 }
 
 fn blend_distance(position: DVec3, rotation: Quat, scale: Vec3, center: Vec3, camera: Camera) -> f64 {

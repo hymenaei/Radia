@@ -2,6 +2,7 @@ mod cache;
 mod draw_list;
 mod frame;
 mod instance;
+mod items;
 mod mesh;
 mod pick;
 mod storage;
@@ -300,9 +301,12 @@ impl GeometryRenderer {
 
     pub(crate) fn skip(&mut self) {
         self.prepared = None;
+        self.cache.camera = None;
+        self.cache.candidates.clear();
+        self.cache.next_candidates.clear();
         self.cache.visible.clear();
         self.cache.next_visible.clear();
-        for item in self.cache.items.values_mut() {
+        for (_, item) in self.cache.items.iter_mut() {
             for face in &mut item.faces {
                 face.slot = None;
                 face.blended_index = None;

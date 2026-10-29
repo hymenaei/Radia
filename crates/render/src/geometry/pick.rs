@@ -31,7 +31,7 @@ impl GeometryRenderer {
             return Ok(None);
         }
         for id in &self.cache.visible {
-            let Some(item) = self.cache.items.get(id) else { continue };
+            let Some(item) = self.cache.items.get(*id) else { continue };
             if !item.pickable {
                 continue;
             }

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::Instant,
 };
@@ -15,8 +15,9 @@ use super::{DrawKey, DrawList};
 use crate::{
     geometry::{
         ShadingMode,
-        cache::{CachedFace, CachedItem, ItemId, MeshInfo},
+        cache::FrameCache,
         instance::{instance_base, parameter_part},
+        items::{CachedFace, CachedItem, ItemId, ItemIndex, ItemSlab, MeshInfo},
     },
     material::FaceParams,
     pipeline::Pipeline,
@@ -54,14 +55,14 @@ fn blended_parameter_patch_does_not_sort() {
     let camera = camera(0.0);
     let origin = super::super::instance::scene_origin(camera.position());
     let id = item_id(0);
-    let mut items = HashMap::new();
+    let mut items = FrameCache::default();
     let mut list = DrawList::default();
-    items.insert(id, new_item(id, 3, 0.0, origin, &mesh, &textures, &mut list));
-    list.layout(&[], &[id], &mut items, camera);
-    if let Some(face) = items.get_mut(&id).and_then(|item| item.faces.first_mut()) {
+    let index = items.insert_item(new_item(id, 3, 0.0, origin, &mesh, &textures, &mut list)).expect("test item index");
+    list.layout(&[], &[index], &mut items.items, camera);
+    if let Some(face) = items.get_by_id_mut(id).and_then(|item| item.faces.first_mut()) {
         face.parameter_bytes[0] ^= 1;
     }
-    let stats = list.patch(&mut items, &[(id, 0)], &[], camera);
+    let stats = list.patch(&mut items.items, &[(index, 0)], &[], camera);
     assert_eq!(stats.faces_patched, 1);
     assert!(!stats.blended_sorted);
 }
@@ -103,11 +104,11 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
     let camera_x = 0.0;
     let current_camera = camera(camera_x);
     let origin = super::super::instance::scene_origin(current_camera.position());
-    let mut items = HashMap::new();
+    let mut items = FrameCache::default();
     let mut list = DrawList::default();
-    let mut visible = visible_items(&items, camera_x);
-    list.layout(&[], &visible, &mut items, current_camera);
-    assert_matches_fresh(&list, &items, &visible, current_camera);
+    let mut visible = visible_items(&items.items, camera_x);
+    list.layout(&[], &visible, &mut items.items, current_camera);
+    assert_matches_fresh(&list, &items.items, &visible, current_camera);
     let mut camera_x = camera_x;
     let mut origin = origin;
 
@@ -120,26 +121,28 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
         let mut blended_patch = false;
         match kind % 6 {
             0 => {
-                if let Entry::Vacant(entry) = items.entry(id) {
-                    entry.insert(new_item(id, *style, camera_x, origin, &mesh, &textures, &mut list));
+                if items.index(id).is_none() {
+                    items.insert_item(new_item(id, *style, camera_x, origin, &mesh, &textures, &mut list)).expect("test item index");
                     layout = true;
                 }
             }
             1 => {
-                if let Some(item) = items.remove(&id) {
+                if let Some(index) = items.index(id)
+                    && let Some(item) = items.remove_item(index)
+                {
                     list.release_faces(&item.faces);
                     layout = true;
                 }
             }
             2 => {
-                if let Some(item) = items.get_mut(&id) {
+                if let Some(item) = items.get_by_id_mut(id) {
                     list.release_faces(&item.faces);
                     item.faces = vec![new_face(id, *style, &item.mesh, item.info.centers[0], item.scale, &textures, &mut list)];
                     layout = true;
                 }
             }
             3 => {
-                let changed = if let Some(item) = items.get_mut(&id) {
+                let changed = if let Some(item) = items.get_by_id_mut(id) {
                     item.position.x += f64::from(*delta_x);
                     item.position.y += f64::from(*delta_y);
                     item.rotation = Quat::from_rotation_y(f32::from(*delta_x) * 0.025);
@@ -149,7 +152,8 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
                     false
                 };
                 if changed {
-                    let stats = list.patch(&mut items, &[(id, 0)], &[id], current_camera);
+                    let index = items.index(id).expect("updated test item");
+                    let stats = list.patch(&mut items.items, &[(index, 0)], &[index], current_camera);
                     blended_patch = stats.blended_sorted;
                 }
             }
@@ -159,7 +163,7 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
                 let next_origin = super::super::instance::scene_origin(camera(camera_x).position());
                 if next_origin != origin {
                     origin = next_origin;
-                    for item in items.values_mut() {
+                    for (_, item) in items.items.iter_mut() {
                         item.transform = instance_base(item.position, item.rotation, item.scale, origin);
                     }
                     layout = true;
@@ -169,7 +173,7 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
                 camera_x = (camera_x / 256.0).floor() * 256.0 + 256.0;
                 camera_changed = true;
                 origin = super::super::instance::scene_origin(camera(camera_x).position());
-                for item in items.values_mut() {
+                for (_, item) in items.items.iter_mut() {
                     item.transform = instance_base(item.position, item.rotation, item.scale, origin);
                 }
                 layout = true;
@@ -177,17 +181,17 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
         }
 
         let camera = camera(camera_x);
-        let next_visible = visible_items(&items, camera_x);
+        let next_visible = visible_items(&items.items, camera_x);
         layout |= previous_visible != next_visible;
         if layout {
-            list.layout(&previous_visible, &next_visible, &mut items, camera);
+            list.layout(&previous_visible, &next_visible, &mut items.items, camera);
         } else if camera_changed && list.has_blended() {
-            list.sort_blended(&mut items, camera);
+            list.sort_blended(&mut items.items, camera);
         } else if blended_patch {
-            list.reorder_blended(&mut items);
+            list.reorder_blended(&mut items.items);
         }
         visible = next_visible;
-        assert_matches_fresh(&list, &items, &visible, camera);
+        assert_matches_fresh(&list, &items.items, &visible, camera);
     }
 }
 
@@ -263,7 +267,7 @@ fn new_face(
         texture: params.texture,
         terrain: None,
     };
-    let group = list.groups.intern(key, texture.as_ref(), None).expect("test draw group ID");
+    let group = list.intern_face(key, texture.as_ref(), None).expect("test draw group ID");
     CachedFace {
         order: (id.0, id.1, id.2, mesh_face.slot),
         indices: mesh_face.indices.clone(),
@@ -281,7 +285,7 @@ fn new_face(
     }
 }
 
-fn assert_matches_fresh(list: &DrawList, items: &HashMap<ItemId, CachedItem>, visible: &[ItemId], camera: Camera) {
+fn assert_matches_fresh(list: &DrawList, items: &ItemSlab, visible: &[ItemIndex], camera: Camera) {
     let expected = fresh_output(list, items, visible, camera);
     let mut opaque = OpaqueOutput::new();
     let mut blended = BlendedOutput::new();
@@ -305,25 +309,26 @@ fn assert_matches_fresh(list: &DrawList, items: &HashMap<ItemId, CachedItem>, vi
             }
         }
     }
-    let expected_slots = items.iter().filter(|(id, _)| visible.binary_search(id).is_ok()).map(|(_, item)| item.faces.len()).sum::<usize>();
+    let expected_slots =
+        items.iter().filter(|(index, _)| contains_item(visible, items, *index)).map(|(_, item)| item.faces.len()).sum::<usize>();
     assert_eq!(slots.len(), expected_slots, "every visible face has one draw slot");
     assert_eq!(list.instance_count, expected_slots, "instance output contains only visible face bytes");
     assert!(opaque == expected.0, "opaque draw key and packed byte multiset differs from a fresh layout");
     assert!(blended == expected.1, "blended draw keys or back-to-front packed byte order differs from a fresh layout");
-    for (id, item) in items {
+    for (index, item) in items.iter() {
         for face in &item.faces {
-            assert_eq!(face.slot.is_some(), visible.binary_search(id).is_ok(), "hidden items cannot retain instance slots");
+            assert_eq!(face.slot.is_some(), contains_item(visible, items, index), "hidden items cannot retain instance slots");
         }
     }
 }
 
-fn fresh_output(list: &DrawList, items: &HashMap<ItemId, CachedItem>, visible: &[ItemId], camera: Camera) -> (OpaqueOutput, BlendedOutput) {
+fn fresh_output(list: &DrawList, items: &ItemSlab, visible: &[ItemIndex], camera: Camera) -> (OpaqueOutput, BlendedOutput) {
     let mut opaque = OpaqueOutput::new();
     let mut blended = Vec::new();
     for id in visible {
-        let Some(item) = items.get(id) else { continue };
+        let Some(item) = items.get(*id) else { continue };
         for face in &item.faces {
-            let Some(key) = list.groups.key(face.group) else { continue };
+            let Some(key) = list.face_key(face.group) else { continue };
             let bytes = instance_from_parts(&item.transform, &face.parameter_bytes);
             if key.blended() {
                 let relative = item.position - camera.position() + (item.rotation * (face.center * item.scale)).as_dvec3();
@@ -350,10 +355,16 @@ fn instance_from_parts(
     transform.iter().chain(parameters).copied().collect()
 }
 
-fn visible_items(items: &HashMap<ItemId, CachedItem>, camera_x: f64) -> Vec<ItemId> {
-    let mut visible = items.values().filter(|item| (item.position.x - camera_x).abs() <= 6.0).map(|item| item.id).collect::<Vec<_>>();
-    visible.sort_unstable();
+fn visible_items(items: &ItemSlab, camera_x: f64) -> Vec<ItemIndex> {
+    let mut visible =
+        items.iter().filter(|(_, item)| (item.position.x - camera_x).abs() <= 6.0).map(|(index, _)| index).collect::<Vec<_>>();
+    visible.sort_unstable_by_key(|index| items.get(*index).map(|item| item.id));
     visible
+}
+
+fn contains_item(visible: &[ItemIndex], items: &ItemSlab, index: ItemIndex) -> bool {
+    let Some(id) = items.get(index).map(|item| item.id) else { return false };
+    visible.binary_search_by(|visible| items.get(*visible).map_or(std::cmp::Ordering::Less, |item| item.id.cmp(&id))).is_ok()
 }
 
 fn camera(camera_x: f64) -> Camera {

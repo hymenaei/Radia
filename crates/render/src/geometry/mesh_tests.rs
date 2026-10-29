@@ -174,7 +174,12 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     assert!(red > 100 && green > 100, "both meshes retain distinct geometry and material colors: {red} red, {green} green pixels");
     drop(pixels);
     readback.unmap();
-    let (id, old) = geometry.meshes.iter().next().unwrap();
+    let (id, old) = geometry
+        .meshes
+        .iter()
+        .filter(|(_, mesh)| filler.as_ref().is_none_or(|filler| !Arc::ptr_eq(mesh.allocation.buffers(), filler.buffers())))
+        .min_by_key(|(_, mesh)| mesh.allocation.vertices().start)
+        .unwrap();
     let id = *id;
     let old_vertices = old.allocation.vertices();
     let old_indices = old.allocation.indices();
@@ -475,9 +480,9 @@ fn gpu_hidden_items_leave_no_instances_in_draws() {
 fn assert_visible_draw_coverage(geometry: &GeometryRenderer) {
     let visible: std::collections::HashSet<_> = geometry.cache.visible.iter().copied().collect();
     let mut face_slots = std::collections::HashSet::new();
-    for (id, item) in &geometry.cache.items {
+    for (index, item) in geometry.cache.items.iter() {
         for face in &item.faces {
-            match (visible.contains(id), face.slot) {
+            match (visible.contains(&index), face.slot) {
                 (true, Some(slot)) => assert!(face_slots.insert(slot), "each visible face owns one instance slot"),
                 (false, None) | (true, None) => {}
                 (false, Some(_)) => panic!("hidden items cannot retain instance slots"),

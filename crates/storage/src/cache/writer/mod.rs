@@ -60,7 +60,10 @@ pub(super) enum WritePoint {
     #[cfg(test)]
     PutQueued,
     #[cfg(test)]
+    SetLimitQueued,
+    #[cfg(test)]
     WriterReady,
+    #[cfg(test)]
     SetLimitReplied,
 }
 
@@ -273,17 +276,16 @@ impl WorkerState {
         Ok(state)
     }
 
-    fn put_batch(&mut self, puts: Vec<(Key, Vec<u8>)>) -> Vec<Result<(), StorageError>> {
+    fn put_batch<'a>(&mut self, total: usize, puts: impl Iterator<Item = (Key, &'a [u8])>) -> Vec<Option<Result<(), StorageError>>> {
         self.drain_touches_best_effort();
-        let total = puts.len();
         let mut staged = Vec::<StagedData>::new();
         let mut staged_indices = Vec::new();
         if staged.try_reserve(total).is_err() || staged_indices.try_reserve(total).is_err() {
-            return (0..total).map(|_| Err(StorageError::Unavailable(UnavailableReason::Allocation))).collect();
+            return (0..total).map(|_| Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)))).collect();
         }
         let mut results = std::iter::repeat_with(|| None).take(total).collect::<Vec<Option<Result<(), StorageError>>>>();
-        for (index, (key, bytes)) in puts.into_iter().enumerate() {
-            match self.write_data(key, &bytes) {
+        for (index, (key, bytes)) in puts.enumerate() {
+            match self.write_data(key, bytes) {
                 Ok(data) => {
                     staged.push(data);
                     staged_indices.push(index);
@@ -296,14 +298,14 @@ impl WorkerState {
                                 *result = Some(Err(clone_error(&failure)));
                             }
                         }
-                        return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
+                        return results.into_iter().map(|result| Some(result.unwrap_or(Ok(())))).collect();
                     }
                     results[index] = Some(Err(error));
                 }
             }
         }
         if staged.is_empty() {
-            return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
+            return results.into_iter().map(|result| Some(result.unwrap_or(Ok(())))).collect();
         }
         let mut staged_entries = Vec::new();
         if staged_entries.try_reserve_exact(staged.len()).is_err() {
@@ -312,19 +314,20 @@ impl WorkerState {
                     *result = Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)));
                 }
             }
-            return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
+            return results.into_iter().map(|result| Some(result.unwrap_or(Ok(())))).collect();
         }
         staged_entries.extend(staged.iter().map(|data| Arc::clone(&data.entry)));
         let prepared = {
             let protection_shared = Arc::clone(&self.read_state.protection);
             let mut protection = lock(&protection_shared.state);
             self.plan_puts(&staged_entries, &protection).and_then(|plan| {
+                let deferred_from = plan.deferred_from;
                 let changes = self.prepare_changes(&plan, &mut protection)?;
                 let eviction_marks = self.mark_evictions(&changes, &mut protection)?;
-                Ok((changes, eviction_marks))
+                Ok((changes, eviction_marks, deferred_from))
             })
         };
-        let (changes, eviction_marks) = match prepared {
+        let (changes, eviction_marks, deferred_from) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 for index in staged_indices {
@@ -332,15 +335,18 @@ impl WorkerState {
                         *result = Some(Err(clone_error(&error)));
                     }
                 }
-                return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
+                return results.into_iter().map(|result| Some(result.unwrap_or(Ok(())))).collect();
             }
         };
+        let committed_stage_count = deferred_from.unwrap_or(staged.len());
+        staged.truncate(committed_stage_count);
+        staged_entries.truncate(committed_stage_count);
         let (committed, error) = match self.publish_and_commit(changes, staged, eviction_marks) {
             Ok(committed) => (committed, None),
             Err(failure) => (failure.committed, Some(failure.error)),
         };
-        for (entry, index) in staged_entries.iter().zip(staged_indices) {
-            if let Some(result) = results.get_mut(index) {
+        for (entry, index) in staged_entries.iter().zip(staged_indices.iter().take(committed_stage_count)) {
+            if let Some(result) = results.get_mut(*index) {
                 *result = Some(match error.as_ref() {
                     None => Ok(()),
                     Some(_) if committed.contains(&entry.key) => Ok(()),
@@ -348,7 +354,14 @@ impl WorkerState {
                 });
             }
         }
-        results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect()
+        if let Some(error) = error.as_ref() {
+            for index in staged_indices.iter().skip(committed_stage_count) {
+                if let Some(result) = results.get_mut(*index) {
+                    *result = Some(Err(clone_error(error)));
+                }
+            }
+        }
+        results
     }
 
     fn write_data(&self, key: Key, bytes: &[u8]) -> Result<StagedData, StorageError> {
@@ -639,6 +652,11 @@ impl WorkerState {
                     return Err(error);
                 }
             };
+            #[cfg(test)]
+            if let Err(error) = self.hooks.check(WritePoint::IndexBatchFailure).map_err(StorageError::Io) {
+                self.rollback_evictions(eviction_marks, &committed);
+                return Err(error);
+            }
             if let Err(error) = self.index.apply(mutations) {
                 let recreated = matches!(error, SqliteError::Corrupt | SqliteError::SchemaMismatch);
                 let storage_error = self.index_failure(error, changes);

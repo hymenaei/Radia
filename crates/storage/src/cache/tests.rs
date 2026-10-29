@@ -37,6 +37,12 @@ fn ordered_key(value: u16) -> Key {
     Key::new(TEST_NAMESPACE, name)
 }
 
+fn same_shard_key(value: u16) -> Key {
+    let mut name = [0; 16];
+    name[1..3].copy_from_slice(&value.to_be_bytes());
+    Key::new(TEST_NAMESPACE, name)
+}
+
 fn queue_puts(cache: Arc<Cache>, keys: &[Key]) -> QueuedPuts {
     let (queued, resumes) = cache.pause_many_at(WritePoint::PutQueued, keys.len());
     let start = Arc::new(Barrier::new(keys.len() + 1));
@@ -471,41 +477,117 @@ fn size_limit_evicts_least_recently_used() {
 #[test]
 fn set_limit_enforces_once_per_writer_batch() {
     let directory = tempdir().expect("cache directory");
-    let mut cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.put(key(100), vec![1; 1024]).expect("store first entry");
     let one_entry_limit = cache.accounted_size();
     for id in 101..140 {
         cache.put(key(id), vec![1; 1024]).expect("store entry");
     }
+    let current_limit = cache.accounted_size();
     let (data_started, resume_data) = cache.pause_at(WritePoint::DataTempCreated);
     let (limit_started, resume_limit) = cache.pause_at(WritePoint::SetLimitReplied);
     cache.arm_fault(WritePoint::DataWriteFailure);
     thread::scope(|scope| {
         let blocker = scope.spawn(|| cache.put(key(200), vec![0; 1024]));
         data_started.recv_timeout(Duration::from_secs(3)).expect("blocker reached its data write");
-        let (limit_reply, limit_receiver) = std::sync::mpsc::sync_channel(0);
-        cache.queue.try_send(writer::Command::SetLimit { limit: one_entry_limit, reply: limit_reply }, 0).expect("queue limit update");
-        let (put_reply, put_receiver) = std::sync::mpsc::sync_channel(0);
-        cache
-            .queue
-            .try_send(writer::Command::Put { key: key(201), bytes: vec![2; 1024], reply: put_reply }, 1024)
-            .expect("queue write after limit update");
+        let (first_limit_queued, resume_first_limit) = cache.pause_at(WritePoint::SetLimitQueued);
+        let (final_limit_queued, resume_final_limit) = cache.pause_at(WritePoint::SetLimitQueued);
+        let first_limit = scope.spawn(|| cache.set_size_limit(current_limit));
+        first_limit_queued.recv_timeout(Duration::from_secs(3)).expect("first limit entered the queue");
+        resume_first_limit.send(()).expect("release first limit caller");
+        let final_limit = scope.spawn(|| cache.set_size_limit(one_entry_limit));
+        final_limit_queued.recv_timeout(Duration::from_secs(3)).expect("final limit entered the queue");
+        resume_final_limit.send(()).expect("release final limit caller");
+        let (put_queued, resume_put) = cache.pause_at(WritePoint::PutQueued);
+        let put = scope.spawn(|| cache.put(key(201), vec![2; 1024]));
+        put_queued.recv_timeout(Duration::from_secs(3)).expect("put entered the queue after both limits");
+        resume_put.send(()).expect("release put caller");
         resume_data.send(()).expect("resume blocker write");
         assert_matches!(
             blocker.join().expect("blocker thread"),
             Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
         );
-        limit_receiver.recv_timeout(Duration::from_secs(3)).expect("limit reply").expect("set cache limit");
+        first_limit.join().expect("first limit thread").expect("set first cache limit");
+        final_limit.join().expect("final limit thread").expect("set final cache limit");
         limit_started.recv_timeout(Duration::from_secs(3)).expect("limit command finished");
+        assert_eq!(cache.entry_count(), 8, "the final limit is enforced before the following put");
 
-        let (shutdown_reply, shutdown_receiver) = std::sync::mpsc::sync_channel(0);
-        cache.queue.send_terminal(writer::Command::Shutdown { reply: shutdown_reply }).expect("queue shutdown after limit batch");
         resume_limit.send(()).expect("resume writer after limit batch");
-        assert_matches!(put_receiver.recv_timeout(Duration::from_secs(3)).expect("put reply"), Err(StorageError::TooLarge));
-        shutdown_receiver.recv_timeout(Duration::from_secs(3)).expect("shutdown reply").expect("shutdown cache");
+        put.join().expect("put thread").expect("later put uses the final limit");
     });
-    cache.worker.take().expect("cache worker").join().expect("join cache worker");
-    assert_eq!(cache.entry_count(), 8);
+    assert_eq!(cache.entry_count(), 1);
+    assert!(cache.accounted_size() <= cache.size_limit());
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
+fn a_large_put_retries_after_bounded_eviction_batches() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
+    const SMALL_ENTRIES: u16 = 160;
+    const SMALL_ENTRY_BYTES: usize = 1024;
+    for id in 0..SMALL_ENTRIES {
+        cache.put(same_shard_key(id), vec![1; SMALL_ENTRY_BYTES]).expect("fill cache with small entries");
+    }
+    let limit = cache.accounted_size();
+    cache.set_size_limit(limit).expect("hold cache at its current size");
+
+    let (batch_committed, resumes) = cache.pause_many_at(WritePoint::IndexBatchCommitted, 3);
+    let writing_cache = Arc::clone(&cache);
+    let (reply, result) = std::sync::mpsc::channel();
+    let large_bytes = usize::from(SMALL_ENTRIES) * SMALL_ENTRY_BYTES;
+    let large_put = thread::spawn(move || {
+        let result = writing_cache.put(same_shard_key(u16::MAX), vec![2; large_bytes]);
+        reply.send(result).expect("report large put result");
+    });
+
+    let mut remaining = usize::from(SMALL_ENTRIES);
+    for resume in resumes {
+        assert!(
+            batch_committed.recv_timeout(Duration::from_secs(3)).is_ok(),
+            "large put result before first batch: {:?}",
+            result.try_recv()
+        );
+        let next = cache.entry_count();
+        assert_eq!(remaining - next, 32, "each progress batch removes at most 32 entries");
+        assert!(matches!(result.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)), "the large put remains pending");
+        remaining = next;
+        resume.send(()).expect("resume eviction writer");
+    }
+
+    result.recv_timeout(Duration::from_secs(3)).expect("large put eventually completes").expect("large put fits after eviction");
+    large_put.join().expect("large put thread completes");
+    assert_matches!(cache.lookup(same_shard_key(u16::MAX)), Lookup::Hit(_));
+    assert!(cache.accounted_size() <= cache.size_limit());
+    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().expect("close cache");
+}
+
+#[test]
+fn failed_limit_enforcement_keeps_the_previous_limit() {
+    let single = tempdir().expect("single cache directory");
+    let single_cache = Cache::open(single.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open single cache");
+    single_cache.put(key(10), vec![1; 1024]).expect("store sample entry");
+    let one_entry_limit = single_cache.accounted_size();
+    single_cache.shutdown().expect("close single cache");
+
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    for id in [11, 12, 13] {
+        cache.put(key(id), vec![1; 1024]).expect("store entry");
+    }
+    let old_limit = cache.size_limit();
+    cache.arm_fault(WritePoint::IndexBatchFailure);
+
+    assert_matches!(
+        cache.set_size_limit(one_entry_limit),
+        Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
+    );
+    assert_eq!(cache.size_limit(), old_limit);
+    assert_eq!(cache.entry_count(), 3);
+    for id in [11, 12, 13] {
+        assert_matches!(cache.lookup(key(id)), Lookup::Hit(_));
+    }
+    cache.shutdown().expect("close cache");
 }
 
 #[test]
@@ -574,6 +656,55 @@ fn protected_scan_reaches_unprotected_beyond_four_turns() {
     assert_eq!(cache.lookup(key(512)), Lookup::Miss);
     assert_matches!(cache.lookup(key(513)), Lookup::Hit(_));
     drop(protections);
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
+fn protected_scan_stops_after_one_full_cycle() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
+    let mut protections = Vec::new();
+    for id in 0..256u16 {
+        let key = key(id);
+        cache.put(key, vec![1; 16]).expect("store protected entry");
+        protections.push(cache.protect(key).expect("protect entry"));
+    }
+    cache.set_size_limit(cache.accounted_size()).expect("set current size limit");
+
+    let writing_cache = Arc::clone(&cache);
+    let (reply, receiver) = std::sync::mpsc::channel();
+    let writer = thread::spawn(move || {
+        let result = writing_cache.put(key(256), vec![2; 16]);
+        reply.send(result).expect("report put result");
+    });
+    let result = receiver.recv_timeout(Duration::from_secs(3)).expect("put finishes after one candidate cycle");
+    assert_matches!(result, Err(StorageError::TooLarge));
+    writer.join().expect("put thread completes");
+
+    assert_eq!(cache.entry_count(), 256);
+    drop(protections);
+    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().expect("close cache");
+}
+
+#[test]
+fn lru_eviction_stays_oldest_first_across_scan_windows() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    for id in 0..256u16 {
+        cache.put(same_shard_key(id), vec![u8::try_from(id % 251).expect("payload byte")]).expect("store entry");
+    }
+
+    let limit = cache.accounted_size().checked_sub(1).expect("cache size is nonzero");
+    cache.set_size_limit(limit).expect("evict oldest entry");
+    cache.put(same_shard_key(256), vec![0]).expect("evict the next oldest entry");
+
+    assert_eq!(cache.lookup(same_shard_key(0)), Lookup::Miss);
+    assert_eq!(cache.lookup(same_shard_key(1)), Lookup::Miss);
+    for id in 2..256u16 {
+        assert_matches!(cache.lookup(same_shard_key(id)), Lookup::Hit(_));
+    }
+    assert_matches!(cache.lookup(same_shard_key(256)), Lookup::Hit(_));
+    assert_eq!(cache.entry_count(), 255);
     cache.shutdown().expect("close cache");
 }
 
@@ -704,6 +835,7 @@ fn replacement_crash_never_trusts_bytes() {
             | WritePoint::LookupHashMismatch
             | WritePoint::IndexTouchBusy
             | WritePoint::PutQueued
+            | WritePoint::SetLimitQueued
             | WritePoint::WriterReady
             | WritePoint::SetLimitReplied => unreachable!(),
         }
@@ -734,8 +866,10 @@ fn interrupted_multi_chunk_write_reopens_with_committed_entries() {
     let hooks = Arc::new(writer::FaultHooks::default());
     let (worker_ready, resume_worker) = hooks.pause_at(WritePoint::WriterReady);
     let (chunk_committed, resume_chunk) = hooks.pause_at(WritePoint::IndexBatchCommitted);
-    let cache =
-        Arc::new(Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::clone(&hooks)).expect("open cache"));
+    let cache = Arc::new(
+        Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::new(LruPolicy), Arc::clone(&hooks))
+            .expect("open cache"),
+    );
     worker_ready.recv_timeout(Duration::from_secs(3)).expect("writer is ready");
     cache.arm_fault(WritePoint::IndexBatchCommitted);
     let keys = (0..=MAX_BATCH_ROWS).map(|id| ordered_key(u16::try_from(id).expect("batch key fits"))).collect::<Vec<_>>();
@@ -794,8 +928,10 @@ fn schema_recovery_does_not_report_removed_entries_as_written() {
 
     let hooks = Arc::new(writer::FaultHooks::default());
     let (worker_ready, resume_worker) = hooks.pause_at(WritePoint::WriterReady);
-    let cache =
-        Arc::new(Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::clone(&hooks)).expect("open cache"));
+    let cache = Arc::new(
+        Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::new(LruPolicy), Arc::clone(&hooks))
+            .expect("open cache"),
+    );
     worker_ready.recv_timeout(Duration::from_secs(3)).expect("writer is ready");
     let keys = (0..=MAX_BATCH_ROWS).map(|id| ordered_key(u16::try_from(id).expect("batch key fits"))).collect::<Vec<_>>();
     let (queued, resumes, puts) = queue_puts(Arc::clone(&cache), &keys);

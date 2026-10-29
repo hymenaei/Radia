@@ -84,6 +84,10 @@ impl Iterator for OrderedScan<'_> {
 }
 
 impl Lru {
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
     pub fn try_reserve(&mut self, additional: usize) -> Result<(), std::collections::TryReserveError> {
         self.stamps.try_reserve(additional)
     }

@@ -15,9 +15,15 @@ pub(super) struct Plan {
     changes: HashMap<Key, Option<Arc<Entry>>>,
     directory_deltas: HashMap<DirectoryId, i64>,
     eviction_reasons: HashMap<Key, EvictionReason>,
+    pub(super) deferred_from: Option<usize>,
 }
 
 enum VictimSearch {
+    Found(Key, EvictionReason),
+    Exhausted,
+}
+
+enum ScanResult {
     Found(Key, EvictionReason),
     Exhausted,
     Deferred,
@@ -66,25 +72,23 @@ impl WorkerState {
             new_stamps.insert(key, stamp);
             while !self.fits(data_bytes, entry_count, directory_count, self.size_limit)? {
                 if eviction_reasons.len() >= remaining_evictions {
-                    return Err(StorageError::TooLarge);
+                    drop(entries);
+                    return self.plan_evictions_for_retry(protection, remaining_evictions);
                 }
-                let (victim, reason) = loop {
-                    match find_victim(
-                        &self.lru,
-                        &mut new_order,
-                        &mut new_stamps,
-                        Some(key),
-                        &changes,
-                        &entries,
-                        protection,
-                        self.read_state.policy.as_ref(),
-                        now,
-                        &mut self.eviction_scan_cursor,
-                    ) {
-                        VictimSearch::Found(victim, reason) => break (victim, reason),
-                        VictimSearch::Exhausted => return Err(StorageError::TooLarge),
-                        VictimSearch::Deferred => {}
-                    }
+                let (victim, reason) = match find_victim(
+                    &self.lru,
+                    &mut new_order,
+                    &mut new_stamps,
+                    Some(key),
+                    &changes,
+                    &entries,
+                    protection,
+                    self.read_state.policy.as_ref(),
+                    now,
+                    &mut self.eviction_scan_cursor,
+                ) {
+                    VictimSearch::Found(victim, reason) => (victim, reason),
+                    VictimSearch::Exhausted => return Err(StorageError::TooLarge),
                 };
                 let previous = effective_entry(&victim, &changes, &entries).ok_or(StorageError::TooLarge)?;
                 self.adjust_directories(&victim, -1, &mut directory_deltas, &mut directory_count)?;
@@ -96,7 +100,55 @@ impl WorkerState {
             }
         }
         self.evictions_this_batch = self.evictions_this_batch.saturating_add(eviction_reasons.len());
-        Ok(Plan { changes, directory_deltas, eviction_reasons })
+        Ok(Plan { changes, directory_deltas, eviction_reasons, deferred_from: None })
+    }
+
+    fn plan_evictions_for_retry(&mut self, protection: &ProtectionRegistry, remaining_evictions: usize) -> Result<Plan, StorageError> {
+        let mut changes = HashMap::<Key, Option<Arc<Entry>>>::new();
+        changes.try_reserve(remaining_evictions).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        let mut eviction_reasons = HashMap::new();
+        eviction_reasons.try_reserve(remaining_evictions).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        let mut directory_deltas = HashMap::<DirectoryId, i64>::new();
+        directory_deltas
+            .try_reserve(remaining_evictions.saturating_mul(3))
+            .map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        if remaining_evictions == 0 {
+            return Ok(Plan { changes, directory_deltas, eviction_reasons, deferred_from: Some(0) });
+        }
+        let entries = read_map(&self.read_state.entries);
+        let mut new_order = BTreeSet::new();
+        let mut new_stamps = HashMap::new();
+        let mut directory_count = self.directory_count;
+        let now = self.read_state.usage_clock.load(Ordering::Relaxed);
+        while eviction_reasons.len() < remaining_evictions {
+            let (key, reason) = match find_victim(
+                &self.lru,
+                &mut new_order,
+                &mut new_stamps,
+                None,
+                &changes,
+                &entries,
+                protection,
+                self.read_state.policy.as_ref(),
+                now,
+                &mut self.eviction_scan_cursor,
+            ) {
+                VictimSearch::Found(key, reason) => (key, reason),
+                VictimSearch::Exhausted => break,
+            };
+            if effective_entry(&key, &changes, &entries).is_none() {
+                return Err(StorageError::TooLarge);
+            }
+            self.adjust_directories(&key, -1, &mut directory_deltas, &mut directory_count)?;
+            changes.insert(key, None);
+            eviction_reasons.insert(key, reason);
+        }
+        drop(entries);
+        if changes.is_empty() {
+            return Err(StorageError::TooLarge);
+        }
+        self.evictions_this_batch = self.evictions_this_batch.saturating_add(eviction_reasons.len());
+        Ok(Plan { changes, directory_deltas, eviction_reasons, deferred_from: Some(0) })
     }
 
     fn adjust_directories(
@@ -193,6 +245,7 @@ impl WorkerState {
         }
         self.drain_touches_best_effort();
         self.blocked_protection_generation = None;
+        self.enforce_limit(limit)?;
         self.size_limit = limit;
         self.read_state.size_limit.store(limit, Ordering::Relaxed);
         Ok(())
@@ -241,7 +294,6 @@ impl WorkerState {
                         scan_exhausted = true;
                         break;
                     }
-                    VictimSearch::Deferred => break,
                 };
                 let entry = effective_entry(&key, &changes, &entries).ok_or(StorageError::TooLarge)?;
                 self.adjust_directories(&key, -1, &mut directory_deltas, &mut directory_count)?;
@@ -257,7 +309,7 @@ impl WorkerState {
                 return Ok(());
             }
             let planned_evictions = eviction_reasons.len();
-            let plan = Plan { changes, directory_deltas, eviction_reasons };
+            let plan = Plan { changes, directory_deltas, eviction_reasons, deferred_from: None };
             let changes = self.prepare_changes(&plan, &mut protection)?;
             let eviction_marks = self.mark_evictions(&changes, &mut protection)?;
             self.evictions_this_batch = self.evictions_this_batch.saturating_add(planned_evictions);
@@ -292,11 +344,35 @@ fn find_victim(
     now: u64,
     scan_cursor: &mut Option<(u64, Key)>,
 ) -> VictimSearch {
-    let result = scan_victim(lru, new_order, new_stamps, excluded, changes, entries, protection, policy, now, scan_cursor);
-    if matches!(result, VictimSearch::Exhausted) {
-        *scan_cursor = None;
+    let candidate_count = lru.len().saturating_add(new_order.len());
+    let mut inspected = 0usize;
+    loop {
+        match scan_victim(
+            lru,
+            new_order,
+            new_stamps,
+            excluded,
+            changes,
+            entries,
+            protection,
+            policy,
+            now,
+            scan_cursor,
+            &mut inspected,
+            candidate_count,
+        ) {
+            ScanResult::Found(key, reason) => return VictimSearch::Found(key, reason),
+            ScanResult::Exhausted => {
+                *scan_cursor = None;
+                return VictimSearch::Exhausted;
+            }
+            ScanResult::Deferred if inspected < candidate_count => {}
+            ScanResult::Deferred => {
+                *scan_cursor = None;
+                return VictimSearch::Exhausted;
+            }
+        }
     }
-    result
 }
 
 fn scan_victim(
@@ -310,12 +386,14 @@ fn scan_victim(
     policy: &dyn EvictionPolicy,
     now: u64,
     scan_cursor: &mut Option<(u64, Key)>,
-) -> VictimSearch {
+    search_inspected: &mut usize,
+    candidate_count: usize,
+) -> ScanResult {
     let mut base_scan = lru.scan_after(*scan_cursor).peekable();
     let mut new_scan = OrderedScan::new(new_order, *scan_cursor).peekable();
     let mut selected: Option<(u128, u64, Key, EvictionReason, bool)> = None;
-    let mut inspected = 0usize;
-    while inspected < MAX_EVICTION_CANDIDATES {
+    let mut turn_inspected = 0usize;
+    while turn_inspected < MAX_EVICTION_CANDIDATES && *search_inspected < candidate_count {
         let next_base = base_scan.peek().copied();
         let next_new = new_scan.peek().copied();
         let (stamp, key, is_new) = match (next_base, next_new) {
@@ -333,7 +411,8 @@ fn scan_victim(
             }
             (None, None) => break,
         };
-        inspected += 1;
+        turn_inspected += 1;
+        *search_inspected += 1;
         *scan_cursor = Some((stamp, key));
         let stale = if is_new {
             changes.get(&key).is_some_and(Option::is_none) || effective_entry(&key, changes, entries).is_none()
@@ -359,13 +438,14 @@ fn scan_victim(
         }
     }
     let has_more = base_scan.peek().is_some() || new_scan.peek().is_some();
-    let Some((_, _, key, reason, is_new)) = selected else {
-        return if has_more { VictimSearch::Deferred } else { VictimSearch::Exhausted };
+    let Some((_, stamp, key, reason, is_new)) = selected else {
+        return if has_more && *search_inspected < candidate_count { ScanResult::Deferred } else { ScanResult::Exhausted };
     };
     drop(new_scan);
     drop(base_scan);
     if is_new {
         remove_new_candidate(&key, new_order, new_stamps);
     }
-    VictimSearch::Found(key, reason)
+    *scan_cursor = Some((stamp, key));
+    ScanResult::Found(key, reason)
 }

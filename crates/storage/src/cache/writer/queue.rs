@@ -5,7 +5,7 @@ use std::{
 };
 
 use super::{
-    WorkerState,
+    WorkerState, clone_error,
     support::{is_simulated_crash, lock, reply_result},
 };
 use crate::cache::{Key, MAX_QUEUED_WRITE_BYTES, MAX_QUEUED_WRITES, StorageError, UnavailableReason, writer::QUEUE_SWEEP_CHUNK};
@@ -103,6 +103,27 @@ impl WriteQueue {
         self.space.notify_all();
     }
 
+    fn requeue(&self, commands: Vec<QueuedCommand>) -> Result<(), (Vec<QueuedCommand>, StorageError)> {
+        let mut state = lock(&self.state);
+        if state.closed && !state.commands.back().is_some_and(|queued| matches!(&queued.command, Command::Shutdown { .. })) {
+            return Err((commands, StorageError::Unavailable(UnavailableReason::WriterStopped)));
+        }
+        if state.commands.try_reserve(commands.len()).is_err() {
+            return Err((commands, StorageError::Unavailable(UnavailableReason::Allocation)));
+        }
+        let shutdown = if state.commands.back().is_some_and(|queued| matches!(&queued.command, Command::Shutdown { .. })) {
+            state.commands.pop_back()
+        } else {
+            None
+        };
+        state.commands.extend(commands);
+        if let Some(shutdown) = shutdown {
+            state.commands.push_back(shutdown);
+        }
+        self.ready.notify_one();
+        Ok(())
+    }
+
     pub fn close(&self) {
         let mut state = lock(&self.state);
         state.closed = true;
@@ -124,24 +145,50 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
         while let Some(queued) = commands.next() {
             match queued.command {
                 Command::Put { key, bytes, reply } => {
-                    let mut puts = vec![(key, bytes)];
-                    let mut replies = vec![reply];
-                    let mut weights = vec![queued.bytes];
+                    let mut puts = vec![QueuedCommand { command: Command::Put { key, bytes, reply }, bytes: queued.bytes }];
                     while commands.peek().is_some_and(|queued| matches!(&queued.command, Command::Put { .. })) {
                         let Some(next) = commands.next() else {
                             break;
                         };
-                        if let Command::Put { key, bytes, reply } = next.command {
-                            puts.push((key, bytes));
-                            replies.push(reply);
-                            weights.push(next.bytes);
+                        puts.push(next);
+                    }
+                    let mut deferred = Vec::new();
+                    if deferred.try_reserve_exact(puts.len()).is_err() {
+                        for queued in puts {
+                            if let Command::Put { reply, .. } = queued.command {
+                                reply_result(reply, Err(StorageError::Unavailable(UnavailableReason::Allocation)));
+                            }
+                            queue.complete(queued.bytes);
+                        }
+                        continue;
+                    }
+                    let results = state.put_batch(
+                        puts.len(),
+                        puts.iter().map(|queued| match &queued.command {
+                            Command::Put { key, bytes, .. } => (*key, bytes.as_slice()),
+                            _ => unreachable!(),
+                        }),
+                    );
+                    let simulated_crash = results.iter().any(|result| matches!(result, Some(Err(error)) if is_simulated_crash(error)));
+                    for (queued, result) in puts.into_iter().zip(results) {
+                        if let Some(result) = result {
+                            if let Command::Put { reply, .. } = queued.command {
+                                reply_result(reply, result);
+                            }
+                            queue.complete(queued.bytes);
+                        } else {
+                            deferred.push(queued);
                         }
                     }
-                    let results = state.put_batch(puts);
-                    let simulated_crash = results.iter().any(|result| result.as_ref().is_err_and(is_simulated_crash));
-                    for ((reply, weight), result) in replies.into_iter().zip(weights).zip(results) {
-                        reply_result(reply, result);
-                        queue.complete(weight);
+                    if !deferred.is_empty()
+                        && let Err((deferred, error)) = queue.requeue(deferred)
+                    {
+                        for queued in deferred {
+                            if let Command::Put { reply, .. } = queued.command {
+                                reply_result(reply, Err(clone_error(&error)));
+                            }
+                            queue.complete(queued.bytes);
+                        }
                     }
                     if simulated_crash {
                         return;
@@ -157,17 +204,40 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
                     reply_result(reply, state.clear());
                     queue.complete(queued.bytes);
                 }
-                Command::SetLimit { limit, reply } => {
+                Command::SetLimit { limit: first_limit, reply: first_reply } => {
+                    let mut limits =
+                        vec![QueuedCommand { command: Command::SetLimit { limit: first_limit, reply: first_reply }, bytes: queued.bytes }];
+                    while commands.peek().is_some_and(|queued| matches!(&queued.command, Command::SetLimit { .. })) {
+                        let Some(next) = commands.next() else {
+                            break;
+                        };
+                        limits.push(next);
+                    }
+                    let minimum_limit = state.read_state.minimum_size_limit;
+                    let final_valid_limit = limits
+                        .iter()
+                        .filter_map(|queued| match &queued.command {
+                            Command::SetLimit { limit, .. } if *limit >= minimum_limit => Some(*limit),
+                            _ => None,
+                        })
+                        .next_back();
                     state.drain_invalid();
-                    let result = state.set_limit(limit).and_then(|()| {
-                        if limit_enforcement_attempted {
-                            return Ok(());
+                    let result = final_valid_limit.map(|limit| state.set_limit(limit));
+                    limit_enforcement_attempted = result.is_some();
+                    for queued in limits {
+                        if let Command::SetLimit { limit, reply } = queued.command {
+                            let caller_result = if limit < minimum_limit {
+                                Err(StorageError::LimitTooSmall)
+                            } else {
+                                match result.as_ref().expect("valid limit group has an enforcement result") {
+                                    Ok(()) => Ok(()),
+                                    Err(error) => Err(clone_error(error)),
+                                }
+                            };
+                            reply_result(reply, caller_result);
                         }
-                        limit_enforcement_attempted = true;
-                        state.enforce_limit(limit)
-                    });
-                    reply_result(reply, result);
-                    queue.complete(queued.bytes);
+                        queue.complete(queued.bytes);
+                    }
                     #[cfg(test)]
                     if state.hooks.check(super::WritePoint::SetLimitReplied).is_err() {
                         return;

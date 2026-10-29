@@ -657,6 +657,8 @@ impl Cache {
         }
         let (reply, receiver) = mpsc::sync_channel(0);
         self.queue.try_send(Command::SetLimit { limit, reply }, 0)?;
+        #[cfg(test)]
+        self.read_state.hooks.check(WritePoint::SetLimitQueued)?;
         receive(receiver)
     }
 

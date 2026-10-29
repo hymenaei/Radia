@@ -87,6 +87,18 @@ impl IngestSummary {
         self.blocks.push(BlockOutcome::Rejected { address, error });
     }
 
+    pub(super) fn touches_entity(&self, entity: world::Entity) -> bool {
+        self.blocks.iter().filter_map(BlockOutcome::applied).any(|applied| {
+            matches!(
+                &applied.outcome,
+                world::ApplyOutcome::Introduced(updated)
+                    | world::ApplyOutcome::Updated(updated)
+                    | world::ApplyOutcome::AgentHandedOff(updated)
+                    if *updated == entity
+            )
+        })
+    }
+
     pub(super) fn append(&mut self, other: Self) {
         self.blocks.extend(other.blocks);
         self.invalid_blocks = self.invalid_blocks.saturating_add(other.invalid_blocks);

@@ -77,7 +77,7 @@ fn compressed_update_keeps_parent_and_angular() {
     let Some(ObjectOperation::Observe(observation)) = batch.blocks[0].as_ref() else { panic!("expected compressed observation") };
     assert_eq!(observation.parent, ParentUpdate::Local(NonZeroU32::new(0x0506_0708).expect("nonzero parent ID")));
     assert_eq!(observation.angular_velocity, Some(Vec3::new(0.5, 0.0, -0.5)));
-    assert_eq!(observation.linear_motion, None);
+    assert_eq!(observation.linear_motion, Some(world::LinearMotion { velocity: None, acceleration: Some(Vec3::ZERO) }));
     assert_eq!(observation.shape, FieldUpdate::Set(Shape::Prim(compressed_prim_shape())));
     assert_eq!(observation.appearance, FieldUpdate::Set(Appearance::Surface));
 }

@@ -1,9 +1,9 @@
 use math::{DVec3, Quat, Vec3};
-use protocol::messages::{AgentMovementComplete, AgentUpdate, SetAlwaysRun, agent::agent_update::AgentData};
+use protocol::messages::{AgentUpdate, SetAlwaysRun, agent::agent_update::AgentData};
 use render::scene::Camera;
 use uuid::Uuid;
 
-use crate::{DEFAULT_DRAW_DISTANCE, agent_movement::MovementObservation};
+use crate::agent_movement::MovementObservation;
 
 pub(crate) fn movement_camera(
     agent_id: Uuid,
@@ -25,13 +25,6 @@ pub(crate) fn movement_camera(
 
 pub(crate) fn always_run(agent_id: Uuid, session_id: Uuid, always_run: bool) -> SetAlwaysRun {
     SetAlwaysRun { agent_id, session_id, always_run }
-}
-
-pub(crate) fn arrival(agent_id: Uuid, session_id: Uuid, movement: &AgentMovementComplete) -> Option<AgentUpdate> {
-    if movement.agent_data.agent_id != agent_id || movement.agent_data.session_id != session_id {
-        return None;
-    }
-    update(agent_id, session_id, movement.data.position, movement.data.look_at, DEFAULT_DRAW_DISTANCE, Quat::IDENTITY, 0)
 }
 
 fn update(
@@ -68,7 +61,7 @@ fn update(
 
 #[cfg(test)]
 mod tests {
-    use protocol::lludp::{Message, Packet};
+    use protocol::lludp::Packet;
 
     use super::*;
     fn idle_movement() -> MovementObservation {
@@ -86,26 +79,6 @@ mod tests {
             view.draw_distance() as f32,
             "simulator interest must match the actual default scene draw distance"
         );
-    }
-
-    #[test]
-    fn arrival_uses_observed_pose() {
-        let bytes = test_support::parse_hex_fixture(test_support::lludp::vectors::AGENT_MOVEMENT_COMPLETE).unwrap();
-        let packet = Packet::decode(&bytes).unwrap();
-        let Message::AgentMovementComplete(movement) = packet.message() else { panic!("movement completion") };
-        let (agent, session) = (movement.agent_data.agent_id, movement.agent_data.session_id);
-        let result = arrival(agent, session, movement).unwrap().agent_data;
-        assert_eq!(result.camera_center, movement.data.position);
-        assert_eq!(result.camera_at_axis, movement.data.look_at.normalize());
-        assert_eq!(result.far, 512.0);
-        assert!(arrival(Uuid::nil(), session, movement).is_none());
-        assert!(arrival(agent, Uuid::nil(), movement).is_none());
-        let mut invalid = movement.clone();
-        invalid.data.position = Vec3::NAN;
-        assert!(arrival(agent, session, &invalid).is_none());
-        invalid.data.position = Vec3::ZERO;
-        invalid.data.look_at = Vec3::ZERO;
-        assert!(arrival(agent, session, &invalid).is_none());
     }
 
     #[test]

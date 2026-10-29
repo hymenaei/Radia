@@ -30,7 +30,7 @@ use winit::{
 };
 
 use self::window::{MAX_RECOVERIES, SceneWindow, SceneWindowError};
-use crate::{agent_movement::MovementObservation, scene_feed::SceneFeed};
+use crate::{agent_movement::MovementObservation, scene_feed::SceneFeed, session::AgentMotionSample};
 
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
@@ -85,12 +85,13 @@ struct InputCapture {
 struct RequestedScene {
     generation: u64,
     visible: bool,
+    activate: bool,
 }
 
 impl RequestedScene {
-    fn show(&mut self, generation: u64) -> bool {
+    fn show(&mut self, generation: u64, activate: bool) -> bool {
         if generation > self.generation {
-            *self = Self { generation, visible: true };
+            *self = Self { generation, visible: true, activate };
             true
         } else {
             false
@@ -100,6 +101,7 @@ impl RequestedScene {
     fn clear(&mut self, generation: u64) {
         if self.generation == generation {
             self.visible = false;
+            self.activate = false;
         }
     }
 }
@@ -162,10 +164,10 @@ impl Viewport {
         Ok((Self { shared, worker: Some(worker) }, incoming))
     }
 
-    pub(crate) fn show(&self, generation: u64) -> bool {
+    pub(crate) fn show(&self, generation: u64, activate: bool) -> bool {
         {
             let mut requested = self.shared.requested.lock().unwrap_or_else(PoisonError::into_inner);
-            if !requested.show(generation) {
+            if !requested.show(generation, activate) {
                 return false;
             }
         }
@@ -195,12 +197,13 @@ impl Viewport {
         agent_id: uuid::Uuid,
         camera: watch::Sender<Option<scene::Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
+        agent_motion: watch::Receiver<Option<AgentMotionSample>>,
         runtime: Handle,
     ) {
         let requested = self.shared.requested.lock().unwrap_or_else(PoisonError::into_inner);
         if requested.generation == generation && requested.visible {
             let shared = Arc::clone(&self.shared);
-            let feed = SceneFeed::start(sources, agent_id, camera, movement, runtime, move || {
+            let feed = SceneFeed::start(sources, agent_id, camera, movement, agent_motion, runtime, move || {
                 shared.wake();
             });
             *self.shared.feed.lock().unwrap_or_else(PoisonError::into_inner) = Some((generation, feed));
@@ -278,7 +281,7 @@ impl WindowApp {
                 return;
             }
             self.generation = requested.generation;
-            match SceneWindow::new(event_loop, requested.generation, Arc::clone(&self.shared)) {
+            match SceneWindow::new(event_loop, requested.generation, requested.activate, Arc::clone(&self.shared)) {
                 Ok(window) => self.active = Some(window),
                 Err(error) => self.publish(ViewportEvent::Failed(requested.generation, ViewportError::SceneWindow(error)), event_loop),
             }
@@ -450,17 +453,20 @@ mod tests {
     fn requests_cannot_revive_cancelled_sessions() {
         let mut requested = RequestedScene::default();
         for generation in 1..=100 {
-            requested.show(generation);
+            requested.show(generation, false);
         }
         requested.clear(99);
         assert_eq!(requested.generation, 100);
         assert!(requested.visible, "late cancellation must leave the current session visible");
         requested.clear(100);
-        requested.show(100);
-        requested.show(99);
+        requested.show(100, false);
+        requested.show(99, false);
         assert!(!requested.visible, "neither repeated nor stale startup may revive a cancelled scene");
-        requested.show(101);
+        requested.show(101, true);
         assert!(requested.visible);
+        assert!(requested.activate, "the startup request carries the focus intent to winit");
         assert_eq!(requested.generation, 101);
+        requested.clear(101);
+        assert!(!requested.activate, "a cancelled startup must not leave a stale activation request");
     }
 }

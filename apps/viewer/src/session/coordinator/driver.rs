@@ -24,7 +24,7 @@ use world::UpdateSource;
 
 use super::{
     WriteLock,
-    events::{SimulatorScope, WorldHandoff, handle_simulator_message, order_evidence, route_recovery_targets},
+    events::{MovementCompleteOutcome, SimulatorScope, WorldHandoff, handle_simulator_message, order_evidence, route_recovery_targets},
     input::{Input, select_drain_input},
     inventory_bootstrap::build_inventory,
     inventory_cache::{InventoryCacheEvent, InventoryCacheSession},
@@ -40,7 +40,7 @@ use crate::{
     },
     remembered_login::{self, RememberedLogin},
     session::{
-        CameraUplink, RegionLookup, Session, SessionHandle,
+        AgentMotionPublisher, CameraUplink, RegionLookup, Session, SessionHandle,
         environment::{Completion, EnvironmentIntake},
         inbound::object_media_requests,
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
@@ -104,6 +104,7 @@ struct SessionDriver {
     inventory_background_done: bool,
     inventory_last_failure: Option<(CategoryKey, InventoryFetchError)>,
     camera: CameraUplink,
+    agent_motion: AgentMotionPublisher,
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
     recovery: RecoveryIntake,
@@ -174,6 +175,7 @@ impl SessionDriver {
             inventory_background_done: false,
             inventory_last_failure: None,
             camera,
+            agent_motion: AgentMotionPublisher::new(),
             region_lookup: None,
             media,
             recovery,
@@ -284,11 +286,15 @@ impl SessionDriver {
 
     fn handle_camera_tick(&mut self) {
         let simulator = self.primary_simulator;
-        let origin = simulator
+        let origin = self.primary_region_origin();
+        self.camera.tick(&self.session_handle, simulator, self.active_session.as_ref(), origin);
+    }
+
+    fn primary_region_origin(&self) -> Option<math::DVec3> {
+        self.primary_simulator
             .and_then(|simulator| self.session_world.region_for(simulator))
             .and_then(|region| self.session_world.world().region(region))
-            .and_then(|info| info.resolved_origin());
-        self.camera.tick(&self.session_handle, simulator, self.active_session.as_ref(), origin);
+            .and_then(|info| info.resolved_origin())
     }
 
     fn handle_media_result(&mut self, result: Option<ObjectMediaResult>) {
@@ -379,19 +385,35 @@ impl SessionDriver {
                     &capabilities,
                     self.primary_simulator,
                 );
-                if let Some(summary) = self.handoff.promote(&mut self.session_world, previous_simulator_id, simulator_id) {
-                    self.process_ingest_summary(simulator_id, summary);
-                }
+                let summary = self.handoff.promote(&mut self.session_world, previous_simulator_id, simulator_id);
                 let region = self.session_world.region_for(simulator_id).map(|region| region.get());
                 tracing::info!(simulator = simulator_id.get(), region, "primary simulator promoted");
                 self.on_primary_changed(simulator_id, *session, capabilities, self.active_login_data.clone());
+                if let Some(summary) = summary {
+                    let touched_agent = self.summary_touches_agent(&summary);
+                    self.process_ingest_summary(simulator_id, summary);
+                    if touched_agent {
+                        self.publish_world_agent_motion(std::time::Instant::now());
+                    }
+                }
+                if let Some((movement, received_at)) = self.handoff.apply_promoted_movement_complete(
+                    &mut self.session_world,
+                    simulator_id,
+                    self.active_session.as_ref().map(|session| (session.agent_id, session.session_id)),
+                ) {
+                    self.publish_arrival_agent_motion(simulator_id, &movement, received_at);
+                }
                 ControlFlow::Continue(())
             }
             SimulatorConnected { simulator_id, region_handle, .. } => {
+                let primary_origin_before = (self.primary_simulator == Some(simulator_id)).then(|| self.primary_region_origin()).flatten();
                 self.handoff.simulator_connected(&mut self.session_world, simulator_id, region_handle);
                 if region_handle.is_none() {
                     self.primary_simulator = Some(simulator_id);
                     self.camera.request_update();
+                }
+                if self.primary_simulator == Some(simulator_id) {
+                    self.camera.region_origin_changed(primary_origin_before, self.primary_region_origin());
                 }
                 ControlFlow::Continue(())
             }
@@ -416,6 +438,7 @@ impl SessionDriver {
             SimulatorDisconnected { simulator_id, .. } | SimulatorFailed { simulator_id, .. } => {
                 let region = self.session_world.region_for(simulator_id).map(|region| region.get());
                 tracing::info!(simulator = simulator_id.get(), region, "simulator disconnected");
+                self.camera.simulator_disconnected(simulator_id);
                 self.environments.simulator_disconnected(&mut self.session_world, simulator_id);
                 if let Some(region) = self.session_world.region_for(simulator_id) {
                     self.assets.retire(region);
@@ -425,6 +448,7 @@ impl SessionDriver {
                 self.media.forget_simulator(simulator_id);
                 if Some(simulator_id) == self.primary_simulator {
                     self.primary_simulator = None;
+                    self.camera.request_update();
                 }
                 ControlFlow::Continue(())
             }
@@ -515,6 +539,8 @@ impl SessionDriver {
         source: std::net::SocketAddr,
         message: Message,
     ) {
+        let received_at = std::time::Instant::now();
+        let primary_origin_before = (self.primary_simulator == Some(simulator_id)).then(|| self.primary_region_origin()).flatten();
         let region = self.session_world.region_for(simulator_id);
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         if matches!(packet_order, PacketOrder::Ordered(_))
@@ -551,8 +577,15 @@ impl SessionDriver {
                 )
                 .await
         };
-        if let Some((simulator_id, summary)) = result {
-            self.process_ingest_summary(simulator_id, summary);
+        let mut touched_agent = false;
+        if let Some(outcome) = result {
+            touched_agent = outcome.touched_agent;
+            if let Some((simulator_id, summary)) = outcome.summary {
+                self.process_ingest_summary(simulator_id, summary);
+            }
+        }
+        if touched_agent && self.primary_simulator == Some(simulator_id) {
+            self.publish_world_agent_motion(received_at);
         }
 
         self.environments.simulator_message(&mut self.session_world, simulator_id, packet_order, &message, self.primary_simulator);
@@ -563,13 +596,16 @@ impl SessionDriver {
         }
 
         if let Message::AgentMovementComplete(movement) = &message {
-            self.camera.on_movement_complete(
-                &self.session_handle,
-                self.primary_simulator,
+            let outcome = self.handoff.movement_complete(
+                &mut self.session_world,
                 simulator_id,
-                self.active_session.as_ref(),
+                self.active_session.as_ref().map(|session| (session.agent_id, session.session_id)),
                 movement,
+                received_at,
             );
+            if outcome == MovementCompleteOutcome::Applied {
+                self.publish_arrival_agent_motion(simulator_id, movement, received_at);
+            }
         }
         let scope = if Some(simulator_id) == self.primary_simulator { SimulatorScope::Primary } else { SimulatorScope::Neighbor };
         let region_name = region.and_then(|region| self.session_world.world().region(region)).and_then(|info| info.name.as_deref());
@@ -582,6 +618,9 @@ impl SessionDriver {
             region_name,
             &self.mailbox,
         );
+        if self.primary_simulator == Some(simulator_id) {
+            self.camera.region_origin_changed(primary_origin_before, self.primary_region_origin());
+        }
     }
 
     fn handle_inventory_udp(&mut self, message: &Message) {
@@ -661,6 +700,8 @@ impl SessionDriver {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             movement: self.camera.movement_sender(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
+            agent_motion: self.agent_motion.receiver(),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             assets: self.assets.handle(),
             session: session.clone(),
             region_name: self.session_world.region_name(simulator_id).map(str::to_owned),
@@ -715,6 +756,38 @@ impl SessionDriver {
         let agent_data =
             self.active_session.as_ref().map(|session| RequestAgentData { agent_id: session.agent_id, session_id: session.session_id });
         self.recovery.schedule(targets, updated, agent_data);
+    }
+
+    fn summary_touches_agent(&self, summary: &IngestSummary) -> bool {
+        self.active_session
+            .as_ref()
+            .and_then(|session| self.session_world.world().entity(session.agent_id))
+            .is_some_and(|entity| summary.touches_entity(entity))
+    }
+
+    fn publish_world_agent_motion(&self, received_at: std::time::Instant) {
+        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
+        self.agent_motion.publish_world(self.session_world.world(), agent_id, received_at);
+    }
+
+    fn publish_arrival_agent_motion(
+        &mut self,
+        simulator_id: SimulatorId,
+        movement: &protocol::messages::AgentMovementComplete,
+        received_at: std::time::Instant,
+    ) {
+        let Some(session) = self.active_session.as_ref() else { return };
+        let Some(origin) = self
+            .session_world
+            .region_for(simulator_id)
+            .and_then(|region| self.session_world.world().region(region))
+            .and_then(world::RegionInfo::resolved_origin)
+        else {
+            return;
+        };
+        if self.agent_motion.publish_arrival(session.agent_id, session.session_id, movement, origin, received_at) {
+            self.camera.request_update();
+        }
     }
 
     fn handle_recovery_completion(&mut self, completion: RecoveryCompletion) {

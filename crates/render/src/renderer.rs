@@ -19,7 +19,7 @@ use wgpu::{
 
 use crate::geometry::{GeometryRenderer, PickError, Stats};
 use crate::gpu_timing::GpuTimings;
-use crate::scene::{Camera, SceneView};
+use crate::scene::{AgentPose, Camera, SceneView};
 use crate::texture::{TextureCompletion, TextureJob};
 
 #[derive(Debug)]
@@ -220,6 +220,7 @@ impl Renderer {
         &mut self,
         mut overlay: Overlay,
         scene: Option<(&SceneView, Camera)>,
+        agent_pose: Option<AgentPose>,
         water_height: Option<f64>,
         before_present: impl FnOnce(),
     ) -> Result<bool, Error> {
@@ -228,7 +229,7 @@ impl Renderer {
                 self.overlay.update_texture(&self.device, &self.queue, id, &delta);
             }
         }
-        let result = self.draw_frame(&overlay, scene, water_height, before_present);
+        let result = self.draw_frame(&overlay, scene, agent_pose, water_height, before_present);
         for id in overlay.textures.free.drain() {
             self.overlay.free_texture(&id);
         }
@@ -239,6 +240,7 @@ impl Renderer {
         &mut self,
         overlay: &Overlay,
         scene: Option<(&SceneView, Camera)>,
+        agent_pose: Option<AgentPose>,
         water_height: Option<f64>,
         before_present: impl FnOnce(),
     ) -> Result<bool, Error> {
@@ -272,7 +274,7 @@ impl Renderer {
         let depth = if let Some((scene, camera)) = scene {
             let depth = self.geometry.depth(&self.device, self.size);
             if depth.is_some() {
-                self.geometry.prepare(&self.device, &mut encoder, scene, camera, self.size, water_height);
+                self.geometry.prepare(&self.device, &mut encoder, scene, agent_pose, camera, self.size, water_height);
             }
             depth
         } else {

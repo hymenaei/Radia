@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::{
-    agent_movement::MovementObservation, asset_coordinator::AssetHandle, session::experience_environment::EnvironmentInbox,
+    agent_movement::MovementObservation,
+    asset_coordinator::AssetHandle,
+    session::{AgentMotionSample, experience_environment::EnvironmentInbox},
     world_reader::WorldReader,
 };
 use crate::{
@@ -146,6 +148,8 @@ pub(crate) struct SessionReadyUpdate {
     pub(crate) camera: watch::Sender<Option<Camera>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) movement: watch::Sender<Option<MovementObservation>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,

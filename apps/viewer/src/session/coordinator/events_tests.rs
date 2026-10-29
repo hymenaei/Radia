@@ -19,7 +19,7 @@ use world::{
     LocalAddress, ObjectObservation, Parent, Pose, Region, RegionHandle, UpdateSource,
 };
 
-use crate::session::coordinator::events::{PendingWorldHandoff, WorldHandoff};
+use crate::session::coordinator::events::{MovementCompleteOutcome, PendingWorldHandoff, WorldHandoff};
 use crate::session::coordinator::tests::apply_world_event;
 use crate::session::coordinator::tests::{
     agent_observation, agent_update, fixture_packet, region_handshake, simulator_message, simulator_message_at_order,
@@ -39,8 +39,12 @@ fn apply_world_event_with_handoff(
     observations: &mut HashMap<network::SimulatorId, ObjectObservation>,
     agent_id: Option<Uuid>,
 ) -> Option<(network::SimulatorId, super::IngestSummary)> {
-    let mut handoff =
-        WorldHandoff { world_primary: *world_primary, promoted_target: *promoted_target, observations: std::mem::take(observations) };
+    let mut handoff = WorldHandoff {
+        world_primary: *world_primary,
+        promoted_target: *promoted_target,
+        observations: std::mem::take(observations),
+        pending_movement_completes: HashMap::new(),
+    };
     let result = handoff.apply_event(world, event, agent_id);
     *world_primary = handoff.world_primary;
     *promoted_target = handoff.promoted_target;
@@ -54,7 +58,12 @@ fn begin_world_handoff(
     source: network::SimulatorId,
     target: network::SimulatorId,
 ) -> bool {
-    let mut handoff = WorldHandoff { world_primary: *world_primary, promoted_target: *promoted_target, observations: HashMap::new() };
+    let mut handoff = WorldHandoff {
+        world_primary: *world_primary,
+        promoted_target: *promoted_target,
+        observations: HashMap::new(),
+        pending_movement_completes: HashMap::new(),
+    };
     let result = handoff.begin(source, target);
     *world_primary = handoff.world_primary;
     *promoted_target = handoff.promoted_target;
@@ -68,7 +77,12 @@ fn complete_promoted_handoff(
     target: network::SimulatorId,
     observation: ObjectObservation,
 ) -> (bool, Option<super::IngestSummary>) {
-    let mut handoff = WorldHandoff { world_primary: *world_primary, promoted_target: *promoted_target, observations: HashMap::new() };
+    let mut handoff = WorldHandoff {
+        world_primary: *world_primary,
+        promoted_target: *promoted_target,
+        observations: HashMap::new(),
+        pending_movement_completes: HashMap::new(),
+    };
     let result = handoff.complete_promoted(world, target, observation);
     *world_primary = handoff.world_primary;
     *promoted_target = handoff.promoted_target;
@@ -82,7 +96,12 @@ fn complete_promoted_world_handoff(
     target: network::SimulatorId,
     observation: ObjectObservation,
 ) -> (bool, Option<Applied>) {
-    let mut handoff = WorldHandoff { world_primary: *world_primary, promoted_target: *promoted_target, observations: HashMap::new() };
+    let mut handoff = WorldHandoff {
+        world_primary: *world_primary,
+        promoted_target: *promoted_target,
+        observations: HashMap::new(),
+        pending_movement_completes: HashMap::new(),
+    };
     let result = handoff.complete_world_handoff(world, target, observation);
     *world_primary = handoff.world_primary;
     *promoted_target = handoff.promoted_target;
@@ -105,6 +124,70 @@ fn region_connection_lifecycle() {
     assert!(intake.region_for(simulator_id).is_none());
     assert!(intake.world().region(region).is_none());
     assert!(apply_world_event(&mut intake, &simulator_message(simulator_id, 1, region_handshake("late"))).is_none());
+}
+
+#[test]
+fn authenticated_primary_movement_complete_resolves_region_origin() {
+    let primary_simulator = simulator_id();
+    let other_simulator = simulator_id();
+    let packet = fixture_packet(vectors::AGENT_MOVEMENT_COMPLETE);
+    let Message::AgentMovementComplete(movement) = packet.message().clone() else { panic!("movement-complete fixture") };
+    let agent_id = movement.agent_data.agent_id;
+    let session_id = movement.agent_data.session_id;
+    let handle = RegionHandle::new(movement.data.region_handle);
+    let mut intake = SessionWorld::new(viewer_world_limits());
+    let region = intake.register_simulator(primary_simulator, None).expect("register simulator without an origin");
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut intake, primary_simulator, agent_id);
+
+    assert_eq!(intake.world().region(region).and_then(|info| info.resolved_origin()), None);
+    let received_at = std::time::Instant::now();
+    assert_eq!(
+        handoff.movement_complete(&mut intake, primary_simulator, Some((agent_id, Uuid::nil())), &movement, received_at),
+        MovementCompleteOutcome::Rejected
+    );
+    assert_eq!(
+        handoff.movement_complete(&mut intake, other_simulator, Some((agent_id, session_id)), &movement, received_at),
+        MovementCompleteOutcome::Rejected
+    );
+    assert_eq!(intake.world().region(region).and_then(|info| info.resolved_origin()), None);
+    assert_eq!(
+        handoff.movement_complete(&mut intake, primary_simulator, Some((agent_id, session_id)), &movement, received_at),
+        MovementCompleteOutcome::Applied
+    );
+    assert_eq!(intake.world().region(region).and_then(|info| info.resolved_origin()), Some(handle.origin()));
+}
+
+#[test]
+fn destination_movement_complete_waits_for_promotion() {
+    let packet = fixture_packet(vectors::AGENT_MOVEMENT_COMPLETE);
+    let Message::AgentMovementComplete(mut movement) = packet.message().clone() else { panic!("movement-complete fixture") };
+    let agent_id = movement.agent_data.agent_id;
+    let session_id = movement.agent_data.session_id;
+    let source = simulator_id();
+    let destination = simulator_id();
+    let source_handle = RegionHandle::new(0x1111_0000_0000_0001);
+    let destination_handle = RegionHandle::new(0x2222_0000_0000_0002);
+    movement.data.region_handle = destination_handle.get();
+    let mut world = SessionWorld::new(viewer_world_limits());
+    world.register_simulator(source, Some(source_handle)).expect("source region");
+    let destination_region = world.register_simulator(destination, None).expect("destination region");
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut world, source, agent_id);
+    let received_at = std::time::Instant::now();
+
+    assert_eq!(
+        handoff.movement_complete(&mut world, destination, Some((agent_id, session_id)), &movement, received_at),
+        MovementCompleteOutcome::Held
+    );
+    assert_eq!(world.world().region(destination_region).and_then(|info| info.resolved_origin()), None);
+
+    let _ = handoff.promote(&mut world, source, destination);
+    let (_, applied_at) = handoff
+        .apply_promoted_movement_complete(&mut world, destination, Some((agent_id, session_id)))
+        .expect("held movement completion applies after promotion");
+    assert_eq!(applied_at, received_at);
+    assert_eq!(world.world().region(destination_region).and_then(|info| info.resolved_origin()), Some(destination_handle.origin()));
 }
 
 #[test]

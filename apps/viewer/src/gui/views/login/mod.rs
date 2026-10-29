@@ -590,6 +590,7 @@ impl LoginScreen {
             session.agent_id,
             ready.camera,
             ready.movement,
+            ready.agent_motion,
             cx,
         );
     }

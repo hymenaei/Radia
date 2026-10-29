@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
+use math::DVec3;
+use uuid::Uuid;
 use wgpu::{CommandEncoder, Device};
+use world::{Kind, WorldPose};
 
 use crate::{
     geometry::{
@@ -11,7 +14,7 @@ use crate::{
     },
     material::FaceParams,
     pipeline::COLOR,
-    scene::{Camera, Object, SceneView, texture_animation},
+    scene::{AgentPose, Camera, Object, Placement, SceneView, texture_animation},
 };
 
 use super::{FramePreparation, FramePreparationKey, GeometryRenderer, PrepareTimes, ShadingMode, Stats};
@@ -22,6 +25,7 @@ impl GeometryRenderer {
         device: &Device,
         encoder: &mut CommandEncoder,
         view: &SceneView,
+        agent_pose: Option<AgentPose>,
         camera: Camera,
         size: [u32; 2],
         water_height: Option<f64>,
@@ -35,7 +39,7 @@ impl GeometryRenderer {
         self.stats.blended_sorts = 0;
         self.stats.animated_faces_visited = 0;
         self.stats.animated_faces_changed = 0;
-        let key = FramePreparationKey { version: view.version(), camera, size, water_height };
+        let key = FramePreparationKey { version: view.version(), camera, agent_pose, size, water_height };
         let same = self.prepared.as_ref().is_some_and(|prepared| prepared.key == key);
         if same {
             let upload_started = Instant::now();
@@ -63,6 +67,7 @@ impl GeometryRenderer {
 
         let visibility_started = Instant::now();
         let mut update = self.update_cache(view);
+        self.apply_agent_pose(agent_pose, origin, &mut update);
         self.stats.items_updated = update.items_updated;
         update.pose_items.sort_unstable();
         update.pose_items.dedup();
@@ -257,6 +262,49 @@ impl GeometryRenderer {
         self.record_prepare(started, times, uploaded);
     }
 
+    fn apply_agent_pose(&mut self, agent_pose: Option<AgentPose>, origin: DVec3, update: &mut CacheUpdate) {
+        let agent_id = agent_pose.map(AgentPose::agent_id);
+        if let Some(previous) = self.applied_agent.filter(|previous| Some(*previous) != agent_id) {
+            self.set_agent_item_pose(previous, None, origin, Some(&mut *update));
+        }
+        if let Some(agent) = agent_pose {
+            self.set_agent_item_pose(agent.agent_id(), Some(agent.pose()), origin, Some(&mut *update));
+        }
+        self.applied_agent = agent_id;
+    }
+
+    pub(super) fn restore_agent_pose(&mut self, agent_id: Uuid) {
+        let origin = self.cache.origin;
+        self.set_agent_item_pose(agent_id, None, origin, None);
+    }
+
+    fn set_agent_item_pose(
+        &mut self,
+        agent_id: Uuid,
+        pose_override: Option<WorldPose>,
+        origin: DVec3,
+        mut update: Option<&mut CacheUpdate>,
+    ) {
+        let Some(index) = self.cache.index((2, agent_id.as_u128(), 0)) else { return };
+        let Some(item) = self.cache.items.get_mut(index) else { return };
+        let Some(object) = item.source.as_ref() else { return };
+        if object.detail().summary.kind != Kind::Avatar {
+            return;
+        }
+        let Placement::Ready(transform) = object.placement() else { return };
+        let pose = pose_override.unwrap_or(transform.pose);
+        if item.position == pose.position && item.rotation == pose.rotation {
+            return;
+        }
+        item.position = pose.position;
+        item.rotation = pose.rotation;
+        item.transform = instance_base(item.position, item.rotation, item.scale, origin);
+        if let Some(update) = &mut update {
+            update.pose_items.push(index);
+            update.items_updated += 1;
+        }
+    }
+
     fn prepare_face_patches(&mut self, update: &CacheUpdate, layout: bool, visible_changed: bool, now: Instant) {
         let visible = if visible_changed { &self.cache.next_visible } else { &self.cache.visible };
         let items = &mut self.cache.items;
@@ -416,6 +464,7 @@ mod tests {
         FramePreparationKey {
             version: view.version(),
             camera: Camera::new(DVec3::ZERO, Vec3::X, 1.0, [720, 720]).expect("fixture camera"),
+            agent_pose: None,
             size: [1280, 720],
             water_height: Some(20.0),
         }

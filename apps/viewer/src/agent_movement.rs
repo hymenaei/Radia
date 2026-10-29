@@ -1,8 +1,12 @@
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::time::{Duration, Instant};
 
-use math::Quat;
+use math::{Quat, Vec3};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-use winit::keyboard::{Key, NamedKey};
+use winit::{
+    event::ElementState,
+    keyboard::{Key, NamedKey},
+};
 
 const AT_POS: u32 = 0x0000_0001;
 const AT_NEG: u32 = 0x0000_0002;
@@ -18,9 +22,12 @@ const FAST_UP: u32 = 0x0000_1000;
 const FLY: u32 = 0x0000_2000;
 pub(crate) const STOP: u32 = 0x0000_4000;
 pub(crate) const BODY_ROTATION_DOT_THRESHOLD: f32 = 0.9997;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const TURN_RATE: f32 = std::f32::consts::FRAC_PI_2;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 const MAX_TURN_STEP: Duration = Duration::from_millis(100);
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MovementKey {
     Forward,
@@ -37,12 +44,12 @@ pub(crate) enum MovementKey {
     DownPage,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KeyBinding {
     Movement(MovementKey),
     ToggleFlying,
     ToggleRun,
-    ToggleCamera,
     Stop,
 }
 
@@ -54,6 +61,13 @@ pub(crate) struct MovementObservation {
     pub(crate) stop_sequence: u64,
 }
 
+impl Default for MovementObservation {
+    fn default() -> Self {
+        Self { control_flags: 0, body_rotation: Quat::IDENTITY, always_run: false, stop_sequence: 0 }
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[derive(Default)]
 pub(crate) struct HeldControls {
     pressed: u16,
@@ -63,18 +77,21 @@ pub(crate) struct HeldControls {
     stop_sequence: u64,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) struct BodyRotation {
-    authoritative: Option<Quat>,
+    seed: Option<u64>,
     current: Quat,
     updated_at: Option<Instant>,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl Default for BodyRotation {
     fn default() -> Self {
-        Self { authoritative: None, current: Quat::IDENTITY, updated_at: None }
+        Self { seed: None, current: Quat::IDENTITY, updated_at: None }
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl KeyBinding {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn from_key(key: &Key) -> Option<Self> {
@@ -87,7 +104,6 @@ impl KeyBinding {
             Key::Character(character) if character.as_str().eq_ignore_ascii_case("c") => Some(Self::Movement(MovementKey::Down)),
             Key::Character(character) if character.as_str().eq_ignore_ascii_case("f") => Some(Self::ToggleFlying),
             Key::Character(character) if character.as_str().eq_ignore_ascii_case("r") => Some(Self::ToggleRun),
-            Key::Character(character) if character.as_str().eq_ignore_ascii_case("v") => Some(Self::ToggleCamera),
             Key::Named(NamedKey::ArrowUp) => Some(Self::Movement(MovementKey::ForwardArrow)),
             Key::Named(NamedKey::ArrowDown) => Some(Self::Movement(MovementKey::BackwardArrow)),
             Key::Named(NamedKey::ArrowLeft) => Some(Self::Movement(MovementKey::TurnLeftArrow)),
@@ -101,12 +117,14 @@ impl KeyBinding {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl MovementKey {
     fn mask(self) -> u16 {
         1 << (self as u8)
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl HeldControls {
     pub(crate) fn set_pressed(&mut self, key: MovementKey, pressed: bool) -> bool {
         let mask = key.mask();
@@ -117,6 +135,40 @@ impl HeldControls {
             self.pressed &= !mask;
         }
         self.pressed != previous
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn keyboard_event(&mut self, key: &Key, state: ElementState, repeat: bool, captured: bool) -> Option<(KeyBinding, bool)> {
+        let binding = KeyBinding::from_key(key)?;
+        if state == ElementState::Released {
+            let changed = match binding {
+                KeyBinding::Movement(key) => self.set_pressed(key, false),
+                _ => false,
+            };
+            return Some((binding, changed));
+        }
+        if repeat {
+            return Some((binding, false));
+        }
+        if captured {
+            return None;
+        }
+        let changed = match binding {
+            KeyBinding::Movement(key) => self.set_pressed(key, true),
+            KeyBinding::ToggleFlying => {
+                self.toggle_flying();
+                true
+            }
+            KeyBinding::ToggleRun => {
+                self.toggle_run();
+                true
+            }
+            KeyBinding::Stop => {
+                self.stop();
+                true
+            }
+        };
+        Some((binding, changed))
     }
 
     pub(crate) fn toggle_flying(&mut self) {
@@ -208,17 +260,19 @@ impl HeldControls {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 impl BodyRotation {
-    pub(crate) fn update(&mut self, authoritative: Option<Quat>, yaw: f32, now: Instant) -> Quat {
-        if let Some(rotation) = authoritative {
-            let changed = self.authoritative.is_none_or(|previous| previous.dot(rotation).abs() < 0.999_999);
-            if changed {
-                let predicted_turn = self.authoritative.is_some_and(|previous| self.current.dot(previous).abs() < 0.999_999);
-                self.authoritative = Some(rotation);
-                if yaw == 0.0 || !predicted_turn {
-                    self.current = rotation;
-                }
-            }
+    pub(crate) fn current(&self) -> Quat {
+        self.current
+    }
+
+    pub(crate) fn update(&mut self, seed: Option<(u64, Quat)>, yaw: f32, now: Instant) -> Quat {
+        if let Some((generation, rotation)) = seed
+            && self.seed != Some(generation)
+            && let Some(rotation) = yaw_rotation(rotation)
+        {
+            self.seed = Some(generation);
+            self.current = rotation;
         }
         let dt = self.updated_at.map_or(Duration::ZERO, |previous| now.saturating_duration_since(previous).min(MAX_TURN_STEP));
         self.updated_at = Some(now);
@@ -229,12 +283,20 @@ impl BodyRotation {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn yaw_rotation(rotation: Quat) -> Option<Quat> {
+    let forward = rotation * Vec3::X;
+    let forward = Vec3::new(forward.x, forward.y, 0.0).try_normalize()?;
+    Some(Quat::from_rotation_z(forward.y.atan2(forward.x)))
+}
+
 #[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
 mod tests {
     use std::time::{Duration, Instant};
 
-    use math::Quat;
-    use winit::keyboard::Key;
+    use math::{Quat, Vec3};
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    use winit::{event::ElementState, keyboard::Key};
 
     use super::{AT_NEG, AT_POS, FAST_AT, FAST_LEFT, FAST_UP, FLY, LEFT_NEG, LEFT_POS, STOP, UP_NEG, UP_POS, YAW_NEG, YAW_POS};
     use super::{BodyRotation, HeldControls, KeyBinding, MovementKey};
@@ -268,6 +330,24 @@ mod tests {
     }
 
     #[test]
+    fn v_is_not_a_camera_mode_toggle() {
+        assert_eq!(KeyBinding::from_key(&Key::Character("v".into())), None);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn captured_press_does_not_move() {
+        let mut controls = HeldControls::default();
+        let key = Key::Character("w".into());
+        assert_eq!(controls.keyboard_event(&key, ElementState::Pressed, false, true), None);
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
+
+        controls.keyboard_event(&key, ElementState::Pressed, false, false).expect("forward press");
+        controls.keyboard_event(&key, ElementState::Released, false, true).expect("forward release");
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
+    }
+
+    #[test]
     fn toggles_and_focus_loss_publish_fly_run_and_stop_state() {
         let mut controls = HeldControls::default();
         controls.set_pressed(MovementKey::Forward, true);
@@ -288,31 +368,44 @@ mod tests {
     fn body_rotation_uses_ninety_degree_per_second_yaw_rate() {
         let start = Instant::now();
         let mut rotation = BodyRotation::default();
-        assert_eq!(rotation.update(Some(Quat::IDENTITY), 1.0, start), Quat::IDENTITY);
+        assert_eq!(rotation.update(Some((1, Quat::IDENTITY)), 1.0, start), Quat::IDENTITY);
         let mut current = Quat::IDENTITY;
         for step in 1..=10 {
-            current = rotation.update(Some(Quat::IDENTITY), 1.0, start + Duration::from_millis(step * 100));
+            current = rotation.update(Some((1, Quat::IDENTITY)), 1.0, start + Duration::from_millis(step * 100));
         }
-        assert!((current * math::Vec3::X).distance(math::Vec3::Y) < 1e-5);
-        let authoritative = Quat::from_rotation_z(0.4);
-        assert!(
-            (rotation.update(Some(authoritative), 0.0, start + Duration::from_secs(2)) * math::Vec3::X)
-                .distance(authoritative * math::Vec3::X)
-                < 1e-5
-        );
+        assert!((current * Vec3::X).distance(Vec3::Y) < 1e-5);
     }
 
     #[test]
-    fn delayed_authority_keeps_held_turn_progress() {
+    fn simulator_rotation_is_ignored_after_seed() {
         let start = Instant::now();
         let mut rotation = BodyRotation::default();
-        rotation.update(Some(Quat::IDENTITY), 1.0, start);
-        for step in 1..=5 {
-            rotation.update(Some(Quat::IDENTITY), 1.0, start + Duration::from_millis(step * 100));
-        }
+        rotation.update(Some((3, Quat::IDENTITY)), 1.0, start);
+        let turned = rotation.update(Some((3, Quat::IDENTITY)), 1.0, start + Duration::from_millis(100));
+        let current = rotation.update(Some((3, Quat::from_rotation_z(0.2))), 0.0, start + Duration::from_millis(200));
+        assert!((current * Vec3::X).distance(turned * Vec3::X) < 1e-5);
+    }
 
-        let current = rotation.update(Some(Quat::from_rotation_z(0.2)), 1.0, start + Duration::from_millis(600));
-        let expected = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2 * 0.6);
-        assert!((current * math::Vec3::X).distance(expected * math::Vec3::X) < 1e-5);
+    #[test]
+    fn arrival_marker_reseeds_rotation() {
+        let start = Instant::now();
+        let mut rotation = BodyRotation::default();
+        rotation.update(Some((1, Quat::IDENTITY)), 1.0, start);
+        rotation.update(Some((1, Quat::IDENTITY)), 1.0, start + Duration::from_millis(100));
+
+        let arrival = Quat::from_rotation_z(0.7);
+        let current = rotation.update(Some((2, arrival)), 0.0, start + Duration::from_millis(200));
+        assert!((current * Vec3::X).distance(arrival * Vec3::X) < 1e-5);
+    }
+
+    #[test]
+    fn seed_rotation_is_flattened() {
+        let start = Instant::now();
+        let mut rotation = BodyRotation::default();
+        let seed = Quat::from_rotation_y(0.8) * Quat::from_rotation_z(0.5);
+        let current = rotation.update(Some((1, seed)), 0.0, start);
+        let forward = seed * Vec3::X;
+        let expected = Vec3::new(forward.x, forward.y, 0.0).normalize();
+        assert!((current * Vec3::X - expected).length() < 1e-5);
     }
 }

@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Condvar, Mutex, mpsc::SyncSender},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use super::{
@@ -14,6 +14,8 @@ use crate::cache::{
 };
 
 const SWEEP_INTERVAL: Duration = Duration::from_millis(5);
+const MAINTENANCE_RETRY_INITIAL: Duration = Duration::from_millis(100);
+const MAINTENANCE_RETRY_MAX: Duration = Duration::from_secs(1);
 
 pub(in crate::cache) enum Command {
     Put { key: Key, bytes: Vec<u8>, reply: SyncSender<Result<(), StorageError>> },
@@ -136,10 +138,17 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
     if state.hooks.check(super::WritePoint::WriterReady).is_err() {
         return;
     }
+    let mut maintenance_retry_at = None;
+    let mut maintenance_retry_delay = MAINTENANCE_RETRY_INITIAL;
+    let mut maintenance_warning_open = false;
     loop {
         let batch = queue.receive_batch();
         let idle = batch.commands.is_empty();
         let contains_put = batch.commands.iter().any(|queued| matches!(&queued.command, Command::Put { .. }));
+        if !idle {
+            maintenance_retry_at = None;
+            maintenance_retry_delay = MAINTENANCE_RETRY_INITIAL;
+        }
         state.evictions_this_batch = 0;
         let mut commands = batch.commands.into_iter().peekable();
         let mut limit_enforcement_attempted = false;
@@ -240,14 +249,40 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
         }
         state.drain_touches_best_effort();
         state.drain_invalid();
-        let watermark = low_watermark(state.size_limit);
-        if !batch.closed
-            && !limit_enforcement_attempted
-            && (idle || !contains_put)
-            && state.accounted_size() > watermark
-            && let Err(error) = state.enforce_limit(watermark)
-        {
-            tracing::warn!(error = %error, "cache limit enforcement failed");
+        let watermark = low_watermark(state.size_limit, state.empty_cache_size());
+        let maintenance_eligible = !batch.closed && !limit_enforcement_attempted && (idle || !contains_put);
+        if maintenance_eligible && state.accounted_size() <= watermark {
+            maintenance_retry_at = None;
+            maintenance_retry_delay = MAINTENANCE_RETRY_INITIAL;
+            maintenance_warning_open = false;
+        } else if maintenance_eligible && maintenance_retry_at.is_none_or(|deadline| Instant::now() >= deadline) {
+            #[cfg(test)]
+            if state.hooks.check(super::WritePoint::MaintenanceStarted).is_err() {
+                return;
+            }
+            match state.enforce_limit(watermark) {
+                Ok(()) => {
+                    maintenance_retry_at = None;
+                    maintenance_retry_delay = MAINTENANCE_RETRY_INITIAL;
+                    maintenance_warning_open = false;
+                }
+                Err(error) => {
+                    if !maintenance_warning_open {
+                        tracing::warn!(error = %error, "cache limit enforcement failed");
+                        maintenance_warning_open = true;
+                    }
+                    maintenance_retry_at = Some(Instant::now() + maintenance_retry_delay);
+                    maintenance_retry_delay = (maintenance_retry_delay * 2).min(MAINTENANCE_RETRY_MAX);
+                }
+            }
+            #[cfg(test)]
+            if state.hooks.check(super::WritePoint::MaintenanceFinished).is_err() {
+                return;
+            }
+        }
+        #[cfg(test)]
+        if state.hooks.check(super::WritePoint::MaintenanceCycleComplete).is_err() {
+            return;
         }
         state.sweep_step(QUEUE_SWEEP_CHUNK);
         if batch.closed {

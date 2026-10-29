@@ -516,7 +516,10 @@ fn replacement_crash_never_trusts_bytes() {
             | WritePoint::PutQueued
             | WritePoint::SetLimitQueued
             | WritePoint::WriterReady
-            | WritePoint::SetLimitReplied => unreachable!(),
+            | WritePoint::SetLimitReplied
+            | WritePoint::MaintenanceStarted
+            | WritePoint::MaintenanceFinished
+            | WritePoint::MaintenanceCycleComplete => unreachable!(),
         }
         cache.shutdown().expect("close recovered cache");
     }

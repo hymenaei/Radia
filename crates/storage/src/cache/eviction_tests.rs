@@ -1,4 +1,12 @@
-use std::{assert_matches, sync::Arc, thread, time::Duration};
+use std::{
+    assert_matches,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 use tempfile::tempdir;
 
@@ -6,6 +14,17 @@ use super::*;
 
 const TEST_NAMESPACES: [Namespace; 2] = [Namespace::new("tests/storage", "bin"), Namespace::new("assets/textures", "j2c")];
 const TEST_NAMESPACE: NamespaceId = NamespaceId::new(0);
+
+struct CountingPolicy {
+    scores: Arc<AtomicUsize>,
+}
+
+impl EvictionPolicy for CountingPolicy {
+    fn score(&self, candidate: EvictionCandidate, _now: u64) -> EvictionScore {
+        self.scores.fetch_add(1, Ordering::Relaxed);
+        EvictionScore { value: u128::from(candidate.last_use), reason: EvictionReason::LeastRecentlyUsed }
+    }
+}
 
 fn key(value: u16) -> Key {
     let mut name = [0; 16];
@@ -19,9 +38,24 @@ fn same_shard_key(value: u16) -> Key {
     Key::new(TEST_NAMESPACE, name)
 }
 
-fn test_low_watermark(limit: u64) -> u64 {
-    let headroom = (MAX_VALUE_BYTES as u64 + 64 * 1024).min(limit / 8);
-    limit.saturating_sub(headroom)
+fn empty_cache_floor() -> u64 {
+    let directory = tempdir().expect("empty cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open empty cache");
+    let size = cache.accounted_size();
+    cache.shutdown().expect("close empty cache");
+    size
+}
+
+fn test_low_watermark(limit: u64, empty_cache_floor: u64) -> u64 {
+    let usable_limit = limit.saturating_sub(empty_cache_floor);
+    let headroom = (MAX_VALUE_BYTES as u64 + 64 * 1024).min(usable_limit / 8);
+    limit.saturating_sub(headroom).max(empty_cache_floor)
+}
+
+fn limit_for_watermark(watermark: u64, empty_cache_floor: u64) -> u64 {
+    let usable_watermark = watermark.saturating_sub(empty_cache_floor);
+    let usable_limit = usable_watermark.saturating_mul(8).div_ceil(7);
+    empty_cache_floor.saturating_add(usable_limit)
 }
 #[test]
 fn size_limit_evicts_least_recently_used() {
@@ -125,6 +159,98 @@ fn impossible_put_preserves_entries() {
 }
 
 #[test]
+fn minimum_limit_keeps_small_entry() {
+    let directory = tempdir().expect("cache directory");
+    let limit = MIN_SIZE_LIMIT + 8192;
+    let cache = Cache::open(directory.path(), limit, &TEST_NAMESPACES).expect("open cache");
+    cache.put(key(8), vec![1]).expect("store small entry");
+    assert!(cache.accounted_size() <= limit);
+
+    let (limit_replied, resume_limit) = cache.pause_at(WritePoint::SetLimitReplied);
+    cache.set_size_limit(limit).expect("set minimum-adjacent limit");
+    limit_replied.recv_timeout(Duration::from_secs(3)).expect("writer completed limit command");
+    let (command_cycle, resume_command_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
+    resume_limit.send(()).expect("resume limit command");
+    command_cycle.recv_timeout(Duration::from_secs(3)).expect("writer completed limit batch");
+
+    let (idle_cycle, resume_idle_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
+    resume_command_cycle.send(()).expect("resume limit batch");
+    idle_cycle.recv_timeout(Duration::from_secs(3)).expect("writer completed idle cycle");
+    assert_matches!(cache.lookup(key(8)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == vec![1]);
+    resume_idle_cycle.send(()).expect("resume idle cycle");
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
+fn over_budget_put_keeps_feasible_siblings() {
+    const ENTRIES: u16 = 40;
+    const ENTRY_BYTES: usize = 1024;
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
+    for id in 0..ENTRIES {
+        cache.put(same_shard_key(id), vec![1; ENTRY_BYTES]).expect("fill cache");
+    }
+    let baseline = cache.accounted_size();
+    let calibration_small = same_shard_key(500);
+    cache.put(calibration_small, vec![1]).expect("store calibration entry");
+    let one_byte_cost = cache.accounted_size() - baseline;
+    cache.remove(calibration_small).expect("remove calibration entry");
+    let calibration_entry = same_shard_key(501);
+    cache.put(calibration_entry, vec![1; ENTRY_BYTES]).expect("store calibration entry");
+    let entry_cost = cache.accounted_size() - baseline;
+    cache.remove(calibration_entry).expect("remove calibration entry");
+    let fixed_cost = one_byte_cost - 1;
+    let first_bytes = usize::try_from(entry_cost * 31 - fixed_cost).expect("first put size fits usize");
+    let large_bytes = usize::try_from(entry_cost * 2 - fixed_cost).expect("large put size fits usize");
+    let limit = baseline;
+
+    let (limit_replied, resume_limit) = cache.pause_at(WritePoint::SetLimitReplied);
+    let limit_cache = Arc::clone(&cache);
+    let limit_thread = thread::spawn(move || limit_cache.set_size_limit(limit));
+    limit_replied.recv_timeout(Duration::from_secs(3)).expect("writer completed limit command");
+    let (data_started, resume_data) = cache.pause_at(WritePoint::DataTempCreated);
+    cache.arm_fault(WritePoint::DataWriteFailure);
+    let blocker_cache = Arc::clone(&cache);
+    let blocker = thread::spawn(move || blocker_cache.put(same_shard_key(600), vec![0]));
+    resume_limit.send(()).expect("resume limit command");
+    data_started.recv_timeout(Duration::from_secs(3)).expect("blocker reached its data write");
+
+    let (first_queued, resume_first) = cache.pause_at(WritePoint::PutQueued);
+    let first_cache = Arc::clone(&cache);
+    let first = thread::spawn(move || first_cache.put(same_shard_key(40), vec![2; first_bytes]));
+    first_queued.recv_timeout(Duration::from_secs(3)).expect("first put entered the queue");
+    resume_first.send(()).expect("release first put caller");
+    let (small_queued, resume_small) = cache.pause_at(WritePoint::PutQueued);
+    let small_cache = Arc::clone(&cache);
+    let small = thread::spawn(move || small_cache.put(same_shard_key(41), vec![3; ENTRY_BYTES]));
+    small_queued.recv_timeout(Duration::from_secs(3)).expect("small put entered the queue");
+    resume_small.send(()).expect("release small put caller");
+    let (large_queued, resume_large) = cache.pause_at(WritePoint::PutQueued);
+    let large_cache = Arc::clone(&cache);
+    let large = thread::spawn(move || large_cache.put(same_shard_key(42), vec![4; large_bytes]));
+    large_queued.recv_timeout(Duration::from_secs(3)).expect("large put entered the queue");
+    resume_large.send(()).expect("release large put caller");
+    let (commit, resume_commit) = cache.pause_at(WritePoint::IndexBatchCommitted);
+    resume_data.send(()).expect("resume blocker write");
+
+    limit_thread.join().expect("limit thread").expect("set current cache limit");
+    assert_matches!(
+        blocker.join().expect("blocker thread"),
+        Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
+    );
+    commit.recv_timeout(Duration::from_secs(3)).expect("feasible puts committed");
+    assert_eq!(cache.entry_count(), usize::from(ENTRIES) + 2 - 32);
+    assert_matches!(cache.lookup(same_shard_key(40)), Lookup::Hit(_));
+    assert_matches!(cache.lookup(same_shard_key(41)), Lookup::Hit(_));
+    assert_eq!(cache.lookup(same_shard_key(42)), Lookup::Miss);
+    resume_commit.send(()).expect("resume grouped commit");
+    first.join().expect("first put thread").expect("31-eviction put succeeds");
+    small.join().expect("small put thread").expect("one-eviction put succeeds");
+    assert_matches!(large.join().expect("large put thread"), Err(StorageError::TooLarge));
+    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().expect("close cache");
+}
+
+#[test]
 fn idle_enforcement_reaches_watermark() {
     const ENTRIES: u16 = 512;
     const ENTRY_BYTES: usize = 512;
@@ -134,7 +260,7 @@ fn idle_enforcement_reaches_watermark() {
         cache.put(same_shard_key(id), vec![1; ENTRY_BYTES]).expect("fill cache");
     }
     let limit = cache.accounted_size();
-    let watermark = test_low_watermark(limit);
+    let watermark = test_low_watermark(limit, empty_cache_floor());
     assert!(watermark < limit);
     let (limit_replied, resume_limit) = cache.pause_at(WritePoint::SetLimitReplied);
     cache.set_size_limit(limit).expect("set current cache limit");
@@ -179,8 +305,9 @@ fn headroom_accepts_large_put() {
         cache.put(same_shard_key(id), vec![1; ENTRY_BYTES]).expect("fill cache");
     }
     let watermark = cache.accounted_size();
-    let limit = watermark + watermark / 7;
-    assert_eq!(test_low_watermark(limit), watermark);
+    let empty_floor = empty_cache_floor();
+    let limit = limit_for_watermark(watermark, empty_floor);
+    assert!(test_low_watermark(limit, empty_floor) >= watermark);
     let (limit_replied, resume_limit) = cache.pause_at(WritePoint::SetLimitReplied);
     cache.set_size_limit(limit).expect("set limit at the watermark");
     limit_replied.recv_timeout(Duration::from_secs(3)).expect("writer finished the limit command");
@@ -216,7 +343,7 @@ fn headroom_accepts_large_put() {
 
 #[test]
 fn over_budget_put_preserves_entries() {
-    const ENTRIES: u16 = 256;
+    const ENTRIES: u16 = 512;
     const ENTRY_BYTES: usize = 1024;
     const LARGE_BYTES: usize = 96 * 1024;
     let directory = tempdir().expect("cache directory");
@@ -225,7 +352,7 @@ fn over_budget_put_preserves_entries() {
         cache.put(same_shard_key(id), vec![1; ENTRY_BYTES]).expect("fill cache");
     }
     let limit = cache.accounted_size();
-    let watermark = test_low_watermark(limit);
+    let watermark = test_low_watermark(limit, empty_cache_floor());
     assert!(u64::try_from(LARGE_BYTES + 1024).expect("test value fits u64") < limit - watermark);
     let (limit_replied, resumes) = cache.pause_many_at(WritePoint::SetLimitReplied, 2);
     cache.set_size_limit(limit).expect("set current cache limit");
@@ -285,6 +412,44 @@ fn failed_limit_enforcement_keeps_the_previous_limit() {
         assert_matches!(cache.lookup(key(id)), Lookup::Hit(_));
     }
     cache.shutdown().expect("close cache");
+}
+
+#[test]
+fn maintenance_failure_backs_off_until_command() {
+    const ENTRIES: u16 = 256;
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
+    for id in 0..ENTRIES {
+        cache.put(same_shard_key(id), vec![1; 1024]).expect("fill cache");
+    }
+    let limit = cache.accounted_size();
+    cache.arm_fault(WritePoint::IndexBatchFailure);
+    let (limit_replied, resume_limit) = cache.pause_at(WritePoint::SetLimitReplied);
+    cache.set_size_limit(limit).expect("set current cache limit");
+    limit_replied.recv_timeout(Duration::from_secs(3)).expect("writer completed limit command");
+    let (command_cycle, resume_command_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
+    let (first_started, resume_first_started) = cache.pause_at(WritePoint::MaintenanceStarted);
+    let (first_finished, resume_first_finished) = cache.pause_at(WritePoint::MaintenanceFinished);
+    resume_limit.send(()).expect("resume limit command");
+    command_cycle.recv_timeout(Duration::from_secs(3)).expect("writer completed limit batch");
+    resume_command_cycle.send(()).expect("resume limit batch");
+    first_started.recv_timeout(Duration::from_secs(3)).expect("idle maintenance started");
+    resume_first_started.send(()).expect("resume failed maintenance");
+    first_finished.recv_timeout(Duration::from_secs(3)).expect("failed maintenance finished");
+    assert_eq!(cache.entry_count(), usize::from(ENTRIES));
+
+    let (retry_started, resume_retry_started) = cache.pause_at(WritePoint::MaintenanceStarted);
+    resume_first_finished.send(()).expect("resume failed maintenance result");
+    assert_matches!(retry_started.recv_timeout(Duration::from_millis(40)), Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+
+    let (retry_finished, resume_retry_finished) = cache.pause_at(WritePoint::MaintenanceFinished);
+    assert!(!cache.remove(same_shard_key(u16::MAX)).expect("remove absent key"));
+    retry_started.recv_timeout(Duration::from_millis(40)).expect("queued command resumes maintenance");
+    resume_retry_started.send(()).expect("resume retried maintenance");
+    retry_finished.recv_timeout(Duration::from_secs(3)).expect("retried maintenance finished");
+    assert_eq!(cache.entry_count(), usize::from(ENTRIES) - 32);
+    resume_retry_finished.send(()).expect("resume retried maintenance result");
+    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().expect("close cache");
 }
 
 #[test]
@@ -441,14 +606,67 @@ fn lru_eviction_stays_oldest_first_across_scan_windows() {
 }
 
 #[test]
+fn protected_scan_latches_until_release() {
+    const ENTRIES: u16 = 16;
+    let directory = tempdir().expect("cache directory");
+    let scores = Arc::new(AtomicUsize::new(0));
+    let cache =
+        Cache::open_with_policy(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, CountingPolicy { scores: Arc::clone(&scores) })
+            .expect("open cache");
+    let mut protections = Vec::new();
+    for id in 0..ENTRIES {
+        let key = same_shard_key(id);
+        cache.put(key, vec![1; 1024]).expect("store entry");
+        protections.push(cache.protect(key).expect("protect entry"));
+    }
+    assert_eq!(scores.load(Ordering::Relaxed), 0);
+    let limit = cache.accounted_size();
+
+    let (limit_replied, resume_limit) = cache.pause_at(WritePoint::SetLimitReplied);
+    cache.set_size_limit(limit).expect("set current cache limit");
+    limit_replied.recv_timeout(Duration::from_secs(3)).expect("writer completed limit command");
+    let (command_cycle, resume_command_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
+    resume_limit.send(()).expect("resume limit command");
+    command_cycle.recv_timeout(Duration::from_secs(3)).expect("writer completed limit batch");
+
+    let (first_started, resume_first_started) = cache.pause_at(WritePoint::MaintenanceStarted);
+    let (first_cycle, resume_first_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
+    resume_command_cycle.send(()).expect("resume limit batch");
+    first_started.recv_timeout(Duration::from_secs(3)).expect("protected idle scan started");
+    resume_first_started.send(()).expect("resume protected idle scan");
+    first_cycle.recv_timeout(Duration::from_secs(3)).expect("protected idle scan completed");
+    let first_score_count = scores.load(Ordering::Relaxed);
+    assert_eq!(first_score_count, usize::from(ENTRIES));
+    assert_eq!(cache.entry_count(), usize::from(ENTRIES));
+
+    let (second_cycle, resume_second_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
+    resume_first_cycle.send(()).expect("resume first protected scan");
+    second_cycle.recv_timeout(Duration::from_secs(3)).expect("next idle cycle completed");
+    assert_eq!(scores.load(Ordering::Relaxed), first_score_count);
+
+    let released = same_shard_key(0);
+    drop(protections.remove(0));
+    let (third_cycle, resume_third_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
+    resume_second_cycle.send(()).expect("resume latched idle cycle");
+    third_cycle.recv_timeout(Duration::from_secs(3)).expect("idle enforcement resumed");
+    assert!(scores.load(Ordering::Relaxed) > first_score_count);
+    assert_eq!(cache.lookup(released), Lookup::Miss);
+    assert_eq!(cache.entry_count(), usize::from(ENTRIES) - 1);
+    resume_third_cycle.send(()).expect("resume resumed enforcement");
+    drop(protections);
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
 fn staged_replacement_can_be_evicted_and_restored_in_one_batch() {
     const ENTRY_BYTES: usize = 256 * 1024;
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     cache.put(key(70), vec![7; ENTRY_BYTES]).expect("store original A");
     let watermark = cache.accounted_size();
-    let limit = watermark + watermark / 7;
-    assert_eq!(test_low_watermark(limit), watermark);
+    let empty_floor = empty_cache_floor();
+    let limit = limit_for_watermark(watermark, empty_floor);
+    assert!(test_low_watermark(limit, empty_floor) >= watermark);
     cache.set_size_limit(limit).expect("limit cache to one entry");
     let (started, resume) = cache.pause_at(WritePoint::DataTempCreated);
     cache.arm_fault(WritePoint::DataWriteFailure);

@@ -19,6 +19,12 @@ pub(super) struct Plan {
     eviction_reasons: HashMap<Key, EvictionReason>,
 }
 
+pub(super) struct PutPlan {
+    pub(super) plan: Option<Plan>,
+    pub(super) accepted: Vec<usize>,
+    pub(super) rejected: Vec<usize>,
+}
+
 enum VictimSearch {
     Found(Key, EvictionReason),
     Exhausted,
@@ -36,6 +42,11 @@ impl WorkerState {
         account_size(index_bytes, self.data_bytes, self.entry_count, self.directory_count).unwrap_or(u64::MAX)
     }
 
+    pub(super) fn empty_cache_size(&self) -> u64 {
+        let index_bytes = self.index.estimated_bytes(0).unwrap_or(u64::MAX);
+        account_size(index_bytes, 0, 0, 0).unwrap_or(u64::MAX)
+    }
+
     pub(super) fn single_put_fits_empty(&self, key: Key, size: usize) -> Result<bool, StorageError> {
         let Some((prefixes, _)) = self.read_state.namespaces.directories(key) else {
             return Err(StorageError::UnknownNamespace);
@@ -47,7 +58,59 @@ impl WorkerState {
         Ok(accounted <= self.size_limit)
     }
 
-    pub(super) fn plan_puts(&mut self, staged: &[Arc<Entry>], protection: &ProtectionRegistry) -> Result<Plan, StorageError> {
+    pub(super) fn plan_puts(&mut self, staged: &[Arc<Entry>], protection: &ProtectionRegistry) -> Result<PutPlan, StorageError> {
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(staged.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        entries.extend(staged.iter().cloned());
+        let mut accepted = Vec::new();
+        accepted.try_reserve_exact(staged.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        accepted.extend(0..staged.len());
+        let mut rejected = Vec::new();
+        rejected.try_reserve_exact(staged.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        loop {
+            if entries.is_empty() {
+                return Ok(PutPlan { plan: None, accepted, rejected });
+            }
+            let scan_cursor = self.eviction_scan_cursor;
+            let evictions_this_batch = self.evictions_this_batch;
+            match self.plan_puts_inner(&entries, protection) {
+                Ok(plan) => return Ok(PutPlan { plan: Some(plan), accepted, rejected }),
+                Err(StorageError::TooLarge) => {
+                    self.eviction_scan_cursor = scan_cursor;
+                    self.evictions_this_batch = evictions_this_batch;
+                    let failed = self.first_failing_put(&entries, protection)?;
+                    rejected.push(accepted.remove(failed));
+                    entries.remove(failed);
+                }
+                Err(error) => {
+                    self.eviction_scan_cursor = scan_cursor;
+                    self.evictions_this_batch = evictions_this_batch;
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    fn first_failing_put(&mut self, entries: &[Arc<Entry>], protection: &ProtectionRegistry) -> Result<usize, StorageError> {
+        let mut low = 0;
+        let mut high = entries.len();
+        while high - low > 1 {
+            let middle = low + (high - low) / 2;
+            let scan_cursor = self.eviction_scan_cursor;
+            let evictions_this_batch = self.evictions_this_batch;
+            let result = self.plan_puts_inner(&entries[..middle], protection);
+            self.eviction_scan_cursor = scan_cursor;
+            self.evictions_this_batch = evictions_this_batch;
+            match result {
+                Ok(_) => low = middle,
+                Err(StorageError::TooLarge) => high = middle,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(high - 1)
+    }
+
+    fn plan_puts_inner(&mut self, staged: &[Arc<Entry>], protection: &ProtectionRegistry) -> Result<Plan, StorageError> {
         let initial_scan_cursor = self.eviction_scan_cursor;
         let entries = read_map(&self.read_state.entries);
         let mut changes = HashMap::new();
@@ -298,9 +361,10 @@ impl WorkerState {
     }
 }
 
-pub(super) fn low_watermark(limit: u64) -> u64 {
-    let headroom = (MAX_VALUE_BYTES as u64 + 64 * 1024).min(limit / 8);
-    limit.saturating_sub(headroom)
+pub(super) fn low_watermark(limit: u64, empty_cache_size: u64) -> u64 {
+    let usable_limit = limit.saturating_sub(empty_cache_size);
+    let headroom = (MAX_VALUE_BYTES as u64 + 64 * 1024).min(usable_limit / 8);
+    limit.saturating_sub(headroom).max(empty_cache_size)
 }
 
 fn find_victim(
@@ -390,7 +454,7 @@ fn scan_victim(
         } else {
             changes.contains_key(&key) || effective_entry(&key, changes, entries).is_none()
         };
-        if stale || Some(key) == excluded || protection.is_active(&key) {
+        if stale || Some(key) == excluded {
             continue;
         }
         let Some(entry) = effective_entry(&key, changes, entries) else {
@@ -403,6 +467,9 @@ fn scan_victim(
             use_count: entry.use_count.load(Ordering::Relaxed),
         };
         let score = policy.score(candidate, now);
+        if protection.is_active(&key) {
+            continue;
+        }
         let rank = (score.value, stamp, key, score.reason, is_new);
         if selected.is_none_or(|current| (rank.0, rank.1, rank.2) < (current.0, current.1, current.2)) {
             selected = Some(rank);

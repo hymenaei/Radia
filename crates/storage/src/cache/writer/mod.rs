@@ -65,6 +65,12 @@ pub(super) enum WritePoint {
     WriterReady,
     #[cfg(test)]
     SetLimitReplied,
+    #[cfg(test)]
+    MaintenanceStarted,
+    #[cfg(test)]
+    MaintenanceFinished,
+    #[cfg(test)]
+    MaintenanceCycleComplete,
 }
 
 #[cfg(test)]
@@ -328,31 +334,68 @@ impl WorkerState {
             return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
         }
         staged_entries.extend(staged.iter().map(|data| Arc::clone(&data.entry)));
+        let mut accepted_staged = Vec::new();
+        let mut accepted_entries = Vec::new();
+        let mut accepted_indices = Vec::new();
+        if accepted_staged.try_reserve_exact(staged.len()).is_err()
+            || accepted_entries.try_reserve_exact(staged.len()).is_err()
+            || accepted_indices.try_reserve_exact(staged.len()).is_err()
+        {
+            for index in staged_indices {
+                if let Some(result) = results.get_mut(index) {
+                    *result = Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)));
+                }
+            }
+            return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
+        }
         let prepared = {
             let protection_shared = Arc::clone(&self.read_state.protection);
             let mut protection = lock(&protection_shared.state);
-            self.plan_puts(&staged_entries, &protection).and_then(|plan| {
+            self.plan_puts(&staged_entries, &protection).and_then(|put_plan| {
+                for index in &put_plan.rejected {
+                    if let Some(result) = results.get_mut(staged_indices[*index]) {
+                        *result = Some(Err(StorageError::TooLarge));
+                    }
+                }
+                let accepted = put_plan.accepted;
+                for index in &accepted {
+                    accepted_entries.push(Arc::clone(&staged_entries[*index]));
+                    accepted_indices.push(staged_indices[*index]);
+                }
+                let Some(plan) = put_plan.plan else {
+                    return Ok(None);
+                };
                 let changes = self.prepare_changes(&plan, &mut protection)?;
                 let eviction_marks = self.mark_evictions(&changes, &mut protection)?;
-                Ok((changes, eviction_marks))
+                Ok(Some((changes, eviction_marks, accepted)))
             })
         };
-        let (changes, eviction_marks) = match prepared {
-            Ok(prepared) => prepared,
+        let (changes, eviction_marks, accepted_stage_indices) = match prepared {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect(),
             Err(error) => {
                 for index in staged_indices {
-                    if let Some(result) = results.get_mut(index) {
+                    if let Some(result) = results.get_mut(index)
+                        && result.is_none()
+                    {
                         *result = Some(Err(clone_error(&error)));
                     }
                 }
                 return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
             }
         };
-        let (committed, error) = match self.publish_and_commit(changes, staged, eviction_marks) {
+        let mut accepted_cursor = 0;
+        for (index, data) in staged.into_iter().enumerate() {
+            if accepted_stage_indices.get(accepted_cursor) == Some(&index) {
+                accepted_staged.push(data);
+                accepted_cursor += 1;
+            }
+        }
+        let (committed, error) = match self.publish_and_commit(changes, accepted_staged, eviction_marks) {
             Ok(committed) => (committed, None),
             Err(failure) => (failure.committed, Some(failure.error)),
         };
-        for (entry, index) in staged_entries.iter().zip(staged_indices.iter()) {
+        for (entry, index) in accepted_entries.iter().zip(accepted_indices.iter()) {
             if let Some(result) = results.get_mut(*index) {
                 *result = Some(match error.as_ref() {
                     None => Ok(()),

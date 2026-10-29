@@ -4,7 +4,10 @@ use std::{
     time::Duration,
 };
 
-use super::{WorkerState, is_simulated_crash, lock, reply_result};
+use super::{
+    WorkerState,
+    support::{is_simulated_crash, lock, reply_result},
+};
 use crate::cache::{Key, MAX_QUEUED_WRITE_BYTES, MAX_QUEUED_WRITES, StorageError, UnavailableReason, writer::QUEUE_SWEEP_CHUNK};
 
 const SWEEP_INTERVAL: Duration = Duration::from_millis(5);

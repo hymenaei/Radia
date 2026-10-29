@@ -51,7 +51,7 @@ async fn primary_event_queue_coverage_loss_keeps_session_active() {
 }
 
 #[tokio::test]
-async fn primary_event_backlog_reports_coverage_without_logout() {
+async fn primary_event_credit_exhaustion_reports_coverage_without_logout() {
     use crate::coverage::{CoverageLoss, CoverageLossReason, CoverageSource};
 
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
@@ -64,8 +64,17 @@ async fn primary_event_backlog_reports_coverage_without_logout() {
 
     let (events, mut received_events) = mpsc::channel(2);
     let mut run_state = RunState::new();
-    for _ in 0..MAX_QUEUED_SIMULATOR_EVENTS {
-        run_state.pending_events.push_back(EventEnvelope::new(Event::Failed("pending event".into())));
+    for index in 0..crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY {
+        let permit =
+            connection.state.packet_memory.application_events().try_acquire().expect("test backlog fits the session application capacity");
+        let mut event = EventEnvelope::new(Event::CapabilityEvent {
+            simulator_id: connection.primary.simulator_id,
+            source: endpoint,
+            message: "pending event".into(),
+            body: llsd::Value::Integer(i32::try_from(index).expect("test event index fits")),
+        });
+        event.attach_application_credit(permit);
+        run_state.pending_events.push_back(event);
     }
     let simulator_id = connection.primary.simulator_id;
     let source = CoverageSource::EventQueue { incarnation: 42 };

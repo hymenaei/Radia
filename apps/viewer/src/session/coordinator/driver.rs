@@ -648,7 +648,7 @@ impl SessionDriver {
     fn handle_inventory_event_queue(&mut self, name: &str, body: &llsd::Value) {
         let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
         let Some(before) = self.inventory.as_ref().map(Inventory::snapshot) else {
-            if self.inventory_bootstrap.is_some() && inventory_intake::is_inventory_event_message(name) {
+            if self.inventory_bootstrap.is_some() && inventory_intake::is_valid_inventory_event(name, body, agent_id) {
                 self.inventory_bootstrap_dirty = true;
             }
             return;
@@ -1122,6 +1122,9 @@ impl SessionDriver {
     }
 
     async fn finish(mut self) {
+        if let Some(inventory_bootstrap) = self.inventory_bootstrap.take() {
+            inventory_bootstrap.abort();
+        }
         self.inventory_pending_moves.clear();
         self.inventory_edits.stop().await;
         self.inventory_fetch.stop().await;

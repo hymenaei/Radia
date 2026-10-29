@@ -19,6 +19,7 @@ pub(crate) const ACK_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const LOGOUT_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const MAX_PENDING_SIMULATOR_EVENTS: usize = 1024;
 pub(crate) const MAX_QUEUED_SIMULATOR_EVENTS: usize = MAX_PENDING_SIMULATOR_EVENTS;
+pub(crate) const MAX_CONNECTION_PRECONNECT_EVENTS: usize = 16;
 pub(crate) const MAX_PRECONNECT_EVENTS: usize = 1024;
 
 #[derive(Clone, Eq, PartialEq)]

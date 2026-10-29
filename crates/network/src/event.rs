@@ -56,16 +56,33 @@ pub(crate) enum EventSendOutcome {
 }
 
 pub(crate) struct EventRetention {
-    _charge: EventRetentionCharge,
+    _charge: Option<EventRetentionCharge>,
+    _application_credit: Option<OwnedSemaphorePermit>,
 }
 
 impl EventRetention {
     pub(crate) fn from_permits(permits: Vec<OwnedSemaphorePermit>) -> Self {
-        Self { _charge: EventRetentionCharge::Permits { _permits: permits } }
+        Self { _charge: Some(EventRetentionCharge::Permits { _permits: permits }), _application_credit: None }
     }
 
     pub(crate) fn from_packet_reservation(reservation: PacketMemoryReservation) -> Self {
-        Self { _charge: EventRetentionCharge::Packet { _reservation: reservation } }
+        Self { _charge: Some(EventRetentionCharge::Packet { _reservation: reservation }), _application_credit: None }
+    }
+
+    fn with_application_credit(permit: OwnedSemaphorePermit) -> Self {
+        Self { _charge: None, _application_credit: Some(permit) }
+    }
+
+    fn attach_application_credit(&mut self, permit: OwnedSemaphorePermit) {
+        self._application_credit = Some(permit);
+    }
+
+    fn release_application_credit(&mut self) {
+        self._application_credit = None;
+    }
+
+    fn has_application_credit(&self) -> bool {
+        self._application_credit.is_some()
     }
 }
 
@@ -107,6 +124,24 @@ impl EventEnvelope {
 
     pub(crate) fn coverage_watermark(&self) -> Option<CoverageWatermark> {
         self.coverage_watermark
+    }
+
+    pub(crate) fn has_application_credit(&self) -> bool {
+        self.retained_bytes.as_ref().is_some_and(EventRetention::has_application_credit)
+    }
+
+    pub(crate) fn attach_application_credit(&mut self, permit: OwnedSemaphorePermit) {
+        if let Some(retention) = &mut self.retained_bytes {
+            retention.attach_application_credit(permit);
+        } else {
+            self.retained_bytes = Some(EventRetention::with_application_credit(permit));
+        }
+    }
+
+    pub(crate) fn release_application_credit(&mut self) {
+        if let Some(retention) = &mut self.retained_bytes {
+            retention.release_application_credit();
+        }
     }
 
     pub(crate) fn into_parts(self) -> (Event, Option<EventRetention>, Option<CoverageWatermark>) {

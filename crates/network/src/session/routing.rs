@@ -4,8 +4,9 @@ use tokio::{sync::mpsc, time::Instant};
 
 use super::teleport::is_teleport_cancel;
 use super::{
-    ConnectionQueueFailure, EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_PRECONNECT_EVENTS,
-    MAX_QUEUED_SIMULATOR_EVENTS, RuntimeAction, SessionDispatcher, SessionError, queue_connection_message, queue_primary_message,
+    ConnectionQueueFailure, EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD, MAX_PENDING_LIFECYCLE_EVENTS,
+    MAX_PENDING_SESSION_EVENTS, MAX_PRECONNECT_EVENTS, RuntimeAction, SessionDispatcher, SessionError, queue_connection_message,
+    queue_primary_message,
 };
 use crate::{
     error::Error,
@@ -84,6 +85,7 @@ pub(super) enum EventQueueOutcome {
     Queued,
     ReceiverClosed,
     BacklogFull,
+    LifecycleBacklogFull,
 }
 
 impl SessionDispatcher<'_> {
@@ -93,7 +95,11 @@ impl SessionDispatcher<'_> {
     ) -> Result<RuntimeAction, SessionError> {
         match permit {
             Ok(permit) => {
-                if let Some(event) = self.run_state.pending_events.pop_front() {
+                if let Some(mut event) = self.run_state.pending_events.pop_front() {
+                    if !event.event.is_application() {
+                        self.run_state.pending_lifecycle_events -= 1;
+                    }
+                    event.release_application_credit();
                     permit.send(event);
                 }
                 self.state.event_backlog.update_pending(self.run_state.pending_events.len(), Instant::now());
@@ -187,38 +193,45 @@ pub(super) fn queue_until_connected(
     if pending.push(simulator_id, event) { PreconnectOutcome::Buffered } else { PreconnectOutcome::Full }
 }
 
-pub(super) async fn queue_simulator_event(
+pub(super) fn queue_simulator_event(
     events: &mpsc::Sender<EventEnvelope>,
     pending_events: &mut VecDeque<EventEnvelope>,
+    pending_lifecycle_events: &mut usize,
     event: EventEnvelope,
 ) -> EventQueueOutcome {
     if events.is_closed() {
         return EventQueueOutcome::ReceiverClosed;
     }
 
+    let is_application = event.event.is_application();
+    if !is_application && *pending_lifecycle_events >= MAX_PENDING_LIFECYCLE_EVENTS {
+        return EventQueueOutcome::LifecycleBacklogFull;
+    }
+    if pending_events.len() >= MAX_PENDING_SESSION_EVENTS {
+        return if is_application { EventQueueOutcome::BacklogFull } else { EventQueueOutcome::LifecycleBacklogFull };
+    }
+
     if !pending_events.is_empty() {
-        if pending_events.len() < MAX_QUEUED_SIMULATOR_EVENTS {
-            pending_events.push_back(event);
-            return EventQueueOutcome::Queued;
-        }
-        if event.event.is_application() {
-            return EventQueueOutcome::BacklogFull;
-        }
-        let Ok(permit) = events.reserve().await else { return EventQueueOutcome::ReceiverClosed };
-        if let Some(queued) = pending_events.pop_front() {
-            permit.send(queued);
-            pending_events.push_back(event);
-        } else {
-            permit.send(event);
+        pending_events.push_back(event);
+        if !is_application {
+            *pending_lifecycle_events += 1;
         }
         return EventQueueOutcome::Queued;
     }
 
-    match events.try_send(event) {
-        Ok(()) => EventQueueOutcome::Queued,
+    match events.try_reserve() {
+        Ok(permit) => {
+            let mut event = event;
+            event.release_application_credit();
+            permit.send(event);
+            EventQueueOutcome::Queued
+        }
         Err(mpsc::error::TrySendError::Closed(_)) => EventQueueOutcome::ReceiverClosed,
-        Err(mpsc::error::TrySendError::Full(event)) => {
+        Err(mpsc::error::TrySendError::Full(_)) => {
             pending_events.push_back(event);
+            if !is_application {
+                *pending_lifecycle_events += 1;
+            }
             EventQueueOutcome::Queued
         }
     }
@@ -227,26 +240,24 @@ pub(super) async fn queue_simulator_event(
 pub(super) fn primary_event_queue_size(events: &mpsc::Sender<EventEnvelope>, pending_events: usize) -> (usize, usize) {
     let channel_capacity = events.max_capacity().saturating_sub(PRIMARY_TERMINAL_EVENT_CAPACITY);
     let channel_occupancy = events.max_capacity().saturating_sub(events.capacity()).saturating_sub(PRIMARY_TERMINAL_EVENT_CAPACITY);
-    (channel_occupancy + pending_events, channel_capacity + MAX_QUEUED_SIMULATOR_EVENTS)
+    (channel_occupancy + pending_events, channel_capacity + MAX_PENDING_SESSION_EVENTS)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, net::SocketAddr, time::Duration};
+    use std::{collections::VecDeque, net::SocketAddr, sync::Arc, time::Duration};
 
     use llsd::Value;
-    use url::Url;
-    use uuid::Uuid;
 
-    use crate::{
-        capabilities::Client,
-        event::{Event, EventEnvelope, SimulatorId},
-        login::{AgentSession, Grid},
+    use crate::event::{Event, EventEnvelope, SimulatorId};
+    use tokio::{
+        sync::{Semaphore, mpsc},
+        time::Instant,
     };
-    use tokio::{sync::mpsc, time::Instant};
 
-    use super::{PrimaryEventBacklog, primary_event_queue_size, queue_simulator_event};
-    use crate::circuit::MAX_QUEUED_SIMULATOR_EVENTS;
+    use super::{
+        MAX_PENDING_LIFECYCLE_EVENTS, MAX_PENDING_SESSION_EVENTS, PrimaryEventBacklog, primary_event_queue_size, queue_simulator_event,
+    };
     use crate::session::EVENT_BACKLOG_WARNING_THRESHOLD;
 
     #[test]
@@ -281,62 +292,65 @@ mod tests {
 
         assert_eq!(
             primary_event_queue_size(&events, 3),
-            (4, 3 + MAX_QUEUED_SIMULATOR_EVENTS),
+            (4, 3 + MAX_PENDING_SESSION_EVENTS),
             "occupancy excludes the terminal reservation and includes the pending deque"
         );
     }
 
-    #[tokio::test]
-    async fn full_application_backlog_preserves_promotion_in_order() {
+    #[test]
+    fn lifecycle_events_use_bounded_allowance() {
         let (events, mut received) = mpsc::channel(1);
-        events.try_send(EventEnvelope::new(application_event(0))).expect("fill the channel");
-        let mut pending = VecDeque::with_capacity(MAX_QUEUED_SIMULATOR_EVENTS);
-        for index in 1..=MAX_QUEUED_SIMULATOR_EVENTS {
+        events.try_send(EventEnvelope::new(lifecycle_event(0))).expect("fill the channel");
+        let mut pending = VecDeque::with_capacity(MAX_PENDING_SESSION_EVENTS);
+        let mut pending_lifecycle_events = 0;
+        for index in 0..crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY {
             std::assert_matches!(
-                queue_simulator_event(&events, &mut pending, EventEnvelope::new(application_event(index))).await,
+                queue_simulator_event(&events, &mut pending, &mut pending_lifecycle_events, EventEnvelope::new(application_event(index)),),
                 super::EventQueueOutcome::Queued
             );
         }
-
-        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
-        let promotion = EventEnvelope::new(Event::SimulatorPromoted {
-            previous_simulator_id: SimulatorId::new(1),
-            simulator_id: SimulatorId::new(2),
-            session: Box::new(AgentSession {
-                first_name: "Test".into(),
-                last_name: "Resident".into(),
-                grid: Grid::Agni,
-                message: String::new(),
-                simulator_address: SocketAddr::from(([127, 0, 0, 1], 9000)),
-                agent_id: Uuid::nil(),
-                session_id: Uuid::nil(),
-                circuit_code: 0,
-                seed_capability: Url::parse("http://127.0.0.1:1/seed").expect("local seed URL"),
-            }),
-            capabilities: Client::new(Url::parse("http://127.0.0.1:1/seed").expect("local seed URL"))
-                .expect("current runtime permits capability client creation"),
-        });
-        let publisher = tokio::spawn(async move {
-            started_sender.send(()).expect("notify before waiting for queue capacity");
-            let outcome = queue_simulator_event(&events, &mut pending, promotion).await;
-            (outcome, pending)
-        });
-        started_receiver.await.expect("promotion publisher should start");
-
-        let first = received.recv().await.expect("read the first application event").into_event();
-        assert_application_event(&first, 0);
-        let second = received.recv().await.expect("promotion waits for earlier queued data").into_event();
-        assert_application_event(&second, 1);
-        let (outcome, pending) = publisher.await.expect("publisher should preserve the promotion");
-        std::assert_matches!(outcome, super::EventQueueOutcome::Queued);
-        assert_eq!(pending.len(), MAX_QUEUED_SIMULATOR_EVENTS);
-        for (offset, event) in pending.iter().take(MAX_QUEUED_SIMULATOR_EVENTS - 1).enumerate() {
-            assert_application_event(&event.event, offset + 2);
+        for index in 1..=MAX_PENDING_LIFECYCLE_EVENTS {
+            std::assert_matches!(
+                queue_simulator_event(&events, &mut pending, &mut pending_lifecycle_events, EventEnvelope::new(lifecycle_event(index)),),
+                super::EventQueueOutcome::Queued
+            );
         }
         std::assert_matches!(
-            pending.back().map(|event| &event.event),
-            Some(Event::SimulatorPromoted { simulator_id, .. }) if *simulator_id == SimulatorId::new(2)
+            queue_simulator_event(
+                &events,
+                &mut pending,
+                &mut pending_lifecycle_events,
+                EventEnvelope::new(lifecycle_event(MAX_PENDING_LIFECYCLE_EVENTS + 1)),
+            ),
+            super::EventQueueOutcome::LifecycleBacklogFull
         );
+        assert_eq!(pending.len(), MAX_PENDING_SESSION_EVENTS);
+        assert_eq!(pending_lifecycle_events, MAX_PENDING_LIFECYCLE_EVENTS);
+        for (index, event) in pending.iter().take(crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY).enumerate() {
+            assert_application_event(&event.event, index);
+        }
+        std::assert_matches!(pending.back().map(|event| &event.event), Some(Event::SimulatorConnected { simulator_id, .. }) if *simulator_id == SimulatorId::new(33));
+        let first = received.try_recv().expect("the channel event remains in front of the pending queue");
+        std::assert_matches!(first.event, Event::SimulatorConnected { simulator_id, .. } if simulator_id == SimulatorId::new(1));
+    }
+
+    #[test]
+    fn application_credit_is_released_at_viewer_channel_handoff() {
+        let credits = Arc::new(Semaphore::new(1));
+        let permit = Arc::clone(&credits).try_acquire_owned().expect("admit one application event");
+        let mut event = EventEnvelope::new(application_event(0));
+        event.attach_application_credit(permit);
+        let (events, mut received) = mpsc::channel(1);
+        let mut pending = VecDeque::new();
+        let mut pending_lifecycle_events = 0;
+
+        std::assert_matches!(
+            queue_simulator_event(&events, &mut pending, &mut pending_lifecycle_events, event),
+            super::EventQueueOutcome::Queued
+        );
+
+        assert_eq!(credits.available_permits(), 1);
+        assert_application_event(&received.try_recv().expect("event remains in the viewer channel").event, 0);
     }
 
     fn application_event(index: usize) -> Event {
@@ -345,6 +359,14 @@ mod tests {
             source: SocketAddr::from(([127, 0, 0, 1], 9000)),
             message: "Test".into(),
             body: Value::Integer(index.try_into().expect("test index fits LLSD integer")),
+        }
+    }
+
+    fn lifecycle_event(index: usize) -> Event {
+        Event::SimulatorConnected {
+            simulator_id: SimulatorId::new(u64::try_from(index + 1).expect("test simulator ID fits")),
+            region_handle: None,
+            endpoint: SocketAddr::from(([127, 0, 0, 1], 9000)),
         }
     }
 

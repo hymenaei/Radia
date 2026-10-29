@@ -14,6 +14,9 @@ pub(crate) enum SessionError {
     SimulatorIdSpaceExhausted,
     PrimaryConnectionStoppedDuringStartup,
     SessionStartupTimedOut,
+    ApplicationEventBacklogExceeded,
+    LifecycleEventBacklogFull,
+    SustainedApplicationEventPressure,
 }
 
 impl fmt::Display for SessionError {
@@ -30,6 +33,11 @@ impl fmt::Display for SessionError {
                 formatter.write_str("The primary simulator connection task stopped during startup.")
             }
             Self::SessionStartupTimedOut => formatter.write_str("Timed out while establishing the simulator session."),
+            Self::ApplicationEventBacklogExceeded => formatter.write_str("The admitted simulator event queue exceeded its capacity."),
+            Self::LifecycleEventBacklogFull => formatter.write_str("The lifecycle event queue is full while event delivery is blocked."),
+            Self::SustainedApplicationEventPressure => {
+                formatter.write_str("Simulator event intake remained blocked beyond the pressure grace period.")
+            }
         }
     }
 }
@@ -45,7 +53,10 @@ impl StdError for SessionError {
             Self::CapabilityClientLimit
             | Self::SimulatorIdSpaceExhausted
             | Self::PrimaryConnectionStoppedDuringStartup
-            | Self::SessionStartupTimedOut => None,
+            | Self::SessionStartupTimedOut
+            | Self::ApplicationEventBacklogExceeded
+            | Self::LifecycleEventBacklogFull
+            | Self::SustainedApplicationEventPressure => None,
         }
     }
 }

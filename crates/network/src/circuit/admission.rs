@@ -1,20 +1,26 @@
 use std::{
     mem::size_of,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::Duration,
 };
 
 use protocol::lludp::{MAX_PACKET_RETAINED_CAPACITY_BYTES, Packet, PacketPreflight};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore, watch},
+    time::Instant,
+};
 
 use crate::{
-    circuit::MAX_SIMULATOR_CONNECTIONS,
-    event::{EventEnvelope, EventRetention},
+    circuit::{MAX_PENDING_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS},
+    event::{CLIENT_EVENT_CAPACITY, EventEnvelope, EventRetention},
 };
 
 pub(super) const MAX_CONCURRENT_PACKET_DECODES: usize = 8;
 pub(crate) const MAX_QUEUED_SIMULATOR_EVENT_BYTES: usize = 32 * 1024 * 1024;
 pub(crate) const MAX_QUEUED_NEIGHBOR_EVENT_BYTES: usize = 24 * 1024 * 1024;
 pub(crate) const MAX_NEIGHBOR_CONNECTION_EVENT_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const SESSION_APPLICATION_EVENT_CAPACITY: usize = CLIENT_EVENT_CAPACITY + MAX_PENDING_SIMULATOR_EVENTS;
+pub(crate) const SESSION_APPLICATION_EVENT_CREDIT_CAPACITY: usize = SESSION_APPLICATION_EVENT_CAPACITY - CLIENT_EVENT_CAPACITY;
 const MAX_PACKET_RETENTION_PERMITS: usize = 3;
 pub(super) const MAX_PACKET_ACK_DECODE_BYTES: usize = 32 * 1024;
 
@@ -50,6 +56,7 @@ struct SharedUsage {
 struct SharedMemoryBudget {
     limits: MemoryLimits,
     usage: Mutex<SharedUsage>,
+    application_events: ApplicationEventAdmission,
 }
 
 struct ConnectionUsage {
@@ -65,18 +72,80 @@ pub(crate) struct SimulatorMemoryBudget {
     connection: Arc<Mutex<ConnectionUsage>>,
 }
 
-impl SimulatorMemoryBudget {
-    pub(crate) fn new() -> Self {
-        Self::with_limits(MemoryLimits::DEFAULT)
+#[derive(Clone)]
+pub(crate) struct ApplicationEventAdmission {
+    credits: Arc<Semaphore>,
+    pressure_since: Arc<Mutex<Option<Instant>>>,
+    pressure_changed: watch::Sender<Option<Instant>>,
+}
+
+impl ApplicationEventAdmission {
+    fn new(capacity: usize) -> Self {
+        let (pressure_changed, _) = watch::channel(None);
+        Self { credits: Arc::new(Semaphore::new(capacity)), pressure_since: Arc::new(Mutex::new(None)), pressure_changed }
     }
 
+    pub(crate) fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.credits).try_acquire_owned().ok()
+    }
+
+    pub(crate) fn note_failure(&self) -> bool {
+        let mut pressure_since = lock_unpoisoned(&self.pressure_since);
+        if pressure_since.is_some() {
+            false
+        } else {
+            let started_at = Instant::now();
+            *pressure_since = Some(started_at);
+            self.pressure_changed.send_replace(Some(started_at));
+            true
+        }
+    }
+
+    pub(crate) fn note_success(&self) {
+        if lock_unpoisoned(&self.pressure_since).take().is_some() {
+            self.pressure_changed.send_replace(None);
+        }
+    }
+
+    pub(crate) fn subscribe_pressure(&self) -> watch::Receiver<Option<Instant>> {
+        self.pressure_changed.subscribe()
+    }
+
+    pub(crate) fn pressure_expired(&self, now: Instant, grace_period: Duration) -> bool {
+        lock_unpoisoned(&self.pressure_since).is_some_and(|since| now.saturating_duration_since(since) >= grace_period)
+    }
+}
+
+impl SimulatorMemoryBudget {
+    #[cfg(test)]
+    pub(crate) fn new() -> Self {
+        Self::with_limits_and_application_capacity(MemoryLimits::DEFAULT, SESSION_APPLICATION_EVENT_CREDIT_CAPACITY)
+    }
+
+    pub(crate) fn with_application_capacity(capacity: usize) -> Self {
+        Self::with_limits_and_application_capacity(MemoryLimits::DEFAULT, capacity)
+    }
+
+    #[cfg(test)]
     fn with_limits(limits: MemoryLimits) -> Self {
+        Self::with_limits_and_application_capacity(limits, SESSION_APPLICATION_EVENT_CREDIT_CAPACITY)
+    }
+
+    fn with_limits_and_application_capacity(limits: MemoryLimits, application_event_capacity: usize) -> Self {
         Self {
             decode_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_PACKET_DECODES)),
             ack_decode_slots: Arc::new(Semaphore::new(MAX_SIMULATOR_CONNECTIONS)),
-            shared: Arc::new(SharedMemoryBudget { limits, usage: Mutex::new(SharedUsage::default()) }),
+            shared: Arc::new(SharedMemoryBudget {
+                limits,
+                usage: Mutex::new(SharedUsage::default()),
+                application_events: ApplicationEventAdmission::new(application_event_capacity),
+            }),
             connection: Arc::new(Mutex::new(ConnectionUsage { role: ConnectionRole::Primary, bytes: 0 })),
         }
+    }
+
+    pub(crate) fn application_events(&self) -> &ApplicationEventAdmission {
+        &self.shared.application_events
     }
 
     pub(crate) fn for_neighbor(&self) -> Self {

@@ -12,7 +12,7 @@ use protocol::{
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
-use super::{apply_event_queue, apply_udp};
+use super::{apply_event_queue, apply_udp, is_valid_inventory_event};
 
 fn uuid(value: u128) -> Uuid {
     Uuid::from_u128(value)
@@ -246,6 +246,20 @@ fn messages_for_another_agent_are_ignored_for_udp_and_event_queue() {
     let body = bulk_event_body(other_agent, Vec::new(), Vec::new());
     assert!(apply_event_queue(&mut inventory, agent, "BulkUpdateInventory", &body).expect("foreign event is ignored").is_none());
     assert_eq!(inventory.snapshot().categories().count(), 1);
+}
+
+#[test]
+fn bootstrap_event_validation_rejects_malformed_and_foreign_events() {
+    let agent = uuid(1);
+    let foreign_agent = uuid(2);
+    let valid = save_asset_event_body(agent, uuid(10), uuid(11));
+    let foreign = save_asset_event_body(foreign_agent, uuid(10), uuid(11));
+    let malformed = value_map([("AgentData".to_owned(), Value::String("invalid".to_owned()))]);
+
+    assert!(is_valid_inventory_event("SaveAssetIntoInventory", &valid, agent));
+    assert!(!is_valid_inventory_event("SaveAssetIntoInventory", &foreign, agent));
+    assert!(!is_valid_inventory_event("SaveAssetIntoInventory", &malformed, agent));
+    assert!(!is_valid_inventory_event("UnknownMessage", &valid, agent));
 }
 
 fn inventory_invariants_hold(inventory: &Inventory, owner: InventoryOwner) -> bool {

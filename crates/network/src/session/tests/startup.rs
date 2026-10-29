@@ -61,8 +61,14 @@ async fn cancelled_queues_release_packet_memory() {
     let (events, _receiver) = mpsc::channel(1);
     events.try_send(EventEnvelope::new(Event::Failed("occupy intake".into()))).expect("fill intake");
     let mut primary_queue = VecDeque::new();
+    let mut pending_lifecycle_events = 0;
     assert!(matches!(
-        queue_simulator_event(&events, &mut primary_queue, retained_packet_event(&budget, primary_id, endpoint, &wire)).await,
+        queue_simulator_event(
+            &events,
+            &mut primary_queue,
+            &mut pending_lifecycle_events,
+            retained_packet_event(&budget, primary_id, endpoint, &wire),
+        ),
         crate::session::EventQueueOutcome::Queued
     ));
     let mut neighbor_queues = Vec::new();

@@ -15,9 +15,9 @@ use tokio::{
 };
 
 use super::{
-    ConnectionError, ConnectionRole, ConnectionTask, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, NeighborEventQueueOutcome,
-    SimulatorEvent, SimulatorRequest, active_queue_class, lifecycle::RunControl, outbound::MovementSend, preempt_deferred_send,
-    preflight_loss_reason, queue_internal,
+    ConnectionError, ConnectionRole, ConnectionTask, MAX_CONNECTION_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS,
+    NeighborEventQueueOutcome, SimulatorEvent, SimulatorRequest, active_queue_class, lifecycle::RunControl, outbound::MovementSend,
+    preempt_deferred_send, preflight_loss_reason, queue_internal,
 };
 use crate::{
     circuit::admission::PacketMemoryReservation,
@@ -206,6 +206,7 @@ impl ConnectionTask {
             match self.packet_memory.reserve_packet(preflight) {
                 Ok(reservation) => Some(reservation),
                 Err(_) => {
+                    self.note_application_admission_failure("packet_memory");
                     self.reject(RejectionKind::RetainedMemoryAdmission, CoverageLossReason::RetainedMemoryAdmission);
                     drop(decode_permit);
                     return Ok(RunControl::Continue);
@@ -262,14 +263,36 @@ impl ConnectionTask {
             self.connection.handoff.as_ref(),
             self.connection.movement_requested,
         );
+        let application_credit = if dispatch_message {
+            let Some(permit) = self.packet_memory.application_events().try_acquire() else {
+                self.note_application_admission_failure("event_credit");
+                self.reject(RejectionKind::EventAdmission, CoverageLossReason::EventAdmission);
+                self.last_udp_received = Instant::now();
+                drop(memory_reservation);
+                drop(decode_permit);
+                return Ok(RunControl::Continue);
+            };
+            Some(permit)
+        } else {
+            None
+        };
         let event_queue_full = if self.phase.is_established() {
             self.pending_events.len() >= MAX_QUEUED_SIMULATOR_EVENTS
         } else {
-            self.preconnect_messages.len() >= MAX_PRECONNECT_EVENTS
+            self.preconnect_messages.len() >= MAX_CONNECTION_PRECONNECT_EVENTS
         };
-        if dispatch_message && (self.phase.is_closing() || self.events.is_closed() || event_queue_full) {
+        if dispatch_message && (self.phase.is_closing() || self.events.is_closed()) {
             self.reject(RejectionKind::EventAdmission, CoverageLossReason::EventAdmission);
             self.last_udp_received = Instant::now();
+            drop(memory_reservation);
+            drop(decode_permit);
+            return Ok(RunControl::Continue);
+        }
+        if dispatch_message && event_queue_full {
+            self.note_application_admission_failure("connection_event_queue");
+            self.reject(RejectionKind::EventAdmission, CoverageLossReason::EventAdmission);
+            self.last_udp_received = Instant::now();
+            drop(application_credit);
             drop(memory_reservation);
             drop(decode_permit);
             return Ok(RunControl::Continue);
@@ -298,7 +321,14 @@ impl ConnectionTask {
             &self.connection.circuit,
             self.ack_timer_due || self.phase.is_draining(),
         )?;
-        self.dispatch_new_packet(packet, receive_outcome.packet_order, dispatch_message, dispatch_allowed, memory_reservation)
+        self.dispatch_new_packet(
+            packet,
+            receive_outcome.packet_order,
+            dispatch_message,
+            dispatch_allowed,
+            application_credit,
+            memory_reservation,
+        )
     }
 
     fn establish_connection_if_ready(&mut self) -> Result<Option<RunControl>, ConnectionError> {
@@ -333,7 +363,10 @@ impl ConnectionTask {
                     }
                     return Ok(Some(RunControl::Finish(None)));
                 }
-                NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::BacklogFull => {
+                NeighborEventQueueOutcome::Queued => {
+                    self.packet_memory.application_events().note_success();
+                }
+                NeighborEventQueueOutcome::BacklogFull => {
                     if admission_rejected && let Some(watermark) = watermark {
                         record_coverage_loss(
                             &self.connection.coverage_losses,
@@ -386,10 +419,11 @@ impl ConnectionTask {
         packet_order: crate::event::PacketOrder,
         dispatch_message: bool,
         dispatch_allowed: bool,
+        application_credit: Option<OwnedSemaphorePermit>,
         mut memory_reservation: Option<PacketMemoryReservation>,
     ) -> Result<RunControl, ConnectionError> {
         if dispatch_message && dispatch_allowed {
-            let event = EventEnvelope::with_retention_and_coverage(
+            let mut event = EventEnvelope::with_retention_and_coverage(
                 Event::SimulatorMessage {
                     simulator_id: self.connection.simulator_id,
                     source: self.connection.session.simulator_address,
@@ -400,8 +434,10 @@ impl ConnectionTask {
                 memory_reservation.take().expect("application packet was admitted").into_retention(),
                 self.connection.coverage_losses.watermark(self.connection.simulator_id, CoverageSource::Lludp),
             );
+            event.attach_application_credit(application_credit.expect("application packet was admitted"));
             return Ok(self.queue_simulator_message_event(event));
         } else if dispatch_message {
+            self.note_application_admission_failure("connection_closing");
             self.reject(RejectionKind::EventAdmission, CoverageLossReason::EventAdmission);
         }
         Ok(RunControl::Continue)
@@ -437,8 +473,9 @@ impl ConnectionTask {
                     }
                 }
             }
-        } else if self.preconnect_messages.len() < MAX_PRECONNECT_EVENTS {
+        } else if self.preconnect_messages.len() < MAX_CONNECTION_PRECONNECT_EVENTS {
             self.preconnect_messages.push_back(event);
+            self.packet_memory.application_events().note_success();
         } else {
             self.packet_rejections.record(RejectionKind::EventAdmission);
             if let Some(watermark) = event.coverage_watermark() {
@@ -579,6 +616,12 @@ impl ConnectionTask {
     fn reject(&mut self, kind: RejectionKind, reason: CoverageLossReason) {
         self.packet_rejections.record(kind);
         record_coverage_loss(&self.connection.coverage_losses, self.connection.simulator_id, CoverageSource::Lludp, reason);
+    }
+
+    fn note_application_admission_failure(&self, reason: &'static str) {
+        if self.packet_memory.application_events().note_failure() {
+            tracing::warn!(simulator = self.connection.simulator_id.get(), reason, "application event intake is under pressure");
+        }
     }
 }
 

@@ -79,6 +79,10 @@ pub(super) fn is_inventory_event_message(name: &str) -> bool {
     )
 }
 
+pub(super) fn is_valid_inventory_event(name: &str, body: &Value, expected_agent: Uuid) -> bool {
+    matches!(parse_event_message(name, body, expected_agent), Ok(Some(_)))
+}
+
 pub(super) fn apply_event_queue(
     inventory: &mut Inventory,
     expected_agent: Uuid,

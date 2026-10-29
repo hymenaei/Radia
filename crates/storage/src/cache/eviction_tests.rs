@@ -209,9 +209,12 @@ fn over_budget_put_keeps_feasible_siblings() {
     let limit_thread = thread::spawn(move || limit_cache.set_size_limit(limit));
     limit_replied.recv_timeout(Duration::from_secs(3)).expect("writer completed limit command");
     let (data_started, resume_data) = cache.pause_at(WritePoint::DataTempCreated);
+    let (blocker_queued, resume_blocker) = cache.pause_at(WritePoint::PutQueued);
     cache.arm_fault(WritePoint::DataWriteFailure);
     let blocker_cache = Arc::clone(&cache);
     let blocker = thread::spawn(move || blocker_cache.put(same_shard_key(600), vec![0]));
+    blocker_queued.recv_timeout(Duration::from_secs(3)).expect("blocker entered the queue");
+    resume_blocker.send(()).expect("release blocker caller");
     resume_limit.send(()).expect("resume limit command");
     data_started.recv_timeout(Duration::from_secs(3)).expect("blocker reached its data write");
 

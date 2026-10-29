@@ -8,7 +8,10 @@ use super::{
     WorkerState, clone_error,
     support::{is_simulated_crash, lock, reply_result},
 };
-use crate::cache::{Key, MAX_QUEUED_WRITE_BYTES, MAX_QUEUED_WRITES, StorageError, UnavailableReason, writer::QUEUE_SWEEP_CHUNK};
+use crate::cache::{
+    Key, MAX_QUEUED_WRITE_BYTES, MAX_QUEUED_WRITES, StorageError, UnavailableReason, writer::QUEUE_SWEEP_CHUNK,
+    writer::eviction::low_watermark,
+};
 
 const SWEEP_INTERVAL: Duration = Duration::from_millis(5);
 
@@ -92,8 +95,25 @@ impl WriteQueue {
             };
             state = next;
         }
-        let commands = state.commands.drain(..).collect();
-        QueueBatch { commands, closed: state.closed }
+        let Some(first) = state.commands.pop_front() else {
+            return QueueBatch { commands: Vec::new(), closed: state.closed };
+        };
+        let group_puts = matches!(&first.command, Command::Put { .. });
+        let group_limits = matches!(&first.command, Command::SetLimit { .. });
+        let mut commands = vec![first];
+        loop {
+            let same_group = state.commands.front().is_some_and(|queued| {
+                (group_puts && matches!(&queued.command, Command::Put { .. }))
+                    || (group_limits && matches!(&queued.command, Command::SetLimit { .. }))
+            });
+            if !same_group {
+                break;
+            }
+            if let Some(next) = state.commands.pop_front() {
+                commands.push(next);
+            }
+        }
+        QueueBatch { commands, closed: state.closed && state.commands.is_empty() }
     }
 
     fn complete(&self, bytes: usize) {
@@ -101,27 +121,6 @@ impl WriteQueue {
         state.pending_bytes = state.pending_bytes.saturating_sub(bytes);
         state.pending_commands = state.pending_commands.saturating_sub(1);
         self.space.notify_all();
-    }
-
-    fn requeue(&self, commands: Vec<QueuedCommand>) -> Result<(), (Vec<QueuedCommand>, StorageError)> {
-        let mut state = lock(&self.state);
-        if state.closed && !state.commands.back().is_some_and(|queued| matches!(&queued.command, Command::Shutdown { .. })) {
-            return Err((commands, StorageError::Unavailable(UnavailableReason::WriterStopped)));
-        }
-        if state.commands.try_reserve(commands.len()).is_err() {
-            return Err((commands, StorageError::Unavailable(UnavailableReason::Allocation)));
-        }
-        let shutdown = if state.commands.back().is_some_and(|queued| matches!(&queued.command, Command::Shutdown { .. })) {
-            state.commands.pop_back()
-        } else {
-            None
-        };
-        state.commands.extend(commands);
-        if let Some(shutdown) = shutdown {
-            state.commands.push_back(shutdown);
-        }
-        self.ready.notify_one();
-        Ok(())
     }
 
     pub fn close(&self) {
@@ -139,6 +138,8 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
     }
     loop {
         let batch = queue.receive_batch();
+        let idle = batch.commands.is_empty();
+        let contains_put = batch.commands.iter().any(|queued| matches!(&queued.command, Command::Put { .. }));
         state.evictions_this_batch = 0;
         let mut commands = batch.commands.into_iter().peekable();
         let mut limit_enforcement_attempted = false;
@@ -152,16 +153,6 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
                         };
                         puts.push(next);
                     }
-                    let mut deferred = Vec::new();
-                    if deferred.try_reserve_exact(puts.len()).is_err() {
-                        for queued in puts {
-                            if let Command::Put { reply, .. } = queued.command {
-                                reply_result(reply, Err(StorageError::Unavailable(UnavailableReason::Allocation)));
-                            }
-                            queue.complete(queued.bytes);
-                        }
-                        continue;
-                    }
                     let results = state.put_batch(
                         puts.len(),
                         puts.iter().map(|queued| match &queued.command {
@@ -169,26 +160,12 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
                             _ => unreachable!(),
                         }),
                     );
-                    let simulated_crash = results.iter().any(|result| matches!(result, Some(Err(error)) if is_simulated_crash(error)));
+                    let simulated_crash = results.iter().any(|result| result.as_ref().is_err_and(is_simulated_crash));
                     for (queued, result) in puts.into_iter().zip(results) {
-                        if let Some(result) = result {
-                            if let Command::Put { reply, .. } = queued.command {
-                                reply_result(reply, result);
-                            }
-                            queue.complete(queued.bytes);
-                        } else {
-                            deferred.push(queued);
+                        if let Command::Put { reply, .. } = queued.command {
+                            reply_result(reply, result);
                         }
-                    }
-                    if !deferred.is_empty()
-                        && let Err((deferred, error)) = queue.requeue(deferred)
-                    {
-                        for queued in deferred {
-                            if let Command::Put { reply, .. } = queued.command {
-                                reply_result(reply, Err(clone_error(&error)));
-                            }
-                            queue.complete(queued.bytes);
-                        }
+                        queue.complete(queued.bytes);
                     }
                     if simulated_crash {
                         return;
@@ -263,9 +240,12 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
         }
         state.drain_touches_best_effort();
         state.drain_invalid();
-        if !limit_enforcement_attempted
-            && state.accounted_size() > state.size_limit
-            && let Err(error) = state.enforce_limit(state.size_limit)
+        let watermark = low_watermark(state.size_limit);
+        if !batch.closed
+            && !limit_enforcement_attempted
+            && (idle || !contains_put)
+            && state.accounted_size() > watermark
+            && let Err(error) = state.enforce_limit(watermark)
         {
             tracing::warn!(error = %error, "cache limit enforcement failed");
         }

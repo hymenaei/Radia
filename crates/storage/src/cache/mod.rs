@@ -950,4 +950,7 @@ pub fn discard_legacy_layout(directory: impl AsRef<Path>) -> Result<(), StorageE
 }
 
 #[cfg(test)]
+mod eviction_tests;
+
+#[cfg(test)]
 mod tests;

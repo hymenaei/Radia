@@ -7,15 +7,16 @@ use super::support::{account_size, effective_entry, lock, read_map, remove_new_c
 use super::{
     DirectoryId, Entry, EvictionReason, Key, Lru, PlannedChange, ProtectionRegistry, StorageError, UnavailableReason, WorkerState,
 };
+use crate::cache::MAX_VALUE_BYTES;
 use crate::cache::eviction::{EvictionCandidate, EvictionPolicy, OrderedScan};
 
 const MAX_EVICTIONS_PER_BATCH: usize = 32;
 const MAX_EVICTION_CANDIDATES: usize = 128;
+
 pub(super) struct Plan {
     changes: HashMap<Key, Option<Arc<Entry>>>,
     directory_deltas: HashMap<DirectoryId, i64>,
     eviction_reasons: HashMap<Key, EvictionReason>,
-    pub(super) deferred_from: Option<usize>,
 }
 
 enum VictimSearch {
@@ -35,7 +36,19 @@ impl WorkerState {
         account_size(index_bytes, self.data_bytes, self.entry_count, self.directory_count).unwrap_or(u64::MAX)
     }
 
+    pub(super) fn single_put_fits_empty(&self, key: Key, size: usize) -> Result<bool, StorageError> {
+        let Some((prefixes, _)) = self.read_state.namespaces.directories(key) else {
+            return Err(StorageError::UnknownNamespace);
+        };
+        let directory_count = prefixes.len().checked_add(1).and_then(|count| u64::try_from(count).ok()).ok_or(StorageError::TooLarge)?;
+        let index_bytes = self.index.estimated_bytes(1)?;
+        let data_bytes = u64::try_from(size).map_err(|_| StorageError::TooLarge)?;
+        let accounted = account_size(index_bytes, data_bytes, 1, directory_count).ok_or(StorageError::TooLarge)?;
+        Ok(accounted <= self.size_limit)
+    }
+
     pub(super) fn plan_puts(&mut self, staged: &[Arc<Entry>], protection: &ProtectionRegistry) -> Result<Plan, StorageError> {
+        let initial_scan_cursor = self.eviction_scan_cursor;
         let entries = read_map(&self.read_state.entries);
         let mut changes = HashMap::new();
         changes.try_reserve(staged.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
@@ -73,7 +86,8 @@ impl WorkerState {
             while !self.fits(data_bytes, entry_count, directory_count, self.size_limit)? {
                 if eviction_reasons.len() >= remaining_evictions {
                     drop(entries);
-                    return self.plan_evictions_for_retry(protection, remaining_evictions);
+                    self.eviction_scan_cursor = initial_scan_cursor;
+                    return Err(StorageError::TooLarge);
                 }
                 let (victim, reason) = match find_victim(
                     &self.lru,
@@ -100,55 +114,7 @@ impl WorkerState {
             }
         }
         self.evictions_this_batch = self.evictions_this_batch.saturating_add(eviction_reasons.len());
-        Ok(Plan { changes, directory_deltas, eviction_reasons, deferred_from: None })
-    }
-
-    fn plan_evictions_for_retry(&mut self, protection: &ProtectionRegistry, remaining_evictions: usize) -> Result<Plan, StorageError> {
-        let mut changes = HashMap::<Key, Option<Arc<Entry>>>::new();
-        changes.try_reserve(remaining_evictions).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-        let mut eviction_reasons = HashMap::new();
-        eviction_reasons.try_reserve(remaining_evictions).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-        let mut directory_deltas = HashMap::<DirectoryId, i64>::new();
-        directory_deltas
-            .try_reserve(remaining_evictions.saturating_mul(3))
-            .map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-        if remaining_evictions == 0 {
-            return Ok(Plan { changes, directory_deltas, eviction_reasons, deferred_from: Some(0) });
-        }
-        let entries = read_map(&self.read_state.entries);
-        let mut new_order = BTreeSet::new();
-        let mut new_stamps = HashMap::new();
-        let mut directory_count = self.directory_count;
-        let now = self.read_state.usage_clock.load(Ordering::Relaxed);
-        while eviction_reasons.len() < remaining_evictions {
-            let (key, reason) = match find_victim(
-                &self.lru,
-                &mut new_order,
-                &mut new_stamps,
-                None,
-                &changes,
-                &entries,
-                protection,
-                self.read_state.policy.as_ref(),
-                now,
-                &mut self.eviction_scan_cursor,
-            ) {
-                VictimSearch::Found(key, reason) => (key, reason),
-                VictimSearch::Exhausted => break,
-            };
-            if effective_entry(&key, &changes, &entries).is_none() {
-                return Err(StorageError::TooLarge);
-            }
-            self.adjust_directories(&key, -1, &mut directory_deltas, &mut directory_count)?;
-            changes.insert(key, None);
-            eviction_reasons.insert(key, reason);
-        }
-        drop(entries);
-        if changes.is_empty() {
-            return Err(StorageError::TooLarge);
-        }
-        self.evictions_this_batch = self.evictions_this_batch.saturating_add(eviction_reasons.len());
-        Ok(Plan { changes, directory_deltas, eviction_reasons, deferred_from: Some(0) })
+        Ok(Plan { changes, directory_deltas, eviction_reasons })
     }
 
     fn adjust_directories(
@@ -309,7 +275,7 @@ impl WorkerState {
                 return Ok(());
             }
             let planned_evictions = eviction_reasons.len();
-            let plan = Plan { changes, directory_deltas, eviction_reasons, deferred_from: None };
+            let plan = Plan { changes, directory_deltas, eviction_reasons };
             let changes = self.prepare_changes(&plan, &mut protection)?;
             let eviction_marks = self.mark_evictions(&changes, &mut protection)?;
             self.evictions_this_batch = self.evictions_this_batch.saturating_add(planned_evictions);
@@ -320,7 +286,7 @@ impl WorkerState {
     }
 
     fn fits(&self, data_bytes: u64, entry_count: usize, directory_count: u64, limit: u64) -> Result<bool, StorageError> {
-        if entry_count > super::super::index::MAX_ENTRIES {
+        if entry_count > crate::cache::index::MAX_ENTRIES {
             return Ok(false);
         }
         let index_bytes = self.index.estimated_bytes(entry_count)?;
@@ -330,6 +296,11 @@ impl WorkerState {
     pub(super) fn update_accounted_size(&self) {
         self.read_state.accounted_size.store(self.accounted_size(), Ordering::Relaxed);
     }
+}
+
+pub(super) fn low_watermark(limit: u64) -> u64 {
+    let headroom = (MAX_VALUE_BYTES as u64 + 64 * 1024).min(limit / 8);
+    limit.saturating_sub(headroom)
 }
 
 fn find_victim(

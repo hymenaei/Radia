@@ -22,6 +22,43 @@ use super::{
 #[cfg(test)]
 use super::{CacheWriteWorker, ObjectCacheEvent, ObjectCacheSession};
 
+const REGION_SCOPES_SCHEMA: &str = "CREATE TABLE region_scopes (
+    grid_id TEXT NOT NULL,
+    region_id BLOB NOT NULL CHECK(length(region_id) = 16),
+    cache_id BLOB NOT NULL CHECK(length(cache_id) = 16),
+    last_used INTEGER NOT NULL,
+    PRIMARY KEY (grid_id, region_id, cache_id)
+) WITHOUT ROWID";
+const OBJECT_ENTRIES_SCHEMA: &str = "CREATE TABLE object_entries (
+    grid_id TEXT NOT NULL,
+    region_id BLOB NOT NULL CHECK(length(region_id) = 16),
+    cache_id BLOB NOT NULL CHECK(length(cache_id) = 16),
+    local_id INTEGER NOT NULL CHECK(local_id > 0 AND local_id <= 4294967295),
+    crc INTEGER NOT NULL CHECK(crc >= 0 AND crc <= 4294967295),
+    update_kind INTEGER NOT NULL CHECK(update_kind IN (0, 1)),
+    update_flags INTEGER NOT NULL CHECK(update_flags >= 0 AND update_flags <= 4294967295),
+    payload BLOB NOT NULL CHECK(length(payload) >= 64 AND length(payload) <= 10000),
+    PRIMARY KEY (grid_id, region_id, cache_id, local_id)
+) WITHOUT ROWID";
+const OBJECT_CACHE_TOTALS_SCHEMA: &str = "CREATE TABLE object_cache_totals (
+    singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
+    entry_count INTEGER NOT NULL CHECK(entry_count >= 0),
+    payload_bytes INTEGER NOT NULL CHECK(payload_bytes >= 0)
+) WITHOUT ROWID";
+const OBJECT_ENTRIES_TOTALS_INSERT_TRIGGER: &str = "CREATE TRIGGER object_entries_totals_insert AFTER INSERT ON object_entries BEGIN
+    UPDATE object_cache_totals SET entry_count = entry_count + 1, payload_bytes = payload_bytes + length(NEW.payload)
+    WHERE singleton = 1;
+END";
+const OBJECT_ENTRIES_TOTALS_DELETE_TRIGGER: &str = "CREATE TRIGGER object_entries_totals_delete AFTER DELETE ON object_entries BEGIN
+    UPDATE object_cache_totals SET entry_count = entry_count - 1, payload_bytes = payload_bytes - length(OLD.payload)
+    WHERE singleton = 1;
+END";
+const OBJECT_ENTRIES_TOTALS_UPDATE_TRIGGER: &str = "CREATE TRIGGER object_entries_totals_update AFTER UPDATE OF payload ON object_entries
+WHEN length(OLD.payload) != length(NEW.payload) BEGIN
+    UPDATE object_cache_totals SET payload_bytes = payload_bytes + length(NEW.payload) - length(OLD.payload)
+    WHERE singleton = 1;
+END";
+
 pub(super) struct PendingSubmission {
     pub(super) batches: Vec<SqliteBatch>,
     pub(super) rows: usize,
@@ -41,27 +78,8 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError>
     match version {
         0 => {
             let transaction = connection.transaction()?;
-            transaction.execute_batch(
-                "CREATE TABLE region_scopes (
-                    grid_id TEXT NOT NULL,
-                    region_id BLOB NOT NULL CHECK(length(region_id) = 16),
-                    cache_id BLOB NOT NULL CHECK(length(cache_id) = 16),
-                    last_used INTEGER NOT NULL,
-                    PRIMARY KEY (grid_id, region_id, cache_id)
-                ) WITHOUT ROWID;
-                CREATE TABLE object_entries (
-                    grid_id TEXT NOT NULL,
-                    region_id BLOB NOT NULL CHECK(length(region_id) = 16),
-                    cache_id BLOB NOT NULL CHECK(length(cache_id) = 16),
-                    local_id INTEGER NOT NULL CHECK(local_id > 0 AND local_id <= 4294967295),
-                    crc INTEGER NOT NULL CHECK(crc >= 0 AND crc <= 4294967295),
-                    update_kind INTEGER NOT NULL CHECK(update_kind IN (0, 1)),
-                    update_flags INTEGER NOT NULL CHECK(update_flags >= 0 AND update_flags <= 4294967295),
-                    payload BLOB NOT NULL CHECK(length(payload) >= 64 AND length(payload) <= 10000),
-                    PRIMARY KEY (grid_id, region_id, cache_id, local_id)
-                ) WITHOUT ROWID;
-                ",
-            )?;
+            transaction.execute_batch(REGION_SCOPES_SCHEMA)?;
+            transaction.execute_batch(OBJECT_ENTRIES_SCHEMA)?;
             install_global_stats(&transaction, false)?;
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
@@ -80,18 +98,24 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError>
 }
 
 fn validate_current_schema(connection: &Connection) -> Result<(), MigrationError> {
-    let mut statement = connection.prepare("SELECT type, name FROM sqlite_master WHERE type IN ('table', 'trigger')")?;
-    let objects =
-        statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?.collect::<Result<HashSet<_>, _>>()?;
+    let mut statement = connection.prepare("SELECT type, name, sql FROM sqlite_master WHERE type IN ('table', 'trigger')")?;
+    let objects = statement
+        .query_map([], |row| Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), row.get::<_, Option<String>>(2)?)))?
+        .collect::<Result<HashMap<_, _>, _>>()?;
     let required = [
-        ("table", "region_scopes"),
-        ("table", "object_entries"),
-        ("table", "object_cache_totals"),
-        ("trigger", "object_entries_totals_insert"),
-        ("trigger", "object_entries_totals_delete"),
-        ("trigger", "object_entries_totals_update"),
+        ("table", "region_scopes", REGION_SCOPES_SCHEMA),
+        ("table", "object_entries", OBJECT_ENTRIES_SCHEMA),
+        ("table", "object_cache_totals", OBJECT_CACHE_TOTALS_SCHEMA),
+        ("trigger", "object_entries_totals_insert", OBJECT_ENTRIES_TOTALS_INSERT_TRIGGER),
+        ("trigger", "object_entries_totals_delete", OBJECT_ENTRIES_TOTALS_DELETE_TRIGGER),
+        ("trigger", "object_entries_totals_update", OBJECT_ENTRIES_TOTALS_UPDATE_TRIGGER),
     ];
-    if required.iter().any(|object| !objects.contains(&(object.0.to_owned(), object.1.to_owned()))) {
+    if required.iter().any(|(kind, name, expected)| {
+        objects
+            .get(&(kind.to_string(), name.to_string()))
+            .and_then(Option::as_deref)
+            .is_none_or(|actual| normalize_schema_sql(actual) != normalize_schema_sql(expected))
+    }) {
         return Err(MigrationError::SchemaMismatch);
     }
     drop(statement);
@@ -111,13 +135,7 @@ fn validate_current_schema(connection: &Connection) -> Result<(), MigrationError
 }
 
 fn install_global_stats(connection: &Connection, backfill: bool) -> Result<(), MigrationError> {
-    connection.execute_batch(
-        "CREATE TABLE object_cache_totals (
-            singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton = 1),
-            entry_count INTEGER NOT NULL CHECK(entry_count >= 0),
-            payload_bytes INTEGER NOT NULL CHECK(payload_bytes >= 0)
-        ) WITHOUT ROWID;",
-    )?;
+    connection.execute_batch(OBJECT_CACHE_TOTALS_SCHEMA)?;
     if backfill {
         connection.execute(
             "INSERT INTO object_cache_totals (singleton, entry_count, payload_bytes)
@@ -127,22 +145,14 @@ fn install_global_stats(connection: &Connection, backfill: bool) -> Result<(), M
     } else {
         connection.execute("INSERT INTO object_cache_totals (singleton, entry_count, payload_bytes) VALUES (1, 0, 0)", [])?;
     }
-    connection.execute_batch(
-        "CREATE TRIGGER object_entries_totals_insert AFTER INSERT ON object_entries BEGIN
-            UPDATE object_cache_totals SET entry_count = entry_count + 1, payload_bytes = payload_bytes + length(NEW.payload)
-            WHERE singleton = 1;
-         END;
-         CREATE TRIGGER object_entries_totals_delete AFTER DELETE ON object_entries BEGIN
-            UPDATE object_cache_totals SET entry_count = entry_count - 1, payload_bytes = payload_bytes - length(OLD.payload)
-            WHERE singleton = 1;
-         END;
-         CREATE TRIGGER object_entries_totals_update AFTER UPDATE OF payload ON object_entries
-         WHEN length(OLD.payload) != length(NEW.payload) BEGIN
-            UPDATE object_cache_totals SET payload_bytes = payload_bytes + length(NEW.payload) - length(OLD.payload)
-            WHERE singleton = 1;
-         END;",
-    )?;
+    connection.execute_batch(OBJECT_ENTRIES_TOTALS_INSERT_TRIGGER)?;
+    connection.execute_batch(OBJECT_ENTRIES_TOTALS_DELETE_TRIGGER)?;
+    connection.execute_batch(OBJECT_ENTRIES_TOTALS_UPDATE_TRIGGER)?;
     Ok(())
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ").trim_end_matches(';').to_owned()
 }
 
 #[cfg(test)]
@@ -556,10 +566,33 @@ mod tests {
         let path = directory.path().join("objects.sqlite");
         let (db, _) = open_at(&path).expect("create current cache schema");
         db.shutdown().expect("close initial database");
+        let (db, status) = open_at(&path).expect("reopen current cache schema");
+        assert_eq!(status, OpenStatus::Existing);
+        db.shutdown().expect("close reopened database");
         Connection::open(&path)
             .expect("open current cache schema")
             .execute_batch("DROP TRIGGER object_entries_totals_insert;")
             .expect("remove a required trigger");
+
+        let (db, status) = open_at(&path).expect("recreate damaged database");
+
+        std::assert_matches!(status, OpenStatus::Recreated(::storage::sqlite::RecoveryReason::SchemaMismatch));
+        db.shutdown().expect("close recreated database");
+    }
+
+    #[test]
+    fn no_op_totals_trigger_recreates_database() {
+        let directory = tempfile::tempdir().expect("create isolated cache directory");
+        let path = directory.path().join("objects.sqlite");
+        let (db, _) = open_at(&path).expect("create current cache schema");
+        db.shutdown().expect("close initial database");
+        Connection::open(&path)
+            .expect("open current cache schema")
+            .execute_batch(
+                "DROP TRIGGER object_entries_totals_insert;
+                 CREATE TRIGGER object_entries_totals_insert AFTER INSERT ON object_entries BEGIN SELECT 1; END;",
+            )
+            .expect("replace totals trigger with a no-op");
 
         let (db, status) = open_at(&path).expect("recreate damaged database");
 

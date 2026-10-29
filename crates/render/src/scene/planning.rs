@@ -62,6 +62,7 @@ pub(in crate::scene) struct MeshPlanner {
     target_users: HashMap<MeshKey, HashSet<Entity>>,
     dirty: bool,
     scanning: bool,
+    deferred_switch: bool,
     cursor: Option<Uuid>,
 }
 
@@ -74,6 +75,7 @@ impl MeshPlanner {
             target_users: HashMap::new(),
             dirty: false,
             scanning: false,
+            deferred_switch: false,
             cursor: None,
         }
     }
@@ -126,7 +128,7 @@ impl MeshPlanner {
     }
 
     pub(in crate::scene) fn retry_admission(&mut self) -> bool {
-        let deferred = self.targets.values().any(|target| !target.admitted);
+        let deferred = self.deferred_switch || self.targets.values().any(|target| !target.admitted);
         self.dirty |= deferred;
         deferred
     }
@@ -144,6 +146,7 @@ impl MeshPlanner {
             self.meshes.begin_priority_generation();
             self.scanning = true;
             self.dirty = false;
+            self.deferred_switch = false;
             self.cursor = None;
         }
         let mut changes = Vec::new();
@@ -165,6 +168,8 @@ impl MeshPlanner {
                         self.detach_target(*entity);
                         self.targets.insert(*entity, MeshTarget { key, sent: None, admitted, priority });
                         self.target_users.entry(key).or_default().insert(*entity);
+                    } else {
+                        self.deferred_switch = true;
                     }
                 } else if self.detach_target(*entity).is_some() {
                     changes.push(MeshChange::Clear(*entity));
@@ -476,6 +481,7 @@ mod tests {
         apply_changes(&mut mirror, &changes);
 
         assert_eq!(planner.targets[&target].key, high);
+        assert!(planner.retry_admission(), "a rejected detail switch is retried");
         assert_eq!(mirror.objects[&target].mesh().map(|(key, _)| key), Some(high));
         assert_matches!(mesh_state(&mirror.objects[&target]), Some((key, MeshStatus::Ready)) if key == high);
     }

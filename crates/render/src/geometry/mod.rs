@@ -1,13 +1,15 @@
-mod batching;
+mod cache;
+mod draw_list;
 mod frame;
 mod instance;
+mod items;
 mod mesh;
 mod pick;
 mod storage;
+mod texture_bindings;
 
 use std::{
     collections::{HashMap, HashSet},
-    ops::Range,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -15,19 +17,19 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assets::{TextureHandle, TextureId};
-use math::{DVec3, Quat, Vec3};
+use assets::TextureId;
 use wgpu::{
-    Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, IndexFormat, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
+    Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 
-use self::batching::{DrawCommand, MAX_FACE_INSTANCES};
+use self::cache::FrameCache;
+use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
 use self::mesh::GpuMesh;
 use self::storage::Storage;
-use crate::scene::{Camera, MeshId, SharedMesh, ViewVersion};
+use crate::scene::{Camera, MeshId, ViewVersion};
 use crate::{
-    pipeline::{INSTANCE_BYTES, SurfacePipelines, Water},
+    pipeline::{SurfacePipelines, Water},
     texture::{TextureCompletion, TextureJob, TextureState, Textures},
 };
 
@@ -35,16 +37,16 @@ pub use pick::PickError;
 
 const MESH_BYTES: usize = 64 * 1024 * 1024;
 const DEPTH_BYTES: usize = 128 * 1024 * 1024;
+pub(super) const INSTANCE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MESH_UPLOADS: usize = 16;
-const MAX_MESHES: usize = 1024;
-const MAX_INSTANCES: usize = 16_384;
 const TRANSFORM_BYTES: usize = 112;
 
 #[derive(Clone, Copy, Default)]
 pub struct Stats {
     pub instances: usize,
     pub draw_calls: usize,
+    pub draw_commands: usize,
     pub pending_meshes: usize,
     pub uploaded_bytes: usize,
     pub mesh_bytes: usize,
@@ -58,6 +60,21 @@ pub struct Stats {
     pub texture_upload_bytes: usize,
     pub pending_textures: usize,
     pub omitted_faces: usize,
+    pub mesh_budget_blocked: usize,
+    pub omission_reason: Option<OmissionReason>,
+    pub layouts: usize,
+    pub items_updated: usize,
+    pub faces_patched: usize,
+    pub blended_sorts: usize,
+    pub animated_faces_visited: usize,
+    pub animated_faces_changed: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OmissionReason {
+    InstanceBufferBudget,
+    MeshMemoryBudget,
+    CombinedBudgets,
 }
 
 #[derive(Default)]
@@ -123,24 +140,7 @@ impl Drop for FrameLease {
     }
 }
 
-pub(crate) struct Instance {
-    mesh: SharedMesh,
-    position: DVec3,
-    rotation: Quat,
-    scale: Vec3,
-    pickable: bool,
-    faces: Vec<PickFace>,
-    shading: ShadingMode,
-    terrain_textures: Option<[Option<TextureHandle>; 4]>,
-    terrain_composition: Option<Arc<[f32]>>,
-}
-
-pub(crate) struct PickFace {
-    indices: Range<u32>,
-    double_sided: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum ShadingMode {
     Studio,
     Terrain,
@@ -167,16 +167,23 @@ struct FramePreparation {
     textures: TextureState,
     meshes: MeshState,
     more_meshes: bool,
-    animated_faces: bool,
+    animation_deadline: Option<Instant>,
 }
 
 impl FramePreparation {
-    fn needs_frame(&self, textures: TextureState, meshes: MeshState) -> bool {
-        self.animated_faces || self.more_meshes || self.textures != textures || self.meshes != meshes
+    fn needs_frame(&self, textures: TextureState, meshes: MeshState, now: Instant) -> bool {
+        self.animation_deadline.is_some_and(|deadline| deadline <= now)
+            || self.more_meshes
+            || self.textures != textures
+            || self.meshes != meshes
     }
 
-    fn reusable(&self, key: &FramePreparationKey, textures: TextureState, meshes: MeshState) -> bool {
-        self.key == *key && self.textures == textures && self.meshes == meshes && !self.more_meshes && !self.animated_faces
+    fn reusable(&self, key: &FramePreparationKey, textures: TextureState, meshes: MeshState, now: Instant) -> bool {
+        self.key == *key
+            && self.textures == textures
+            && self.meshes == meshes
+            && !self.more_meshes
+            && self.animation_deadline.is_none_or(|deadline| deadline > now)
     }
 }
 
@@ -185,8 +192,8 @@ struct PrepareTimes {
     visibility: Duration,
     requests: Duration,
     textures: Duration,
-    faces: Duration,
-    instances: Duration,
+    meshes: Duration,
+    draw_list: Duration,
 }
 
 pub(crate) struct GeometryRenderer {
@@ -197,12 +204,19 @@ pub(crate) struct GeometryRenderer {
     textures: Textures,
     requested_textures: HashSet<TextureId>,
     instances: Buffer,
+    indirect: Buffer,
+    indirect_first_instance: bool,
     depth: Option<Depth>,
     meshes: HashMap<MeshId, GpuMesh>,
     storage: Storage,
     retired: Vec<GpuMesh>,
-    draws: Vec<DrawCommand>,
-    visible: Vec<Instance>,
+    cache: FrameCache,
+    draw_list: DrawList,
+    pending_meshes: HashSet<MeshId>,
+    pending_textures: HashSet<TextureId>,
+    draw_report: Option<Instant>,
+    omitted_faces: usize,
+    mesh_budget_blocked: HashSet<MeshId>,
     epoch: u64,
     prepared: Option<FramePreparation>,
     slow_report: Option<Instant>,
@@ -214,14 +228,19 @@ impl GeometryRenderer {
         self.textures.release_resources();
     }
 
-    pub(crate) fn needs_frame(&self) -> bool {
-        self.prepared.as_ref().is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.memory.mesh_state()))
+    pub(crate) fn needs_frame(&self, now: Instant) -> bool {
+        self.prepared.as_ref().is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.memory.mesh_state(), now))
             || self.textures.uploading()
+    }
+
+    pub(crate) fn animation_deadline(&self) -> Option<Instant> {
+        self.prepared.as_ref().and_then(|prepared| prepared.animation_deadline)
     }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
         let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout);
+        let indirect_bytes = MAX_FACE_INSTANCES * INDIRECT_DRAW_BYTES;
         Self {
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
@@ -229,13 +248,20 @@ impl GeometryRenderer {
             textures,
             requested_textures: HashSet::new(),
             water: Water::new(device, format),
-            instances: buffer(device, "Face instances", MAX_FACE_INSTANCES * INSTANCE_BYTES, BufferUsages::VERTEX),
+            instances: buffer(device, "Face instances", INSTANCE_BUFFER_BYTES, BufferUsages::VERTEX),
+            indirect: buffer(device, "Scene indexed draws", indirect_bytes, BufferUsages::INDIRECT),
+            indirect_first_instance: device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
             depth: None,
             meshes: HashMap::new(),
             storage: Storage::default(),
             retired: Vec::new(),
-            draws: Vec::new(),
-            visible: Vec::new(),
+            cache: FrameCache::default(),
+            draw_list: DrawList::default(),
+            pending_meshes: HashSet::new(),
+            pending_textures: HashSet::new(),
+            draw_report: None,
+            omitted_faces: 0,
+            mesh_budget_blocked: HashSet::new(),
             epoch: 0,
             prepared: None,
             slow_report: None,
@@ -275,10 +301,33 @@ impl GeometryRenderer {
 
     pub(crate) fn skip(&mut self) {
         self.prepared = None;
-        self.visible.clear();
-        self.draws.clear();
+        self.cache.camera = None;
+        self.cache.candidates.clear();
+        self.cache.next_candidates.clear();
+        self.cache.visible.clear();
+        self.cache.next_visible.clear();
+        self.cache.mesh_ids.clear();
+        self.cache.mesh_set.clear();
+        self.cache.mesh_representatives.clear();
+        self.cache.mesh_compositions.clear();
+        self.cache.mesh_priorities.clear();
+        self.cache.mesh_ready.clear();
+        self.pending_meshes.clear();
+        for (_, item) in self.cache.items.iter_mut() {
+            for face in &mut item.faces {
+                face.slot = None;
+                face.blended_index = None;
+            }
+        }
+        self.draw_list.clear();
         self.stats.instances = 0;
         self.stats.draw_calls = 0;
+        self.stats.draw_commands = 0;
+        self.omitted_faces = 0;
+        self.mesh_budget_blocked.clear();
+        self.stats.omitted_faces = 0;
+        self.stats.mesh_budget_blocked = 0;
+        self.stats.omission_reason = None;
     }
 
     fn memory_stats(&mut self) {
@@ -310,43 +359,44 @@ impl GeometryRenderer {
         let mut texture = None;
         let mut terrain = None;
         let mut buffers = None;
-        for draw in &self.draws {
-            if pipeline != Some(draw.pipeline) {
-                self.pipelines.bind_pipeline(pass, draw.pipeline);
-                pipeline = Some(draw.pipeline);
+        for draw in self.draw_list.draw_batches() {
+            if pipeline != Some(draw.key.pipeline) {
+                self.pipelines.bind_pipeline(pass, draw.key.pipeline);
+                pipeline = Some(draw.key.pipeline);
             }
-            if texture != Some(draw.texture) {
-                pass.set_bind_group(1, self.textures.binding(draw.texture), &[]);
-                texture = Some(draw.texture);
+            if texture != Some(draw.key.texture) {
+                pass.set_bind_group(1, self.textures.binding(draw.key.texture), &[]);
+                texture = Some(draw.key.texture);
             }
-            if draw.pipeline == crate::pipeline::Pipeline::Terrain {
-                let key = draw.terrain.expect("terrain draw has detail texture bindings");
+            if draw.key.pipeline == crate::pipeline::Pipeline::Terrain {
+                let key = draw.key.terrain.expect("terrain batch has detail texture bindings");
                 if terrain != Some(key) {
                     pass.set_bind_group(2, self.textures.terrain_binding(key), &[]);
                     terrain = Some(key);
                 }
             }
-            let mesh = &self.meshes[&draw.mesh];
-            let allocation = &mesh.allocation;
-            if buffers.is_none_or(|bound| !Arc::ptr_eq(bound, allocation.buffers())) {
-                pass.set_vertex_buffer(0, allocation.buffers().vertices.slice(..));
-                pass.set_index_buffer(allocation.buffers().indices.slice(..), IndexFormat::Uint32);
-                buffers = Some(allocation.buffers());
+            let page = Arc::as_ptr(&draw.buffers) as usize;
+            if buffers != Some(page) {
+                pass.set_vertex_buffer(0, draw.buffers.vertices.slice(..));
+                pass.set_index_buffer(draw.buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
+                buffers = Some(page);
             }
-            if draw.pipeline == crate::pipeline::Pipeline::Terrain {
-                let composition = allocation.buffers().composition.as_ref().expect("terrain mesh has a composition stream");
+            let instance_slot = if draw.key.pipeline == crate::pipeline::Pipeline::Terrain { 2 } else { 1 };
+            if draw.key.pipeline == crate::pipeline::Pipeline::Terrain {
+                let composition = draw.buffers.composition.as_ref().expect("terrain buffer has composition attributes");
                 pass.set_vertex_buffer(1, composition.slice(..));
-                pass.set_vertex_buffer(2, self.instances.slice(..));
-            } else {
-                pass.set_vertex_buffer(1, self.instances.slice(..));
             }
-            let index_offset = allocation.indices().start;
-            let base_vertex = i32::try_from(allocation.vertices().start).expect("mesh page fits the GPU budget");
-            pass.draw_indexed(
-                draw.indices.start + index_offset..draw.indices.end + index_offset,
-                base_vertex,
-                draw.first..draw.first + draw.count,
-            );
+            if self.indirect_first_instance {
+                pass.set_vertex_buffer(instance_slot, self.instances.slice(..));
+                pass.multi_draw_indexed_indirect(&self.indirect, draw.offset, draw.count);
+            } else {
+                for command in 0..draw.count {
+                    let Some(first_instance) = self.draw_list.first_instance(draw.offset, command) else { continue };
+                    let start = u64::from(first_instance) * crate::pipeline::INSTANCE_BYTES as u64;
+                    pass.set_vertex_buffer(instance_slot, self.instances.slice(start..));
+                    pass.draw_indexed_indirect(&self.indirect, draw.offset + u64::from(command) * INDIRECT_DRAW_BYTES as u64);
+                }
+            }
         }
     }
 

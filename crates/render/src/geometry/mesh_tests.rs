@@ -1,4 +1,8 @@
-use std::sync::{Arc, mpsc};
+use std::{
+    assert_matches,
+    sync::{Arc, mpsc},
+    time::Instant,
+};
 
 use futures::executor::block_on;
 use math::{DVec3, Vec3};
@@ -12,13 +16,13 @@ use wgpu::{
 
 use super::*;
 use crate::geometry::{
-    Instance, ShadingMode,
-    fixtures::{scene, scene_with_mapping, scene_with_scales},
+    fixtures::{scene, scene_with_mapping, scene_with_scales, scene_with_world},
     instance::{instance_base, packed_instance},
 };
 use crate::material::FaceParams;
-use crate::pipeline::{INSTANCE_BYTES, Pipeline};
-use crate::scene::Placement;
+use crate::pipeline::{INSTANCE_BYTES, Pipeline, VERTEX_BYTES};
+use crate::scene::{Camera, Placement, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView};
+use world::{Appearance, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, Region, SurfaceAppearance, UpdateSource};
 
 fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_pages: bool) {
     let scope = device.push_error_scope(ErrorFilter::Validation);
@@ -44,7 +48,11 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
         assert_eq!(meshes[0].allocation.indices().end, meshes[1].allocation.indices().start);
     }
     if alpha == 255 {
-        assert_eq!(geometry.stats.draw_calls, 2, "identical material parameters combine adjacent faces within each mesh");
+        let grouped_calls = if separate_pages { 2 } else { 1 };
+        let expected_calls = if geometry.indirect_first_instance { grouped_calls } else { geometry.stats.draw_commands };
+        assert_eq!(geometry.stats.draw_calls, expected_calls, "draw submissions match the available indirect features");
+        geometry.draw_list.build_draw_batches(&geometry.meshes, geometry.indirect_first_instance);
+        assert_eq!(geometry.draw_list.draw_batches().len(), grouped_calls, "rebuilding retained indirect groups keeps submissions");
     }
     let mut objects: Vec<_> = view.objects().collect();
     objects.sort_by_key(|object| object.detail().summary.id);
@@ -64,19 +72,12 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
             }
             let indices: Vec<_> = mesh.indices().iter().flat_map(|index| index.to_le_bytes()).collect();
             let Placement::Ready(transform) = object.placement() else { panic!("fixture object must be placed") };
-            let instance = Instance {
-                mesh: shared.clone(),
-                position: transform.pose.position,
-                rotation: transform.pose.rotation,
-                scale: transform.scale,
-                pickable: true,
-                faces: Vec::new(),
-                shading: ShadingMode::Studio,
-                terrain_textures: None,
-                terrain_composition: None,
-            };
             let params = FaceParams::new(Some(&object.materials().unwrap()[0]));
-            let packed = packed_instance(&instance_base(&instance, camera.position()), &params, instance.scale);
+            let packed = packed_instance(
+                &instance_base(transform.pose.position, transform.pose.rotation, transform.scale, camera.position()),
+                &params,
+                transform.scale,
+            );
             (
                 device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &vertices, usage: BufferUsages::VERTEX }),
                 device.create_buffer_init(&BufferInitDescriptor { label: None, contents: &indices, usage: BufferUsages::INDEX }),
@@ -158,7 +159,14 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     complete.recv().unwrap().unwrap();
     let pixels = readback.get_mapped_range(..).unwrap();
     let (shared_pixels, reference_pixels) = pixels.split_at(128 * 128 * 4);
-    assert!(shared_pixels == reference_pixels, "batched pages must match independently drawn complete source meshes");
+    let mismatched_pixels = shared_pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(reference_pixels.as_chunks::<4>().0)
+        .filter(|(shared, reference)| shared != reference)
+        .count();
+    assert_eq!(mismatched_pixels, 0, "batched pages must match independently drawn complete source meshes");
     let mut red = 0;
     let mut green = 0;
     for pixel in shared_pixels.as_chunks::<4>().0 {
@@ -168,7 +176,12 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     assert!(red > 100 && green > 100, "both meshes retain distinct geometry and material colors: {red} red, {green} green pixels");
     drop(pixels);
     readback.unmap();
-    let (id, old) = geometry.meshes.iter().next().unwrap();
+    let (id, old) = geometry
+        .meshes
+        .iter()
+        .filter(|(_, mesh)| filler.as_ref().is_none_or(|filler| !Arc::ptr_eq(mesh.allocation.buffers(), filler.buffers())))
+        .min_by_key(|(_, mesh)| mesh.allocation.vertices().start)
+        .unwrap();
     let id = *id;
     let old_vertices = old.allocation.vertices();
     let old_indices = old.allocation.indices();
@@ -180,10 +193,14 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     geometry.submitted(frame);
     device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
     assert_eq!(geometry.memory.mesh_state().bytes, charged);
-    assert!(geometry.needs_frame(), "retirement must unblock preparation without freeing a whole page");
+    assert!(geometry.needs_frame(Instant::now()), "retirement must unblock preparation without freeing a whole page");
     let reused = geometry.storage.allocate(device, old_vertices.len(), old_indices.len(), false, &geometry.memory).unwrap();
     assert_eq!((reused.vertices(), reused.indices()), (old_vertices, old_indices));
-    assert!(Arc::ptr_eq(reused.buffers(), &old_buffers));
+    if separate_pages {
+        assert!(!Arc::ptr_eq(reused.buffers(), &old_buffers), "empty pages are released before a new page allocation");
+    } else {
+        assert!(Arc::ptr_eq(reused.buffers(), &old_buffers), "ranges on a page with live allocations are reused");
+    }
     drop(reused);
     drop(old_buffers);
     drop(filler);
@@ -192,6 +209,54 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     drop(geometry);
     device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
     assert_eq!(memory.mesh_state().bytes, 0, "renderer retirement releases page accounting after GPU completion");
+}
+
+fn mesh_page_bytes(shared: &crate::scene::SharedMesh) -> usize {
+    let mesh = shared.mesh();
+    let bytes = mesh.vertices().len() * VERTEX_BYTES + std::mem::size_of_val(mesh.indices());
+    bytes * (1024 * 1024 / bytes).max(1)
+}
+
+fn settle_scene(world: &world::World, scene: &mut Reconciler, view: &mut SceneView, mut now: Instant) {
+    loop {
+        match scene.poll(now) {
+            ReconcileStep::Read(job) => {
+                let result = match job.query() {
+                    ReadQuery::Barrier => Ok(ReadReply::Barrier(world.read_barrier())),
+                    ReadQuery::Objects(cursor) => world.object_list_page(*cursor, 256).map(ReadReply::Objects),
+                    ReadQuery::Regions(cursor) => world.region_page(*cursor, 64).map(ReadReply::Regions),
+                    ReadQuery::Details(entities) => world.object_detail_batch(entities).map(ReadReply::Details),
+                    ReadQuery::Changes(cursor) => world.change_page(*cursor, 256).map(ReadReply::Changes),
+                    ReadQuery::Terrain(region, cursor) => world.terrain_page(*region, *cursor, 8).map(ReadReply::Terrain),
+                    ReadQuery::Environment(region) => Ok(ReadReply::Environment(world.environment(*region))),
+                };
+                scene.complete_read(job, result.map_err(crate::scene::ReadFailure::World), now);
+            }
+            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+            ReconcileStep::Publish(batch) => {
+                view.apply(batch).unwrap();
+            }
+            ReconcileStep::Continue => {}
+            ReconcileStep::Wait(until) => now = until,
+            ReconcileStep::Idle => return,
+            _ => panic!("fixture stopped before publishing geometry"),
+        }
+    }
+}
+
+fn move_object(world: &mut world::World, id: u32, order: u64, position: Vec3, color: [u8; 4]) {
+    let mut observation = ObjectObservation::new(
+        UpdateSource::new(Region::new(1), u32::try_from(order).expect("fixture sequence"), OrderEvidence::Ordered(order), 0),
+        uuid::Uuid::from_u128(u128::from(id)),
+        std::num::NonZeroU32::new(id).expect("fixture local ID"),
+        Kind::Object,
+        ParentUpdate::Root,
+    );
+    observation.pose = Some(Pose { position: Some(position), rotation: Some(math::Quat::IDENTITY) });
+    observation.appearance = FieldUpdate::Set(Appearance::Surface);
+    observation.surface_appearance =
+        Some(SurfaceAppearance::new(world::FaceAppearance { color, ..Default::default() }, Vec::new()).expect("fixture appearance"));
+    assert_matches!(world.observe_object(observation).unwrap().outcome, world::ApplyOutcome::Updated(_));
 }
 
 fn render_pixels(
@@ -276,8 +341,8 @@ fn check_mirrored_render(device: &wgpu::Device, queue: &wgpu::Queue) {
             green.push(pixel[1]);
         }
     }
-    assert!(red.len() > 100, "unmirrored prim remains visible after back-face culling");
-    assert!(green.len() > 100, "mirrored prim remains visible after back-face culling");
+    assert!(red.len() > 100, "unmirrored prim remains visible after back-face culling: {} pixels", red.len());
+    assert!(green.len() > 100, "mirrored prim remains visible after back-face culling: {} pixels", green.len());
     let average = |values: &[u8]| values.iter().map(|value| u32::from(*value)).sum::<u32>() / values.len() as u32;
     assert!(average(&red).abs_diff(average(&green)) < 30, "mirroring keeps front-face normals outward for studio lighting");
     drop(geometry);
@@ -291,30 +356,22 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
     let size = [256, 256];
     let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba8UnormSrgb);
     let depth = geometry.depth(device, size).unwrap();
-    let projection = geometry.pipelines.update_camera_uniform(queue, camera, size);
+    let projection = geometry.pipelines.update_camera_uniform(queue, camera, size, camera.position());
     let mut objects: Vec<_> = view.objects().collect();
     objects.sort_by_key(|object| object.detail().summary.id);
     let mut instances = Vec::new();
     for object in &objects {
-        let (_, mesh) = object.mesh().unwrap();
         let Placement::Ready(transform) = object.placement() else { panic!("fixture prim must be placed") };
         let face = object.materials().unwrap().iter().find(|material| material.slot == 0).expect("fixture has face zero");
         let mut params = FaceParams::new(Some(face));
         assert_eq!(params.params[3], 1.0, "scene planar mapping reaches the production surface parameters");
         params.color = [1.0; 4];
         params.params[0] = 1.0;
-        let instance = Instance {
-            mesh: mesh.clone(),
-            position: transform.pose.position,
-            rotation: transform.pose.rotation,
-            scale: transform.scale,
-            pickable: true,
-            faces: Vec::new(),
-            shading: ShadingMode::Studio,
-            terrain_textures: None,
-            terrain_composition: None,
-        };
-        instances.extend_from_slice(&packed_instance(&instance_base(&instance, camera.position()), &params, instance.scale));
+        instances.extend_from_slice(&packed_instance(
+            &instance_base(transform.pose.position, transform.pose.rotation, transform.scale, camera.position()),
+            &params,
+            transform.scale,
+        ));
     }
     let vertices: Vec<u8> = [Vec3::new(0.0, -0.5, -0.5), Vec3::new(0.0, 0.5, -0.5), Vec3::new(0.0, 0.5, 0.5), Vec3::new(0.0, -0.5, 0.5)]
         .into_iter()
@@ -388,6 +445,138 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
     assert!(block_on(scope.pop()).is_none(), "planar projection through the surface shader satisfies GPU validation");
 }
 
+fn assert_visible_draw_coverage(geometry: &GeometryRenderer) {
+    let visible: std::collections::HashSet<_> = geometry.cache.visible.iter().copied().collect();
+    let mut face_slots = std::collections::HashSet::new();
+    for (index, item) in geometry.cache.items.iter() {
+        for face in &item.faces {
+            match (visible.contains(&index), face.slot) {
+                (true, Some(slot)) => assert!(face_slots.insert(slot), "each visible face owns one instance slot"),
+                (false, None) | (true, None) => {}
+                (false, Some(_)) => panic!("hidden items cannot retain instance slots"),
+            }
+        }
+    }
+    let draw_slots: std::collections::HashSet<_> =
+        geometry.draw_list.draws().iter().flat_map(|draw| draw.first..draw.first.saturating_add(draw.count)).collect();
+    assert_eq!(draw_slots, face_slots, "draw commands cover every packed visible face and no hidden face");
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(gpu_retired_hidden_page_releases_for_visible_mesh)'"]
+fn gpu_retired_hidden_page_releases_for_visible_mesh() {
+    let (device, queue) = block_on(async {
+        let instance =
+            wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
+    });
+    let (_scene, view, _) = scene(128);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    let retired_camera = Camera::new(DVec3::new(13.0, 0.0, 0.0), Vec3::X, 1.0, [128, 128]).unwrap();
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, retired_camera, [128, 128], None);
+    assert_eq!(geometry.stats.instances, 1);
+    assert_eq!(geometry.meshes.len(), 1);
+    assert!(!geometry.draw_list.draw_batches().is_empty());
+
+    let retired_id = *geometry.meshes.keys().next().expect("initial visible mesh");
+    let retired_object = view
+        .objects()
+        .find(|object| object.mesh().is_some_and(|(_, mesh)| mesh.id() == retired_id))
+        .expect("retired mesh object remains in the scene");
+    let retired_entity = retired_object.detail().summary.entity;
+    let target_object =
+        view.objects().find(|object| object.mesh().is_some_and(|(_, mesh)| mesh.id() != retired_id)).expect("another cached mesh");
+    let (_, target_mesh) = target_object.mesh().expect("target mesh");
+    let target_id = target_mesh.id();
+    let target_entity = target_object.detail().summary.entity;
+    let retired_index = geometry.cache.objects[&retired_entity];
+    let target_index = geometry.cache.objects[&target_entity];
+    let old_page_bytes = geometry.memory.mesh_state().bytes;
+    let target_page_bytes = mesh_page_bytes(target_mesh);
+    let headroom = target_page_bytes.saturating_sub(old_page_bytes).saturating_add(1);
+    let blocker_bytes = crate::geometry::MESH_BYTES
+        .checked_sub(old_page_bytes.checked_add(headroom).expect("fixture page budget"))
+        .expect("fixture meshes fit the renderer budget");
+    let blocker = geometry.memory.reserve(blocker_bytes, crate::geometry::Resource::Mesh).expect("fill the unused mesh budget");
+
+    drop(geometry.meshes.remove(&retired_id).expect("retired GPU mesh"));
+    geometry.cache.items.get_mut(retired_index).expect("cached retired item").position = DVec3::new(-100.0, 0.0, 0.0);
+    geometry.cache.items.get_mut(target_index).expect("cached target item").position = DVec3::new(14.0, 0.0, 0.0);
+    geometry.cache.camera = None;
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, retired_camera, [128, 128], None);
+    if !geometry.meshes.contains_key(&target_id) {
+        assert!(geometry.needs_frame(Instant::now()), "a freed mesh page must schedule another preparation");
+        let mut encoder = device.create_command_encoder(&Default::default());
+        geometry.prepare(&device, &mut encoder, &view, retired_camera, [128, 128], None);
+    }
+
+    assert!(geometry.meshes.contains_key(&target_id), "the newly visible mesh uploads after the hidden page is released");
+    assert!(geometry.pending_meshes.is_empty());
+    assert!(geometry.cache.items.get(retired_index).is_some(), "hidden face groups remain cached");
+    assert!(!geometry.cache.candidates.contains(&retired_index));
+    assert!(!geometry.cache.visible.contains(&retired_index));
+    assert!(geometry.cache.candidates.contains(&target_index));
+    assert!(geometry.cache.visible.contains(&target_index));
+
+    let memory = geometry.memory.clone();
+    drop(blocker);
+    drop(geometry);
+    device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    assert_eq!(memory.mesh_state().bytes, 0);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(gpu_appearance_replacement_rechecks_visibility)'"]
+fn gpu_appearance_replacement_rechecks_visibility() {
+    let (device, queue) = block_on(async {
+        let instance =
+            wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
+    });
+    let (mut world, mut scene, mut view, camera) = scene_with_world(255, [Vec3::splat(2.0); 2], Default::default());
+    let entity = view
+        .objects()
+        .find(|object| object.detail().summary.id == uuid::Uuid::from_u128(1))
+        .expect("fixture object")
+        .detail()
+        .summary
+        .entity;
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    let index = geometry.cache.objects[&entity];
+    let item_id = geometry.cache.items.get(index).expect("cached fixture object").id;
+    assert!(geometry.cache.candidates.contains(&index));
+    assert!(geometry.cache.visible.contains(&index));
+
+    move_object(&mut world, 1, 100, Vec3::new(10.0, 100.0, 0.0), [0, 0, 255, 255]);
+    scene.notify_world_change();
+    settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    let index = geometry.cache.objects[&entity];
+    assert_eq!(geometry.cache.items.get(index).map(|item| item.id), Some(item_id));
+    assert!(!geometry.cache.candidates.contains(&index));
+    assert!(!geometry.cache.visible.contains(&index));
+    assert_visible_draw_coverage(&geometry);
+
+    move_object(&mut world, 1, 200, Vec3::new(10.0, -2.0, 0.0), [255, 255, 0, 255]);
+    scene.notify_world_change();
+    settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    let index = geometry.cache.objects[&entity];
+    assert_eq!(geometry.cache.items.get(index).map(|item| item.id), Some(item_id));
+    assert!(geometry.cache.candidates.contains(&index));
+    assert!(geometry.cache.visible.contains(&index));
+    assert_visible_draw_coverage(&geometry);
+}
+
 #[test]
 #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored ignored-only gpu_mesh_pages"]
 fn gpu_mesh_pages() {
@@ -395,7 +584,13 @@ fn gpu_mesh_pages() {
         let instance =
             wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
         let adapter = instance.request_adapter(&Default::default()).await.unwrap();
-        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
+        adapter
+            .request_device(&DeviceDescriptor {
+                required_features: adapter.features() & wgpu::Features::INDIRECT_FIRST_INSTANCE,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
     });
     for (alpha, separate_pages) in [(255, false), (128, true)] {
         check_pages(&device, &queue, alpha, separate_pages);
@@ -413,4 +608,65 @@ fn gpu_prim_transforms() {
     });
     check_mirrored_render(&device, &queue);
     check_planar_projection(&device, &queue);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo test -p render gpu_skip_rebuilds_scene -- --ignored"]
+fn gpu_skip_rebuilds_scene() {
+    let (device, queue) = block_on(async {
+        let instance =
+            wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
+    });
+    let (_scene, view, camera) = scene(255);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    assert!(!geometry.draw_list.draws().is_empty());
+    geometry.pending_meshes.insert(*geometry.cache.mesh_ids.first().expect("visible mesh demand"));
+    assert!(!geometry.cache.mesh_representatives.is_empty());
+    assert!(!geometry.cache.mesh_compositions.is_empty());
+    assert!(!geometry.cache.mesh_priorities.is_empty());
+    assert!(!geometry.cache.mesh_ready.is_empty());
+    geometry.skip();
+    assert!(geometry.pending_meshes.is_empty());
+    assert!(geometry.cache.mesh_ids.is_empty());
+    assert!(geometry.cache.mesh_set.is_empty());
+    assert!(geometry.cache.mesh_representatives.is_empty());
+    assert!(geometry.cache.mesh_compositions.is_empty());
+    assert!(geometry.cache.mesh_priorities.is_empty());
+    assert!(geometry.cache.mesh_ready.is_empty());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    assert!(!geometry.draw_list.draws().is_empty());
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo test -p render gpu_hidden_items_leave_no_instances_in_draws -- --ignored"]
+fn gpu_hidden_items_leave_no_instances_in_draws() {
+    let (device, queue) = block_on(async {
+        let instance =
+            wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
+    });
+    let (_scene, view, _) = scene(128);
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let hidden = Camera::new(DVec3::new(13.0, 0.0, 0.0), Vec3::X, 1.0, [128, 128]).unwrap();
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, hidden, [128, 128], None);
+    assert_eq!(geometry.stats.instances, 1);
+    assert!(geometry.draw_list.has_blended());
+
+    let visible = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, visible, [128, 128], None);
+    assert_eq!(geometry.stats.instances, 2);
+    assert_visible_draw_coverage(&geometry);
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, hidden, [128, 128], None);
+    assert_eq!(geometry.stats.instances, 1);
+    assert_visible_draw_coverage(&geometry);
 }

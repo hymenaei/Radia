@@ -18,7 +18,10 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-use super::{FRAME_INTERVAL, InputCapture, SharedWindowState};
+use super::{
+    FRAME_INTERVAL, InputCapture, SharedWindowState,
+    timing::{FrameTimes, next_frame_deadline, redraw_interval, refresh_interval},
+};
 use crate::{
     DEFAULT_DRAW_DISTANCE,
     agent_movement::{BodyRotation, HeldControls, KeyBinding, MovementObservation, STOP},
@@ -28,6 +31,11 @@ use crate::{
 
 const RECOVERY_DELAY: Duration = Duration::from_millis(500);
 pub(super) const MAX_RECOVERIES: u32 = 3;
+
+fn display_refresh_interval(window: &Window) -> Duration {
+    let millihertz = window.current_monitor().and_then(|monitor| monitor.refresh_rate_millihertz());
+    refresh_interval(millihertz, FRAME_INTERVAL)
+}
 
 #[derive(Debug)]
 pub(crate) enum SceneWindowError {
@@ -82,10 +90,13 @@ pub(super) struct SceneWindow {
     next_ui: Option<Instant>,
     window: Arc<Window>,
     generation: u64,
-    frame_work: Duration,
+    frame_times: FrameTimes,
+    animation_redraw_at: Option<Instant>,
+    frame_interval: Duration,
     next_frame: Instant,
     dpi: f64,
     occluded: bool,
+    focused: bool,
     ready: bool,
     recoveries: u32,
     recovery: PresentationRecovery,
@@ -121,6 +132,7 @@ impl SceneWindow {
         tracing::info!(backend = ?info.backend, gpu = %info.name, driver = %info.driver, driver_info = %info.driver_info, "scene GPU initialized");
         window.set_visible(true);
         let now = Instant::now();
+        let frame_interval = display_refresh_interval(&window);
         let texture_soft_cap = renderer.texture_soft_cap_mib();
         let (texture_sender, texture_receiver) = mpsc::sync_channel(2);
         Ok(Self {
@@ -137,10 +149,13 @@ impl SceneWindow {
             next_ui: None,
             window,
             generation,
-            frame_work: Duration::ZERO,
+            frame_times: FrameTimes::default(),
+            animation_redraw_at: None,
+            frame_interval,
             next_frame: now,
             dpi,
             occluded: false,
+            focused: true,
             ready: false,
             recoveries: 0,
             recovery: PresentationRecovery::default(),
@@ -190,6 +205,7 @@ impl SceneWindow {
                 }
             }
             WindowEvent::Focused(false) => {
+                self.focused = false;
                 self.release_drag(false);
                 self.modifiers = ModifiersState::empty();
                 let rotation = self.body_rotation.update(self.agent_pose().map(|pose| pose.rotation), 0.0, Instant::now());
@@ -198,6 +214,10 @@ impl SceneWindow {
                 if let Some(feed) = &mut self.feed {
                     feed.set_movement(movement);
                 }
+                self.dirty = true;
+            }
+            WindowEvent::Focused(true) => {
+                self.focused = true;
                 self.dirty = true;
             }
             WindowEvent::CursorMoved { position, .. } => self.cursor = *position,
@@ -456,7 +476,11 @@ impl SceneWindow {
     }
 
     fn draw_debug_ui(&mut self, now: Instant) -> DebugUiFrame {
-        let stats = self.renderer.as_ref().expect("renderer ensured before debug UI").stats();
+        let renderer = self.renderer.as_ref().expect("renderer ensured before debug UI");
+        let stats = renderer.stats();
+        let gpu_timings = renderer.gpu_timings();
+        let gpu_timing_supported = renderer.gpu_timing_supported();
+        let frame_times = self.frame_times.summary();
         self.dpi = self.window.scale_factor();
         let input = self.platform.take_egui_input(&self.window);
         let mut request_chat = false;
@@ -473,8 +497,19 @@ impl SceneWindow {
                     }
                 }
                 ui.label(format!("Camera: {} (V)", self.camera_mode.label()));
-                ui.label(format!("CPU frame: {:.2} ms", self.frame_work.as_secs_f64() * 1000.0));
-                ui.label(format!("Draws: {}, instances: {}", stats.draw_calls, stats.instances));
+                if let Some(times) = &frame_times {
+                    ui.label(format!(
+                        "Frametime: p50 {:.2} ms, p95 {:.2} ms",
+                        times.p50.as_secs_f64() * 1000.0,
+                        times.p95.as_secs_f64() * 1000.0
+                    ));
+                } else {
+                    ui.label("Frametime: no samples");
+                }
+                ui.label(format!(
+                    "Draw submissions: {}, indexed commands: {}, instances: {}",
+                    stats.draw_calls, stats.draw_commands, stats.instances
+                ));
                 ui.collapsing("Diagnostics", |ui| {
                     ui.horizontal(|ui| {
                         ui.add(DragValue::new(&mut self.texture_soft_cap).speed(16).suffix(" MiB"))
@@ -482,6 +517,19 @@ impl SceneWindow {
                         ui.label("Texture soft cap");
                     });
                     ui.label(format!("CPU prepare: {:.2} ms", stats.prepare_ms));
+                    ui.label(format!(
+                        "Prepare work: layouts {}, items updated {}, faces patched {}, blended sorts {}",
+                        stats.layouts, stats.items_updated, stats.faces_patched, stats.blended_sorts
+                    ));
+                    ui.label(format!(
+                        "Animated texture faces: {} visited, {} changed",
+                        stats.animated_faces_visited, stats.animated_faces_changed
+                    ));
+                    if let Some((scene_ms, diagnostics_ms)) = gpu_timings {
+                        ui.label(format!("GPU passes: scene {:.2} ms, diagnostics {:.2} ms", scene_ms, diagnostics_ms));
+                    } else if gpu_timing_supported {
+                        ui.label("GPU pass timings: collecting");
+                    }
                     ui.label(format!("GPU meshes: {:.1} MiB, pending: {}", stats.mesh_bytes as f64 / 1048576.0, stats.pending_meshes));
                     ui.label(format!(
                         "GPU textures: {}, {:.1} MiB, pending: {}",
@@ -495,7 +543,22 @@ impl SceneWindow {
                         stats.texture_upload_bytes as f64 / 1048576.0
                     ));
                     if stats.omitted_faces > 0 {
-                        ui.label(format!("Faces over draw budget: {}", stats.omitted_faces));
+                        let reason = match stats.omission_reason {
+                            Some(render::OmissionReason::InstanceBufferBudget) => {
+                                "GPU instance buffer budget; nearest and largest objects kept first"
+                            }
+                            Some(render::OmissionReason::MeshMemoryBudget) => {
+                                "GPU mesh memory budget; nearest and largest meshes kept first"
+                            }
+                            Some(render::OmissionReason::CombinedBudgets) => {
+                                "GPU mesh and instance budgets; nearest and largest content kept first"
+                            }
+                            None => "unknown renderer limit",
+                        };
+                        ui.label(format!("Faces omitted: {} ({reason})", stats.omitted_faces));
+                    }
+                    if stats.mesh_budget_blocked > 0 {
+                        ui.label(format!("Meshes blocked by GPU memory budget: {}", stats.mesh_budget_blocked));
                     }
                     ui.label(format!("GPU depth: {:.1} MiB", stats.depth_bytes as f64 / 1048576.0));
                     if let Some(feed) = &self.feed {
@@ -539,6 +602,7 @@ impl SceneWindow {
     }
 
     fn submit_frame(&mut self, observation: Option<scene::Camera>, now: Instant, ui: DebugUiFrame) -> DrawActions {
+        let scheduled_deadline = self.next_frame;
         let scene = self.feed.as_ref().zip(observation).map(|(feed, camera)| (&feed.view, camera));
         let water_height = self.feed.as_ref().and_then(|feed| feed.water_height);
         let result = {
@@ -547,8 +611,8 @@ impl SceneWindow {
             renderer.draw(ui.overlay, scene, water_height, || self.window.pre_present_notify())
         };
         self.dispatch_texture_jobs();
-        self.next_frame = Instant::now();
-        self.frame_work = self.next_frame.duration_since(now);
+        let completed = Instant::now();
+        let frame_work = completed.saturating_duration_since(now);
         match result {
             Ok(presented) => {
                 let active_motion = self.controls.active() || self.stop_clear_pending;
@@ -558,13 +622,16 @@ impl SceneWindow {
                         && self.camera.as_ref().is_some_and(|camera| camera.moving(Instant::now())));
                 self.dirty |= self.camera_observation(self.agent_pose(), Instant::now()) != observation;
                 if presented {
+                    self.frame_times.record(frame_work);
                     self.last_camera = observation;
                     self.recovery.presented();
                     if self.dirty {
-                        self.next_frame += FRAME_INTERVAL;
+                        self.next_frame = next_frame_deadline(scheduled_deadline, completed, self.frame_interval);
+                    } else {
+                        self.next_frame = completed;
                     }
                 } else {
-                    self.next_frame += FRAME_INTERVAL;
+                    self.next_frame = next_frame_deadline(scheduled_deadline, completed, self.frame_interval);
                 }
                 let first_frame = presented && !self.ready;
                 self.ready |= presented;
@@ -614,14 +681,17 @@ impl SceneWindow {
 
     pub(super) fn poll_renderer(&mut self, now: Instant) -> bool {
         let Some(renderer) = &mut self.renderer else {
+            self.animation_redraw_at = None;
             return false;
         };
         match renderer.poll() {
             Ok(progress) => {
+                self.animation_redraw_at = progress.redraw_at;
                 self.dirty |= progress.redraw;
                 progress.pending
             }
             Err(error) => {
+                self.animation_redraw_at = None;
                 tracing::warn!(%error, "scene GPU failed; scheduling recovery");
                 self.retire_renderer();
                 self.schedule_recovery(now);
@@ -637,9 +707,15 @@ impl SceneWindow {
 
     pub(super) fn schedule_redraw(&mut self, event_loop: &ActiveEventLoop, pending: bool, can_redraw: bool) {
         if self.occluded || self.window.inner_size().width == 0 || self.window.inner_size().height == 0 {
-            event_loop.set_control_flow(if pending { ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL) } else { ControlFlow::Wait });
+            event_loop.set_control_flow(if pending {
+                ControlFlow::WaitUntil(Instant::now() + self.frame_interval)
+            } else {
+                ControlFlow::Wait
+            });
             return;
         }
+        let display_interval = display_refresh_interval(&self.window);
+        self.frame_interval = redraw_interval(display_interval, self.focused, self.controls.active() || self.stop_clear_pending);
         let now = Instant::now();
         if self.next_ui.is_some_and(|at| now >= at) {
             self.next_ui = None;
@@ -650,8 +726,8 @@ impl SceneWindow {
             event_loop.set_control_flow(ControlFlow::Wait);
         } else {
             let redraw = (self.dirty && can_redraw).then_some(self.next_frame.max(now + Duration::from_millis(1)));
-            let poll = pending.then_some(now + FRAME_INTERVAL);
-            event_loop.set_control_flow(match redraw.into_iter().chain(poll).chain(self.next_ui).min() {
+            let poll = pending.then_some(now + self.frame_interval);
+            event_loop.set_control_flow(match redraw.into_iter().chain(poll).chain(self.animation_redraw_at).chain(self.next_ui).min() {
                 Some(at) => ControlFlow::WaitUntil(at),
                 None => ControlFlow::Wait,
             });

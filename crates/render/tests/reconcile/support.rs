@@ -28,14 +28,24 @@ pub(super) fn world_at(origin: DVec3) -> World {
 }
 
 pub(super) fn world_with_journal(origin: DVec3, journal_entries: usize) -> World {
+    world_with_limits(origin, journal_entries, 2048)
+}
+
+pub(super) fn world_with_capacity(capacity: usize) -> World {
+    world_with_limits(DVec3::ZERO, 8192, capacity)
+}
+
+fn world_with_limits(origin: DVec3, journal_entries: usize, capacity: usize) -> World {
+    let tombstones_per_region = capacity.max(2048);
+    let tombstones = tombstones_per_region * 2;
     let mut world = World::new(WorldLimits {
         max_region_registrations: 40,
-        max_entities: 2048,
-        max_entities_per_region: 2048,
-        max_tombstones_per_region: 2048,
-        max_tombstones: 4096,
-        max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(2048),
-        max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(4096),
+        max_entities: capacity,
+        max_entities_per_region: capacity,
+        max_tombstones_per_region: tombstones_per_region,
+        max_tombstones: tombstones,
+        max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(tombstones_per_region),
+        max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(tombstones),
         max_journal_entries: journal_entries,
         max_journal_changes: journal_entries * 2,
         max_region_name_bytes: 256,
@@ -51,10 +61,14 @@ pub(super) fn source(region: u64, order: u64) -> world::UpdateSource {
 }
 
 pub(super) fn add(world: &mut World, id: u128, local: u32, parent: ParentUpdate, x: f32, order: u64) {
+    add_shaped(world, id, local, parent, x, order, world::PrimShape::default());
+}
+
+pub(super) fn add_shaped(world: &mut World, id: u128, local: u32, parent: ParentUpdate, x: f32, order: u64, shape: world::PrimShape) {
     let mut obj = ObjectObservation::new(source(1, order), Uuid::from_u128(id), NonZeroU32::new(local).unwrap(), Kind::Object, parent);
     obj.pose = Some(Pose { position: Some(Vec3::new(x, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
     obj.scale = Some(Vec3::ONE);
-    obj.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
+    obj.shape = FieldUpdate::Set(Shape::Prim(shape));
     obj.appearance = FieldUpdate::Set(Appearance::Surface);
     let _ = world.observe_object(obj).unwrap();
 }

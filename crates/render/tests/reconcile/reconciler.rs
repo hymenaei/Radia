@@ -1,11 +1,12 @@
-use std::assert_matches;
+use std::{assert_matches, collections::HashSet};
 
-use world::{FaceAppearance, SurfaceAppearance, TextureMapping};
+use world::{FaceAppearance, SurfaceAppearance, TerrainPatch, TerrainSettings, TextureMapping};
 
 use super::support::{
-    BTreeMap, BTreeSet, Budget, DVec3, Detail, FieldUpdate, Instant, Kind, NonZeroU32, ObjectObservation, ObjectPatch, ParentUpdate,
-    Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, RecoveryReason, Region, RegionInfo, Shape,
-    Status, Uuid, Vec3, add, camera, ids, move_root, positions, reply, settle, source, world,
+    AssetId, BTreeMap, BTreeSet, Budget, DVec3, Detail, FieldUpdate, Instant, Kind, NonZeroU32, ObjectObservation, ObjectPatch,
+    ParentUpdate, Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, RecoveryReason, Region,
+    RegionInfo, Request, Shape, Status, Uuid, Vec3, add, add_shaped, camera, ids, move_root, positions, prepared_asset, reply, settle,
+    settle_materials, source, world, world_with_capacity,
 };
 
 #[test]
@@ -185,50 +186,128 @@ fn camera_updates_preserve_progress() {
 }
 
 #[test]
-fn mesh_admission_recovery() {
-    let mut world = world();
-    for id in 1..=1025 {
-        add(&mut world, id, id as u32, ParentUpdate::Root, 100.0, id as u64 * 2);
-        let mut patch = ObjectPatch::new(source(1, id as u64 * 2 + 1), NonZeroU32::new(id as u32).unwrap());
-        patch.shape = FieldUpdate::Set(Shape::Prim(world::PrimShape { profile_begin: id as u16, ..Default::default() }));
-        let _ = world.patch_object(patch).unwrap();
+fn unique_mesh_scene_settles() {
+    let mut world = world_with_capacity(3000);
+    for id in 1..=3000 {
+        let index = id - 1;
+        let twist = (index % 201) as i16;
+        let twist = if twist <= 100 { twist } else { twist - 201 };
+        let shape = world::PrimShape {
+            profile_curve: 2,
+            profile_hollow: 12_500,
+            path_scale_x: 100 + (index / 201) as u8,
+            path_twist: twist as i8,
+            ..Default::default()
+        };
+        add_shaped(&mut world, id as u128, id, ParentUpdate::Root, 100.0, id as u64, shape);
     }
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
     scene.set_camera(camera(-300.0));
-    for _ in 0..30_000 {
-        match scene.poll(now) {
-            ReconcileStep::Read(job) => {
-                let result = reply(&world, &job);
-                scene.complete_read(job, result, now);
-            }
-            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
-            ReconcileStep::Publish(batch) => view.apply(batch).unwrap(),
-            ReconcileStep::Continue => {}
-            ReconcileStep::Wait(until) => now = until,
-            _ => panic!("expected bounded preparation work"),
-        }
-        if view.objects().filter(|object| object.mesh().is_some()).count() == 1024
-            && view.revision() == Some(world.revision())
-            && view.objects().any(|object| matches!(object.mesh_state(), Some((_, PreparedMesh::Capacity))))
-            && view.objects().all(|object| object.mesh().is_none() || object.materials().is_some())
-        {
-            break;
-        }
-    }
-    assert_eq!(view.objects().filter(|object| matches!(object.mesh_state(), Some((_, PreparedMesh::Capacity)))).count(), 1);
-    for _ in 0..32 {
-        match scene.poll(now) {
-            ReconcileStep::Continue => {}
-            ReconcileStep::Wait(until) => now = until,
-            _ => panic!("unchanged capacity cannot republish or regenerate"),
-        }
-    }
-    let _ = world.remove_object(source(1, 10_000), NonZeroU32::new(1).unwrap()).unwrap();
-    scene.notify_world_change();
     settle(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(view.object_count(), 1024);
-    assert!(view.objects().all(|object| object.mesh().is_some()));
+    assert_eq!(view.object_count(), 3000);
+    assert_eq!(view.objects().filter(|object| object.mesh().is_some()).count(), 3000);
+    assert!(view.objects().all(|object| !matches!(object.mesh_state(), Some((_, PreparedMesh::Capacity)))));
+    let meshes = view.objects().filter_map(|object| object.mesh().map(|(_, mesh)| mesh.id())).collect::<HashSet<_>>();
+    assert_eq!(meshes.len(), 3000, "each unique prim shape must have settled geometry");
+}
+
+#[test]
+fn unique_meshes_follow_camera_priority() {
+    let mut world = world_with_capacity(3000);
+    for id in 1..=3000 {
+        let index = id - 1;
+        let twist = (index % 201) as i16;
+        let twist = if twist <= 100 { twist } else { twist - 201 };
+        let shape = world::PrimShape {
+            profile_curve: 2,
+            profile_hollow: 12_500,
+            path_scale_x: 100 + (index / 201) as u8,
+            path_twist: twist as i8,
+            ..Default::default()
+        };
+        let x = if id <= 1500 { 100.0 } else { 500.0 };
+        add_shaped(&mut world, id as u128, id, ParentUpdate::Root, x, id as u64, shape);
+    }
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(camera(99.0));
+    settle(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(view.objects().filter(|object| object.mesh().is_some()).count(), 3000);
+
+    scene.set_camera(camera(499.0));
+    settle(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(view.objects().filter(|object| object.detail().summary.id.as_u128() > 1500 && object.mesh().is_some()).count(), 1500);
+    assert_eq!(view.objects().filter(|object| object.detail().summary.id.as_u128() <= 1500 && object.mesh().is_some()).count(), 0);
+}
+
+#[test]
+fn busy_scene_tracks_live_updates() {
+    let mut world = world_with_capacity(3000);
+    for id in 1..=3000 {
+        add(&mut world, id as u128, id, ParentUpdate::Root, 100.0, id as u64);
+    }
+    for id in 1..=2 {
+        let mut patch = ObjectPatch::new(source(1, 4000 + id as u64), NonZeroU32::new(id).unwrap());
+        patch.surface_appearance = Some(
+            SurfaceAppearance::new(
+                FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(9000 + id as u128))), ..FaceAppearance::default() },
+                Vec::new(),
+            )
+            .unwrap(),
+        );
+        let _ = world.patch_object(patch).unwrap();
+    }
+    let terrain_ids = std::array::from_fn(|index| Uuid::from_u128(9100 + index as u128));
+    let _ = world.observe_terrain_settings(source(1, 4100), TerrainSettings::new(terrain_ids, [0.0; 4], [64.0; 4]).unwrap()).unwrap();
+    let _ = world.observe_terrain_patch(source(1, 4101), TerrainPatch::new(0, 0, Box::new([0.0; 256])).unwrap()).unwrap();
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(camera(98.0));
+    let initial = settle_materials(&mut scene, &mut view, &world, &mut now);
+    for request in initial.requested {
+        let status = prepared_asset(request.request, test_support::texture::RGB_J2C.to_vec());
+        scene.complete_asset(request.ticket, status);
+    }
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+
+    for id in 1..=50 {
+        let mut patch = ObjectPatch::new(source(1, 5000 + id as u64), NonZeroU32::new(id).unwrap());
+        patch.pose = Some(Pose { position: Some(Vec3::new(200.0 + id as f32, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+        if id <= 2 {
+            patch.surface_appearance = Some(
+                SurfaceAppearance::new(
+                    FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(9200 + id as u128))), ..FaceAppearance::default() },
+                    Vec::new(),
+                )
+                .unwrap(),
+            );
+        }
+        let _ = world.patch_object(patch).unwrap();
+    }
+    let terrain_ids = std::array::from_fn(|index| Uuid::from_u128(if index == 0 { 9300 } else { 9100 + index as u128 }));
+    let _ = world.observe_terrain_settings(source(1, 5100), TerrainSettings::new(terrain_ids, [0.0; 4], [64.0; 4]).unwrap()).unwrap();
+    scene.set_camera(camera(99.0));
+    scene.notify_world_change();
+    let arrivals = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!((2..=5).contains(&arrivals.requested.len()), "pose and terrain updates should request a few new textures");
+    assert!(arrivals.requested.iter().all(|request| matches!(request.request, Request::Texture { .. })));
+    for request in arrivals.requested {
+        let status = prepared_asset(request.request, test_support::texture::RGB_J2C.to_vec());
+        scene.complete_asset(request.ticket, status);
+    }
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(view.object_count(), 3000);
+    let positions = positions(&view);
+    for id in 1..=50 {
+        assert_eq!(positions[&(id as u128)], f64::from(200 + id));
+    }
+    assert_eq!(
+        view.objects()
+            .filter(|object| object.materials().is_some_and(|materials| materials.iter().any(|face| face.base_color_texture.is_some())))
+            .count(),
+        2
+    );
 }
 
 #[test]

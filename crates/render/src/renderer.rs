@@ -4,7 +4,7 @@ use std::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use egui::{ClippedPrimitive, TexturesDelta};
@@ -13,11 +13,12 @@ use math::DVec3;
 use wgpu::{
     AdapterInfo, Backends, Color, CommandEncoderDescriptor, CreateSurfaceError, CurrentSurfaceTexture, Device, DeviceDescriptor,
     ErrorFilter, InstanceDescriptor, LoadOp, Operations, PollError, PollType, PowerPreference, PresentMode, Queue,
-    RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor, RequestAdapterError, RequestAdapterOptions,
-    RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureViewDescriptor,
+    RenderPassColorAttachment, RenderPassDepthStencilAttachment, RenderPassDescriptor, RenderPassTimestampWrites, RequestAdapterError,
+    RequestAdapterOptions, RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureViewDescriptor,
 };
 
 use crate::geometry::{GeometryRenderer, PickError, Stats};
+use crate::gpu_timing::GpuTimings;
 use crate::scene::{Camera, SceneView};
 use crate::texture::{TextureCompletion, TextureJob};
 
@@ -80,6 +81,7 @@ pub struct Renderer {
     failure: Arc<Mutex<Option<wgpu::Error>>>,
     overlay: egui_wgpu::Renderer,
     geometry: GeometryRenderer,
+    gpu_timings: Option<GpuTimings>,
 }
 
 impl Renderer {
@@ -92,13 +94,18 @@ impl Renderer {
     pub fn poll(&mut self) -> Result<Progress, Error> {
         self.geometry.release_textures();
         let status = self.device.poll(PollType::Poll).map_err(Error::Poll)?;
+        if let Some(gpu_timings) = &mut self.gpu_timings {
+            gpu_timings.poll();
+        }
         if let Some(error) = self.failure.lock().unwrap_or_else(PoisonError::into_inner).take() {
             return Err(Error::Gpu(error));
         }
         if self.lost.load(Ordering::Acquire) {
             return Err(Error::DeviceLost);
         }
-        Ok(Progress { redraw: self.geometry.needs_frame(), pending: !status.is_queue_empty() })
+        let now = Instant::now();
+        let redraw_at = self.geometry.animation_deadline().filter(|deadline| *deadline > now);
+        Ok(Progress { redraw: self.geometry.needs_frame(now), pending: !status.is_queue_empty(), redraw_at })
     }
     pub async fn new(target: impl Into<SurfaceTarget<'static>>, width: u32, height: u32) -> Result<Self, Error> {
         let instance =
@@ -114,10 +121,14 @@ impl Renderer {
             .await
             .map_err(Error::Adapter)?;
         let info = adapter.get_info();
+        let supported_features = adapter.features();
+        let timestamp_features = supported_features & wgpu::Features::TIMESTAMP_QUERY;
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 label: Some("Radia scene"),
-                required_features: adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC,
+                required_features: (supported_features
+                    & (wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::INDIRECT_FIRST_INSTANCE))
+                    | timestamp_features,
                 ..Default::default()
             })
             .await
@@ -136,17 +147,25 @@ impl Renderer {
             }
         }));
         let mut config = surface.get_default_config(&adapter, width.max(1), height.max(1)).ok_or(Error::UnsupportedSurface)?;
-        config.format =
-            surface.get_capabilities(&adapter).formats.into_iter().find(|f| f.is_srgb()).ok_or(Error::UnsupportedColorFormat)?;
-        config.present_mode = PresentMode::Fifo;
-        config.desired_maximum_frame_latency = 2;
+        let capabilities = surface.get_capabilities(&adapter);
+        config.format = capabilities.formats.into_iter().find(|format| format.is_srgb()).ok_or(Error::UnsupportedColorFormat)?;
+        config.present_mode =
+            if capabilities.present_modes.contains(&PresentMode::Mailbox) { PresentMode::Mailbox } else { PresentMode::Fifo };
+        config.desired_maximum_frame_latency = 1;
+        tracing::info!(
+            present_mode = ?config.present_mode,
+            maximum_frame_latency = config.desired_maximum_frame_latency,
+            timestamp_queries = !timestamp_features.is_empty(),
+            "scene presentation configured"
+        );
         let scope = device.push_error_scope(ErrorFilter::Validation);
         let overlay = egui_wgpu::Renderer::new(&device, config.format, RendererOptions::default());
         let geometry = GeometryRenderer::new(&device, &queue, config.format);
+        let gpu_timings = if timestamp_features.is_empty() { None } else { GpuTimings::new(&device, queue.get_timestamp_period()) };
         if let Some(error) = scope.pop().await {
             return Err(Error::Gpu(error));
         }
-        let mut renderer = Self { surface, device, queue, config, size: [0, 0], info, lost, failure, overlay, geometry };
+        let mut renderer = Self { surface, device, queue, config, size: [0, 0], info, lost, failure, overlay, geometry, gpu_timings };
         renderer.resize(width, height);
         Ok(renderer)
     }
@@ -157,6 +176,14 @@ impl Renderer {
 
     pub fn stats(&self) -> Stats {
         self.geometry.stats
+    }
+
+    pub fn gpu_timings(&self) -> Option<(f64, f64)> {
+        self.gpu_timings.as_ref()?.latest()
+    }
+
+    pub fn gpu_timing_supported(&self) -> bool {
+        self.gpu_timings.is_some()
     }
 
     pub fn pick(&self, camera: Camera, ray: DVec3) -> Result<Option<DVec3>, PickError> {
@@ -239,6 +266,7 @@ impl Renderer {
         };
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor { label: Some("Scene frame") });
+        let timestamp_queries = self.gpu_timings.as_ref().filter(|timings| timings.recording()).map(GpuTimings::query_set);
         let screen = ScreenDescriptor { size_in_pixels: self.size, pixels_per_point: overlay.pixels_per_point };
         let commands = self.overlay.update_buffers(&self.device, &self.queue, &mut encoder, &overlay.primitives, &screen);
         let depth = if let Some((scene, camera)) = scene {
@@ -267,6 +295,11 @@ impl Renderer {
                     depth_ops: Some(Operations { load: LoadOp::Clear(0.0), store: StoreOp::Store }),
                     stencil_ops: None,
                 }),
+                timestamp_writes: timestamp_queries.map(|query_set| RenderPassTimestampWrites {
+                    query_set,
+                    beginning_of_pass_write_index: Some(0),
+                    end_of_pass_write_index: Some(1),
+                }),
                 ..Default::default()
             });
             if depth.is_some() {
@@ -282,11 +315,26 @@ impl Renderer {
                     resolve_target: None,
                     ops: Operations { load: LoadOp::Load, store: StoreOp::Store },
                 })],
+                timestamp_writes: timestamp_queries.map(|query_set| RenderPassTimestampWrites {
+                    query_set,
+                    beginning_of_pass_write_index: Some(2),
+                    end_of_pass_write_index: Some(3),
+                }),
                 ..Default::default()
             });
             self.overlay.render(&mut pass.forget_lifetime(), &overlay.primitives, &screen);
         }
+        if timestamp_queries.is_some()
+            && let Some(gpu_timings) = &self.gpu_timings
+        {
+            gpu_timings.resolve(&mut encoder);
+        }
         self.queue.submit(commands.into_iter().chain([encoder.finish()]));
+        if timestamp_queries.is_some()
+            && let Some(gpu_timings) = &mut self.gpu_timings
+        {
+            gpu_timings.submitted();
+        }
         self.geometry.submitted(admission);
         before_present();
         self.queue.present(frame);
@@ -306,6 +354,7 @@ pub struct Overlay {
 pub struct Progress {
     pub redraw: bool,
     pub pending: bool,
+    pub redraw_at: Option<Instant>,
 }
 
 pub struct Retirement {

@@ -1,3 +1,4 @@
+mod timing;
 mod window;
 
 use std::{

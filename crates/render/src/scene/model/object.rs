@@ -69,6 +69,10 @@ impl Object {
             && a.pbr_material_overrides == b.pbr_material_overrides
     }
 
+    pub(crate) fn same_render_appearance(&self, other: &Self) -> bool {
+        self.same_appearance(other) && self.materials() == other.materials()
+    }
+
     pub fn mesh_state(&self) -> Option<(MeshKey, &PreparedMesh)> {
         self.preparation.as_ref().map(|(key, state)| (*key, state))
     }

@@ -160,6 +160,10 @@ impl Storage {
             return None;
         }
         for page in &mut self.pages {
+            page.layout.reclaim();
+        }
+        self.pages.retain(|page| !page.layout.blocks.is_empty());
+        for page in &mut self.pages {
             if page.buffers.composition.is_some() != has_composition {
                 continue;
             }

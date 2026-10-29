@@ -19,7 +19,7 @@ use crate::scene::{Budget, MeshBuildError, PreparedMesh, SharedMesh, budget::Mes
 
 type Key = (SurfaceKind, Region);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub enum SurfaceKind {
     Water,
     Terrain(TerrainPatchId),

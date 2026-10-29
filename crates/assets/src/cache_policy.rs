@@ -79,7 +79,7 @@ fn score_candidate(candidate: EvictionCandidate, now: u64, decode_micros: u64) -
     let footprint = candidate.size.max(1);
     let decode_density =
         u128::from(decode_bytes).saturating_mul(1024).checked_div(u128::from(footprint)).unwrap_or(0).min(DECODE_DENSITY_CAP);
-    let value_density = 1024 + decode_density;
+    let value_density = (1024 + decode_density).min(4096);
     let value = recency.saturating_mul(u128::from(frequency)).saturating_mul(value_density) / 1024;
     let reason = if age > RECENCY_BUCKET.saturating_mul(8) {
         EvictionReason::Stale
@@ -158,6 +158,13 @@ mod tests {
         let expensive = policy.score(entry, 1000);
 
         assert!(expensive.value > cheap.value);
+    }
+
+    #[test]
+    fn reconstruction_multiplier_caps_at_four_x() {
+        let score = score_candidate(candidate(5, 1, 1000, FREQUENCY_CAP, Kind::Mesh), 1000, MAX_OBSERVED_DECODE_MICROS);
+
+        assert_eq!(score.value, RECENCY_SCALE * 16 * 4);
     }
 
     #[test]

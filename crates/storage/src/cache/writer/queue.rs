@@ -118,7 +118,9 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
     }
     loop {
         let batch = queue.receive_batch();
+        state.evictions_this_batch = 0;
         let mut commands = batch.commands.into_iter().peekable();
+        let mut limit_enforcement_attempted = false;
         while let Some(queued) = commands.next() {
             match queued.command {
                 Command::Put { key, bytes, reply } => {
@@ -157,8 +159,19 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
                 }
                 Command::SetLimit { limit, reply } => {
                     state.drain_invalid();
-                    reply_result(reply, state.set_limit(limit));
+                    let result = state.set_limit(limit).and_then(|()| {
+                        if limit_enforcement_attempted {
+                            return Ok(());
+                        }
+                        limit_enforcement_attempted = true;
+                        state.enforce_limit(limit)
+                    });
+                    reply_result(reply, result);
                     queue.complete(queued.bytes);
+                    #[cfg(test)]
+                    if state.hooks.check(super::WritePoint::SetLimitReplied).is_err() {
+                        return;
+                    }
                 }
                 Command::Flush { reply } => {
                     state.drain_invalid();
@@ -180,7 +193,8 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
         }
         state.drain_touches_best_effort();
         state.drain_invalid();
-        if state.accounted_size() > state.size_limit
+        if !limit_enforcement_attempted
+            && state.accounted_size() > state.size_limit
             && let Err(error) = state.enforce_limit(state.size_limit)
         {
             tracing::warn!(error = %error, "cache limit enforcement failed");

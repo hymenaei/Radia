@@ -45,6 +45,15 @@ pub enum AssetLookup {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AssetCacheEntriesByKind {
+    pub textures: usize,
+    pub pbr_materials: usize,
+    pub legacy_materials: usize,
+    pub environments: usize,
+    pub meshes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AssetCacheStats {
     pub hits: u64,
     pub misses: u64,
@@ -54,7 +63,7 @@ pub struct AssetCacheStats {
     pub dropped_writes: u64,
     pub size_bytes: u64,
     pub size_limit_bytes: u64,
-    pub entries_by_kind: [usize; 4],
+    pub entries_by_kind: AssetCacheEntriesByKind,
     pub protected_bytes: u64,
     pub recent_evictions: [Option<EvictionReason>; 8],
 }
@@ -226,12 +235,13 @@ impl AssetCache {
             dropped_writes: self.counters.dropped_writes.load(Ordering::Relaxed),
             size_bytes: self.storage.accounted_size(),
             size_limit_bytes: self.storage.size_limit(),
-            entries_by_kind: [
-                self.storage.namespace_entry_count(TEXTURES),
-                self.storage.namespace_entry_count(PBR_MATERIALS),
-                self.storage.namespace_entry_count(LEGACY_MATERIALS),
-                self.storage.namespace_entry_count(ENVIRONMENTS),
-            ],
+            entries_by_kind: AssetCacheEntriesByKind {
+                textures: self.storage.namespace_entry_count(TEXTURES),
+                pbr_materials: self.storage.namespace_entry_count(PBR_MATERIALS),
+                legacy_materials: self.storage.namespace_entry_count(LEGACY_MATERIALS),
+                environments: self.storage.namespace_entry_count(ENVIRONMENTS),
+                meshes: self.storage.namespace_entry_count(MESHES),
+            },
             protected_bytes: self.storage.protected_bytes(),
             recent_evictions: self.storage.recent_evictions(),
         }

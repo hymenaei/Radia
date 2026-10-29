@@ -659,8 +659,12 @@ impl SceneWindow {
                                 cache.protected_bytes as f64 / 1048576.0
                             ));
                             ui.label(format!(
-                                "Cached: {} textures, {} PBR, {} legacy, {} environments",
-                                cache.entries_by_kind[0], cache.entries_by_kind[1], cache.entries_by_kind[2], cache.entries_by_kind[3]
+                                "Cached: {} textures, {} PBR, {} legacy, {} environments, {} meshes",
+                                cache.entries_by_kind.textures,
+                                cache.entries_by_kind.pbr_materials,
+                                cache.entries_by_kind.legacy_materials,
+                                cache.entries_by_kind.environments,
+                                cache.entries_by_kind.meshes
                             ));
                             let reasons = cache
                                 .recent_evictions

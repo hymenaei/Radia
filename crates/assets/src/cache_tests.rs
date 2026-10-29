@@ -68,10 +68,12 @@ fn llsd_kinds_use_distinct_paths() {
     let legacy = resource(0xabcdef0123456789abcdef0123456789, Kind::LegacyMaterial);
     let environment = resource(0xabcdef0123456789abcdef0123456789, Kind::Environment);
     let mesh = resource(0xabcdef0123456789abcdef0123456789, Kind::Mesh);
+    let texture = resource(0xabcdef0123456789abcdef0123456788, Kind::Texture);
     cache.put_complete(pbr, b"pbr llsd".to_vec()).expect("store PBR material");
     cache.put_complete(legacy, b"legacy llsd".to_vec()).expect("store legacy material");
     cache.put_complete(environment, b"environment llsd".to_vec()).expect("store environment");
     cache.put_complete(mesh, b"mesh payload".to_vec()).expect("store mesh");
+    cache.put_complete(texture, b"texture payload".to_vec()).expect("store texture");
 
     let name = "abcdef01-2345-6789-abcd-ef0123456789";
     assert_eq!(std::fs::read(directory.path().join(format!("assets/materials/pbr/ab/{name}.llsd"))).expect("read PBR file"), b"pbr llsd");
@@ -85,6 +87,29 @@ fn llsd_kinds_use_distinct_paths() {
     );
     assert_eq!(std::fs::read(directory.path().join(format!("assets/meshes/ab/{name}.llmesh"))).expect("read mesh file"), b"mesh payload");
     assert!(!directory.path().join("assets/animations").exists());
+    assert_eq!(
+        cache.stats().entries_by_kind,
+        AssetCacheEntriesByKind { textures: 1, pbr_materials: 1, legacy_materials: 1, environments: 1, meshes: 1 }
+    );
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
+fn open_uses_asset_policy_for_real_eviction() {
+    const ENTRY_BYTES: usize = 16 * 1024;
+    let directory = tempdir().expect("cache directory");
+    let cache = AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache");
+    let expensive_mesh = resource(60, Kind::Mesh);
+    let cheap_texture = resource(61, Kind::Texture);
+    cache.observe_decode(Kind::Mesh, std::time::Duration::from_secs(30));
+    cache.put_complete(expensive_mesh, vec![1; ENTRY_BYTES]).expect("store expensive mesh first");
+    let one_entry_limit = cache.accounted_size();
+    cache.put_complete(cheap_texture, vec![2; ENTRY_BYTES]).expect("store cheap texture second");
+
+    cache.set_size_limit(one_entry_limit).expect("evict under asset cache limit");
+
+    std::assert_matches!(cache.lookup(expensive_mesh), AssetLookup::Hit(_));
+    assert_eq!(cache.lookup(cheap_texture), AssetLookup::Miss);
     cache.shutdown().expect("close cache");
 }
 

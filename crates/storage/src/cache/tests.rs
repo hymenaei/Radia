@@ -469,6 +469,46 @@ fn size_limit_evicts_least_recently_used() {
 }
 
 #[test]
+fn set_limit_enforces_once_per_writer_batch() {
+    let directory = tempdir().expect("cache directory");
+    let mut cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    cache.put(key(100), vec![1; 1024]).expect("store first entry");
+    let one_entry_limit = cache.accounted_size();
+    for id in 101..140 {
+        cache.put(key(id), vec![1; 1024]).expect("store entry");
+    }
+    let (data_started, resume_data) = cache.pause_at(WritePoint::DataTempCreated);
+    let (limit_started, resume_limit) = cache.pause_at(WritePoint::SetLimitReplied);
+    cache.arm_fault(WritePoint::DataWriteFailure);
+    thread::scope(|scope| {
+        let blocker = scope.spawn(|| cache.put(key(200), vec![0; 1024]));
+        data_started.recv_timeout(Duration::from_secs(3)).expect("blocker reached its data write");
+        let (limit_reply, limit_receiver) = std::sync::mpsc::sync_channel(0);
+        cache.queue.try_send(writer::Command::SetLimit { limit: one_entry_limit, reply: limit_reply }, 0).expect("queue limit update");
+        let (put_reply, put_receiver) = std::sync::mpsc::sync_channel(0);
+        cache
+            .queue
+            .try_send(writer::Command::Put { key: key(201), bytes: vec![2; 1024], reply: put_reply }, 1024)
+            .expect("queue write after limit update");
+        resume_data.send(()).expect("resume blocker write");
+        assert_matches!(
+            blocker.join().expect("blocker thread"),
+            Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
+        );
+        limit_receiver.recv_timeout(Duration::from_secs(3)).expect("limit reply").expect("set cache limit");
+        limit_started.recv_timeout(Duration::from_secs(3)).expect("limit command finished");
+
+        let (shutdown_reply, shutdown_receiver) = std::sync::mpsc::sync_channel(0);
+        cache.queue.send_terminal(writer::Command::Shutdown { reply: shutdown_reply }).expect("queue shutdown after limit batch");
+        resume_limit.send(()).expect("resume writer after limit batch");
+        assert_matches!(put_receiver.recv_timeout(Duration::from_secs(3)).expect("put reply"), Err(StorageError::TooLarge));
+        shutdown_receiver.recv_timeout(Duration::from_secs(3)).expect("shutdown reply").expect("shutdown cache");
+    });
+    cache.worker.take().expect("cache worker").join().expect("join cache worker");
+    assert_eq!(cache.entry_count(), 8);
+}
+
+#[test]
 fn protection_tracks_live_keys() {
     let directory = tempdir().expect("single cache directory");
     let single = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open single cache");
@@ -508,32 +548,68 @@ fn protection_tracks_live_keys() {
 }
 
 #[test]
-fn protected_scan_reaches_unprotected() {
+fn protected_scan_reaches_unprotected_beyond_four_turns() {
     const ENTRY_BYTES: usize = 16 * 1024;
     const ENTRY_BYTES_U64: u64 = 16 * 1024;
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
     let mut protections = Vec::new();
-    for id in 0..129u16 {
-        let value = u8::try_from(id).expect("test key fits a byte");
+    for id in 0..513u16 {
+        let value = u8::try_from(id % 256).expect("wrapped test value fits a byte");
         cache.put(key(id), vec![value; ENTRY_BYTES]).expect("store entry");
-        if id < 128 {
+        if id < 512 {
             protections.push(cache.protect(key(id)).expect("protect live entry"));
         }
     }
     let current_size = cache.accounted_size();
     cache.set_size_limit(current_size).expect("set limit to current size");
 
-    cache.put(key(129), vec![129; ENTRY_BYTES]).expect("evict beyond the protected scan window");
+    cache.put(key(513), vec![1; ENTRY_BYTES]).expect("evict beyond four bounded scan turns");
 
-    assert_eq!(cache.entry_count(), 129);
-    assert_eq!(cache.protected_bytes(), 128 * ENTRY_BYTES_U64);
-    for id in 0..128u16 {
+    assert_eq!(cache.entry_count(), 513);
+    assert_eq!(cache.protected_bytes(), 512 * ENTRY_BYTES_U64);
+    for id in 0..512u16 {
         assert_matches!(cache.lookup(key(id)), Lookup::Hit(_));
     }
-    assert_eq!(cache.lookup(key(128)), Lookup::Miss);
-    assert_matches!(cache.lookup(key(129)), Lookup::Hit(_));
+    assert_eq!(cache.lookup(key(512)), Lookup::Miss);
+    assert_matches!(cache.lookup(key(513)), Lookup::Hit(_));
     drop(protections);
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
+fn staged_replacement_can_be_evicted_and_restored_in_one_batch() {
+    const ENTRY_BYTES: usize = 16 * 1024;
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    cache.put(key(70), vec![7; ENTRY_BYTES]).expect("store original A");
+    cache.set_size_limit(cache.accounted_size()).expect("limit cache to one entry");
+    let (started, resume) = cache.pause_at(WritePoint::DataTempCreated);
+    cache.arm_fault(WritePoint::DataWriteFailure);
+
+    thread::scope(|scope| {
+        let blocker = scope.spawn(|| cache.put(key(900), vec![0; ENTRY_BYTES]));
+        started.recv_timeout(Duration::from_secs(3)).expect("blocker reached its data write");
+        let mut replies = Vec::new();
+        for (key, value) in [(key(70), 1), (key(71), 2), (key(70), 3)] {
+            let (reply, receiver) = std::sync::mpsc::sync_channel(0);
+            let bytes = vec![value; ENTRY_BYTES];
+            cache.queue.try_send(writer::Command::Put { key, bytes, reply }, ENTRY_BYTES).expect("queue staged put");
+            replies.push(receiver);
+        }
+        resume.send(()).expect("resume blocker write");
+        assert_matches!(
+            blocker.join().expect("blocker thread"),
+            Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
+        );
+        for receiver in replies {
+            receiver.recv_timeout(Duration::from_secs(3)).expect("staged put reply").expect("commit staged put");
+        }
+    });
+
+    assert_matches!(cache.lookup(key(70)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == vec![3; ENTRY_BYTES]);
+    assert_eq!(cache.lookup(key(71)), Lookup::Miss);
+    assert_eq!(cache.entry_count(), 1);
     cache.shutdown().expect("close cache");
 }
 
@@ -628,7 +704,8 @@ fn replacement_crash_never_trusts_bytes() {
             | WritePoint::LookupHashMismatch
             | WritePoint::IndexTouchBusy
             | WritePoint::PutQueued
-            | WritePoint::WriterReady => unreachable!(),
+            | WritePoint::WriterReady
+            | WritePoint::SetLimitReplied => unreachable!(),
         }
         cache.shutdown().expect("close recovered cache");
     }

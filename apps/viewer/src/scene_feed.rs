@@ -604,6 +604,7 @@ mod tests {
             seed: 1,
         };
         let budget = Budget::default();
+        let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (_, view) = Reconciler::new(budget.clone());
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, _) = oneshot::channel();
@@ -612,6 +613,7 @@ mod tests {
             runtime: Handle::current(),
             view,
             budget,
+            assets: assets.handle(),
             agent_id,
             agent: None,
             water_height: None,

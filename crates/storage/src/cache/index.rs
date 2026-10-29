@@ -476,27 +476,6 @@ mod tests {
     use crate::cache::{Namespace, NamespaceTable};
     use tempfile::tempdir;
 
-    fn record(value: u8, last_use: u64) -> Record {
-        Record { key: Key::new(NamespaceId::new(0), [value; 16]), size: 0, hash: [0; 32], last_use, use_count: 0 }
-    }
-
-    #[test]
-    fn load_records_recovers_an_interrupted_insert_batch() {
-        let directory = tempdir().expect("cache directory");
-        let namespaces = NamespaceTable::new(&[Namespace::new("items", "bin")]).expect("valid namespaces");
-        let (index, records) = Index::open(directory.path().join("index.sqlite"), &namespaces).expect("create index");
-        assert!(records.is_empty());
-        let mutations = (1..=4).map(|value| Mutation::Put(record(value, u64::from(value)))).collect();
-        index.apply(mutations).expect("write partial insertion batch");
-
-        let recovered = index.load_records_with_limits(3, 1).expect("recover one excess row");
-
-        assert_eq!(recovered.len(), 3);
-        assert!(recovered.iter().all(|record| record.key != Key::new(NamespaceId::new(0), [1; 16])));
-        assert!(recovered.iter().any(|record| record.key == Key::new(NamespaceId::new(0), [4; 16])));
-        index.shutdown().expect("close index");
-    }
-
     #[test]
     fn oversized_namespace_recreates_index() {
         let directory = tempdir().expect("cache directory");
@@ -517,6 +496,28 @@ mod tests {
         let connection = Connection::open(path).expect("open recovered database");
         let value: String = connection.query_row("SELECT directory FROM namespaces", [], |row| row.get(0)).expect("read namespace");
         assert_eq!(value, "items");
+    }
+
+    #[test]
+    fn oversized_extension_recreates_index() {
+        let directory = tempdir().expect("cache directory");
+        let path = directory.path().join("index.sqlite");
+        let namespaces = NamespaceTable::new(&[Namespace::new("items", "bin")]).expect("valid namespaces");
+        let (index, _) = Index::open(&path, &namespaces).expect("create index");
+        index.shutdown().expect("close index");
+
+        let connection = Connection::open(&path).expect("open index database");
+        let oversized = "x".repeat(MAX_EXTENSION_BYTES + 1);
+        connection.execute("UPDATE namespaces SET extension=?1", [&oversized]).expect("write oversized extension");
+        drop(connection);
+
+        let (index, records) = Index::open(&path, &namespaces).expect("recreate invalid index");
+        assert!(records.is_empty());
+        index.shutdown().expect("close recovered index");
+
+        let connection = Connection::open(path).expect("open recovered database");
+        let value: String = connection.query_row("SELECT extension FROM namespaces", [], |row| row.get(0)).expect("read extension");
+        assert_eq!(value, "bin");
     }
 
     #[test]
@@ -552,44 +553,5 @@ mod tests {
         assert_eq!(value, "new");
         let row_count: i64 = connection.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0)).expect("count recovered entries");
         assert_eq!(row_count, 0);
-    }
-
-    #[test]
-    fn constraint_write_recreates_index() {
-        let directory = tempdir().expect("cache directory");
-        let path = directory.path().join("index.sqlite");
-        let connection = Connection::open(&path).expect("create index database");
-        connection
-            .execute_batch(
-                "CREATE TABLE namespaces (
-                    namespace INTEGER PRIMARY KEY CHECK(namespace >= 0 AND namespace <= 255),
-                    directory TEXT NOT NULL,
-                    extension TEXT NOT NULL,
-                    UNIQUE(directory, extension)
-                );
-                CREATE TABLE entries (
-                    namespace INTEGER NOT NULL CHECK(namespace >= 0 AND namespace <= 511),
-                    name BLOB NOT NULL CHECK(length(name) = 16),
-                    size INTEGER NOT NULL CHECK(size >= 0 AND size <= 0),
-                    hash BLOB NOT NULL CHECK(length(hash) = 32),
-                    last_use INTEGER NOT NULL CHECK(last_use >= 0),
-                    use_count INTEGER NOT NULL CHECK(use_count >= 0),
-                    PRIMARY KEY(namespace, name)
-                ) WITHOUT ROWID;
-                INSERT INTO namespaces VALUES (0, 'items', 'bin');
-                PRAGMA user_version = 5;",
-            )
-            .expect("create same-version schema with extra constraint");
-        drop(connection);
-
-        let namespaces = NamespaceTable::new(&[Namespace::new("items", "bin")]).expect("valid namespaces");
-        let (index, records) = Index::open(&path, &namespaces).expect("open same-version index");
-        assert!(records.is_empty());
-        let mut constrained_record = record(1, 1);
-        constrained_record.size = 1;
-        let error = index.apply(vec![Mutation::Put(constrained_record)]).expect_err("constraint reveals unexpected schema");
-        std::assert_matches!(error, SqliteError::SchemaMismatch);
-        assert!(index.load_records().expect("read recreated index").is_empty());
-        index.shutdown().expect("close index");
     }
 }

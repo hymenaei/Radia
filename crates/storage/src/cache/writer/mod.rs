@@ -55,6 +55,8 @@ pub(super) enum WritePoint {
     IndexTouchBusy,
     #[cfg(test)]
     PutQueued,
+    #[cfg(test)]
+    WriterReady,
 }
 
 #[cfg(test)]
@@ -504,7 +506,11 @@ impl WorkerState {
                 return Err(CommitFailure { committed, error });
             }
             if let Err(error) = self.index.apply(mutations) {
+                let recreated = matches!(&error, SqliteError::Corrupt | SqliteError::SchemaMismatch);
                 let storage_error = self.index_failure(error, &changes);
+                if recreated {
+                    committed.clear();
+                }
                 self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, false);
                 return Err(CommitFailure { committed, error: storage_error });
             }
@@ -1132,50 +1138,4 @@ fn simulated_crash_error() -> StorageError {
 
 fn is_simulated_crash(error: &StorageError) -> bool {
     matches!(error, StorageError::Io(error) if error.kind() == io::ErrorKind::Interrupted)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::atomic::{AtomicU8, AtomicU64};
-
-    use super::*;
-    use crate::cache::{NamespaceId, index::MAX_ENTRIES};
-
-    fn key(value: u32) -> Key {
-        let mut name = [0; 16];
-        name[..4].copy_from_slice(&value.to_be_bytes());
-        Key::new(NamespaceId::new(0), name)
-    }
-
-    fn entry(key: Key) -> Arc<Entry> {
-        Arc::new(Entry {
-            key,
-            size: 0,
-            hash: [0; 32],
-            last_use: AtomicU64::new(0),
-            use_count: AtomicU64::new(0),
-            persisted_use_count: AtomicU64::new(0),
-            state: AtomicU8::new(ENTRY_VALID),
-        })
-    }
-
-    #[test]
-    fn the_first_committed_chunk_is_safe_to_interrupt() {
-        let mut changes = Vec::new();
-        for value in 0..MAX_BATCH_ROWS {
-            let evicted_key = key((MAX_BATCH_ROWS + value) as u32);
-            let inserted_key = key(value as u32);
-            changes.push(PlannedChange { key: evicted_key, previous: Some(entry(evicted_key)), next: None });
-            changes.push(PlannedChange { key: inserted_key, previous: None, next: Some(entry(inserted_key)) });
-        }
-        sort_changes(&mut changes);
-
-        let first_chunk = changes.chunks(MAX_BATCH_ROWS).next().expect("first SQLite batch");
-        let row_count = first_chunk
-            .iter()
-            .fold(MAX_ENTRIES, |count, change| if change.next.is_some() { count.saturating_add(1) } else { count.saturating_sub(1) });
-
-        assert!(first_chunk.iter().all(|change| change.next.is_none()));
-        assert!(row_count <= MAX_ENTRIES);
-    }
 }

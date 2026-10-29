@@ -109,6 +109,10 @@ impl WriteQueue {
 }
 
 pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueue>) {
+    #[cfg(test)]
+    if state.hooks.check(super::WritePoint::WriterReady).is_err() {
+        return;
+    }
     loop {
         let batch = queue.receive_batch();
         let mut commands = batch.commands.into_iter().peekable();

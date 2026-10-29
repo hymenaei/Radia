@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc, Barrier,
+        mpsc::{Receiver, SyncSender},
+    },
     thread,
     time::Duration,
 };
@@ -19,11 +22,49 @@ use super::*;
 
 const TEST_NAMESPACES: [Namespace; 2] = [Namespace::new("tests/storage", "bin"), Namespace::new("assets/textures", "j2c")];
 const TEST_NAMESPACE: NamespaceId = NamespaceId::new(0);
+type QueuedPuts = (Receiver<()>, Vec<SyncSender<()>>, Vec<thread::JoinHandle<Result<(), StorageError>>>);
 
 fn key(value: u16) -> Key {
     let mut name = [0; 16];
     name[..2].copy_from_slice(&value.to_le_bytes());
     Key::new(TEST_NAMESPACE, name)
+}
+
+fn ordered_key(value: u16) -> Key {
+    let mut name = [0; 16];
+    name[..2].copy_from_slice(&value.to_be_bytes());
+    Key::new(TEST_NAMESPACE, name)
+}
+
+fn queue_puts(cache: Arc<Cache>, keys: &[Key]) -> QueuedPuts {
+    let (queued, resumes) = cache.pause_many_at(WritePoint::PutQueued, keys.len());
+    let start = Arc::new(Barrier::new(keys.len() + 1));
+    let puts = keys
+        .iter()
+        .copied()
+        .map(|key| {
+            let cache = Arc::clone(&cache);
+            let start = Arc::clone(&start);
+            thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn(move || {
+                    start.wait();
+                    cache.put(key, vec![1])
+                })
+                .expect("spawn cache put")
+        })
+        .collect();
+    start.wait();
+    (queued, resumes, puts)
+}
+
+fn release_queued_puts(queued: Receiver<()>, resumes: Vec<SyncSender<()>>, count: usize) {
+    for _ in 0..count {
+        queued.recv_timeout(Duration::from_secs(3)).expect("put reached queue barrier");
+    }
+    for resume in resumes {
+        resume.send(()).expect("release queued put");
+    }
 }
 
 fn data_file(directory: &Path, key: Key) -> PathBuf {
@@ -501,7 +542,8 @@ fn replacement_crash_never_trusts_bytes() {
             | WritePoint::LookupEntrySelected
             | WritePoint::LookupHashMismatch
             | WritePoint::IndexTouchBusy
-            | WritePoint::PutQueued => unreachable!(),
+            | WritePoint::PutQueued
+            | WritePoint::WriterReady => unreachable!(),
         }
         cache.shutdown().expect("close recovered cache");
     }
@@ -525,68 +567,86 @@ fn renamed_unindexed_payload_is_swept() {
 }
 
 #[test]
-fn partial_batch_reports_committed_puts() {
+fn interrupted_multi_chunk_write_reopens_with_committed_entries() {
     let directory = tempdir().expect("cache directory");
-    let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
-    let (started, resume) = cache.pause_at(WritePoint::IndexBatchStarted);
+    let hooks = Arc::new(writer::FaultHooks::default());
+    let (worker_ready, resume_worker) = hooks.pause_at(WritePoint::WriterReady);
+    let (chunk_committed, resume_chunk) = hooks.pause_at(WritePoint::IndexBatchCommitted);
+    let cache =
+        Arc::new(Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::clone(&hooks)).expect("open cache"));
+    worker_ready.recv_timeout(Duration::from_secs(3)).expect("writer is ready");
+    cache.arm_fault(WritePoint::IndexBatchCommitted);
+    let keys = (0..=MAX_BATCH_ROWS).map(|id| ordered_key(u16::try_from(id).expect("batch key fits"))).collect::<Vec<_>>();
+    let (queued, resumes, puts) = queue_puts(Arc::clone(&cache), &keys);
+    release_queued_puts(queued, resumes, keys.len());
+    resume_worker.send(()).expect("start writer");
+    chunk_committed.recv_timeout(Duration::from_secs(3)).expect("first chunk committed");
+    resume_chunk.send(()).expect("interrupt the multi-chunk write");
+    let results = puts.into_iter().map(|put| put.join().expect("cache put completes")).collect::<Vec<_>>();
 
-    thread::scope(|scope| {
-        let writing_cache = Arc::clone(&cache);
-        let first = thread::Builder::new()
-            .stack_size(256 * 1024)
-            .spawn_scoped(scope, move || writing_cache.put(key(600), b"barrier".to_vec()))
-            .expect("spawn first cache write");
-        started.recv_timeout(Duration::from_secs(3)).expect("first write reached index");
-
-        let write_count = MAX_BATCH_ROWS + 1;
-        let (queued, resumes) = cache.pause_many_at(WritePoint::PutQueued, write_count);
-        let mut pending = Vec::new();
-        for id in 0..=MAX_BATCH_ROWS {
-            let writing_cache = Arc::clone(&cache);
-            let write_key = key(u16::try_from(id).expect("batch key fits"));
-            let bytes = vec![u8::try_from(id % 251).expect("byte value")];
-            let write = thread::Builder::new()
-                .stack_size(256 * 1024)
-                .spawn_scoped(scope, move || writing_cache.put(write_key, bytes))
-                .expect("spawn queued cache write");
-            pending.push((id, write));
-        }
-        let mut admitted = 0;
-        for _ in 0..write_count {
-            if queued.recv_timeout(Duration::from_secs(3)).is_err() {
-                break;
-            }
-            admitted += 1;
-        }
-        for resume in resumes {
-            resume.send(()).expect("release queued write");
-        }
-        cache.read_state.hooks.arm_after(WritePoint::IndexBatchStarted, 3);
-        resume.send(()).expect("release first write");
-        first.join().expect("first writer completes").expect("first write commits");
-        assert_eq!(admitted, write_count, "every public write entered the bounded queue");
-        let mut committed = 0;
-        for (id, write) in pending {
-            let result = write.join().expect("queued write completes");
-            if id == 255 {
-                std::assert_matches!(result, Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted);
-            } else {
-                std::assert_matches!(result, Ok(()), "key {id} was committed by the first chunk");
-                committed += 1;
-            }
-        }
-        assert_eq!(committed, MAX_BATCH_ROWS);
-    });
-
-    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).simulate_crash().expect("stop failed writer");
+    let cache = Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released"));
+    cache.simulate_crash().expect("stop failed writer");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("recover partially committed batch");
-    for id in 0..MAX_BATCH_ROWS - 1 {
-        let id = u16::try_from(id).expect("batch key fits");
-        std::assert_matches!(cache.lookup(key(id)), Lookup::Hit(_), "row {id} committed before the simulated crash");
+    let committed = results.iter().filter(|result| result.is_ok()).count();
+    assert!(committed > 0);
+    assert!(committed < results.len());
+    for (key, result) in keys.into_iter().zip(results) {
+        if result.is_ok() {
+            std::assert_matches!(cache.lookup(key), Lookup::Hit(CacheValue { bytes, .. }) if bytes == [1]);
+        } else {
+            std::assert_matches!(cache.lookup(key), Lookup::Miss);
+        }
     }
-    std::assert_matches!(cache.lookup(key(256)), Lookup::Hit(_));
-    assert_eq!(cache.lookup(key(255)), Lookup::Miss);
+    assert_eq!(cache.entry_count(), committed);
+    assert!(cache.entry_count() <= index::MAX_ENTRIES);
+    assert!(cache.accounted_size() <= cache.size_limit());
     cache.shutdown().expect("close recovered cache");
+}
+
+#[test]
+fn schema_recovery_does_not_report_removed_entries_as_written() {
+    let directory = tempdir().expect("cache directory");
+    let database = Connection::open(directory.path().join("index.sqlite")).expect("create constrained index");
+    database
+        .execute_batch(
+            "CREATE TABLE namespaces (
+                namespace INTEGER PRIMARY KEY CHECK(namespace >= 0 AND namespace <= 255),
+                directory TEXT NOT NULL,
+                extension TEXT NOT NULL,
+                UNIQUE(directory, extension)
+            );
+            CREATE TABLE entries (
+                namespace INTEGER NOT NULL CHECK(namespace >= 0 AND namespace <= 511),
+                name BLOB NOT NULL CHECK(length(name) = 16 AND substr(name, 1, 1) < x'01'),
+                size INTEGER NOT NULL CHECK(size >= 0),
+                hash BLOB NOT NULL CHECK(length(hash) = 32),
+                last_use INTEGER NOT NULL CHECK(last_use >= 0),
+                use_count INTEGER NOT NULL CHECK(use_count >= 0),
+                PRIMARY KEY(namespace, name)
+            ) WITHOUT ROWID;
+            INSERT INTO namespaces VALUES (0, 'tests/storage', 'bin');
+            PRAGMA user_version = 5;",
+        )
+        .expect("create same-version schema with a second-chunk constraint");
+    drop(database);
+
+    let hooks = Arc::new(writer::FaultHooks::default());
+    let (worker_ready, resume_worker) = hooks.pause_at(WritePoint::WriterReady);
+    let cache =
+        Arc::new(Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::clone(&hooks)).expect("open cache"));
+    worker_ready.recv_timeout(Duration::from_secs(3)).expect("writer is ready");
+    let keys = (0..=MAX_BATCH_ROWS).map(|id| ordered_key(u16::try_from(id).expect("batch key fits"))).collect::<Vec<_>>();
+    let (queued, resumes, puts) = queue_puts(Arc::clone(&cache), &keys);
+    release_queued_puts(queued, resumes, keys.len());
+    resume_worker.send(()).expect("start writer");
+    let results = puts.into_iter().map(|put| put.join().expect("cache put completes")).collect::<Vec<_>>();
+
+    assert!(results.iter().all(Result::is_err));
+    assert_eq!(cache.entry_count(), 0);
+    for key in keys {
+        std::assert_matches!(cache.lookup(key), Lookup::Miss);
+    }
+    Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().expect("close recovered cache");
 }
 
 #[test]

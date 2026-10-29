@@ -19,6 +19,11 @@ pub(super) fn scene_with_scales(alpha: u8, scales: [Vec3; 2]) -> (Reconciler, Sc
 }
 
 pub(super) fn scene_with_mapping(alpha: u8, scales: [Vec3; 2], mapping: world::TextureMapping) -> (Reconciler, SceneView, Camera) {
+    let (_, scene, view, camera) = scene_with_world(alpha, scales, mapping);
+    (scene, view, camera)
+}
+
+pub(super) fn scene_with_world(alpha: u8, scales: [Vec3; 2], mapping: world::TextureMapping) -> (World, Reconciler, SceneView, Camera) {
     let mut world = World::new(WorldLimits {
         max_region_registrations: 1,
         max_entities: 2,
@@ -86,7 +91,7 @@ pub(super) fn scene_with_mapping(alpha: u8, scales: [Vec3; 2], mapping: world::T
             ReconcileStep::Idle => {
                 assert_eq!(view.object_count(), 2);
                 assert!(view.objects().all(|object| object.mesh().is_some() && object.materials().is_some()));
-                return (scene, view, camera);
+                return (world, scene, view, camera);
             }
             _ => panic!("fixture stopped before publishing geometry"),
         }

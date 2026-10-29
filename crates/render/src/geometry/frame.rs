@@ -78,6 +78,10 @@ impl GeometryRenderer {
         times.visibility = visibility_started.elapsed();
 
         let previous_mesh_state = self.cache.mesh_state;
+        let mut batches_invalidated = previous_mesh_state != self.memory.mesh_state();
+        if batches_invalidated {
+            self.draw_list.invalidate_batches();
+        }
         let meshes_started = Instant::now();
         let candidate_mesh_missing = if candidates_changed || update.mesh_dirty { self.rebuild_visible_meshes(camera) } else { false };
         let mesh_progress = candidate_mesh_missing
@@ -107,6 +111,7 @@ impl GeometryRenderer {
         }
         if self.cache.mesh_state != previous_mesh_state {
             self.draw_list.invalidate_batches();
+            batches_invalidated = true;
         }
         let rebuild_visible = candidates_changed || mesh_progress;
         if rebuild_visible {
@@ -167,7 +172,7 @@ impl GeometryRenderer {
             self.draw_list.upload_patch(&self.queue, &self.instances, !blended_sorted);
         }
         let draw_updates_time = draw_updates_started.elapsed();
-        let draw_commands_changed = layout || blended_sorted;
+        let draw_commands_changed = layout || blended_sorted || batches_invalidated;
         let draw_batches_started = Instant::now();
         if draw_commands_changed {
             self.draw_list.build_draw_batches(&self.meshes, self.indirect_first_instance);
@@ -245,7 +250,7 @@ impl GeometryRenderer {
             key,
             textures: self.textures.state(),
             meshes: self.memory.mesh_state(),
-            more_meshes: !self.pending_meshes.is_empty() && uploaded > 0,
+            more_meshes: !self.pending_meshes.is_empty() && (uploaded > 0 || self.cache.mesh_state != previous_mesh_state),
             animation_deadline,
         });
         times.draw_list += instances_started.elapsed();

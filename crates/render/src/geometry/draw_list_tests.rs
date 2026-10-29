@@ -11,7 +11,7 @@ use utils::AssetId;
 use uuid::Uuid;
 use world::Region;
 
-use super::{DrawKey, DrawList};
+use super::{DrawKey, DrawList, MAX_FACE_INSTANCES};
 use crate::{
     geometry::{
         ShadingMode,
@@ -65,6 +65,72 @@ fn blended_parameter_patch_does_not_sort() {
     let stats = list.patch(&mut items.items, &[(index, 0)], &[], camera);
     assert_eq!(stats.faces_patched, 1);
     assert!(!stats.blended_sorted);
+}
+
+#[test]
+fn overflow_omits_items_until_within_budget() {
+    let (_scene, view, _) = super::super::fixtures::scene(255);
+    let object = view.objects().next().expect("fixture object");
+    let (_, mesh) = object.mesh().expect("fixture mesh");
+    let mesh = mesh.clone();
+    let textures = [loaded_texture(9_100_001), loaded_texture(9_100_002)];
+    let camera = camera(0.0);
+    let origin = super::super::instance::scene_origin(camera.position());
+    let faces_per_item = MAX_FACE_INSTANCES / 2 + 1;
+    let mut items = FrameCache::default();
+    let mut list = DrawList::default();
+    let mut indices = Vec::new();
+
+    for (slot, style, x) in [(0, 0, 1.0), (1, 3, 100.0)] {
+        let id = item_id(slot);
+        let mut item = new_item(id, style, 0.0, origin, &mesh, &textures, &mut list);
+        item.position = DVec3::new(x, 0.0, 0.0);
+        let first_face = item.faces.pop().expect("test item face");
+        let center = item.info.centers[0];
+        let scale = item.scale;
+        let mut faces = Vec::with_capacity(faces_per_item);
+        faces.push(first_face);
+        for _ in 1..faces_per_item {
+            faces.push(new_face(id, style, &mesh, center, scale, &textures, &mut list));
+        }
+        item.faces = faces;
+        indices.push(items.insert_item(item).expect("test item index"));
+    }
+
+    let visible = indices.clone();
+    let stats = list.layout(&[], &visible, &mut items.items, camera);
+    let omitted = items.items.get(indices[1]).expect("omitted item");
+    let emitted = list.draws().iter().map(|draw| draw.count as usize).sum::<usize>();
+    let retained_slots: HashSet<_> =
+        items.items.get(indices[0]).expect("retained item").faces.iter().filter_map(|face| face.slot).collect();
+
+    assert_eq!(stats.omitted_faces, faces_per_item);
+    assert!(list.instance_count <= MAX_FACE_INSTANCES);
+    assert_eq!(emitted, list.instance_count);
+    assert_eq!(retained_slots.len(), faces_per_item);
+    assert!(retained_slots.iter().all(|slot| usize::try_from(*slot).is_ok_and(|slot| slot < MAX_FACE_INSTANCES)));
+    assert!(omitted.faces.iter().all(|face| face.slot.is_none()), "omitted items cannot own instance slots");
+    assert!(list.draws().iter().all(|draw| draw.pipeline != Pipeline::Blend), "omitted items cannot appear in draw commands");
+
+    let retained_faces = MAX_FACE_INSTANCES - faces_per_item - 1;
+    let removed = items.items.get_mut(indices[1]).expect("second item").faces.split_off(retained_faces);
+    list.release_faces(&removed);
+    let stats = list.layout(&visible, &visible, &mut items.items, camera);
+    let emitted = list.draws().iter().map(|draw| draw.count as usize).sum::<usize>();
+    let slots: HashSet<_> = indices
+        .iter()
+        .filter_map(|index| items.items.get(*index))
+        .flat_map(|item| item.faces.iter().filter_map(|face| face.slot))
+        .collect();
+
+    assert_eq!(stats.omitted_faces, 0);
+    assert_eq!(list.instance_count, faces_per_item + retained_faces);
+    assert_eq!(emitted, list.instance_count);
+    assert_eq!(slots.len(), list.instance_count);
+    assert!(slots.iter().all(|slot| usize::try_from(*slot).is_ok_and(|slot| slot < MAX_FACE_INSTANCES)));
+    assert!(list.instance_count < MAX_FACE_INSTANCES);
+    assert!(indices.iter().all(|index| items.items.get(*index).is_some_and(|item| item.faces.iter().all(|face| face.slot.is_some()))));
+    assert!(list.draws().iter().any(|draw| draw.pipeline == Pipeline::Blend), "restored items return to draw commands");
 }
 
 proptest! {

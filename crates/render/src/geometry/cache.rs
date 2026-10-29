@@ -336,6 +336,9 @@ impl GeometryRenderer {
                     self.cache.animated_items.insert(index);
                 }
                 self.cache.objects.insert(entity, index);
+                if old_id == Some(id) {
+                    update.pose_items.push(index);
+                }
             }
             update.layout_changed = true;
             if old_id != Some(id) {

@@ -635,6 +635,7 @@ impl DrawList {
 
     pub(super) fn invalidate_batches(&mut self) {
         self.groups.invalidate_batches();
+        self.draw_batches.clear();
     }
 
     pub(super) fn texture_demands(&self) -> &[TextureDemand] {

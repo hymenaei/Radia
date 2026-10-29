@@ -306,6 +306,13 @@ impl GeometryRenderer {
         self.cache.next_candidates.clear();
         self.cache.visible.clear();
         self.cache.next_visible.clear();
+        self.cache.mesh_ids.clear();
+        self.cache.mesh_set.clear();
+        self.cache.mesh_representatives.clear();
+        self.cache.mesh_compositions.clear();
+        self.cache.mesh_priorities.clear();
+        self.cache.mesh_ready.clear();
+        self.pending_meshes.clear();
         for (_, item) in self.cache.items.iter_mut() {
             for face in &mut item.faces {
                 face.slot = None;

@@ -78,6 +78,12 @@ struct LoadedRegion {
     complete: bool,
 }
 
+#[derive(Default)]
+struct InFlightRegionLoad {
+    invalidated_local_ids: HashSet<u32>,
+    stale: bool,
+}
+
 #[derive(Clone)]
 pub(super) struct EncodedEntry {
     local_id: u32,
@@ -138,6 +144,7 @@ pub(super) struct ObjectCacheSession {
     grid_id: String,
     identities: HashMap<SimulatorId, CacheScope>,
     loaded_regions: HashMap<SimulatorId, LoadedRegion>,
+    in_flight_loads: HashMap<(SimulatorId, CacheScope), InFlightRegionLoad>,
     loaded_entries: usize,
     loaded_bytes: usize,
     use_clock: u64,
@@ -167,6 +174,7 @@ impl ObjectCacheSession {
             grid_id: grid.id().to_owned(),
             identities: HashMap::new(),
             loaded_regions: HashMap::new(),
+            in_flight_loads: HashMap::new(),
             loaded_entries: 0,
             loaded_bytes: 0,
             use_clock: 0,
@@ -255,9 +263,17 @@ impl ObjectCacheSession {
                 None
             }
             ObjectCacheEvent::RegionLoaded { simulator_id, scope, result, _permit } => {
+                let in_flight = self.in_flight_loads.remove(&(simulator_id, scope.clone()));
                 match result {
                     RegionLoadResult::Loaded(mut entries) => {
                         if self.identities.get(&simulator_id) == Some(&scope) {
+                            if let Some(in_flight) = in_flight {
+                                if in_flight.stale {
+                                    entries.clear();
+                                } else {
+                                    entries.retain(|local_id, _| !in_flight.invalidated_local_ids.contains(local_id));
+                                }
+                            }
                             self.merge_partial_region(simulator_id, &scope, &mut entries);
                             self.install_loaded_region(simulator_id, scope.clone(), entries);
                         }
@@ -384,6 +400,17 @@ impl ObjectCacheSession {
             let generation = self.next_cache_generation();
             let versions: CacheEntryVersions = local_ids.iter().map(|local_id| (*local_id, generation)).collect::<Vec<_>>().into();
             let local_id_set = local_ids.iter().copied().collect::<HashSet<_>>();
+            if let Some(load) = self.in_flight_loads.get_mut(&(simulator_id, scope.clone()))
+                && !load.stale
+            {
+                let additional = local_id_set.iter().filter(|local_id| !load.invalidated_local_ids.contains(local_id)).count();
+                if load.invalidated_local_ids.len().saturating_add(additional) > MAX_REGION_ENTRIES {
+                    load.invalidated_local_ids.clear();
+                    load.stale = true;
+                } else {
+                    load.invalidated_local_ids.extend(local_id_set.iter().copied());
+                }
+            }
             self.remove_loaded_entries(simulator_id, &local_id_set);
             let queued = self.queue_invalidation(CacheWriteJob {
                 operation: CacheWriteOperation::DeleteEntries {
@@ -441,6 +468,9 @@ impl ObjectCacheSession {
         if self.loaded_regions.get(&simulator_id).is_some_and(|region| region.scope == scope && region.complete) {
             return Some(self.region_handshake_flags(simulator_id));
         }
+        if self.in_flight_loads.contains_key(&(simulator_id, scope.clone())) {
+            return None;
+        }
         if self.disabled {
             return Some(self.region_handshake_flags(simulator_id));
         }
@@ -459,6 +489,7 @@ impl ObjectCacheSession {
                 return Some(self.region_handshake_flags(simulator_id));
             }
         };
+        self.in_flight_loads.insert((simulator_id, scope.clone()), InFlightRegionLoad::default());
         let sender = self.event_sender.clone();
         drop(runtime.spawn(async move {
             let result = match timeout(HANDSHAKE_CACHE_LOAD_TIMEOUT, receipt.wait()).await {
@@ -792,6 +823,41 @@ mod tests {
             _permit: permit,
         });
         assert_eq!(reply, Some((SIMULATOR, 7)));
+        cache.close().await;
+    }
+
+    #[tokio::test]
+    async fn terse_update_during_region_load_stays_missing() {
+        let directory = tempfile::tempdir().expect("create isolated cache directory");
+        let mut cache = open_cache(directory.path().join("objects.sqlite"));
+        let mut full = fixture_message(vectors::OBJECT_UPDATE);
+        let Message::ObjectUpdate(update) = &mut full else { panic!("object fixture should be a full update") };
+        update.objects.truncate(1);
+        let local_id = update.objects[0].local_id;
+        let (region_data, references) = cached_references(&full);
+        cache.record_update(SIMULATOR, full);
+        flush(&mut cache).await;
+        cache.remove_loaded_region(SIMULATOR);
+
+        assert_eq!(cache.begin_region_load(SIMULATOR, &Handle::current()), None);
+        let event = cache.next_event().await.expect("scope load returns its snapshot");
+        let ObjectCacheEvent::RegionLoaded { scope, .. } = &event else { panic!("scope load returns RegionLoaded") };
+        assert_eq!(cache.identities.get(&SIMULATOR), Some(scope));
+
+        let mut terse = fixture_message(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
+        let Message::ImprovedTerseObjectUpdate(update) = &mut terse else { panic!("terse fixture should be a terse update") };
+        update.region_data.region_handle = region_data.region_handle;
+        update.objects[0].as_decoded_mut().expect("terse fixture object is valid").local_id = local_id;
+        cache.record_update(SIMULATOR, terse);
+        assert_eq!(cache.handle_event(event), Some((SIMULATOR, 7)));
+        flush(&mut cache).await;
+
+        assert_eq!(cache_count(cache.db.as_ref().expect("cache database is open")).await, 0);
+        let resolved = resolve(&mut cache, &cached_message(region_data, references), 80).await;
+        std::assert_matches!(
+            resolved.blocks[0],
+            Some(crate::session::inbound::ObjectOperation::Cached { cache_miss_type: protocol::messages::CacheMissType::Full, .. })
+        );
         cache.close().await;
     }
 }

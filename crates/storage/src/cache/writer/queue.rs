@@ -4,7 +4,10 @@ use std::{
     time::Duration,
 };
 
-use super::{WorkerState, is_simulated_crash, lock, reply_result};
+use super::{
+    WorkerState,
+    support::{is_simulated_crash, lock, reply_result},
+};
 use crate::cache::{Key, MAX_QUEUED_WRITE_BYTES, MAX_QUEUED_WRITES, StorageError, UnavailableReason, writer::QUEUE_SWEEP_CHUNK};
 
 const SWEEP_INTERVAL: Duration = Duration::from_millis(5);
@@ -109,6 +112,10 @@ impl WriteQueue {
 }
 
 pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueue>) {
+    #[cfg(test)]
+    if state.hooks.check(super::WritePoint::WriterReady).is_err() {
+        return;
+    }
     loop {
         let batch = queue.receive_batch();
         let mut commands = batch.commands.into_iter().peekable();
@@ -165,22 +172,20 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
                     }
                 }
                 Command::Shutdown { reply } => {
-                    state.drain_invalid();
-                    state.sweep_all();
-                    reply_result(reply, state.flush());
+                    reply_result(reply, state.shutdown());
                     queue.complete(queued.bytes);
                     return;
                 }
             }
         }
-        state.drain_touches();
+        state.drain_touches_best_effort();
         state.drain_invalid();
         state.sweep_step(QUEUE_SWEEP_CHUNK);
         if batch.closed {
             state.drain_invalid();
             state.sweep_all();
             if let Err(error) = state.flush() {
-                tracing::warn!(error = %error, "cache shutdown compaction failed");
+                tracing::warn!(error = %error, "cache shutdown flush failed");
             }
             return;
         }

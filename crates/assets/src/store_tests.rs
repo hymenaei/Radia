@@ -478,6 +478,42 @@ fn cached_full_mesh_response_finishes() {
     drop(demand);
     drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+
+    let cache = crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("reopen cache");
+    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(resource) else { panic!("SQLite index retained the full mesh asset") };
+    assert_eq!(cached.bytes, asset);
+    cache.shutdown().expect("close reopened cache");
+}
+
+#[test]
+fn partial_mesh_is_not_cached() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let now = Instant::now();
+    let id = AssetId::new(Uuid::from_u128(105));
+    let resource = Resource { id, kind: Kind::Mesh };
+    let (request, _, bytes) = mesh_lod_requests(id);
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
+
+    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("cold mesh reads cache") };
+    let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss schedules mesh fetch") };
+    let input = fetch
+        .complete_response(Ok(FetchResponse::Partial { bytes, range: request.range(), total_length: Some(request.asset_length()) }))
+        .expect("partial mesh block enters decoding");
+    let decode = store.start_decode(input).expect("admit mesh decode");
+    let writes = store.complete(decode.run(), now);
+
+    assert_matches!(demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+    assert!(writes.is_empty(), "a partial LOD block is not a complete raw mesh asset");
+    drop(demand);
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+
+    let cache = crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("reopen cache");
+    assert_eq!(cache.lookup(resource), crate::cache::AssetLookup::Miss);
+    cache.shutdown().expect("close reopened cache");
 }
 
 fn legacy_fields(mode: i32, cutoff: i32) -> llsd::Map {

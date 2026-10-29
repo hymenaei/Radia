@@ -125,6 +125,7 @@ struct ConnectionTask {
     pending_events: VecDeque<EventEnvelope>,
     pending_notifications: VecDeque<SimulatorEvent>,
     outbound: OutboundQueue,
+    pending_handshake_reply: Option<QueuedMessage>,
     pending_send: Option<PendingSend>,
     deferred_retries: HashMap<u32, Instant>,
     priority_logout: Option<QueuedMessage>,
@@ -229,6 +230,7 @@ impl SimulatorConnection {
             || outbound.has_handoff_movement()
             || pending_send
                 .is_some_and(|pending| pending.queued_message.as_ref().is_some_and(|queued| queued.movement == MovementSend::Handoff))
+            || outbound.is_full(TrafficClass::Deadline, active_queue_class(pending_send))
         {
             return Ok(());
         }

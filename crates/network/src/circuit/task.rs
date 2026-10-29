@@ -72,6 +72,7 @@ impl ConnectionTask {
             if self.drain_is_complete() {
                 return finish_connection_logout(self.phase.close_reason());
             }
+            self.admit_pending_handshake_reply()?;
             if !self.prepare_send()? {
                 continue;
             }
@@ -159,7 +160,17 @@ impl ConnectionTask {
     }
 
     fn expire_sends(&mut self) -> Result<(), ConnectionError> {
-        expire_deferred_retries(&self.connection.circuit, &mut self.deferred_retries, Instant::now())?;
+        let now = Instant::now();
+        expire_deferred_retries(&self.connection.circuit, &mut self.deferred_retries, now)?;
+        if self.pending_handshake_reply.as_ref().is_some_and(|queued| now.saturating_duration_since(queued.queued_at) >= MAX_SEND_AGE) {
+            if let Some(mut queued) = self.pending_handshake_reply.take()
+                && let Some(completed) = queued.completion.take()
+                && let Err(error) = completed.send(Err(Error::SimulatorCommandQueueFull))
+            {
+                drop(error);
+            }
+            return Err(ConnectionError::SimulatorCommandQueueFull);
+        }
         if self.pending_notifications.is_empty() {
             for queued in self.outbound.expire(Instant::now()) {
                 let error = send_age_expiry_error(&queued);
@@ -195,6 +206,9 @@ impl ConnectionTask {
         for queued in self.outbound.drain() {
             fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued);
         }
+        if let Some(queued) = self.pending_handshake_reply.take() {
+            fail_queued_on_close(&self.events, &mut self.pending_notifications, self.connection.simulator_id, queued);
+        }
         if self.pending_send.as_ref().is_some_and(|pending| !pending.meta.is_acknowledgement)
             && let Some(mut canceled) = self.pending_send.take()
             && let Some(queued) = canceled.queued_message.take()
@@ -206,6 +220,7 @@ impl ConnectionTask {
     fn drain_is_complete(&self) -> bool {
         self.phase.is_draining()
             && self.pending_send.is_none()
+            && self.pending_handshake_reply.is_none()
             && !self.connection.circuit.has_pending_acks()
             && self.pending_notifications.is_empty()
     }
@@ -269,6 +284,32 @@ impl ConnectionTask {
         Ok(true)
     }
 
+    fn admit_pending_handshake_reply(&mut self) -> Result<(), ConnectionError> {
+        let Some(queued) = self.pending_handshake_reply.take() else { return Ok(()) };
+        match self.outbound.push(queued, active_queue_class(self.pending_send.as_ref())) {
+            Ok(()) => {
+                if self.phase.has_region_handshake() {
+                    self.connection.region_handshake_reply_sent = true;
+                }
+                preempt_deferred_send(
+                    &mut self.pending_send,
+                    &mut self.outbound,
+                    &self.connection.circuit,
+                    self.ack_timer_due || self.phase.is_draining(),
+                )?;
+                if self.phase.is_established()
+                    && self.phase.has_region_handshake()
+                    && self.connection.region_handshake_reply_sent
+                    && self.connection.handoff.is_some()
+                {
+                    self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
+                }
+            }
+            Err(queued) => self.pending_handshake_reply = Some(*queued),
+        }
+        Ok(())
+    }
+
     fn send_completed(&mut self, sent: Result<(Instant, PreparedDatagram), ConnectionError>) -> Result<RunControl, ConnectionError> {
         let mut completed = self.pending_send.take().expect("send branch is guarded");
         match sent {
@@ -311,6 +352,13 @@ impl ConnectionTask {
                         MovementSend::Initial => self.connection.initial_movement_sent = true,
                         MovementSend::Handoff => self.connection.movement_requested = true,
                         MovementSend::None => {}
+                    }
+                    if self.phase.is_established()
+                        && self.phase.has_region_handshake()
+                        && self.connection.region_handshake_reply_sent
+                        && self.connection.handoff.is_some()
+                    {
+                        self.connection.queue_handoff_movement(&mut self.outbound, self.pending_send.as_ref())?;
                     }
                 }
             }
@@ -475,11 +523,15 @@ impl ConnectionTask {
                             }
                         }
                         Err(mut queued) => {
-                            if let Some(completed) = queued.completion.take()
-                                && let Err(error) = completed.send(Err(Error::SimulatorCommandQueueFull))
-                            {
-                                drop(error);
+                            if self.pending_handshake_reply.is_some() {
+                                if let Some(completed) = queued.completion.take()
+                                    && let Err(error) = completed.send(Err(Error::SimulatorCommandQueueFull))
+                                {
+                                    drop(error);
+                                }
+                                return Err(ConnectionError::SimulatorCommandQueueFull);
                             }
+                            self.pending_handshake_reply = Some(*queued);
                         }
                     }
                 }
@@ -616,6 +668,7 @@ pub(super) async fn run(
         pending_events: VecDeque::with_capacity(MAX_QUEUED_SIMULATOR_EVENTS),
         pending_notifications: VecDeque::with_capacity(MAX_PENDING_SEND_NOTIFICATIONS),
         outbound: super::OutboundQueue::new(),
+        pending_handshake_reply: None,
         pending_send: None,
         deferred_retries: HashMap::new(),
         priority_logout: None,

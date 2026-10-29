@@ -129,7 +129,7 @@ async fn load_object_cache(cache: &mut ObjectCacheSession, simulator: network::S
 async fn await_cache_write(cache: &mut ObjectCacheSession) {
     loop {
         let event = cache.next_event().await.expect("cache worker returns the write result");
-        let is_write = matches!(&event, ObjectCacheEvent::WriteApplied { .. } | ObjectCacheEvent::WriteDropped);
+        let is_write = matches!(&event, ObjectCacheEvent::WriteApplied { .. } | ObjectCacheEvent::WriteDropped { .. });
         let _ = cache.handle_event(event);
         if is_write {
             return;
@@ -177,11 +177,17 @@ async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
         })
     };
     let cached = make_cached(&full);
+    let before_live_hit = world.world().revision();
     assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 2, &cached).await.0.is_empty());
+    assert_eq!(world.world().revision(), before_live_hit);
     assert_public_world_invariants(&world, region);
 
     let parent_local_id = match &full {
         Message::ObjectUpdate(update) => update.objects[0].local_id,
+        _ => unreachable!(),
+    };
+    let parent_id = match &full {
+        Message::ObjectUpdate(update) => update.objects[0].id,
         _ => unreachable!(),
     };
     let mut terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).into_message();
@@ -192,17 +198,25 @@ async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
     object.motion.position = Vec3::new(31.0, 42.0, 53.0);
     object.motion.rotation = Quat::IDENTITY;
     apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 3, &terse).await;
+    cache.record_update(simulator, terse.clone());
     assert_public_world_invariants(&world, region);
+
+    let before_probe = world.world().revision();
+    let (recovery, _) = apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 4, &make_cached(&full)).await;
+    assert!(recovery.is_empty());
+    assert_eq!(world.world().revision(), before_probe);
+    let parent = world.world().object(world.world().entity(parent_id).expect("parent object remains live")).expect("parent object exists");
+    assert_eq!(parent.transform().position(), Some(Vec3::new(31.0, 42.0, 53.0)));
 
     let Message::ObjectUpdate(update) = &mut full else { unreachable!() };
     update.objects[0].crc = update.objects[0].crc.wrapping_add(1);
-    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 4, &full).await;
+    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 5, &full).await;
     cache.record_update(simulator, full.clone());
     await_cache_write(&mut cache).await;
     assert_public_world_invariants(&world, region);
 
     let cached = make_cached(&full);
-    assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 5, &cached).await.0.is_empty());
+    assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 6, &cached).await.0.is_empty());
     assert_public_world_invariants(&world, region);
 
     let child_local_id = match &full {
@@ -216,7 +230,8 @@ async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
     object.local_id = child_local_id;
     object.motion.position = Vec3::new(-5.0, 7.0, 11.0);
     object.motion.rotation = Quat::IDENTITY;
-    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 6, &terse).await;
+    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 7, &terse).await;
+    cache.record_update(simulator, terse);
     assert_public_world_invariants(&world, region);
     cache.close().await;
 }
@@ -245,11 +260,11 @@ async fn recovered_cached_object_media_reaches_session_handoff() {
     let ObjectUpdate(update) = &mut full else { panic!("full object fixture should decode as an update") };
     update.region_data.region_handle = region_handle;
     update.objects.truncate(1);
+    update.objects[0].parent_local_id = 0;
     let object_id = Uuid::from_u128(0xabcde);
     update.objects[0].pcode = 9;
     update.objects[0].id = object_id;
     update.objects[0].media_url = "x-mv:12/00000000-0000-0000-0000-000000000001".into();
-    let _ = apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 1, &full).await;
     cache.record_update(simulator, full.clone());
     load_object_cache(&mut cache, simulator).await;
 

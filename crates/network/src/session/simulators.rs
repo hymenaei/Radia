@@ -49,7 +49,7 @@ pub(in crate::session) use tests::publish_primary_terminal_event;
 pub(super) const SESSION_TIMEOUT: Duration = Duration::from_secs(40);
 pub(super) const EVENT_BACKLOG_WARNING_THRESHOLD: usize = MAX_PENDING_SIMULATOR_EVENTS / 2;
 pub(super) const EVENT_BACKLOG_WARNING_INTERVAL: Duration = Duration::from_secs(10);
-pub(super) const MAX_PENDING_REGION_HANDSHAKE_REPLIES: usize = 32;
+pub(super) const MAX_PENDING_REGION_HANDSHAKE_REPLIES: usize = MAX_SIMULATOR_CONNECTIONS;
 pub(super) const MAX_PENDING_LIFECYCLE_EVENTS: usize = 32;
 pub(super) const MAX_PENDING_SESSION_EVENTS: usize = SESSION_APPLICATION_EVENT_CREDIT_CAPACITY + MAX_PENDING_LIFECYCLE_EVENTS;
 #[cfg(not(test))]

@@ -327,8 +327,17 @@ impl WorldHandoff {
         let update = match (update, message) {
             (DecodedWorldUpdate::Object(batch), Message::ObjectUpdateCached(cached)) => {
                 let region = world.region_for(simulator_id)?;
-                let (batch, requests) =
-                    object_cache.resolve_cached(simulator_id, region, sequence, order_evidence(packet_order), cached, batch);
+                let (batch, requests) = object_cache
+                    .resolve_cached(
+                        simulator_id,
+                        region,
+                        sequence,
+                        order_evidence(packet_order),
+                        |address| world.world().entity_at(address).is_some(),
+                        cached,
+                        batch,
+                    )
+                    .await;
                 recovered_media_requests = requests;
                 DecodedWorldUpdate::Object(batch)
             }

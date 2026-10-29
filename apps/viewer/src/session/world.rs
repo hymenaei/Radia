@@ -24,7 +24,7 @@ const MAX_WORLD_TOMBSTONES: usize = 16_384;
 const MAX_WORLD_JOURNAL_ENTRIES: usize = 4_096;
 const MAX_REGION_NAME_BYTES: usize = 256;
 const MAX_INGEST_DIAGNOSTIC_ADDRESSES: usize = 8;
-const MAX_OBJECTS_PER_INTAKE_QUANTUM: usize = 32;
+pub(super) const MAX_OBJECTS_PER_INTAKE_QUANTUM: usize = 32;
 const PARCEL_REJECTION_LOG_INTERVAL: u64 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

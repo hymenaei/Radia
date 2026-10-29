@@ -72,10 +72,41 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), MigrationError>
             transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             transaction.commit()?;
         }
-        SCHEMA_VERSION => {}
+        SCHEMA_VERSION => validate_current_schema(connection)?,
         _ => return Err(MigrationError::SchemaMismatch),
     }
     connection.pragma_update(None, "max_page_count", MAX_DATABASE_PAGES)?;
+    Ok(())
+}
+
+fn validate_current_schema(connection: &Connection) -> Result<(), MigrationError> {
+    let mut statement = connection.prepare("SELECT type, name FROM sqlite_master WHERE type IN ('table', 'trigger')")?;
+    let objects =
+        statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?.collect::<Result<HashSet<_>, _>>()?;
+    let required = [
+        ("table", "region_scopes"),
+        ("table", "object_entries"),
+        ("table", "object_cache_totals"),
+        ("trigger", "object_entries_totals_insert"),
+        ("trigger", "object_entries_totals_delete"),
+        ("trigger", "object_entries_totals_update"),
+    ];
+    if required.iter().any(|object| !objects.contains(&(object.0.to_owned(), object.1.to_owned()))) {
+        return Err(MigrationError::SchemaMismatch);
+    }
+    drop(statement);
+
+    let actual: (i64, i64) = connection
+        .query_row("SELECT COUNT(*), COALESCE(SUM(length(payload)), 0) FROM object_entries", [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let totals_rows: i64 = connection.query_row("SELECT COUNT(*) FROM object_cache_totals", [], |row| row.get(0))?;
+    let stored: Option<(i64, i64)> = connection
+        .query_row("SELECT entry_count, payload_bytes FROM object_cache_totals WHERE singleton = 1", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()?;
+    if totals_rows != 1 || stored != Some(actual) {
+        return Err(MigrationError::SchemaMismatch);
+    }
     Ok(())
 }
 
@@ -241,6 +272,35 @@ pub(super) fn make_scope_delete_submission(scope: CacheScope) -> PendingSubmissi
         batches.push(batch);
     }
     PendingSubmission { batches, rows: MAX_REGION_DELETE_BATCHES * 256, bytes: MAX_REGION_DELETE_BATCHES * 256 }
+}
+
+pub(super) fn make_delete_entries_batches(scope: CacheScope, local_ids: Arc<[u32]>) -> Vec<SqliteBatch> {
+    let rows_per_batch = MAX_BATCH_ROWS.min(MAX_BATCH_BYTES.saturating_sub(64) / 4).max(1);
+    local_ids
+        .chunks(rows_per_batch)
+        .enumerate()
+        .map(|(index, ids)| {
+            let start = index * rows_per_batch;
+            let count = ids.len();
+            let scope = scope.clone();
+            let local_ids = Arc::clone(&local_ids);
+            SqliteBatch::new(count, count.saturating_mul(4).saturating_add(64), move |transaction| {
+                for local_id in local_ids.iter().skip(start).take(count) {
+                    transaction.execute(
+                        "DELETE FROM object_entries WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3 AND local_id = ?4",
+                        params![
+                            scope.grid_id,
+                            scope.region_id.as_bytes().as_slice(),
+                            scope.cache_id.as_bytes().as_slice(),
+                            i64::from(*local_id)
+                        ],
+                    )?;
+                }
+                remove_empty_scope(transaction, &scope)
+            })
+            .expect("cache entry delete batch fits SQLite limits")
+        })
+        .collect()
 }
 
 pub(super) fn make_clear_all_batches() -> Vec<SqliteBatch> {
@@ -498,6 +558,40 @@ mod tests {
 
         assert_eq!(version, 1);
         assert!(!totals_table_exists);
+    }
+
+    #[test]
+    fn missing_totals_trigger_recreates_database() {
+        let directory = tempfile::tempdir().expect("create isolated cache directory");
+        let path = directory.path().join("objects.sqlite");
+        let (db, _) = open_at(&path).expect("create current cache schema");
+        db.shutdown().expect("close initial database");
+        Connection::open(&path)
+            .expect("open current cache schema")
+            .execute_batch("DROP TRIGGER object_entries_totals_insert;")
+            .expect("remove a required trigger");
+
+        let (db, status) = open_at(&path).expect("recreate damaged database");
+
+        std::assert_matches!(status, OpenStatus::Recreated(::storage::sqlite::RecoveryReason::SchemaMismatch));
+        db.shutdown().expect("close recreated database");
+    }
+
+    #[test]
+    fn stale_totals_recreate_database() {
+        let directory = tempfile::tempdir().expect("create isolated cache directory");
+        let path = directory.path().join("objects.sqlite");
+        let (db, _) = open_at(&path).expect("create current cache schema");
+        db.shutdown().expect("close initial database");
+        Connection::open(&path)
+            .expect("open current cache schema")
+            .execute_batch("UPDATE object_cache_totals SET entry_count = 1, payload_bytes = 64 WHERE singleton = 1;")
+            .expect("corrupt cached totals");
+
+        let (db, status) = open_at(&path).expect("recreate damaged database");
+
+        std::assert_matches!(status, OpenStatus::Recreated(::storage::sqlite::RecoveryReason::SchemaMismatch));
+        db.shutdown().expect("close recreated database");
     }
 
     #[tokio::test]

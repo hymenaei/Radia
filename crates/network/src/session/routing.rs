@@ -117,7 +117,22 @@ impl SessionDispatcher<'_> {
 
     fn queue_handshake_reply(&mut self, simulator_id: SimulatorId, command: SimulatorCommand) {
         let commands = self.simulator_commands(simulator_id);
-        queue_handshake_reply(commands.as_ref(), &mut self.run_state.pending_region_handshake_replies, simulator_id, command);
+        if queue_handshake_reply(commands.as_ref(), &mut self.run_state.pending_region_handshake_replies, simulator_id, command) {
+            self.abort_simulator_connection(simulator_id);
+        }
+    }
+
+    fn abort_simulator_connection(&self, simulator_id: SimulatorId) {
+        let abort = self
+            .run_state
+            .neighbor_connections
+            .values()
+            .find(|connection| connection.simulator_id == simulator_id)
+            .map(|connection| connection.abort.clone())
+            .or_else(|| (simulator_id == self.state.simulator_id).then(|| self.state.root_connection_abort.clone()).flatten());
+        if let Some(abort) = abort {
+            abort.abort();
+        }
     }
 
     pub(super) async fn handle_pending_application_event(
@@ -244,29 +259,35 @@ fn queue_handshake_reply(
     pending: &mut VecDeque<(SimulatorId, SimulatorCommand)>,
     simulator_id: SimulatorId,
     command: SimulatorCommand,
-) {
+) -> bool {
     if pending.iter().any(|(pending_id, _)| *pending_id == simulator_id) {
-        defer_handshake_reply(pending, simulator_id, command);
-        return;
+        return defer_handshake_reply(pending, simulator_id, command);
     }
     let Some(commands) = commands else {
         complete_handshake_reply(command, Error::SimulatorUnavailable);
-        return;
+        return false;
     };
     match commands.try_send(command) {
-        Ok(()) => {}
+        Ok(()) => false,
         Err(mpsc::error::TrySendError::Full(command)) => defer_handshake_reply(pending, simulator_id, command),
         Err(mpsc::error::TrySendError::Closed(command)) => {
             complete_handshake_reply(command, Error::SimulatorConnectionClosed);
+            false
         }
     }
 }
 
-fn defer_handshake_reply(pending: &mut VecDeque<(SimulatorId, SimulatorCommand)>, simulator_id: SimulatorId, command: SimulatorCommand) {
+fn defer_handshake_reply(
+    pending: &mut VecDeque<(SimulatorId, SimulatorCommand)>,
+    simulator_id: SimulatorId,
+    command: SimulatorCommand,
+) -> bool {
     if pending.len() < MAX_PENDING_REGION_HANDSHAKE_REPLIES {
         pending.push_back((simulator_id, command));
+        false
     } else {
         complete_handshake_reply(command, Error::SimulatorCommandQueueFull);
+        true
     }
 }
 
@@ -482,8 +503,8 @@ mod tests {
         let (first_completed, first_response) = oneshot::channel();
         let (second_completed, second_response) = oneshot::channel();
 
-        queue_handshake_reply(Some(&commands), &mut pending, simulator_id, handshake_reply(first_completed));
-        queue_handshake_reply(Some(&commands), &mut pending, simulator_id, handshake_reply(second_completed));
+        assert!(!queue_handshake_reply(Some(&commands), &mut pending, simulator_id, handshake_reply(first_completed)));
+        assert!(!queue_handshake_reply(Some(&commands), &mut pending, simulator_id, handshake_reply(second_completed)));
         assert_eq!(pending.len(), 2);
 
         let Ok(SimulatorCommand::CancelHandoff) = received.try_recv() else {
@@ -516,8 +537,9 @@ mod tests {
 
         for index in 0..=MAX_PENDING_REGION_HANDSHAKE_REPLIES {
             let (completed, response) = oneshot::channel();
-            queue_handshake_reply(Some(&commands), &mut pending, simulator_id, handshake_reply(completed));
+            let overflowed = queue_handshake_reply(Some(&commands), &mut pending, simulator_id, handshake_reply(completed));
             if index == MAX_PENDING_REGION_HANDSHAKE_REPLIES {
+                assert!(overflowed);
                 overflow = Some(response);
             }
         }

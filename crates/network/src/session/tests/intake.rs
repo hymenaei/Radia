@@ -74,6 +74,7 @@ async fn receive_releases_capability_bytes() {
                 source: "127.0.0.1:13000".parse().expect("simulator endpoint"),
                 message: "TestEvent".into(),
                 body: Value::Undefined,
+                handoff_outcome: None,
             },
             permit,
         ))
@@ -97,7 +98,7 @@ async fn recv_batch_keeps_order() {
             simulator_id: test_simulator_id(77),
             source: "127.0.0.1:13000".parse().expect("simulator endpoint"),
             order,
-            events: vec![CapabilityEvent { message: "TestEvent".into(), body: Value::Undefined, retained_bytes: 0 }],
+            events: vec![CapabilityEvent { message: "TestEvent".into(), body: Value::Undefined, handoff_outcome: None, retained_bytes: 0 }],
         }))
         .await
         .expect("queue EventQueue batch");

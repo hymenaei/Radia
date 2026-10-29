@@ -846,6 +846,27 @@ async fn crossed_region_promotes_after_matching_movement() {
     };
     let (neighbor_id, neighbor_peer) =
         prepare_crossed_region_destination(&neighbor, neighbor_endpoint, region_handle, &session, &mut received_events).await;
+    let (completed, response) = oneshot::channel();
+    commands
+        .send(Command::RequestTeleport {
+            message: Message::TeleportLocationRequest(protocol::messages::TeleportLocationRequest {
+                agent_id,
+                session_id,
+                region_handle,
+                position: math::Vec3::new(128.0, 128.0, 25.0),
+                look_at: math::Vec3::new(1.0, 0.0, 0.0),
+            }),
+            completed,
+        })
+        .await
+        .expect("queue teleport admission while crossing");
+    std::assert_matches!(response.await, Ok(Err(Error::SimulatorHandoffInProgress)));
+    assert!(
+        timeout(Duration::from_millis(100), receive_message(&primary, |message| matches!(message, Message::TeleportLocationRequest(_))))
+            .await
+            .is_err(),
+        "a teleport request is not sent while the CrossedRegion handoff is pending"
+    );
     promote_crossed_region(&neighbor, neighbor_peer, region_handle, &session, primary_id, neighbor_id, &mut received_events).await;
 
     commands

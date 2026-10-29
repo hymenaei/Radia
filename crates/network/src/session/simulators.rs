@@ -39,7 +39,7 @@ use crate::{
     },
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource, record_coverage_loss, record_event_envelope_loss},
     error::Error,
-    event::{Event, EventEnvelope, SimulatorId},
+    event::{Event, EventEnvelope, HandoffEventOutcome, PacketOrder, SimulatorId},
 };
 
 #[cfg(test)]
@@ -174,6 +174,7 @@ pub(super) struct SessionState {
     pub(super) coverage_losses: CoverageLossLedger,
     pub(super) outbound_budget: Option<OutboundBudget>,
     pub(super) handoff_generation: Option<u64>,
+    pub(super) latest_teleport_packet_order: Option<(SimulatorId, u64)>,
 }
 
 pub(super) struct RuntimeInputs {
@@ -205,6 +206,18 @@ impl Drop for SessionState {
 }
 
 impl SessionState {
+    pub(super) fn accept_teleport_packet_order(&mut self, simulator_id: SimulatorId, packet_order: PacketOrder) -> bool {
+        let PacketOrder::Ordered(order) = packet_order else { return true };
+        if self
+            .latest_teleport_packet_order
+            .is_some_and(|(last_simulator, last_order)| last_simulator == simulator_id && order <= last_order)
+        {
+            return false;
+        }
+        self.latest_teleport_packet_order = Some((simulator_id, order));
+        true
+    }
+
     pub(super) fn promote_primary(&mut self, next: PrimaryRoute, role_generation: u64) {
         self.primary.memory.promote_to(&next.memory);
         self.primary.state.send_replace(PrimaryState::Neighbor { generation: role_generation });
@@ -238,20 +251,23 @@ impl SessionRuntime {
     pub(super) async fn run(
         self,
         commands: mpsc::Receiver<Command>,
+        handoff_cancellations: mpsc::Receiver<super::HandoffCancellationCommand>,
         events: mpsc::Sender<EventEnvelope>,
         disconnect_requested: watch::Receiver<bool>,
         terminal_event_permit: mpsc::OwnedPermit<EventEnvelope>,
     ) -> Result<(), SessionError> {
         let Self { mut state, runtime_inputs } = self;
         let simulator_id = state.simulator_id;
-        let result = match SessionDispatcher::start(&mut state, runtime_inputs, commands, events, disconnect_requested).await {
-            Ok(mut runtime) => {
-                let result = runtime.run().await;
-                runtime.shutdown().await;
-                result
-            }
-            Err(error) => Err(error),
-        };
+        let result =
+            match SessionDispatcher::start(&mut state, runtime_inputs, commands, handoff_cancellations, events, disconnect_requested).await
+            {
+                Ok(mut runtime) => {
+                    let result = runtime.run().await;
+                    runtime.shutdown().await;
+                    result
+                }
+                Err(error) => Err(error),
+            };
         if let Some(outbound_budget) = state.outbound_budget.take() {
             outbound_budget.shutdown().await;
         }
@@ -491,17 +507,23 @@ impl SessionState {
         order: Option<HandoffOrder>,
         setup: &mut PromotionSetup<'_>,
         handoff_state: &mut HandoffState,
-    ) -> Result<(), SessionError> {
+    ) -> Result<Option<HandoffEventOutcome>, SessionError> {
         if setup.state.logout_deadline.is_some() {
-            return Ok(());
+            return Ok(None);
         }
         match message {
-            "EnableSimulator" => self.process_enable_simulators(simulator_id, body, setup).await,
-            "CrossedRegion" => self.process_crossed_region(simulator_id, body, setup, handoff_state).await,
-            "TeleportFinish" => self.process_teleport_finish(simulator_id, body, order, setup, handoff_state).await,
-            "TeleportFailed" => self.process_teleport_failed(body, order, setup, handoff_state),
-            "EstablishAgentCommunication" => self.process_agent_communication(body, setup).await,
-            _ => Ok(()),
+            "EnableSimulator" => {
+                self.process_enable_simulators(simulator_id, body, setup).await?;
+                Ok(None)
+            }
+            "CrossedRegion" => Ok(Some(self.process_crossed_region(simulator_id, body, setup, handoff_state).await?)),
+            "TeleportFinish" => Ok(Some(self.process_teleport_finish(simulator_id, body, order, setup, handoff_state).await?)),
+            "TeleportFailed" => Ok(Some(self.process_teleport_failed(body, order, setup, handoff_state)?)),
+            "EstablishAgentCommunication" => {
+                self.process_agent_communication(body, setup).await?;
+                Ok(None)
+            }
+            _ => Ok(None),
         }
     }
 
@@ -531,10 +553,10 @@ impl SessionState {
         body: &Value,
         setup: &mut PromotionSetup<'_>,
         handoff_state: &mut HandoffState,
-    ) -> Result<(), SessionError> {
+    ) -> Result<HandoffEventOutcome, SessionError> {
         match decode_crossed_region(body, self.session.agent_id, self.session.session_id) {
             Ok(handoff) => self.request_handoff(simulator_id, handoff, HandoffAnnouncement::CrossedRegion, setup, handoff_state).await,
-            Err(_reason) => Ok(()),
+            Err(_reason) => Ok(HandoffEventOutcome::Ignored),
         }
     }
 
@@ -545,7 +567,7 @@ impl SessionState {
         order: Option<HandoffOrder>,
         setup: &mut PromotionSetup<'_>,
         handoff_state: &mut HandoffState,
-    ) -> Result<(), SessionError> {
+    ) -> Result<HandoffEventOutcome, SessionError> {
         match decode_event_teleport_finish(body, self.session.agent_id, self.session.session_id) {
             Ok(handoff) => {
                 self.request_handoff(
@@ -557,7 +579,7 @@ impl SessionState {
                 )
                 .await
             }
-            Err(_reason) => Ok(()),
+            Err(_reason) => Ok(HandoffEventOutcome::Ignored),
         }
     }
 
@@ -567,10 +589,13 @@ impl SessionState {
         order: Option<HandoffOrder>,
         setup: &mut PromotionSetup<'_>,
         handoff_state: &mut HandoffState,
-    ) -> Result<(), SessionError> {
+    ) -> Result<HandoffEventOutcome, SessionError> {
         match decode_event_teleport_failed(body, self.session.agent_id) {
-            Ok(()) if teleport_failure_matches(handoff_state.pending(), order.unwrap_or(HandoffOrder::Unavailable)) => {
-                if let Some(pending) = handoff_state.take_pending() {
+            Ok(()) => {
+                let matching = handoff_state.pending().is_none()
+                    || teleport_failure_matches(handoff_state.pending(), order.unwrap_or(HandoffOrder::Unavailable));
+                let generation = handoff_state.pending().map(|pending| pending.generation);
+                if matching && let Some(pending) = handoff_state.take_pending() {
                     cancel_pending_handoff(
                         pending,
                         "teleport failed",
@@ -583,11 +608,10 @@ impl SessionState {
                         &self.coverage_losses,
                     );
                 }
+                Ok(if matching { HandoffEventOutcome::accepted(generation) } else { HandoffEventOutcome::Ignored })
             }
-            Ok(()) => {}
-            Err(_reason) => {}
+            Err(_reason) => Ok(HandoffEventOutcome::Ignored),
         }
-        Ok(())
     }
 
     pub(super) async fn process_agent_communication(&mut self, body: &Value, setup: &mut PromotionSetup<'_>) -> Result<(), SessionError> {

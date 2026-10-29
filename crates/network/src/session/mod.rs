@@ -27,7 +27,7 @@ use std::{
 use protocol::lludp::Message;
 use protocol::messages::{
     AgentUpdate, ChatFromViewer, MapBlockRequest, MoveInventoryFolder, MoveInventoryItem, RegionHandleRequest, RequestMultipleObjects,
-    SetAlwaysRun, TeleportCancel,
+    SetAlwaysRun, TeleportCancel, TeleportLandmarkRequest, TeleportLocationRequest,
 };
 use tokio::sync::{
     mpsc::{self, Receiver, Sender},
@@ -36,7 +36,7 @@ use tokio::sync::{
 
 use crate::circuit::{ConnectionError, SimulatorConnection, SimulatorConnectionOptions, admission::SimulatorMemoryBudget};
 use crate::{
-    LoginCredentials,
+    HandoffGeneration, LoginCredentials,
     circuit::lludp::Delivery,
     circuit::{
         HandoffTarget, LOGOUT_TIMEOUT, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, PrimaryState, SimulatorCommand, SimulatorEvent,
@@ -47,7 +47,7 @@ use crate::{
         record_event_envelope_loss,
     },
     error::Error,
-    event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, SimulatorId},
+    event::{CLIENT_EVENT_CAPACITY, Event, EventEnvelope, HandoffCancellationOutcome, SimulatorId},
 };
 #[cfg(test)]
 use neighbors::{neighbor_completion_event, neighbor_event_queue_failure};
@@ -74,6 +74,7 @@ pub(crate) use tests::run_session as run_test_session;
 pub(crate) use tests::{connect_test_connection, connect_test_primary_with_state};
 
 pub(crate) const COMMAND_CAPACITY: usize = 256;
+const HANDOFF_CANCELLATION_CAPACITY: usize = 1;
 const NETWORK_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
 pub const DEFAULT_UPSTREAM_BYTES_PER_SECOND: NonZeroU64 = NonZeroU64::new(64_000).unwrap();
 const MAX_OUTBOUND_CHAT_MESSAGE_BYTES: usize = 8 * 1024 - 6 - 4 - 40 - (1 + u8::MAX as usize * 4);
@@ -337,6 +338,7 @@ impl Drop for Session {
 #[derive(Clone)]
 pub struct SessionHandle {
     commands: Sender<Command>,
+    handoff_cancellations: Sender<HandoffCancellationCommand>,
     disconnect_requested: watch::Sender<bool>,
     command_admission_closed: Arc<Mutex<bool>>,
     worker_finished: watch::Receiver<bool>,
@@ -390,6 +392,94 @@ impl SessionHandle {
         }
     }
 
+    pub async fn send_teleport_cancel(
+        &self,
+        simulator_id: SimulatorId,
+        message: TeleportCancel,
+        delivery: Delivery,
+        generation: Option<HandoffGeneration>,
+    ) -> Result<(), Error> {
+        let message = Message::TeleportCancel(message);
+        validate_outbound_message(&message)?;
+        let mut disconnect_requested = self.disconnect_requested.subscribe();
+        let (completed, response) = oneshot::channel();
+        {
+            let admission_closed = self.command_admission_closed.lock().unwrap_or_else(|error| error.into_inner());
+            if *admission_closed || *self.disconnect_requested.borrow() || *self.worker_finished.borrow() {
+                return Err(Error::SessionClosed);
+            }
+            self.commands.try_send(Command::SendTeleportCancel { simulator_id, message, delivery, generation, completed }).map_err(
+                |error| match error {
+                    mpsc::error::TrySendError::Full(_) => Error::SimulatorCommandQueueFull,
+                    mpsc::error::TrySendError::Closed(_) => Error::SessionClosed,
+                },
+            )?;
+        }
+        tokio::select! {
+            biased;
+            _ = disconnect_requested.changed() => Err(Error::SessionClosed),
+            result = response => result.map_err(|_| {
+                if *self.disconnect_requested.borrow() || *self.worker_finished.borrow() || self.commands.is_closed() {
+                    Error::SessionClosed
+                } else {
+                    Error::SimulatorConnectionClosed
+                }
+            })?,
+        }
+    }
+
+    pub async fn request_teleport(&self, request: TeleportRequest) -> Result<(), Error> {
+        if matches!(
+            &request,
+            TeleportRequest::Location(request) if !request.position.is_finite() || !request.look_at.is_finite()
+        ) {
+            return Err(Error::InvalidTeleportRequest);
+        }
+        let message = match request {
+            TeleportRequest::Location(request) => Message::TeleportLocationRequest(request),
+            TeleportRequest::Landmark(request) => Message::TeleportLandmarkRequest(request),
+        };
+        let mut disconnect_requested = self.disconnect_requested.subscribe();
+        let (completed, response) = oneshot::channel();
+        {
+            let admission_closed = self.command_admission_closed.lock().unwrap_or_else(|error| error.into_inner());
+            if *admission_closed || *self.disconnect_requested.borrow() || *self.worker_finished.borrow() {
+                return Err(Error::SessionClosed);
+            }
+            self.commands.try_send(Command::RequestTeleport { message, completed }).map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => Error::CommandQueueFull,
+                mpsc::error::TrySendError::Closed(_) => Error::SessionClosed,
+            })?;
+        }
+        tokio::select! {
+            biased;
+            _ = disconnect_requested.changed() => Err(Error::SessionClosed),
+            result = response => result.map_err(|_| Error::SessionClosed)?,
+        }
+    }
+
+    pub async fn cancel_pending_handoff(&self, generation: Option<HandoffGeneration>) -> Result<HandoffCancellationOutcome, Error> {
+        let mut disconnect_requested = self.disconnect_requested.subscribe();
+        let (completed, response) = oneshot::channel();
+        {
+            let admission_closed = self.command_admission_closed.lock().unwrap_or_else(|error| error.into_inner());
+            if *admission_closed || *self.disconnect_requested.borrow() || *self.worker_finished.borrow() {
+                return Err(Error::SessionClosed);
+            }
+        }
+        let sent = tokio::select! {
+            biased;
+            _ = disconnect_requested.changed() => return Err(Error::SessionClosed),
+            sent = self.handoff_cancellations.send(HandoffCancellationCommand { generation, completed }) => sent,
+        };
+        sent.map_err(|_| Error::SessionClosed)?;
+        tokio::select! {
+            biased;
+            _ = disconnect_requested.changed() => Err(Error::SessionClosed),
+            result = response => result.map_err(|_| Error::SessionClosed)?,
+        }
+    }
+
     pub async fn disconnect(&self) {
         self.request_disconnect();
         let mut worker_finished = self.worker_finished.clone();
@@ -403,8 +493,38 @@ impl SessionHandle {
 
 pub(crate) enum Command {
     SubmitMfaCode(String),
-    SendMessage { message: Message, delivery: Delivery },
-    SendTo { simulator_id: SimulatorId, message: Message, delivery: Delivery, completed: oneshot::Sender<Result<(), Error>> },
+    SendMessage {
+        message: Message,
+        delivery: Delivery,
+    },
+    SendTo {
+        simulator_id: SimulatorId,
+        message: Message,
+        delivery: Delivery,
+        completed: oneshot::Sender<Result<(), Error>>,
+    },
+    SendTeleportCancel {
+        simulator_id: SimulatorId,
+        message: Message,
+        delivery: Delivery,
+        generation: Option<HandoffGeneration>,
+        completed: oneshot::Sender<Result<(), Error>>,
+    },
+    RequestTeleport {
+        message: Message,
+        completed: oneshot::Sender<Result<(), Error>>,
+    },
+}
+
+pub(crate) struct HandoffCancellationCommand {
+    pub(crate) generation: Option<HandoffGeneration>,
+    pub(crate) completed: oneshot::Sender<Result<HandoffCancellationOutcome, Error>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TeleportRequest {
+    Location(TeleportLocationRequest),
+    Landmark(TeleportLandmarkRequest),
 }
 
 impl outbound_message::Sealed for TeleportCancel {}

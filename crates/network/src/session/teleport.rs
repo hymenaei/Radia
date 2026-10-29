@@ -143,8 +143,8 @@ fn make_handoff_target(
     Ok(HandoffTarget { agent_id, session_id, region_handle, endpoint, seed_capability })
 }
 
-pub(super) fn is_handoff_message(message: &Message) -> bool {
-    matches!(message, Message::TeleportFinish(_) | Message::TeleportFailed(_))
+pub(super) fn is_teleport_lifecycle_message(message: &Message) -> bool {
+    matches!(message, Message::TeleportStart(_) | Message::TeleportLocal(_) | Message::TeleportFinish(_) | Message::TeleportFailed(_))
 }
 
 pub(super) fn is_teleport_cancel(message: &Message, agent_id: Uuid, session_id: Uuid) -> bool {

@@ -134,7 +134,13 @@ async fn backlog_logout_drops_covered_application_events_but_keeps_lifecycle_eve
             &events,
             &mut run_state,
             event_with_coverage_watermark(
-                Event::CapabilityEvent { simulator_id, source: endpoint, message: "CrossedRegion".into(), body: llsd::Value::Undefined },
+                Event::CapabilityEvent {
+                    simulator_id,
+                    source: endpoint,
+                    message: "CrossedRegion".into(),
+                    body: llsd::Value::Undefined,
+                    handoff_outcome: None,
+                },
                 watermark,
             ),
         )

@@ -11,7 +11,8 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::{mpsc, watch};
 
 use crate::{
-    AgentSession, capabilities::Client, circuit::admission::PacketMemoryReservation, coverage::CoverageWatermark, session::MfaChallenge,
+    AgentSession, HandoffGeneration, capabilities::Client, circuit::admission::PacketMemoryReservation, coverage::CoverageWatermark,
+    session::MfaChallenge,
 };
 
 pub(crate) const CLIENT_EVENT_CAPACITY: usize = 32;
@@ -77,7 +78,47 @@ enum EventRetentionCharge {
 pub struct CapabilityEvent {
     pub message: String,
     pub body: Value,
+    pub handoff_outcome: Option<HandoffEventOutcome>,
     pub(crate) retained_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HandoffEventOutcome {
+    Accepted { generation: Option<HandoffGeneration> },
+    Ignored,
+    Conflict { generation: HandoffGeneration },
+}
+
+impl HandoffEventOutcome {
+    pub const fn accepted(generation: Option<HandoffGeneration>) -> Self {
+        Self::Accepted { generation }
+    }
+
+    pub const fn conflict(generation: HandoffGeneration) -> Self {
+        Self::Conflict { generation }
+    }
+
+    pub const fn generation(self) -> Option<HandoffGeneration> {
+        match self {
+            Self::Accepted { generation } => generation,
+            Self::Conflict { generation } => Some(generation),
+            Self::Ignored => None,
+        }
+    }
+
+    pub const fn is_accepted(self) -> bool {
+        matches!(self, Self::Accepted { .. })
+    }
+
+    pub const fn is_conflict(self) -> bool {
+        matches!(self, Self::Conflict { .. })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HandoffCancellationOutcome {
+    Cancelled { generation: Option<HandoffGeneration> },
+    Stale { generation: HandoffGeneration },
 }
 
 impl fmt::Debug for CapabilityEvent {
@@ -128,21 +169,85 @@ impl From<Event> for EventEnvelope {
 }
 
 pub enum Event {
-    MfaRequired { challenge: MfaChallenge },
-    LoginAccepted { mfa_hash: Option<String> },
-    SessionReady { simulator_id: SimulatorId, session: Box<AgentSession>, capabilities: Client, login_data: ResponseData },
-    CapabilityEvent { simulator_id: SimulatorId, source: SocketAddr, message: String, body: Value },
-    CapabilityEventBatch { simulator_id: SimulatorId, source: SocketAddr, order: EventQueueBatchOrder, events: Vec<CapabilityEvent> },
-    CapabilityError { simulator_id: SimulatorId, source: SocketAddr, capability: String, reason: String },
-    EventQueueCoverageLost { simulator_id: SimulatorId, source: SocketAddr, reason: String },
-    CoverageLost { loss: crate::coverage::CoverageLoss },
-    SimulatorConnected { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr },
-    SimulatorDisconnected { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr },
-    SimulatorFailed { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr, reason: String },
-    SimulatorConnectFailed { simulator_id: SimulatorId, region_handle: u64, endpoint: SocketAddr },
-    SimulatorCapabilities { simulator_id: SimulatorId, source: SocketAddr, capabilities: Client },
-    SimulatorPromoted { previous_simulator_id: SimulatorId, simulator_id: SimulatorId, session: Box<AgentSession>, capabilities: Client },
-    SimulatorMessage { simulator_id: SimulatorId, source: SocketAddr, sequence: u32, packet_order: PacketOrder, message: Message },
+    MfaRequired {
+        challenge: MfaChallenge,
+    },
+    LoginAccepted {
+        mfa_hash: Option<String>,
+    },
+    SessionReady {
+        simulator_id: SimulatorId,
+        session: Box<AgentSession>,
+        capabilities: Client,
+        login_data: ResponseData,
+    },
+    CapabilityEvent {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        message: String,
+        body: Value,
+        handoff_outcome: Option<HandoffEventOutcome>,
+    },
+    CapabilityEventBatch {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        order: EventQueueBatchOrder,
+        events: Vec<CapabilityEvent>,
+    },
+    CapabilityError {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        capability: String,
+        reason: String,
+    },
+    EventQueueCoverageLost {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        reason: String,
+    },
+    CoverageLost {
+        loss: crate::coverage::CoverageLoss,
+    },
+    SimulatorConnected {
+        simulator_id: SimulatorId,
+        region_handle: Option<u64>,
+        endpoint: SocketAddr,
+    },
+    SimulatorDisconnected {
+        simulator_id: SimulatorId,
+        region_handle: Option<u64>,
+        endpoint: SocketAddr,
+    },
+    SimulatorFailed {
+        simulator_id: SimulatorId,
+        region_handle: Option<u64>,
+        endpoint: SocketAddr,
+        reason: String,
+    },
+    SimulatorConnectFailed {
+        simulator_id: SimulatorId,
+        region_handle: u64,
+        endpoint: SocketAddr,
+    },
+    SimulatorCapabilities {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        capabilities: Client,
+    },
+    SimulatorPromoted {
+        previous_simulator_id: SimulatorId,
+        simulator_id: SimulatorId,
+        session: Box<AgentSession>,
+        capabilities: Client,
+    },
+    SimulatorMessage {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        sequence: u32,
+        packet_order: PacketOrder,
+        message: Message,
+        handoff_outcome: Option<HandoffEventOutcome>,
+    },
     SendFailed(String),
     Failed(String),
 }
@@ -284,6 +389,7 @@ mod redaction_tests {
             source: "192.0.2.90:13000".parse().expect("valid endpoint"),
             message: "session-event-secret".into(),
             body: Value::String("event-body-secret".into()),
+            handoff_outcome: None,
         };
         let debug = format!("{event:?}");
         assert!(!debug.contains("192.0.2.90"));

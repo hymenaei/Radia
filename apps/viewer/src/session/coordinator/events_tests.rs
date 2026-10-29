@@ -1,8 +1,9 @@
-use std::{collections::HashMap, num::NonZeroU32};
+use std::{collections::HashMap, num::NonZeroU32, sync::Arc};
 
 use math::{Quat, Vec3};
 use network::{
     Event::{SimulatorConnected, SimulatorDisconnected},
+    HandoffEventOutcome,
     PacketOrder::{Ambiguous, Ordered},
 };
 use protocol::{
@@ -16,7 +17,9 @@ use world::{
     Applied,
     ApplyOutcome::{Deferred, Introduced, TombstoneRecorded, Unchanged},
     DeferredReason::AmbiguousOrder,
-    LocalAddress, ObjectObservation, Parent, Pose, Region, RegionHandle, UpdateSource,
+    LocalAddress, ObjectObservation, OrderEvidence, PARCEL_BITMAP_BYTES, PARCEL_OVERLAY_PART_BYTES, PARCEL_OVERLAY_PARTS,
+    ParcelAccessSettings, ParcelBitmap, ParcelFlags, ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesData,
+    ParcelPropertiesObservation, Parent, Pose, Region, RegionHandle, RegionOutcome, UpdateSource,
 };
 
 use crate::session::coordinator::events::{PendingWorldHandoff, WorldHandoff};
@@ -27,6 +30,7 @@ use crate::session::coordinator::tests::{
 use crate::session::inbound::{ObjectBatch, ObjectOperation};
 use crate::session::{
     recovery::recovery_request,
+    teleport::{Destination, TeleportController, TeleportStatus},
     world::{IngestStatus, SessionWorld, viewer_world_limits},
 };
 use crate::test_helpers::simulator_id;
@@ -89,6 +93,54 @@ fn complete_promoted_world_handoff(
     result
 }
 
+fn parcel_properties(local_id: i32) -> ParcelPropertiesData {
+    let bitmap = ParcelBitmap::from_bytes(&[0; PARCEL_BITMAP_BYTES]).expect("parcel bitmap");
+    ParcelPropertiesData {
+        local_id: ParcelLocalId::new(local_id).expect("parcel local ID"),
+        name: Arc::from("parcel"),
+        description: Arc::from("parcel description"),
+        owner_id: None,
+        group_id: None,
+        group_owned: false,
+        area: 1024,
+        flags: ParcelFlags::from_bits(0),
+        bitmap,
+        landing_point: None,
+        landing_look_at: None,
+        landing_type: None,
+        music_url: Arc::from(""),
+        media_url: Arc::from(""),
+        access: ParcelAccessSettings::default(),
+    }
+}
+
+fn seed_parcel_region(world: &mut SessionWorld, region: Region, order: u64, local_id: i32, overlay_value: u8) {
+    let source =
+        |order: u64| UpdateSource::new(region, u32::try_from(order).expect("test update sequence"), OrderEvidence::Ordered(order), 0);
+    let _properties_applied = world
+        .observe_parcel_properties(
+            source(order),
+            ParcelPropertiesObservation {
+                request_result: 0,
+                sequence_id: i32::try_from(order).expect("test parcel sequence"),
+                properties: Some(parcel_properties(local_id)),
+            },
+        )
+        .expect("store parcel properties");
+    for part in 0..PARCEL_OVERLAY_PARTS {
+        let _overlay_applied = world
+            .observe_parcel_overlay(
+                source(order + 1 + part as u64),
+                ParcelOverlayObservation {
+                    sequence_id: i32::try_from(part).expect("overlay part index"),
+                    data: vec![overlay_value; PARCEL_OVERLAY_PART_BYTES],
+                },
+            )
+            .expect("store parcel overlay part");
+    }
+    let _flags_applied = world.observe_region_flags(source(order + 5), Some(1), Some(2)).expect("store region flags");
+}
+
 #[test]
 fn region_connection_lifecycle() {
     let simulator_id = simulator_id();
@@ -98,13 +150,205 @@ fn region_connection_lifecycle() {
 
     apply_world_event(&mut intake, &SimulatorConnected { simulator_id, region_handle: Some(handle), endpoint });
     let region = intake.region_for(simulator_id).expect("registered region");
-    assert_eq!(region, Region::new(simulator_id.get()));
     assert_eq!(intake.world().region(region).unwrap().handle, Some(RegionHandle::new(handle)));
 
     apply_world_event(&mut intake, &SimulatorDisconnected { simulator_id, region_handle: Some(handle), endpoint });
     assert!(intake.region_for(simulator_id).is_none());
     assert!(intake.world().region(region).is_none());
     assert!(apply_world_event(&mut intake, &simulator_message(simulator_id, 1, region_handshake("late"))).is_none());
+}
+
+#[test]
+fn local_teleport_changes_only_the_authenticated_agents_position() {
+    let simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x1234);
+    let handle = RegionHandle::new(0x1111_0000_0000_0001);
+    let mut world = SessionWorld::new(viewer_world_limits());
+    world.set_self_agent(simulator, agent_id);
+    let region = world.register_simulator(simulator, Some(handle)).expect("register primary region");
+    assert!(apply_world_event(&mut world, &simulator_message(simulator, 1, agent_update(agent_id, 10, handle.get()))).is_some());
+
+    let entity = world.world().entity(agent_id).expect("self avatar is present");
+    let before = world.world().object(entity).expect("self avatar object").local_transform().expect("avatar transform");
+    let position = Vec3::new(34.0, 56.0, 78.0);
+    let source = UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0);
+    assert!(world.apply_teleport_local(simulator, agent_id, source, position).expect("self avatar address").is_ok());
+
+    let after = world.world().object(entity).expect("self avatar remains present").local_transform().expect("updated avatar transform");
+    assert_eq!(after.position, position);
+    assert_eq!(after.rotation, before.rotation);
+}
+
+#[test]
+fn teleport_retirement_removes_old_primary_and_neighbor_world_state() {
+    let primary = simulator_id();
+    let neighbor = simulator_id();
+    let destination = simulator_id();
+    let agent_id = Uuid::from_u128(0x1234);
+    let primary_handle = RegionHandle::new(0x1111_0000_0000_0001);
+    let neighbor_handle = RegionHandle::new(0x2222_0000_0000_0002);
+    let destination_handle = RegionHandle::new(0x3333_0000_0000_0003);
+    let mut world = SessionWorld::new(viewer_world_limits());
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut world, primary, agent_id);
+    world.register_simulator(neighbor, Some(neighbor_handle)).expect("register neighbor region");
+    world.register_simulator(destination, Some(destination_handle)).expect("register destination region");
+    let neighbor_object = Uuid::from_u128(0x2222);
+    let destination_object = Uuid::from_u128(0x3333);
+    assert!(apply_world_event(&mut world, &simulator_message(primary, 1, agent_update(agent_id, 10, primary_handle.get()))).is_some());
+    assert!(
+        apply_world_event(&mut world, &simulator_message(neighbor, 2, agent_update(neighbor_object, 20, neighbor_handle.get()))).is_some()
+    );
+    assert!(
+        apply_world_event(&mut world, &simulator_message(destination, 3, agent_update(destination_object, 30, destination_handle.get())))
+            .is_some()
+    );
+    assert!(world.world().entity(agent_id).is_some());
+    assert!(world.world().entity(neighbor_object).is_some());
+    assert!(world.world().entity(destination_object).is_some());
+
+    handoff.teleport_completed(&mut world, destination);
+
+    assert!(world.region_for(primary).is_none());
+    assert!(world.region_for(neighbor).is_none());
+    assert!(world.region_for(destination).is_some());
+    assert!(world.world().entity(agent_id).is_none());
+    assert!(world.world().entity(neighbor_object).is_none());
+    assert!(world.world().entity(destination_object).is_some());
+}
+
+#[test]
+fn return_teleport_restores_reused_region_route_and_keeps_both_retired_scenes_empty() {
+    let returning_simulator = simulator_id();
+    let current_simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x1234);
+    let old_return_object = Uuid::from_u128(0x1111);
+    let current_object = Uuid::from_u128(0x2222);
+    let returned_object = Uuid::from_u128(0x3333);
+    let returning_handle = RegionHandle::new(0x1111_0000_0000_0001);
+    let current_handle = RegionHandle::new(0x2222_0000_0000_0002);
+    let endpoint = "127.0.0.1:13001".parse().expect("return simulator endpoint");
+    let mut world = SessionWorld::new(viewer_world_limits());
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut world, returning_simulator, agent_id);
+    handoff.simulator_connected(&mut world, returning_simulator, Some(returning_handle.get()));
+    handoff.simulator_connected(&mut world, current_simulator, Some(current_handle.get()));
+    let original_return_region = world.region_for(returning_simulator).expect("original return region");
+    let current_region = world.region_for(current_simulator).expect("current region");
+    seed_parcel_region(&mut world, original_return_region, 10, 31, 7);
+    seed_parcel_region(&mut world, current_region, 20, 42, 8);
+    assert!(
+        apply_world_event(
+            &mut world,
+            &simulator_message(returning_simulator, 1, agent_update(old_return_object, 11, returning_handle.get()))
+        )
+        .is_some()
+    );
+    assert!(
+        apply_world_event(&mut world, &simulator_message(current_simulator, 2, agent_update(current_object, 22, current_handle.get())))
+            .is_some()
+    );
+
+    handoff.teleport_completed(&mut world, current_simulator);
+    assert!(world.region_for(returning_simulator).is_none());
+    assert!(world.world().entity(old_return_object).is_none());
+    assert!(world.world().parcel_state(original_return_region).is_none());
+
+    let mut teleport = TeleportController::new();
+    assert!(teleport.accept_lifecycle_packet(current_simulator, Ordered(1)));
+    teleport.on_start(&protocol::messages::TeleportStart { teleport_flags: 0 }, Some(current_handle.get()));
+    let destination = Destination { region_handle: returning_handle.get(), endpoint };
+    assert!(teleport.accept_lifecycle_packet(current_simulator, Ordered(2)));
+    assert!(!teleport.on_finish(destination, 0, Some(13), HandoffEventOutcome::accepted(None)));
+    let stale_local = protocol::messages::TeleportLocal {
+        agent_id,
+        location_id: 0,
+        position: Vec3::new(5.0, 6.0, 7.0),
+        look_at: Vec3::Y,
+        teleport_flags: 0,
+    };
+    if teleport.accept_local_packet(current_simulator, Ordered(1)) {
+        teleport.on_local(&stale_local, Some(current_handle.get()), agent_id);
+    }
+    assert_eq!(
+        teleport.handle().state().status,
+        TeleportStatus::Connecting { region_handle: returning_handle.get() },
+        "an older local notice must not replace the accepted cross-region finish"
+    );
+    let region_handle = teleport.region_handle_for_promotion(endpoint).expect("accepted return destination");
+    assert!(handoff.restore_promoted_region(&mut world, returning_simulator, region_handle).is_some());
+    assert!(teleport.on_simulator_promoted(Some(region_handle), endpoint));
+    handoff.teleport_completed(&mut world, returning_simulator);
+
+    let returned_region = world.region_for(returning_simulator).expect("restored return region");
+    assert_ne!(returned_region, original_return_region);
+    assert_eq!(world.world().region(returned_region).expect("restored World region").handle, Some(returning_handle));
+    let returned_parcels = world.world().parcel_state(returned_region).expect("fresh parcel state for returned region");
+    assert!(returned_parcels.current.is_none());
+    assert!(returned_parcels.overlay.is_none());
+    assert!(world.region_for(current_simulator).is_none());
+    assert!(world.world().entity(old_return_object).is_none());
+    assert!(world.world().entity(current_object).is_none());
+    assert!(
+        apply_world_event(
+            &mut world,
+            &simulator_message(returning_simulator, 3, agent_update(returned_object, 33, returning_handle.get()))
+        )
+        .is_some()
+    );
+    assert!(world.world().entity(returned_object).is_some());
+}
+
+#[test]
+fn region_crossing_clears_agent_parcels_and_keeps_region_overlay_and_flags() {
+    let source_simulator = simulator_id();
+    let target_simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x1234);
+    let source_handle = RegionHandle::new(0x1111_0000_0000_0001);
+    let target_handle = RegionHandle::new(0x2222_0000_0000_0002);
+    let mut world = SessionWorld::new(viewer_world_limits());
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut world, source_simulator, agent_id);
+    handoff.simulator_connected(&mut world, target_simulator, Some(target_handle.get()));
+    let source_region = world.region_for(source_simulator).expect("source region");
+    let target_region = world.region_for(target_simulator).expect("target region");
+    seed_parcel_region(&mut world, source_region, 10, 31, 7);
+    seed_parcel_region(&mut world, target_region, 20, 42, 8);
+
+    assert!(
+        handoff
+            .apply_event(
+                &mut world,
+                &simulator_message(source_simulator, 1, agent_update(agent_id, 11, source_handle.get())),
+                Some(agent_id),
+            )
+            .is_some()
+    );
+    let destination = agent_observation(UpdateSource::new(target_region, 30, OrderEvidence::Ordered(30), 0), 22, agent_id, None);
+    assert!(handoff.begin(source_simulator, target_simulator));
+    let (completed, _) = handoff.complete_promoted(&mut world, target_simulator, destination);
+    assert!(completed);
+
+    for region in [source_region, target_region] {
+        let parcel = world.world().parcel_state(region).expect("active region parcel state");
+        assert!(parcel.current.is_none());
+        assert_eq!(parcel.overlay.as_ref().and_then(|grid| grid.raw_cell(0, 0)), Some(if region == source_region { 7 } else { 8 }));
+        assert_eq!(parcel.region_flags.low, Some(1));
+        assert_eq!(parcel.region_flags.extended, Some(2));
+        assert!(world.world().environment(region).expect("active region environment").parcel.is_none());
+    }
+
+    let applied = world
+        .observe_parcel_properties(
+            UpdateSource::new(target_region, 40, OrderEvidence::Ordered(40), 0),
+            ParcelPropertiesObservation { request_result: 0, sequence_id: 41, properties: Some(parcel_properties(43)) },
+        )
+        .expect("new primary parcel properties are accepted");
+    std::assert_matches!(applied.outcome, RegionOutcome::Patched { .. });
+    assert_eq!(
+        world.world().parcel_state(target_region).unwrap().current.as_ref().unwrap().properties.local_id,
+        ParcelLocalId::new(43).expect("new current parcel")
+    );
 }
 
 #[test]

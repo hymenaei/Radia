@@ -26,7 +26,7 @@ use crate::{
     event::{Event, EventEnvelope, SimulatorId},
 };
 
-use super::{handoff::matches_pending_promotion, teleport::is_handoff_message};
+use super::{handoff::matches_pending_promotion, teleport::is_teleport_lifecycle_message};
 
 impl SessionState {
     pub(super) async fn start_neighbor(
@@ -330,7 +330,7 @@ impl SessionDispatcher<'_> {
 
     async fn handle_current_simulator_event(
         &mut self,
-        event: Event,
+        mut event: Event,
         retained_bytes: Option<crate::event::EventRetention>,
         coverage_watermark: Option<crate::coverage::CoverageWatermark>,
     ) -> Result<RuntimeAction, SessionError> {
@@ -346,8 +346,8 @@ impl SessionDispatcher<'_> {
                 self.startup.mark_ready_published();
             }
         }
-        if let Event::SimulatorMessage { simulator_id, packet_order, message, .. } = &event
-            && is_handoff_message(message)
+        let handoff_outcome = if let Event::SimulatorMessage { simulator_id, packet_order, message, .. } = &event
+            && is_teleport_lifecycle_message(message)
             && self.run_state.logout_deadline.is_none()
         {
             let mut setup = PromotionSetup {
@@ -358,7 +358,14 @@ impl SessionDispatcher<'_> {
                 shutdown: self.disconnect_requested.clone(),
                 capability_events: self.capability_events.clone(),
             };
-            self.state.handle_handoff_message(*simulator_id, message, *packet_order, &mut setup, &mut self.handoff_state).await?;
+            Some(self.state.handle_handoff_message(*simulator_id, message, *packet_order, &mut setup, &mut self.handoff_state).await?)
+        } else {
+            None
+        };
+        if let Some(outcome) = handoff_outcome
+            && let Event::SimulatorMessage { handoff_outcome, .. } = &mut event
+        {
+            *handoff_outcome = Some(outcome);
         }
         if let Event::SimulatorMessage { simulator_id, message: Message::AgentMovementComplete(movement), .. } = &event
             && self.run_state.logout_deadline.is_none()

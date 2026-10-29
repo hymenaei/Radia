@@ -19,7 +19,7 @@ fn source() -> CoverageSource {
 fn event(message: &str) -> CapabilityEvent {
     let mut body = Value::Undefined;
     let retained_bytes = queued_event_retained_size(message.len(), &mut body);
-    CapabilityEvent { message: message.into(), body, retained_bytes }
+    CapabilityEvent { message: message.into(), body, handoff_outcome: None, retained_bytes }
 }
 
 fn pending_loss(ledger: &CoverageLossLedger, simulator_id: SimulatorId) -> PendingEventQueueLoss {

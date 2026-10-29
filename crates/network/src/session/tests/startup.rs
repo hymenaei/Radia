@@ -181,7 +181,8 @@ async fn full_decode_slots_do_not_block_primary_retry_timers() {
     let (events, _received) = mpsc::channel(TEST_EVENT_CAPACITY);
     let terminal_event_permit = events.clone().reserve_owned().await.expect("reserve terminal event slot");
     let (_disconnect, disconnect_requested) = watch::channel(false);
-    let client = spawn(connection.run(command_receiver, events, disconnect_requested, terminal_event_permit));
+    let (_, handoff_cancellations) = mpsc::channel(1);
+    let client = spawn(connection.run(command_receiver, handoff_cancellations, events, disconnect_requested, terminal_event_permit));
 
     let (initial, peer) = receive(&simulator).await;
     std::assert_matches!(Packet::decode(&initial).expect("decode initial circuit packet").message(), Message::UseCircuitCode(_));
@@ -321,7 +322,8 @@ async fn full_queue_keeps_control_responsive() {
     events.try_send(EventEnvelope::new(Event::Failed("fill event queue".into()))).expect("fill event queue");
     let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (disconnect, disconnect_requested) = watch::channel(false);
-    let run = spawn(connection.run(command_receiver, events, disconnect_requested, terminal_event_permit));
+    let (_, handoff_cancellations) = mpsc::channel(1);
+    let run = spawn(connection.run(command_receiver, handoff_cancellations, events, disconnect_requested, terminal_event_permit));
 
     let mut chat = test_fixture("chat_from_simulator.hex");
     chat[0] |= 0x40;
@@ -365,7 +367,13 @@ async fn capability_events_wait_for_simulator_connection() {
     let mut first_event_permit = Some(queued_bytes.clone().acquire_many_owned(7).await.expect("reserve capability event bytes"));
 
     for (index, message) in ["First", "Second"].into_iter().enumerate() {
-        let event = Event::CapabilityEvent { simulator_id, source: endpoint, message: message.to_owned(), body: Value::Undefined };
+        let event = Event::CapabilityEvent {
+            simulator_id,
+            source: endpoint,
+            message: message.to_owned(),
+            body: Value::Undefined,
+            handoff_outcome: None,
+        };
         let envelope = if index == 0 {
             event_with_retained_bytes(event, first_event_permit.take().expect("first event permit"))
         } else {

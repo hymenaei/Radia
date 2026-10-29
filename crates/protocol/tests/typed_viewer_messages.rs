@@ -1,9 +1,10 @@
 use std::assert_matches;
 
+use math::Vec3;
 use protocol::{
     BlockInstance, BlockValues, FieldValue, SchemaMessage,
     lludp::{LLUdpError, Message, Packet},
-    messages::{RegionInfo, TeleportFinish, region::region_info},
+    messages::{RegionInfo, TeleportFinish, TeleportLandmarkRequest, TeleportLocationRequest, region::region_info},
 };
 use uuid::Uuid;
 
@@ -113,4 +114,59 @@ fn teleport_flags_accept_truncation() {
     let Message::TeleportFinish(decoded) = decoded.into_message() else { panic!("expected TeleportFinish") };
     assert_eq!(decoded.sim_access, Some(13));
     assert_eq!(decoded.teleport_flags, None);
+}
+
+#[test]
+fn teleport_requests_round_trip_with_their_template_coding() {
+    let location = TeleportLocationRequest {
+        agent_id: Uuid::from_u128(1),
+        session_id: Uuid::from_u128(2),
+        region_handle: 3,
+        position: Vec3::new(128.0, 64.0, 25.0),
+        look_at: Vec3::new(1.0, 0.0, 0.0),
+    };
+    let packet = Packet::new(1, Message::TeleportLocationRequest(location.clone())).encode().expect("encode location request");
+    let decoded = Packet::decode(&packet).expect("decode location request");
+    assert_eq!(decoded.message(), &Message::TeleportLocationRequest(location));
+
+    let landmark =
+        TeleportLandmarkRequest { agent_id: Uuid::from_u128(4), session_id: Uuid::from_u128(5), landmark_id: Uuid::from_u128(6) };
+    let packet = Packet::new(2, Message::TeleportLandmarkRequest(landmark.clone())).encode().expect("encode landmark request");
+    let decoded = Packet::decode(&packet).expect("decode landmark request");
+    assert_eq!(decoded.message(), &Message::TeleportLandmarkRequest(landmark));
+    assert!(decoded.is_zerocoded().expect("read landmark zero-code flag"));
+}
+
+#[test]
+fn teleport_local_progress_and_start_decode_from_schema_packets() {
+    let local = schema_packet(
+        "TeleportLocal",
+        vec![BlockValues::single(vec![
+            FieldValue::Uuid(Uuid::from_u128(1)),
+            FieldValue::U32(2),
+            FieldValue::Vector3(Vec3::new(3.0, 4.0, 5.0)),
+            FieldValue::Vector3(Vec3::new(1.0, 0.0, 0.0)),
+            FieldValue::U32(6),
+        ])],
+    );
+    let decoded = Packet::decode(&local).expect("decode TeleportLocal");
+    let Message::TeleportLocal(message) = decoded.into_message() else { panic!("expected typed TeleportLocal") };
+    assert_eq!(message.agent_id, Uuid::from_u128(1));
+    assert_eq!(message.position, Vec3::new(3.0, 4.0, 5.0));
+
+    let progress = schema_packet(
+        "TeleportProgress",
+        vec![
+            BlockValues::single(vec![FieldValue::Uuid(Uuid::from_u128(7))]),
+            BlockValues::single(vec![FieldValue::U32(8), FieldValue::Bytes(b"pending\0".to_vec())]),
+        ],
+    );
+    let decoded = Packet::decode(&progress).expect("decode TeleportProgress");
+    let Message::TeleportProgress(message) = decoded.into_message() else { panic!("expected typed TeleportProgress") };
+    assert_eq!(message.message, b"pending\0");
+
+    let start = schema_packet("TeleportStart", vec![BlockValues::single(vec![FieldValue::U32(9)])]);
+    let decoded = Packet::decode(&start).expect("decode TeleportStart");
+    let Message::TeleportStart(message) = decoded.into_message() else { panic!("expected typed TeleportStart") };
+    assert_eq!(message.teleport_flags, 9);
 }

@@ -16,7 +16,9 @@ use futures::{
     future::{BoxFuture, Shared},
     pin_mut,
 };
-use network::{AgentSession, CoverageLoss, CoverageSource, Event, Grid, PacketOrder, SimulatorId, capabilities::Client};
+use network::{
+    AgentSession, CoverageLoss, CoverageSource, Event, Grid, HandoffEventOutcome, PacketOrder, SimulatorId, capabilities::Client,
+};
 use protocol::{lludp::Message, login::ResponseData, messages::RequestAgentData};
 use tokio::{runtime::Handle, sync::watch};
 use tracing::Instrument;
@@ -45,6 +47,10 @@ use crate::{
         inbound::object_media_requests,
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
         recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error, warn_unrecovered},
+        teleport::{
+            TeleportCancelFailure, TeleportCommand, TeleportController, TeleportInput, crossed_region_from_event, destination_from_udp,
+            failure_from_event, failure_from_udp, finish_metadata_from_event,
+        },
         terrain::{DecodedTerrain, TerrainDecodeQueue},
         world::{IngestSummary, SessionWorld, viewer_world_limits},
     },
@@ -55,6 +61,7 @@ use crate::{
 use crate::session::experience_environment::{EnvironmentInbox, EnvironmentSender};
 
 type Cancellation = Shared<BoxFuture<'static, ()>>;
+const HANDOFF_CLEANUP_ATTEMPTS: usize = 2;
 
 enum DriverInput {
     Session(Input),
@@ -107,6 +114,7 @@ struct SessionDriver {
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
     recovery: RecoveryIntake,
+    teleport: TeleportController,
 }
 
 impl SessionDriver {
@@ -177,6 +185,7 @@ impl SessionDriver {
             region_lookup: None,
             media,
             recovery,
+            teleport: TeleportController::new(),
         }
     }
 
@@ -197,6 +206,7 @@ impl SessionDriver {
                     self.camera.next_tick(),
                     self.recovery.next_completion(),
                     self.inventory_fetch.next_event(),
+                    self.teleport.next_input(),
                 ) => DriverInput::Session(input),
                 cache_event = self.inventory_cache.next_event() => DriverInput::InventoryCache(cache_event),
                 edit_event = self.inventory_edits.next_event() => DriverInput::InventoryEdit(edit_event),
@@ -255,6 +265,26 @@ impl SessionDriver {
                         self.handle_recovery_completion(completion);
                         ControlFlow::Continue(())
                     }
+                    Input::Teleport(TeleportInput::Command(command)) => {
+                        self.handle_teleport_command(command).await;
+                        self.finish_teleport_cancellation_if_ready().await;
+                        ControlFlow::Continue(())
+                    }
+                    Input::Teleport(TeleportInput::Timeout) => {
+                        self.teleport.on_timeout(&self.session_handle, self.primary_simulator, self.active_session.as_ref());
+                        self.finish_teleport_cancellation_if_ready().await;
+                        ControlFlow::Continue(())
+                    }
+                    Input::Teleport(TeleportInput::CancelRetry) => {
+                        self.teleport.on_cancel_retry(&self.session_handle, self.primary_simulator, self.active_session.as_ref());
+                        self.finish_teleport_cancellation_if_ready().await;
+                        ControlFlow::Continue(())
+                    }
+                    Input::Teleport(TeleportInput::CancelResult(result)) => {
+                        self.teleport.on_cancel_result(result);
+                        self.finish_teleport_cancellation_if_ready().await;
+                        ControlFlow::Continue(())
+                    }
                 },
             };
             if flow.is_break() {
@@ -291,6 +321,156 @@ impl SessionDriver {
         self.camera.tick(&self.session_handle, simulator, self.active_session.as_ref(), origin);
     }
 
+    async fn handle_teleport_command(&mut self, command: TeleportCommand) {
+        let origin_region_handle = self.current_region_handle(self.primary_simulator);
+        let active_session = self.active_session.clone();
+        self.teleport
+            .handle_command(command, &self.session_handle, active_session.as_ref(), self.primary_simulator, origin_region_handle)
+            .await;
+    }
+
+    async fn finish_teleport_cancellation_if_ready(&mut self) {
+        for _ in 0..HANDOFF_CLEANUP_ATTEMPTS {
+            if !self.teleport.handoff_cancellation_ready() {
+                return;
+            }
+            let result = self
+                .session_handle
+                .cancel_pending_handoff(self.teleport.cancellation_handoff_generation())
+                .await
+                .map_err(|_| TeleportCancelFailure::SessionUnavailable);
+            self.teleport.finish_cancellation(result);
+        }
+    }
+
+    fn current_region_handle(&self, simulator_id: Option<SimulatorId>) -> Option<u64> {
+        let simulator_id = simulator_id?;
+        let region = self.session_world.region_for(simulator_id)?;
+        self.session_world.world().region(region)?.handle.map(|handle| handle.get())
+    }
+
+    fn handle_teleport_message(
+        &mut self,
+        simulator_id: SimulatorId,
+        sequence: u32,
+        packet_order: PacketOrder,
+        message: &Message,
+        handoff_outcome: Option<HandoffEventOutcome>,
+    ) {
+        if self.primary_simulator != Some(simulator_id) {
+            return;
+        }
+        let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
+        match message {
+            Message::TeleportStart(message) => {
+                let origin = self.current_region_handle(Some(simulator_id));
+                if self.teleport.accept_lifecycle_packet(simulator_id, packet_order) {
+                    self.teleport.on_start(message, origin);
+                }
+            }
+            Message::TeleportProgress(message) => self.teleport.on_progress(message, agent_id),
+            Message::TeleportFailed(message) if message.agent_id == agent_id => {
+                let outcome = handoff_outcome.unwrap_or(HandoffEventOutcome::Ignored);
+                if outcome.is_accepted() && self.teleport.accept_lifecycle_packet(simulator_id, packet_order) {
+                    self.teleport.on_failed(failure_from_udp(message), outcome);
+                }
+            }
+            Message::TeleportLocal(message) if message.agent_id == agent_id => {
+                if !self.teleport.accept_local_packet(simulator_id, packet_order) {
+                    return;
+                }
+                let Some(region) = self.session_world.region_for(simulator_id) else { return };
+                let source = UpdateSource::new(region, sequence, order_evidence(packet_order), 0);
+                if let Some(Err(error)) = self.session_world.apply_teleport_local(simulator_id, agent_id, source, message.position) {
+                    tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "local teleport position could not be applied");
+                }
+                self.teleport.on_local(message, self.current_region_handle(Some(simulator_id)), agent_id);
+            }
+            Message::TeleportFinish(message) if message.agent_id == agent_id => {
+                let outcome = handoff_outcome.unwrap_or(HandoffEventOutcome::Ignored);
+                if outcome != HandoffEventOutcome::Ignored
+                    && self.teleport.accept_lifecycle_packet(simulator_id, packet_order)
+                    && let Some(destination) = destination_from_udp(message)
+                    && self.teleport.on_finish_packet(
+                        simulator_id,
+                        packet_order,
+                        destination,
+                        message.teleport_flags.unwrap_or_default(),
+                        message.sim_access,
+                        outcome,
+                    )
+                {
+                    self.cancel_conflicted_teleport();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_teleport_capability_event(
+        &mut self,
+        simulator_id: SimulatorId,
+        message: &str,
+        body: &llsd::Value,
+        handoff_outcome: Option<HandoffEventOutcome>,
+        capability_order: Option<(u64, u64, usize)>,
+    ) {
+        if self.primary_simulator != Some(simulator_id) {
+            return;
+        }
+        if matches!(message, "CrossedRegion" | "TeleportFinish" | "TeleportFailed")
+            && let Some((incarnation, batch, index)) = capability_order
+            && !self.teleport.accept_capability_order(simulator_id, incarnation, batch, index)
+        {
+            return;
+        }
+        let Some((agent_id, session_id)) = self.active_session.as_ref().map(|session| (session.agent_id, session.session_id)) else {
+            return;
+        };
+        match message {
+            "CrossedRegion" => {
+                if let Some(destination) = crossed_region_from_event(body, agent_id, session_id)
+                    && self.teleport.on_crossed_region(destination, handoff_outcome.unwrap_or(HandoffEventOutcome::Ignored))
+                {
+                    self.cancel_conflicted_teleport();
+                }
+            }
+            "TeleportFinish" => {
+                if let Some((destination, flags, sim_access)) = finish_metadata_from_event(body, agent_id)
+                    && self.teleport.on_finish(destination, flags, sim_access, handoff_outcome.unwrap_or(HandoffEventOutcome::Ignored))
+                {
+                    self.cancel_conflicted_teleport();
+                }
+            }
+            "TeleportFailed" => {
+                if let Some(failure) = failure_from_event(body, agent_id) {
+                    self.teleport.on_failed(failure, handoff_outcome.unwrap_or(HandoffEventOutcome::Ignored));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn cancel_conflicted_teleport(&mut self) {
+        let active_session = self.active_session.clone();
+        self.teleport.cancel_conflicted(&self.session_handle, self.primary_simulator, active_session.as_ref());
+    }
+
+    fn retire_regions_after_teleport(&mut self, primary: SimulatorId) {
+        let retired = self.session_world.simulator_ids().filter(|simulator| *simulator != primary).collect::<Vec<_>>();
+        for simulator_id in retired {
+            let region = self.session_world.region_for(simulator_id);
+            self.environments.simulator_disconnected(&mut self.session_world, simulator_id);
+            if let Some(region) = region {
+                self.assets.retire(region);
+            }
+            self.recovery.cancel_simulator(simulator_id);
+            self.media.forget_simulator(simulator_id);
+            self.handoff.simulator_disconnected(&mut self.session_world, simulator_id);
+        }
+        self.handoff.teleport_completed(&mut self.session_world, primary);
+    }
+
     fn handle_media_result(&mut self, result: Option<ObjectMediaResult>) {
         if let Some(result) = result {
             self.media.apply_result(result, &mut self.session_world);
@@ -305,7 +485,9 @@ impl SessionDriver {
             self.mailbox.publish(ViewerUpdate::Failed("The network session ended.".into()));
             return ControlFlow::Break(());
         };
-        self.handle_event(event).await
+        let flow = self.handle_event(event).await;
+        self.finish_teleport_cancellation_if_ready().await;
+        flow
     }
 
     async fn handle_event(&mut self, event: Event) -> ControlFlow<()> {
@@ -364,6 +546,19 @@ impl SessionDriver {
                 ControlFlow::Continue(())
             }
             SimulatorPromoted { previous_simulator_id, simulator_id, session, capabilities } => {
+                if self.session_world.region_for(simulator_id).is_none()
+                    && let Some(region_handle) = self.teleport.region_handle_for_promotion(session.simulator_address)
+                {
+                    if let Some(region) = self.handoff.restore_promoted_region(&mut self.session_world, simulator_id, region_handle) {
+                        self.assets.register(region, capabilities.clone());
+                    } else {
+                        tracing::warn!(
+                            simulator = simulator_id.get(),
+                            region = region_handle,
+                            "promoted simulator region could not be restored"
+                        );
+                    }
+                }
                 #[cfg(any(target_os = "windows", target_os = "linux"))]
                 if let Some(region) = self.session_world.region_for(simulator_id)
                     && let Err(error) = self.environment_pushes.clear_region(region)
@@ -382,6 +577,10 @@ impl SessionDriver {
                 if let Some(summary) = self.handoff.promote(&mut self.session_world, previous_simulator_id, simulator_id) {
                     self.process_ingest_summary(simulator_id, summary);
                 }
+                let promoted_region_handle = self.current_region_handle(Some(simulator_id));
+                if self.teleport.on_simulator_promoted(promoted_region_handle, session.simulator_address) {
+                    self.retire_regions_after_teleport(simulator_id);
+                }
                 let region = self.session_world.region_for(simulator_id).map(|region| region.get());
                 tracing::info!(simulator = simulator_id.get(), region, "primary simulator promoted");
                 self.on_primary_changed(simulator_id, *session, capabilities, self.active_login_data.clone());
@@ -395,8 +594,9 @@ impl SessionDriver {
                 }
                 ControlFlow::Continue(())
             }
-            SimulatorMessage { simulator_id, sequence, packet_order, source, message } => {
+            SimulatorMessage { simulator_id, sequence, packet_order, source, message, handoff_outcome } => {
                 self.handle_inventory_udp(&message);
+                self.handle_teleport_message(simulator_id, sequence, packet_order, &message, handoff_outcome);
                 self.handle_simulator_message(simulator_id, sequence, packet_order, source, message).await;
                 ControlFlow::Continue(())
             }
@@ -413,7 +613,11 @@ impl SessionDriver {
                 self.mailbox.publish(ViewerUpdate::Failed(error));
                 ControlFlow::Break(())
             }
-            SimulatorDisconnected { simulator_id, .. } | SimulatorFailed { simulator_id, .. } => {
+            SimulatorDisconnected { simulator_id, region_handle, endpoint }
+            | SimulatorFailed { simulator_id, region_handle, endpoint, .. } => {
+                if let Some(region_handle) = region_handle {
+                    self.teleport.on_simulator_connect_failed(region_handle, Some(endpoint));
+                }
                 let region = self.session_world.region_for(simulator_id).map(|region| region.get());
                 tracing::info!(simulator = simulator_id.get(), region, "simulator disconnected");
                 self.environments.simulator_disconnected(&mut self.session_world, simulator_id);
@@ -428,13 +632,21 @@ impl SessionDriver {
                 }
                 ControlFlow::Continue(())
             }
-            CapabilityEvent { simulator_id, message, body, .. } => {
+            CapabilityEvent { simulator_id, message, body, handoff_outcome, .. } => {
+                self.handle_teleport_capability_event(simulator_id, &message, &body, handoff_outcome, None);
                 self.handle_inventory_event_queue(&message, &body);
                 self.environments.capability(&mut self.session_world, simulator_id, &message, &body, self.primary_simulator);
                 ControlFlow::Continue(())
             }
-            CapabilityEventBatch { simulator_id, events, .. } => {
-                for event in &events {
+            CapabilityEventBatch { simulator_id, order, events, .. } => {
+                for (index, event) in events.iter().enumerate() {
+                    self.handle_teleport_capability_event(
+                        simulator_id,
+                        &event.message,
+                        &event.body,
+                        event.handoff_outcome,
+                        Some((order.incarnation, order.ordinal, index)),
+                    );
                     self.handle_inventory_event_queue(&event.message, &event.body);
                 }
                 self.environments.capability_batch(
@@ -445,7 +657,11 @@ impl SessionDriver {
                 );
                 ControlFlow::Continue(())
             }
-            CapabilityError { .. } | SimulatorConnectFailed { .. } => ControlFlow::Continue(()),
+            SimulatorConnectFailed { region_handle, endpoint, .. } => {
+                self.teleport.on_simulator_connect_failed(region_handle, Some(endpoint));
+                ControlFlow::Continue(())
+            }
+            CapabilityError { .. } => ControlFlow::Continue(()),
             SimulatorCapabilities { simulator_id, capabilities, .. } => {
                 self.environments.simulator_capabilities(&mut self.session_world, simulator_id, &capabilities, self.primary_simulator);
                 if let Some(region) = self.session_world.region_for(simulator_id) {
@@ -663,6 +879,7 @@ impl SessionDriver {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             assets: self.assets.handle(),
             session: session.clone(),
+            teleport: self.teleport.handle(),
             region_name: self.session_world.region_name(simulator_id).map(str::to_owned),
             inventory_updates: self.inventory_changes.subscribe(),
             inventory_fetch: self.inventory.as_ref().map(|_| self.inventory_fetch.handle()),

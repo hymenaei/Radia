@@ -137,6 +137,29 @@ impl SessionDispatcher<'_> {
                     self.state.publish_event(&self.events, &mut self.run_state, Event::SendFailed(failure.error.to_string())).await?;
                 }
             }
+            Some(Command::RequestTeleport { message, completed }) => {
+                if completed.is_closed() {
+                    return Ok(RuntimeAction::Continue);
+                }
+                let result = if self.handoff_state.pending().is_some_and(|pending| pending.evidence.crossed_region) {
+                    Err(Error::SimulatorHandoffInProgress)
+                } else if !self.startup.is_ready() {
+                    Err(Error::SimulatorNotReady)
+                } else {
+                    queue_primary_message(
+                        &self.state.primary.commands,
+                        self.state.session.agent_id,
+                        self.state.session.session_id,
+                        message,
+                        crate::circuit::lludp::Delivery::Reliable,
+                        self.handoff_state.cancellation(),
+                    )
+                    .map_err(|failure| failure.error)
+                };
+                if let Err(error) = completed.send(result) {
+                    drop(error);
+                }
+            }
             Some(Command::SendTo { simulator_id, message, delivery, completed }) => {
                 let cancel_handoff = simulator_id == self.state.primary.simulator_id
                     && is_teleport_cancel(&message, self.state.session.agent_id, self.state.session.session_id);
@@ -157,6 +180,22 @@ impl SessionDispatcher<'_> {
                     queue_connection_message(commands, message, delivery, completion.take(), cancel_target, false)
                 } else {
                     Err(ConnectionQueueFailure { error: Error::SimulatorUnavailable, completion: completion.take() })
+                };
+                if let Err(failure) = result
+                    && let Some(completion) = failure.completion
+                    && let Err(error) = completion.send(Err(failure.error))
+                {
+                    drop(error);
+                }
+            }
+            Some(Command::SendTeleportCancel { simulator_id, message, delivery, generation, completed }) => {
+                let cancel_target = self.handoff_state.cancellation().filter(|cancellation| Some(cancellation.generation) == generation);
+                let result = if simulator_id != self.state.primary.simulator_id {
+                    Err(ConnectionQueueFailure { error: Error::SimulatorUnavailable, completion: Some(completed) })
+                } else if !self.startup.is_ready() {
+                    Err(ConnectionQueueFailure { error: Error::SimulatorNotReady, completion: Some(completed) })
+                } else {
+                    queue_connection_message(&self.state.primary.commands, message, delivery, Some(completed), cancel_target, false)
                 };
                 if let Err(failure) = result
                     && let Some(completion) = failure.completion

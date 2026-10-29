@@ -3,6 +3,7 @@ use std::future::Future;
 use futures::{FutureExt, pin_mut};
 use network::Event;
 
+use crate::session::teleport::TeleportInput;
 use crate::{
     inventory::InventoryFetchEvent,
     session::{environment::Completion, object_media::ObjectMediaResult, recovery::RecoveryCompletion, terrain::DecodedTerrain},
@@ -19,9 +20,10 @@ pub(super) enum Input {
     CameraTick,
     Recovery(RecoveryCompletion),
     InventoryFetch(Option<InventoryFetchEvent>),
+    Teleport(TeleportInput),
 }
 
-pub(super) async fn select_drain_input<E, M, T, N, C, Q, R, I>(
+pub(super) async fn select_drain_input<E, M, T, N, C, Q, R, I, P>(
     reads: &mut WorldReadHost,
     event: E,
     media: M,
@@ -31,6 +33,7 @@ pub(super) async fn select_drain_input<E, M, T, N, C, Q, R, I>(
     camera_tick: Q,
     recovery: R,
     inventory_fetch: I,
+    teleport: P,
 ) -> Input
 where
     E: Future<Output = Option<Event>>,
@@ -41,6 +44,7 @@ where
     Q: Future<Output = tokio::time::Instant>,
     R: Future<Output = RecoveryCompletion>,
     I: Future<Output = Option<InventoryFetchEvent>>,
+    P: Future<Output = TeleportInput>,
 {
     let event = event.fuse();
     let media = media.fuse();
@@ -48,6 +52,7 @@ where
     let environment = environment.fuse();
     let recovery = recovery.fuse();
     let inventory_fetch = inventory_fetch.fuse();
+    let teleport = teleport.fuse();
     if cancellation.clone().now_or_never().is_some() {
         return Input::Cancelled;
     }
@@ -58,9 +63,10 @@ where
     let camera_tick = camera_tick.fuse();
     let input = {
         let read = reads.next_request().fuse();
-        pin_mut!(event, media, terrain, environment, cancellation, camera_tick, read, recovery, inventory_fetch);
+        pin_mut!(event, media, terrain, environment, cancellation, camera_tick, read, recovery, inventory_fetch, teleport);
         futures::select_biased! {
             _ = cancellation => Input::Cancelled,
+            teleport = teleport => Input::Teleport(teleport),
             _ = camera_tick => Input::CameraTick,
             decoded = terrain => Input::Terrain(decoded),
             result = media => Input::Media(result),

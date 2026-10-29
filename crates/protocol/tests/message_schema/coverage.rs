@@ -9,7 +9,8 @@ use protocol::schema::{
         OBJECT_UPDATE_CACHED, OBJECT_UPDATE_COMPRESSED, PACKET_ACK, PARCEL_OVERLAY, PARCEL_PROPERTIES, REGION_HANDLE_REQUEST,
         REGION_HANDSHAKE, REGION_HANDSHAKE_REPLY, REGION_ID_AND_HANDLE_REPLY, REGION_INFO, REMOVE_INVENTORY_FOLDER, REMOVE_INVENTORY_ITEM,
         REMOVE_INVENTORY_OBJECTS, REQUEST_MULTIPLE_OBJECTS, SAVE_ASSET_INTO_INVENTORY, SET_ALWAYS_RUN, START_PING_CHECK, TELEPORT_CANCEL,
-        TELEPORT_FAILED, TELEPORT_FINISH, UPDATE_CREATE_INVENTORY_ITEM, USE_CIRCUIT_CODE,
+        TELEPORT_FAILED, TELEPORT_FINISH, TELEPORT_LANDMARK_REQUEST, TELEPORT_LOCAL, TELEPORT_LOCATION_REQUEST, TELEPORT_PROGRESS,
+        TELEPORT_START, UPDATE_CREATE_INVENTORY_ITEM, USE_CIRCUIT_CODE,
     },
 };
 use test_support::lludp::vectors;
@@ -135,6 +136,28 @@ typed_message_coverage! {
         ("Info", BlockMode::Single, "AgentID Reason"),
         ("AlertInfo", BlockMode::Variable, "Message ExtraParams"),
     ];
+    "TeleportLocationRequest" => TeleportLocationRequest, TELEPORT_LOCATION_REQUEST, "",
+        NoAlloc, SchemaConforming, [
+            ("AgentData", BlockMode::Single, "AgentID SessionID"),
+            ("Info", BlockMode::Single, "RegionHandle Position LookAt"),
+        ];
+    "TeleportLocal" => TeleportLocal, TELEPORT_LOCAL, "",
+        NoAlloc, SchemaConforming, [
+            ("Info", BlockMode::Single, "AgentID LocationID Position LookAt TeleportFlags"),
+        ];
+    "TeleportLandmarkRequest" => TeleportLandmarkRequest, TELEPORT_LANDMARK_REQUEST, "",
+        NoAlloc, SchemaConforming, [
+            ("Info", BlockMode::Single, "AgentID SessionID LandmarkID"),
+        ];
+    "TeleportProgress" => TeleportProgress, TELEPORT_PROGRESS, "",
+        SchemaDerived, SchemaConforming, [
+            ("AgentData", BlockMode::Single, "AgentID"),
+            ("Info", BlockMode::Single, "TeleportFlags Message"),
+        ];
+    "TeleportStart" => TeleportStart, TELEPORT_START, "",
+        NoAlloc, SchemaConforming, [
+            ("Info", BlockMode::Single, "TeleportFlags"),
+        ];
     "LogoutRequest" => LogoutRequest, LOGOUT_REQUEST, vectors::LOGOUT_REQUEST,
         NoAlloc, SchemaConforming, [
         ("AgentData", BlockMode::Single, "AgentID SessionID"),

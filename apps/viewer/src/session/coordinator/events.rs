@@ -8,7 +8,7 @@ use protocol::messages::ParcelProperties;
 use uuid::Uuid;
 use world::{
     Applied, LocalAddress, ObjectObservation, OrderEvidence, OrderEvidence::Ordered, ParcelAccessSettings, ParcelBitmap, ParcelFlags,
-    ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesData, ParcelPropertiesObservation, RegionHandle, UpdateSource,
+    ParcelLocalId, ParcelOverlayObservation, ParcelPropertiesData, ParcelPropertiesObservation, Region, RegionHandle, UpdateSource,
 };
 
 use super::{PresentationMailbox, ViewerUpdate};
@@ -163,6 +163,9 @@ impl WorldHandoff {
             Err(RegistrationError::HandleChanged) => {
                 tracing::error!(simulator = simulator_id.get(), region, "primary simulator handle changed during one connection lifetime");
             }
+            Err(RegistrationError::IdentityExhausted) => {
+                tracing::error!(simulator = simulator_id.get(), "World region identity space exhausted");
+            }
             Err(RegistrationError::Apply(error)) => {
                 tracing::error!(simulator = simulator_id.get(), region, %error, "could not register primary world region")
             }
@@ -177,10 +180,25 @@ impl WorldHandoff {
             Err(RegistrationError::HandleChanged) => {
                 tracing::warn!(simulator = simulator_id.get(), region, "simulator handle changed during one connection lifetime");
             }
+            Err(RegistrationError::IdentityExhausted) => {
+                tracing::warn!(simulator = simulator_id.get(), "World region identity space exhausted");
+            }
             Err(RegistrationError::Apply(error)) => {
                 tracing::warn!(simulator = simulator_id.get(), region, %error, "could not register simulator world region")
             }
         }
+    }
+
+    pub(super) fn restore_promoted_region(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator_id: SimulatorId,
+        region_handle: u64,
+    ) -> Option<Region> {
+        if world.region_for(simulator_id).is_none() {
+            self.simulator_connected(world, simulator_id, Some(region_handle));
+        }
+        world.region_for(simulator_id)
     }
 
     pub(super) fn simulator_disconnected(&mut self, world: &mut SessionWorld, simulator_id: SimulatorId) {
@@ -191,6 +209,25 @@ impl WorldHandoff {
         self.observations.remove(&simulator_id);
         if self.promoted_target.is_some_and(|handoff| handoff.target == simulator_id) {
             self.promoted_target = None;
+        }
+    }
+
+    pub(super) fn teleport_completed(&mut self, world: &mut SessionWorld, simulator_id: SimulatorId) {
+        self.clear_agent_parcel(world, simulator_id);
+        self.observations.retain(|known, _| *known == simulator_id);
+        self.promoted_target = None;
+        self.world_primary = Some(simulator_id);
+        for (retired, error) in world.retire_all_except(simulator_id) {
+            let region = world.region_for(retired).map(|region| region.get());
+            tracing::warn!(simulator = retired.get(), region, %error, "could not retire region after teleport");
+        }
+    }
+
+    fn clear_agent_parcel(&self, world: &mut SessionWorld, simulator_id: SimulatorId) {
+        if let Some(region) = world.region_for(simulator_id)
+            && let Err(error) = world.clear_agent_parcel(region)
+        {
+            tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "could not clear agent parcel after simulator promotion");
         }
     }
 
@@ -480,6 +517,8 @@ impl WorldHandoff {
         if completed {
             self.world_primary = Some(target);
             self.promoted_target = None;
+            self.clear_agent_parcel(world, target);
+            self.clear_agent_parcel(world, handoff.source);
         }
         (completed, applied)
     }

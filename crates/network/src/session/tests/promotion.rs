@@ -397,11 +397,13 @@ async fn mfa_continuation() {
     let (events_sender, mut events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let terminal_event_permit = events_sender.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
     let (disconnect, disconnect_requested) = watch::channel(false);
+    let (_handoff_cancellation_sender, handoff_cancellations) = mpsc::channel(1);
     let client = spawn(run_client(
         credentials,
         Channels {
             commands: command_receiver,
             command_sender: commands.clone(),
+            handoff_cancellations,
             events: events_sender,
             terminal_event_permit,
             disconnect_requested,

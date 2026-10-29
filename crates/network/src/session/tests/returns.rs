@@ -42,6 +42,242 @@ async fn run_event_batch_order_survives_forwarding() {
     assert_eq!(server.finish().len(), 3);
 }
 
+async fn run_event_queue_teleport_finish_promotes_destination() {
+    use llsd::{Map, Value, xml};
+
+    use crate::fixtures::http::{EventQueueTestServer, EventServerResponse, response};
+
+    let (release, poll_response) = sync::mpsc::channel();
+    let server = EventQueueTestServer::start(|base| {
+        let seed = format!("<llsd><map><key>EventQueueGet</key><uri>{base}events</uri></map></llsd>");
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed)),
+            EventServerResponse::Controlled(poll_response),
+            EventServerResponse::Hold,
+        ]
+    });
+    let seed_capability = server.url("/seed");
+    let mut harness = Box::pin(connected_neighbor_with_seed(seed_capability.clone())).await;
+    let session = AgentSession { seed_capability, ..login_session(harness.primary.local_addr().expect("primary simulator address")) };
+    let destination = UdpSocket::bind("127.0.0.1:0").await.expect("bind teleport destination");
+    let destination_endpoint = destination.local_addr().expect("teleport destination address");
+    let destination_region = 0x3000_0000_0000_3000_u64;
+    let SocketAddr::V4(destination_endpoint) = destination_endpoint else { panic!("test simulator must use IPv4") };
+    let event = Value::Map(Map::from([(
+        "Info".into(),
+        Value::Array(vec![Value::Map(Map::from([
+            ("AgentID".into(), Value::Uuid(session.agent_id)),
+            ("RegionHandle".into(), Value::Binary(destination_region.to_be_bytes().to_vec().into())),
+            ("SimIP".into(), Value::Binary(destination_endpoint.ip().octets().to_vec().into())),
+            ("SimPort".into(), Value::Integer(i32::from(destination_endpoint.port()))),
+            ("SeedCapability".into(), Value::Uri(session.seed_capability.to_string().into())),
+            ("TeleportFlags".into(), Value::Integer(7)),
+            ("SimAccess".into(), Value::Integer(13)),
+        ]))]),
+    )]));
+    let body = xml::to_string(&Value::Map(Map::from([
+        ("id".into(), Value::Integer(1)),
+        (
+            "events".into(),
+            Value::Array(vec![Value::Map(Map::from([("message".into(), Value::String("TeleportFinish".into())), ("body".into(), event)]))]),
+        ),
+    ])))
+    .expect("encode TeleportFinish EventQueue batch");
+    release.send(response(200, "OK", "application/llsd+xml", None, &body)).expect("deliver TeleportFinish event");
+
+    timeout(WAIT, async {
+        loop {
+            if let Event::CapabilityEventBatch { events, .. } = next_raw_event(&mut harness.events).await
+                && let Some(event) = events.iter().find(|event| event.message == "TeleportFinish")
+            {
+                let fields = crate::session::teleport::event_fields(&event.body).expect("published finish body");
+                let info = crate::session::teleport::event_block(fields, "Info").expect("published finish Info");
+                assert_eq!(info.get("SeedCapability"), Some(&Value::String("[redacted]".into())));
+                assert!(event.handoff_outcome.is_some_and(crate::event::HandoffEventOutcome::is_accepted));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("TeleportFinish from EventQueue reaches the session event stream");
+
+    let (bytes, destination_peer) = timeout(WAIT, receive(&destination)).await.expect("destination circuit should be established");
+    let use_circuit = Packet::decode(&bytes).expect("decode destination circuit packet");
+    std::assert_matches!(use_circuit.message(), Message::UseCircuitCode(_));
+    assert!(use_circuit.is_reliable());
+    destination.send_to(&ack(80, use_circuit.sequence()), destination_peer).await.expect("ack destination circuit");
+
+    let mut handshake = test_fixture("region_handshake.hex");
+    handshake[0] |= 0x40;
+    set_sequence(&mut handshake, 81);
+    destination.send_to(&handshake, destination_peer).await.expect("send destination handshake");
+    let reply = receive_message(&destination, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
+    let movement = receive_message(&destination, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
+    destination.send_to(&ack(82, reply.sequence()), destination_peer).await.expect("ack destination handshake reply");
+    destination.send_to(&ack(83, movement.sequence()), destination_peer).await.expect("ack destination movement request");
+    destination
+        .send_to(&movement_complete_packet(84, session.agent_id, session.session_id, destination_region), destination_peer)
+        .await
+        .expect("complete movement into teleport destination");
+
+    timeout(WAIT, async {
+        loop {
+            match next_raw_event(&mut harness.events).await {
+                Event::SimulatorPromoted { previous_simulator_id, simulator_id, session, .. } => {
+                    assert_eq!(previous_simulator_id, harness.primary_id);
+                    assert_ne!(simulator_id, harness.primary_id);
+                    assert_eq!(session.simulator_address, destination.local_addr().expect("teleport destination address"));
+                    break;
+                }
+                Event::Failed(reason) => panic!("EventQueue teleport handoff failed: {reason}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("EventQueue teleport destination is promoted after movement completion");
+
+    harness.disconnect.send_replace(true);
+    receive_message(&destination, |message| matches!(message, Message::LogoutRequest(_))).await;
+    assert!(timeout(WAIT, harness.client).await.expect("shutdown completes").expect("session task").is_ok());
+    assert_eq!(server.finish().len(), 3);
+}
+
+async fn run_rejected_crossing_is_reported_as_ignored() {
+    use llsd::{Map, Value, xml};
+
+    use crate::fixtures::http::{EventQueueTestServer, EventServerResponse, response};
+
+    let (release, poll_response) = sync::mpsc::channel();
+    let server = EventQueueTestServer::start(|base| {
+        let seed = format!("<llsd><map><key>EventQueueGet</key><uri>{base}events</uri></map></llsd>");
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed)),
+            EventServerResponse::Controlled(poll_response),
+            EventServerResponse::Hold,
+        ]
+    });
+    let mut harness = Box::pin(connected_neighbor_with_seed(server.url("/seed"))).await;
+    let session = login_session(harness.primary.local_addr().expect("primary simulator address"));
+    let crossing = Value::Map(Map::from([
+        (
+            "AgentData".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("AgentID".into(), Value::Uuid(session.agent_id)),
+                ("SessionID".into(), Value::Uuid(session.session_id)),
+            ]))]),
+        ),
+        (
+            "RegionData".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("RegionHandle".into(), Value::Binary(0x3000_0000_0000_3000_u64.to_be_bytes().to_vec().into())),
+                ("SimIP".into(), Value::Binary([127, 0, 0, 1].to_vec().into())),
+                ("SimPort".into(), Value::Integer(13000)),
+                ("SeedCapability".into(), Value::String("ftp://invalid.example/seed".into())),
+            ]))]),
+        ),
+    ]));
+    let body = xml::to_string(&Value::Map(Map::from([
+        ("id".into(), Value::Integer(1)),
+        (
+            "events".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("message".into(), Value::String("CrossedRegion".into())),
+                ("body".into(), crossing),
+            ]))]),
+        ),
+    ])))
+    .expect("encode rejected crossing event");
+    release.send(response(200, "OK", "application/llsd+xml", None, &body)).expect("deliver rejected crossing event");
+
+    timeout(WAIT, async {
+        loop {
+            if let Event::CapabilityEventBatch { events, .. } = next_raw_event(&mut harness.events).await
+                && let Some(event) = events.iter().find(|event| event.message == "CrossedRegion")
+            {
+                assert_eq!(event.handoff_outcome, Some(crate::event::HandoffEventOutcome::Ignored));
+                let fields = crate::session::teleport::event_fields(&event.body).expect("forwarded crossing body");
+                let region = crate::session::teleport::event_block(fields, "RegionData").expect("forwarded RegionData block");
+                assert_eq!(region.get("SeedCapability"), Some(&Value::String("[redacted]".into())));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("rejected crossing reaches the session with its network decision");
+
+    harness.shutdown().await;
+    assert_eq!(server.finish().len(), 3);
+}
+
+async fn run_crossing_to_current_primary_is_reported_as_ignored() {
+    use llsd::{Map, Value, xml};
+
+    use crate::fixtures::http::{EventQueueTestServer, EventServerResponse, response};
+
+    let (release, poll_response) = sync::mpsc::channel();
+    let server = EventQueueTestServer::start(|base| {
+        let seed = format!("<llsd><map><key>EventQueueGet</key><uri>{base}events</uri></map></llsd>");
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed)),
+            EventServerResponse::Controlled(poll_response),
+            EventServerResponse::Hold,
+        ]
+    });
+    let seed_capability = server.url("/seed");
+    let mut harness = Box::pin(connected_neighbor_with_seed(seed_capability.clone())).await;
+    let session = login_session(harness.primary.local_addr().expect("primary simulator address"));
+    let SocketAddr::V4(primary_endpoint) = harness.primary.local_addr().expect("primary simulator address") else {
+        panic!("test simulator must use IPv4")
+    };
+    let crossing = Value::Map(Map::from([
+        (
+            "AgentData".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("AgentID".into(), Value::Uuid(session.agent_id)),
+                ("SessionID".into(), Value::Uuid(session.session_id)),
+            ]))]),
+        ),
+        (
+            "RegionData".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("RegionHandle".into(), Value::Binary(harness.primary_region_handle.to_be_bytes().to_vec().into())),
+                ("SimIP".into(), Value::Binary(primary_endpoint.ip().octets().to_vec().into())),
+                ("SimPort".into(), Value::Integer(i32::from(primary_endpoint.port()))),
+                ("SeedCapability".into(), Value::Uri(seed_capability.to_string().into())),
+            ]))]),
+        ),
+    ]));
+    let body = xml::to_string(&Value::Map(Map::from([
+        ("id".into(), Value::Integer(1)),
+        (
+            "events".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("message".into(), Value::String("CrossedRegion".into())),
+                ("body".into(), crossing),
+            ]))]),
+        ),
+    ])))
+    .expect("encode current-primary crossing event");
+    release.send(response(200, "OK", "application/llsd+xml", None, &body)).expect("deliver current-primary crossing event");
+
+    timeout(WAIT, async {
+        loop {
+            if let Event::CapabilityEventBatch { events, .. } = next_raw_event(&mut harness.events).await
+                && let Some(event) = events.iter().find(|event| event.message == "CrossedRegion")
+            {
+                assert_eq!(event.handoff_outcome, Some(crate::event::HandoffEventOutcome::Ignored));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("current-primary crossing is reported without creating a handoff");
+
+    harness.shutdown().await;
+    assert_eq!(server.finish().len(), 3);
+}
+
 async fn run_return_handoff_reuses_root_connection() {
     let mut harness = Box::pin(connected_neighbor()).await;
     let session = login_session(harness.primary.local_addr().expect("primary endpoint"));
@@ -56,6 +292,63 @@ async fn run_return_handoff_reuses_root_connection() {
     .encode()
     .expect("encode first handoff");
     harness.primary.send_to(&to_neighbor, harness.primary_peer).await.expect("announce neighbor handoff");
+    timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorMessage { message: Message::TeleportFinish(_), handoff_outcome, .. } =
+                next_raw_event(&mut harness.events).await
+            {
+                assert!(handoff_outcome.is_some_and(crate::event::HandoffEventOutcome::is_accepted));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("network reports its accepted finish decision");
+
+    let stale_destination = "127.0.0.1:19999".parse().expect("stale teleport destination");
+    let stale_finish = Packet::new(99, teleport_finish_to(session.agent_id, stale_destination, neighbor_region + 1, seed))
+        .with_reliable()
+        .encode()
+        .expect("encode stale handoff");
+    harness.primary.send_to(&stale_finish, harness.primary_peer).await.expect("announce stale handoff");
+    timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorMessage { message: Message::TeleportFinish(_), handoff_outcome, .. } =
+                next_raw_event(&mut harness.events).await
+            {
+                assert_eq!(handoff_outcome, Some(crate::event::HandoffEventOutcome::Ignored));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("network marks its stale finish as ignored");
+
+    let stale_failure = Packet::new(
+        98,
+        Message::TeleportFailed(protocol::messages::TeleportFailed {
+            agent_id: session.agent_id,
+            reason: b"blocked_tport".to_vec(),
+            alert_info: Vec::new(),
+        }),
+    )
+    .with_reliable()
+    .encode()
+    .expect("encode stale failure");
+    harness.primary.send_to(&stale_failure, harness.primary_peer).await.expect("announce stale failure");
+    timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorMessage { message: Message::TeleportFailed(_), handoff_outcome, .. } =
+                next_raw_event(&mut harness.events).await
+            {
+                assert_eq!(handoff_outcome, Some(crate::event::HandoffEventOutcome::Ignored));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("network marks its stale failure as ignored");
+
     let mut handshake = test_fixture("region_handshake.hex");
     handshake[0] |= 0x40;
     set_sequence(&mut handshake, 102);
@@ -131,6 +424,120 @@ async fn run_return_handoff_reuses_root_connection() {
     let (_, route_peer) =
         receive_message_with_peer(&harness.primary, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
     assert_eq!(route_peer, harness.primary_peer);
+    harness.shutdown().await;
+}
+
+async fn run_older_finish_after_newer_start_is_ignored() {
+    let mut harness = Box::pin(connected_neighbor()).await;
+    let session = login_session(harness.primary.local_addr().expect("primary simulator address"));
+    let start = Packet::new(70, Message::TeleportStart(TeleportStart { teleport_flags: 0 }))
+        .with_reliable()
+        .encode()
+        .expect("encode newer teleport start");
+    harness.primary.send_to(&start, harness.primary_peer).await.expect("send newer teleport start");
+    timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorMessage { message: Message::TeleportStart(_), .. } = next_raw_event(&mut harness.events).await {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("viewer receives the newer teleport start");
+
+    let stale_finish = Packet::new(
+        69,
+        teleport_finish_to(
+            session.agent_id,
+            harness.neighbor.local_addr().expect("neighbor address"),
+            0x1000_0000_0000_1000,
+            session.seed_capability.as_str(),
+        ),
+    )
+    .with_reliable()
+    .encode()
+    .expect("encode older teleport finish");
+    harness.primary.send_to(&stale_finish, harness.primary_peer).await.expect("send older teleport finish");
+    timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorMessage { message: Message::TeleportFinish(_), handoff_outcome, .. } =
+                next_raw_event(&mut harness.events).await
+            {
+                assert_eq!(handoff_outcome, Some(crate::event::HandoffEventOutcome::Ignored));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("network ignores an older finish after a newer lifecycle packet");
+
+    harness
+        .handle
+        .request_teleport(crate::TeleportRequest::Location(protocol::messages::TeleportLocationRequest {
+            agent_id: session.agent_id,
+            session_id: session.session_id,
+            region_handle: 0x1000_0000_0000_2000,
+            position: math::Vec3::new(10.0, 20.0, 30.0),
+            look_at: math::Vec3::Y,
+        }))
+        .await
+        .expect("an ignored finish must not leave a network handoff pending");
+    let sent = receive_message(&harness.primary, |message| matches!(message, Message::TeleportLocationRequest(_))).await;
+    harness.primary.send_to(&ack(71, sent.sequence()), harness.primary_peer).await.expect("ack the next teleport request");
+
+    let pending_finish = Packet::new(
+        72,
+        teleport_finish_to(
+            session.agent_id,
+            harness.neighbor.local_addr().expect("neighbor address"),
+            0x1000_0000_0000_1000,
+            session.seed_capability.as_str(),
+        ),
+    )
+    .with_reliable()
+    .encode()
+    .expect("encode accepted finish before newer start");
+    harness.primary.send_to(&pending_finish, harness.primary_peer).await.expect("send finish before newer start");
+    timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorMessage { message: Message::TeleportFinish(_), handoff_outcome, .. } =
+                next_raw_event(&mut harness.events).await
+            {
+                assert!(handoff_outcome.is_some_and(crate::event::HandoffEventOutcome::is_accepted));
+                break;
+            }
+        }
+    })
+    .await
+    .expect("network accepts the finish before its newer lifecycle packet arrives");
+
+    let newer_start =
+        Packet::new(73, Message::TeleportStart(TeleportStart { teleport_flags: 0 })).with_reliable().encode().expect("encode newer start");
+    harness.primary.send_to(&newer_start, harness.primary_peer).await.expect("send newer start");
+    timeout(WAIT, async {
+        loop {
+            if let Event::SimulatorMessage { message: Message::TeleportStart(_), .. } = next_raw_event(&mut harness.events).await {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("network processes the newer lifecycle packet");
+
+    harness
+        .handle
+        .request_teleport(crate::TeleportRequest::Location(protocol::messages::TeleportLocationRequest {
+            agent_id: session.agent_id,
+            session_id: session.session_id,
+            region_handle: 0x1000_0000_0000_3000,
+            position: math::Vec3::new(10.0, 20.0, 30.0),
+            look_at: math::Vec3::Y,
+        }))
+        .await
+        .expect("newer start must clear the older pending handoff");
+    let sent = receive_message(&harness.primary, |message| matches!(message, Message::TeleportLocationRequest(_))).await;
+    harness.primary.send_to(&ack(74, sent.sequence()), harness.primary_peer).await.expect("ack teleport after stale handoff cleanup");
+
     harness.shutdown().await;
 }
 
@@ -255,6 +662,161 @@ async fn run_stale_cancel() {
     assert_eq!(server.finish().len(), 3);
 }
 
+async fn run_stale_handoff_cancellation_preserves_refreshed_crossing() {
+    use llsd::{Map, Value, xml};
+
+    use crate::fixtures::http::{EventQueueTestServer, EventServerResponse, response};
+    use crate::{HandoffCancellationOutcome, HandoffEventOutcome};
+
+    let (release, poll_response) = sync::mpsc::channel();
+    let (release_refresh, refresh_response) = sync::mpsc::channel();
+    let server = EventQueueTestServer::start(|base| {
+        let seed = format!("<llsd><map><key>EventQueueGet</key><uri>{base}events</uri></map></llsd>");
+        vec![
+            EventServerResponse::Response(response(200, "OK", "application/llsd+xml", None, &seed)),
+            EventServerResponse::Controlled(poll_response),
+            EventServerResponse::Controlled(refresh_response),
+            EventServerResponse::Hold,
+        ]
+    });
+    let mut harness = Box::pin(connected_neighbor_with_seed(server.url("/seed"))).await;
+    let session = login_session(harness.primary.local_addr().expect("primary simulator address"));
+    let SocketAddr::V4(target) = harness.neighbor.local_addr().expect("crossing simulator address") else {
+        panic!("test simulator must use IPv4")
+    };
+    let region_handle = 0x1000_0000_0000_1000_u64;
+    let crossing = Value::Map(Map::from([
+        (
+            "AgentData".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("AgentID".into(), Value::Uuid(session.agent_id)),
+                ("SessionID".into(), Value::Uuid(session.session_id)),
+            ]))]),
+        ),
+        (
+            "RegionData".into(),
+            Value::Array(vec![Value::Map(Map::from([
+                ("RegionHandle".into(), Value::Binary(region_handle.to_be_bytes().to_vec().into())),
+                ("SimIP".into(), Value::Binary(target.ip().octets().to_vec().into())),
+                ("SimPort".into(), Value::Integer(i32::from(target.port()))),
+                ("SeedCapability".into(), Value::Uri(session.seed_capability.to_string().into())),
+            ]))]),
+        ),
+        ("Info".into(), Value::Array(vec![Value::Map(Map::new())])),
+    ]));
+    let body = |id| {
+        xml::to_string(&Value::Map(Map::from([
+            ("id".into(), Value::Integer(id)),
+            (
+                "events".into(),
+                Value::Array(vec![Value::Map(Map::from([
+                    ("message".into(), Value::String("CrossedRegion".into())),
+                    ("body".into(), crossing.clone()),
+                ]))]),
+            ),
+        ])))
+        .expect("encode CrossedRegion event")
+    };
+    let first_body = body(1);
+    release.send(response(200, "OK", "application/llsd+xml", None, &first_body)).expect("deliver crossing event");
+
+    let first_generation = timeout(WAIT, async {
+        loop {
+            if let Event::CapabilityEventBatch { events, .. } = next_raw_event(&mut harness.events).await
+                && let Some(event) = events.iter().find(|event| event.message == "CrossedRegion")
+            {
+                let outcome = event.handoff_outcome.expect("network handoff outcome");
+                assert!(outcome.is_accepted());
+                break outcome.generation().expect("accepted crossing generation");
+            }
+        }
+    })
+    .await
+    .expect("network should accept the region crossing");
+
+    assert_eq!(
+        harness.handle.cancel_pending_handoff(None).await.expect("unscoped cleanup reports the current handoff generation"),
+        HandoffCancellationOutcome::Stale { generation: first_generation }
+    );
+    std::assert_matches!(
+        harness
+            .handle
+            .request_teleport(crate::TeleportRequest::Location(protocol::messages::TeleportLocationRequest {
+                agent_id: session.agent_id,
+                session_id: session.session_id,
+                region_handle: region_handle + 1,
+                position: math::Vec3::new(10.0, 20.0, 30.0),
+                look_at: math::Vec3::Y,
+            }))
+            .await,
+        Err(crate::Error::SimulatorHandoffInProgress)
+    );
+
+    let refresh_body = body(2);
+    release_refresh.send(response(200, "OK", "application/llsd+xml", None, &refresh_body)).expect("deliver refreshed crossing event");
+    let refreshed_generation = timeout(WAIT, async {
+        loop {
+            if let Event::CapabilityEventBatch { events, .. } = next_raw_event(&mut harness.events).await
+                && let Some(event) = events.iter().find(|event| event.message == "CrossedRegion")
+            {
+                assert_eq!(event.handoff_outcome.map(HandoffEventOutcome::is_accepted), Some(true));
+                break event.handoff_outcome.and_then(HandoffEventOutcome::generation).expect("refreshed crossing generation");
+            }
+        }
+    })
+    .await
+    .expect("network should refresh the same crossing");
+    assert_ne!(first_generation, refreshed_generation);
+
+    let cancel = TeleportCancel { agent_id: session.agent_id, session_id: session.session_id };
+    let handle = harness.handle.clone();
+    let primary_id = harness.primary_id;
+    let cancel_sent =
+        spawn(async move { handle.send_teleport_cancel(primary_id, cancel, Delivery::Reliable, Some(first_generation)).await });
+    let sent_cancel = receive_message(&harness.primary, |message| matches!(message, Message::TeleportCancel(_))).await;
+    harness.primary.send_to(&ack(63, sent_cancel.sequence()), harness.primary_peer).await.expect("ack stale-generation cancel packet");
+    cancel_sent.await.expect("cancel send task").expect("queue generation-scoped cancel packet");
+    assert!(matches!(
+        harness
+            .handle
+            .request_teleport(crate::TeleportRequest::Location(protocol::messages::TeleportLocationRequest {
+                agent_id: session.agent_id,
+                session_id: session.session_id,
+                region_handle: region_handle + 1,
+                position: math::Vec3::new(10.0, 20.0, 30.0),
+                look_at: math::Vec3::Y,
+            }))
+            .await,
+        Err(crate::Error::SimulatorHandoffInProgress)
+    ));
+
+    let request = crate::TeleportRequest::Location(protocol::messages::TeleportLocationRequest {
+        agent_id: session.agent_id,
+        session_id: session.session_id,
+        region_handle: region_handle + 1,
+        position: math::Vec3::new(10.0, 20.0, 30.0),
+        look_at: math::Vec3::Y,
+    });
+    std::assert_matches!(harness.handle.request_teleport(request.clone()).await, Err(crate::Error::SimulatorHandoffInProgress));
+
+    assert_eq!(
+        harness.handle.cancel_pending_handoff(Some(first_generation)).await.expect("reject stale local handoff cleanup"),
+        HandoffCancellationOutcome::Stale { generation: refreshed_generation }
+    );
+    std::assert_matches!(harness.handle.request_teleport(request.clone()).await, Err(crate::Error::SimulatorHandoffInProgress));
+
+    assert_eq!(
+        harness.handle.cancel_pending_handoff(Some(refreshed_generation)).await.expect("clear the matching local handoff"),
+        HandoffCancellationOutcome::Cancelled { generation: Some(refreshed_generation) }
+    );
+    harness.handle.request_teleport(request).await.expect("new teleport should not be blocked by the old crossing");
+    let sent = receive_message(&harness.primary, |message| matches!(message, Message::TeleportLocationRequest(_))).await;
+    harness.primary.send_to(&ack(63, sent.sequence()), harness.primary_peer).await.expect("ack the next teleport request");
+
+    harness.shutdown().await;
+    assert_eq!(server.finish().len(), 4);
+}
+
 async fn run_disconnect_logs_out_promoted_primary() {
     use crate::event::Event::SimulatorMessage;
     use protocol::lludp::Message::RegionHandshake;
@@ -349,13 +911,38 @@ fn event_batch_preserves_forwarded_order() {
 }
 
 #[test]
+fn event_queue_teleport_finish_promotes_destination() {
+    run_large_stack_test(run_event_queue_teleport_finish_promotes_destination);
+}
+
+#[test]
+fn rejected_crossing_is_forwarded_as_ignored() {
+    run_large_stack_test(run_rejected_crossing_is_reported_as_ignored);
+}
+
+#[test]
+fn crossing_to_current_primary_is_forwarded_as_ignored() {
+    run_large_stack_test(run_crossing_to_current_primary_is_reported_as_ignored);
+}
+
+#[test]
 fn return_handoff_reuses_root_connection() {
     run_large_stack_test(run_return_handoff_reuses_root_connection);
 }
 
 #[test]
+fn older_finish_after_newer_start_is_ignored() {
+    run_large_stack_test(run_older_finish_after_newer_start_is_ignored);
+}
+
+#[test]
 fn stale_cancel_keeps_new_handoff() {
     run_large_stack_test(run_stale_cancel);
+}
+
+#[test]
+fn local_handoff_cancellation_unblocks_teleport_request() {
+    run_large_stack_test(run_stale_handoff_cancellation_preserves_refreshed_crossing);
 }
 
 #[test]

@@ -14,8 +14,8 @@ use tokio::{
 };
 
 use super::{
-    COMMAND_CAPACITY, Command, MfaChallenge, NETWORK_THREAD_STACK_SIZE, Session, SessionError, SessionHandle, SessionOptions,
-    SessionRuntime, SessionRuntimeOptions,
+    COMMAND_CAPACITY, Command, HANDOFF_CANCELLATION_CAPACITY, HandoffCancellationCommand, MfaChallenge, NETWORK_THREAD_STACK_SIZE, Session,
+    SessionError, SessionHandle, SessionOptions, SessionRuntime, SessionRuntimeOptions,
 };
 use crate::{
     LoginCredentials,
@@ -28,6 +28,7 @@ use crate::{
 pub(super) struct Channels {
     pub(super) commands: Receiver<Command>,
     pub(super) command_sender: Sender<Command>,
+    pub(super) handoff_cancellations: Receiver<HandoffCancellationCommand>,
     pub(super) events: Sender<EventEnvelope>,
     pub(super) terminal_event_permit: OwnedPermit<EventEnvelope>,
     pub(super) disconnect_requested: watch::Receiver<bool>,
@@ -36,6 +37,7 @@ pub(super) struct Channels {
 
 pub(super) fn start_at(credentials: LoginCredentials, options: SessionOptions, login_url: String) -> Result<Session, Error> {
     let (command_sender, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (handoff_cancellation_sender, handoff_cancellations) = mpsc::channel(HANDOFF_CANCELLATION_CAPACITY);
     let (event_sender, events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let coverage_losses = CoverageLossLedger::new();
     let coverage_changed = coverage_losses.subscribe();
@@ -66,6 +68,7 @@ pub(super) fn start_at(credentials: LoginCredentials, options: SessionOptions, l
             let channels = Channels {
                 commands: command_receiver,
                 command_sender: worker_command_sender,
+                handoff_cancellations,
                 events: event_sender,
                 terminal_event_permit,
                 disconnect_requested: disconnect_receiver,
@@ -86,6 +89,7 @@ pub(super) fn start_at(credentials: LoginCredentials, options: SessionOptions, l
     Ok(Session {
         handle: SessionHandle {
             commands: command_sender,
+            handoff_cancellations: handoff_cancellation_sender,
             disconnect_requested: disconnect_sender,
             command_admission_closed: Arc::new(Mutex::new(false)),
             worker_finished,
@@ -106,7 +110,15 @@ pub(super) async fn run_client(
     login_url: String,
     options: SessionOptions,
 ) -> Result<(), SessionError> {
-    let Channels { mut commands, command_sender, events, terminal_event_permit, mut disconnect_requested, coverage_losses } = channels;
+    let Channels {
+        mut commands,
+        command_sender,
+        handoff_cancellations,
+        events,
+        terminal_event_permit,
+        mut disconnect_requested,
+        coverage_losses,
+    } = channels;
     let mut mfa_token = String::new();
     let mut mfa_hash = credentials.mfa_hash.clone();
     let (session, login_data) = loop {
@@ -174,6 +186,16 @@ pub(super) async fn run_client(
                                 drop(error);
                             }
                         }
+                        Some(Command::SendTeleportCancel { completed, .. }) => {
+                            if let Err(error) = completed.send(Err(Error::SimulatorNotReady)) {
+                                drop(error);
+                            }
+                        }
+                        Some(Command::RequestTeleport { completed, .. }) => {
+                            if let Err(error) = completed.send(Err(Error::SimulatorNotReady)) {
+                                drop(error);
+                            }
+                        }
                         None => return Ok(()),
                     }
                 }
@@ -198,7 +220,7 @@ pub(super) async fn run_client(
     else {
         return Ok(());
     };
-    runtime.run(commands, events, disconnect_requested, terminal_event_permit).await
+    runtime.run(commands, handoff_cancellations, events, disconnect_requested, terminal_event_permit).await
 }
 
 pub(super) async fn wait_for_login<F: Future>(login: F, disconnect_requested: &mut watch::Receiver<bool>) -> Option<F::Output> {

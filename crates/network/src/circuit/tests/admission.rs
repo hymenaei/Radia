@@ -64,6 +64,7 @@ mod memory {
                 sequence: packet.sequence(),
                 packet_order: Ordered(1),
                 message: packet.into_message(),
+                handoff_outcome: None,
             },
             reservation.into_retention(),
         );

@@ -20,7 +20,7 @@ use std::{
     future::{Future, pending},
     io::ErrorKind,
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -32,7 +32,7 @@ use protocol::{
     login::ResponseData,
     messages::{
         AgentMovementComplete, CacheMissType, ChatFromViewer, CompletePingCheck, ObjectRequest, PacketAck, PingId, RequestAgentData,
-        RequestMultipleObjects, StartPingCheck, TeleportCancel, TeleportFinish,
+        RequestMultipleObjects, StartPingCheck, TeleportCancel, TeleportFinish, TeleportStart,
         agent::agent_movement_complete::{AgentData, Data, SimData},
         chat::chat_from_viewer,
         chat::chat_from_viewer::ChatData,
@@ -76,7 +76,10 @@ use crate::{
         CLIENT_EVENT_CAPACITY, CapabilityEvent, Event, EventEnvelope, EventQueueBatchOrder, EventRetention, EventSendOutcome,
         PRIMARY_TERMINAL_EVENT_CAPACITY, PacketOrder::Ordered, SimulatorId,
     },
-    session::{COMMAND_CAPACITY, Command, DEFAULT_UPSTREAM_BYTES_PER_SECOND, NETWORK_THREAD_STACK_SIZE},
+    session::{
+        COMMAND_CAPACITY, Command, DEFAULT_UPSTREAM_BYTES_PER_SECOND, HANDOFF_CANCELLATION_CAPACITY, NETWORK_THREAD_STACK_SIZE,
+        SessionHandle,
+    },
 };
 
 use super::logout::{LogoutAttemptError, LogoutOutcome, LogoutUnavailable, PendingLogout, send_logout_with_deadline};
@@ -107,6 +110,7 @@ struct NeighborHarness {
     primary_region_handle: u64,
     neighbor_id: SimulatorId,
     commands: mpsc::Sender<Command>,
+    handle: SessionHandle,
     events: mpsc::Receiver<EventEnvelope>,
     disconnect: watch::Sender<bool>,
     packet_memory: SimulatorMemoryBudget,
@@ -136,7 +140,8 @@ pub(crate) async fn run_session(
         let connection = SessionRuntime::connect(session, ResponseData::default(), test_options())
             .await?
             .ok_or(crate::session::SessionError::PrimaryConnectionStoppedDuringStartup)?;
-        connection.run(commands, events, disconnect_requested, terminal_event_permit).await
+        let (_, handoff_cancellations) = mpsc::channel(1);
+        connection.run(commands, handoff_cancellations, events, disconnect_requested, terminal_event_permit).await
     }
     .await;
     if let Err(error) = &result {
@@ -296,6 +301,7 @@ fn retained_packet_event(budget: &SimulatorMemoryBudget, simulator_id: Simulator
             source,
             sequence,
             packet_order: Ordered(u64::from(sequence)),
+            handoff_outcome: None,
             message: packet.into_message(),
         },
         reservation.into_retention(),
@@ -367,8 +373,10 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
     let primary_endpoint = primary.local_addr().expect("primary simulator address");
     let neighbor_endpoint = neighbor.local_addr().expect("neighbor simulator address");
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (handoff_cancellations, handoff_cancellation_receiver) = mpsc::channel(HANDOFF_CANCELLATION_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(TEST_EVENT_CAPACITY);
     let (disconnect, disconnect_requested) = watch::channel(false);
+    let (worker_finished_sender, worker_finished) = watch::channel(false);
     let (send_gate, pause_sends, send_entered) = new_send_gate();
     let connection = connect_with_send_gate(
         AgentSession { seed_capability: seed, ..login_session(primary_endpoint) },
@@ -379,7 +387,18 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
     .expect("connect primary simulator");
     let packet_memory = connection.packet_memory.clone();
     let terminal = event_sender.clone().reserve_owned().await.expect("reserve terminal event");
-    let client = spawn(connection.run(command_receiver, event_sender, disconnect_requested, terminal));
+    let handle = SessionHandle {
+        commands: commands.clone(),
+        handoff_cancellations,
+        disconnect_requested: disconnect.clone(),
+        command_admission_closed: Arc::new(Mutex::new(false)),
+        worker_finished,
+    };
+    let client = spawn(async move {
+        let result = connection.run(command_receiver, handoff_cancellation_receiver, event_sender, disconnect_requested, terminal).await;
+        worker_finished_sender.send_replace(true);
+        result
+    });
 
     let (_, primary_peer) = receive(&primary).await;
     primary.send_to(&ack(20, 1), primary_peer).await.expect("ack primary circuit");
@@ -441,6 +460,7 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
         primary_region_handle,
         neighbor_id,
         commands,
+        handle,
         events,
         disconnect,
         packet_memory,

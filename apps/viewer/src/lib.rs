@@ -11,5 +11,12 @@ mod session;
 #[cfg(test)]
 mod test_helpers;
 pub mod world_reader;
+pub mod teleport {
+    pub use crate::session::{
+        CrossingState, TeleportAlertInfo, TeleportCancelFailure, TeleportCancelOutcome, TeleportFailure, TeleportFailureReason,
+        TeleportHandle, TeleportLandmarkRequest, TeleportLocationRequest, TeleportProgressKind, TeleportRequestError, TeleportSnapshot,
+        TeleportStatus,
+    };
+}
 
 pub(crate) const DEFAULT_DRAW_DISTANCE: f32 = 512.0;

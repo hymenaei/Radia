@@ -466,6 +466,40 @@ async fn foreign_ids_are_unavailable() {
 }
 
 #[tokio::test]
+async fn stray_logout_reply_keeps_session_running() {
+    let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
+    let session = login_session(primary.local_addr().expect("primary simulator address"));
+    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
+    let (disconnect_signal, disconnect_requested) = watch::channel(false);
+    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+
+    let (_, primary_peer) = receive(&primary).await;
+    primary.send_to(&ack(20, 1), primary_peer).await.expect("ack primary circuit");
+    receive_message(&primary, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
+    primary.send_to(&ack(21, 2), primary_peer).await.expect("ack initial movement");
+
+    let mut logout_reply = test_fixture("logout_reply.hex");
+    logout_reply[0] |= 0x40;
+    set_sequence(&mut logout_reply, 22);
+    primary.send_to(&logout_reply, primary_peer).await.expect("send stray logout reply");
+
+    let mut handshake = test_fixture("region_handshake.hex");
+    handshake[0] |= 0x40;
+    set_sequence(&mut handshake, 23);
+    primary.send_to(&handshake, primary_peer).await.expect("send primary handshake");
+    receive_message(&primary, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
+    let Event::SimulatorMessage { sequence, .. } = next_event(&mut events).await else {
+        panic!("expected region handshake event after the stray logout reply");
+    };
+    assert_eq!(sequence, 23);
+
+    disconnect_signal.send(true).expect("request disconnect");
+    drop(events);
+    let _result = client.await.expect("session task did not panic");
+}
+
+#[tokio::test]
 async fn neighbor_backpressure_controls() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");

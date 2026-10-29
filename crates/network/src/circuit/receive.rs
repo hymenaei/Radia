@@ -603,7 +603,7 @@ impl ConnectionTask {
                 dispatch_message = false;
                 self.phase.begin_draining();
             }
-            Message::PacketAck(_) => dispatch_message = false,
+            Message::LogoutReply(_) | Message::PacketAck(_) => dispatch_message = false,
             _ => {}
         }
         Ok(dispatch_message)

@@ -393,7 +393,7 @@ impl SessionDriver {
                     let touched_agent = self.summary_touches_agent(&summary);
                     self.process_ingest_summary(simulator_id, summary);
                     if touched_agent {
-                        self.publish_world_agent_motion();
+                        self.publish_world_agent_motion(std::time::Instant::now());
                     }
                 }
                 if let Some((movement, received_at)) = self.handoff.apply_promoted_movement_complete(
@@ -581,12 +581,11 @@ impl SessionDriver {
         if let Some(outcome) = result {
             touched_agent = outcome.touched_agent;
             if let Some((simulator_id, summary)) = outcome.summary {
-                touched_agent |= self.summary_touches_agent(&summary);
                 self.process_ingest_summary(simulator_id, summary);
             }
         }
         if touched_agent && self.primary_simulator == Some(simulator_id) {
-            self.publish_world_agent_motion();
+            self.publish_world_agent_motion(received_at);
         }
 
         self.environments.simulator_message(&mut self.session_world, simulator_id, packet_order, &message, self.primary_simulator);
@@ -766,9 +765,9 @@ impl SessionDriver {
             .is_some_and(|entity| summary.touches_entity(entity))
     }
 
-    fn publish_world_agent_motion(&self) {
+    fn publish_world_agent_motion(&self, received_at: std::time::Instant) {
         let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
-        self.agent_motion.publish_world(self.session_world.world(), agent_id, std::time::Instant::now());
+        self.agent_motion.publish_world(self.session_world.world(), agent_id, received_at);
     }
 
     fn publish_arrival_agent_motion(

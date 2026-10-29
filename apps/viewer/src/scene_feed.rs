@@ -30,6 +30,7 @@ use crate::{
 };
 
 const MAX_UPDATE_INTERPOLATION_TIME: Duration = Duration::from_secs(3);
+const MIN_ACTIVE_MOTION_SQUARED: f32 = 1e-6;
 
 #[derive(Default)]
 struct DeadReckoning {
@@ -56,7 +57,8 @@ impl DeadReckoning {
     fn active(&self, now: Instant) -> bool {
         self.sample.is_some_and(|sample| {
             now.saturating_duration_since(sample.received_at) <= MAX_UPDATE_INTERPOLATION_TIME
-                && (sample.velocity != math::Vec3::ZERO || sample.acceleration != math::Vec3::ZERO)
+                && (sample.velocity.length_squared() > MIN_ACTIVE_MOTION_SQUARED
+                    || sample.acceleration.length_squared() > MIN_ACTIVE_MOTION_SQUARED)
         })
     }
 }
@@ -557,6 +559,20 @@ mod tests {
         assert_eq!(dead_reckoning.pose(received_at + Duration::from_secs(3)).unwrap().position.x, 13.0);
         assert_eq!(dead_reckoning.pose(received_at + Duration::from_secs(10)).unwrap().position.x, 13.0);
         assert!(!dead_reckoning.active(received_at + Duration::from_secs(3) + Duration::from_nanos(1)));
+    }
+
+    #[test]
+    fn negligible_motion_is_idle() {
+        let received_at = Instant::now();
+        let mut sample = motion_sample(received_at);
+        sample.velocity = Vec3::splat(1e-4);
+        sample.acceleration = Vec3::splat(1e-4);
+        let mut dead_reckoning = DeadReckoning::default();
+        dead_reckoning.replace(Some(sample));
+        assert!(!dead_reckoning.active(received_at));
+        sample.velocity = Vec3::X * 0.01;
+        dead_reckoning.replace(Some(sample));
+        assert!(dead_reckoning.active(received_at));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::num::{NonZeroU8, NonZeroU32};
 
-use math::UvTransform;
+use math::{UvTransform, Vec3};
 use protocol::{
     lludp::{
         Message,
@@ -326,7 +326,7 @@ fn compressed_observation(
         kind: classification.kind,
         parent,
         pose: Some(Pose { position: Some(block.position), rotation: Some(block.rotation) }),
-        linear_motion: None,
+        linear_motion: Some(LinearMotion { velocity: None, acceleration: Some(Vec3::ZERO) }),
         angular_velocity: block.angular_velocity,
         scale: Some(block.scale),
         attachment_point: attachment_point(block.state),

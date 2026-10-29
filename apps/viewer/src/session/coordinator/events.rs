@@ -328,12 +328,11 @@ impl WorldHandoff {
                         on_object_chunk(targets, cancellations);
                     })
                     .await?;
-                let touched_agent =
-                    agent_id.and_then(|agent_id| world.world().entity(agent_id)).is_some_and(|entity| batch_summary.touches_entity(entity));
-                Some(SimulatorMessageOutcome {
-                    summary: self.complete_observation(world, simulator_id).map(|summary| (simulator_id, summary)),
-                    touched_agent,
-                })
+                let summary = self.complete_observation(world, simulator_id);
+                let touched_agent = agent_id.and_then(|agent_id| world.world().entity(agent_id)).is_some_and(|entity| {
+                    batch_summary.touches_entity(entity) || summary.as_ref().is_some_and(|summary| summary.touches_entity(entity))
+                });
+                Some(SimulatorMessageOutcome { summary: summary.map(|summary| (simulator_id, summary)), touched_agent })
             }
             update => {
                 Some(SimulatorMessageOutcome { summary: self.apply_update(world, simulator_id, update, agent_id), touched_agent: false })

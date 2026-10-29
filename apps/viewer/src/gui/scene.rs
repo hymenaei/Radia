@@ -1,3 +1,13 @@
+use futures::{StreamExt, future::BoxFuture};
+use gpui::{
+    AnyElement, AnyWindowHandle, App, AppContext, BackgroundExecutor, Entity, Render, Subscription, TitlebarOptions, Window, WindowBounds,
+    WindowId, WindowOptions, div, prelude::*, px, size,
+};
+use gpui_component::{Root, Theme};
+use render::scene::Camera;
+use tokio::sync::watch;
+use uuid::Uuid;
+
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::AssetHandle,
@@ -11,15 +21,6 @@ use crate::{
     session::{AgentMotionSample, EnvironmentInbox},
     world_reader::WorldReader,
 };
-use futures::{StreamExt, future::BoxFuture};
-use gpui::{
-    AnyElement, AnyWindowHandle, App, AppContext, BackgroundExecutor, Entity, Render, Subscription, TitlebarOptions, Window, WindowBounds,
-    WindowId, WindowOptions, div, prelude::*, px, size,
-};
-use gpui_component::{Root, Theme};
-use render::scene::Camera;
-use tokio::sync::watch;
-use uuid::Uuid;
 
 pub(super) struct State {
     main: MainWindow,

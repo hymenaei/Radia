@@ -255,6 +255,29 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
 }
 
 #[test]
+fn demand_lease_protects_cache_key() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let resource = resource(10);
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::new(resource), Priority::Visible, Instant::now()).expect("request texture");
+    assert_eq!(cache.stats().protected_bytes, 0);
+
+    cache.put_complete(resource, vec![7; 1024]).expect("write demanded key");
+    assert_eq!(cache.stats().protected_bytes, 1024);
+    let second_demand = demand.clone();
+    drop(demand);
+    assert_eq!(cache.stats().protected_bytes, 1024);
+    drop(second_demand);
+    assert_eq!(cache.stats().protected_bytes, 0);
+
+    store.close();
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
 fn retired_route_discards_a_completed_disk_read() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));

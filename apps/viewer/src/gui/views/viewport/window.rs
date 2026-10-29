@@ -651,6 +651,39 @@ impl SceneWindow {
                             feed.budget.charged_bytes() as f64 / 1048576.0,
                             feed.budget.high_water_bytes() as f64 / 1048576.0
                         ));
+                        if let Some(cache) = feed.assets.cache_stats() {
+                            ui.label(format!(
+                                "Asset cache: {:.1}/{:.1} MiB, protected {:.1} MiB",
+                                cache.size_bytes as f64 / 1048576.0,
+                                cache.size_limit_bytes as f64 / 1048576.0,
+                                cache.protected_bytes as f64 / 1048576.0
+                            ));
+                            ui.label(format!(
+                                "Cached: {} textures, {} PBR, {} legacy, {} environments, {} meshes",
+                                cache.entries_by_kind.textures,
+                                cache.entries_by_kind.pbr_materials,
+                                cache.entries_by_kind.legacy_materials,
+                                cache.entries_by_kind.environments,
+                                cache.entries_by_kind.meshes
+                            ));
+                            let reasons = cache
+                                .recent_evictions
+                                .iter()
+                                .filter_map(|reason| {
+                                    reason.map(|reason| match reason {
+                                        assets::cache::CacheEvictionReason::Infrequent => "infrequent",
+                                        assets::cache::CacheEvictionReason::Stale => "stale",
+                                        assets::cache::CacheEvictionReason::LowReconstructionCost => "low decode cost",
+                                        assets::cache::CacheEvictionReason::LeastRecentlyUsed => "least recent",
+                                        assets::cache::CacheEvictionReason::LowUtility => "low utility",
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            if !reasons.is_empty() {
+                                ui.label(format!("Recent evictions: {reasons}"));
+                            }
+                        }
                     }
                     if self.recoveries > 0 {
                         ui.label(format!("GPU recreations: {}", self.recoveries));

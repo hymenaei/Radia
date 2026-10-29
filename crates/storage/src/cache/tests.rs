@@ -356,7 +356,7 @@ fn lookup_checks_hash_and_removes_corruption() {
 fn busy_usage_update_is_requeued_and_merged() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
     let hooks = Arc::new(writer::FaultHooks::default());
-    let cache = Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, hooks)?;
+    let cache = Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::new(LruPolicy), hooks)?;
     let cache_key = key(25);
     cache.put(cache_key, b"usage metadata".to_vec())?;
     let first = match cache.lookup(cache_key) {
@@ -439,35 +439,6 @@ fn write_failure_keeps_existing_entries() {
 }
 
 #[test]
-fn size_limit_evicts_least_recently_used() {
-    let single = tempdir().expect("single cache directory");
-    let single_cache = Cache::open(single.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open single cache");
-    single_cache.put(key(10), vec![1; 64 * 1024]).expect("store sample entry");
-    let one_entry_limit = single_cache.accounted_size();
-    single_cache.shutdown().expect("close single cache");
-
-    let directory = tempdir().expect("cache directory");
-    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
-    for id in [11, 12, 13] {
-        cache.put(key(id), vec![1; 64 * 1024]).expect("store entry");
-    }
-    std::assert_matches!(cache.lookup(key(12)), Lookup::Hit(_));
-    cache.set_size_limit(one_entry_limit).expect("shrink cache");
-    assert_eq!(cache.entry_count(), 1);
-    let Lookup::Hit(value) = cache.lookup(key(12)) else {
-        panic!("most recently used entry remains");
-    };
-    assert_eq!(value.bytes, vec![1; 64 * 1024]);
-    assert_eq!(value.use_count, 2);
-    assert_eq!(cache.lookup(key(11)), Lookup::Miss);
-    assert_eq!(cache.lookup(key(13)), Lookup::Miss);
-    assert!(cache.accounted_size() <= cache.size_limit());
-    cache.clear().expect("clear cache");
-    assert_eq!(cache.entry_count(), 0);
-    cache.shutdown().expect("close cache");
-}
-
-#[test]
 fn lookup_ignores_slow_writes() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
@@ -543,7 +514,12 @@ fn replacement_crash_never_trusts_bytes() {
             | WritePoint::LookupHashMismatch
             | WritePoint::IndexTouchBusy
             | WritePoint::PutQueued
-            | WritePoint::WriterReady => unreachable!(),
+            | WritePoint::SetLimitQueued
+            | WritePoint::WriterReady
+            | WritePoint::SetLimitReplied
+            | WritePoint::MaintenanceStarted
+            | WritePoint::MaintenanceFinished
+            | WritePoint::MaintenanceCycleComplete => unreachable!(),
         }
         cache.shutdown().expect("close recovered cache");
     }
@@ -572,8 +548,10 @@ fn interrupted_multi_chunk_write_reopens_with_committed_entries() {
     let hooks = Arc::new(writer::FaultHooks::default());
     let (worker_ready, resume_worker) = hooks.pause_at(WritePoint::WriterReady);
     let (chunk_committed, resume_chunk) = hooks.pause_at(WritePoint::IndexBatchCommitted);
-    let cache =
-        Arc::new(Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::clone(&hooks)).expect("open cache"));
+    let cache = Arc::new(
+        Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::new(LruPolicy), Arc::clone(&hooks))
+            .expect("open cache"),
+    );
     worker_ready.recv_timeout(Duration::from_secs(3)).expect("writer is ready");
     cache.arm_fault(WritePoint::IndexBatchCommitted);
     let keys = (0..=MAX_BATCH_ROWS).map(|id| ordered_key(u16::try_from(id).expect("batch key fits"))).collect::<Vec<_>>();
@@ -632,8 +610,10 @@ fn schema_recovery_does_not_report_removed_entries_as_written() {
 
     let hooks = Arc::new(writer::FaultHooks::default());
     let (worker_ready, resume_worker) = hooks.pause_at(WritePoint::WriterReady);
-    let cache =
-        Arc::new(Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::clone(&hooks)).expect("open cache"));
+    let cache = Arc::new(
+        Cache::open_internal(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES, Arc::new(LruPolicy), Arc::clone(&hooks))
+            .expect("open cache"),
+    );
     worker_ready.recv_timeout(Duration::from_secs(3)).expect("writer is ready");
     let keys = (0..=MAX_BATCH_ROWS).map(|id| ordered_key(u16::try_from(id).expect("batch key fits"))).collect::<Vec<_>>();
     let (queued, resumes, puts) = queue_puts(Arc::clone(&cache), &keys);

@@ -1,9 +1,10 @@
 mod disk;
+mod eviction;
 mod queue;
 mod support;
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     fs::{self, File, ReadDir},
     io::{self, Write},
     path::PathBuf,
@@ -21,18 +22,16 @@ use std::sync::{
 };
 
 use super::{
-    DirectoryId, ENTRY_INVALID, ENTRY_REPLACING, ENTRY_VALID, Entry, Key, PendingTouch, ReadState, StorageError, UnavailableReason,
-    index::Index,
+    DirectoryId, ENTRY_INVALID, ENTRY_REPLACING, ENTRY_VALID, Entry, Key, PendingTouch, ProtectionRegistry, ReadState, StorageError,
+    UnavailableReason, index::Index,
 };
 use crate::{
+    EvictionReason,
     cache::eviction::Lru,
     sqlite::{MAX_BATCH_ROWS, SqliteError},
 };
 use disk::{DATA_TEMP_PREFIX, delete_data, fail_temporary, persist_with_retry, remove_path};
-use support::{
-    account_size, clone_error, effective_entry, is_index_file, is_simulated_crash, lock, mutations, next_victim, read_map,
-    remove_new_candidate, simulated_crash_error, sort_changes, write_map,
-};
+use support::{clone_error, is_index_file, is_simulated_crash, lock, mutations, read_map, simulated_crash_error, write_map};
 
 pub(in crate::cache) use queue::{Command, WriteQueue, writer_loop};
 
@@ -61,7 +60,17 @@ pub(super) enum WritePoint {
     #[cfg(test)]
     PutQueued,
     #[cfg(test)]
+    SetLimitQueued,
+    #[cfg(test)]
     WriterReady,
+    #[cfg(test)]
+    SetLimitReplied,
+    #[cfg(test)]
+    MaintenanceStarted,
+    #[cfg(test)]
+    MaintenanceFinished,
+    #[cfg(test)]
+    MaintenanceCycleComplete,
 }
 
 #[cfg(test)]
@@ -175,11 +184,6 @@ impl FaultHooks {
     }
 }
 
-struct Plan {
-    changes: HashMap<Key, Option<Arc<Entry>>>,
-    directory_deltas: HashMap<DirectoryId, i64>,
-}
-
 struct StagedData {
     entry: Arc<Entry>,
     temp: NamedTempFile,
@@ -189,6 +193,7 @@ struct PlannedChange {
     key: Key,
     previous: Option<Arc<Entry>>,
     next: Option<Arc<Entry>>,
+    eviction_reason: Option<EvictionReason>,
 }
 
 struct CommitFailure {
@@ -208,12 +213,15 @@ pub(super) struct WorkerState {
     index: Index,
     read_state: Arc<ReadState>,
     lru: Lru,
+    eviction_scan_cursor: Option<(u64, Key)>,
     referenced_keys: HashSet<Key>,
     directory_counts: HashMap<DirectoryId, usize>,
     directory_count: u64,
     data_bytes: u64,
     entry_count: usize,
+    evictions_this_batch: usize,
     size_limit: u64,
+    blocked_protection_generation: Option<u64>,
     hooks: Arc<FaultHooks>,
     sweep: Vec<(PathBuf, ReadDir)>,
     sweep_complete: bool,
@@ -251,48 +259,50 @@ impl WorkerState {
         let entry_count = entries.len();
         let directory_count = u64::try_from(directory_counts.len()).map_err(|_| StorageError::TooLarge)?;
         drop(entries);
-        let mut state = Self {
+        let state = Self {
             root,
             _lock_file: lock_file,
             index,
             size_limit: read_state.size_limit.load(Ordering::Relaxed),
             read_state,
             lru,
+            eviction_scan_cursor: None,
             referenced_keys,
             directory_counts,
             directory_count,
             data_bytes,
             entry_count,
+            evictions_this_batch: 0,
+            blocked_protection_generation: None,
             hooks,
             sweep: Vec::new(),
             sweep_complete: false,
         };
         state.update_accounted_size();
-        if state.accounted_size() > state.size_limit {
-            state.enforce_limit(state.size_limit)?;
-            if state.accounted_size() > state.size_limit {
-                return Err(StorageError::TooLarge);
-            }
-        }
         Ok(state)
     }
 
-    pub fn accounted_size(&self) -> u64 {
-        let index_bytes = self.index.estimated_bytes(self.entry_count).unwrap_or(u64::MAX);
-        account_size(index_bytes, self.data_bytes, self.entry_count, self.directory_count).unwrap_or(u64::MAX)
-    }
-
-    fn put_batch(&mut self, puts: Vec<(Key, Vec<u8>)>) -> Vec<Result<(), StorageError>> {
+    fn put_batch<'a>(&mut self, total: usize, puts: impl Iterator<Item = (Key, &'a [u8])>) -> Vec<Result<(), StorageError>> {
         self.drain_touches_best_effort();
-        let total = puts.len();
         let mut staged = Vec::<StagedData>::new();
         let mut staged_indices = Vec::new();
         if staged.try_reserve(total).is_err() || staged_indices.try_reserve(total).is_err() {
             return (0..total).map(|_| Err(StorageError::Unavailable(UnavailableReason::Allocation))).collect();
         }
         let mut results = std::iter::repeat_with(|| None).take(total).collect::<Vec<Option<Result<(), StorageError>>>>();
-        for (index, (key, bytes)) in puts.into_iter().enumerate() {
-            match self.write_data(key, &bytes) {
+        for (index, (key, bytes)) in puts.enumerate() {
+            match self.single_put_fits_empty(key, bytes.len()) {
+                Ok(true) => {}
+                Ok(false) => {
+                    results[index] = Some(Err(StorageError::TooLarge));
+                    continue;
+                }
+                Err(error) => {
+                    results[index] = Some(Err(error));
+                    continue;
+                }
+            }
+            match self.write_data(key, bytes) {
                 Ok(data) => {
                     staged.push(data);
                     staged_indices.push(index);
@@ -324,23 +334,69 @@ impl WorkerState {
             return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
         }
         staged_entries.extend(staged.iter().map(|data| Arc::clone(&data.entry)));
-        let plan = match self.plan_puts(&staged_entries) {
-            Ok(plan) => plan,
+        let mut accepted_staged = Vec::new();
+        let mut accepted_entries = Vec::new();
+        let mut accepted_indices = Vec::new();
+        if accepted_staged.try_reserve_exact(staged.len()).is_err()
+            || accepted_entries.try_reserve_exact(staged.len()).is_err()
+            || accepted_indices.try_reserve_exact(staged.len()).is_err()
+        {
+            for index in staged_indices {
+                if let Some(result) = results.get_mut(index) {
+                    *result = Some(Err(StorageError::Unavailable(UnavailableReason::Allocation)));
+                }
+            }
+            return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
+        }
+        let prepared = {
+            let protection_shared = Arc::clone(&self.read_state.protection);
+            let mut protection = lock(&protection_shared.state);
+            self.plan_puts(&staged_entries, &protection).and_then(|put_plan| {
+                for index in &put_plan.rejected {
+                    if let Some(result) = results.get_mut(staged_indices[*index]) {
+                        *result = Some(Err(StorageError::TooLarge));
+                    }
+                }
+                let accepted = put_plan.accepted;
+                for index in &accepted {
+                    accepted_entries.push(Arc::clone(&staged_entries[*index]));
+                    accepted_indices.push(staged_indices[*index]);
+                }
+                let Some(plan) = put_plan.plan else {
+                    return Ok(None);
+                };
+                let changes = self.prepare_changes(&plan, &mut protection)?;
+                let eviction_marks = self.mark_evictions(&changes, &mut protection)?;
+                Ok(Some((changes, eviction_marks, accepted)))
+            })
+        };
+        let (changes, eviction_marks, accepted_stage_indices) = match prepared {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect(),
             Err(error) => {
                 for index in staged_indices {
-                    if let Some(result) = results.get_mut(index) {
+                    if let Some(result) = results.get_mut(index)
+                        && result.is_none()
+                    {
                         *result = Some(Err(clone_error(&error)));
                     }
                 }
                 return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
             }
         };
-        let (committed, error) = match self.publish_and_commit(&plan, staged) {
+        let mut accepted_cursor = 0;
+        for (index, data) in staged.into_iter().enumerate() {
+            if accepted_stage_indices.get(accepted_cursor) == Some(&index) {
+                accepted_staged.push(data);
+                accepted_cursor += 1;
+            }
+        }
+        let (committed, error) = match self.publish_and_commit(changes, accepted_staged, eviction_marks) {
             Ok(committed) => (committed, None),
             Err(failure) => (failure.committed, Some(failure.error)),
         };
-        for (entry, index) in staged_entries.iter().zip(staged_indices) {
-            if let Some(result) = results.get_mut(index) {
+        for (entry, index) in accepted_entries.iter().zip(accepted_indices.iter()) {
+            if let Some(result) = results.get_mut(*index) {
                 *result = Some(match error.as_ref() {
                     None => Ok(()),
                     Some(_) if committed.contains(&entry.key) => Ok(()),
@@ -349,81 +405,6 @@ impl WorkerState {
             }
         }
         results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect()
-    }
-
-    fn plan_puts(&self, staged: &[Arc<Entry>]) -> Result<Plan, StorageError> {
-        let entries = read_map(&self.read_state.entries);
-        let mut changes = HashMap::new();
-        changes.try_reserve(staged.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-        let mut directory_deltas = HashMap::<DirectoryId, i64>::new();
-        directory_deltas
-            .try_reserve(staged.len().saturating_mul(3))
-            .map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-        let mut new_order = BTreeSet::<(u64, Key)>::new();
-        let mut new_stamps = HashMap::<Key, u64>::new();
-        let mut base_order = self.lru.oldest().peekable();
-        let mut data_bytes = self.data_bytes;
-        let mut directory_count = self.directory_count;
-        let mut entry_count = self.entry_count;
-
-        for entry in staged {
-            let key = entry.key;
-            if let Some(previous) = effective_entry(&key, &changes, &entries) {
-                self.adjust_directories(&key, -1, &mut directory_deltas, &mut directory_count)?;
-                data_bytes = data_bytes.checked_sub(previous.size).ok_or(StorageError::TooLarge)?;
-                entry_count = entry_count.saturating_sub(1);
-            }
-            remove_new_candidate(&key, &mut new_order, &mut new_stamps);
-            self.adjust_directories(&key, 1, &mut directory_deltas, &mut directory_count)?;
-            data_bytes = data_bytes.checked_add(entry.size).ok_or(StorageError::TooLarge)?;
-            entry_count = entry_count.checked_add(1).ok_or(StorageError::TooLarge)?;
-            changes.try_reserve(1).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-            changes.insert(key, Some(Arc::clone(entry)));
-            let stamp = entry.last_use.load(Ordering::Relaxed);
-            new_order.insert((stamp, key));
-            new_stamps.insert(key, stamp);
-            while !self.fits(data_bytes, entry_count, directory_count, self.size_limit)? {
-                let victim = next_victim(&mut base_order, &mut new_order, &mut new_stamps, Some(key), &changes, &entries)
-                    .ok_or(StorageError::TooLarge)?;
-                let previous = effective_entry(&victim, &changes, &entries).ok_or(StorageError::TooLarge)?;
-                self.adjust_directories(&victim, -1, &mut directory_deltas, &mut directory_count)?;
-                data_bytes = data_bytes.checked_sub(previous.size).ok_or(StorageError::TooLarge)?;
-                entry_count = entry_count.saturating_sub(1);
-                changes.try_reserve(1).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-                changes.insert(victim, None);
-            }
-        }
-        Ok(Plan { changes, directory_deltas })
-    }
-
-    fn adjust_directories(
-        &self,
-        key: &Key,
-        amount: i64,
-        deltas: &mut HashMap<DirectoryId, i64>,
-        directory_count: &mut u64,
-    ) -> Result<(), StorageError> {
-        let Some((prefixes, shard)) = self.read_state.namespaces.directories(*key) else {
-            return Err(StorageError::UnknownNamespace);
-        };
-        for directory in prefixes.iter().copied().chain(std::iter::once(shard)) {
-            let current_delta = deltas.get(&directory).copied().unwrap_or(0);
-            let existing = self.directory_counts.get(&directory).copied().unwrap_or(0);
-            let current =
-                i64::try_from(existing).map_err(|_| StorageError::TooLarge)?.checked_add(current_delta).ok_or(StorageError::TooLarge)?;
-            let next = current.checked_add(amount).ok_or(StorageError::TooLarge)?;
-            if next < 0 {
-                return Err(StorageError::TooLarge);
-            }
-            if current == 0 && next > 0 {
-                *directory_count = directory_count.checked_add(1).ok_or(StorageError::TooLarge)?;
-            } else if current > 0 && next == 0 {
-                *directory_count = directory_count.checked_sub(1).ok_or(StorageError::TooLarge)?;
-            }
-            deltas.try_reserve(1).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-            deltas.insert(directory, current_delta.checked_add(amount).ok_or(StorageError::TooLarge)?);
-        }
-        Ok(())
     }
 
     fn write_data(&self, key: Key, bytes: &[u8]) -> Result<StagedData, StorageError> {
@@ -457,57 +438,66 @@ impl WorkerState {
         Ok(StagedData { entry, temp })
     }
 
-    fn publish_and_commit(&mut self, plan: &Plan, staged: Vec<StagedData>) -> Result<HashSet<Key>, CommitFailure> {
-        let changes = self.prepare_changes(plan).map_err(CommitFailure::before_commit)?;
+    fn publish_and_commit(
+        &mut self,
+        changes: Vec<PlannedChange>,
+        staged: Vec<StagedData>,
+        eviction_marks: Vec<Arc<Entry>>,
+    ) -> Result<HashSet<Key>, CommitFailure> {
         let mut staged_files = Vec::new();
-        staged_files
-            .try_reserve_exact(staged.len())
-            .map_err(|_| CommitFailure::before_commit(StorageError::Unavailable(UnavailableReason::Allocation)))?;
+        if staged_files.try_reserve_exact(staged.len()).is_err() {
+            return Err(self.commit_failure_before_commit(&eviction_marks, StorageError::Unavailable(UnavailableReason::Allocation)));
+        }
         for data in staged {
-            let destination = self
-                .read_state
-                .namespaces
-                .path(&self.root, data.entry.key)
-                .ok_or_else(|| CommitFailure::before_commit(StorageError::UnknownNamespace))?;
+            let Some(destination) = self.read_state.namespaces.path(&self.root, data.entry.key) else {
+                return Err(self.commit_failure_before_commit(&eviction_marks, StorageError::UnknownNamespace));
+            };
             staged_files.push((data, destination));
         }
+
         let mut batches = Vec::new();
-        batches
-            .try_reserve_exact(changes.len().div_ceil(MAX_BATCH_ROWS))
-            .map_err(|_| CommitFailure::before_commit(StorageError::Unavailable(UnavailableReason::Allocation)))?;
-        for chunk in changes.chunks(MAX_BATCH_ROWS) {
-            batches.push(mutations(chunk).map_err(CommitFailure::before_commit)?);
+        if batches.try_reserve_exact(changes.len().div_ceil(MAX_BATCH_ROWS)).is_err() {
+            return Err(self.commit_failure_before_commit(&eviction_marks, StorageError::Unavailable(UnavailableReason::Allocation)));
         }
+        for chunk in changes.chunks(MAX_BATCH_ROWS) {
+            match mutations(chunk) {
+                Ok(batch) => batches.push(batch),
+                Err(error) => return Err(self.commit_failure_before_commit(&eviction_marks, error)),
+            }
+        }
+
         let mut renamed = HashSet::new();
-        renamed
-            .try_reserve(staged_files.len())
-            .map_err(|_| CommitFailure::before_commit(StorageError::Unavailable(UnavailableReason::Allocation)))?;
+        if renamed.try_reserve(staged_files.len()).is_err() {
+            return Err(self.commit_failure_before_commit(&eviction_marks, StorageError::Unavailable(UnavailableReason::Allocation)));
+        }
         let mut committed = HashSet::new();
-        committed
-            .try_reserve(changes.len())
-            .map_err(|_| CommitFailure::before_commit(StorageError::Unavailable(UnavailableReason::Allocation)))?;
-        let replacing = self.begin_replacements(&changes).map_err(CommitFailure::before_commit)?;
+        if committed.try_reserve(changes.len()).is_err() {
+            return Err(self.commit_failure_before_commit(&eviction_marks, StorageError::Unavailable(UnavailableReason::Allocation)));
+        }
+        let replacing = match self.begin_replacements(&changes) {
+            Ok(replacing) => replacing,
+            Err(error) => return Err(self.commit_failure_before_commit(&eviction_marks, error)),
+        };
         for (data, destination) in staged_files {
             if let Err(error) = persist_with_retry(data.temp, &destination).map_err(StorageError::Io) {
-                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error));
+                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error), &eviction_marks);
                 return Err(CommitFailure { committed, error });
             }
             renamed.insert(data.entry.key);
             if let Err(error) = self.hooks.check(WritePoint::DataRenamed).map_err(StorageError::Io) {
-                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error));
+                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error), &eviction_marks);
                 return Err(CommitFailure { committed, error });
             }
         }
 
         for (chunk, mutations) in changes.chunks(MAX_BATCH_ROWS).zip(batches) {
             if let Err(error) = self.hooks.check(WritePoint::IndexBatchStarted).map_err(StorageError::Io) {
-                let crashed = is_simulated_crash(&error);
-                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, crashed);
+                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error), &eviction_marks);
                 return Err(CommitFailure { committed, error });
             }
             #[cfg(test)]
             if let Err(error) = self.hooks.check(WritePoint::IndexBatchFailure).map_err(StorageError::Io) {
-                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, false);
+                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, false, &eviction_marks);
                 return Err(CommitFailure { committed, error });
             }
             if let Err(error) = self.index.apply(mutations) {
@@ -516,7 +506,7 @@ impl WorkerState {
                 if recreated {
                     committed.clear();
                 }
-                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, false);
+                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, false, &eviction_marks);
                 return Err(CommitFailure { committed, error: storage_error });
             }
             self.publish_changes(chunk);
@@ -524,34 +514,17 @@ impl WorkerState {
                 committed.insert(change.key);
             }
             if let Err(error) = self.hooks.check(WritePoint::IndexBatchCommitted).map_err(StorageError::Io) {
-                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error));
+                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error), &eviction_marks);
                 return Err(CommitFailure { committed, error });
             }
         }
         Ok(committed)
     }
 
-    fn prepare_changes(&mut self, plan: &Plan) -> Result<Vec<PlannedChange>, StorageError> {
-        let mut changes = Vec::new();
-        changes.try_reserve_exact(plan.changes.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-        let entries = read_map(&self.read_state.entries);
-        for (key, next) in &plan.changes {
-            changes.push(PlannedChange { key: *key, previous: entries.get(key).cloned(), next: next.clone() });
-        }
-        drop(entries);
-        sort_changes(&mut changes);
-        let additional = changes.iter().filter(|change| change.next.is_some()).count();
-        let mut entries = write_map(&self.read_state.entries);
-        entries.try_reserve(additional).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-        drop(entries);
-        self.referenced_keys.try_reserve(additional).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-        self.directory_counts
-            .try_reserve(plan.directory_deltas.len())
-            .map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-        self.lru.try_reserve(additional).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-        Ok(changes)
+    fn commit_failure_before_commit(&self, eviction_marks: &[Arc<Entry>], error: StorageError) -> CommitFailure {
+        self.rollback_evictions(eviction_marks, &HashSet::new());
+        CommitFailure::before_commit(error)
     }
-
     fn begin_replacements(&self, changes: &[PlannedChange]) -> Result<Vec<Arc<Entry>>, StorageError> {
         let count = changes.iter().filter(|change| change.next.is_some() && change.previous.is_some()).count();
         let mut replacing = Vec::new();
@@ -587,6 +560,7 @@ impl WorkerState {
         changes: &[PlannedChange],
         committed: &HashSet<Key>,
         crashed: bool,
+        eviction_marks: &[Arc<Entry>],
     ) {
         let entries = read_map(&self.read_state.entries);
         let mut invalid = lock(&self.read_state.invalid);
@@ -603,6 +577,7 @@ impl WorkerState {
         }
         drop(invalid);
         drop(entries);
+        self.rollback_evictions(eviction_marks, committed);
         if !crashed {
             for change in changes {
                 if !committed.contains(&change.key) && change.next.is_some() && renamed.contains(&change.key) {
@@ -623,8 +598,16 @@ impl WorkerState {
                 }
             }
         }
+        let protection_shared = Arc::clone(&self.read_state.protection);
+        {
+            let mut protection = lock(&protection_shared.state);
+            for change in changes {
+                protection.update_size(change.key, change.next.as_ref().map(|entry| entry.size), &protection_shared.bytes);
+            }
+        }
         for change in changes {
             if let Some(previous) = &change.previous {
+                self.update_namespace_stats(change.key, true, false);
                 self.lru.remove(&change.key);
                 self.referenced_keys.remove(&change.key);
                 self.data_bytes = self.data_bytes.saturating_sub(previous.size);
@@ -632,6 +615,7 @@ impl WorkerState {
                 self.adjust_live_directories(&change.key, -1);
             }
             if let Some(entry) = &change.next {
+                self.update_namespace_stats(change.key, false, true);
                 self.lru.insert(change.key, entry.last_use.load(Ordering::Relaxed));
                 self.referenced_keys.insert(change.key);
                 self.data_bytes = self.data_bytes.saturating_add(entry.size);
@@ -640,8 +624,22 @@ impl WorkerState {
             } else {
                 delete_data(&self.root, &self.read_state.namespaces, &change.key);
             }
+            if let Some(reason) = change.eviction_reason {
+                self.read_state.evictions.record(reason);
+            }
         }
         self.update_accounted_size();
+        self.blocked_protection_generation = None;
+    }
+
+    fn update_namespace_stats(&self, key: Key, previous: bool, next: bool) {
+        let index = usize::from(key.namespace().0);
+        if previous && let Some(count) = self.read_state.namespace_entry_counts.get(index) {
+            count.fetch_sub(1, Ordering::Relaxed);
+        }
+        if next && let Some(count) = self.read_state.namespace_entry_counts.get(index) {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn adjust_live_directories(&mut self, key: &Key, amount: i8) {
@@ -669,8 +667,8 @@ impl WorkerState {
         let Some(entry) = entry else {
             return Ok(false);
         };
-        let change = PlannedChange { key, previous: Some(entry), next: None };
-        self.commit_changes(std::slice::from_ref(&change))?;
+        let change = PlannedChange { key, previous: Some(entry), next: None, eviction_reason: None };
+        self.commit_changes(std::slice::from_ref(&change), &[])?;
         Ok(true)
     }
 
@@ -679,17 +677,44 @@ impl WorkerState {
         if !current.as_ref().is_some_and(|entry| Arc::ptr_eq(entry, &target)) {
             return Ok(());
         }
-        let change = PlannedChange { key, previous: Some(target), next: None };
-        self.commit_changes(std::slice::from_ref(&change))
+        let change = PlannedChange { key, previous: Some(target), next: None, eviction_reason: None };
+        self.commit_changes(std::slice::from_ref(&change), &[])
     }
 
-    fn commit_changes(&mut self, changes: &[PlannedChange]) -> Result<(), StorageError> {
+    fn commit_changes(&mut self, changes: &[PlannedChange], eviction_marks: &[Arc<Entry>]) -> Result<(), StorageError> {
+        let mut committed = HashSet::new();
+        if committed.try_reserve(changes.len()).is_err() {
+            self.rollback_evictions(eviction_marks, &committed);
+            return Err(StorageError::Unavailable(UnavailableReason::Allocation));
+        }
         for chunk in changes.chunks(MAX_BATCH_ROWS) {
-            let mutations = mutations(chunk)?;
+            let mutations = match mutations(chunk) {
+                Ok(mutations) => mutations,
+                Err(error) => {
+                    self.rollback_evictions(eviction_marks, &committed);
+                    return Err(error);
+                }
+            };
+            #[cfg(test)]
+            if let Err(error) = self.hooks.check(WritePoint::IndexBatchFailure).map_err(StorageError::Io) {
+                self.rollback_evictions(eviction_marks, &committed);
+                return Err(error);
+            }
             if let Err(error) = self.index.apply(mutations) {
-                return Err(self.index_failure(error, changes));
+                let recreated = matches!(error, SqliteError::Corrupt | SqliteError::SchemaMismatch);
+                let storage_error = self.index_failure(error, changes);
+                if !recreated {
+                    self.rollback_evictions(eviction_marks, &committed);
+                }
+                return Err(storage_error);
             }
             self.publish_changes(chunk);
+            committed.extend(chunk.iter().map(|change| change.key));
+            #[cfg(test)]
+            if let Err(error) = self.hooks.check(WritePoint::IndexBatchCommitted).map_err(StorageError::Io) {
+                self.rollback_evictions(eviction_marks, &committed);
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -708,6 +733,13 @@ impl WorkerState {
             let mut entries = write_map(&self.read_state.entries);
             std::mem::take(&mut *entries)
         };
+        let protection_shared = Arc::clone(&self.read_state.protection);
+        let mut protection = lock(&protection_shared.state);
+        for key in old.keys() {
+            self.update_namespace_stats(*key, true, false);
+            protection.update_size(*key, None, &protection_shared.bytes);
+        }
+        drop(protection);
         self.lru.clear();
         self.referenced_keys.clear();
         self.directory_counts.clear();
@@ -731,6 +763,13 @@ impl WorkerState {
             let mut entries = write_map(&self.read_state.entries);
             std::mem::take(&mut *entries)
         };
+        let protection_shared = Arc::clone(&self.read_state.protection);
+        let mut protection = lock(&protection_shared.state);
+        for key in old.keys() {
+            self.update_namespace_stats(*key, true, false);
+            protection.update_size(*key, None, &protection_shared.bytes);
+        }
+        drop(protection);
         self.lru.clear();
         self.referenced_keys.clear();
         self.directory_counts.clear();
@@ -744,50 +783,6 @@ impl WorkerState {
         }
         self.update_accounted_size();
         Ok(())
-    }
-
-    fn set_limit(&mut self, limit: u64) -> Result<(), StorageError> {
-        if limit < self.read_state.minimum_size_limit {
-            return Err(StorageError::LimitTooSmall);
-        }
-        self.enforce_limit(limit)?;
-        if self.accounted_size() > limit {
-            return Err(StorageError::TooLarge);
-        }
-        self.size_limit = limit;
-        self.read_state.size_limit.store(limit, Ordering::Relaxed);
-        Ok(())
-    }
-
-    fn enforce_limit(&mut self, limit: u64) -> Result<(), StorageError> {
-        self.drain_touches_best_effort();
-        let entries = read_map(&self.read_state.entries);
-        let mut base_order = self.lru.oldest().peekable();
-        let mut changes = HashMap::<Key, Option<Arc<Entry>>>::new();
-        let mut directory_deltas = HashMap::<DirectoryId, i64>::new();
-        let mut data_bytes = self.data_bytes;
-        let mut directory_count = self.directory_count;
-        let mut entry_count = self.entry_count;
-        let mut no_new_order = BTreeSet::new();
-        let mut no_new_stamps = HashMap::new();
-        while !self.fits(data_bytes, entry_count, directory_count, limit)? {
-            let key = next_victim(&mut base_order, &mut no_new_order, &mut no_new_stamps, None, &changes, &entries)
-                .ok_or(StorageError::TooLarge)?;
-            let entry = effective_entry(&key, &changes, &entries).ok_or(StorageError::TooLarge)?;
-            self.adjust_directories(&key, -1, &mut directory_deltas, &mut directory_count)?;
-            data_bytes = data_bytes.checked_sub(entry.size).ok_or(StorageError::TooLarge)?;
-            entry_count = entry_count.saturating_sub(1);
-            changes.try_reserve(1).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-            changes.insert(key, None);
-        }
-        drop(base_order);
-        drop(entries);
-        if changes.is_empty() {
-            return Ok(());
-        }
-        let plan = Plan { changes, directory_deltas };
-        let changes = self.prepare_changes(&plan)?;
-        self.commit_changes(&changes)
     }
 
     fn flush(&mut self) -> Result<(), StorageError> {
@@ -896,18 +891,6 @@ impl WorkerState {
                 }
             }
         }
-    }
-
-    fn fits(&self, data_bytes: u64, entry_count: usize, directory_count: u64, limit: u64) -> Result<bool, StorageError> {
-        if entry_count > super::index::MAX_ENTRIES {
-            return Ok(false);
-        }
-        let index_bytes = self.index.estimated_bytes(entry_count)?;
-        Ok(account_size(index_bytes, data_bytes, entry_count, directory_count).ok_or(StorageError::TooLarge)? <= limit)
-    }
-
-    fn update_accounted_size(&self) {
-        self.read_state.accounted_size.store(self.accounted_size(), Ordering::Relaxed);
     }
 
     fn sweep_step(&mut self, limit: usize) -> bool {

@@ -1,5 +1,6 @@
 mod eviction;
 mod index;
+mod protection;
 mod writer;
 
 use std::{
@@ -24,8 +25,12 @@ use std::sync::mpsc::SyncSender;
 
 use self::{
     index::{Index, Record},
+    protection::{EVICTION_HISTORY_LEN, EvictionHistory, ProtectionRegistry, ProtectionShared, lock_protection},
     writer::{Command, WorkerState, WriteQueue, writer_loop},
 };
+
+pub use self::eviction::{EvictionCandidate, EvictionPolicy, EvictionReason, EvictionScore, LruPolicy};
+pub use self::protection::Protection;
 
 #[cfg(test)]
 use self::writer::WritePoint;
@@ -56,6 +61,7 @@ const INDEX_FILE: &str = "index.sqlite";
 const ENTRY_VALID: u8 = 0;
 const ENTRY_REPLACING: u8 = 1;
 const ENTRY_INVALID: u8 = 2;
+const ENTRY_EVICTING: u8 = 3;
 
 pub const MIN_SIZE_LIMIT: u64 = MIN_SIZE_LIMIT_INTERNAL;
 
@@ -91,7 +97,7 @@ impl Key {
         Self { namespace, name }
     }
 
-    pub(super) const fn namespace(self) -> NamespaceId {
+    pub const fn namespace(self) -> NamespaceId {
         self.namespace
     }
 
@@ -436,6 +442,10 @@ struct ReadState {
     entries: Arc<RwLock<HashMap<Key, Arc<Entry>>>>,
     touches: Arc<Mutex<HashMap<Key, PendingTouch>>>,
     invalid: Arc<Mutex<HashMap<Key, Arc<Entry>>>>,
+    namespace_entry_counts: Vec<AtomicUsize>,
+    protection: Arc<ProtectionShared>,
+    evictions: EvictionHistory,
+    policy: Arc<dyn EvictionPolicy>,
     active_reads: AtomicUsize,
     usage_clock: AtomicU64,
     size_limit: AtomicU64,
@@ -484,7 +494,16 @@ impl fmt::Debug for Cache {
 
 impl Cache {
     pub fn open(directory: impl AsRef<Path>, size_limit: u64, namespaces: &[Namespace]) -> Result<Self, StorageError> {
-        Self::open_internal(directory.as_ref(), size_limit, namespaces, Arc::new(writer::FaultHooks::default()))
+        Self::open_with_policy(directory, size_limit, namespaces, LruPolicy)
+    }
+
+    pub fn open_with_policy(
+        directory: impl AsRef<Path>,
+        size_limit: u64,
+        namespaces: &[Namespace],
+        policy: impl EvictionPolicy + 'static,
+    ) -> Result<Self, StorageError> {
+        Self::open_internal(directory.as_ref(), size_limit, namespaces, Arc::new(policy), Arc::new(writer::FaultHooks::default()))
     }
 
     pub fn lookup(&self, key: Key) -> Lookup {
@@ -520,6 +539,7 @@ impl Cache {
                     }
                     continue;
                 }
+                ENTRY_EVICTING => return Lookup::Miss,
                 ENTRY_VALID | ENTRY_REPLACING => {}
                 _ => return Lookup::Unavailable(UnavailableReason::Io),
             }
@@ -601,6 +621,15 @@ impl Cache {
         receive(receiver)
     }
 
+    pub fn protect(&self, key: Key) -> Result<Protection, StorageError> {
+        if !self.read_state.namespaces.contains(key.namespace) {
+            return Err(StorageError::UnknownNamespace);
+        }
+        let mut state = lock_protection(&self.read_state.protection.state);
+        state.acquire(key, &self.read_state.protection.bytes)?;
+        Ok(Protection { shared: Arc::clone(&self.read_state.protection), key })
+    }
+
     pub fn discard(&self, key: Key) {
         if !self.read_state.namespaces.contains(key.namespace) {
             return;
@@ -628,6 +657,8 @@ impl Cache {
         }
         let (reply, receiver) = mpsc::sync_channel(0);
         self.queue.try_send(Command::SetLimit { limit, reply }, 0)?;
+        #[cfg(test)]
+        self.read_state.hooks.check(WritePoint::SetLimitQueued)?;
         receive(receiver)
     }
 
@@ -651,6 +682,18 @@ impl Cache {
             Err(poisoned) => poisoned.into_inner(),
         };
         entries.values().filter(|entry| entry.state.load(Ordering::Acquire) != ENTRY_INVALID).count()
+    }
+
+    pub fn namespace_entry_count(&self, namespace: NamespaceId) -> usize {
+        self.read_state.namespace_entry_counts.get(usize::from(namespace.0)).map_or(0, |count| count.load(Ordering::Relaxed))
+    }
+
+    pub fn protected_bytes(&self) -> u64 {
+        self.read_state.protection.bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn recent_evictions(&self) -> [Option<EvictionReason>; EVICTION_HISTORY_LEN] {
+        self.read_state.evictions.snapshot()
     }
 
     pub fn shutdown(mut self) -> Result<(), StorageError> {
@@ -677,6 +720,7 @@ impl Cache {
         directory: &Path,
         size_limit: u64,
         namespace_config: &[Namespace],
+        policy: Arc<dyn EvictionPolicy>,
         hooks: Arc<writer::FaultHooks>,
     ) -> Result<Self, StorageError> {
         let root = directory.to_path_buf();
@@ -700,7 +744,18 @@ impl Cache {
         let (index, records) = Index::open(root.join(INDEX_FILE), &namespaces)?;
         let mut entries = HashMap::new();
         entries.try_reserve(records.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        let mut namespace_entry_counts = Vec::new();
+        namespace_entry_counts.try_reserve_exact(namespaces.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        namespace_entry_counts.extend((0..namespaces.len()).map(|_| AtomicUsize::new(0)));
+        let mut protection_state = ProtectionRegistry::default();
+        protection_state.sizes.try_reserve(records.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
         for record in records {
+            let namespace = usize::from(record.key.namespace().0);
+            let Some(count) = namespace_entry_counts.get(namespace) else {
+                return Err(StorageError::InvalidNamespaces);
+            };
+            count.fetch_add(1, Ordering::Relaxed);
+            protection_state.sizes.insert(record.key, record.size);
             entries.insert(record.key, Arc::new(Entry::from_record(record)));
         }
         let max_tick = entries.values().map(|entry| entry.last_use.load(Ordering::Relaxed)).max().unwrap_or(0);
@@ -714,6 +769,10 @@ impl Cache {
             entries,
             touches,
             invalid,
+            namespace_entry_counts,
+            protection: Arc::new(ProtectionShared { state: Mutex::new(protection_state), bytes: AtomicU64::new(0) }),
+            evictions: EvictionHistory::default(),
+            policy,
             active_reads: AtomicUsize::new(0),
             usage_clock: AtomicU64::new(max_tick),
             size_limit: AtomicU64::new(size_limit),
@@ -889,6 +948,9 @@ pub fn discard_legacy_layout(directory: impl AsRef<Path>) -> Result<(), StorageE
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod eviction_tests;
 
 #[cfg(test)]
 mod tests;

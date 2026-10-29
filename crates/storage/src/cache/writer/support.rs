@@ -54,59 +54,6 @@ pub(super) fn remove_new_candidate(key: &Key, order: &mut BTreeSet<(u64, Key)>, 
     }
 }
 
-pub(super) fn next_victim(
-    base_order: &mut std::iter::Peekable<impl Iterator<Item = (u64, Key)>>,
-    new_order: &mut BTreeSet<(u64, Key)>,
-    new_stamps: &mut HashMap<Key, u64>,
-    protected: Option<Key>,
-    changes: &HashMap<Key, Option<Arc<Entry>>>,
-    entries: &HashMap<Key, Arc<Entry>>,
-) -> Option<Key> {
-    loop {
-        while let Some((_, key)) = base_order.peek().cloned() {
-            if Some(&key) == protected.as_ref() || changes.contains_key(&key) || effective_entry(&key, changes, entries).is_none() {
-                base_order.next();
-            } else {
-                break;
-            }
-        }
-        let stale = new_order
-            .iter()
-            .find(|&(_, key)| changes.get(key).is_some_and(Option::is_none) || effective_entry(key, changes, entries).is_none())
-            .cloned();
-        if let Some(stale) = stale {
-            new_order.remove(&stale);
-            new_stamps.remove(&stale.1);
-            continue;
-        }
-        let base = base_order.peek().cloned();
-        let new = new_order.iter().find(|&(_, key)| Some(key) != protected.as_ref()).cloned();
-        let selected = match (base, new) {
-            (Some(base), Some(new)) if base <= new => {
-                base_order.next();
-                Some(base)
-            }
-            (_, Some(new)) => {
-                new_order.remove(&new);
-                new_stamps.remove(&new.1);
-                Some(new)
-            }
-            (Some(base), None) => {
-                base_order.next();
-                Some(base)
-            }
-            (None, None) => None,
-        };
-        if let Some((_, key)) = selected {
-            if effective_entry(&key, changes, entries).is_some() {
-                return Some(key);
-            }
-        } else {
-            return None;
-        }
-    }
-}
-
 pub(super) fn account_size(index_bytes: u64, data_bytes: u64, entry_count: usize, directory_count: u64) -> Option<u64> {
     let files = u64::try_from(entry_count).ok()?.checked_add(INDEX_FILE_OVERHEAD)?;
     let directories = directory_count.checked_add(1)?;

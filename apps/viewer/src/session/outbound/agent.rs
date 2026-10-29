@@ -1,8 +1,7 @@
 use math::{DVec3, Quat, Vec3};
-use protocol::messages::{AgentMovementComplete, AgentUpdate, SetAlwaysRun, agent::agent_update::AgentData};
+use protocol::messages::{AgentUpdate, SetAlwaysRun, agent::agent_update::AgentData};
 use render::scene::Camera;
 use uuid::Uuid;
-use world::WorldPose;
 
 use crate::agent_movement::MovementObservation;
 
@@ -26,23 +25,6 @@ pub(crate) fn movement_camera(
 
 pub(crate) fn always_run(agent_id: Uuid, session_id: Uuid, always_run: bool) -> SetAlwaysRun {
     SetAlwaysRun { agent_id, session_id, always_run }
-}
-
-pub(crate) fn pose_from_arrival(
-    agent_id: Uuid,
-    session_id: Uuid,
-    movement: &AgentMovementComplete,
-    region_origin: DVec3,
-) -> Option<WorldPose> {
-    if movement.agent_data.agent_id != agent_id || movement.agent_data.session_id != session_id {
-        return None;
-    }
-    let position = region_origin + movement.data.position.as_dvec3();
-    if !position.is_finite() {
-        return None;
-    }
-    let look_at = movement.data.look_at.try_normalize()?;
-    Some(WorldPose { position, rotation: Quat::from_rotation_arc(Vec3::X, look_at) })
 }
 
 fn update(
@@ -79,7 +61,7 @@ fn update(
 
 #[cfg(test)]
 mod tests {
-    use protocol::lludp::{Message, Packet};
+    use protocol::lludp::Packet;
 
     use super::*;
     fn idle_movement() -> MovementObservation {
@@ -97,26 +79,6 @@ mod tests {
             view.draw_distance() as f32,
             "simulator interest must match the actual default scene draw distance"
         );
-    }
-
-    #[test]
-    fn arrival_pose_uses_region_origin_and_look_at() {
-        let bytes = test_support::parse_hex_fixture(test_support::lludp::vectors::AGENT_MOVEMENT_COMPLETE).unwrap();
-        let packet = Packet::decode(&bytes).unwrap();
-        let Message::AgentMovementComplete(movement) = packet.message() else { panic!("movement completion") };
-        let (agent, session) = (movement.agent_data.agent_id, movement.agent_data.session_id);
-        let origin = DVec3::new(256.0, 512.0, 0.0);
-        let pose = pose_from_arrival(agent, session, movement, origin).unwrap();
-
-        assert_eq!(pose.position, origin + movement.data.position.as_dvec3());
-        assert!((pose.rotation * Vec3::X - movement.data.look_at.normalize()).length() < 1e-5);
-        assert!(pose_from_arrival(Uuid::nil(), session, movement, origin).is_none());
-        assert!(pose_from_arrival(agent, Uuid::nil(), movement, origin).is_none());
-        let mut invalid = movement.clone();
-        invalid.data.position = Vec3::splat(f32::NAN);
-        assert!(pose_from_arrival(agent, session, &invalid, origin).is_none());
-        invalid.data.look_at = Vec3::ZERO;
-        assert!(pose_from_arrival(agent, session, &invalid, origin).is_none());
     }
 
     #[test]

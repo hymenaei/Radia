@@ -26,8 +26,8 @@ use super::{
 };
 use crate::{
     DEFAULT_DRAW_DISTANCE,
-    agent_movement::{BodyRotation, HeldControls, KeyBinding, MovementObservation, STOP},
-    camera::{FollowCamera, OrbitCamera},
+    agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
+    camera::{CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
     scene_feed::SceneFeed,
 };
 
@@ -231,8 +231,9 @@ impl SceneWindow {
                 if !focused {
                     self.release_drag(false);
                     self.modifiers = ModifiersState::empty();
-                    let pose = self.agent_pose();
-                    let rotation = self.body_rotation.update(pose.map(|pose| pose.rotation), 0.0, Instant::now());
+                    let now = Instant::now();
+                    let (_, seed) = self.agent_pose_and_seed_at(now);
+                    let rotation = self.body_rotation.update(seed, 0.0, now);
                     let movement = self.controls.release_and_observe(rotation);
                     self.stop_clear_pending = movement.control_flags & STOP != 0;
                     if let Some(feed) = &mut self.feed {
@@ -432,7 +433,7 @@ impl SceneWindow {
         }
         let Some(mut pose) = self.agent_pose() else { return };
         pose.rotation = self.body_rotation.current();
-        let (position, focus) = self.follow_camera.current_position_and_focus(pose);
+        let (position, focus) = self.follow_camera.current_position_and_focus(pose, Instant::now());
         let (draw_distance, lod_factor) =
             self.camera.as_ref().map_or((DEFAULT_DRAW_DISTANCE, 1.0), |camera| (camera.draw_distance, camera.lod_factor));
         self.camera = Some(OrbitCamera::from_follow_view(position, focus, draw_distance, lod_factor));
@@ -461,8 +462,11 @@ impl SceneWindow {
         self.feed.as_mut()?.camera_pose()
     }
 
-    fn agent_pose_at(&mut self, now: Instant, movement: MovementObservation) -> Option<world::WorldPose> {
-        self.feed.as_mut()?.camera_pose_at(now, movement)
+    fn agent_pose_and_seed_at(&mut self, now: Instant) -> (Option<world::WorldPose>, Option<(u64, math::Quat)>) {
+        let Some((pose, seed)) = self.feed.as_mut().and_then(|feed| feed.camera_pose_and_seed_at(now)) else {
+            return (None, None);
+        };
+        (Some(pose), Some(seed))
     }
 
     fn camera_observation(&mut self, pose: Option<world::WorldPose>, rotation: math::Quat, now: Instant) -> Option<scene::Camera> {
@@ -480,10 +484,9 @@ impl SceneWindow {
 
     pub(super) fn draw(&mut self) -> Result<DrawActions, SceneWindowError> {
         let now = Instant::now();
-        let movement = self.controls.observation(self.modifiers.shift_key(), self.body_rotation.current());
-        let pose = self.agent_pose_at(now, movement);
+        let (pose, seed) = self.agent_pose_and_seed_at(now);
         self.ensure_camera(pose);
-        let rotation = self.body_rotation.update(pose.map(|pose| pose.rotation), self.controls.yaw(self.modifiers.shift_key()), now);
+        let rotation = self.body_rotation.update(seed, self.controls.yaw(self.modifiers.shift_key()), now);
         let movement: MovementObservation = self.controls.observation(self.modifiers.shift_key(), rotation);
         self.stop_clear_pending = movement.control_flags & STOP != 0;
         let observation = self.camera_observation(pose, rotation, now);
@@ -697,7 +700,7 @@ impl SceneWindow {
                 let active_motion = self.controls.active() || self.stop_clear_pending;
                 self.dirty |= !presented
                     || active_motion
-                    || self.feed.as_ref().is_some_and(|feed| feed.agent_prediction_active(Instant::now()))
+                    || self.feed.as_ref().is_some_and(|feed| feed.agent_motion_active(Instant::now()))
                     || (self.camera_mode == CameraMode::Follow
                         && agent_pose.is_some_and(|agent_pose| self.follow_camera.moving(agent_pose, Instant::now())))
                     || (self.camera_mode == CameraMode::Free && self.camera.as_ref().is_some_and(|camera| camera.moving(Instant::now())));
@@ -827,55 +830,6 @@ impl Drop for SceneWindow {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CameraMode {
-    Follow,
-    Free,
-}
-
-impl CameraMode {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Follow => "Follow",
-            Self::Free => "Free",
-        }
-    }
-
-    fn detach_for_focus(&mut self) {
-        *self = Self::Free;
-    }
-
-    fn return_to_follow(&mut self) {
-        *self = Self::Follow;
-    }
-
-    fn on_movement_key(&mut self, binding: KeyBinding, state: ElementState, repeat: bool, captured: bool) {
-        if state == ElementState::Pressed
-            && !repeat
-            && !captured
-            && matches!(binding, KeyBinding::Movement(_) | KeyBinding::ToggleFlying | KeyBinding::ToggleRun | KeyBinding::Stop)
-        {
-            self.return_to_follow();
-        }
-    }
-}
-
-fn handle_keyboard_input(
-    controls: &mut HeldControls,
-    camera_mode: &mut CameraMode,
-    key: &Key,
-    state: ElementState,
-    repeat: bool,
-    captured: bool,
-) -> Option<bool> {
-    if state == ElementState::Pressed && !repeat && KeyBinding::from_key(key).is_some() {
-        tracing::debug!(?key, captured, "viewport movement key received");
-    }
-    let (binding, changed) = controls.keyboard_event(key, state, repeat, captured)?;
-    camera_mode.on_movement_key(binding, state, repeat, captured);
-    Some(changed)
-}
-
 struct DragState {
     origin: PhysicalPosition<f64>,
     travel: [f64; 2],
@@ -935,73 +889,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use winit::{
-        event::ElementState,
-        keyboard::{Key, NamedKey},
-    };
-
-    use crate::agent_movement::{HeldControls, KeyBinding, MovementKey};
-
-    use super::{CameraMode, PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError, handle_keyboard_input};
-
-    #[test]
-    fn picked_focus_detaches_and_escape_returns_to_follow() {
-        let mut mode = CameraMode::Follow;
-        mode.detach_for_focus();
-        assert_eq!(mode, CameraMode::Free, "picked focus opens a detached view");
-
-        mode.return_to_follow();
-        assert_eq!(mode, CameraMode::Follow);
-    }
-
-    #[test]
-    fn uncaptured_movement_returns_to_follow() {
-        let mut mode = CameraMode::Free;
-        let mut controls = HeldControls::default();
-
-        assert_eq!(
-            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, false),
-            Some(true)
-        );
-        assert_eq!(mode, CameraMode::Follow);
-        assert_eq!(controls.observation(false, math::Quat::IDENTITY).control_flags & 0x0000_0001, 0x0000_0001);
-    }
-
-    #[test]
-    fn egui_captured_movement_does_not_return_to_follow() {
-        let mut mode = CameraMode::Free;
-        let mut controls = HeldControls::default();
-
-        assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, true), None);
-        assert_eq!(mode, CameraMode::Free);
-        assert_eq!(controls.observation(false, math::Quat::IDENTITY).control_flags, 0);
-    }
-
-    #[test]
-    fn flight_run_and_stop_keys_return_to_follow() {
-        for key in [Key::Character("f".into()), Key::Character("r".into()), Key::Named(NamedKey::Space)] {
-            let mut mode = CameraMode::Free;
-            let mut controls = HeldControls::default();
-
-            let binding = KeyBinding::from_key(&key).expect("mapped camera-return key");
-            assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &key, ElementState::Pressed, false, false), Some(true));
-            assert!(matches!(binding, KeyBinding::ToggleFlying | KeyBinding::ToggleRun | KeyBinding::Stop));
-            assert_eq!(mode, CameraMode::Follow);
-        }
-    }
-
-    #[test]
-    fn movement_key_release_does_not_change_camera_mode() {
-        let mut mode = CameraMode::Free;
-        let mut controls = HeldControls::default();
-        controls.set_pressed(MovementKey::Forward, true);
-
-        assert_eq!(
-            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Released, false, false),
-            Some(true)
-        );
-        assert_eq!(mode, CameraMode::Free);
-    }
+    use super::{PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError};
 
     #[test]
     fn presentation_resets_recovery_limit() {

@@ -7,7 +7,14 @@ use math::{DQuat, DVec3};
 use render::scene;
 use world::WorldPose;
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use winit::event::ElementState;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use winit::keyboard::Key;
+
 use crate::DEFAULT_DRAW_DISTANCE;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use crate::agent_movement::{HeldControls, KeyBinding};
 
 const FOCUS_TIME: Duration = Duration::from_millis(400);
 const FOLLOW_SMOOTHING_HALF_LIFE: f64 = 0.02;
@@ -29,8 +36,7 @@ pub(crate) struct OrbitCamera {
 }
 
 pub(crate) struct FollowCamera {
-    position: Option<DVec3>,
-    focus: Option<DVec3>,
+    camera_offset: Option<DVec3>,
     updated_at: Option<Instant>,
     transition: Option<Transition>,
     focus_offset: DVec3,
@@ -41,8 +47,7 @@ pub(crate) struct FollowCamera {
 impl Default for FollowCamera {
     fn default() -> Self {
         Self {
-            position: None,
-            focus: None,
+            camera_offset: None,
             updated_at: None,
             transition: None,
             focus_offset: DVec3::new(1.0, 0.0, 1.0),
@@ -123,43 +128,50 @@ impl FollowCamera {
 
     fn advance(&mut self, pose: WorldPose, now: Instant) -> (DVec3, DVec3) {
         let (target_position, target_focus) = self.target_position_and_focus(pose);
-        let Some((previous_position, previous_focus)) = self.position.zip(self.focus) else {
-            self.position = Some(target_position);
-            self.focus = Some(target_focus);
+        let Some(previous_offset) = self.camera_offset else {
+            self.camera_offset = Some(target_position - target_focus);
             self.updated_at = Some(now);
             return (target_position, target_focus);
         };
 
-        let (position, focus) = if let Some(transition) = &self.transition {
+        let elapsed = self.updated_at.map_or(Duration::ZERO, |updated| now.saturating_duration_since(updated)).as_secs_f64();
+        let fraction = 1.0 - 2.0_f64.powf(-elapsed / FOLLOW_SMOOTHING_HALF_LIFE);
+        if let Some(transition) = &self.transition {
             let elapsed = now.saturating_duration_since(transition.start);
             if elapsed >= FOCUS_TIME {
                 self.transition = None;
-                (target_position, target_focus)
             } else {
                 let fraction = elapsed.as_secs_f64() / FOCUS_TIME.as_secs_f64();
                 let fraction = fraction * fraction * (3.0 - 2.0 * fraction);
-                (transition.position.lerp(target_position, fraction), transition.focus.lerp(target_focus, fraction))
+                let position = transition.position.lerp(target_position, fraction);
+                let focus = transition.focus.lerp(target_focus, fraction);
+                self.camera_offset = Some(position - focus);
+                self.updated_at = Some(now);
+                return (position, focus);
             }
-        } else if target_position.distance(previous_position) >= MAX_FOLLOW_SMOOTH_DISTANCE
-            || target_focus.distance(previous_focus) >= MAX_FOLLOW_SMOOTH_DISTANCE
-        {
-            (target_position, target_focus)
+        }
+        let target_offset = target_position - target_focus;
+        let camera_offset = if target_offset.distance(previous_offset) >= MAX_FOLLOW_SMOOTH_DISTANCE {
+            target_offset
         } else {
-            let elapsed = self.updated_at.map_or(Duration::ZERO, |updated| now.saturating_duration_since(updated)).as_secs_f64();
-            let fraction = 1.0 - 2.0_f64.powf(-elapsed / FOLLOW_SMOOTHING_HALF_LIFE);
-            (previous_position.lerp(target_position, fraction), target_focus)
+            previous_offset.lerp(target_offset, fraction)
         };
-        self.position = Some(position);
-        self.focus = Some(focus);
+        self.camera_offset = Some(camera_offset);
         self.updated_at = Some(now);
-        (position, focus)
+        (target_focus + camera_offset, target_focus)
     }
 
-    pub(crate) fn current_position_and_focus(&self, pose: WorldPose) -> (DVec3, DVec3) {
-        match (self.position, self.focus) {
-            (Some(position), Some(focus)) => (position, focus),
-            _ => self.target_position_and_focus(pose),
+    pub(crate) fn current_position_and_focus(&self, pose: WorldPose, now: Instant) -> (DVec3, DVec3) {
+        let (target_position, target_focus) = self.target_position_and_focus(pose);
+        if let Some(transition) = &self.transition {
+            let elapsed = now.saturating_duration_since(transition.start);
+            if elapsed < FOCUS_TIME {
+                let fraction = elapsed.as_secs_f64() / FOCUS_TIME.as_secs_f64();
+                let fraction = fraction * fraction * (3.0 - 2.0 * fraction);
+                return (transition.position.lerp(target_position, fraction), transition.focus.lerp(target_focus, fraction));
+            }
         }
+        self.camera_offset.map_or((target_position, target_focus), |offset| (target_focus + offset, target_focus))
     }
 
     pub(crate) fn moving(&self, pose: WorldPose, now: Instant) -> bool {
@@ -167,13 +179,11 @@ impl FollowCamera {
             return true;
         }
         let (target_position, target_focus) = self.target_position_and_focus(pose);
-        self.position.is_none_or(|position| position.distance(target_position) > 0.01)
-            || self.focus.is_none_or(|focus| focus.distance(target_focus) > 0.01)
+        self.camera_offset.is_some_and(|offset| (target_position - target_focus).distance(offset) > 0.01)
     }
 
     pub(crate) fn transition_from(&mut self, position: DVec3, focus: DVec3, now: Instant) {
-        self.position = Some(position);
-        self.focus = Some(focus);
+        self.camera_offset = Some(position - focus);
         self.updated_at = Some(now);
         self.transition = Some(Transition { start: now, position, focus });
     }
@@ -268,9 +278,61 @@ impl OrbitCamera {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CameraMode {
+    Follow,
+    Free,
+}
+
+impl CameraMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Follow => "Follow",
+            Self::Free => "Free",
+        }
+    }
+
+    pub(crate) fn detach_for_focus(&mut self) {
+        *self = Self::Free;
+    }
+
+    pub(crate) fn return_to_follow(&mut self) {
+        *self = Self::Follow;
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn on_movement_key(&mut self, binding: KeyBinding, state: ElementState, repeat: bool, captured: bool) {
+        if state == ElementState::Pressed
+            && !repeat
+            && !captured
+            && matches!(binding, KeyBinding::Movement(_) | KeyBinding::ToggleFlying | KeyBinding::ToggleRun | KeyBinding::Stop)
+        {
+            self.return_to_follow();
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(crate) fn handle_keyboard_input(
+    controls: &mut HeldControls,
+    camera_mode: &mut CameraMode,
+    key: &Key,
+    state: ElementState,
+    repeat: bool,
+    captured: bool,
+) -> Option<bool> {
+    if state == ElementState::Pressed && !repeat && KeyBinding::from_key(key).is_some() {
+        tracing::debug!(?key, captured, "viewport movement key received");
+    }
+    let (binding, changed) = controls.keyboard_event(key, state, repeat, captured)?;
+    camera_mode.on_movement_key(binding, state, repeat, captured);
+    Some(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use math::Quat;
 
     #[test]
     fn follow_camera_uses_official_rear_view_offsets_in_agent_axes() {
@@ -283,6 +345,120 @@ mod tests {
         let (position, focus) = FollowCamera::position_and_focus(pose);
         assert!((position - (pose.position + DVec3::new(0.0, -3.0, 0.75))).length() < 1e-6);
         assert!((focus - (pose.position + DVec3::new(0.0, 1.0, 1.0))).length() < 1e-6);
+    }
+
+    #[test]
+    fn follow_camera_moves_rigidly_with_avatar_translation() {
+        let start = Instant::now();
+        let pose = WorldPose { position: DVec3::new(10.0, 20.0, 30.0), rotation: math::Quat::IDENTITY };
+        let mut camera = FollowCamera::default();
+        let first = camera.follow(pose, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
+        let translated = WorldPose { position: pose.position + DVec3::new(100.0, -50.0, 20.0), ..pose };
+        let second =
+            camera.follow(translated, [1280, 720], 512.0, 1.0, start + Duration::from_millis(10)).expect("translated follow camera");
+
+        assert_eq!(second.position() - first.position(), DVec3::new(100.0, -50.0, 20.0));
+        assert!(!camera.moving(translated, start + Duration::from_millis(10)));
+    }
+
+    #[test]
+    fn follow_camera_converges_offset_after_turn() {
+        let start = Instant::now();
+        let pose = WorldPose { position: DVec3::ZERO, rotation: math::Quat::IDENTITY };
+        let mut camera = FollowCamera::default();
+        camera.follow(pose, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
+        let turned = WorldPose { rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2), ..pose };
+        let halfway = camera.follow(turned, [1280, 720], 512.0, 1.0, start + Duration::from_millis(20)).expect("turned follow camera");
+        let (target, target_focus) = FollowCamera::position_and_focus(turned);
+        assert!(halfway.position().distance(target) > 0.01, "camera offset should lag the avatar turn");
+        let (_, focus) = camera.current_position_and_focus(turned, start + Duration::from_millis(20));
+        assert_eq!(focus, target_focus);
+
+        let converged = camera.follow(turned, [1280, 720], 512.0, 1.0, start + Duration::from_secs(1)).expect("converged follow camera");
+        assert!(converged.position().distance(target) < 0.01);
+        assert!(!camera.moving(turned, start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn follow_camera_snaps_large_offset_changes() {
+        let start = Instant::now();
+        let pose = WorldPose { position: DVec3::ZERO, rotation: math::Quat::IDENTITY };
+        let mut camera = FollowCamera::default();
+        camera.follow(pose, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
+        camera.offset = DVec3::new(-100.0, 0.0, 0.0);
+        let (target, _) = camera.target_position_and_focus(pose);
+
+        let snapped = camera.follow(pose, [1280, 720], 512.0, 1.0, start + Duration::from_millis(10)).expect("snapped follow camera");
+        assert!(snapped.position().distance(target) < 1e-9);
+        assert!(!camera.moving(pose, start + Duration::from_millis(10)));
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn picked_focus_detaches_and_escape_returns_to_follow() {
+        let mut mode = CameraMode::Follow;
+        mode.detach_for_focus();
+        assert_eq!(mode, CameraMode::Free);
+
+        mode.return_to_follow();
+        assert_eq!(mode, CameraMode::Follow);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn uncaptured_movement_returns_to_follow() {
+        let mut mode = CameraMode::Free;
+        let mut controls = HeldControls::default();
+
+        assert_eq!(
+            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, false),
+            Some(true)
+        );
+        assert_eq!(mode, CameraMode::Follow);
+        assert_eq!(controls.observation(false, math::Quat::IDENTITY).control_flags & 0x0000_0001, 0x0000_0001);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn egui_captured_movement_does_not_return_to_follow() {
+        let mut mode = CameraMode::Free;
+        let mut controls = HeldControls::default();
+
+        assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, true), None);
+        assert_eq!(mode, CameraMode::Free);
+        assert_eq!(controls.observation(false, math::Quat::IDENTITY).control_flags, 0);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn flight_run_and_stop_keys_return_to_follow() {
+        use winit::keyboard::NamedKey;
+
+        for key in [Key::Character("f".into()), Key::Character("r".into()), Key::Named(NamedKey::Space)] {
+            let mut mode = CameraMode::Free;
+            let mut controls = HeldControls::default();
+
+            let binding = KeyBinding::from_key(&key).expect("mapped camera-return key");
+            assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &key, ElementState::Pressed, false, false), Some(true));
+            assert!(matches!(binding, KeyBinding::ToggleFlying | KeyBinding::ToggleRun | KeyBinding::Stop));
+            assert_eq!(mode, CameraMode::Follow);
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn movement_key_release_does_not_change_camera_mode() {
+        use crate::agent_movement::MovementKey;
+
+        let mut mode = CameraMode::Free;
+        let mut controls = HeldControls::default();
+        controls.set_pressed(MovementKey::Forward, true);
+
+        assert_eq!(
+            handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Released, false, false),
+            Some(true)
+        );
+        assert_eq!(mode, CameraMode::Free);
     }
 
     #[test]

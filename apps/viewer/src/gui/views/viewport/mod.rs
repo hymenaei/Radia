@@ -30,7 +30,7 @@ use winit::{
 };
 
 use self::window::{MAX_RECOVERIES, SceneWindow, SceneWindowError};
-use crate::{agent_movement::MovementObservation, scene_feed::SceneFeed};
+use crate::{agent_movement::MovementObservation, scene_feed::SceneFeed, session::AgentMotionSample};
 
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
@@ -197,13 +197,13 @@ impl Viewport {
         agent_id: uuid::Uuid,
         camera: watch::Sender<Option<scene::Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
-        arrival_pose: watch::Receiver<Option<world::WorldPose>>,
+        agent_motion: watch::Receiver<Option<AgentMotionSample>>,
         runtime: Handle,
     ) {
         let requested = self.shared.requested.lock().unwrap_or_else(PoisonError::into_inner);
         if requested.generation == generation && requested.visible {
             let shared = Arc::clone(&self.shared);
-            let feed = SceneFeed::start(sources, agent_id, camera, movement, arrival_pose, runtime, move || {
+            let feed = SceneFeed::start(sources, agent_id, camera, movement, agent_motion, runtime, move || {
                 shared.wake();
             });
             *self.shared.feed.lock().unwrap_or_else(PoisonError::into_inner) = Some((generation, feed));

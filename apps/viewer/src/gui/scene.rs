@@ -1,15 +1,3 @@
-use futures::{StreamExt, future::BoxFuture};
-use gpui::{
-    AnyElement, AnyWindowHandle, App, AppContext, BackgroundExecutor, Entity, Render, Subscription, TitlebarOptions, Window, WindowBounds,
-    WindowId, WindowOptions, div, prelude::*, px, size,
-};
-use gpui_component::{Root, Theme};
-use render::scene::Camera;
-use tokio::sync::watch;
-use uuid::Uuid;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use world::WorldPose;
-
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::AssetHandle,
@@ -20,9 +8,18 @@ use crate::{
         views::viewport::{Viewport, ViewportError},
     },
     scene_feed::SceneSources,
-    session::EnvironmentInbox,
+    session::{AgentMotionSample, EnvironmentInbox},
     world_reader::WorldReader,
 };
+use futures::{StreamExt, future::BoxFuture};
+use gpui::{
+    AnyElement, AnyWindowHandle, App, AppContext, BackgroundExecutor, Entity, Render, Subscription, TitlebarOptions, Window, WindowBounds,
+    WindowId, WindowOptions, div, prelude::*, px, size,
+};
+use gpui_component::{Root, Theme};
+use render::scene::Camera;
+use tokio::sync::watch;
+use uuid::Uuid;
 
 pub(super) struct State {
     main: MainWindow,
@@ -78,7 +75,7 @@ pub(crate) fn start_session(
     agent_id: Uuid,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
-    arrival_pose: watch::Receiver<Option<WorldPose>>,
+    agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     cx: &mut App,
 ) {
     if start_scene(generation, cx) {
@@ -88,7 +85,7 @@ pub(crate) fn start_session(
             agent_id,
             camera,
             movement,
-            arrival_pose,
+            agent_motion,
             cx,
         );
     }
@@ -158,7 +155,7 @@ fn connect_world(
     agent_id: Uuid,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
-    arrival_pose: watch::Receiver<Option<WorldPose>>,
+    agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     cx: &mut App,
 ) {
     let lifecycle = cx.global::<AppLifecycle>();
@@ -166,7 +163,7 @@ fn connect_world(
         && lifecycle.scene.main.is_current(generation)
         && let Some(viewport) = &lifecycle.scene.viewport
     {
-        viewport.connect_world(generation, sources, agent_id, camera, movement, arrival_pose, service_runtime(cx));
+        viewport.connect_world(generation, sources, agent_id, camera, movement, agent_motion, service_runtime(cx));
     }
 }
 

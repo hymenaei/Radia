@@ -12,7 +12,6 @@ use futures::{
     pin_mut,
     stream::FuturesUnordered,
 };
-use math::{DVec3, Vec3};
 use render::scene::{
     ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, Object, ReadFailure, ReadJob, ReadQuery, ReadReply,
     ReconcileStep, Reconciler, SceneView,
@@ -21,131 +20,45 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 use uuid::Uuid;
-use world::{
-    Entity, LinearMotion, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, WorldPose,
-};
+use world::{Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, WorldPose};
 
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::{AssetHandle, RequestError},
-    session::EnvironmentInbox,
+    session::{AgentMotionSample, EnvironmentInbox},
     world_reader::{ReadError, WorldReader},
 };
 
-const MAX_AGENT_PREDICTION: Duration = Duration::from_millis(100);
-const MAX_AGENT_PREDICTION_DISTANCE: f64 = 2.0;
-const AGENT_CORRECTION_HALF_LIFE: Duration = Duration::from_millis(60);
-const AGENT_TELEPORT_DISTANCE: f64 = 50.0;
-const MAX_AGENT_PREDICTION_STEP: Duration = Duration::from_millis(100);
-const AGENT_ACCELERATION: f32 = 60.0;
-const AGENT_DECELERATION: f32 = 80.0;
-const AGENT_VELOCITY_EPSILON: f32 = 0.01;
+const MAX_UPDATE_INTERPOLATION_TIME: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
-struct AgentPrediction {
-    sample: Option<AgentSample>,
-    position: Option<DVec3>,
-    input_offset: DVec3,
-    input_velocity: Vec3,
-    updated_at: Option<Instant>,
+struct DeadReckoning {
+    sample: Option<AgentMotionSample>,
 }
 
-#[derive(Clone, Copy)]
-struct AgentSample {
-    pose: WorldPose,
-    motion: LinearMotion,
-    received_at: Instant,
-}
-
-impl AgentPrediction {
-    fn predict(&mut self, pose: WorldPose, motion: LinearMotion, movement: MovementObservation, now: Instant) -> WorldPose {
-        let changed = self.sample.is_none_or(|sample| sample.pose != pose || sample.motion != motion);
-        if changed {
-            if let Some(position) = self.position {
-                let error = pose.position - position;
-                if error.length() >= AGENT_TELEPORT_DISTANCE {
-                    self.position = Some(pose.position);
-                    self.input_offset = DVec3::ZERO;
-                    self.input_velocity = Vec3::ZERO;
-                } else {
-                    self.input_offset = position - pose.position;
-                }
-            }
-            self.sample = Some(AgentSample { pose, motion, received_at: now });
+impl DeadReckoning {
+    fn replace(&mut self, sample: Option<AgentMotionSample>) {
+        match sample {
+            Some(sample) if sample.is_finite() => self.sample = Some(sample),
+            Some(_) => {}
+            None => self.sample = None,
         }
-        let Some(sample) = self.sample else { return pose };
-        let elapsed = self.updated_at.map_or(Duration::ZERO, |updated| now.saturating_duration_since(updated));
-        let step = elapsed.min(MAX_AGENT_PREDICTION_STEP);
-        let target_velocity = movement.predicted_velocity();
-        let input_active = target_velocity.length_squared() > AGENT_VELOCITY_EPSILON * AGENT_VELOCITY_EPSILON;
-        let local_motion = input_active || self.input_velocity.length_squared() > AGENT_VELOCITY_EPSILON * AGENT_VELOCITY_EPSILON;
-        let position = if local_motion {
-            let rate = if input_active { AGENT_ACCELERATION } else { AGENT_DECELERATION };
-            let velocity = approach_velocity(self.input_velocity, target_velocity, rate * step.as_secs_f32());
-            let displacement = (self.input_velocity + velocity) * (0.5 * step.as_secs_f32());
-            self.input_velocity = velocity;
-            self.input_offset += displacement.as_dvec3();
-            if self.input_offset.length_squared() > MAX_AGENT_PREDICTION_DISTANCE.powi(2) {
-                self.input_offset = self.input_offset.normalize_or_zero() * MAX_AGENT_PREDICTION_DISTANCE;
-                self.input_velocity = Vec3::ZERO;
-            }
-            sample.pose.position + self.input_offset
-        } else {
-            self.input_velocity = Vec3::ZERO;
-            let target = predict_position(sample, now);
-            let position = match self.position {
-                Some(previous) if previous.distance(target) >= AGENT_TELEPORT_DISTANCE => target,
-                Some(previous) => {
-                    let fraction = 1.0 - 2.0_f64.powf(-elapsed.as_secs_f64() / AGENT_CORRECTION_HALF_LIFE.as_secs_f64());
-                    previous.lerp(target, fraction)
-                }
-                None => target,
-            };
-            self.input_offset = position - sample.pose.position;
-            position
-        };
-        self.position = Some(position);
-        self.updated_at = Some(now);
-        WorldPose { position, rotation: sample.pose.rotation }
+    }
+
+    fn pose(&self, now: Instant) -> Option<WorldPose> {
+        let sample = self.sample?;
+        let time = now.saturating_duration_since(sample.received_at).min(MAX_UPDATE_INTERPOLATION_TIME).as_secs_f64();
+        let position =
+            sample.position + sample.velocity.as_dvec3() * time + sample.acceleration.as_dvec3() * (0.5 * time * (time - 1.0 / 45.0));
+        Some(sample.pose(position))
     }
 
     fn active(&self, now: Instant) -> bool {
         self.sample.is_some_and(|sample| {
-            let moving = now.saturating_duration_since(sample.received_at) < MAX_AGENT_PREDICTION
-                && (sample.motion.velocity.is_some_and(|velocity| velocity.length_squared() > 1e-6)
-                    || sample.motion.acceleration.is_some_and(|acceleration| acceleration.length_squared() > 1e-6));
-            let correcting = self.position.is_some_and(|position| position.distance(predict_position(sample, now)) > 0.01);
-            moving
-                || correcting
-                || self.input_velocity.length_squared() > AGENT_VELOCITY_EPSILON * AGENT_VELOCITY_EPSILON
-                || self.input_offset.length_squared() > 0.0001
+            now.saturating_duration_since(sample.received_at) <= MAX_UPDATE_INTERPOLATION_TIME
+                && (sample.velocity != math::Vec3::ZERO || sample.acceleration != math::Vec3::ZERO)
         })
     }
-
-    fn reset(&mut self) {
-        self.sample = None;
-        self.position = None;
-        self.input_offset = DVec3::ZERO;
-        self.input_velocity = Vec3::ZERO;
-        self.updated_at = None;
-    }
-}
-
-fn approach_velocity(current: Vec3, target: Vec3, maximum_change: f32) -> Vec3 {
-    let difference = target - current;
-    let distance = difference.length();
-    if distance <= maximum_change || distance <= AGENT_VELOCITY_EPSILON { target } else { current + difference / distance * maximum_change }
-}
-
-fn predict_position(sample: AgentSample, now: Instant) -> DVec3 {
-    let elapsed = now.saturating_duration_since(sample.received_at).min(MAX_AGENT_PREDICTION).as_secs_f64();
-    let velocity = sample.motion.velocity.unwrap_or_default().as_dvec3();
-    let acceleration = sample.motion.acceleration.unwrap_or_default().as_dvec3();
-    let mut displacement = velocity * elapsed + acceleration * (0.5 * elapsed * elapsed);
-    if displacement.length_squared() > MAX_AGENT_PREDICTION_DISTANCE.powi(2) {
-        displacement = displacement.normalize_or_zero() * MAX_AGENT_PREDICTION_DISTANCE;
-    }
-    sample.pose.position + displacement
 }
 
 pub(crate) struct SceneSources {
@@ -163,10 +76,8 @@ pub(crate) struct SceneFeed {
     pub(crate) water_height: Option<f64>,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
-    arrival_pose: watch::Receiver<Option<WorldPose>>,
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    arrival_pose_pending: bool,
-    agent_prediction: AgentPrediction,
+    agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+    dead_reckoning: DeadReckoning,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
@@ -178,7 +89,7 @@ impl SceneFeed {
         agent_id: Uuid,
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
-        arrival_pose: watch::Receiver<Option<WorldPose>>,
+        mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
@@ -188,11 +99,13 @@ impl SceneFeed {
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
-        let arrival_poses = arrival_pose.clone();
+        let agent_motions = agent_motion.clone();
+        let mut dead_reckoning = DeadReckoning::default();
+        dead_reckoning.replace(*agent_motion.borrow_and_update());
         drop(
             runtime
                 .clone()
-                .spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, arrival_poses, wake).in_current_span()),
+                .spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, agent_motions, wake).in_current_span()),
         );
         Self {
             runtime,
@@ -203,58 +116,39 @@ impl SceneFeed {
             water_height: None,
             camera,
             movement,
-            arrival_pose,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
-            arrival_pose_pending: true,
-            agent_prediction: AgentPrediction::default(),
+            agent_motion,
+            dead_reckoning,
             last_movement: None,
             incoming,
             _cancel: cancel,
         }
     }
 
-    pub(crate) fn agent(&self) -> Option<&Object> {
-        self.agent.and_then(|entity| self.view.object(entity))
-    }
-
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn camera_pose(&mut self) -> Option<WorldPose> {
-        let movement = self.last_movement.unwrap_or_default();
-        self.camera_pose_at(Instant::now(), movement)
+        self.camera_pose_at(Instant::now())
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    pub(crate) fn camera_pose_at(&mut self, now: Instant, movement: MovementObservation) -> Option<WorldPose> {
-        if self.arrival_pose.has_changed().is_ok_and(|changed| changed) {
-            self.arrival_pose_pending = self.arrival_pose.borrow_and_update().is_some();
+    pub(crate) fn camera_pose_at(&mut self, now: Instant) -> Option<WorldPose> {
+        self.camera_pose_and_seed_at(now).map(|(pose, _)| pose)
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn camera_pose_and_seed_at(&mut self, now: Instant) -> Option<(WorldPose, (u64, math::Quat))> {
+        if self.agent_motion.has_changed().is_ok_and(|changed| changed) {
+            self.dead_reckoning.replace(*self.agent_motion.borrow_and_update());
         }
-        let agent = self.agent().and_then(|agent| {
-            let motion = agent.detail().linear_motion;
-            let pose = agent.detail().world_transform.ok().and_then(|transform| match transform {
-                world::WorldTransformState::Resolved(transform) => Some(transform.pose),
-                world::WorldTransformState::MissingScale(pose) => Some(pose),
-                world::WorldTransformState::Provisional { .. } | world::WorldTransformState::Unresolved(_) => None,
-            });
-            pose.map(|pose| (pose, motion))
-        });
-        let (pose, motion) = if let Some((pose, motion)) = agent {
-            self.arrival_pose_pending = false;
-            (pose, motion)
-        } else if let Some(pose) = self.arrival_pose_pending.then(|| *self.arrival_pose.borrow()).flatten() {
-            (pose, LinearMotion::default())
-        } else {
-            self.agent_prediction.reset();
-            return None;
-        };
-        Some(self.agent_prediction.predict(pose, motion, movement, now))
+        let sample = self.dead_reckoning.sample?;
+        Some((self.dead_reckoning.pose(now)?, (sample.seed, sample.simulator_rotation)))
     }
 
     pub(crate) fn agent_id(&self) -> Uuid {
         self.agent_id
     }
 
-    pub(crate) fn agent_prediction_active(&self, now: Instant) -> bool {
-        self.agent_prediction.active(now)
+    pub(crate) fn agent_motion_active(&self, now: Instant) -> bool {
+        self.dead_reckoning.active(now)
     }
 
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {
@@ -438,7 +332,7 @@ async fn run(
     runtime: Handle,
     cancelled: oneshot::Receiver<()>,
     mut camera: watch::Receiver<Option<Camera>>,
-    mut arrival_pose: watch::Receiver<Option<WorldPose>>,
+    mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     wake: impl Fn(),
 ) {
     let SceneSources { mut reader, assets, environments } = sources;
@@ -501,7 +395,7 @@ async fn run(
             }
             .fuse();
             let moved = camera.changed().fuse();
-            let arrived = arrival_pose.changed().fuse();
+            let motion_updated = agent_motion.changed().fuse();
             let available = assets.next().fuse();
             let released = textures.changed().fuse();
             let timer = async {
@@ -512,7 +406,7 @@ async fn run(
                 }
             }
             .fuse();
-            pin_mut!(reading, building, changed, moved, arrived, available, released, timer, pushed);
+            pin_mut!(reading, building, changed, moved, motion_updated, available, released, timer, pushed);
             let mut asset_event = None;
             futures::select_biased! {
                 _ = cancelled => break,
@@ -536,7 +430,7 @@ async fn run(
                 event = available => asset_event = event,
 
                 result = released => { if result.is_err() { break; } wake(); }
-                result = arrived => { if result.is_err() { break; } wake(); }
+                result = motion_updated => { if result.is_err() { break; } wake(); }
                 result = moved => { if result.is_err() { break; } }
                 result = changed => { if result.is_err() { break; } scene.notify_world_change(); }
                 _ = timer => {}
@@ -607,16 +501,94 @@ mod tests {
         })
     }
 
+    fn motion_sample(received_at: Instant) -> AgentMotionSample {
+        AgentMotionSample {
+            position: DVec3::new(10.0, 20.0, 30.0),
+            velocity: Vec3::ZERO,
+            acceleration: Vec3::ZERO,
+            simulator_rotation: Quat::IDENTITY,
+            received_at,
+            seed: 1,
+        }
+    }
+
+    #[test]
+    fn dead_reckoning_uses_constant_velocity() {
+        let received_at = Instant::now();
+        let mut sample = motion_sample(received_at);
+        sample.velocity = Vec3::new(2.0, -1.0, 0.5);
+        let mut dead_reckoning = DeadReckoning::default();
+        dead_reckoning.replace(Some(sample));
+
+        assert_eq!(dead_reckoning.pose(received_at + Duration::from_secs(2)).unwrap().position, DVec3::new(14.0, 18.0, 31.0));
+    }
+
+    #[test]
+    fn dead_reckoning_uses_timestep_acceleration() {
+        let received_at = Instant::now();
+        let mut sample = motion_sample(received_at);
+        sample.acceleration = Vec3::new(0.0, 9.0, 0.0);
+        let mut dead_reckoning = DeadReckoning::default();
+        dead_reckoning.replace(Some(sample));
+
+        let expected = 20.0 + 0.5 * 9.0 * (1.0 - 1.0 / 45.0);
+        assert!((dead_reckoning.pose(received_at + Duration::from_secs(1)).unwrap().position.y - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn new_sample_replaces_state_immediately() {
+        let received_at = Instant::now();
+        let mut dead_reckoning = DeadReckoning::default();
+        dead_reckoning.replace(Some(motion_sample(received_at)));
+        let next = AgentMotionSample { position: DVec3::new(400.0, 500.0, 40.0), seed: 2, ..motion_sample(received_at) };
+        dead_reckoning.replace(Some(next));
+
+        assert_eq!(dead_reckoning.pose(received_at).unwrap().position, next.position);
+    }
+
+    #[test]
+    fn dead_reckoning_holds_position_after_three_seconds() {
+        let received_at = Instant::now();
+        let mut sample = motion_sample(received_at);
+        sample.velocity = Vec3::X;
+        let mut dead_reckoning = DeadReckoning::default();
+        dead_reckoning.replace(Some(sample));
+
+        assert_eq!(dead_reckoning.pose(received_at + Duration::from_secs(3)).unwrap().position.x, 13.0);
+        assert_eq!(dead_reckoning.pose(received_at + Duration::from_secs(10)).unwrap().position.x, 13.0);
+        assert!(!dead_reckoning.active(received_at + Duration::from_secs(3) + Duration::from_nanos(1)));
+    }
+
+    #[test]
+    fn non_finite_sample_does_not_replace_valid_state() {
+        let received_at = Instant::now();
+        let valid = motion_sample(received_at);
+        let mut dead_reckoning = DeadReckoning::default();
+        dead_reckoning.replace(Some(valid));
+        let invalid = AgentMotionSample { velocity: Vec3::splat(f32::INFINITY), ..valid };
+        dead_reckoning.replace(Some(invalid));
+
+        assert_eq!(dead_reckoning.pose(received_at).unwrap().position, valid.position);
+    }
+
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[tokio::test]
-    async fn arrival_pose_seeds_follow_camera_before_the_avatar_resolves() {
+    async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
         let agent_id = Uuid::from_u128(1);
-        let pose = WorldPose { position: DVec3::new(270.0, 520.0, 24.0), rotation: Quat::IDENTITY };
+        let now = Instant::now();
+        let sample = AgentMotionSample {
+            position: DVec3::new(270.0, 520.0, 24.0),
+            velocity: Vec3::X,
+            acceleration: Vec3::ZERO,
+            simulator_rotation: Quat::IDENTITY,
+            received_at: now,
+            seed: 1,
+        };
         let budget = Budget::default();
         let (_, view) = Reconciler::new(budget.clone());
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, _) = oneshot::channel();
-        let (arrival_pose, arrival_poses) = watch::channel(Some(pose));
+        let (agent_motion_sender, agent_motion) = watch::channel(Some(sample));
         let mut feed = SceneFeed {
             runtime: Handle::current(),
             view,
@@ -626,18 +598,20 @@ mod tests {
             water_height: None,
             camera: watch::channel(None).0,
             movement: watch::channel(None).0,
-            arrival_pose: arrival_poses,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
-            arrival_pose_pending: true,
-            agent_prediction: AgentPrediction::default(),
+            agent_motion,
+            dead_reckoning: DeadReckoning { sample: Some(sample) },
             last_movement: None,
             incoming,
             _cancel: cancel,
         };
-        drop((sender, arrival_pose));
+        drop((sender, agent_motion_sender));
 
-        assert!(feed.agent().is_none(), "the self avatar has not entered World yet");
-        assert_eq!(feed.camera_pose(), Some(pose), "follow mode uses the arrival pose until World resolves the avatar");
+        assert!(feed.agent.is_none(), "the self avatar has not entered World yet");
+        assert_eq!(
+            feed.camera_pose_at(now),
+            Some(sample.pose(sample.position)),
+            "follow mode uses the sample until World resolves the avatar"
+        );
     }
 
     #[tokio::test]
@@ -668,7 +642,7 @@ mod tests {
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, _) = oneshot::channel();
         let (camera, _) = watch::channel(None);
-        let (_, arrival_pose) = watch::channel(None);
+        let (_agent_motion_sender, agent_motion) = watch::channel(None);
         let mut feed = SceneFeed {
             runtime: Handle::current(),
             view,
@@ -678,10 +652,8 @@ mod tests {
             water_height: None,
             camera,
             movement: watch::channel(None).0,
-            arrival_pose,
-            #[cfg(any(target_os = "windows", target_os = "linux"))]
-            arrival_pose_pending: true,
-            agent_prediction: AgentPrediction::default(),
+            agent_motion,
+            dead_reckoning: DeadReckoning::default(),
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -709,7 +681,12 @@ mod tests {
                     }
                     ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
                     ReconcileStep::Continue => {}
-                    ReconcileStep::Idle => return (feed.water_height, feed.agent().map(|object| object.detail().summary.entity)),
+                    ReconcileStep::Idle => {
+                        return (
+                            feed.water_height,
+                            feed.agent.and_then(|entity| feed.view.object(entity)).map(|object| object.detail().summary.entity),
+                        );
+                    }
                     _ => panic!("expected scene reconciliation"),
                 }
             }
@@ -764,13 +741,13 @@ mod tests {
         let mut reads = WorldReadHost::new(&world, Handle::current());
         let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
-        let (_arrival_pose_sender, arrival_pose) = watch::channel(None);
+        let (_agent_motion_sender, agent_motion) = watch::channel(None);
         let mut feed = SceneFeed::start(
             SceneSources { reader: reads.reader(), environments, assets: assets.handle() },
             Uuid::from_u128(2),
             watch::channel(None).0,
             watch::channel(None).0,
-            arrival_pose,
+            agent_motion,
             Handle::current(),
             || {},
         );
@@ -823,13 +800,13 @@ mod tests {
         let reader = service.reader();
         let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (pushes, environments) = crate::session::EnvironmentInbox::channel();
-        let (_arrival_pose_sender, arrival_pose) = watch::channel(None);
+        let (_agent_motion_sender, agent_motion) = watch::channel(None);
         let mut feed = SceneFeed::start(
             SceneSources { reader: reader.clone(), environments, assets: assets.handle() },
             Uuid::from_u128(1),
             watch::channel(None).0,
             watch::channel(None).0,
-            arrival_pose,
+            agent_motion,
             Handle::current(),
             || {},
         );

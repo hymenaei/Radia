@@ -4,16 +4,8 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
 };
 
-use ::inventory::InventorySnapshot;
-use futures::{channel::mpsc, stream::StreamExt};
-use network::{AgentSession, Grid, MfaChallenge};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-use render::scene::Camera;
-use tokio::sync::watch;
-use uuid::Uuid;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
-use world::WorldPose;
-
+use crate::session::AgentMotionSample;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::{
     agent_movement::MovementObservation, asset_coordinator::AssetHandle, session::experience_environment::EnvironmentInbox,
@@ -24,6 +16,13 @@ use crate::{
     remembered_login::{CredentialStoreError, RememberedLogin},
     session::ChatMessage,
 };
+use ::inventory::InventorySnapshot;
+use futures::{channel::mpsc, stream::StreamExt};
+use network::{AgentSession, Grid, MfaChallenge};
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use render::scene::Camera;
+use tokio::sync::watch;
+use uuid::Uuid;
 
 const MAX_PENDING_CHAT_MESSAGES: usize = 64;
 const MAX_PENDING_CHAT_BYTES: usize = 256 * 1024;
@@ -149,7 +148,7 @@ pub(crate) struct SessionReadyUpdate {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) movement: watch::Sender<Option<MovementObservation>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    pub(crate) arrival_pose: watch::Receiver<Option<WorldPose>>,
+    pub(crate) agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,

@@ -21,10 +21,7 @@ const FAST_LEFT: u32 = 0x0000_0800;
 const FAST_UP: u32 = 0x0000_1000;
 const FLY: u32 = 0x0000_2000;
 pub(crate) const STOP: u32 = 0x0000_4000;
-const ACTIVE_MOVEMENT_FLAGS: u32 = AT_POS | AT_NEG | LEFT_POS | LEFT_NEG | UP_POS | UP_NEG | YAW_POS | YAW_NEG;
 pub(crate) const BODY_ROTATION_DOT_THRESHOLD: f32 = 0.9997;
-const WALK_SPEED: f32 = 2.0;
-const RUN_SPEED: f32 = 5.0;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 const TURN_RATE: f32 = std::f32::consts::FRAC_PI_2;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -70,32 +67,6 @@ impl Default for MovementObservation {
     }
 }
 
-impl MovementObservation {
-    pub(crate) fn has_active_controls(self) -> bool {
-        self.control_flags & ACTIVE_MOVEMENT_FLAGS != 0
-    }
-
-    pub(crate) fn predicted_velocity(self) -> Vec3 {
-        if self.control_flags & STOP != 0 {
-            return Vec3::ZERO;
-        }
-        let forward = f32::from((self.control_flags & AT_POS != 0) as u8) - f32::from((self.control_flags & AT_NEG != 0) as u8);
-        let left = f32::from((self.control_flags & LEFT_POS != 0) as u8) - f32::from((self.control_flags & LEFT_NEG != 0) as u8);
-        let vertical = if self.control_flags & FLY != 0 {
-            f32::from((self.control_flags & UP_POS != 0) as u8) - f32::from((self.control_flags & UP_NEG != 0) as u8)
-        } else {
-            0.0
-        };
-        let mut direction = Vec3::new(forward, left, vertical);
-        if direction.length_squared() <= f32::EPSILON {
-            return Vec3::ZERO;
-        }
-        direction = direction.normalize();
-        let speed = if self.always_run || self.control_flags & (FAST_AT | FAST_LEFT | FAST_UP) != 0 { RUN_SPEED } else { WALK_SPEED };
-        self.body_rotation * direction * speed
-    }
-}
-
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 #[derive(Default)]
 pub(crate) struct HeldControls {
@@ -108,7 +79,7 @@ pub(crate) struct HeldControls {
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) struct BodyRotation {
-    authoritative: Option<Quat>,
+    seed: Option<u64>,
     current: Quat,
     updated_at: Option<Instant>,
 }
@@ -116,7 +87,7 @@ pub(crate) struct BodyRotation {
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 impl Default for BodyRotation {
     fn default() -> Self {
-        Self { authoritative: None, current: Quat::IDENTITY, updated_at: None }
+        Self { seed: None, current: Quat::IDENTITY, updated_at: None }
     }
 }
 
@@ -295,16 +266,13 @@ impl BodyRotation {
         self.current
     }
 
-    pub(crate) fn update(&mut self, authoritative: Option<Quat>, yaw: f32, now: Instant) -> Quat {
-        if let Some(rotation) = authoritative {
-            let changed = self.authoritative.is_none_or(|previous| previous.dot(rotation).abs() < 0.999_999);
-            if changed {
-                let predicted_turn = self.authoritative.is_some_and(|previous| self.current.dot(previous).abs() < 0.999_999);
-                self.authoritative = Some(rotation);
-                if yaw == 0.0 || !predicted_turn {
-                    self.current = rotation;
-                }
-            }
+    pub(crate) fn update(&mut self, seed: Option<(u64, Quat)>, yaw: f32, now: Instant) -> Quat {
+        if let Some((generation, rotation)) = seed
+            && self.seed != Some(generation)
+            && let Some(rotation) = yaw_rotation(rotation)
+        {
+            self.seed = Some(generation);
+            self.current = rotation;
         }
         let dt = self.updated_at.map_or(Duration::ZERO, |previous| now.saturating_duration_since(previous).min(MAX_TURN_STEP));
         self.updated_at = Some(now);
@@ -315,11 +283,18 @@ impl BodyRotation {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn yaw_rotation(rotation: Quat) -> Option<Quat> {
+    let forward = rotation * Vec3::X;
+    let forward = Vec3::new(forward.x, forward.y, 0.0).try_normalize()?;
+    Some(Quat::from_rotation_z(forward.y.atan2(forward.x)))
+}
+
 #[cfg(all(test, any(target_os = "windows", target_os = "linux")))]
 mod tests {
     use std::time::{Duration, Instant};
 
-    use math::Quat;
+    use math::{Quat, Vec3};
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     use winit::{event::ElementState, keyboard::Key};
 
@@ -393,31 +368,44 @@ mod tests {
     fn body_rotation_uses_ninety_degree_per_second_yaw_rate() {
         let start = Instant::now();
         let mut rotation = BodyRotation::default();
-        assert_eq!(rotation.update(Some(Quat::IDENTITY), 1.0, start), Quat::IDENTITY);
+        assert_eq!(rotation.update(Some((1, Quat::IDENTITY)), 1.0, start), Quat::IDENTITY);
         let mut current = Quat::IDENTITY;
         for step in 1..=10 {
-            current = rotation.update(Some(Quat::IDENTITY), 1.0, start + Duration::from_millis(step * 100));
+            current = rotation.update(Some((1, Quat::IDENTITY)), 1.0, start + Duration::from_millis(step * 100));
         }
-        assert!((current * math::Vec3::X).distance(math::Vec3::Y) < 1e-5);
-        let authoritative = Quat::from_rotation_z(0.4);
-        assert!(
-            (rotation.update(Some(authoritative), 0.0, start + Duration::from_secs(2)) * math::Vec3::X)
-                .distance(authoritative * math::Vec3::X)
-                < 1e-5
-        );
+        assert!((current * Vec3::X).distance(Vec3::Y) < 1e-5);
     }
 
     #[test]
-    fn delayed_authority_keeps_held_turn_progress() {
+    fn simulator_rotation_is_ignored_after_seed() {
         let start = Instant::now();
         let mut rotation = BodyRotation::default();
-        rotation.update(Some(Quat::IDENTITY), 1.0, start);
-        for step in 1..=5 {
-            rotation.update(Some(Quat::IDENTITY), 1.0, start + Duration::from_millis(step * 100));
-        }
+        rotation.update(Some((3, Quat::IDENTITY)), 1.0, start);
+        let turned = rotation.update(Some((3, Quat::IDENTITY)), 1.0, start + Duration::from_millis(100));
+        let current = rotation.update(Some((3, Quat::from_rotation_z(0.2))), 0.0, start + Duration::from_millis(200));
+        assert!((current * Vec3::X).distance(turned * Vec3::X) < 1e-5);
+    }
 
-        let current = rotation.update(Some(Quat::from_rotation_z(0.2)), 1.0, start + Duration::from_millis(600));
-        let expected = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2 * 0.6);
-        assert!((current * math::Vec3::X).distance(expected * math::Vec3::X) < 1e-5);
+    #[test]
+    fn arrival_marker_reseeds_rotation() {
+        let start = Instant::now();
+        let mut rotation = BodyRotation::default();
+        rotation.update(Some((1, Quat::IDENTITY)), 1.0, start);
+        rotation.update(Some((1, Quat::IDENTITY)), 1.0, start + Duration::from_millis(100));
+
+        let arrival = Quat::from_rotation_z(0.7);
+        let current = rotation.update(Some((2, arrival)), 0.0, start + Duration::from_millis(200));
+        assert!((current * Vec3::X).distance(arrival * Vec3::X) < 1e-5);
+    }
+
+    #[test]
+    fn seed_rotation_is_flattened() {
+        let start = Instant::now();
+        let mut rotation = BodyRotation::default();
+        let seed = Quat::from_rotation_y(0.8) * Quat::from_rotation_z(0.5);
+        let current = rotation.update(Some((1, seed)), 0.0, start);
+        let forward = seed * Vec3::X;
+        let expected = Vec3::new(forward.x, forward.y, 0.0).normalize();
+        assert!((current * Vec3::X - expected).length() < 1e-5);
     }
 }

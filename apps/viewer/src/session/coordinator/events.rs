@@ -1,4 +1,4 @@
-use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 
 #[cfg(test)]
 use network::Event;
@@ -22,6 +22,7 @@ use crate::session::{
 };
 
 const MAX_HANDOFF_OBSERVATIONS: usize = 32;
+const MAX_PENDING_MOVEMENT_COMPLETES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct PendingWorldHandoff {
@@ -34,12 +35,30 @@ pub(super) struct WorldHandoff {
     world_primary: Option<SimulatorId>,
     promoted_target: Option<PendingWorldHandoff>,
     observations: HashMap<SimulatorId, ObjectObservation>,
+    pending_movement_completes: HashMap<SimulatorId, PendingMovementComplete>,
+}
+
+struct PendingMovementComplete {
+    movement: AgentMovementComplete,
+    received_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MovementCompleteOutcome {
+    Applied,
+    Held,
+    Rejected,
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum SimulatorScope {
     Primary,
     Neighbor,
+}
+
+pub(super) struct SimulatorMessageOutcome {
+    pub(super) summary: Option<(SimulatorId, IngestSummary)>,
+    pub(super) touched_agent: bool,
 }
 
 pub(super) enum DecodedWorldUpdate {
@@ -189,17 +208,52 @@ impl WorldHandoff {
         simulator_id: SimulatorId,
         session: Option<(Uuid, Uuid)>,
         movement: &AgentMovementComplete,
-    ) -> bool {
-        if self.world_primary != Some(simulator_id) {
-            return false;
-        }
-        let Some((agent_id, session_id)) = session else { return false };
+        received_at: Instant,
+    ) -> MovementCompleteOutcome {
+        let Some((agent_id, session_id)) = session else { return MovementCompleteOutcome::Rejected };
         if movement.agent_data.agent_id != agent_id || movement.agent_data.session_id != session_id {
-            return false;
+            return MovementCompleteOutcome::Rejected;
         }
-
-        let region = world.region_for(simulator_id).map(|region| region.get());
         let handle = RegionHandle::new(movement.data.region_handle);
+        if self.world_primary == Some(simulator_id) || self.promoted_target.is_some_and(|handoff| handoff.target == simulator_id) {
+            return if self.resolve_movement_region(world, simulator_id, handle) {
+                MovementCompleteOutcome::Applied
+            } else {
+                MovementCompleteOutcome::Rejected
+            };
+        }
+        if !movement_region_matches(world, simulator_id, handle) {
+            return MovementCompleteOutcome::Rejected;
+        }
+        self.pending_movement_completes.insert(simulator_id, PendingMovementComplete { movement: movement.clone(), received_at });
+        while self.pending_movement_completes.len() > MAX_PENDING_MOVEMENT_COMPLETES {
+            if let Some(stale) = self.pending_movement_completes.keys().next().copied() {
+                self.pending_movement_completes.remove(&stale);
+            }
+        }
+        MovementCompleteOutcome::Held
+    }
+
+    pub(super) fn apply_promoted_movement_complete(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator_id: SimulatorId,
+        session: Option<(Uuid, Uuid)>,
+    ) -> Option<(AgentMovementComplete, Instant)> {
+        let pending = self.pending_movement_completes.remove(&simulator_id)?;
+        let (agent_id, session_id) = session?;
+        if pending.movement.agent_data.agent_id != agent_id || pending.movement.agent_data.session_id != session_id {
+            return None;
+        }
+        if self.world_primary != Some(simulator_id) && !self.promoted_target.is_some_and(|handoff| handoff.target == simulator_id) {
+            return None;
+        }
+        self.resolve_movement_region(world, simulator_id, RegionHandle::new(pending.movement.data.region_handle))
+            .then_some((pending.movement, pending.received_at))
+    }
+
+    fn resolve_movement_region(&self, world: &mut SessionWorld, simulator_id: SimulatorId, handle: RegionHandle) -> bool {
+        let region = world.region_for(simulator_id).map(|region| region.get());
         match world.register_simulator(simulator_id, Some(handle)) {
             Ok(_) => true,
             Err(RegistrationError::HandleChanged) => {
@@ -219,6 +273,7 @@ impl WorldHandoff {
             tracing::warn!(simulator = simulator_id.get(), region, %error, "could not retire simulator world region");
         }
         self.observations.remove(&simulator_id);
+        self.pending_movement_completes.remove(&simulator_id);
         if self.promoted_target.is_some_and(|handoff| handoff.target == simulator_id) {
             self.promoted_target = None;
         }
@@ -263,19 +318,26 @@ impl WorldHandoff {
         message: &Message,
         agent_id: Option<Uuid>,
         on_object_chunk: &mut impl FnMut(Vec<(Option<SimulatorId>, LocalAddress)>, Vec<LocalAddress>),
-    ) -> Option<(SimulatorId, IngestSummary)> {
+    ) -> Option<SimulatorMessageOutcome> {
         let update = decode_simulator_world_update(world, simulator_id, sequence, packet_order, message)?;
         match update {
             DecodedWorldUpdate::Object(batch) => {
                 let batch = self.filter_batch(world, simulator_id, agent_id, batch)?;
-                let _summary = world
+                let batch_summary = world
                     .apply_object_batch_cooperatively(simulator_id, batch, |_summary, targets, cancellations| {
                         on_object_chunk(targets, cancellations);
                     })
                     .await?;
-                self.complete_observation(world, simulator_id).map(|summary| (simulator_id, summary))
+                let touched_agent =
+                    agent_id.and_then(|agent_id| world.world().entity(agent_id)).is_some_and(|entity| batch_summary.touches_entity(entity));
+                Some(SimulatorMessageOutcome {
+                    summary: self.complete_observation(world, simulator_id).map(|summary| (simulator_id, summary)),
+                    touched_agent,
+                })
             }
-            update => self.apply_update(world, simulator_id, update, agent_id),
+            update => {
+                Some(SimulatorMessageOutcome { summary: self.apply_update(world, simulator_id, update, agent_id), touched_agent: false })
+            }
         }
     }
 
@@ -473,6 +535,7 @@ impl WorldHandoff {
         if !self.begin(source, target) {
             return None;
         }
+        self.pending_movement_completes.retain(|simulator, _| *simulator == target);
         if let Some(previous_target) = previous_target.filter(|previous_target| *previous_target != target) {
             self.observations.remove(&previous_target);
         }
@@ -513,6 +576,13 @@ impl WorldHandoff {
         }
         (completed, applied)
     }
+}
+
+fn movement_region_matches(world: &SessionWorld, simulator_id: SimulatorId, handle: RegionHandle) -> bool {
+    world
+        .region_for(simulator_id)
+        .and_then(|region| world.world().region(region))
+        .is_some_and(|info| info.handle.is_none_or(|known| known == handle))
 }
 
 fn parcel_properties_observation(message: &ParcelProperties) -> Result<ParcelPropertiesObservation, ()> {

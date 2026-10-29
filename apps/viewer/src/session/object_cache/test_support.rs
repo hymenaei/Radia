@@ -17,7 +17,7 @@ use world::{OrderEvidence, Region, RegionHandle};
 
 use crate::session::inbound::{ObjectBatch, decode_object_message};
 use crate::session::object_cache::storage::open_at;
-use crate::session::object_cache::{CacheWriteWorker, ObjectCacheEvent, ObjectCacheSession};
+use crate::session::object_cache::{CacheScope, CacheWriteWorker, ObjectCacheEvent, ObjectCacheSession};
 use crate::session::world::{SessionWorld, viewer_world_limits};
 pub(super) const SIMULATOR: SimulatorId = SimulatorId::new(77);
 pub(super) const REGION: Region = Region::new(77);
@@ -125,6 +125,22 @@ pub(super) async fn cache_count(db: &SqliteDb) -> usize {
         .read(32, |transaction| transaction.query_row("SELECT COUNT(*) FROM object_entries", [], |row| row.get::<_, i64>(0)))
         .expect("queue cache count");
     receipt.wait().await.expect("read cache count") as usize
+}
+
+pub(super) async fn cache_scope_entry_count(db: &SqliteDb, scope: &CacheScope) -> usize {
+    let grid_id = scope.grid_id.clone();
+    let region_id = scope.region_id.as_bytes().to_vec();
+    let cache_id = scope.cache_id.as_bytes().to_vec();
+    let receipt = db
+        .read(64, move |transaction| {
+            transaction.query_row(
+                "SELECT COUNT(*) FROM object_entries WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3",
+                rusqlite::params![grid_id, region_id, cache_id],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("queue cache scope count");
+    usize::try_from(receipt.wait().await.expect("read cache scope count")).expect("cache row count fits usize")
 }
 
 pub(super) async fn cache_totals(db: &SqliteDb) -> (i64, i64, i64, i64) {

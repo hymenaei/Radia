@@ -275,7 +275,7 @@ pub(super) fn make_scope_delete_submission(scope: CacheScope) -> PendingSubmissi
 }
 
 pub(super) fn make_delete_entries_batches(scope: CacheScope, local_ids: Arc<[u32]>) -> Vec<SqliteBatch> {
-    let rows_per_batch = MAX_BATCH_ROWS.min(MAX_BATCH_BYTES.saturating_sub(64) / 4).max(1);
+    let rows_per_batch = MAX_BATCH_ROWS.saturating_sub(1).min(MAX_BATCH_BYTES.saturating_sub(64) / 4).max(1);
     local_ids
         .chunks(rows_per_batch)
         .enumerate()
@@ -284,7 +284,7 @@ pub(super) fn make_delete_entries_batches(scope: CacheScope, local_ids: Arc<[u32
             let count = ids.len();
             let scope = scope.clone();
             let local_ids = Arc::clone(&local_ids);
-            SqliteBatch::new(count, count.saturating_mul(4).saturating_add(64), move |transaction| {
+            SqliteBatch::new(count.saturating_add(1), count.saturating_mul(4).saturating_add(64), move |transaction| {
                 for local_id in local_ids.iter().skip(start).take(count) {
                     transaction.execute(
                         "DELETE FROM object_entries WHERE grid_id = ?1 AND region_id = ?2 AND cache_id = ?3 AND local_id = ?4",
@@ -301,16 +301,6 @@ pub(super) fn make_delete_entries_batches(scope: CacheScope, local_ids: Arc<[u32
             .expect("cache entry delete batch fits SQLite limits")
         })
         .collect()
-}
-
-pub(super) fn make_clear_all_batches() -> Vec<SqliteBatch> {
-    vec![
-        SqliteBatch::new(MAX_BATCH_ROWS, MAX_BATCH_BYTES, |transaction| {
-            transaction.execute_batch("DELETE FROM object_entries; DELETE FROM region_scopes;")?;
-            Ok(())
-        })
-        .expect("clear cache batch fits SQLite limits"),
-    ]
 }
 
 pub(super) fn make_access_submission(scope: CacheScope, stale: HashSet<u32>, last_used: i64) -> PendingSubmission {

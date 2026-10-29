@@ -32,14 +32,10 @@ pub fn scene_world(count: usize, region_count: usize) -> (World, Vec<Row>) {
     scene_world_with(count, region_count, 1, prim_shape, false, None)
 }
 
-pub fn prepare_world(count: usize, mesh_count: usize) -> (World, Vec<Row>) {
-    scene_world_with(count, 1, 1, |index| prepare_shape(index % mesh_count), true, None)
-}
-
-pub fn live_prepare_world(count: usize, mesh_count: usize, texture_count: usize) -> (World, Vec<Row>) {
+pub fn live_prepare_world_with_regions(count: usize, mesh_count: usize, texture_count: usize, region_count: usize) -> (World, Vec<Row>) {
     let object_textures = texture_count.saturating_sub(4).max(1);
     let (mut world, rows) =
-        scene_world_with(count, 1, object_textures, |index| prepare_shape(index % mesh_count), true, Some(object_textures));
+        scene_world_with(count, region_count, object_textures, |index| prepare_shape(index % mesh_count), true, Some(object_textures));
     let order_base = INITIAL_ORDER + count as u64 + 100;
     for (index, row) in rows.iter().enumerate() {
         let current = order_base + index as u64;
@@ -432,6 +428,28 @@ pub fn update_one(world: &mut World, row: &Row, order: &mut u64, generation: u64
     let _applied = world.patch_object(patch).expect("benchmark object update");
 }
 
+pub fn update_texture(world: &mut World, row: &Row, order: &mut u64, generation: u64) -> AssetId {
+    let current = *order;
+    *order += 1;
+    let mut patch = ObjectPatch::new(UpdateSource::new(row.region, current as u32, Ordered(current), 0), row.local_id);
+    let mut face = *world
+        .object_detail(row.entity)
+        .expect("benchmark appearance object detail")
+        .surface_appearance
+        .as_ref()
+        .expect("benchmark appearance object surface")
+        .default_face();
+    let texture = texture_asset(1 + generation as usize % 2);
+    face.texture = Some(texture);
+    patch.surface_appearance = Some(SurfaceAppearance::new(face, Vec::new()).expect("benchmark appearance update"));
+    let applied = world.patch_object(patch).expect("benchmark appearance patch");
+    match applied.outcome {
+        world::ApplyOutcome::Updated(entity) => assert_eq!(entity, row.entity),
+        outcome => panic!("benchmark appearance update was not applied: {outcome:?}"),
+    }
+    texture
+}
+
 pub fn first_publish(reconciler: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) {
     reconciler.notify_world_change();
     for _ in 0..100_000 {
@@ -455,6 +473,43 @@ pub fn first_publish(reconciler: &mut Reconciler, view: &mut SceneView, world: &
     panic!("object update did not converge");
 }
 
+pub fn publish_texture_update(
+    reconciler: &mut Reconciler,
+    view: &mut SceneView,
+    world: &World,
+    now: &mut Instant,
+    row: &Row,
+    texture: AssetId,
+) {
+    reconciler.notify_world_change();
+    for _ in 0..100_000 {
+        match reconciler.poll(*now) {
+            ReconcileStep::Read(job) => {
+                let reply = reply(world, &job);
+                reconciler.complete_read(job, reply, *now);
+            }
+            ReconcileStep::Publish(batch) => {
+                view.apply(batch).expect("benchmark scene publication");
+                if view_texture(view, row) == Some(texture) {
+                    return;
+                }
+            }
+            ReconcileStep::Build(job) => reconciler.complete_mesh(job.run()),
+            ReconcileStep::Continue => {}
+            ReconcileStep::Wait(until) => *now = until,
+            ReconcileStep::Asset(_) => {}
+            ReconcileStep::Idle if view_texture(view, row) == Some(texture) => return,
+            ReconcileStep::Idle => panic!("benchmark texture update did not publish"),
+            ReconcileStep::Closed => panic!("benchmark scene closed"),
+        }
+    }
+    panic!("benchmark texture update did not converge");
+}
+
+fn view_texture(view: &SceneView, row: &Row) -> Option<AssetId> {
+    view.object(row.entity)?.detail().surface_appearance.as_ref()?.default_face().texture
+}
+
 fn camera(detail: Detail) -> Camera {
     let (distance, height) = match detail {
         Detail::Lowest => (10.0, 16),
@@ -472,13 +527,6 @@ fn prim_shape(index: usize) -> PrimShape {
         2 => PrimShape { path_curve: 0x20, profile_curve: 5, ..PrimShape::default() },
         _ => PrimShape { path_curve: 0x20, profile_curve: 0, path_scale_x: 150, path_scale_y: 150, ..PrimShape::default() },
     }
-}
-
-pub fn prepare_camera() -> Camera {
-    Camera::new(DVec3::new(50.0, 15.0, 120.0), -Vec3::Z, PI / 2.0, [1024, 1024])
-        .expect("benchmark prepare camera")
-        .with_quality(512.0, 1.0)
-        .expect("benchmark camera quality")
 }
 
 fn texture_asset(index: usize) -> AssetId {

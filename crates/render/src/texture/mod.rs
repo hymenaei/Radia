@@ -686,8 +686,8 @@ impl Textures {
         &self.terrain_bindings.get(&region).expect("terrain binding prepared with its draw").binding
     }
 
-    pub(crate) fn clear_terrain_bindings(&mut self) {
-        self.terrain_bindings.clear();
+    pub(crate) fn retain_terrain_bindings(&mut self, regions: &HashSet<Region>) {
+        self.terrain_bindings.retain(|region, _| regions.contains(region));
     }
 
     pub(crate) fn take_changed_ids(&mut self) -> HashSet<TextureId> {

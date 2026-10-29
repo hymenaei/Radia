@@ -1,132 +1,95 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     ops::Range,
     sync::Arc,
     time::Instant,
 };
 
-use assets::{TextureHandle, TextureId};
+use assets::TextureHandle;
 use math::{Bounds, Frustum, Quat, Vec3};
 use world::{Entity, FaceAppearance, Region};
 
-use super::instance::is_visible;
-use super::{GeometryRenderer, Instance, MeshState, ShadingMode};
+use super::instance::{instance_base, is_visible, parameter_part};
+use super::{GeometryRenderer, MeshState, ShadingMode, TRANSFORM_BYTES};
 use crate::{
-    geometry::batching::{DrawKey, FaceOrder},
+    geometry::draw_list::{DrawInterner, DrawKey, FaceOrder},
     material::{FaceMaterial, FaceParams},
     pipeline::{COLOR, Pipeline},
     scene::{Camera, MeshId, Object, Placement, PreparedMesh, SceneView, SharedMesh, Surface, SurfaceKind, ViewVersion, texture_animation},
-    texture::{TextureKey, TextureState},
 };
 
 pub(super) type ItemId = (u8, u128, u16);
 
 pub(super) struct MeshInfo {
-    pub bounds: Bounds,
-    pub centers: Vec<Vec3>,
+    pub(super) bounds: Bounds,
+    pub(super) centers: Vec<Vec3>,
 }
 
 pub(super) struct CachedFace {
-    pub order: FaceOrder,
-    pub indices: Range<u32>,
-    pub center: Vec3,
-    pub base_params: FaceParams,
-    pub params: FaceParams,
-    pub texture: Option<TextureHandle>,
-    pub material_index: Option<usize>,
-    pub texture_entry_transform: math::UvTransform,
-    pub draw: DrawKey,
-    pub slot: Option<u32>,
-    pub included: bool,
+    pub(super) order: FaceOrder,
+    pub(super) indices: Range<u32>,
+    pub(super) center: Vec3,
+    pub(super) base_params: FaceParams,
+    pub(super) params: FaceParams,
+    pub(super) texture: Option<TextureHandle>,
+    pub(super) material_index: Option<usize>,
+    pub(super) texture_entry_transform: math::UvTransform,
+    pub(super) group: u32,
+    pub(super) blended: bool,
+    pub(super) parameter_bytes: [u8; super::instance::PARAMETER_BYTES],
+    pub(super) slot: Option<u32>,
+    pub(super) blended_index: Option<usize>,
 }
 
 pub(super) struct CachedItem {
-    pub id: ItemId,
-    pub entity: Option<Entity>,
-    pub region: Region,
-    pub mesh: SharedMesh,
-    pub info: Arc<MeshInfo>,
-    pub position: math::DVec3,
-    pub rotation: math::Quat,
-    pub scale: Vec3,
-    pub pickable: bool,
-    pub shading: ShadingMode,
-    pub terrain_textures: Option<[Option<TextureHandle>; 4]>,
-    pub terrain_composition: Option<Arc<[f32]>>,
-    pub surface_kind: Option<crate::scene::SurfaceKind>,
-    pub source: Option<Object>,
-    pub faces: Vec<CachedFace>,
-    pub animated_faces: Vec<usize>,
-    pub animation_deadline: Option<Instant>,
-    pub visible_index: Option<usize>,
-    pub parameters_dirty: bool,
-}
-
-impl CachedItem {
-    pub fn instance(&self, with_faces: bool) -> Instance {
-        Instance {
-            mesh: self.mesh.clone(),
-            position: self.position,
-            rotation: self.rotation,
-            scale: self.scale,
-            pickable: self.pickable,
-            faces: if with_faces {
-                self.faces
-                    .iter()
-                    .filter(|face| face.included)
-                    .map(|face| super::PickFace { indices: face.indices.clone(), double_sided: face.params.double_sided })
-                    .collect()
-            } else {
-                Vec::new()
-            },
-        }
-    }
+    pub(super) id: ItemId,
+    pub(super) entity: Option<Entity>,
+    pub(super) region: Region,
+    pub(super) mesh: SharedMesh,
+    pub(super) info: Arc<MeshInfo>,
+    pub(super) position: math::DVec3,
+    pub(super) rotation: math::Quat,
+    pub(super) scale: Vec3,
+    pub(super) transform: [u8; TRANSFORM_BYTES],
+    pub(super) pickable: bool,
+    pub(super) shading: ShadingMode,
+    pub(super) terrain_textures: Option<[Option<TextureHandle>; 4]>,
+    pub(super) terrain_composition: Option<Arc<[f32]>>,
+    pub(super) surface_kind: Option<crate::scene::SurfaceKind>,
+    pub(super) source: Option<Object>,
+    pub(super) faces: Vec<CachedFace>,
+    pub(super) animated_faces: Vec<usize>,
+    pub(super) animation_deadline: Option<Instant>,
+    pub(super) parameters_dirty: bool,
 }
 
 #[derive(Default)]
 pub(super) struct FrameCache {
-    pub items: BTreeMap<ItemId, CachedItem>,
-    pub objects: HashMap<Entity, ItemId>,
-    pub mesh_info: HashMap<MeshId, Arc<MeshInfo>>,
-    pub candidates: Vec<ItemId>,
-    pub next_candidates: Vec<ItemId>,
-    pub candidate_added: Vec<ItemId>,
-    pub candidate_removed: Vec<ItemId>,
-    pub visible: Vec<ItemId>,
-    pub next_visible: Vec<ItemId>,
-    pub visible_added: Vec<ItemId>,
-    pub visible_removed: Vec<ItemId>,
-    pub priority_items: Vec<ItemId>,
-    pub slots: HashMap<FaceOrder, u32>,
-    pub mesh_ids: Vec<MeshId>,
-    pub mesh_set: HashSet<MeshId>,
-    pub mesh_priorities: HashMap<MeshId, (f64, f64)>,
-    pub mesh_ready: HashSet<MeshId>,
-    pub mesh_representatives: HashMap<MeshId, SharedMesh>,
-    pub mesh_compositions: HashMap<MeshId, Option<Arc<[f32]>>>,
-    pub retained_meshes: HashSet<MeshId>,
-    pub mesh_state: MeshState,
-    pub texture_keys: Vec<TextureKey>,
-    pub texture_set: HashSet<TextureKey>,
-    pub texture_face_counts: HashMap<TextureKey, usize>,
-    pub visible_texture_counts: HashMap<TextureId, usize>,
-    pub visible_texture_handles: HashMap<TextureId, TextureHandle>,
-    pub update_items: Vec<ItemId>,
-    pub visibility_slots: Vec<u32>,
-    pub update_set: HashSet<ItemId>,
-    pub pose_set: HashSet<ItemId>,
-    pub animated_items: HashSet<ItemId>,
-    pub blended_items: HashSet<ItemId>,
-    pub changed_objects: HashSet<Entity>,
-    pub changed_surfaces: HashSet<(Region, crate::scene::SurfaceKind)>,
-    pub retired_regions: HashSet<Region>,
-    pub changed_terrain_regions: HashSet<Region>,
-    pub version: Option<ViewVersion>,
-    pub camera: Option<Camera>,
-    pub origin: math::DVec3,
-    pub size: [u32; 2],
-    pub texture_state: TextureState,
-    pub batches_valid: bool,
+    pub(super) items: HashMap<ItemId, CachedItem>,
+    pub(super) objects: HashMap<Entity, ItemId>,
+    pub(super) mesh_info: HashMap<MeshId, Arc<MeshInfo>>,
+    pub(super) candidates: Vec<ItemId>,
+    pub(super) next_candidates: Vec<ItemId>,
+    pub(super) visible: Vec<ItemId>,
+    pub(super) next_visible: Vec<ItemId>,
+    pub(super) mesh_ids: Vec<MeshId>,
+    pub(super) mesh_set: HashSet<MeshId>,
+    pub(super) mesh_priorities: HashMap<MeshId, (f64, f64)>,
+    pub(super) mesh_ready: HashSet<MeshId>,
+    pub(super) mesh_representatives: HashMap<MeshId, SharedMesh>,
+    pub(super) mesh_compositions: HashMap<MeshId, Option<Arc<[f32]>>>,
+    pub(super) retained_meshes: HashSet<MeshId>,
+    pub(super) mesh_state: MeshState,
+    pub(super) animated_items: HashSet<ItemId>,
+    pub(super) patch_items: Vec<ItemId>,
+    pub(super) patch_faces: Vec<(ItemId, usize)>,
+    pub(super) changed_objects: HashSet<Entity>,
+    pub(super) changed_surfaces: HashSet<(Region, crate::scene::SurfaceKind)>,
+    pub(super) retired_regions: HashSet<Region>,
+    pub(super) version: Option<ViewVersion>,
+    pub(super) camera: Option<Camera>,
+    pub(super) origin: math::DVec3,
+    pub(super) size: [u32; 2],
 }
 
 pub(super) fn mesh_info(mesh: &SharedMesh) -> Arc<MeshInfo> {
@@ -161,14 +124,10 @@ impl GeometryRenderer {
         self.cache.changed_objects.clear();
         self.cache.changed_surfaces.clear();
         self.cache.retired_regions.clear();
-        self.cache.candidate_added.clear();
-        self.cache.candidate_removed.clear();
-        let mut region_invalidations = 0;
         if let Some(changes) = changes {
             for change in changes {
                 full |= change.full;
                 reconcile_all |= change.reconcile_all;
-                region_invalidations += change.regions.len();
                 regions.extend(change.regions.iter().copied());
                 self.cache.changed_objects.extend(change.objects.iter().copied());
                 self.cache.changed_surfaces.extend(change.surfaces.iter().copied());
@@ -191,20 +150,15 @@ impl GeometryRenderer {
             self.cache.mesh_compositions.clear();
             self.cache.mesh_priorities.clear();
             self.cache.mesh_ready.clear();
-            self.cache.visible_texture_counts.clear();
-            self.cache.visible_texture_handles.clear();
             self.cache.animated_items.clear();
-            self.cache.blended_items.clear();
-            self.cache.batches_valid = false;
+            self.draw_list.groups.clear();
             self.pending_meshes.clear();
             self.pending_textures.clear();
             self.cache.mesh_state = self.memory.mesh_state();
             let mut update = CacheUpdate {
-                full_rebuilds: true,
-                region_invalidations,
-                dirtied_items: view.object_count() + view.surfaces().count(),
+                layout_changed: true,
+                items_updated: view.object_count() + view.surfaces().count(),
                 full_visibility: true,
-                batch_dirty: true,
                 mesh_dirty: true,
                 ..CacheUpdate::default()
             };
@@ -216,7 +170,6 @@ impl GeometryRenderer {
             for object in view.objects() {
                 update.background.push(object.detail().summary.entity);
                 if let Some(item) = self.object_item(object) {
-                    update.objects_reprepared += 1;
                     if !item.animated_faces.is_empty() {
                         self.cache.animated_items.insert(item.id);
                     }
@@ -228,7 +181,7 @@ impl GeometryRenderer {
             return update;
         }
 
-        let mut update = CacheUpdate { region_invalidations, ..CacheUpdate::default() };
+        let mut update = CacheUpdate::default();
         if reconcile_all {
             self.reconcile_snapshot(view, &mut update);
         } else {
@@ -244,8 +197,8 @@ impl GeometryRenderer {
                         && item.terrain_textures.as_ref() != Some(&textures)
                     {
                         item.terrain_textures = Some(textures.clone());
-                        update.dirtied_items += 1;
-                        update.texture_items.push(id);
+                        self.draw_list.update_terrain(region, &textures);
+                        update.items_updated += 1;
                         if !update.terrain_regions.contains(&region) {
                             update.terrain_regions.push(region);
                         }
@@ -263,12 +216,11 @@ impl GeometryRenderer {
                     .collect::<Vec<_>>();
                 if !removed.is_empty() {
                     update.full_visibility = true;
-                    update.batch_dirty = true;
+                    update.layout_changed = true;
                 }
                 for (id, entity) in removed {
-                    self.cache.items.remove(&id);
+                    self.remove_item(id);
                     self.cache.animated_items.remove(&id);
-                    self.cache.blended_items.remove(&id);
                     if let Some(entity) = entity {
                         self.cache.objects.remove(&entity);
                     }
@@ -284,7 +236,7 @@ impl GeometryRenderer {
                 self.update_surface(view, view.surface(region, kind), region, kind, &mut update);
             }
         }
-        if update.full_visibility || update.batch_dirty {
+        if update.full_visibility || update.mesh_dirty {
             self.prune_mesh_info();
         }
         self.cache.version = Some(view.version());
@@ -322,37 +274,34 @@ impl GeometryRenderer {
         let old_id = self.cache.objects.get(&entity).copied();
         let Some(object) = object else {
             if let Some(id) = old_id {
-                update.dirtied_items += 1;
-                self.cache.items.remove(&id);
+                update.items_updated += 1;
+                self.remove_item(id);
                 self.cache.animated_items.remove(&id);
-                self.cache.blended_items.remove(&id);
                 self.cache.objects.remove(&entity);
                 update.full_visibility = true;
-                update.batch_dirty = true;
+                update.layout_changed = true;
             }
             return;
         };
         let Some((_, mesh)) = object.mesh() else {
             if let Some(id) = old_id {
-                update.dirtied_items += 1;
-                self.cache.items.remove(&id);
+                update.items_updated += 1;
+                self.remove_item(id);
                 self.cache.animated_items.remove(&id);
-                self.cache.blended_items.remove(&id);
                 self.cache.objects.remove(&entity);
                 update.full_visibility = true;
-                update.batch_dirty = true;
+                update.layout_changed = true;
             }
             return;
         };
         let Placement::Ready(transform) = object.placement() else {
             if let Some(id) = old_id {
-                update.dirtied_items += 1;
-                self.cache.items.remove(&id);
+                update.items_updated += 1;
+                self.remove_item(id);
                 self.cache.animated_items.remove(&id);
-                self.cache.blended_items.remove(&id);
                 self.cache.objects.remove(&entity);
                 update.full_visibility = true;
-                update.batch_dirty = true;
+                update.layout_changed = true;
             }
             return;
         };
@@ -367,16 +316,25 @@ impl GeometryRenderer {
                 cached.position != transform.pose.position || cached.rotation != transform.pose.rotation || cached.scale != transform.scale;
             let parameters_dirty =
                 cached.source.as_ref().and_then(|previous| previous.detail().texture_animation) != object.detail().texture_animation;
-            update.dirtied_items += usize::from(pose_changed || parameters_dirty);
+            update.items_updated += usize::from(pose_changed || parameters_dirty);
             if parameters_dirty {
                 cached.animated_faces = animated_face_indices(object, &cached.faces);
                 cached.animation_deadline = (!cached.animated_faces.is_empty()).then(Instant::now);
             }
-            let winding_changed = refresh_winding_pipeline(&mut cached.faces, cached.scale, transform.scale);
+            let scale_changed = cached.scale != transform.scale;
+            let winding_changed = refresh_winding_pipeline(&mut cached.faces, cached.scale, transform.scale, &mut self.draw_list.groups);
+            if pose_changed {
+                cached.transform = instance_base(transform.pose.position, transform.pose.rotation, transform.scale, self.cache.origin);
+                if scale_changed {
+                    for face in &mut cached.faces {
+                        face.parameter_bytes = parameter_part(&face.params, transform.scale);
+                    }
+                }
+            }
             cached.position = transform.pose.position;
             cached.rotation = transform.pose.rotation;
             cached.scale = transform.scale;
-            update.batch_dirty |= winding_changed;
+            update.layout_changed |= winding_changed;
             cached.parameters_dirty |= parameters_dirty;
             cached.source = Some(object.clone());
             if !cached.animated_faces.is_empty() {
@@ -384,18 +342,19 @@ impl GeometryRenderer {
             } else {
                 self.cache.animated_items.remove(&id);
             }
-            if pose_changed || parameters_dirty {
+            if pose_changed {
                 update.pose_items.push(id);
+            }
+            if parameters_dirty {
+                update.parameter_items.push(id);
             }
             return;
         }
         let item = self.object_item(object);
-        update.dirtied_items += usize::from(item.is_some() || old_id.is_some());
-        update.objects_reprepared += usize::from(item.is_some());
+        update.items_updated += usize::from(item.is_some() || old_id.is_some());
         if let Some(id) = old_id {
-            self.cache.items.remove(&id);
+            self.remove_item(id);
             self.cache.animated_items.remove(&id);
-            self.cache.blended_items.remove(&id);
         }
         if let Some(item) = item {
             let id = item.id;
@@ -405,16 +364,14 @@ impl GeometryRenderer {
             }
             self.cache.objects.insert(entity, id);
             self.cache.items.insert(id, item);
-            update.pose_items.push(id);
-            update.texture_items.push(id);
-            update.batch_dirty = true;
+            update.layout_changed = true;
             if old_id != Some(id) {
                 update.full_visibility = true;
             }
         } else {
             self.cache.objects.remove(&entity);
             update.full_visibility = true;
-            update.batch_dirty = true;
+            update.layout_changed = true;
         }
     }
 
@@ -429,28 +386,32 @@ impl GeometryRenderer {
             {
                 if previous.terrain_textures != item.terrain_textures {
                     previous.terrain_textures = item.terrain_textures;
-                    update.dirtied_items += 1;
-                    update.texture_items.push(id);
+                    if let Some(textures) = previous.terrain_textures.as_ref() {
+                        self.draw_list.update_terrain(region, textures);
+                    }
+                    update.items_updated += 1;
                     if !update.terrain_regions.contains(&region) {
                         update.terrain_regions.push(region);
                     }
                 }
+                self.draw_list.release_faces(&item.faces);
                 return;
             }
-            update.dirtied_items += 1;
+            update.items_updated += 1;
             update.mesh_dirty |= !old || self.cache.items.get(&id).is_some_and(|previous| previous.mesh.id() != item.mesh.id());
+            if old {
+                self.remove_item(id);
+            }
             self.cache.items.insert(id, item);
-            update.batch_dirty = true;
-            update.pose_items.push(id);
-            update.texture_items.push(id);
+            update.layout_changed = true;
             if !old {
                 update.full_visibility = true;
             }
-        } else if self.cache.items.remove(&id).is_some() {
-            self.cache.blended_items.remove(&id);
-            update.dirtied_items += 1;
+        } else if self.cache.items.contains_key(&id) {
+            self.remove_item(id);
+            update.items_updated += 1;
             update.full_visibility = true;
-            update.batch_dirty = true;
+            update.layout_changed = true;
         }
     }
 
@@ -462,7 +423,18 @@ impl GeometryRenderer {
         let info = self.cached_mesh_info(mesh);
         let materials = object.materials();
         let appearance = object.detail().surface_appearance.as_ref();
-        let faces = cached_faces(id, mesh, &info, materials, appearance, transform.scale, ShadingMode::Studio);
+        let faces = cached_faces(
+            id,
+            mesh,
+            &info,
+            materials,
+            appearance,
+            transform.scale,
+            ShadingMode::Studio,
+            None,
+            None,
+            &mut self.draw_list.groups,
+        );
         let animated_faces = animated_face_indices(object, &faces);
         Some(CachedItem {
             id,
@@ -473,6 +445,7 @@ impl GeometryRenderer {
             position: transform.pose.position,
             rotation: transform.pose.rotation,
             scale: transform.scale,
+            transform: instance_base(transform.pose.position, transform.pose.rotation, transform.scale, self.cache.origin),
             pickable: true,
             shading: ShadingMode::Studio,
             terrain_textures: None,
@@ -482,7 +455,6 @@ impl GeometryRenderer {
             faces,
             animation_deadline: (!animated_faces.is_empty()).then(Instant::now),
             animated_faces,
-            visible_index: None,
             parameters_dirty: false,
         })
     }
@@ -497,12 +469,19 @@ impl GeometryRenderer {
         let terrain_textures = (shading == ShadingMode::Terrain)
             .then(|| view.region(surface.region).map_or_else(|| std::array::from_fn(|_| None), |region| region.terrain_textures().clone()));
         let info = self.cached_mesh_info(mesh);
-        let mut faces = cached_faces(id, mesh, &info, None, None, scale, shading);
-        if shading == ShadingMode::Terrain {
-            for face in &mut faces {
-                face.draw.terrain = Some(surface.region);
-            }
-        }
+        let terrain_region = (shading == ShadingMode::Terrain).then_some(surface.region);
+        let faces = cached_faces(
+            id,
+            mesh,
+            &info,
+            None,
+            None,
+            scale,
+            shading,
+            terrain_region,
+            terrain_textures.as_ref(),
+            &mut self.draw_list.groups,
+        );
         Some(CachedItem {
             id,
             entity: None,
@@ -512,6 +491,7 @@ impl GeometryRenderer {
             position: surface.position,
             rotation,
             scale,
+            transform: instance_base(surface.position, rotation, scale, self.cache.origin),
             pickable,
             shading,
             terrain_textures,
@@ -521,7 +501,6 @@ impl GeometryRenderer {
             faces,
             animated_faces: Vec::new(),
             animation_deadline: None,
-            visible_index: None,
             parameters_dirty: false,
         })
     }
@@ -538,6 +517,12 @@ impl GeometryRenderer {
         self.cache.mesh_info.retain(|id, _| self.cache.retained_meshes.contains(id));
     }
 
+    fn remove_item(&mut self, id: ItemId) -> Option<CachedItem> {
+        let item = self.cache.items.remove(&id)?;
+        self.draw_list.release_faces(&item.faces);
+        Some(item)
+    }
+
     pub(super) fn rebuild_candidates(&mut self, camera: Camera, projection: math::Mat4) -> bool {
         self.cache.next_candidates.clear();
         let frustum = Frustum::from_clip_matrix(projection);
@@ -546,14 +531,9 @@ impl GeometryRenderer {
                 self.cache.next_candidates.push(item.id);
             }
         }
+        self.cache.next_candidates.sort_unstable();
         let changed = self.cache.candidates != self.cache.next_candidates;
         if changed {
-            visible_difference(
-                &self.cache.candidates,
-                &self.cache.next_candidates,
-                &mut self.cache.candidate_added,
-                &mut self.cache.candidate_removed,
-            );
             std::mem::swap(&mut self.cache.candidates, &mut self.cache.next_candidates);
         }
         self.cache.next_candidates.clear();
@@ -569,12 +549,10 @@ impl GeometryRenderer {
             match self.cache.candidates.binary_search(id) {
                 Ok(index) if !visible => {
                     self.cache.candidates.remove(index);
-                    self.cache.candidate_removed.push(*id);
                     changed = true;
                 }
                 Err(index) if visible => {
                     self.cache.candidates.insert(index, *id);
-                    self.cache.candidate_added.push(*id);
                     changed = true;
                 }
                 _ => {}
@@ -584,7 +562,7 @@ impl GeometryRenderer {
     }
 
     fn is_item_visible(&self, item: &CachedItem, camera: Camera, frustum: &Frustum) -> bool {
-        is_visible(item.position, item.rotation, item.scale, item.info.bounds, camera, frustum)
+        is_visible(item.position, item.rotation, item.scale, item.info.bounds, item.shading, camera, frustum)
     }
 
     pub(super) fn rebuild_visible_meshes(&mut self, camera: Camera) -> bool {
@@ -621,45 +599,18 @@ impl GeometryRenderer {
 
 #[derive(Default)]
 pub(super) struct CacheUpdate {
-    pub(super) full_rebuilds: bool,
-    pub(super) region_invalidations: usize,
-    pub(super) objects_reprepared: usize,
-    pub(super) dirtied_items: usize,
+    pub(super) layout_changed: bool,
+    pub(super) items_updated: usize,
     pub(super) terrain_regions: Vec<Region>,
-    pub(super) texture_items: Vec<ItemId>,
     pub(super) full_visibility: bool,
-    pub(super) batch_dirty: bool,
     pub(super) mesh_dirty: bool,
     pub(super) background: Vec<Entity>,
     pub(super) pose_items: Vec<ItemId>,
+    pub(super) parameter_items: Vec<ItemId>,
 }
 
 pub(super) fn object_item_id(object: &Object) -> ItemId {
     (2, object.detail().summary.id.as_u128(), 0)
-}
-
-pub(super) fn visible_difference(current: &[ItemId], next: &[ItemId], added: &mut Vec<ItemId>, removed: &mut Vec<ItemId>) {
-    added.clear();
-    removed.clear();
-    let (mut current_index, mut next_index) = (0, 0);
-    while current_index < current.len() && next_index < next.len() {
-        match current[current_index].cmp(&next[next_index]) {
-            std::cmp::Ordering::Less => {
-                removed.push(current[current_index]);
-                current_index += 1;
-            }
-            std::cmp::Ordering::Greater => {
-                added.push(next[next_index]);
-                next_index += 1;
-            }
-            std::cmp::Ordering::Equal => {
-                current_index += 1;
-                next_index += 1;
-            }
-        }
-    }
-    removed.extend_from_slice(&current[current_index..]);
-    added.extend_from_slice(&next[next_index..]);
 }
 
 fn animated_face_indices(object: &Object, faces: &[CachedFace]) -> Vec<usize> {
@@ -693,6 +644,9 @@ pub(super) fn cached_faces(
     appearance: Option<&world::SurfaceAppearance>,
     scale: Vec3,
     shading: ShadingMode,
+    terrain: Option<Region>,
+    terrain_textures: Option<&[Option<TextureHandle>; 4]>,
+    interner: &mut DrawInterner,
 ) -> Vec<CachedFace> {
     let mut material_slots = [None; 256];
     if let Some(materials) = materials {
@@ -729,6 +683,8 @@ pub(super) fn cached_faces(
             ShadingMode::Water => Pipeline::Water,
             ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, scale),
         };
+        let key = DrawKey { mesh: mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture: params.texture, terrain };
+        let Some(group) = interner.intern(key, texture.as_ref(), terrain_textures) else { continue };
         cached.push(CachedFace {
             order: (id.0, id.1, id.2, face.slot),
             indices: face.indices.clone(),
@@ -741,16 +697,11 @@ pub(super) fn cached_faces(
                 .and_then(|appearance| appearance.face(face.slot))
                 .map_or_else(FaceAppearance::default, |face| *face)
                 .transform,
-            draw: DrawKey {
-                mesh: mesh.id(),
-                start: face.indices.start,
-                end: face.indices.end,
-                pipeline,
-                texture: params.texture,
-                terrain: None,
-            },
+            group,
+            blended: key.blended(),
+            parameter_bytes: parameter_part(&params, scale),
             slot: None,
-            included: false,
+            blended_index: None,
         });
     }
     cached
@@ -785,12 +736,23 @@ pub(super) fn surface_pipeline(blend: bool, double_sided: bool, scale: Vec3) -> 
     }
 }
 
-pub(super) fn refresh_winding_pipeline(faces: &mut [CachedFace], old_scale: Vec3, scale: Vec3) -> bool {
+pub(super) fn refresh_winding_pipeline(faces: &mut [CachedFace], old_scale: Vec3, scale: Vec3, interner: &mut DrawInterner) -> bool {
     if math::flips_winding(old_scale) == math::flips_winding(scale) {
         return false;
     }
+    let mut changed = false;
     for face in faces {
-        face.draw.pipeline = surface_pipeline(face.base_params.blend, face.base_params.double_sided, scale);
+        let Some(mut key) = interner.key(face.group) else { continue };
+        let previous_pipeline = key.pipeline;
+        key.pipeline = surface_pipeline(face.base_params.blend, face.base_params.double_sided, scale);
+        if key.pipeline == previous_pipeline {
+            continue;
+        }
+        if let Some(group) = interner.intern(key, face.texture.as_ref(), None) {
+            interner.release(face.group);
+            face.group = group;
+            changed = true;
+        }
     }
-    true
+    changed
 }

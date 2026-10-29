@@ -1,7 +1,9 @@
 use math::{Bounds, DVec3, Frustum, Mat4, Quat, Vec3, normal_matrix};
 
-use super::TRANSFORM_BYTES;
+use super::{ShadingMode, TRANSFORM_BYTES};
 use crate::{material::FaceParams, pipeline::INSTANCE_BYTES, scene::Camera};
+
+pub(super) const PARAMETER_BYTES: usize = INSTANCE_BYTES - TRANSFORM_BYTES;
 
 pub(super) fn model(position: DVec3, rotation: Quat, scale: Vec3, origin: DVec3) -> Mat4 {
     Mat4::from_scale_rotation_translation(scale, rotation, (position - origin).as_vec3())
@@ -25,23 +27,38 @@ pub(super) fn instance_base(position: DVec3, rotation: Quat, scale: Vec3, origin
     bytes
 }
 
+#[cfg(test)]
 pub(super) fn packed_instance(base: &[u8; TRANSFORM_BYTES], params: &FaceParams, scale: Vec3) -> [u8; INSTANCE_BYTES] {
     let mut bytes = [0; INSTANCE_BYTES];
     bytes[..TRANSFORM_BYTES].copy_from_slice(base);
+    bytes[TRANSFORM_BYTES..].copy_from_slice(&parameter_part(params, scale));
+    bytes
+}
+
+pub(super) fn parameter_part(params: &FaceParams, scale: Vec3) -> [u8; PARAMETER_BYTES] {
+    let mut bytes = [0; PARAMETER_BYTES];
     let values = params.color.into_iter().chain(params.uv.into_iter().flatten()).chain(params.params).chain(scale.extend(0.0).to_array());
-    for (dest, value) in bytes[TRANSFORM_BYTES..].as_chunks_mut::<4>().0.iter_mut().zip(values) {
+    for (dest, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         *dest = value.to_le_bytes();
     }
     bytes
 }
 
-pub(super) fn is_visible(position: DVec3, rotation: Quat, scale: Vec3, bounds: Bounds, camera: Camera, frustum: &Frustum) -> bool {
+pub(super) fn is_visible(
+    position: DVec3,
+    rotation: Quat,
+    scale: Vec3,
+    bounds: Bounds,
+    shading: ShadingMode,
+    camera: Camera,
+    frustum: &Frustum,
+) -> bool {
     let center = (bounds.min.as_dvec3() + bounds.max.as_dvec3()) * 0.5 * scale.as_dvec3();
     let offset = position - camera.position() + (rotation * center.as_vec3()).as_dvec3();
     let radius = ((bounds.max.as_dvec3() - bounds.min.as_dvec3()) * 0.5 * scale.as_dvec3()).length();
     if !offset.is_finite()
         || !radius.is_finite()
-        || offset.length() - radius > camera.draw_distance()
+        || (shading == ShadingMode::Studio && offset.length() - radius > camera.draw_distance())
         || offset.abs().max_element() + radius > f64::from(f32::MAX) / 16.0
     {
         return false;
@@ -55,7 +72,10 @@ pub(super) fn is_visible(position: DVec3, rotation: Quat, scale: Vec3, bounds: B
 
 #[cfg(test)]
 mod tests {
+    use math::Mat4;
+
     use super::*;
+    use crate::geometry::fixtures;
 
     #[test]
     fn instance_attributes_match_shader() {
@@ -73,5 +93,23 @@ mod tests {
             "surface shader locations 10 through 14 consume five vec4 attributes"
         );
         assert_eq!(bytes.len(), 192, "GPU instance stride");
+    }
+
+    #[test]
+    fn terrain_visibility_ignores_draw_distance_but_objects_do_not() {
+        let (_scene, view, _) = fixtures::scene(255);
+        let object = view.objects().next().expect("fixture object");
+        let (_, mesh) = object.mesh().expect("fixture mesh");
+        let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1000, 1000]).expect("fixture camera");
+        let close = camera.with_quality(64.0, 1.0).expect("close draw distance");
+        let far = camera.with_quality(512.0, 1.0).expect("far draw distance");
+        let frustum = Frustum::from_clip_matrix(Mat4::from_scale(Vec3::splat(0.001)));
+        let position = DVec3::new(100.0, 0.0, 0.0);
+        for shading in [ShadingMode::Terrain, ShadingMode::Water] {
+            assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), shading, close, &frustum));
+            assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), shading, far, &frustum));
+        }
+        assert!(!is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Studio, close, &frustum));
+        assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Studio, far, &frustum));
     }
 }

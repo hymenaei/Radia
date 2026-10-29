@@ -518,19 +518,13 @@ impl SceneWindow {
                     });
                     ui.label(format!("CPU prepare: {:.2} ms", stats.prepare_ms));
                     ui.label(format!(
-                        "Prepare causes: full {}, regions {}, texture IDs {} / faces {}, objects {}, dirtied items {}",
-                        stats.full_rebuilds,
-                        stats.region_invalidations,
-                        stats.texture_state_changes,
-                        stats.texture_state_reresolves,
-                        stats.objects_reprepared,
-                        stats.dirtied_items
+                        "Prepare work: layouts {}, items updated {}, faces patched {}, blended sorts {}",
+                        stats.layouts, stats.items_updated, stats.faces_patched, stats.blended_sorts
                     ));
                     ui.label(format!(
                         "Animated texture faces: {} visited, {} changed",
                         stats.animated_faces_visited, stats.animated_faces_changed
                     ));
-                    ui.label(format!("Animated texture update: {:.2} ms", stats.animation_update_ms));
                     if let Some((scene_ms, diagnostics_ms)) = gpu_timings {
                         ui.label(format!("GPU passes: scene {:.2} ms, diagnostics {:.2} ms", scene_ms, diagnostics_ms));
                     } else if gpu_timing_supported {

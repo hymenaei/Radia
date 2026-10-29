@@ -1,14 +1,14 @@
-mod batching;
 mod cache;
+mod draw_list;
 mod frame;
 mod instance;
 mod mesh;
 mod pick;
 mod storage;
+mod texture_bindings;
 
 use std::{
     collections::{HashMap, HashSet},
-    ops::Range,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -17,17 +17,16 @@ use std::{
 };
 
 use assets::TextureId;
-use math::{DVec3, Quat, Vec3};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 
-use self::batching::{Batches, DrawCommand, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
 use self::cache::FrameCache;
+use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
 use self::mesh::GpuMesh;
 use self::storage::Storage;
-use crate::scene::{Camera, MeshId, SharedMesh, ViewVersion};
+use crate::scene::{Camera, MeshId, ViewVersion};
 use crate::{
     pipeline::{SurfacePipelines, Water},
     texture::{TextureCompletion, TextureJob, TextureState, Textures},
@@ -62,15 +61,12 @@ pub struct Stats {
     pub omitted_faces: usize,
     pub mesh_budget_blocked: usize,
     pub omission_reason: Option<OmissionReason>,
-    pub full_rebuilds: usize,
-    pub region_invalidations: usize,
-    pub texture_state_reresolves: usize,
-    pub texture_state_changes: usize,
-    pub objects_reprepared: usize,
-    pub dirtied_items: usize,
+    pub layouts: usize,
+    pub items_updated: usize,
+    pub faces_patched: usize,
+    pub blended_sorts: usize,
     pub animated_faces_visited: usize,
     pub animated_faces_changed: usize,
-    pub animation_update_ms: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,20 +139,6 @@ impl Drop for FrameLease {
     }
 }
 
-pub(crate) struct Instance {
-    mesh: SharedMesh,
-    position: DVec3,
-    rotation: Quat,
-    scale: Vec3,
-    pickable: bool,
-    faces: Vec<PickFace>,
-}
-
-pub(crate) struct PickFace {
-    indices: Range<u32>,
-    double_sided: bool,
-}
-
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ShadingMode {
     Studio,
@@ -209,8 +191,8 @@ struct PrepareTimes {
     visibility: Duration,
     requests: Duration,
     textures: Duration,
-    faces: Duration,
-    instances: Duration,
+    meshes: Duration,
+    draw_list: Duration,
 }
 
 pub(crate) struct GeometryRenderer {
@@ -228,17 +210,12 @@ pub(crate) struct GeometryRenderer {
     storage: Storage,
     retired: Vec<GpuMesh>,
     cache: FrameCache,
-    batches: Batches,
+    draw_list: DrawList,
     pending_meshes: HashSet<MeshId>,
     pending_textures: HashSet<TextureId>,
-    draws: Vec<DrawCommand>,
     draw_report: Option<Instant>,
     omitted_faces: usize,
     mesh_budget_blocked: HashSet<MeshId>,
-    visible: Vec<Instance>,
-    visible_ids: Vec<cache::ItemId>,
-    visible_count: usize,
-    instance_bytes: Vec<u8>,
     epoch: u64,
     prepared: Option<FramePreparation>,
     slow_report: Option<Instant>,
@@ -278,17 +255,12 @@ impl GeometryRenderer {
             storage: Storage::default(),
             retired: Vec::new(),
             cache: FrameCache::default(),
-            batches: Batches::default(),
+            draw_list: DrawList::default(),
             pending_meshes: HashSet::new(),
             pending_textures: HashSet::new(),
-            draws: Vec::new(),
             draw_report: None,
             omitted_faces: 0,
             mesh_budget_blocked: HashSet::new(),
-            visible: Vec::new(),
-            visible_ids: Vec::new(),
-            visible_count: 0,
-            instance_bytes: Vec::new(),
             epoch: 0,
             prepared: None,
             slow_report: None,
@@ -328,12 +300,15 @@ impl GeometryRenderer {
 
     pub(crate) fn skip(&mut self) {
         self.prepared = None;
-        self.cache.batches_valid = false;
-        self.visible.clear();
-        self.visible_ids.clear();
-        self.visible_count = 0;
-        self.draws.clear();
-        self.batches.clear();
+        self.cache.visible.clear();
+        self.cache.next_visible.clear();
+        for item in self.cache.items.values_mut() {
+            for face in &mut item.faces {
+                face.slot = None;
+                face.blended_index = None;
+            }
+        }
+        self.draw_list.clear();
         self.stats.instances = 0;
         self.stats.draw_calls = 0;
         self.stats.draw_commands = 0;
@@ -373,7 +348,7 @@ impl GeometryRenderer {
         let mut texture = None;
         let mut terrain = None;
         let mut buffers = None;
-        for draw in self.batches.draw_batches() {
+        for draw in self.draw_list.draw_batches() {
             if pipeline != Some(draw.key.pipeline) {
                 self.pipelines.bind_pipeline(pass, draw.key.pipeline);
                 pipeline = Some(draw.key.pipeline);
@@ -405,7 +380,7 @@ impl GeometryRenderer {
                 pass.multi_draw_indexed_indirect(&self.indirect, draw.offset, draw.count);
             } else {
                 for command in 0..draw.count {
-                    let first_instance = self.batches.first_instance(draw.offset, command);
+                    let Some(first_instance) = self.draw_list.first_instance(draw.offset, command) else { continue };
                     let start = u64::from(first_instance) * crate::pipeline::INSTANCE_BYTES as u64;
                     pass.set_vertex_buffer(instance_slot, self.instances.slice(start..));
                     pass.draw_indexed_indirect(&self.indirect, draw.offset + u64::from(command) * INDIRECT_DRAW_BYTES as u64);

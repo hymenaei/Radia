@@ -5,9 +5,9 @@ use std::{
     sync::{Arc, Mutex, RwLock, mpsc::SyncSender},
 };
 
-use super::super::index::Mutation;
-use super::super::{DIRECTORY_OVERHEAD, FILE_OVERHEAD, INDEX_FILE, INDEX_FILE_OVERHEAD, JOURNAL_FILE, SNAPSHOT_FILE};
 use super::{Entry, Key, PlannedChange, StorageError, UnavailableReason};
+use crate::cache::index::Mutation;
+use crate::cache::{DIRECTORY_OVERHEAD, FILE_OVERHEAD, INDEX_FILE, INDEX_FILE_OVERHEAD, JOURNAL_FILE, SNAPSHOT_FILE};
 
 pub(super) fn mutations(changes: &[PlannedChange]) -> Result<Vec<Mutation>, StorageError> {
     let mut mutations = Vec::new();

@@ -73,7 +73,7 @@ async fn fill_promoted_outbound_queue(
     pending_response
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn handshake_reply_waits_for_outbound_space() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
     let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
@@ -105,12 +105,15 @@ async fn handshake_reply_waits_for_outbound_space() {
     receive_connected(&mut received_events).await;
     pause_sends.send_replace(true);
 
-    let send_control = |ping_id: u8| SimulatorCommand::Send {
-        message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id } }),
-        delivery: Delivery::Unreliable,
-        completed: None,
-        cancel_target: None,
-        report_failure: false,
+    let send_control = |ping_id: u8| {
+        let (completed, _) = oneshot::channel();
+        SimulatorCommand::Send {
+            message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id } }),
+            delivery: Delivery::Unreliable,
+            completed: Some(completed),
+            cancel_target: None,
+            report_failure: false,
+        }
     };
     commands.send(send_control(1)).await.expect("queue active control send");
     timeout(WAIT, send_entered.notified()).await.expect("active send reaches the paused transport");
@@ -130,13 +133,19 @@ async fn handshake_reply_waits_for_outbound_space() {
     let mut response = response;
     assert!(timeout(Duration::from_millis(25), &mut response).await.is_err());
 
+    advance(MAX_SEND_AGE + Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    std::assert_matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    advance(MAX_SEND_AGE + Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    std::assert_matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+
     pause_sends.send_replace(false);
-    let mut control_sends = 0;
     let mut handshake_replies = 0;
-    while control_sends < MAX_PENDING_SENDS || handshake_replies == 0 {
+    while handshake_replies == 0 {
         let (packet, peer) = timeout(WAIT, receive_packet(&simulator)).await.expect("outbound queue drains");
         match packet.message() {
-            Message::CompletePingCheck(_) => control_sends += 1,
+            Message::CompletePingCheck(_) => {}
             Message::RegionHandshakeReply(_) => {
                 handshake_replies += 1;
                 send_ack(&simulator, peer, packet.sequence()).await;
@@ -144,9 +153,18 @@ async fn handshake_reply_waits_for_outbound_space() {
             _ => panic!("unexpected message while draining outbound queue"),
         }
     }
-    assert_eq!(control_sends, MAX_PENDING_SENDS);
     assert_eq!(handshake_replies, 1);
     assert!(response.await.expect("handshake reply completion").is_ok());
+
+    commands.send(send_control(200)).await.expect("queue a send after the aged reply");
+    loop {
+        let (packet, peer) = timeout(WAIT, receive_packet(&simulator)).await.expect("connection stays active after aged reply");
+        match packet.message() {
+            Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 200 => break,
+            Message::StartPingCheck(_) => send_ack(&simulator, peer, packet.sequence()).await,
+            _ => panic!("unexpected message after aged handshake reply"),
+        }
+    }
 
     shutdown.send_replace(true);
     assert!(timeout(WAIT, task).await.expect("join connection task").expect("connection task").is_ok());

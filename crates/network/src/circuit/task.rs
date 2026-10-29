@@ -162,15 +162,6 @@ impl ConnectionTask {
     fn expire_sends(&mut self) -> Result<(), ConnectionError> {
         let now = Instant::now();
         expire_deferred_retries(&self.connection.circuit, &mut self.deferred_retries, now)?;
-        if self.pending_handshake_reply.as_ref().is_some_and(|queued| now.saturating_duration_since(queued.queued_at) >= MAX_SEND_AGE) {
-            if let Some(mut queued) = self.pending_handshake_reply.take()
-                && let Some(completed) = queued.completion.take()
-                && let Err(error) = completed.send(Err(Error::SimulatorCommandQueueFull))
-            {
-                drop(error);
-            }
-            return Err(ConnectionError::SimulatorCommandQueueFull);
-        }
         if self.pending_notifications.is_empty() {
             for queued in self.outbound.expire(Instant::now()) {
                 let error = send_age_expiry_error(&queued);
@@ -190,7 +181,12 @@ impl ConnectionTask {
 
     fn pending_send_deadline(&self) -> Option<Instant> {
         let pending = self.pending_send.as_ref()?;
-        pending.queued_message.as_ref().map(|queued| queued.queued_at + MAX_SEND_AGE).or(pending.retry_deadline)
+        pending
+            .queued_message
+            .as_ref()
+            .filter(|queued| !queued.age_exempt())
+            .map(|queued| queued.queued_at + MAX_SEND_AGE)
+            .or(pending.retry_deadline)
     }
 
     fn begin_draining_when_ready(&mut self) {

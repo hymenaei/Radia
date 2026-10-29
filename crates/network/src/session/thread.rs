@@ -192,6 +192,8 @@ pub(super) async fn run_client(
             session: options,
             startup_disconnect: Some(disconnect_requested.clone()),
             root_transport: None,
+            #[cfg(test)]
+            application_event_capacity: crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY,
         },
     )
     .await?

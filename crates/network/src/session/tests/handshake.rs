@@ -114,7 +114,7 @@ async fn handshake_chat_logout() {
 }
 
 #[tokio::test]
-async fn handshake_fits_backlog() {
+async fn handshake_survives_application_backlog() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
     let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -159,38 +159,25 @@ async fn handshake_fits_backlog() {
     set_sequence(&mut movement_complete, 39);
     simulator.send_to(&movement_complete, peer).await.expect("send movement completion at backlog limit");
 
-    let mut acknowledged_movement_complete = false;
-    let logout = timeout(SIMULATOR_TIMEOUT, async {
-        loop {
-            let (bytes, _) = receive(&simulator).await;
-            let packet = Packet::decode(&bytes).expect("decode client message");
-            acknowledged_movement_complete |= packet.appended_acks().contains(&39) || packet_ack_contains(packet.message(), 39);
-            if matches!(packet.message(), Message::LogoutRequest(_)) {
-                break packet;
-            }
-        }
-    })
-    .await
-    .expect("full backlog should start logout after both handshake events are queued");
-    assert_ne!(logout.sequence(), 0);
-    acknowledged_movement_complete |= logout.appended_acks().contains(&39) || packet_ack_contains(logout.message(), 39);
-    assert!(acknowledged_movement_complete, "reliable movement completion must be acknowledged before disconnect");
-
+    let mut received = HashSet::new();
     let mut saw_session_ready = false;
-    let mut saw_movement_complete = false;
-    while !(saw_session_ready && saw_movement_complete) {
+    while !(saw_session_ready && received.len() == 17) {
         match next_event(&mut events).await {
             Event::SessionReady { .. } => saw_session_ready = true,
-            Event::SimulatorMessage { sequence: 39, .. } => saw_movement_complete = true,
+            Event::SimulatorMessage { sequence, .. } if (23..=39).contains(&sequence) => {
+                assert!(received.insert(sequence), "each queued simulator message should be delivered once");
+            }
+            Event::Failed(reason) => panic!("queued startup events ended the session: {reason}"),
             _ => {}
         }
     }
+    assert_eq!(received, (23..=39).collect());
 
     disconnect_signal.send_replace(true);
     assert!(
         timeout(Duration::from_millis(200), client)
             .await
-            .expect("disconnect should not wait for a simulator reply")
+            .expect("disconnect should finish")
             .expect("session task should not panic")
             .is_ok()
     );

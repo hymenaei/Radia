@@ -1,15 +1,15 @@
-use std::{collections::VecDeque, pin::Pin};
+use std::{collections::VecDeque, future::pending, pin::Pin};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinSet,
-    time::{self, Interval, Sleep},
+    time::{self, Instant, Interval, Sleep},
 };
 
 use super::handoff::HandoffState;
 use super::{
-    CLIENT_EVENT_CAPACITY, ConnectionTaskResult, HANDOFF_COMMAND_RETRY_INTERVAL, LOGOUT_TIMEOUT, RunState, RuntimeInputs, SESSION_TIMEOUT,
-    SessionError, SessionStartup, SessionState, SimulatorCapabilitySession, SimulatorEvent, SimulatorRequest,
-    retry_pending_handoff_commands,
+    APPLICATION_EVENT_PRESSURE_GRACE_PERIOD, CLIENT_EVENT_CAPACITY, ConnectionTaskResult, HANDOFF_COMMAND_RETRY_INTERVAL, LOGOUT_TIMEOUT,
+    RunState, RuntimeInputs, SESSION_TIMEOUT, SessionError, SessionStartup, SessionState, SimulatorCapabilitySession, SimulatorEvent,
+    SimulatorRequest, retry_pending_handoff_commands,
 };
 use crate::{
     capabilities::{EventQueueRoleHandle, EventQueueTask},
@@ -138,8 +138,25 @@ impl<'a> SessionDispatcher<'a> {
             self.state.graceful_disconnect(false).await?;
             return Ok(());
         }
+        let mut application_pressure_changed = self.state.packet_memory.application_events().subscribe_pressure();
         loop {
+            let pressure_deadline = (*application_pressure_changed.borrow()).map(|since| since + APPLICATION_EVENT_PRESSURE_GRACE_PERIOD);
+            let application_pressure = async {
+                if let Some(deadline) = pressure_deadline {
+                    time::sleep_until(deadline).await;
+                } else {
+                    pending::<()>().await;
+                }
+            };
             let action = tokio::select! {
+                _ = application_pressure => {
+                    if self.state.packet_memory.application_events().pressure_expired(Instant::now(), APPLICATION_EVENT_PRESSURE_GRACE_PERIOD) {
+                        self.state.graceful_disconnect(false).await?;
+                        return Err(SessionError::SustainedApplicationEventPressure);
+                    }
+                    RuntimeAction::Continue
+                }
+                _ = application_pressure_changed.changed() => RuntimeAction::Continue,
                 _ = self.disconnect_requested.changed() => self.handle_disconnect_changed().await?,
                 result = async {
                     self.state.pending_primary_logout

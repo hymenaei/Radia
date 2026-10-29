@@ -63,9 +63,8 @@ use crate::{
     AgentSession, Error, Grid, StartLocation,
     capabilities::{CapabilityBudget, Client, EventQueueExit},
     circuit::{
-        EVENT_BACKLOG_DISCONNECT_REASON, HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS,
-        MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, NeighborEventQueueOutcome, SimulatorEvent,
-        UdpTransport,
+        HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PRECONNECT_EVENTS,
+        NeighborEventQueueOutcome, SimulatorEvent, UdpTransport,
         admission::{MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES},
         lludp::{Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, RESENT_FLAG, ReceiveError},
         pacing::{OutboundBudget, OutboundBudgetHandle},
@@ -79,7 +78,7 @@ use crate::{
     session::{COMMAND_CAPACITY, Command, DEFAULT_UPSTREAM_BYTES_PER_SECOND, NETWORK_THREAD_STACK_SIZE},
 };
 
-use super::logout::{LogoutAttemptError, LogoutOutcome, LogoutUnavailable, PendingLogout, send_logout_with_deadline};
+use super::logout::{LogoutAttemptError, LogoutOutcome, PendingLogout, send_logout_with_deadline};
 use super::*;
 use super::{
     HandoffState, NEIGHBOR_COMMAND_CAPACITY, PreconnectEvents, PreconnectOutcome, SimulatorCapabilitySession, SimulatorConnection,
@@ -129,11 +128,21 @@ pub(crate) async fn run_session(
     events: mpsc::Sender<EventEnvelope>,
     disconnect_requested: watch::Receiver<bool>,
 ) -> Result<(), crate::session::SessionError> {
+    run_session_with_options(session, commands, events, disconnect_requested, test_options()).await
+}
+
+pub(crate) async fn run_session_with_options(
+    session: AgentSession,
+    commands: mpsc::Receiver<Command>,
+    events: mpsc::Sender<EventEnvelope>,
+    disconnect_requested: watch::Receiver<bool>,
+    options: SessionRuntimeOptions,
+) -> Result<(), crate::session::SessionError> {
     let failure_events = events.clone();
     let mut failure_shutdown = disconnect_requested.clone();
     let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
     let result = async {
-        let connection = SessionRuntime::connect(session, ResponseData::default(), test_options())
+        let connection = SessionRuntime::connect(session, ResponseData::default(), options)
             .await?
             .ok_or(crate::session::SessionError::PrimaryConnectionStoppedDuringStartup)?;
         connection.run(commands, events, disconnect_requested, terminal_event_permit).await
@@ -151,6 +160,7 @@ pub(super) fn test_options() -> SessionRuntimeOptions {
         session: SessionOptions::default(),
         startup_disconnect: None,
         root_transport: None,
+        application_event_capacity: crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY,
     }
 }
 

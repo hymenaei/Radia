@@ -6,7 +6,11 @@ use std::{
 };
 
 use ::inventory::{Category, CategoryKey, FolderType, Inventory, InventoryError, InventoryLimits, InventoryOwner, ServerVersion};
-use protocol::login::{InventoryBootstrap as LoginInventoryBootstrap, InventorySkeleton, InventorySkeletonFolder};
+use protocol::login::{
+    InventoryBootstrap as LoginInventoryBootstrap, InventoryBootstrapError as LoginInventoryBootstrapError, InventorySkeleton,
+    InventorySkeletonFolder, ResponseData,
+};
+use tokio::{runtime::Handle, task::JoinHandle};
 use utils::FolderId;
 use uuid::Uuid;
 
@@ -40,6 +44,30 @@ impl Error for InventoryBootstrapError {}
 impl From<InventoryError> for InventoryBootstrapError {
     fn from(error: InventoryError) -> Self {
         Self::Model(error)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum InventoryWorkerError {
+    Login(LoginInventoryBootstrapError),
+    Build(InventoryBootstrapError),
+}
+
+impl fmt::Display for InventoryWorkerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Login(error) => write!(formatter, "{error}"),
+            Self::Build(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl Error for InventoryWorkerError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Login(error) => Some(error),
+            Self::Build(error) => Some(error),
+        }
     }
 }
 
@@ -87,6 +115,31 @@ pub(crate) fn build_inventory(
         inventory,
         InventoryBootstrapReport { personal_categories, library_categories, rejected_personal_entries, rejected_library_entries },
     ))
+}
+
+pub(crate) fn spawn_inventory_build(
+    runtime: &Handle,
+    agent_id: Uuid,
+    login_data: ResponseData,
+) -> JoinHandle<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>> {
+    spawn_inventory_build_with(runtime, agent_id, login_data, build_inventory_from_login)
+}
+
+fn spawn_inventory_build_with(
+    runtime: &Handle,
+    agent_id: Uuid,
+    login_data: ResponseData,
+    build: impl FnOnce(Uuid, ResponseData) -> Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError> + Send + 'static,
+) -> JoinHandle<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>> {
+    runtime.spawn_blocking(move || build(agent_id, login_data))
+}
+
+fn build_inventory_from_login(
+    agent_id: Uuid,
+    login_data: ResponseData,
+) -> Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError> {
+    let bootstrap = login_data.inventory_bootstrap().map_err(InventoryWorkerError::Login)?;
+    build_inventory(agent_id, bootstrap).map_err(InventoryWorkerError::Build)
 }
 
 fn build_scope(owner: InventoryOwner, root_id: Uuid, skeleton: InventorySkeleton) -> ScopeCategories {
@@ -179,10 +232,109 @@ fn empty_root(owner: InventoryOwner, id: FolderId) -> Category {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use protocol::login::{InventorySkeleton, InventorySkeletonFolder};
+    use protocol::login::{InventorySkeleton, InventorySkeletonFolder, Value};
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        time::Duration,
+    };
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
 
     fn uuid(id: u128) -> Uuid {
         Uuid::from_u128(id)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn max_login_skeleton_does_not_block_intake() {
+        let root = uuid(1);
+        let folders = (1..=protocol::login::MAX_LOGIN_INVENTORY_FOLDERS)
+            .map(|id| {
+                let id = uuid(id as u128);
+                let parent_id = if id == root { Uuid::nil() } else { root };
+                Value::Struct(BTreeMap::from([
+                    ("folder_id".into(), Value::String(id.to_string())),
+                    ("parent_id".into(), Value::String(parent_id.to_string())),
+                    ("name".into(), Value::String("folder".into())),
+                    ("version".into(), Value::Integer(-1)),
+                ]))
+            })
+            .collect();
+        let login_data = ResponseData::from_fields(BTreeMap::from([
+            (
+                "inventory-root".into(),
+                Value::Array(vec![Value::Struct(BTreeMap::from([("folder_id".into(), Value::String(root.to_string()))]))]),
+            ),
+            ("inventory-skeleton".into(), Value::Array(folders)),
+        ]));
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let worker_busy = Arc::new(AtomicBool::new(false));
+        let worker_busy_signal = Arc::clone(&worker_busy);
+        let build = spawn_inventory_build_with(&Handle::current(), uuid(10), login_data, move |agent_id, login_data| {
+            worker_busy_signal.store(true, Ordering::Release);
+            started_sender.send(()).expect("test is waiting for worker start");
+            release_receiver.recv_timeout(Duration::from_secs(2)).expect("test releases worker");
+            worker_busy_signal.store(false, Ordering::Release);
+            build_inventory_from_login(agent_id, login_data)
+        });
+        started_receiver.await.expect("slow worker section has started");
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = sender.send(());
+        });
+
+        timeout(Duration::from_secs(1), receiver)
+            .await
+            .expect("session intake should run while the login worker is busy")
+            .expect("intake signal should arrive");
+        assert!(worker_busy.load(Ordering::Acquire), "worker should still be busy while intake progresses");
+        release_sender.send(()).expect("worker is still waiting at its barrier");
+        let (inventory, report) = build.await.expect("inventory worker should finish").expect("valid login inventory should build");
+        assert_eq!(report.personal_categories, protocol::login::MAX_LOGIN_INVENTORY_FOLDERS);
+        assert_eq!(inventory.snapshot().categories().count(), protocol::login::MAX_LOGIN_INVENTORY_FOLDERS);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pending_build_result_can_finish_after_session_shutdown() {
+        let login_data = ResponseData::default();
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let (finished_sender, finished_receiver) = oneshot::channel();
+        let build = spawn_inventory_build_with(&Handle::current(), uuid(10), login_data, move |agent_id, login_data| {
+            started_sender.send(()).expect("test is waiting for worker start");
+            release_receiver.recv().expect("test releases worker");
+            let result = build_inventory_from_login(agent_id, login_data);
+            let _ = finished_sender.send(());
+            result
+        });
+        started_receiver.await.expect("worker has started");
+        build.abort();
+        drop(build);
+        release_sender.send(()).expect("worker is waiting at its barrier");
+        timeout(Duration::from_secs(1), finished_receiver)
+            .await
+            .expect("worker can finish after its session stopped waiting")
+            .expect("worker completion signal arrives");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn worker_preserves_login_and_model_error_types() {
+        let invalid_login = ResponseData::from_fields(BTreeMap::from([("inventory-root".into(), Value::String("invalid".into()))]));
+        let login_result =
+            super::spawn_inventory_build(&Handle::current(), uuid(10), invalid_login).await.expect("login worker should complete");
+        let Err(login_error) = login_result else { panic!("invalid login root should fail parsing") };
+        std::assert_matches!(login_error, InventoryWorkerError::Login(LoginInventoryBootstrapError::InvalidPersonalRoot));
+
+        let model_result = super::spawn_inventory_build(&Handle::current(), uuid(10), ResponseData::default())
+            .await
+            .expect("login worker should complete");
+        let Err(model_error) = model_result else { panic!("missing personal root should fail model construction") };
+        std::assert_matches!(model_error, InventoryWorkerError::Build(InventoryBootstrapError::MissingPersonalRoot));
     }
 
     fn folder(id: u128, parent_id: u128, name: &str, type_default: Option<i32>) -> InventorySkeletonFolder {

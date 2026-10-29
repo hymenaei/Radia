@@ -1,12 +1,7 @@
 use std::{error::Error as StdError, fmt};
 
 use super::logout::LogoutAttemptError;
-use crate::{
-    capabilities::SetupError,
-    circuit::{ConnectionError, MAX_PRECONNECT_EVENTS},
-    error::Error,
-    login::LoginError,
-};
+use crate::{capabilities::SetupError, circuit::ConnectionError, error::Error, login::LoginError};
 
 #[derive(Debug)]
 pub(crate) enum SessionError {
@@ -19,8 +14,9 @@ pub(crate) enum SessionError {
     SimulatorIdSpaceExhausted,
     PrimaryConnectionStoppedDuringStartup,
     SessionStartupTimedOut,
-    PreconnectBufferOverflow,
-    ShutdownReason(&'static str),
+    ApplicationEventBacklogExceeded,
+    LifecycleEventBacklogFull,
+    SustainedApplicationEventPressure,
 }
 
 impl fmt::Display for SessionError {
@@ -37,10 +33,11 @@ impl fmt::Display for SessionError {
                 formatter.write_str("The primary simulator connection task stopped during startup.")
             }
             Self::SessionStartupTimedOut => formatter.write_str("Timed out while establishing the simulator session."),
-            Self::PreconnectBufferOverflow => {
-                write!(formatter, "A simulator connection exceeded the {MAX_PRECONNECT_EVENTS}-event pre-connect buffer.")
+            Self::ApplicationEventBacklogExceeded => formatter.write_str("The admitted simulator event queue exceeded its capacity."),
+            Self::LifecycleEventBacklogFull => formatter.write_str("The lifecycle event queue is full while event delivery is blocked."),
+            Self::SustainedApplicationEventPressure => {
+                formatter.write_str("Simulator event intake remained blocked beyond the pressure grace period.")
             }
-            Self::ShutdownReason(reason) => formatter.write_str(reason),
         }
     }
 }
@@ -57,8 +54,9 @@ impl StdError for SessionError {
             | Self::SimulatorIdSpaceExhausted
             | Self::PrimaryConnectionStoppedDuringStartup
             | Self::SessionStartupTimedOut
-            | Self::PreconnectBufferOverflow
-            | Self::ShutdownReason(_) => None,
+            | Self::ApplicationEventBacklogExceeded
+            | Self::LifecycleEventBacklogFull
+            | Self::SustainedApplicationEventPressure => None,
         }
     }
 }

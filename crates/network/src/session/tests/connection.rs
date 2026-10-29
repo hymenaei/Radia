@@ -466,6 +466,40 @@ async fn foreign_ids_are_unavailable() {
 }
 
 #[tokio::test]
+async fn stray_logout_reply_keeps_session_running() {
+    let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
+    let session = login_session(primary.local_addr().expect("primary simulator address"));
+    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
+    let (disconnect_signal, disconnect_requested) = watch::channel(false);
+    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+
+    let (_, primary_peer) = receive(&primary).await;
+    primary.send_to(&ack(20, 1), primary_peer).await.expect("ack primary circuit");
+    receive_message(&primary, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
+    primary.send_to(&ack(21, 2), primary_peer).await.expect("ack initial movement");
+
+    let mut logout_reply = test_fixture("logout_reply.hex");
+    logout_reply[0] |= 0x40;
+    set_sequence(&mut logout_reply, 22);
+    primary.send_to(&logout_reply, primary_peer).await.expect("send stray logout reply");
+
+    let mut handshake = test_fixture("region_handshake.hex");
+    handshake[0] |= 0x40;
+    set_sequence(&mut handshake, 23);
+    primary.send_to(&handshake, primary_peer).await.expect("send primary handshake");
+    receive_message(&primary, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
+    let Event::SimulatorMessage { sequence, .. } = next_event(&mut events).await else {
+        panic!("expected region handshake event after the stray logout reply");
+    };
+    assert_eq!(sequence, 23);
+
+    disconnect_signal.send(true).expect("request disconnect");
+    drop(events);
+    let _result = client.await.expect("session task did not panic");
+}
+
+#[tokio::test]
 async fn neighbor_backpressure_controls() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
@@ -552,7 +586,7 @@ fn neighbor_pressure_keeps_primary_live() {
 }
 
 #[tokio::test]
-async fn neighbor_overload_keeps_control() {
+async fn neighbor_backpressure_keeps_control() {
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
     let neighbor_endpoint = neighbor.local_addr().expect("neighbor simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");
@@ -575,8 +609,7 @@ async fn neighbor_overload_keeps_control() {
     std::assert_matches!(Packet::decode(&use_circuit).expect("decode neighbor circuit packet").message(), Message::UseCircuitCode(_));
     neighbor.send_to(&ack(40, 1), neighbor_peer).await.expect("ack neighbor circuit");
     let first_sequence = 41;
-    let burst_len = MAX_QUEUED_SIMULATOR_EVENTS * 4;
-    let admitted_count = MAX_PENDING_SIMULATOR_EVENTS - 1;
+    let burst_len = 64;
     let last_sequence = first_sequence + u32::try_from(burst_len).expect("small simulator burst") - 1;
     for sequence in first_sequence..=last_sequence {
         let mut chat = test_fixture("chat_from_simulator.hex");
@@ -590,7 +623,7 @@ async fn neighbor_overload_keeps_control() {
     let mut acknowledged_sequences = HashSet::with_capacity(burst_len);
     let mut answered_ping = false;
     timeout(WAIT, async {
-        while !(acknowledged_sequences.len() == admitted_count && answered_ping) {
+        while !(acknowledged_sequences.len() == burst_len && answered_ping) {
             let (bytes, _) = receive(&neighbor).await;
             let packet = Packet::decode(&bytes).expect("decode neighbor control reply");
             acknowledged_sequences.extend(
@@ -608,8 +641,8 @@ async fn neighbor_overload_keeps_control() {
     .expect("neighbor ACK and ping handling should continue through a paused-consumer burst");
     assert_eq!(
         acknowledged_sequences,
-        (first_sequence..first_sequence + admitted_count as u32).collect(),
-        "only payloads retained by the event queue may be acknowledged"
+        (first_sequence..=last_sequence).collect(),
+        "every payload retained by the bounded event queue may be acknowledged"
     );
     let retained_bytes = MAX_QUEUED_SIMULATOR_EVENT_BYTES - budget.global_available_bytes();
     assert!(retained_bytes > 0, "accepted packets must remain charged while the consumer is paused");
@@ -620,41 +653,20 @@ async fn neighbor_overload_keeps_control() {
     let mut duplicate_chat = test_fixture("chat_from_simulator.hex");
     duplicate_chat[0] |= 0x40;
     set_sequence(&mut duplicate_chat, first_sequence);
-    neighbor.send_to(&duplicate_chat, neighbor_peer).await.expect("retransmit a reliable packet after overload begins");
+    neighbor.send_to(&duplicate_chat, neighbor_peer).await.expect("retransmit an admitted reliable packet");
     receive_ack(&neighbor, first_sequence).await;
-
-    let rejected_sequence = first_sequence + admitted_count as u32;
-    let mut rejected_chat = test_fixture("chat_from_simulator.hex");
-    rejected_chat[0] |= 0x40;
-    set_sequence(&mut rejected_chat, rejected_sequence);
-    neighbor.send_to(&rejected_chat, neighbor_peer).await.expect("retransmit a payload rejected by event admission");
-    let rejected_ack = timeout(Duration::from_millis(100), async {
-        loop {
-            let (bytes, _) = receive(&neighbor).await;
-            let packet = Packet::decode(&bytes).expect("decode possible rejected-payload ACK");
-            if packet.appended_acks().contains(&rejected_sequence)
-                || matches!(packet.message(), Message::PacketAck(ack) if ack.packets.iter().any(|item| item.id == rejected_sequence))
-            {
-                break;
-            }
-        }
-    })
-    .await;
-    assert!(rejected_ack.is_err(), "a rejected reliable payload must remain unacknowledged on retransmission");
 
     let mut disable = test_fixture("disable_simulator.hex");
     disable[0] |= 0x40;
-    set_sequence(&mut disable, last_sequence + 2);
-    neighbor.send_to(&disable, neighbor_peer).await.expect("disable the overloaded neighbor");
-    receive_ack(&neighbor, last_sequence + 2).await;
+    set_sequence(&mut disable, last_sequence + 1);
+    neighbor.send_to(&disable, neighbor_peer).await.expect("disable the neighbor after the pressure check");
+    receive_ack(&neighbor, last_sequence + 1).await;
 
-    assert!(!task.is_finished(), "the neighbor should remain alive while queued events cannot drain");
     let error = timeout(LOGOUT_TIMEOUT + Duration::from_secs(1), &mut task)
         .await
-        .expect("overload teardown should finish within its deadline")
-        .expect("neighbor task should not panic")
-        .expect_err("backpressure must end with an explicit overload failure");
-    std::assert_matches!(error, ConnectionError::ShutdownReason(reason) if reason.contains(EVENT_BACKLOG_DISCONNECT_REASON));
+        .expect("neighbor shutdown should finish after DisableSimulator")
+        .expect("neighbor task should not panic");
+    assert!(error.is_ok(), "queue pressure must not create a simulator failure");
     assert_eq!(budget.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES);
     assert_eq!(budget.neighbor_available_bytes(), MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
     assert_eq!(budget.connection_available_bytes(), MAX_NEIGHBOR_CONNECTION_EVENT_BYTES);

@@ -17,12 +17,10 @@ pub(crate) const MAX_NEIGHBOR_CONNECTION_TASKS: usize = MAX_NEIGHBOR_SIMULATORS 
 pub(crate) const MAX_SIMULATOR_CONNECTIONS: usize = MAX_NEIGHBOR_CONNECTION_TASKS + 1;
 pub(crate) const ACK_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const LOGOUT_TIMEOUT: Duration = Duration::from_secs(5);
-pub(crate) const MAX_PENDING_SIMULATOR_EVENTS: usize = 16;
-pub(crate) const MAX_QUEUED_SIMULATOR_EVENTS: usize = MAX_PENDING_SIMULATOR_EVENTS + 1;
-pub(crate) const MAX_PRECONNECT_EVENTS: usize = 64;
-pub(crate) const EVENT_BACKLOG_DISCONNECT_REASON: &str =
-    "The simulator connection closed because the viewer could not keep up with incoming events.";
-pub(crate) const NEIGHBOR_PRECONNECT_OVERFLOW_REASON: &str = "The neighbor simulator exceeded its bounded pre-connect event buffer.";
+pub(crate) const MAX_PENDING_SIMULATOR_EVENTS: usize = 1024;
+pub(crate) const MAX_QUEUED_SIMULATOR_EVENTS: usize = MAX_PENDING_SIMULATOR_EVENTS;
+pub(crate) const MAX_CONNECTION_PRECONNECT_EVENTS: usize = 16;
+pub(crate) const MAX_PRECONNECT_EVENTS: usize = 1024;
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct HandoffTarget {
@@ -117,7 +115,7 @@ pub(crate) enum SimulatorCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum NeighborEventQueueOutcome {
     Queued,
-    Closing,
+    BacklogFull,
     ReceiverClosed,
 }
 

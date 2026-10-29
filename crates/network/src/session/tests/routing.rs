@@ -269,7 +269,7 @@ async fn replacing_neighbor_releases_queued_state() {
 }
 
 #[tokio::test]
-async fn preconnect_overflow_is_neighbor_scoped() {
+async fn preconnect_overflow_reports_coverage_without_disconnect() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let primary_endpoint = primary.local_addr().expect("read primary address");
     let mut connection = connect_runtime(login_session(primary_endpoint), ResponseData::default()).await.expect("connect primary circuit");
@@ -296,21 +296,40 @@ async fn preconnect_overflow_is_neighbor_scoped() {
         assert!(run_state.preconnect_events.push(simulator_id, EventEnvelope::new(Event::Failed("buffered".into()))));
     }
     let (events, mut received) = mpsc::channel(1);
+    let source = CoverageSource::EventQueue { incarnation: 54 };
+    let watermark = connection.coverage_losses.watermark(simulator_id, source);
 
     connection
-        .fail_preconnect_overflow(simulator_id, &events, &mut run_state)
+        .publish_simulator_event(
+            simulator_id,
+            event_with_coverage_watermark(
+                Event::CapabilityEvent {
+                    simulator_id,
+                    source: neighbor_endpoint,
+                    message: "CrossedRegion".into(),
+                    body: llsd::Value::Undefined,
+                },
+                watermark,
+            ),
+            &events,
+            &mut run_state,
+        )
         .await
-        .expect("neighbor overflow should not log out the primary simulator");
+        .expect("a full pre-connect buffer should report coverage loss without ending the session");
 
-    assert!(run_state.neighbor_connections.is_empty(), "overflow must remove the affected neighbor");
-    assert!(run_state.preconnect_events.take(simulator_id).is_empty());
+    assert!(run_state.neighbor_connections.contains_key(&region_handle), "queue pressure must keep the neighbor connected");
+    assert_eq!(run_state.preconnect_events.take(simulator_id).len(), MAX_PRECONNECT_EVENTS);
     assert!(!run_state.connected_simulators.contains(&simulator_id));
-    assert!(neighbor_task.await.expect_err("overflow should cancel the neighbor worker").is_cancelled());
+    assert!(received.try_recv().is_err(), "the pre-connect event remains buffered until connection ordering is established");
     std::assert_matches!(
-        received.recv().await.map(EventEnvelope::into_event),
-        Some(Event::SimulatorFailed { simulator_id: failed_id, region_handle: Some(handle), endpoint, .. })
-            if failed_id == simulator_id && handle == region_handle && endpoint == neighbor_endpoint
+        connection.coverage_losses.snapshot().losses.as_slice(),
+        [CoverageLoss::Source(record)]
+            if record.watermark.simulator_id == simulator_id
+                && record.watermark.source == source
+                && record.reason == CoverageLossReason::EventAdmission
     );
+    neighbor_task.abort();
+    assert!(neighbor_task.await.expect_err("test neighbor worker should be cancelled").is_cancelled());
 }
 
 #[tokio::test]

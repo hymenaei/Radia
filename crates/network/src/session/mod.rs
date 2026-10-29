@@ -39,8 +39,8 @@ use crate::{
     LoginCredentials,
     circuit::lludp::Delivery,
     circuit::{
-        HandoffTarget, LOGOUT_TIMEOUT, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, PrimaryState, SimulatorCommand, SimulatorEvent,
-        SimulatorRequest, SimulatorTaskOutcome,
+        HandoffTarget, LOGOUT_TIMEOUT, MAX_PRECONNECT_EVENTS, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorRequest,
+        SimulatorTaskOutcome,
     },
     coverage::{
         CoverageLoss, CoverageLossLedger, CoverageLossRecord, CoverageSnapshot, CoverageSource, CoverageWatermark,
@@ -55,11 +55,12 @@ use neighbors::{neighbor_completion_event, neighbor_event_queue_failure};
 use routing::{EventQueueOutcome, PreconnectEvents, PreconnectOutcome, queue_simulator_event, queue_until_connected};
 use runtime::{RuntimeAction, SessionDispatcher};
 use simulators::{
-    ConnectionQueueFailure, ConnectionTaskResult, EVENT_BACKLOG_WARNING_INTERVAL, EVENT_BACKLOG_WARNING_THRESHOLD,
-    HANDOFF_COMMAND_RETRY_INTERVAL, HandoffCommand, NEIGHBOR_COMMAND_CAPACITY, NeighborEventQueueJoin, PrimaryRoute, RunState,
-    RuntimeInputs, SESSION_TIMEOUT, SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession,
-    SimulatorConnectionState, is_current_simulator, queue_connection_message, queue_primary_message, remove_simulator_capability,
-    retry_pending_handoff_commands, track_capability_requests,
+    APPLICATION_EVENT_PRESSURE_GRACE_PERIOD, ConnectionQueueFailure, ConnectionTaskResult, EVENT_BACKLOG_WARNING_INTERVAL,
+    EVENT_BACKLOG_WARNING_THRESHOLD, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffCommand, MAX_PENDING_LIFECYCLE_EVENTS,
+    MAX_PENDING_SESSION_EVENTS, NEIGHBOR_COMMAND_CAPACITY, NeighborEventQueueJoin, PrimaryRoute, RunState, RuntimeInputs, SESSION_TIMEOUT,
+    SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession, SimulatorConnectionState, is_current_simulator,
+    queue_connection_message, queue_primary_message, remove_simulator_capability, retry_pending_handoff_commands,
+    track_capability_requests,
 };
 use startup::SessionStartup;
 #[cfg(test)]

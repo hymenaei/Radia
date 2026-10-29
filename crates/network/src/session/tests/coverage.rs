@@ -51,66 +51,7 @@ async fn primary_event_queue_coverage_loss_keeps_session_active() {
 }
 
 #[tokio::test]
-async fn retry_avoids_double_logout() {
-    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
-    let endpoint = simulator.local_addr().expect("read simulator address");
-    let mut connection = connect_runtime(login_session(endpoint), ResponseData::default()).await.expect("connect simulator circuit");
-    let (_, peer) = receive(&simulator).await;
-
-    let (events, _event_receiver) = mpsc::channel(1);
-    let mut run_state = RunState::new();
-    for _ in 1..MAX_PENDING_SIMULATOR_EVENTS {
-        run_state.pending_events.push_back(EventEnvelope::new(Event::Failed("pending event".into())));
-    }
-    connection.publish_event(&events, &mut run_state, Event::Failed("backlog limit".into())).await.expect("backlog sends first logout");
-    assert!(run_state.logout_deadline.is_some());
-
-    let (bytes, logout_peer) = receive(&simulator).await;
-    let logout = Packet::decode(&bytes).expect("decode backlog logout");
-    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
-    assert_eq!(logout_peer, peer);
-
-    connection.note_primary_event_queue_exit(EventQueueExit::RetryLimitReached);
-
-    let mut buffer = [0; 65_535];
-    assert!(timeout(Duration::from_millis(50), simulator.recv_from(&mut buffer)).await.is_err());
-}
-
-#[tokio::test]
-async fn failed_backlog_logout_is_not_reported_as_sent() {
-    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
-    let endpoint = simulator.local_addr().expect("read simulator address");
-    let mut connection = connect_runtime(login_session(endpoint), ResponseData::default()).await.expect("connect simulator circuit");
-    receive(&simulator).await;
-
-    let (logout, logout_receiver) = mpsc::channel(1);
-    drop(logout_receiver);
-    connection.primary.logout = logout;
-
-    let (events, _event_receiver) = mpsc::channel(1);
-    let mut run_state = RunState::new();
-    for _ in 1..MAX_PENDING_SIMULATOR_EVENTS {
-        run_state.pending_events.push_back(EventEnvelope::new(Event::Failed("pending event".into())));
-    }
-    connection
-        .publish_event(&events, &mut run_state, Event::Failed("backlog limit".into()))
-        .await
-        .expect("backlog handling records the unavailable logout");
-
-    assert!(run_state.logout_deadline.is_some());
-    assert!(!connection.logout_request_sent);
-    let logout_request_sent = connection.logout_request_sent;
-    assert_eq!(
-        connection.disconnect_once(logout_request_sent).await.expect("disconnect reports unavailable logout"),
-        LogoutOutcome::Unavailable(LogoutUnavailable::ConnectionClosed)
-    );
-
-    let mut buffer = [0; 65_535];
-    assert!(timeout(Duration::from_millis(50), simulator.recv_from(&mut buffer)).await.is_err());
-}
-
-#[tokio::test]
-async fn backlog_logout_drops_covered_application_events_but_keeps_lifecycle_events() {
+async fn primary_event_credit_exhaustion_reports_coverage_without_logout() {
     use crate::coverage::{CoverageLoss, CoverageLossReason, CoverageSource};
 
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
@@ -123,8 +64,18 @@ async fn backlog_logout_drops_covered_application_events_but_keeps_lifecycle_eve
 
     let (events, mut received_events) = mpsc::channel(2);
     let mut run_state = RunState::new();
-    run_state.logout_deadline = Some(time::Instant::now() + LOGOUT_TIMEOUT);
-    run_state.disconnect_reason = Some(EVENT_BACKLOG_DISCONNECT_REASON);
+    for index in 0..crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY {
+        let permit =
+            connection.state.packet_memory.application_events().try_acquire().expect("test backlog fits the session application capacity");
+        let mut event = EventEnvelope::new(Event::CapabilityEvent {
+            simulator_id: connection.primary.simulator_id,
+            source: endpoint,
+            message: "pending event".into(),
+            body: llsd::Value::Integer(i32::try_from(index).expect("test event index fits")),
+        });
+        event.attach_application_credit(permit);
+        run_state.pending_events.push_back(event);
+    }
     let simulator_id = connection.primary.simulator_id;
     let source = CoverageSource::EventQueue { incarnation: 42 };
     let watermark = coverage_losses.watermark(simulator_id, source);
@@ -139,9 +90,10 @@ async fn backlog_logout_drops_covered_application_events_but_keeps_lifecycle_eve
             ),
         )
         .await
-        .expect("application event suppression is a normal overload outcome");
+        .expect("a full event queue should report coverage loss without ending the session");
 
-    assert!(received_events.try_recv().is_err(), "application data must not resume after overload starts logout");
+    assert!(received_events.try_recv().is_err(), "the full queue must not admit an extra event");
+    assert!(run_state.logout_deadline.is_none(), "queue pressure must not start simulator logout");
     std::assert_matches!(
         coverage_losses.snapshot().losses.as_slice(),
         [CoverageLoss::Source(record)]
@@ -150,11 +102,13 @@ async fn backlog_logout_drops_covered_application_events_but_keeps_lifecycle_eve
                 && record.reason == CoverageLossReason::EventAdmission
     );
 
+    run_state.pending_events.clear();
     connection
         .publish_event(&events, &mut run_state, Event::SimulatorDisconnected { simulator_id, region_handle: None, endpoint })
         .await
-        .expect("lifecycle events remain admissible during graceful teardown");
+        .expect("events should flow again after the consumer drains the backlog");
     std::assert_matches!(received_events.try_recv().map(|event| event.event), Ok(Event::SimulatorDisconnected { .. }));
+    assert!(run_state.logout_deadline.is_none());
 }
 
 #[tokio::test]
@@ -170,7 +124,6 @@ async fn terminal_logout_skips_capability_events_that_start_neighbor_work() {
     let (neighbor_events, _neighbor_event_rx) = mpsc::channel(1);
     let (_shutdown, shutdown) = watch::channel(false);
     run_state.logout_deadline = Some(time::Instant::now() + LOGOUT_TIMEOUT);
-    run_state.disconnect_reason = Some(EVENT_BACKLOG_DISCONNECT_REASON);
     let (capability_events, _capability_event_rx) = mpsc::channel(1);
     let mut setup =
         PromotionSetup { state: &mut run_state, neighbor_requests, application_events, neighbor_events, shutdown, capability_events };

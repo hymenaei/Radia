@@ -61,6 +61,28 @@ pub(crate) fn apply_udp(
     apply_message(inventory, expected_agent, message)
 }
 
+pub(super) fn is_inventory_udp_message(message: &Message, expected_agent: Uuid) -> bool {
+    message_agent(message).is_some_and(|(agent_id, _)| agent_id == expected_agent)
+}
+
+pub(super) fn is_inventory_event_message(name: &str) -> bool {
+    matches!(
+        name,
+        "UpdateCreateInventoryItem"
+            | "RemoveInventoryItem"
+            | "RemoveInventoryFolder"
+            | "RemoveInventoryObjects"
+            | "SaveAssetIntoInventory"
+            | "BulkUpdateInventory"
+            | "MoveInventoryFolder"
+            | "MoveInventoryItem"
+    )
+}
+
+pub(super) fn is_valid_inventory_event(name: &str, body: &Value, expected_agent: Uuid) -> bool {
+    matches!(parse_event_message(name, body, expected_agent), Ok(Some(_)))
+}
+
 pub(super) fn apply_event_queue(
     inventory: &mut Inventory,
     expected_agent: Uuid,
@@ -403,17 +425,7 @@ fn folder_move_creates_cycle(
 }
 
 fn parse_event_message(name: &str, body: &Value, expected_agent: Uuid) -> Result<Option<Message>, InventoryIntakeError> {
-    if !matches!(
-        name,
-        "UpdateCreateInventoryItem"
-            | "RemoveInventoryItem"
-            | "RemoveInventoryFolder"
-            | "RemoveInventoryObjects"
-            | "SaveAssetIntoInventory"
-            | "BulkUpdateInventory"
-            | "MoveInventoryFolder"
-            | "MoveInventoryItem"
-    ) {
+    if !is_inventory_event_message(name) {
         return Ok(None);
     }
     let body = body.as_map().ok_or(InventoryIntakeError::MalformedEvent)?;

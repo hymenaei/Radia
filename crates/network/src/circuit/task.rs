@@ -11,7 +11,7 @@ use tokio::{
 };
 
 use super::{
-    ACK_INTERVAL, ConnectionError, ConnectionRole, ConnectionTask, LOGOUT_TIMEOUT, MAX_PENDING_SEND_NOTIFICATIONS, MAX_PRECONNECT_EVENTS,
+    ACK_INTERVAL, ConnectionError, ConnectionRole, ConnectionTask, LOGOUT_TIMEOUT, MAX_PENDING_SEND_NOTIFICATIONS,
     MAX_QUEUED_SIMULATOR_EVENTS, MAX_SEND_AGE, PrimaryState, SimulatorCommand, SimulatorEvent, SimulatorMemoryBudget, SimulatorRequest,
     active_queue_class, expire_deferred_retries, expire_pending_send, fail_queued_on_close, flush_send_notifications,
     lifecycle::{LogoutAction, Phase, RunControl},
@@ -567,7 +567,7 @@ pub(super) async fn run(
         logout_commands: Some(logout_commands),
         packet_memory,
         phase: Phase::new(),
-        preconnect_messages: VecDeque::with_capacity(MAX_PRECONNECT_EVENTS),
+        preconnect_messages: VecDeque::new(),
         pending_events: VecDeque::with_capacity(MAX_QUEUED_SIMULATOR_EVENTS),
         pending_notifications: VecDeque::with_capacity(MAX_PENDING_SEND_NOTIFICATIONS),
         outbound: super::OutboundQueue::new(),

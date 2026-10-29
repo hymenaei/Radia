@@ -654,6 +654,12 @@ impl DrawList {
         &self.draws
     }
 
+    #[cfg(test)]
+    pub(super) fn instance_transform(&self, slot: u32) -> Option<&[u8]> {
+        let start = usize::try_from(slot).ok()?.checked_mul(INSTANCE_BYTES)?;
+        self.instance_bytes.get(start..start.checked_add(TRANSFORM_BYTES)?)
+    }
+
     pub(super) fn draw_batches(&self) -> &[DrawBatch] {
         &self.draw_batches
     }

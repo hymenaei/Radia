@@ -1,40 +1,30 @@
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use std::time::{Duration, Instant};
 
-use math::Quat;
+use math::{Quat, Vec3};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use winit::{
     event::ElementState,
     keyboard::{Key, NamedKey},
 };
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const AT_POS: u32 = 0x0000_0001;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const AT_NEG: u32 = 0x0000_0002;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const LEFT_POS: u32 = 0x0000_0004;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const LEFT_NEG: u32 = 0x0000_0008;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const UP_POS: u32 = 0x0000_0010;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const UP_NEG: u32 = 0x0000_0020;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const YAW_POS: u32 = 0x0000_0100;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const YAW_NEG: u32 = 0x0000_0200;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const FAST_AT: u32 = 0x0000_0400;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const FAST_LEFT: u32 = 0x0000_0800;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const FAST_UP: u32 = 0x0000_1000;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 const FLY: u32 = 0x0000_2000;
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub(crate) const STOP: u32 = 0x0000_4000;
+const ACTIVE_MOVEMENT_FLAGS: u32 = AT_POS | AT_NEG | LEFT_POS | LEFT_NEG | UP_POS | UP_NEG | YAW_POS | YAW_NEG;
 pub(crate) const BODY_ROTATION_DOT_THRESHOLD: f32 = 0.9997;
+const WALK_SPEED: f32 = 2.0;
+const RUN_SPEED: f32 = 5.0;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 const TURN_RATE: f32 = std::f32::consts::FRAC_PI_2;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -72,6 +62,38 @@ pub(crate) struct MovementObservation {
     pub(crate) body_rotation: Quat,
     pub(crate) always_run: bool,
     pub(crate) stop_sequence: u64,
+}
+
+impl Default for MovementObservation {
+    fn default() -> Self {
+        Self { control_flags: 0, body_rotation: Quat::IDENTITY, always_run: false, stop_sequence: 0 }
+    }
+}
+
+impl MovementObservation {
+    pub(crate) fn has_active_controls(self) -> bool {
+        self.control_flags & ACTIVE_MOVEMENT_FLAGS != 0
+    }
+
+    pub(crate) fn predicted_velocity(self) -> Vec3 {
+        if self.control_flags & STOP != 0 {
+            return Vec3::ZERO;
+        }
+        let forward = f32::from((self.control_flags & AT_POS != 0) as u8) - f32::from((self.control_flags & AT_NEG != 0) as u8);
+        let left = f32::from((self.control_flags & LEFT_POS != 0) as u8) - f32::from((self.control_flags & LEFT_NEG != 0) as u8);
+        let vertical = if self.control_flags & FLY != 0 {
+            f32::from((self.control_flags & UP_POS != 0) as u8) - f32::from((self.control_flags & UP_NEG != 0) as u8)
+        } else {
+            0.0
+        };
+        let mut direction = Vec3::new(forward, left, vertical);
+        if direction.length_squared() <= f32::EPSILON {
+            return Vec3::ZERO;
+        }
+        direction = direction.normalize();
+        let speed = if self.always_run || self.control_flags & (FAST_AT | FAST_LEFT | FAST_UP) != 0 { RUN_SPEED } else { WALK_SPEED };
+        self.body_rotation * direction * speed
+    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -269,6 +291,10 @@ impl HeldControls {
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 impl BodyRotation {
+    pub(crate) fn current(&self) -> Quat {
+        self.current
+    }
+
     pub(crate) fn update(&mut self, authoritative: Option<Quat>, yaw: f32, now: Instant) -> Quat {
         if let Some(rotation) = authoritative {
             let changed = self.authoritative.is_none_or(|previous| previous.dot(rotation).abs() < 0.999_999);

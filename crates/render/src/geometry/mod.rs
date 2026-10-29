@@ -18,6 +18,7 @@ use std::{
 };
 
 use assets::TextureId;
+use uuid::Uuid;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
     TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
@@ -27,7 +28,7 @@ use self::cache::FrameCache;
 use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
 use self::mesh::GpuMesh;
 use self::storage::Storage;
-use crate::scene::{Camera, MeshId, ViewVersion};
+use crate::scene::{AgentPose, Camera, MeshId, ViewVersion};
 use crate::{
     pipeline::{SurfacePipelines, Water},
     texture::{TextureCompletion, TextureJob, TextureState, Textures},
@@ -158,6 +159,7 @@ struct Depth {
 struct FramePreparationKey {
     version: ViewVersion,
     camera: Camera,
+    agent_pose: Option<AgentPose>,
     size: [u32; 2],
     water_height: Option<f64>,
 }
@@ -219,6 +221,7 @@ pub(crate) struct GeometryRenderer {
     mesh_budget_blocked: HashSet<MeshId>,
     epoch: u64,
     prepared: Option<FramePreparation>,
+    applied_agent: Option<Uuid>,
     slow_report: Option<Instant>,
     pub(crate) stats: Stats,
 }
@@ -264,6 +267,7 @@ impl GeometryRenderer {
             mesh_budget_blocked: HashSet::new(),
             epoch: 0,
             prepared: None,
+            applied_agent: None,
             slow_report: None,
             stats: Stats::default(),
         }
@@ -300,6 +304,9 @@ impl GeometryRenderer {
     }
 
     pub(crate) fn skip(&mut self) {
+        if let Some(agent_id) = self.applied_agent.take() {
+            self.restore_agent_pose(agent_id);
+        }
         self.prepared = None;
         self.cache.camera = None;
         self.cache.candidates.clear();

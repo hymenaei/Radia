@@ -573,7 +573,14 @@ impl SessionDriver {
             }
         }
 
-        if let Message::AgentMovementComplete(movement) = &message {
+        if let Message::AgentMovementComplete(movement) = &message
+            && self.handoff.movement_complete(
+                &mut self.session_world,
+                simulator_id,
+                self.active_session.as_ref().map(|session| (session.agent_id, session.session_id)),
+                movement,
+            )
+        {
             self.camera.on_movement_complete(self.primary_simulator, simulator_id, self.active_session.as_ref(), movement);
         }
         let scope = if Some(simulator_id) == self.primary_simulator { SimulatorScope::Primary } else { SimulatorScope::Neighbor };

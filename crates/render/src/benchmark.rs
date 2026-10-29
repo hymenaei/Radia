@@ -22,7 +22,7 @@ impl GeometryPrepare {
         size: [u32; 2],
         water_height: Option<f64>,
     ) {
-        self.0.prepare(device, encoder, view, camera, size, water_height);
+        self.0.prepare(device, encoder, view, None, camera, size, water_height);
     }
 
     pub fn stats(&self) -> Stats {

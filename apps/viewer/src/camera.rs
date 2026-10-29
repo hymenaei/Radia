@@ -10,6 +10,8 @@ use world::WorldPose;
 use crate::DEFAULT_DRAW_DISTANCE;
 
 const FOCUS_TIME: Duration = Duration::from_millis(400);
+const FOLLOW_SMOOTHING_HALF_LIFE: f64 = 0.02;
+const MAX_FOLLOW_SMOOTH_DISTANCE: f64 = 50.0;
 
 struct Transition {
     start: Instant,
@@ -26,20 +28,154 @@ pub(crate) struct OrbitCamera {
     pub(crate) lod_factor: f32,
 }
 
-pub(crate) struct FollowCamera;
+pub(crate) struct FollowCamera {
+    position: Option<DVec3>,
+    focus: Option<DVec3>,
+    updated_at: Option<Instant>,
+    transition: Option<Transition>,
+    focus_offset: DVec3,
+    offset: DVec3,
+    minimum: f64,
+}
+
+impl Default for FollowCamera {
+    fn default() -> Self {
+        Self {
+            position: None,
+            focus: None,
+            updated_at: None,
+            transition: None,
+            focus_offset: DVec3::new(1.0, 0.0, 1.0),
+            offset: DVec3::new(-4.0, 0.0, -0.25),
+            minimum: 0.5,
+        }
+    }
+}
 
 impl FollowCamera {
+    #[cfg(test)]
     pub(crate) fn scene_camera(pose: WorldPose, viewport: [u32; 2], draw_distance: f32, lod_factor: f32) -> Option<scene::Camera> {
         let (position, focus) = Self::position_and_focus(pose);
+        Self::build_camera(position, focus, viewport, draw_distance, lod_factor)
+    }
+
+    pub(crate) fn follow(
+        &mut self,
+        pose: WorldPose,
+        viewport: [u32; 2],
+        draw_distance: f32,
+        lod_factor: f32,
+        now: Instant,
+    ) -> Option<scene::Camera> {
+        let (position, focus) = self.advance(pose, now);
+        Self::build_camera(position, focus, viewport, draw_distance, lod_factor)
+    }
+
+    fn build_camera(position: DVec3, focus: DVec3, viewport: [u32; 2], draw_distance: f32, lod_factor: f32) -> Option<scene::Camera> {
         scene::Camera::new(position, (focus - position).as_vec3(), FRAC_PI_3, viewport)
             .and_then(|camera| camera.with_quality(f64::from(draw_distance), f64::from(lod_factor)))
             .ok()
     }
 
+    #[cfg(test)]
     fn position_and_focus(pose: WorldPose) -> (DVec3, DVec3) {
-        let offset = (pose.rotation * math::Vec3::new(-3.0, 0.0, 0.75)).as_dvec3();
-        let focus = (pose.rotation * math::Vec3::new(1.0, 0.0, 1.0)).as_dvec3();
-        (pose.position + offset, pose.position + focus)
+        Self::view_for_offsets(pose, DVec3::new(1.0, 0.0, 1.0), DVec3::new(-4.0, 0.0, -0.25))
+    }
+
+    fn view_for_offsets(pose: WorldPose, focus_offset: DVec3, offset: DVec3) -> (DVec3, DVec3) {
+        let focus = pose.position + (pose.rotation * focus_offset.as_vec3()).as_dvec3();
+        let position = focus + (pose.rotation * offset.as_vec3()).as_dvec3();
+        (position, focus)
+    }
+
+    fn target_position_and_focus(&self, pose: WorldPose) -> (DVec3, DVec3) {
+        Self::view_for_offsets(pose, self.focus_offset, self.offset)
+    }
+
+    pub(crate) fn drag(&mut self, delta: [f64; 2], width: f64, control: bool, shift: bool, draw_distance: f32) {
+        if width <= 0.0 {
+            return;
+        }
+        let [dx, dy] = delta;
+        let direction = -self.offset.normalize();
+        let left = DVec3::Z.cross(direction).normalize_or(DVec3::Y);
+        if control && shift {
+            let up = direction.cross(left);
+            self.focus_offset += (left * dx + up * dy) * (3.0 * self.offset.length() / width);
+        } else {
+            self.offset = DQuat::from_rotation_z(-dx * TAU / width) * self.offset;
+            if control {
+                let angle = self.offset.normalize().z.clamp(-1.0, 1.0).acos();
+                let next = (angle - dy * TAU / width).clamp(PI / 180.0, PI * 179.0 / 180.0);
+                let left = DVec3::Z.cross(-self.offset).normalize_or(DVec3::Y);
+                self.offset = DQuat::from_axis_angle(left, angle - next) * self.offset;
+            } else {
+                self.zoom(0.99f64.powf(-dy), draw_distance);
+            }
+        }
+    }
+
+    pub(crate) fn zoom(&mut self, fraction: f64, draw_distance: f32) {
+        let maximum = 240.0f64.min(f64::from(draw_distance) - 1.0);
+        let distance = (self.offset.length() * fraction).clamp(self.minimum, maximum);
+        self.offset = self.offset.normalize() * distance;
+    }
+
+    fn advance(&mut self, pose: WorldPose, now: Instant) -> (DVec3, DVec3) {
+        let (target_position, target_focus) = self.target_position_and_focus(pose);
+        let Some((previous_position, previous_focus)) = self.position.zip(self.focus) else {
+            self.position = Some(target_position);
+            self.focus = Some(target_focus);
+            self.updated_at = Some(now);
+            return (target_position, target_focus);
+        };
+
+        let (position, focus) = if let Some(transition) = &self.transition {
+            let elapsed = now.saturating_duration_since(transition.start);
+            if elapsed >= FOCUS_TIME {
+                self.transition = None;
+                (target_position, target_focus)
+            } else {
+                let fraction = elapsed.as_secs_f64() / FOCUS_TIME.as_secs_f64();
+                let fraction = fraction * fraction * (3.0 - 2.0 * fraction);
+                (transition.position.lerp(target_position, fraction), transition.focus.lerp(target_focus, fraction))
+            }
+        } else if target_position.distance(previous_position) >= MAX_FOLLOW_SMOOTH_DISTANCE
+            || target_focus.distance(previous_focus) >= MAX_FOLLOW_SMOOTH_DISTANCE
+        {
+            (target_position, target_focus)
+        } else {
+            let elapsed = self.updated_at.map_or(Duration::ZERO, |updated| now.saturating_duration_since(updated)).as_secs_f64();
+            let fraction = 1.0 - 2.0_f64.powf(-elapsed / FOLLOW_SMOOTHING_HALF_LIFE);
+            (previous_position.lerp(target_position, fraction), target_focus)
+        };
+        self.position = Some(position);
+        self.focus = Some(focus);
+        self.updated_at = Some(now);
+        (position, focus)
+    }
+
+    pub(crate) fn current_position_and_focus(&self, pose: WorldPose) -> (DVec3, DVec3) {
+        match (self.position, self.focus) {
+            (Some(position), Some(focus)) => (position, focus),
+            _ => self.target_position_and_focus(pose),
+        }
+    }
+
+    pub(crate) fn moving(&self, pose: WorldPose, now: Instant) -> bool {
+        if self.transition.as_ref().is_some_and(|transition| now.saturating_duration_since(transition.start) < FOCUS_TIME) {
+            return true;
+        }
+        let (target_position, target_focus) = self.target_position_and_focus(pose);
+        self.position.is_none_or(|position| position.distance(target_position) > 0.01)
+            || self.focus.is_none_or(|focus| focus.distance(target_focus) > 0.01)
+    }
+
+    pub(crate) fn transition_from(&mut self, position: DVec3, focus: DVec3, now: Instant) {
+        self.position = Some(position);
+        self.focus = Some(focus);
+        self.updated_at = Some(now);
+        self.transition = Some(Transition { start: now, position, focus });
     }
 }
 
@@ -58,8 +194,13 @@ impl OrbitCamera {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_follow_pose(pose: WorldPose, draw_distance: f32, lod_factor: f32) -> Self {
         let (position, focus) = FollowCamera::position_and_focus(pose);
+        Self { focus, offset: position - focus, minimum: 0.5, transition: None, draw_distance, lod_factor }
+    }
+
+    pub(crate) fn from_follow_view(position: DVec3, focus: DVec3, draw_distance: f32, lod_factor: f32) -> Self {
         Self { focus, offset: position - focus, minimum: 0.5, transition: None, draw_distance, lod_factor }
     }
 
@@ -81,6 +222,10 @@ impl OrbitCamera {
         }
         let fraction = time * time * (3.0 - 2.0 * time);
         (transition.position.lerp(position, fraction), transition.focus.lerp(self.focus, fraction))
+    }
+
+    pub(crate) fn current_position_and_focus(&self, now: Instant) -> (DVec3, DVec3) {
+        self.position_and_focus(now)
     }
 
     pub(crate) fn focus(&mut self, point: DVec3, now: Instant) {

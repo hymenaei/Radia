@@ -4,7 +4,7 @@ use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
 use network::Event;
 use network::{AgentSession, PacketOrder, SimulatorId};
 use protocol::lludp::Message;
-use protocol::messages::ParcelProperties;
+use protocol::messages::{AgentMovementComplete, ParcelProperties};
 use uuid::Uuid;
 use world::{
     Applied, LocalAddress, ObjectObservation, OrderEvidence, OrderEvidence::Ordered, ParcelAccessSettings, ParcelBitmap, ParcelFlags,
@@ -179,6 +179,36 @@ impl WorldHandoff {
             }
             Err(RegistrationError::Apply(error)) => {
                 tracing::warn!(simulator = simulator_id.get(), region, %error, "could not register simulator world region")
+            }
+        }
+    }
+
+    pub(super) fn movement_complete(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator_id: SimulatorId,
+        session: Option<(Uuid, Uuid)>,
+        movement: &AgentMovementComplete,
+    ) -> bool {
+        if self.world_primary != Some(simulator_id) {
+            return false;
+        }
+        let Some((agent_id, session_id)) = session else { return false };
+        if movement.agent_data.agent_id != agent_id || movement.agent_data.session_id != session_id {
+            return false;
+        }
+
+        let region = world.region_for(simulator_id).map(|region| region.get());
+        let handle = RegionHandle::new(movement.data.region_handle);
+        match world.register_simulator(simulator_id, Some(handle)) {
+            Ok(_) => true,
+            Err(RegistrationError::HandleChanged) => {
+                tracing::error!(simulator = simulator_id.get(), region, "primary simulator handle changed during movement completion");
+                false
+            }
+            Err(RegistrationError::Apply(error)) => {
+                tracing::warn!(simulator = simulator_id.get(), region, %error, "could not resolve primary simulator region from movement completion");
+                false
             }
         }
     }

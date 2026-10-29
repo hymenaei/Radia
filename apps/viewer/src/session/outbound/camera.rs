@@ -15,6 +15,7 @@ use super::agent;
 use crate::agent_movement::{BODY_ROTATION_DOT_THRESHOLD, MovementObservation};
 
 const MIN_UPDATE_INTERVAL: Duration = Duration::from_millis(8);
+const MOVEMENT_UPDATE_INTERVAL: Duration = Duration::from_millis(50);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 const CAMERA_POSITION_THRESHOLD: f64 = 0.01;
 const CAMERA_AXIS_THRESHOLD: f32 = 0.1f32.to_radians();
@@ -198,7 +199,11 @@ impl CameraUplink {
 
     fn next_deadline(&self) -> Option<Instant> {
         let keepalive = self.last_sent_at.map(|sent| sent + KEEPALIVE_INTERVAL);
-        [self.pending_at, self.followup_at, self.always_run_retry_at, keepalive].into_iter().flatten().min()
+        let movement = self
+            .last_sent
+            .filter(|state| state.movement.has_active_controls())
+            .and_then(|_| self.last_sent_at.map(|sent| sent + MOVEMENT_UPDATE_INTERVAL));
+        [self.pending_at, self.followup_at, self.always_run_retry_at, movement, keepalive].into_iter().flatten().min()
     }
 
     fn tick_with(
@@ -289,6 +294,8 @@ impl CameraUplink {
         let body_changed = previous.is_none_or(|previous| rotation_changed(previous.movement.body_rotation, movement.body_rotation));
         let any_change = context_changed || camera_changed || body_changed;
         let keepalive_due = self.last_sent_at.is_none_or(|sent| now.saturating_duration_since(sent) >= KEEPALIVE_INTERVAL);
+        let movement_due = movement.has_active_controls()
+            && self.last_sent_at.is_none_or(|sent| now.saturating_duration_since(sent) >= MOVEMENT_UPDATE_INTERVAL);
         let followup_due = self.followup_at.is_some_and(|deadline| now >= deadline);
         let forced = previous.is_none() || context_changed || control_changed;
         let min_interval_elapsed = self.last_sent_at.is_none_or(|sent| now.saturating_duration_since(sent) >= MIN_UPDATE_INTERVAL);
@@ -296,7 +303,7 @@ impl CameraUplink {
             self.pending_at = self.last_sent_at.map(|sent| sent + MIN_UPDATE_INTERVAL);
             return;
         }
-        if !forced && !any_change && !keepalive_due && !followup_due {
+        if !forced && !any_change && !keepalive_due && !movement_due && !followup_due {
             self.pending_at = None;
             return;
         }
@@ -422,7 +429,7 @@ mod tests {
         session::world::{SessionWorld, viewer_world_limits},
     };
 
-    use super::{CameraUplink, KEEPALIVE_INTERVAL, MIN_UPDATE_INTERVAL, UplinkMessage, camera_changed};
+    use super::{CameraUplink, KEEPALIVE_INTERVAL, MIN_UPDATE_INTERVAL, MOVEMENT_UPDATE_INTERVAL, UplinkMessage, camera_changed};
 
     fn view(position: DVec3, direction: Vec3) -> Camera {
         Camera::new(position, direction, 1.0, [720, 720]).expect("valid camera").with_quality(64.0, 1.0).expect("valid quality")
@@ -771,7 +778,7 @@ mod tests {
             Ok(())
         });
         assert_eq!(sent.len(), 3, "a control change schedules its protocol follow-up");
-        advance(KEEPALIVE_INTERVAL - Duration::from_millis(1)).await;
+        advance(MOVEMENT_UPDATE_INTERVAL - Duration::from_millis(1)).await;
         uplink.tick_with(Some((simulator, Uuid::nil(), Uuid::nil())), Some(DVec3::ZERO), Some(camera), Some(changed), |message, _| {
             if let UplinkMessage::AgentUpdate(update) = message {
                 sent.push(update);
@@ -787,6 +794,40 @@ mod tests {
             Ok(())
         });
         assert_eq!(sent.len(), 4);
+
+        let mut released = changed;
+        released.control_flags = 0;
+        uplink.tick_with(Some((simulator, Uuid::nil(), Uuid::nil())), Some(DVec3::ZERO), Some(camera), Some(released), |message, _| {
+            if let UplinkMessage::AgentUpdate(update) = message {
+                sent.push(update);
+            }
+            Ok(())
+        });
+        assert_eq!(sent.len(), 5, "releasing movement sends neutral controls immediately");
+        advance(MIN_UPDATE_INTERVAL).await;
+        uplink.tick_with(Some((simulator, Uuid::nil(), Uuid::nil())), Some(DVec3::ZERO), Some(camera), Some(released), |message, _| {
+            if let UplinkMessage::AgentUpdate(update) = message {
+                sent.push(update);
+            }
+            Ok(())
+        });
+        assert_eq!(sent.len(), 6, "neutral controls keep their protocol follow-up");
+        advance(KEEPALIVE_INTERVAL - Duration::from_millis(1)).await;
+        uplink.tick_with(Some((simulator, Uuid::nil(), Uuid::nil())), Some(DVec3::ZERO), Some(camera), Some(released), |message, _| {
+            if let UplinkMessage::AgentUpdate(update) = message {
+                sent.push(update);
+            }
+            Ok(())
+        });
+        assert_eq!(sent.len(), 6, "idle controls keep the one-second interval");
+        advance(Duration::from_millis(1)).await;
+        uplink.tick_with(Some((simulator, Uuid::nil(), Uuid::nil())), Some(DVec3::ZERO), Some(camera), Some(released), |message, _| {
+            if let UplinkMessage::AgentUpdate(update) = message {
+                sent.push(update);
+            }
+            Ok(())
+        });
+        assert_eq!(sent.len(), 7);
     }
 
     #[tokio::test(start_paused = true)]

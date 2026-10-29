@@ -12,6 +12,7 @@ use futures::{
     pin_mut,
     stream::FuturesUnordered,
 };
+use math::{DVec3, Vec3};
 use render::scene::{
     ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, Object, ReadFailure, ReadJob, ReadQuery, ReadReply,
     ReconcileStep, Reconciler, SceneView,
@@ -20,7 +21,9 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 use uuid::Uuid;
-use world::{Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, WorldPose};
+use world::{
+    Entity, LinearMotion, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, WorldPose,
+};
 
 use crate::{
     agent_movement::MovementObservation,
@@ -28,6 +31,122 @@ use crate::{
     session::EnvironmentInbox,
     world_reader::{ReadError, WorldReader},
 };
+
+const MAX_AGENT_PREDICTION: Duration = Duration::from_millis(100);
+const MAX_AGENT_PREDICTION_DISTANCE: f64 = 2.0;
+const AGENT_CORRECTION_HALF_LIFE: Duration = Duration::from_millis(60);
+const AGENT_TELEPORT_DISTANCE: f64 = 50.0;
+const MAX_AGENT_PREDICTION_STEP: Duration = Duration::from_millis(100);
+const AGENT_ACCELERATION: f32 = 60.0;
+const AGENT_DECELERATION: f32 = 80.0;
+const AGENT_VELOCITY_EPSILON: f32 = 0.01;
+
+#[derive(Default)]
+struct AgentPrediction {
+    sample: Option<AgentSample>,
+    position: Option<DVec3>,
+    input_offset: DVec3,
+    input_velocity: Vec3,
+    updated_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy)]
+struct AgentSample {
+    pose: WorldPose,
+    motion: LinearMotion,
+    received_at: Instant,
+}
+
+impl AgentPrediction {
+    fn predict(&mut self, pose: WorldPose, motion: LinearMotion, movement: MovementObservation, now: Instant) -> WorldPose {
+        let changed = self.sample.is_none_or(|sample| sample.pose != pose || sample.motion != motion);
+        if changed {
+            if let Some(position) = self.position {
+                let error = pose.position - position;
+                if error.length() >= AGENT_TELEPORT_DISTANCE {
+                    self.position = Some(pose.position);
+                    self.input_offset = DVec3::ZERO;
+                    self.input_velocity = Vec3::ZERO;
+                } else {
+                    self.input_offset = position - pose.position;
+                }
+            }
+            self.sample = Some(AgentSample { pose, motion, received_at: now });
+        }
+        let Some(sample) = self.sample else { return pose };
+        let elapsed = self.updated_at.map_or(Duration::ZERO, |updated| now.saturating_duration_since(updated));
+        let step = elapsed.min(MAX_AGENT_PREDICTION_STEP);
+        let target_velocity = movement.predicted_velocity();
+        let input_active = target_velocity.length_squared() > AGENT_VELOCITY_EPSILON * AGENT_VELOCITY_EPSILON;
+        let local_motion = input_active || self.input_velocity.length_squared() > AGENT_VELOCITY_EPSILON * AGENT_VELOCITY_EPSILON;
+        let position = if local_motion {
+            let rate = if input_active { AGENT_ACCELERATION } else { AGENT_DECELERATION };
+            let velocity = approach_velocity(self.input_velocity, target_velocity, rate * step.as_secs_f32());
+            let displacement = (self.input_velocity + velocity) * (0.5 * step.as_secs_f32());
+            self.input_velocity = velocity;
+            self.input_offset += displacement.as_dvec3();
+            if self.input_offset.length_squared() > MAX_AGENT_PREDICTION_DISTANCE.powi(2) {
+                self.input_offset = self.input_offset.normalize_or_zero() * MAX_AGENT_PREDICTION_DISTANCE;
+                self.input_velocity = Vec3::ZERO;
+            }
+            sample.pose.position + self.input_offset
+        } else {
+            self.input_velocity = Vec3::ZERO;
+            let target = predict_position(sample, now);
+            let position = match self.position {
+                Some(previous) if previous.distance(target) >= AGENT_TELEPORT_DISTANCE => target,
+                Some(previous) => {
+                    let fraction = 1.0 - 2.0_f64.powf(-elapsed.as_secs_f64() / AGENT_CORRECTION_HALF_LIFE.as_secs_f64());
+                    previous.lerp(target, fraction)
+                }
+                None => target,
+            };
+            self.input_offset = position - sample.pose.position;
+            position
+        };
+        self.position = Some(position);
+        self.updated_at = Some(now);
+        WorldPose { position, rotation: sample.pose.rotation }
+    }
+
+    fn active(&self, now: Instant) -> bool {
+        self.sample.is_some_and(|sample| {
+            let moving = now.saturating_duration_since(sample.received_at) < MAX_AGENT_PREDICTION
+                && (sample.motion.velocity.is_some_and(|velocity| velocity.length_squared() > 1e-6)
+                    || sample.motion.acceleration.is_some_and(|acceleration| acceleration.length_squared() > 1e-6));
+            let correcting = self.position.is_some_and(|position| position.distance(predict_position(sample, now)) > 0.01);
+            moving
+                || correcting
+                || self.input_velocity.length_squared() > AGENT_VELOCITY_EPSILON * AGENT_VELOCITY_EPSILON
+                || self.input_offset.length_squared() > 0.0001
+        })
+    }
+
+    fn reset(&mut self) {
+        self.sample = None;
+        self.position = None;
+        self.input_offset = DVec3::ZERO;
+        self.input_velocity = Vec3::ZERO;
+        self.updated_at = None;
+    }
+}
+
+fn approach_velocity(current: Vec3, target: Vec3, maximum_change: f32) -> Vec3 {
+    let difference = target - current;
+    let distance = difference.length();
+    if distance <= maximum_change || distance <= AGENT_VELOCITY_EPSILON { target } else { current + difference / distance * maximum_change }
+}
+
+fn predict_position(sample: AgentSample, now: Instant) -> DVec3 {
+    let elapsed = now.saturating_duration_since(sample.received_at).min(MAX_AGENT_PREDICTION).as_secs_f64();
+    let velocity = sample.motion.velocity.unwrap_or_default().as_dvec3();
+    let acceleration = sample.motion.acceleration.unwrap_or_default().as_dvec3();
+    let mut displacement = velocity * elapsed + acceleration * (0.5 * elapsed * elapsed);
+    if displacement.length_squared() > MAX_AGENT_PREDICTION_DISTANCE.powi(2) {
+        displacement = displacement.normalize_or_zero() * MAX_AGENT_PREDICTION_DISTANCE;
+    }
+    sample.pose.position + displacement
+}
 
 pub(crate) struct SceneSources {
     pub(crate) reader: WorldReader,
@@ -47,6 +166,7 @@ pub(crate) struct SceneFeed {
     arrival_pose: watch::Receiver<Option<WorldPose>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     arrival_pose_pending: bool,
+    agent_prediction: AgentPrediction,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
@@ -86,6 +206,7 @@ impl SceneFeed {
             arrival_pose,
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             arrival_pose_pending: true,
+            agent_prediction: AgentPrediction::default(),
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -98,19 +219,42 @@ impl SceneFeed {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn camera_pose(&mut self) -> Option<WorldPose> {
+        let movement = self.last_movement.unwrap_or_default();
+        self.camera_pose_at(Instant::now(), movement)
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn camera_pose_at(&mut self, now: Instant, movement: MovementObservation) -> Option<WorldPose> {
         if self.arrival_pose.has_changed().is_ok_and(|changed| changed) {
             self.arrival_pose_pending = self.arrival_pose.borrow_and_update().is_some();
         }
-        let world_pose = self.agent().and_then(|agent| agent.detail().world_transform.ok()).and_then(|transform| match transform {
-            world::WorldTransformState::Resolved(transform) => Some(transform.pose),
-            world::WorldTransformState::MissingScale(pose) => Some(pose),
-            world::WorldTransformState::Provisional { .. } | world::WorldTransformState::Unresolved(_) => None,
+        let agent = self.agent().and_then(|agent| {
+            let motion = agent.detail().linear_motion;
+            let pose = agent.detail().world_transform.ok().and_then(|transform| match transform {
+                world::WorldTransformState::Resolved(transform) => Some(transform.pose),
+                world::WorldTransformState::MissingScale(pose) => Some(pose),
+                world::WorldTransformState::Provisional { .. } | world::WorldTransformState::Unresolved(_) => None,
+            });
+            pose.map(|pose| (pose, motion))
         });
-        if world_pose.is_some() {
+        let (pose, motion) = if let Some((pose, motion)) = agent {
             self.arrival_pose_pending = false;
-            return world_pose;
-        }
-        self.arrival_pose_pending.then(|| *self.arrival_pose.borrow()).flatten()
+            (pose, motion)
+        } else if let Some(pose) = self.arrival_pose_pending.then(|| *self.arrival_pose.borrow()).flatten() {
+            (pose, LinearMotion::default())
+        } else {
+            self.agent_prediction.reset();
+            return None;
+        };
+        Some(self.agent_prediction.predict(pose, motion, movement, now))
+    }
+
+    pub(crate) fn agent_id(&self) -> Uuid {
+        self.agent_id
+    }
+
+    pub(crate) fn agent_prediction_active(&self, now: Instant) -> bool {
+        self.agent_prediction.active(now)
     }
 
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {
@@ -485,6 +629,7 @@ mod tests {
             arrival_pose: arrival_poses,
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             arrival_pose_pending: true,
+            agent_prediction: AgentPrediction::default(),
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -536,6 +681,7 @@ mod tests {
             arrival_pose,
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             arrival_pose_pending: true,
+            agent_prediction: AgentPrediction::default(),
             last_movement: None,
             incoming,
             _cancel: cancel,

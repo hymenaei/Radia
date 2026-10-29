@@ -16,13 +16,15 @@ use wgpu::{
 
 use super::*;
 use crate::geometry::{
-    fixtures::{scene, scene_with_mapping, scene_with_scales, scene_with_world},
+    fixtures::{scene, scene_with_agent, scene_with_mapping, scene_with_scales, scene_with_world},
     instance::{instance_base, packed_instance},
 };
 use crate::material::FaceParams;
 use crate::pipeline::{INSTANCE_BYTES, Pipeline, VERTEX_BYTES};
-use crate::scene::{Camera, Placement, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView};
-use world::{Appearance, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, Region, SurfaceAppearance, UpdateSource};
+use crate::scene::{AgentPose, Camera, Placement, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView};
+use world::{
+    Appearance, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, Region, SurfaceAppearance, UpdateSource, WorldPose,
+};
 
 fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_pages: bool) {
     let scope = device.push_error_scope(ErrorFilter::Validation);
@@ -38,7 +40,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
     });
     let mut encoder = device.create_command_encoder(&Default::default());
     let depth = geometry.depth(device, [128, 128]).unwrap();
-    geometry.prepare(device, &mut encoder, &view, camera, [128, 128], None);
+    geometry.prepare(device, &mut encoder, &view, None, camera, [128, 128], None);
     let mut meshes: Vec<_> = geometry.meshes.values().collect();
     meshes.sort_by_key(|mesh| mesh.allocation.vertices().start);
     assert_eq!(meshes.len(), 2);
@@ -327,7 +329,7 @@ fn check_mirrored_render(device: &wgpu::Device, queue: &wgpu::Queue) {
     let mut geometry = GeometryRenderer::new(device, queue, TextureFormat::Rgba8UnormSrgb);
     let mut prepare = device.create_command_encoder(&Default::default());
     let depth = geometry.depth(device, size).unwrap();
-    geometry.prepare(device, &mut prepare, &view, camera, size, None);
+    geometry.prepare(device, &mut prepare, &view, None, camera, size, None);
     queue.submit([prepare.finish()]);
     assert_eq!(geometry.stats.instances, 2, "the public scene view submits both visible prims");
     let pixels = render_pixels(device, queue, size, &depth, |pass| geometry.draw(pass));
@@ -476,7 +478,7 @@ fn gpu_retired_hidden_page_releases_for_visible_mesh() {
     geometry.memory = Arc::new(crate::geometry::Accounting::default());
     let retired_camera = Camera::new(DVec3::new(13.0, 0.0, 0.0), Vec3::X, 1.0, [128, 128]).unwrap();
     let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, retired_camera, [128, 128], None);
+    geometry.prepare(&device, &mut encoder, &view, None, retired_camera, [128, 128], None);
     assert_eq!(geometry.stats.instances, 1);
     assert_eq!(geometry.meshes.len(), 1);
     assert!(!geometry.draw_list.draw_batches().is_empty());
@@ -507,11 +509,11 @@ fn gpu_retired_hidden_page_releases_for_visible_mesh() {
     geometry.cache.items.get_mut(target_index).expect("cached target item").position = DVec3::new(14.0, 0.0, 0.0);
     geometry.cache.camera = None;
     let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, retired_camera, [128, 128], None);
+    geometry.prepare(&device, &mut encoder, &view, None, retired_camera, [128, 128], None);
     if !geometry.meshes.contains_key(&target_id) {
         assert!(geometry.needs_frame(Instant::now()), "a freed mesh page must schedule another preparation");
         let mut encoder = device.create_command_encoder(&Default::default());
-        geometry.prepare(&device, &mut encoder, &view, retired_camera, [128, 128], None);
+        geometry.prepare(&device, &mut encoder, &view, None, retired_camera, [128, 128], None);
     }
 
     assert!(geometry.meshes.contains_key(&target_id), "the newly visible mesh uploads after the hidden page is released");
@@ -548,7 +550,7 @@ fn gpu_appearance_replacement_rechecks_visibility() {
         .entity;
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
     let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    geometry.prepare(&device, &mut encoder, &view, None, camera, [128, 128], None);
     let index = geometry.cache.objects[&entity];
     let item_id = geometry.cache.items.get(index).expect("cached fixture object").id;
     assert!(geometry.cache.candidates.contains(&index));
@@ -558,7 +560,7 @@ fn gpu_appearance_replacement_rechecks_visibility() {
     scene.notify_world_change();
     settle_scene(&world, &mut scene, &mut view, Instant::now());
     let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    geometry.prepare(&device, &mut encoder, &view, None, camera, [128, 128], None);
     let index = geometry.cache.objects[&entity];
     assert_eq!(geometry.cache.items.get(index).map(|item| item.id), Some(item_id));
     assert!(!geometry.cache.candidates.contains(&index));
@@ -569,7 +571,7 @@ fn gpu_appearance_replacement_rechecks_visibility() {
     scene.notify_world_change();
     settle_scene(&world, &mut scene, &mut view, Instant::now());
     let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    geometry.prepare(&device, &mut encoder, &view, None, camera, [128, 128], None);
     let index = geometry.cache.objects[&entity];
     assert_eq!(geometry.cache.items.get(index).map(|item| item.id), Some(item_id));
     assert!(geometry.cache.candidates.contains(&index));
@@ -622,7 +624,7 @@ fn gpu_skip_rebuilds_scene() {
     let (_scene, view, camera) = scene(255);
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
     let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    geometry.prepare(&device, &mut encoder, &view, None, camera, [128, 128], None);
     assert!(!geometry.draw_list.draws().is_empty());
     geometry.pending_meshes.insert(*geometry.cache.mesh_ids.first().expect("visible mesh demand"));
     assert!(!geometry.cache.mesh_representatives.is_empty());
@@ -638,7 +640,7 @@ fn gpu_skip_rebuilds_scene() {
     assert!(geometry.cache.mesh_priorities.is_empty());
     assert!(geometry.cache.mesh_ready.is_empty());
     let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, camera, [128, 128], None);
+    geometry.prepare(&device, &mut encoder, &view, None, camera, [128, 128], None);
     assert!(!geometry.draw_list.draws().is_empty());
 }
 
@@ -655,18 +657,69 @@ fn gpu_hidden_items_leave_no_instances_in_draws() {
     let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
     let hidden = Camera::new(DVec3::new(13.0, 0.0, 0.0), Vec3::X, 1.0, [128, 128]).unwrap();
     let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, hidden, [128, 128], None);
+    geometry.prepare(&device, &mut encoder, &view, None, hidden, [128, 128], None);
     assert_eq!(geometry.stats.instances, 1);
     assert!(geometry.draw_list.has_blended());
 
     let visible = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
     let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, visible, [128, 128], None);
+    geometry.prepare(&device, &mut encoder, &view, None, visible, [128, 128], None);
     assert_eq!(geometry.stats.instances, 2);
     assert_visible_draw_coverage(&geometry);
 
     let mut encoder = device.create_command_encoder(&Default::default());
-    geometry.prepare(&device, &mut encoder, &view, hidden, [128, 128], None);
+    geometry.prepare(&device, &mut encoder, &view, None, hidden, [128, 128], None);
     assert_eq!(geometry.stats.instances, 1);
     assert_visible_draw_coverage(&geometry);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(gpu_agent_pose_override_patches_draw_and_pick)'"]
+fn gpu_agent_pose_override_patches_draw_and_pick() {
+    let (device, queue) = block_on(async {
+        let instance =
+            wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
+    });
+    let (_scene, view, _) = scene_with_agent();
+    let size = [128, 128];
+    let agent_id = uuid::Uuid::from_u128(1);
+    let agent = view.objects().find(|object| object.detail().summary.id == agent_id).expect("fixture avatar");
+    let entity = agent.detail().summary.entity;
+    let Placement::Ready(simulator_transform) = agent.placement() else { panic!("fixture avatar must have a pose") };
+    let camera = Camera::new(DVec3::new(0.0, -2.0, 0.0), Vec3::X, 1.0, size).unwrap();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, None, camera, size, None);
+    assert_eq!(geometry.stats.layouts, 1);
+    let old_ray = camera.ray([64.0, 64.0], size);
+    assert!(geometry.pick(camera, old_ray).unwrap().is_some(), "the simulator pose is pickable");
+
+    let predicted_pose = WorldPose { position: simulator_transform.pose.position + DVec3::Y * 2.0, ..simulator_transform.pose };
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, Some(AgentPose::new(agent_id, predicted_pose)), camera, size, None);
+    assert_eq!(geometry.stats.layouts, 0, "a pose-only update does not rebuild the draw-list layout");
+    assert!(geometry.stats.faces_patched > 0, "visible avatar faces use the pose-patch path");
+    let index = geometry.cache.objects[&entity];
+    let item = geometry.cache.items.get(index).expect("cached avatar");
+    assert_eq!(item.position, predicted_pose.position);
+    let slot = item.faces.iter().find_map(|face| face.slot).expect("visible avatar face slot");
+    assert_eq!(geometry.draw_list.instance_transform(slot), Some(item.transform.as_slice()));
+    assert_eq!(geometry.pick(camera, old_ray).unwrap(), None, "picking no longer sees the old avatar position");
+    let moved_ray = camera.ray([41.0, 64.0], size);
+    let moved_hit = geometry.pick(camera, moved_ray).unwrap().expect("predicted avatar position is pickable");
+    assert!(moved_hit.distance(predicted_pose.position) < 1.0, "picked point follows the predicted pose: {moved_hit:?}");
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, None, camera, size, None);
+    assert_eq!(geometry.stats.layouts, 0, "removing an override restores the item through a pose patch");
+    assert!(geometry.stats.faces_patched > 0);
+    let item = geometry.cache.items.get(index).expect("cached avatar");
+    assert_eq!(item.position, simulator_transform.pose.position);
+    let slot = item.faces.iter().find_map(|face| face.slot).expect("visible avatar face slot");
+    assert_eq!(geometry.draw_list.instance_transform(slot), Some(item.transform.as_slice()));
+    assert!(geometry.pick(camera, old_ray).unwrap().is_some(), "picking returns to the simulator pose");
+    assert_eq!(geometry.pick(camera, moved_ray).unwrap(), None, "the restored avatar is absent from the predicted ray");
 }

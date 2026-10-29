@@ -108,6 +108,28 @@ fn region_connection_lifecycle() {
 }
 
 #[test]
+fn authenticated_primary_movement_complete_resolves_region_origin() {
+    let primary_simulator = simulator_id();
+    let other_simulator = simulator_id();
+    let packet = fixture_packet(vectors::AGENT_MOVEMENT_COMPLETE);
+    let Message::AgentMovementComplete(movement) = packet.message().clone() else { panic!("movement-complete fixture") };
+    let agent_id = movement.agent_data.agent_id;
+    let session_id = movement.agent_data.session_id;
+    let handle = RegionHandle::new(movement.data.region_handle);
+    let mut intake = SessionWorld::new(viewer_world_limits());
+    let region = intake.register_simulator(primary_simulator, None).expect("register simulator without an origin");
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut intake, primary_simulator, agent_id);
+
+    assert_eq!(intake.world().region(region).and_then(|info| info.resolved_origin()), None);
+    assert!(!handoff.movement_complete(&mut intake, primary_simulator, Some((agent_id, Uuid::nil())), &movement));
+    assert!(!handoff.movement_complete(&mut intake, other_simulator, Some((agent_id, session_id)), &movement));
+    assert_eq!(intake.world().region(region).and_then(|info| info.resolved_origin()), None);
+    assert!(handoff.movement_complete(&mut intake, primary_simulator, Some((agent_id, session_id)), &movement));
+    assert_eq!(intake.world().region(region).and_then(|info| info.resolved_origin()), Some(handle.origin()));
+}
+
+#[test]
 fn agent_waits_for_primary_promotion() {
     let agent_id = Uuid::from_u128(0x1234);
     let source_id = simulator_id();

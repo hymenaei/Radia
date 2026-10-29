@@ -103,6 +103,7 @@ pub(super) struct SceneWindow {
     recoveries: u32,
     recovery: PresentationRecovery,
     camera: Option<OrbitCamera>,
+    follow_camera: FollowCamera,
     camera_mode: CameraMode,
     controls: HeldControls,
     body_rotation: BodyRotation,
@@ -179,6 +180,7 @@ impl SceneWindow {
             recoveries: 0,
             recovery: PresentationRecovery::default(),
             camera: None,
+            follow_camera: FollowCamera::default(),
             camera_mode: CameraMode::Follow,
             controls: HeldControls::default(),
             body_rotation: BodyRotation::default(),
@@ -244,16 +246,23 @@ impl SceneWindow {
                 self.handle_left_click(*state, capture);
             }
             WindowEvent::MouseWheel { delta, .. } if !capture.consumed && !capture.pointer => {
-                self.enter_free_camera();
-                if self.camera_mode == CameraMode::Free
-                    && let Some(camera) = &mut self.camera
-                {
-                    let clicks = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
-                        MouseScrollDelta::PixelDelta(position) => position.y / (40.0 * self.dpi),
-                    };
-                    camera.zoom(2.0f64.powf(-clicks / 4.0));
+                let clicks = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+                    MouseScrollDelta::PixelDelta(position) => position.y / (40.0 * self.dpi),
+                };
+                let zoom = 2.0f64.powf(-clicks / 4.0);
+                match self.camera_mode {
+                    CameraMode::Follow => {
+                        let draw_distance = self.camera.as_ref().map_or(DEFAULT_DRAW_DISTANCE, |camera| camera.draw_distance);
+                        self.follow_camera.zoom(zoom, draw_distance);
+                    }
+                    CameraMode::Free => {
+                        if let Some(camera) = &mut self.camera {
+                            camera.zoom(zoom);
+                        }
+                    }
                 }
+                self.dirty = true;
             }
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
@@ -262,9 +271,12 @@ impl SceneWindow {
                     && !capture.keyboard =>
             {
                 self.release_drag(true);
-                self.camera_mode.return_to_follow();
+                if self.camera_mode == CameraMode::Free {
+                    self.transition_to_follow();
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                let was_free = self.camera_mode == CameraMode::Free;
                 let Some(changed) = handle_keyboard_input(
                     &mut self.controls,
                     &mut self.camera_mode,
@@ -277,6 +289,9 @@ impl SceneWindow {
                 };
                 if changed {
                     self.dirty = true;
+                }
+                if was_free && self.camera_mode == CameraMode::Follow {
+                    self.transition_to_follow();
                 }
                 if self.camera_mode == CameraMode::Follow {
                     self.release_drag(true);
@@ -376,9 +391,17 @@ impl SceneWindow {
         if drag.travel[0] >= 4.0 || drag.travel[1] >= 4.0 {
             self.dirty = true;
             let dy = if drag.travel[1] >= 4.0 { dy } else { 0.0 };
-            self.enter_free_camera();
-            if let Some(camera) = &mut self.camera {
-                camera.drag([dx, dy], f64::from(self.window.inner_size().width), self.modifiers.control_key(), self.modifiers.shift_key());
+            let width = f64::from(self.window.inner_size().width);
+            match self.camera_mode {
+                CameraMode::Follow => {
+                    let draw_distance = self.camera.as_ref().map_or(DEFAULT_DRAW_DISTANCE, |camera| camera.draw_distance);
+                    self.follow_camera.drag([dx, dy], width, self.modifiers.control_key(), self.modifiers.shift_key(), draw_distance);
+                }
+                CameraMode::Free => {
+                    if let Some(camera) = &mut self.camera {
+                        camera.drag([dx, dy], width, self.modifiers.control_key(), self.modifiers.shift_key());
+                    }
+                }
             }
         }
     }
@@ -407,11 +430,23 @@ impl SceneWindow {
         if self.camera_mode == CameraMode::Free {
             return;
         }
-        let Some(pose) = self.agent_pose() else { return };
+        let Some(mut pose) = self.agent_pose() else { return };
+        pose.rotation = self.body_rotation.current();
+        let (position, focus) = self.follow_camera.current_position_and_focus(pose);
         let (draw_distance, lod_factor) =
             self.camera.as_ref().map_or((DEFAULT_DRAW_DISTANCE, 1.0), |camera| (camera.draw_distance, camera.lod_factor));
-        self.camera = Some(OrbitCamera::from_follow_pose(pose, draw_distance, lod_factor));
-        self.camera_mode.detach_for_mouse();
+        self.camera = Some(OrbitCamera::from_follow_view(position, focus, draw_distance, lod_factor));
+        self.camera_mode.detach_for_focus();
+    }
+
+    fn transition_to_follow(&mut self) {
+        if let Some(camera) = &self.camera {
+            let now = Instant::now();
+            let (position, focus) = camera.current_position_and_focus(now);
+            self.follow_camera.transition_from(position, focus, now);
+        }
+        self.camera_mode.return_to_follow();
+        self.dirty = true;
     }
 
     fn ensure_camera(&mut self, pose: Option<world::WorldPose>) {
@@ -426,13 +461,18 @@ impl SceneWindow {
         self.feed.as_mut()?.camera_pose()
     }
 
-    fn camera_observation(&self, pose: Option<world::WorldPose>, now: Instant) -> Option<scene::Camera> {
+    fn agent_pose_at(&mut self, now: Instant, movement: MovementObservation) -> Option<world::WorldPose> {
+        self.feed.as_mut()?.camera_pose_at(now, movement)
+    }
+
+    fn camera_observation(&mut self, pose: Option<world::WorldPose>, rotation: math::Quat, now: Instant) -> Option<scene::Camera> {
         let viewport = self.window.inner_size().into();
         match self.camera_mode {
-            CameraMode::Follow => pose.and_then(|pose| {
+            CameraMode::Follow => pose.and_then(|mut pose| {
+                pose.rotation = rotation;
                 let (draw_distance, lod_factor) =
                     self.camera.as_ref().map_or((DEFAULT_DRAW_DISTANCE, 1.0), |camera| (camera.draw_distance, camera.lod_factor));
-                FollowCamera::scene_camera(pose, viewport, draw_distance, lod_factor)
+                self.follow_camera.follow(pose, viewport, draw_distance, lod_factor, now)
             }),
             CameraMode::Free => self.camera.as_ref().and_then(|camera| camera.scene_camera(viewport, now)),
         }
@@ -440,12 +480,17 @@ impl SceneWindow {
 
     pub(super) fn draw(&mut self) -> Result<DrawActions, SceneWindowError> {
         let now = Instant::now();
-        let pose = self.agent_pose();
+        let movement = self.controls.observation(self.modifiers.shift_key(), self.body_rotation.current());
+        let pose = self.agent_pose_at(now, movement);
         self.ensure_camera(pose);
         let rotation = self.body_rotation.update(pose.map(|pose| pose.rotation), self.controls.yaw(self.modifiers.shift_key()), now);
         let movement: MovementObservation = self.controls.observation(self.modifiers.shift_key(), rotation);
         self.stop_clear_pending = movement.control_flags & STOP != 0;
-        let observation = self.camera_observation(pose, now);
+        let observation = self.camera_observation(pose, rotation, now);
+        let agent_pose = pose.map(|mut pose| {
+            pose.rotation = rotation;
+            pose
+        });
         if let Some(feed) = &mut self.feed {
             feed.set_camera(observation);
             feed.set_movement(movement);
@@ -459,7 +504,7 @@ impl SceneWindow {
         }
         self.complete_texture_jobs();
         let debug_ui = self.draw_debug_ui(now);
-        Ok(self.submit_frame(observation, now, debug_ui))
+        Ok(self.submit_frame(observation, agent_pose, now, debug_ui))
     }
 
     fn ensure_renderer(&mut self, now: Instant) -> Result<bool, SceneWindowError> {
@@ -628,14 +673,21 @@ impl SceneWindow {
         }
     }
 
-    fn submit_frame(&mut self, observation: Option<scene::Camera>, now: Instant, ui: DebugUiFrame) -> DrawActions {
+    fn submit_frame(
+        &mut self,
+        observation: Option<scene::Camera>,
+        agent_pose: Option<world::WorldPose>,
+        now: Instant,
+        ui: DebugUiFrame,
+    ) -> DrawActions {
         let scheduled_deadline = self.next_frame;
         let scene = self.feed.as_ref().zip(observation).map(|(feed, camera)| (&feed.view, camera));
+        let avatar_pose = self.feed.as_ref().zip(agent_pose).map(|(feed, pose)| scene::AgentPose::new(feed.agent_id(), pose));
         let water_height = self.feed.as_ref().and_then(|feed| feed.water_height);
         let result = {
             let renderer = self.renderer.as_mut().expect("renderer ensured before frame submission");
             renderer.set_texture_soft_cap(self.texture_soft_cap);
-            renderer.draw(ui.overlay, scene, water_height, || self.window.pre_present_notify())
+            renderer.draw(ui.overlay, scene, avatar_pose, water_height, || self.window.pre_present_notify())
         };
         self.dispatch_texture_jobs();
         let completed = Instant::now();
@@ -645,9 +697,10 @@ impl SceneWindow {
                 let active_motion = self.controls.active() || self.stop_clear_pending;
                 self.dirty |= !presented
                     || active_motion
+                    || self.feed.as_ref().is_some_and(|feed| feed.agent_prediction_active(Instant::now()))
+                    || (self.camera_mode == CameraMode::Follow
+                        && agent_pose.is_some_and(|agent_pose| self.follow_camera.moving(agent_pose, Instant::now())))
                     || (self.camera_mode == CameraMode::Free && self.camera.as_ref().is_some_and(|camera| camera.moving(Instant::now())));
-                let pose = self.agent_pose();
-                self.dirty |= self.camera_observation(pose, Instant::now()) != observation;
                 if presented {
                     self.frame_times.record(frame_work);
                     self.last_camera = observation;
@@ -788,7 +841,7 @@ impl CameraMode {
         }
     }
 
-    fn detach_for_mouse(&mut self) {
+    fn detach_for_focus(&mut self) {
         *self = Self::Free;
     }
 
@@ -892,10 +945,10 @@ mod tests {
     use super::{CameraMode, PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError, handle_keyboard_input};
 
     #[test]
-    fn mouse_camera_edits_detach_and_escape_returns_to_follow() {
+    fn picked_focus_detaches_and_escape_returns_to_follow() {
         let mut mode = CameraMode::Follow;
-        mode.detach_for_mouse();
-        assert_eq!(mode, CameraMode::Free, "the same detach transition is used before drag and zoom");
+        mode.detach_for_focus();
+        assert_eq!(mode, CameraMode::Free, "picked focus opens a detached view");
 
         mode.return_to_follow();
         assert_eq!(mode, CameraMode::Follow);

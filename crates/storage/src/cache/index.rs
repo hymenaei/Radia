@@ -1,12 +1,16 @@
-use std::{error::Error, io, path::Path};
+use std::{error::Error, io, path::Path, str};
 
 use futures::executor::block_on;
-use rusqlite::{Connection, Error as RusqliteError, Transaction, TransactionBehavior, params, types::Type};
+use rusqlite::{
+    Connection, Error as RusqliteError, Row, Transaction, TransactionBehavior, params,
+    types::{Type, ValueRef},
+};
 
 use crate::sqlite::{MAX_BATCH_ROWS, MigrationError, OpenStatus, SqliteBatch, SqliteDb, SqliteError};
 
 use super::{
-    Key, MAX_QUEUED_WRITES, MAX_VALUE_BYTES, NamespaceId, NamespaceTable, StorageError, UnavailableReason, valid_extension, valid_namespace,
+    Key, MAX_EXTENSION_BYTES, MAX_NAMESPACE_BYTES, MAX_QUEUED_WRITES, MAX_VALUE_BYTES, NamespaceId, NamespaceTable, StorageError,
+    UnavailableReason, valid_extension, valid_namespace,
 };
 
 const INDEX_VERSION: i64 = 5;
@@ -47,7 +51,8 @@ impl Index {
         let namespace_bytes = namespace_bytes(namespaces)?;
         let migration_definitions = definitions.clone();
         let (db, _status): (SqliteDb, OpenStatus) =
-            SqliteDb::open(path, move |connection| migrate(connection, &migration_definitions)).map_err(map_sqlite_error)?;
+            SqliteDb::open(path, move |connection| migrate(connection, &migration_definitions).map_err(map_index_migration_error))
+                .map_err(map_sqlite_error)?;
         let index = Self { db: Some(db), namespace_count: definitions.len(), namespace_bytes };
         let records = index.load_records().map_err(map_sqlite_error)?;
         Ok((index, records))
@@ -59,7 +64,8 @@ impl Index {
         }
         let rows = mutations.len();
         let bytes = rows.checked_mul(MUTATION_BYTES).ok_or(SqliteError::QueueFull)?;
-        let batch = SqliteBatch::new(rows, bytes, move |transaction| apply_mutations(transaction, mutations))?;
+        let batch =
+            SqliteBatch::new(rows, bytes, move |transaction| apply_mutations(transaction, mutations).map_err(map_index_constraint_error))?;
         let receipt = self.database()?.submit_batches(vec![batch])?;
         block_on(receipt.wait())
     }
@@ -73,12 +79,14 @@ impl Index {
         let batch = SqliteBatch::new(rows, bytes, move |transaction| {
             let mut statement = transaction.prepare("UPDATE entries SET last_use=?1, use_count=?2 WHERE namespace=?3 AND name=?4")?;
             for record in records {
-                statement.execute(params![
-                    sql_integer(record.last_use),
-                    sql_integer(record.use_count),
-                    i64::from(record.key.namespace().0),
-                    record.key.name().as_slice(),
-                ])?;
+                statement
+                    .execute(params![
+                        sql_integer(record.last_use),
+                        sql_integer(record.use_count),
+                        i64::from(record.key.namespace().0),
+                        record.key.name().as_slice(),
+                    ])
+                    .map_err(map_index_constraint_error)?;
             }
             Ok(())
         })?;
@@ -261,13 +269,17 @@ fn migrate(connection: &mut Connection, definitions: &[(String, String)]) -> Res
     if !valid_schema(&transaction)? {
         return Err(MigrationError::SchemaMismatch);
     }
+    let entry_count: i64 = transaction.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))?;
+    if usize::try_from(entry_count).map_err(|_| MigrationError::SchemaMismatch)? > MAX_ENTRIES {
+        return Err(MigrationError::SchemaMismatch);
+    }
     let mut statement = transaction.prepare("SELECT namespace, directory, extension FROM namespaces ORDER BY namespace")?;
     let mut rows = statement.query([])?;
     let mut previous = Vec::new();
     while let Some(row) = rows.next()? {
         let namespace: i64 = row.get(0)?;
-        let directory: String = row.get(1)?;
-        let extension: String = row.get(2)?;
+        let directory = namespace_value(row, 1, MAX_NAMESPACE_BYTES)?;
+        let extension = namespace_value(row, 2, MAX_EXTENSION_BYTES)?;
         if namespace != i64::try_from(previous.len()).map_err(|_| RusqliteError::InvalidQuery)?
             || previous.len() >= 256
             || !valid_namespace(&directory)
@@ -306,6 +318,21 @@ fn migrate(connection: &mut Connection, definitions: &[(String, String)]) -> Res
     }
     transaction.commit()?;
     Ok(())
+}
+
+fn namespace_value(row: &Row<'_>, column: usize, max_bytes: usize) -> Result<String, MigrationError> {
+    let bytes = match row.get_ref(column)? {
+        ValueRef::Text(bytes) if bytes.len() <= max_bytes => bytes,
+        _ => return Err(MigrationError::SchemaMismatch),
+    };
+    Ok(str::from_utf8(bytes).map_err(|_| MigrationError::SchemaMismatch)?.to_owned())
+}
+
+fn map_index_migration_error(error: MigrationError) -> MigrationError {
+    match error {
+        MigrationError::Sqlite(error) => MigrationError::Sqlite(map_index_constraint_error(error)),
+        error => error,
+    }
 }
 
 fn valid_schema(transaction: &Transaction<'_>) -> Result<bool, RusqliteError> {
@@ -407,6 +434,18 @@ fn sql_integer(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
+fn map_index_constraint_error(error: RusqliteError) -> RusqliteError {
+    match error {
+        RusqliteError::SqliteFailure(details, _) if details.code == rusqlite::ffi::ErrorCode::ConstraintViolation => {
+            RusqliteError::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_SCHEMA),
+                Some("asset cache index constraint mismatch".to_owned()),
+            )
+        }
+        error => error,
+    }
+}
+
 pub(super) fn map_sqlite_error(error: SqliteError) -> StorageError {
     match error {
         SqliteError::Busy => StorageError::Unavailable(UnavailableReason::Busy),
@@ -455,6 +494,102 @@ mod tests {
         assert_eq!(recovered.len(), 3);
         assert!(recovered.iter().all(|record| record.key != Key::new(NamespaceId::new(0), [1; 16])));
         assert!(recovered.iter().any(|record| record.key == Key::new(NamespaceId::new(0), [4; 16])));
+        index.shutdown().expect("close index");
+    }
+
+    #[test]
+    fn oversized_namespace_recreates_index() {
+        let directory = tempdir().expect("cache directory");
+        let path = directory.path().join("index.sqlite");
+        let namespaces = NamespaceTable::new(&[Namespace::new("items", "bin")]).expect("valid namespaces");
+        let (index, _) = Index::open(&path, &namespaces).expect("create index");
+        index.shutdown().expect("close index");
+
+        let connection = Connection::open(&path).expect("open index database");
+        let oversized = "x".repeat(MAX_NAMESPACE_BYTES + 1);
+        connection.execute("UPDATE namespaces SET directory=?1", [&oversized]).expect("write oversized namespace");
+        drop(connection);
+
+        let (index, records) = Index::open(&path, &namespaces).expect("recreate invalid index");
+        assert!(records.is_empty());
+        index.shutdown().expect("close recovered index");
+
+        let connection = Connection::open(path).expect("open recovered database");
+        let value: String = connection.query_row("SELECT directory FROM namespaces", [], |row| row.get(0)).expect("read namespace");
+        assert_eq!(value, "items");
+    }
+
+    #[test]
+    fn oversized_table_skips_remap() {
+        let directory = tempdir().expect("cache directory");
+        let path = directory.path().join("index.sqlite");
+        let old_namespaces = NamespaceTable::new(&[Namespace::new("old", "bin")]).expect("valid old namespaces");
+        let (index, _) = Index::open(&path, &old_namespaces).expect("create index");
+        index.shutdown().expect("close index");
+
+        let connection = Connection::open(&path).expect("open index database");
+        let row_limit = i64::try_from(MAX_ENTRIES).expect("entry limit fits SQLite");
+        let inserted = connection
+            .execute(
+                "WITH RECURSIVE sequence(value) AS (
+                    SELECT 0 UNION ALL SELECT value + 1 FROM sequence WHERE value < ?1
+                 )
+                 INSERT INTO entries(namespace, name, size, hash, last_use, use_count)
+                 SELECT 0, CAST(printf('%016d', value) AS BLOB), 0, zeroblob(32), value, 0 FROM sequence",
+                [row_limit],
+            )
+            .expect("insert over-cap table");
+        assert_eq!(inserted, MAX_ENTRIES + 1);
+        drop(connection);
+
+        let new_namespaces = NamespaceTable::new(&[Namespace::new("new", "bin")]).expect("valid new namespaces");
+        let (index, records) = Index::open(&path, &new_namespaces).expect("recreate over-cap index");
+        assert!(records.is_empty());
+        index.shutdown().expect("close recovered index");
+
+        let connection = Connection::open(path).expect("open recovered database");
+        let value: String = connection.query_row("SELECT directory FROM namespaces", [], |row| row.get(0)).expect("read namespace");
+        assert_eq!(value, "new");
+        let row_count: i64 = connection.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0)).expect("count recovered entries");
+        assert_eq!(row_count, 0);
+    }
+
+    #[test]
+    fn constraint_write_recreates_index() {
+        let directory = tempdir().expect("cache directory");
+        let path = directory.path().join("index.sqlite");
+        let connection = Connection::open(&path).expect("create index database");
+        connection
+            .execute_batch(
+                "CREATE TABLE namespaces (
+                    namespace INTEGER PRIMARY KEY CHECK(namespace >= 0 AND namespace <= 255),
+                    directory TEXT NOT NULL,
+                    extension TEXT NOT NULL,
+                    UNIQUE(directory, extension)
+                );
+                CREATE TABLE entries (
+                    namespace INTEGER NOT NULL CHECK(namespace >= 0 AND namespace <= 511),
+                    name BLOB NOT NULL CHECK(length(name) = 16),
+                    size INTEGER NOT NULL CHECK(size >= 0 AND size <= 0),
+                    hash BLOB NOT NULL CHECK(length(hash) = 32),
+                    last_use INTEGER NOT NULL CHECK(last_use >= 0),
+                    use_count INTEGER NOT NULL CHECK(use_count >= 0),
+                    PRIMARY KEY(namespace, name)
+                ) WITHOUT ROWID;
+                INSERT INTO namespaces VALUES (0, 'items', 'bin');
+                PRAGMA user_version = 5;",
+            )
+            .expect("create same-version schema with extra constraint");
+        drop(connection);
+
+        let namespaces = NamespaceTable::new(&[Namespace::new("items", "bin")]).expect("valid namespaces");
+        let (index, records) = Index::open(&path, &namespaces).expect("open same-version index");
+        assert!(records.is_empty());
+        let mut constrained_record = record(1, 1);
+        constrained_record.size = 1;
+        let error = index.apply(vec![Mutation::Put(constrained_record)]).expect_err("constraint reveals unexpected schema");
+        std::assert_matches!(error, SqliteError::SchemaMismatch);
+        assert!(index.load_records().expect("read recreated index").is_empty());
         index.shutdown().expect("close index");
     }
 }

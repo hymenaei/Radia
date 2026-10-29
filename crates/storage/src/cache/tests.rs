@@ -475,7 +475,12 @@ fn replacement_crash_never_trusts_bytes() {
         let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
         cache.put(key(23), b"old payload".to_vec()).expect("store old payload");
         cache.arm_fault(point);
-        assert!(cache.put(key(23), b"replacement payload".to_vec()).is_err(), "{point:?}");
+        let result = cache.put(key(23), b"replacement payload".to_vec());
+        if point == WritePoint::IndexBatchCommitted {
+            std::assert_matches!(result, Ok(()), "the replacement row committed before the crash hook");
+        } else {
+            std::assert_matches!(result, Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted, "{point:?}");
+        }
         cache.simulate_crash().expect("simulate replacement crash");
 
         let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("recover fixed path");
@@ -492,6 +497,7 @@ fn replacement_crash_never_trusts_bytes() {
                 std::assert_matches!(cache.lookup(key(23)), Lookup::Hit(CacheValue { bytes, .. }) if bytes == b"replacement payload", "{point:?}");
             }
             WritePoint::DataWriteFailure
+            | WritePoint::IndexBatchFailure
             | WritePoint::LookupEntrySelected
             | WritePoint::LookupHashMismatch
             | WritePoint::IndexTouchBusy
@@ -519,7 +525,7 @@ fn renamed_unindexed_payload_is_swept() {
 }
 
 #[test]
-fn crash_mid_batch_keeps_rows() {
+fn partial_batch_reports_committed_puts() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache"));
     let (started, resume) = cache.pause_at(WritePoint::IndexBatchStarted);
@@ -539,12 +545,11 @@ fn crash_mid_batch_keeps_rows() {
             let writing_cache = Arc::clone(&cache);
             let write_key = key(u16::try_from(id).expect("batch key fits"));
             let bytes = vec![u8::try_from(id % 251).expect("byte value")];
-            pending.push(
-                thread::Builder::new()
-                    .stack_size(256 * 1024)
-                    .spawn_scoped(scope, move || writing_cache.put(write_key, bytes))
-                    .expect("spawn queued cache write"),
-            );
+            let write = thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn_scoped(scope, move || writing_cache.put(write_key, bytes))
+                .expect("spawn queued cache write");
+            pending.push((id, write));
         }
         let mut admitted = 0;
         for _ in 0..write_count {
@@ -556,11 +561,21 @@ fn crash_mid_batch_keeps_rows() {
         for resume in resumes {
             resume.send(()).expect("release queued write");
         }
-        cache.read_state.hooks.arm_after(WritePoint::IndexBatchCommitted, 2);
+        cache.read_state.hooks.arm_after(WritePoint::IndexBatchStarted, 3);
         resume.send(()).expect("release first write");
         first.join().expect("first writer completes").expect("first write commits");
         assert_eq!(admitted, write_count, "every public write entered the bounded queue");
-        assert!(pending.into_iter().all(|write| write.join().is_ok_and(|result| result.is_err())));
+        let mut committed = 0;
+        for (id, write) in pending {
+            let result = write.join().expect("queued write completes");
+            if id == 255 {
+                std::assert_matches!(result, Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted);
+            } else {
+                std::assert_matches!(result, Ok(()), "key {id} was committed by the first chunk");
+                committed += 1;
+            }
+        }
+        assert_eq!(committed, MAX_BATCH_ROWS);
     });
 
     Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).simulate_crash().expect("stop failed writer");
@@ -572,6 +587,26 @@ fn crash_mid_batch_keeps_rows() {
     std::assert_matches!(cache.lookup(key(256)), Lookup::Hit(_));
     assert_eq!(cache.lookup(key(255)), Lookup::Miss);
     cache.shutdown().expect("close recovered cache");
+}
+
+#[test]
+fn failed_replacement_removes_uncommitted_bytes() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    let payload = data_file(directory.path(), key(23));
+    cache.put(key(23), b"old payload".to_vec()).expect("store old payload");
+    cache.arm_fault(WritePoint::IndexBatchFailure);
+
+    std::assert_matches!(
+        cache.put(key(23), b"replacement payload".to_vec()),
+        Err(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::StorageFull
+    );
+    cache.flush().expect("drain invalid replacement");
+
+    assert_eq!(cache.lookup(key(23)), Lookup::Miss);
+    assert_eq!(cache.entry_count(), 0);
+    assert!(!payload.exists());
+    cache.shutdown().expect("close cache");
 }
 
 #[test]
@@ -656,7 +691,12 @@ proptest! {
                     let existed = model.contains_key(&id);
                     cache.arm_fault(selected);
                     let result = cache.put(key(id), bytes.clone());
-                    prop_assert!(result.is_err(), "injected write failure is observed");
+                    match result {
+                        Ok(()) if selected == WritePoint::IndexBatchCommitted => {}
+                        Err(StorageError::Io(error))
+                            if selected != WritePoint::IndexBatchCommitted && error.kind() == std::io::ErrorKind::Interrupted => {}
+                        other => prop_assert!(false, "unexpected write result: {other:?}"),
+                    }
                     cache.simulate_crash().expect("simulate process crash");
                     if selected == WritePoint::IndexBatchCommitted {
                         model.insert(id, bytes);
@@ -698,8 +738,8 @@ proptest! {
         for revision in 0..20u8 {
             let bytes = vec![revision; 32];
             cache.arm_fault(WritePoint::IndexBatchCommitted);
-            let error = cache.put(key(0), bytes.clone()).expect_err("simulate crash after row commit");
-            std::assert_matches!(error, StorageError::Io(error) if error.kind() == std::io::ErrorKind::Interrupted);
+            let result = cache.put(key(0), bytes.clone());
+            prop_assert!(result.is_ok(), "the row committed before the crash hook");
             cache.simulate_crash().expect("simulate replacement crash");
             model.insert(0, bytes);
             cache = Cache::open(directory.path(), small_limit, &TEST_NAMESPACES).expect("reopen after committed replacement");

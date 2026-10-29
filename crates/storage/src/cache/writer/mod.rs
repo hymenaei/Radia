@@ -44,6 +44,8 @@ pub(super) enum WritePoint {
     DataWritten,
     DataRenamed,
     IndexBatchStarted,
+    #[cfg(test)]
+    IndexBatchFailure,
     IndexBatchCommitted,
     #[cfg(test)]
     LookupEntrySelected,
@@ -111,10 +113,11 @@ impl FaultHooks {
                 false
             };
             if should_fail {
-                let (kind, message) = if point == WritePoint::DataWriteFailure {
-                    (io::ErrorKind::StorageFull, "simulated full disk")
-                } else {
-                    (io::ErrorKind::Interrupted, "simulated cache crash")
+                let (kind, message) = match point {
+                    WritePoint::DataWriteFailure => (io::ErrorKind::StorageFull, "simulated full disk"),
+                    #[cfg(test)]
+                    WritePoint::IndexBatchFailure => (io::ErrorKind::StorageFull, "simulated full disk"),
+                    _ => (io::ErrorKind::Interrupted, "simulated cache crash"),
                 };
                 return Err(io::Error::new(kind, message));
             }
@@ -179,6 +182,17 @@ struct PlannedChange {
     key: Key,
     previous: Option<Arc<Entry>>,
     next: Option<Arc<Entry>>,
+}
+
+struct CommitFailure {
+    committed: HashSet<Key>,
+    error: StorageError,
+}
+
+impl CommitFailure {
+    fn before_commit(error: StorageError) -> Self {
+        Self { committed: HashSet::new(), error }
+    }
 }
 
 pub(super) struct WorkerState {
@@ -314,20 +328,17 @@ impl WorkerState {
                 return results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect();
             }
         };
-        match self.publish_and_commit(&plan, staged) {
-            Ok(()) => {
-                for index in staged_indices {
-                    if let Some(result) = results.get_mut(index) {
-                        *result = Some(Ok(()));
-                    }
-                }
-            }
-            Err(error) => {
-                for index in staged_indices {
-                    if let Some(result) = results.get_mut(index) {
-                        *result = Some(Err(clone_error(&error)));
-                    }
-                }
+        let (committed, error) = match self.publish_and_commit(&plan, staged) {
+            Ok(committed) => (committed, None),
+            Err(failure) => (failure.committed, Some(failure.error)),
+        };
+        for (entry, index) in staged_entries.iter().zip(staged_indices) {
+            if let Some(result) = results.get_mut(index) {
+                *result = Some(match error.as_ref() {
+                    None => Ok(()),
+                    Some(_) if committed.contains(&entry.key) => Ok(()),
+                    Some(error) => Err(clone_error(error)),
+                });
             }
         }
         results.into_iter().map(|result| result.unwrap_or(Ok(()))).collect()
@@ -439,37 +450,63 @@ impl WorkerState {
         Ok(StagedData { entry, temp })
     }
 
-    fn publish_and_commit(&mut self, plan: &Plan, staged: Vec<StagedData>) -> Result<(), StorageError> {
-        let changes = self.prepare_changes(plan)?;
-        let replacing = self.begin_replacements(&changes)?;
-        let mut renamed = HashSet::new();
-        renamed.try_reserve(staged.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+    fn publish_and_commit(&mut self, plan: &Plan, staged: Vec<StagedData>) -> Result<HashSet<Key>, CommitFailure> {
+        let changes = self.prepare_changes(plan).map_err(CommitFailure::before_commit)?;
+        let mut staged_files = Vec::new();
+        staged_files
+            .try_reserve_exact(staged.len())
+            .map_err(|_| CommitFailure::before_commit(StorageError::Unavailable(UnavailableReason::Allocation)))?;
         for data in staged {
-            let destination = self.read_state.namespaces.path(&self.root, data.entry.key).ok_or(StorageError::UnknownNamespace)?;
+            let destination = self
+                .read_state
+                .namespaces
+                .path(&self.root, data.entry.key)
+                .ok_or_else(|| CommitFailure::before_commit(StorageError::UnknownNamespace))?;
+            staged_files.push((data, destination));
+        }
+        let mut batches = Vec::new();
+        batches
+            .try_reserve_exact(changes.len().div_ceil(MAX_BATCH_ROWS))
+            .map_err(|_| CommitFailure::before_commit(StorageError::Unavailable(UnavailableReason::Allocation)))?;
+        for chunk in changes.chunks(MAX_BATCH_ROWS) {
+            batches.push(mutations(chunk).map_err(CommitFailure::before_commit)?);
+        }
+        let mut renamed = HashSet::new();
+        renamed
+            .try_reserve(staged_files.len())
+            .map_err(|_| CommitFailure::before_commit(StorageError::Unavailable(UnavailableReason::Allocation)))?;
+        let mut committed = HashSet::new();
+        committed
+            .try_reserve(changes.len())
+            .map_err(|_| CommitFailure::before_commit(StorageError::Unavailable(UnavailableReason::Allocation)))?;
+        let replacing = self.begin_replacements(&changes).map_err(CommitFailure::before_commit)?;
+        for (data, destination) in staged_files {
             if let Err(error) = persist_with_retry(data.temp, &destination).map_err(StorageError::Io) {
-                self.finish_failed_replacements(&replacing, &renamed, &changes, &HashSet::new(), is_simulated_crash(&error));
-                return Err(error);
+                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error));
+                return Err(CommitFailure { committed, error });
             }
             renamed.insert(data.entry.key);
             if let Err(error) = self.hooks.check(WritePoint::DataRenamed).map_err(StorageError::Io) {
-                self.finish_failed_replacements(&replacing, &renamed, &changes, &HashSet::new(), is_simulated_crash(&error));
-                return Err(error);
+                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error));
+                return Err(CommitFailure { committed, error });
             }
         }
 
-        let mut committed = HashSet::new();
-        committed.try_reserve(changes.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
-        for chunk in changes.chunks(MAX_BATCH_ROWS) {
-            let mutations = mutations(chunk)?;
+        for (chunk, mutations) in changes.chunks(MAX_BATCH_ROWS).zip(batches) {
             if let Err(error) = self.hooks.check(WritePoint::IndexBatchStarted).map_err(StorageError::Io) {
                 let crashed = is_simulated_crash(&error);
                 self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, crashed);
-                return Err(error);
+                return Err(CommitFailure { committed, error });
+            }
+            #[cfg(test)]
+            if let Err(error) = self.hooks.check(WritePoint::IndexBatchFailure).map_err(StorageError::Io) {
+                self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, false);
+                return Err(CommitFailure { committed, error });
             }
             if let Err(error) = self.index.apply(mutations) {
                 let storage_error = self.index_failure(error, &changes);
                 self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, false);
-                return Err(storage_error);
+                return Err(CommitFailure { committed, error: storage_error });
             }
             self.publish_changes(chunk);
             for change in chunk {
@@ -477,10 +514,10 @@ impl WorkerState {
             }
             if let Err(error) = self.hooks.check(WritePoint::IndexBatchCommitted).map_err(StorageError::Io) {
                 self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error));
-                return Err(error);
+                return Err(CommitFailure { committed, error });
             }
         }
-        Ok(())
+        Ok(committed)
     }
 
     fn prepare_changes(&mut self, plan: &Plan) -> Result<Vec<PlannedChange>, StorageError> {
@@ -557,7 +594,7 @@ impl WorkerState {
         drop(entries);
         if !crashed {
             for change in changes {
-                if !committed.contains(&change.key) && change.previous.is_none() && change.next.is_some() && renamed.contains(&change.key) {
+                if !committed.contains(&change.key) && change.next.is_some() && renamed.contains(&change.key) {
                     delete_data(&self.root, &self.read_state.namespaces, &change.key);
                 }
             }

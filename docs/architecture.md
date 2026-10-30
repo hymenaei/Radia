@@ -104,7 +104,7 @@ The inventory cache uses one `inventory.sqlite` file below the default cache dir
 
 ### `crates/test-support`
 
-Provides shared LLUDP vectors and a hex parser, texture samples with independent pixel expectations, and synchronous allocation measurements. Production crates use it only as a dev-dependency. Network keeps its process-wide probes local because they measure a different scope.
+Provides shared LLUDP vectors and a hex parser, texture samples with independent pixel expectations, synchronous allocation measurements, and a subprocess test helper with bounded readiness waits and child cleanup. Production crates use it only as a dev-dependency. Network keeps its process-wide probes local because they measure a different scope.
 
 ### `crates/utils`
 

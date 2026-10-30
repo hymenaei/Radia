@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::Write,
     process::{Command, Stdio},
     sync::mpsc,
 };
@@ -9,6 +9,7 @@ use std::{
 use futures::executor::block_on;
 use rusqlite::{Connection, Error as RusqliteError, Transaction};
 use tempfile::tempdir;
+use test_support::process::TestProcess;
 
 use super::*;
 
@@ -143,33 +144,21 @@ fn second_process_write_returns_busy() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     let path = directory.path().join("inventory.sqlite");
     let (db, _) = SqliteDb::open(&path, migrate)?;
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    command
         .arg("--exact")
         .arg("sqlite::tests::busy_process_helper")
         .arg("--nocapture")
         .env("RADIA_SQLITE_BUSY_PATH", &path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-    let stdout = child.stdout.take().ok_or("child stdout missing")?;
-    let mut locked = false;
-    let mut stdout = BufReader::new(stdout);
-    for line in stdout.by_ref().lines() {
-        if line?.trim() == "sqlite write locked" {
-            locked = true;
-            break;
-        }
-    }
-    assert!(locked, "child process did not acquire the SQLite write lock");
+        .stderr(Stdio::inherit());
+    let mut child = TestProcess::spawn(&mut command)?;
+    child.wait_for_stdout("sqlite write locked")?;
 
     let receipt = db.submit_batches(vec![insert(55)?])?;
     std::assert_matches!(block_on(receipt.wait()), Err(SqliteError::Busy));
 
-    child.stdin.take().ok_or("child stdin missing")?.write_all(b"continue\n")?;
-    let mut remaining_output = String::new();
-    stdout.read_to_string(&mut remaining_output)?;
-    assert!(child.wait()?.success());
+    child.write_stdin(b"continue\n")?;
+    assert!(child.wait()?.success(), "child process failed; stdout: {}", child.stdout());
     db.shutdown()?;
     Ok(())
 }
@@ -180,33 +169,21 @@ fn repair_waits_for_other_process() -> Result<(), Box<dyn Error>> {
     let path = directory.path().join("inventory.sqlite");
     let (initial, _) = SqliteDb::open(&path, versioned_migration(1))?;
     initial.shutdown()?;
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    command
         .arg("--exact")
         .arg("sqlite::tests::maintenance_process_helper")
         .arg("--nocapture")
         .env("RADIA_SQLITE_MAINTENANCE_PATH", &path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-    let stdout = child.stdout.take().ok_or("child stdout missing")?;
-    let mut stdout = BufReader::new(stdout);
-    let mut held = false;
-    for line in stdout.by_ref().lines() {
-        if line?.trim() == "sqlite maintenance held" {
-            held = true;
-            break;
-        }
-    }
-    assert!(held, "child process did not retain the database lock");
+        .stderr(Stdio::inherit());
+    let mut child = TestProcess::spawn(&mut command)?;
+    child.wait_for_stdout("sqlite maintenance held")?;
 
     std::assert_matches!(SqliteDb::open(&path, versioned_migration(2)), Err(SqliteError::Busy));
     assert!(path.exists(), "failed repair removed a database another process holds open");
 
-    child.stdin.take().ok_or("child stdin missing")?.write_all(b"continue\n")?;
-    let mut remaining_output = String::new();
-    stdout.read_to_string(&mut remaining_output)?;
-    assert!(child.wait()?.success());
+    child.write_stdin(b"continue\n")?;
+    assert!(child.wait()?.success(), "child process failed; stdout: {}", child.stdout());
     let (repaired, status) = SqliteDb::open(&path, versioned_migration(2))?;
     assert_eq!(status, OpenStatus::Recreated(RecoveryReason::SchemaMismatch));
     repaired.shutdown()?;

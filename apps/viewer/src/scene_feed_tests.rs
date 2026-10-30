@@ -62,7 +62,7 @@ fn motion_sample(received_at: Instant) -> AgentMotionSample {
         velocity: Vec3::ZERO,
         acceleration: Vec3::ZERO,
         time_dilation: 1.0,
-        ping_delay: Duration::ZERO,
+        ping_delay: None,
         simulator_rotation: Quat::IDENTITY,
         received_at,
         seed: 1,
@@ -101,7 +101,7 @@ fn dead_reckoning_applies_half_ping_lead_with_time_dilation() {
     let mut sample = motion_sample(received_at);
     sample.velocity = Vec3::X * 2.0;
     sample.time_dilation = 0.5;
-    sample.ping_delay = Duration::from_millis(100);
+    sample.ping_delay = Some(Duration::from_millis(100));
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
 
@@ -189,7 +189,7 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
         velocity: Vec3::X,
         acceleration: Vec3::ZERO,
         time_dilation: 1.0,
-        ping_delay: Duration::ZERO,
+        ping_delay: None,
         simulator_rotation: Quat::IDENTITY,
         received_at: now,
         seed: 1,

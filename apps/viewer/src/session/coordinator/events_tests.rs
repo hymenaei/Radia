@@ -104,7 +104,7 @@ async fn apply_with_cache(
             sequence,
             Ordered(u64::from(sequence)),
             std::time::Instant::now(),
-            std::time::Duration::ZERO,
+            None,
             message,
             None,
             cache,

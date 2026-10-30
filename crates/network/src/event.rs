@@ -40,7 +40,7 @@ impl SimulatorId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CircuitMotionStatus {
     pub last_packet_received_at: Instant,
-    pub ping_delay: Duration,
+    pub measured_ping_delay: Option<Duration>,
     pub connected: bool,
 }
 
@@ -251,7 +251,7 @@ pub enum Event {
         sequence: u32,
         packet_order: PacketOrder,
         received_at: Instant,
-        ping_delay: Duration,
+        ping_delay: Option<Duration>,
         message: Message,
     },
     SendFailed(String),

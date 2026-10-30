@@ -218,7 +218,7 @@ mod tests {
             sequence,
             packet_order,
             received_at: std::time::Instant::now(),
-            ping_delay: std::time::Duration::ZERO,
+            ping_delay: None,
             message,
         }
     }

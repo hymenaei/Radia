@@ -133,7 +133,7 @@ impl Object {
             angular_velocity: detail.angular_velocity.unwrap_or_default(),
             is_physical: detail.is_physical,
             time_dilation: detail.time_dilation,
-            ping_delay: detail.motion_source.map_or(std::time::Duration::ZERO, world::UpdateSource::motion_ping_delay),
+            ping_delay: detail.motion_source.and_then(world::UpdateSource::motion_ping_delay),
             motion_update_kind: detail.motion_source.map_or(MotionUpdateKind::Full, world::UpdateSource::motion_update_kind),
             is_attachment,
             source: detail.motion_source,

@@ -30,7 +30,7 @@ pub(crate) struct MotionSample {
     pub(crate) angular_velocity: Vec3,
     pub(crate) is_physical: bool,
     pub(crate) time_dilation: f32,
-    pub(crate) ping_delay: Duration,
+    pub(crate) ping_delay: Option<Duration>,
     pub(crate) motion_update_kind: MotionUpdateKind,
     pub(crate) is_attachment: bool,
     pub(crate) source: Option<world::UpdateSource>,
@@ -329,7 +329,7 @@ mod tests {
             angular_velocity,
             is_physical,
             time_dilation: 1.0,
-            ping_delay: Duration::ZERO,
+            ping_delay: None,
             motion_update_kind: MotionUpdateKind::Full,
             is_attachment: false,
             source: None,
@@ -459,7 +459,7 @@ mod tests {
         let received_at = Instant::now();
         let mut sample = sample(DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::ZERO, false);
         sample.time_dilation = 0.5;
-        sample.ping_delay = Duration::from_millis(100);
+        sample.ping_delay = Some(Duration::from_millis(100));
         sample.source =
             Some(UpdateSource::new(Region::new(1), 1, OrderEvidence::Ordered(1), 0).with_motion_timing(received_at, sample.ping_delay));
         let state = MotionState::new(received_at);

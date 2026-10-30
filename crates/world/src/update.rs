@@ -48,7 +48,7 @@ pub struct UpdateSource {
     motion_update_kind: MotionUpdateKind,
     explicit_angular_velocity: bool,
     motion_received_at: Option<Instant>,
-    motion_ping_delay: Duration,
+    motion_ping_delay: Option<Duration>,
 }
 
 impl UpdateSource {
@@ -62,7 +62,7 @@ impl UpdateSource {
             motion_update_kind: MotionUpdateKind::Full,
             explicit_angular_velocity: false,
             motion_received_at: None,
-            motion_ping_delay: Duration::ZERO,
+            motion_ping_delay: None,
         }
     }
 
@@ -81,7 +81,7 @@ impl UpdateSource {
         self
     }
 
-    pub const fn with_motion_timing(mut self, received_at: Instant, ping_delay: Duration) -> Self {
+    pub const fn with_motion_timing(mut self, received_at: Instant, ping_delay: Option<Duration>) -> Self {
         self.motion_received_at = Some(received_at);
         self.motion_ping_delay = ping_delay;
         self
@@ -103,7 +103,7 @@ impl UpdateSource {
         self.motion_received_at
     }
 
-    pub const fn motion_ping_delay(self) -> Duration {
+    pub const fn motion_ping_delay(self) -> Option<Duration> {
         self.motion_ping_delay
     }
 

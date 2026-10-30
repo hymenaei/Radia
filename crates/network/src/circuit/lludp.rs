@@ -126,6 +126,7 @@ pub(crate) struct Circuit {
     ordering_authority: OrderingAuthority,
     duplicate_history_full: bool,
     ping_delay_average: Duration,
+    measured_ping_delay_average: Option<Duration>,
     next_ping_id: u8,
     pending_pings: HashMap<u8, Instant>,
     quarantined_ping_ids: HashMap<u8, Instant>,
@@ -145,6 +146,7 @@ impl Circuit {
             ordering_authority: OrderingAuthority::Trusted,
             duplicate_history_full: false,
             ping_delay_average: INITIAL_PING_DELAY,
+            measured_ping_delay_average: None,
             next_ping_id: 0,
             pending_pings: HashMap::new(),
             quarantined_ping_ids: HashMap::new(),
@@ -155,8 +157,8 @@ impl Circuit {
         MINIMUM_RELIABLE_TIMEOUT.max(self.ping_delay_average.saturating_mul(RELIABLE_TIMEOUT_FACTOR))
     }
 
-    pub(crate) fn ping_delay_average(&self) -> Duration {
-        self.ping_delay_average
+    pub(crate) fn measured_ping_delay_average(&self) -> Option<Duration> {
+        self.measured_ping_delay_average
     }
 
     fn retry_timeout_for(&self, retries: u8) -> Duration {
@@ -189,6 +191,7 @@ impl Circuit {
         self.pending_pings.remove(&ping_id);
         self.quarantined_ping_ids.insert(ping_id, received_at);
         self.update_ping_delay(sample);
+        self.update_measured_ping_delay(sample);
         true
     }
 
@@ -209,6 +212,14 @@ impl Circuit {
         let previous_or_sample = self.ping_delay_average.max(sample);
         let average_nanos = (previous_or_sample.as_nanos() * 4 + sample.as_nanos()) / 5;
         self.ping_delay_average = Duration::from_nanos(average_nanos.min(MAXIMUM_PING_DELAY.as_nanos()) as u64).max(MINIMUM_PING_DELAY);
+    }
+
+    fn update_measured_ping_delay(&mut self, sample: Duration) {
+        let sample = sample.min(MAXIMUM_PING_DELAY);
+        self.measured_ping_delay_average = Some(self.measured_ping_delay_average.map_or(sample, |previous| {
+            let average_nanos = (previous.as_nanos() * 4 + sample.as_nanos()) / 5;
+            Duration::from_nanos(average_nanos as u64)
+        }));
     }
 
     pub(crate) fn has_pending(&self, sequence: u32) -> bool {

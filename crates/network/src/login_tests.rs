@@ -421,7 +421,7 @@ fn debug_redacts_private_data() {
         sequence: 7,
         packet_order: Ordered(7),
         received_at: std::time::Instant::now(),
-        ping_delay: std::time::Duration::ZERO,
+        ping_delay: None,
         message: Message::ChatFromSimulator(ChatFromSimulator {
             chat_data: ChatData {
                 from_name: "private-avatar-name".into(),

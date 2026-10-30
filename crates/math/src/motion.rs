@@ -25,11 +25,11 @@ impl RegionBounds {
     }
 }
 
-pub fn half_ping_lead(time_dilation: f64, ping_delay: Duration, frame_dt: f64) -> f64 {
+pub fn half_ping_lead(time_dilation: f64, ping_delay: Option<Duration>, frame_dt: f64) -> f64 {
     if !time_dilation.is_finite() || !frame_dt.is_finite() {
         return 0.0;
     }
-    0.5 * time_dilation.clamp(0.0, 1.0) * (ping_delay.as_secs_f64() + frame_dt.max(0.0))
+    0.5 * time_dilation.clamp(0.0, 1.0) * (ping_delay.map_or(0.0, |delay| delay.as_secs_f64()) + frame_dt.max(0.0))
 }
 
 pub fn phase_out_needed(sampled_at: Instant, now: Instant, last_packet_received_at: Instant, connected: bool) -> bool {
@@ -214,7 +214,12 @@ mod tests {
 
     #[test]
     fn half_ping_lead_applies_time_dilation_to_ping_and_frame() {
-        assert!((half_ping_lead(0.5, Duration::from_millis(100), 0.02) - 0.03).abs() < f64::EPSILON);
+        assert!((half_ping_lead(0.5, Some(Duration::from_millis(100)), 0.02) - 0.03).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn unmeasured_ping_uses_only_frame_lead() {
+        assert!((half_ping_lead(0.5, None, 0.02) - 0.005).abs() < f64::EPSILON);
     }
 
     #[test]

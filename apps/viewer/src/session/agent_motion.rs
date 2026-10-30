@@ -18,7 +18,7 @@ pub(crate) struct AgentMotionSample {
     pub(crate) velocity: Vec3,
     pub(crate) acceleration: Vec3,
     pub(crate) time_dilation: f32,
-    pub(crate) ping_delay: Duration,
+    pub(crate) ping_delay: Option<Duration>,
     pub(crate) simulator_rotation: Quat,
     pub(crate) received_at: Instant,
     pub(crate) seed: u64,
@@ -66,7 +66,7 @@ impl AgentMotionPublisher {
         region: Region,
         region_origin: DVec3,
         received_at: Instant,
-        ping_delay: Duration,
+        ping_delay: Option<Duration>,
     ) -> bool {
         if self.sender.borrow().is_some()
             || movement.agent_data.agent_id != agent_id
@@ -137,7 +137,7 @@ impl AgentMotionPublisher {
             velocity,
             acceleration,
             time_dilation: agent.time_dilation(),
-            ping_delay: source.map_or(Duration::ZERO, world::UpdateSource::motion_ping_delay),
+            ping_delay: source.and_then(world::UpdateSource::motion_ping_delay),
             simulator_rotation: pose.rotation,
             received_at,
             seed: self.seed,
@@ -189,7 +189,7 @@ mod tests {
             Region::new(1),
             DVec3::new(256.0, 512.0, 0.0),
             now,
-            Duration::ZERO,
+            None,
         ));
         let sample = publisher.receiver().borrow().expect("arrival sample");
         assert_eq!(sample.position, DVec3::new(266.0, 532.0, 30.0));
@@ -206,7 +206,7 @@ mod tests {
             Region::new(1),
             DVec3::ZERO,
             now + Duration::from_secs(1),
-            Duration::ZERO,
+            None,
         ));
         assert_eq!(publisher.receiver().borrow().expect("last valid sample").position, DVec3::new(266.0, 532.0, 30.0));
     }
@@ -217,7 +217,7 @@ mod tests {
         let movement = arrival();
         let (agent_id, session_id) = (movement.agent_data.agent_id, movement.agent_data.session_id);
         let now = std::time::Instant::now();
-        assert!(publisher.publish_arrival(agent_id, session_id, &movement, Region::new(1), DVec3::ZERO, now, Duration::ZERO));
+        assert!(publisher.publish_arrival(agent_id, session_id, &movement, Region::new(1), DVec3::ZERO, now, None));
         let first = publisher.receiver().borrow().expect("arrival sample");
         assert!(!publisher.publish_arrival(
             agent_id,
@@ -226,7 +226,7 @@ mod tests {
             Region::new(1),
             DVec3::new(256.0, 0.0, 0.0),
             now + Duration::from_secs(1),
-            Duration::ZERO
+            None
         ));
         assert_eq!(publisher.receiver().borrow().expect("first arrival kept"), first);
     }
@@ -280,7 +280,7 @@ mod tests {
         world.set_self_agent(agent_id).expect("self agent");
         let rotation = Quat::from_rotation_z(0.4);
         let received_at = std::time::Instant::now();
-        let ping_delay = Duration::from_millis(120);
+        let ping_delay = Some(Duration::from_millis(120));
         let mut agent = ObjectObservation::new(
             UpdateSource::new(region, 1, Ordered(1), 0).with_motion_timing(received_at, ping_delay),
             agent_id,
@@ -340,7 +340,7 @@ mod tests {
             velocity: Vec3::new(f32::INFINITY, 0.0, 0.0),
             acceleration: Vec3::ZERO,
             time_dilation: 1.0,
-            ping_delay: Duration::ZERO,
+            ping_delay: None,
             simulator_rotation: Quat::IDENTITY,
             received_at: std::time::Instant::now(),
             seed: 0,

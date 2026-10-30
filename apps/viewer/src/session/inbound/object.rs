@@ -51,7 +51,7 @@ pub(crate) struct ObjectBatch {
 }
 
 impl ObjectBatch {
-    pub(crate) fn stamp_motion(&mut self, received_at: Instant, ping_delay: Duration) {
+    pub(crate) fn stamp_motion(&mut self, received_at: Instant, ping_delay: Option<Duration>) {
         for operation in self.blocks.iter_mut().flatten() {
             operation.set_source(operation.source().with_motion_timing(received_at, ping_delay));
         }

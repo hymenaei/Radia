@@ -803,6 +803,7 @@ async fn retry_timeout_tracks_ping() {
     let mut buffer = [0; 1024];
 
     assert_eq!(circuit.retry_timeout(), Duration::from_secs(5));
+    assert_eq!(circuit.measured_ping_delay_average(), None);
     let sent_at = Instant::now();
     send_ping_at(&mut circuit, &transport, sent_at).await.expect("send circuit ping");
     let (_, packet) = receive_packet(&simulator, &mut buffer).await;
@@ -812,6 +813,7 @@ async fn retry_timeout_tracks_ping() {
 
     assert!(circuit.record_ping_response(message.ping_id.ping_id, sent_at + Duration::from_millis(300)));
     assert_eq!(circuit.retry_timeout(), Duration::from_millis(4300));
+    assert_eq!(circuit.measured_ping_delay_average(), Some(Duration::from_millis(300)));
     assert!(!circuit.record_ping_response(message.ping_id.ping_id, Instant::now() + Duration::from_secs(1)));
 }
 

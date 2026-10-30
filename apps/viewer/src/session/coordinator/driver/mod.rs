@@ -618,7 +618,7 @@ impl SessionDriver {
         packet_order: PacketOrder,
         source: std::net::SocketAddr,
         received_at: std::time::Instant,
-        ping_delay: std::time::Duration,
+        ping_delay: Option<std::time::Duration>,
         message: Message,
     ) {
         let primary_origin_before = (self.primary_simulator == Some(simulator_id)).then(|| self.primary_region_origin()).flatten();
@@ -815,7 +815,7 @@ impl SessionDriver {
         let Some(origin) = self.session_world.world().region(region).and_then(world::RegionInfo::resolved_origin) else {
             return;
         };
-        let ping_delay = self.motion_statuses.get(&simulator_id).map_or(std::time::Duration::ZERO, |status| status.borrow().ping_delay);
+        let ping_delay = self.motion_statuses.get(&simulator_id).and_then(|status| status.borrow().measured_ping_delay);
         if self.agent_motion.publish_arrival(session.agent_id, session.session_id, movement, region, origin, received_at, ping_delay) {
             self.camera.request_update();
         }

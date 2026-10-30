@@ -276,7 +276,7 @@ mod tests {
                 order,
                 Ordered(u64::from(order)),
                 std::time::Instant::now(),
-                std::time::Duration::ZERO,
+                None,
                 &message,
             );
             handle_simulator_message(SimulatorScope::Primary, address, &message, None, None, world.region_name(simulator), &mailbox);

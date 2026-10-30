@@ -336,7 +336,7 @@ fn retained_packet_event(budget: &SimulatorMemoryBudget, simulator_id: Simulator
             sequence,
             packet_order: Ordered(u64::from(sequence)),
             received_at: std::time::Instant::now(),
-            ping_delay: std::time::Duration::ZERO,
+            ping_delay: None,
             message: packet.into_message(),
         },
         reservation.into_retention(),

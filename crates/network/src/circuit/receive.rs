@@ -340,9 +340,9 @@ impl ConnectionTask {
             return Ok(None);
         }
         self.phase.mark_established();
-        let ping_delay = self.connection.circuit.ping_delay_average();
+        let measured_ping_delay = self.connection.circuit.measured_ping_delay_average();
         self.motion_status_sender.send_modify(|status| {
-            status.ping_delay = ping_delay;
+            status.measured_ping_delay = measured_ping_delay;
             status.connected = true;
         });
         tracing::info!(role = ?self.connection.current_primary_state().connection_role(), "simulator connected");
@@ -447,7 +447,7 @@ impl ConnectionTask {
                     sequence: packet.sequence(),
                     packet_order,
                     received_at: received_at.into_std(),
-                    ping_delay: self.connection.circuit.ping_delay_average(),
+                    ping_delay: self.connection.circuit.measured_ping_delay_average(),
                     message: packet.into_message(),
                 },
                 memory_reservation.take().expect("application packet was admitted").into_retention(),
@@ -463,11 +463,11 @@ impl ConnectionTask {
     }
 
     fn record_motion_packet(&self, received_at: Instant) {
-        let ping_delay = self.connection.circuit.ping_delay_average();
+        let measured_ping_delay = self.connection.circuit.measured_ping_delay_average();
         let connected = self.phase.is_established();
         self.motion_status_sender.send_modify(|status| {
             status.last_packet_received_at = received_at.into_std();
-            status.ping_delay = ping_delay;
+            status.measured_ping_delay = measured_ping_delay;
             status.connected = connected;
         });
     }

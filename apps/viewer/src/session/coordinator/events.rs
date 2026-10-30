@@ -91,7 +91,7 @@ pub(super) fn decode_simulator_world_update(
     sequence: u32,
     packet_order: PacketOrder,
     received_at: Instant,
-    ping_delay: Duration,
+    ping_delay: Option<Duration>,
     message: &Message,
 ) -> Option<DecodedWorldUpdate> {
     let region = world.region_for(simulator_id)?;
@@ -329,7 +329,7 @@ impl WorldHandoff {
         sequence: u32,
         packet_order: PacketOrder,
         received_at: Instant,
-        ping_delay: Duration,
+        ping_delay: Option<Duration>,
         message: &Message,
         agent_id: Option<Uuid>,
         object_cache: &mut ObjectCacheSession,

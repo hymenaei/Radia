@@ -272,6 +272,7 @@ pub(in crate::circuit) async fn run_budget_retry(role: ConnectionRole) {
     })
     .await
     .expect("memory rejection is recorded before inspecting acknowledgements");
+    drop(full_budget);
     let fence = Packet::new(sequence + 1, crate::fixtures::circuit::start_ping(77, 0)).encode().expect("encode admission fence");
     simulator.send_to(&fence, peer).await.expect("fence rejected memory admission");
     let (_, acknowledgements) = crate::fixtures::simulator::receive_message_with_acknowledgements(
@@ -291,7 +292,6 @@ pub(in crate::circuit) async fn run_budget_retry(role: ConnectionRole) {
         "memory rejection must remain visible to Session coverage handling"
     );
 
-    drop(full_budget);
     simulator.send_to(&wire, peer).await.expect("retry after byte budget recovers");
     receive_ack(&simulator, sequence).await;
     std::assert_matches!(receive_message_event(&mut received_events, sequence).await, Event::SimulatorMessage { .. });

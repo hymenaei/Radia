@@ -52,6 +52,27 @@ async fn neighbor_pressure_keeps_primary_live_inner() {
     second_neighbor.send_to(&second_chat, second_peer).await.expect("send second neighbor payload under pressure");
     harness.primary.send_to(&start_ping_packet(32, 7, 0), harness.primary_peer).await.expect("send primary ping under neighbor pressure");
     receive_message(&harness.primary, |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 7)).await;
+    let mut coverage_changed = harness.coverage.subscribe();
+    timeout(WAIT, async {
+        loop {
+            let snapshot = harness.coverage.snapshot();
+            if [harness.neighbor_id, second_id].into_iter().all(|id| {
+                snapshot.losses.iter().any(|loss| {
+                    matches!(loss, CoverageLoss::Source(record)
+                    if record.watermark.simulator_id == id
+                        && record.watermark.source == CoverageSource::Lludp
+                        && record.reason == CoverageLossReason::RetainedMemoryAdmission)
+                })
+            }) {
+                break;
+            }
+            coverage_changed.changed().await.expect("coverage ledger remains active");
+        }
+    })
+    .await
+    .expect("both neighbor packets are rejected before memory recovery");
+    assert_eq!(harness.packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES - MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
+    drop(neighbor_budget);
     harness.neighbor.send_to(&start_ping_packet(42, 8, 0), harness.neighbor_peer).await.expect("fence first neighbor rejection");
     second_neighbor.send_to(&start_ping_packet(52, 9, 0), second_peer).await.expect("fence second neighbor rejection");
     let (_, first_acks) = crate::fixtures::simulator::receive_message_with_acknowledgements(
@@ -66,9 +87,6 @@ async fn neighbor_pressure_keeps_primary_live_inner() {
     .await;
     assert!(!first_acks.contains(&41), "first neighbor rejection must remain unacknowledged");
     assert!(!second_acks.contains(&51), "second neighbor rejection must remain unacknowledged");
-    assert_eq!(harness.packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES - MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
-
-    drop(neighbor_budget);
     harness.neighbor.send_to(&chat, harness.neighbor_peer).await.expect("retry neighbor payload after budget recovery");
     second_neighbor.send_to(&second_chat, second_peer).await.expect("retry second neighbor payload after budget recovery");
     receive_ack(&harness.neighbor, 41).await;

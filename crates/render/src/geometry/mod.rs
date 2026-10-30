@@ -18,6 +18,7 @@ use std::{
 };
 
 use assets::TextureId;
+use math::motion::RegionBounds;
 use uuid::Uuid;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
@@ -31,7 +32,7 @@ use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
 use self::items::ItemIndex;
 use self::mesh::GpuMesh;
 use self::storage::Storage;
-use crate::scene::{AgentPose, Camera, MeshId, ViewVersion, motion::RegionBounds};
+use crate::scene::{AgentPose, Camera, MeshId, ViewVersion};
 use crate::{
     pipeline::{SurfacePipelines, Water},
     texture::{TextureCompletion, TextureJob, TextureState, Textures},

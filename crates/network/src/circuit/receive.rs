@@ -49,6 +49,7 @@ enum RejectionKind {
 struct DecodedPacket {
     packet: Packet,
     admission: ReceiveAdmission,
+    received_at: Instant,
     decode_permit: Option<OwnedSemaphorePermit>,
     ack_decode_permit: Option<OwnedSemaphorePermit>,
     memory_reservation: Option<PacketMemoryReservation>,
@@ -143,8 +144,10 @@ impl ConnectionTask {
                 return Ok(RunControl::Continue);
             }
         };
+        let received_at = Instant::now();
+        self.record_motion_packet(received_at);
         let admission =
-            match self.connection.circuit.prepare_receive(frame.sequence(), frame.is_reliable(), frame.appended_acks(), Instant::now()) {
+            match self.connection.circuit.prepare_receive(frame.sequence(), frame.is_reliable(), frame.appended_acks(), received_at) {
                 Ok(admission) => admission,
                 Err(_) => {
                     self.reject(RejectionKind::AcknowledgementAdmission, CoverageLossReason::AcknowledgementAdmission);
@@ -158,7 +161,7 @@ impl ConnectionTask {
                 &self.connection.circuit,
                 self.ack_timer_due || self.phase.is_draining(),
             )?;
-            self.last_udp_received = Instant::now();
+            self.last_udp_received = received_at;
             return Ok(RunControl::Continue);
         }
         let message_id = match frame.message_id() {
@@ -234,6 +237,7 @@ impl ConnectionTask {
         self.process_decoded_packet(DecodedPacket {
             packet,
             admission,
+            received_at,
             decode_permit,
             ack_decode_permit: _ack_decode_permit,
             memory_reservation,
@@ -241,7 +245,8 @@ impl ConnectionTask {
     }
 
     fn process_decoded_packet(&mut self, decoded: DecodedPacket) -> Result<RunControl, ConnectionError> {
-        let DecodedPacket { packet, admission, decode_permit, ack_decode_permit: _ack_decode_permit, mut memory_reservation } = decoded;
+        let DecodedPacket { packet, admission, received_at, decode_permit, ack_decode_permit: _ack_decode_permit, mut memory_reservation } =
+            decoded;
         if let Some(reservation) = &mut memory_reservation
             && self.packet_memory.trim_packet_reservation(reservation, &packet).is_err()
         {
@@ -264,7 +269,7 @@ impl ConnectionTask {
             let Some(permit) = self.packet_memory.application_events().try_acquire() else {
                 self.note_application_admission_failure("event_credit");
                 self.reject(RejectionKind::EventAdmission, CoverageLossReason::EventAdmission);
-                self.last_udp_received = Instant::now();
+                self.last_udp_received = received_at;
                 drop(memory_reservation);
                 drop(decode_permit);
                 return Ok(RunControl::Continue);
@@ -280,7 +285,7 @@ impl ConnectionTask {
         };
         if dispatch_message && (self.phase.is_closing() || self.events.is_closed()) {
             self.reject(RejectionKind::EventAdmission, CoverageLossReason::EventAdmission);
-            self.last_udp_received = Instant::now();
+            self.last_udp_received = received_at;
             drop(memory_reservation);
             drop(decode_permit);
             return Ok(RunControl::Continue);
@@ -288,13 +293,13 @@ impl ConnectionTask {
         if dispatch_message && event_queue_full {
             self.note_application_admission_failure("connection_event_queue");
             self.reject(RejectionKind::EventAdmission, CoverageLossReason::EventAdmission);
-            self.last_udp_received = Instant::now();
+            self.last_udp_received = received_at;
             drop(application_credit);
             drop(memory_reservation);
             drop(decode_permit);
             return Ok(RunControl::Continue);
         }
-        self.last_udp_received = Instant::now();
+        self.last_udp_received = received_at;
         let receive_outcome = self.connection.circuit.commit_received_packet(admission, &packet);
         preempt_deferred_send(
             &mut self.pending_send,
@@ -312,6 +317,7 @@ impl ConnectionTask {
             return Ok(RunControl::Continue);
         }
         let dispatch_message = self.handle_simulator_message(message, connection_role, dispatch_allowed)?;
+        self.record_motion_packet(received_at);
         preempt_deferred_send(
             &mut self.pending_send,
             &mut self.outbound,
@@ -321,6 +327,7 @@ impl ConnectionTask {
         self.dispatch_new_packet(
             packet,
             receive_outcome.packet_order,
+            received_at,
             dispatch_message,
             dispatch_allowed,
             application_credit,
@@ -333,11 +340,23 @@ impl ConnectionTask {
             return Ok(None);
         }
         self.phase.mark_established();
+        let ping_delay = self.connection.circuit.ping_delay_average();
+        self.motion_status_sender.send_modify(|status| {
+            status.ping_delay = ping_delay;
+            status.connected = true;
+        });
         tracing::info!(role = ?self.connection.current_primary_state().connection_role(), "simulator connected");
         match self.queue_event(Event::SimulatorConnected {
             simulator_id: self.connection.simulator_id,
             region_handle: self.connection.region_handle,
             endpoint: self.connection.session.simulator_address,
+        }) {
+            NeighborEventQueueOutcome::ReceiverClosed => return Ok(Some(RunControl::Finish(None))),
+            NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::BacklogFull => {}
+        }
+        match self.queue_event(Event::SimulatorMotionStatus {
+            simulator_id: self.connection.simulator_id,
+            motion_status: self.motion_status_receiver.clone(),
         }) {
             NeighborEventQueueOutcome::ReceiverClosed => return Ok(Some(RunControl::Finish(None))),
             NeighborEventQueueOutcome::Queued | NeighborEventQueueOutcome::BacklogFull => {}
@@ -414,6 +433,7 @@ impl ConnectionTask {
         &mut self,
         packet: Packet,
         packet_order: crate::event::PacketOrder,
+        received_at: Instant,
         dispatch_message: bool,
         dispatch_allowed: bool,
         application_credit: Option<OwnedSemaphorePermit>,
@@ -426,6 +446,8 @@ impl ConnectionTask {
                     source: self.connection.session.simulator_address,
                     sequence: packet.sequence(),
                     packet_order,
+                    received_at: received_at.into_std(),
+                    ping_delay: self.connection.circuit.ping_delay_average(),
                     message: packet.into_message(),
                 },
                 memory_reservation.take().expect("application packet was admitted").into_retention(),
@@ -438,6 +460,16 @@ impl ConnectionTask {
             self.reject(RejectionKind::EventAdmission, CoverageLossReason::EventAdmission);
         }
         Ok(RunControl::Continue)
+    }
+
+    fn record_motion_packet(&self, received_at: Instant) {
+        let ping_delay = self.connection.circuit.ping_delay_average();
+        let connected = self.phase.is_established();
+        self.motion_status_sender.send_modify(|status| {
+            status.last_packet_received_at = received_at.into_std();
+            status.ping_delay = ping_delay;
+            status.connected = connected;
+        });
     }
 
     fn queue_simulator_message_event(&mut self, event: EventEnvelope) -> RunControl {

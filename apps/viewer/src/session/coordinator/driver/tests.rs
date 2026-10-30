@@ -8,10 +8,10 @@ use tokio::sync::oneshot;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
-use super::{
-    FolderFetch, MoveExpectation, PendingHandshakeReplies, apply_inventory_fetch, cache_restore_move_changes,
-    resolve_pending_inventory_moves,
-};
+use crate::inventory::FolderFetch;
+
+use super::inventory::{apply_inventory_fetch, cache_restore_move_changes, resolve_pending_inventory_moves};
+use super::{MoveExpectation, PendingHandshakeReplies};
 
 #[test]
 fn pending_handshake_replies_share_one_drain_and_keep_each_reply() {

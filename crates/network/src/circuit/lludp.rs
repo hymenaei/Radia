@@ -155,6 +155,10 @@ impl Circuit {
         MINIMUM_RELIABLE_TIMEOUT.max(self.ping_delay_average.saturating_mul(RELIABLE_TIMEOUT_FACTOR))
     }
 
+    pub(crate) fn ping_delay_average(&self) -> Duration {
+        self.ping_delay_average
+    }
+
     fn retry_timeout_for(&self, retries: u8) -> Duration {
         let multiplier = 1u32.checked_shl(u32::from(retries)).unwrap_or(u32::MAX);
         self.retry_timeout().saturating_mul(multiplier).min(KEEPALIVE_TIMEOUT)

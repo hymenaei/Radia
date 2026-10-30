@@ -1,18 +1,27 @@
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use math::{DVec3, Quat, Vec3, motion as kinematics};
 use world::{Entity, MotionUpdateKind, Parent, Region, WorldPose, WorldTransform};
 
 use super::SceneView;
 
-const MAX_REGION_CROSSING_TIME: f64 = 1.0;
-const REGION_SIZE: f64 = 256.0;
-const REGION_EDGE_EPSILON: f64 = 0.000_001;
 const MAX_PARENT_EDGES: usize = 16;
+const MAX_REGION_HEIGHT: f64 = 4096.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MotionCircuit {
+    pub region: Region,
+    pub last_packet_received_at: Instant,
+    pub connected: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MotionSample {
     pub(crate) transform: WorldTransform,
+    pub(crate) kind: world::Kind,
     pub(crate) region: Region,
     pub(crate) local_position: Vec3,
     pub(crate) local_rotation: Quat,
@@ -21,6 +30,7 @@ pub(crate) struct MotionSample {
     pub(crate) angular_velocity: Vec3,
     pub(crate) is_physical: bool,
     pub(crate) time_dilation: f32,
+    pub(crate) ping_delay: Duration,
     pub(crate) motion_update_kind: MotionUpdateKind,
     pub(crate) is_attachment: bool,
     pub(crate) source: Option<world::UpdateSource>,
@@ -37,7 +47,18 @@ impl MotionState {
         Self { sampled_at, angular_offset: Quat::IDENTITY }
     }
 
+    #[cfg(test)]
     pub(crate) fn updated(previous_state: Self, previous: MotionSample, next: MotionSample, at: Instant) -> Self {
+        Self::updated_at(previous_state, previous, next, at, at)
+    }
+
+    pub(crate) fn updated_at(
+        previous_state: Self,
+        previous: MotionSample,
+        next: MotionSample,
+        _rendered_at: Instant,
+        sampled_at: Instant,
+    ) -> Self {
         if same_motion(previous, next) {
             return previous_state;
         }
@@ -45,15 +66,15 @@ impl MotionState {
             && previous.local_rotation == next.local_rotation
             && next.angular_velocity == Vec3::ZERO
         {
-            return Self::new(at);
+            return Self::new(sampled_at);
         }
         let physical_velocity_changed = next.is_physical && previous.angular_velocity != next.angular_velocity;
         let angular_offset = if previous.local_rotation == next.local_rotation && !physical_velocity_changed {
-            local_rotation(previous, previous_state, at) * next.local_rotation.inverse()
+            local_rotation(previous, previous_state, sampled_at) * next.local_rotation.inverse()
         } else {
             Quat::IDENTITY
         };
-        Self { sampled_at: at, angular_offset }
+        Self { sampled_at, angular_offset }
     }
 
     fn elapsed(self, now: Instant) -> f64 {
@@ -78,21 +99,6 @@ fn same_motion(previous: MotionSample, next: MotionSample) -> bool {
         && previous.motion_update_kind == next.motion_update_kind
         && previous.is_attachment == next.is_attachment
         && previous.source == next.source
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct RegionBounds {
-    region: Region,
-    origin: DVec3,
-}
-
-impl RegionBounds {
-    fn contains(self, position: DVec3) -> bool {
-        position.x >= self.origin.x
-            && position.x < self.origin.x + REGION_SIZE
-            && position.y >= self.origin.y
-            && position.y < self.origin.y + REGION_SIZE
-    }
 }
 
 pub(crate) fn needs_evaluation(view: &SceneView, entity: Entity) -> bool {
@@ -121,13 +127,13 @@ pub(crate) fn fill_placement_pair(
     entities: &[Entity],
     placements: &mut HashMap<Entity, WorldTransform>,
     future_placements: &mut HashMap<Entity, WorldTransform>,
-    regions: &mut Vec<RegionBounds>,
+    regions: &mut Vec<kinematics::RegionBounds>,
 ) {
     placements.clear();
     future_placements.clear();
     regions.clear();
     regions.extend(view.regions().filter_map(|region| {
-        region.summary().info.resolved_origin().map(|origin| RegionBounds { region: region.summary().region, origin })
+        region.summary().info.resolved_origin().map(|origin| kinematics::RegionBounds { region_id: region.summary().region.get(), origin })
     }));
     for entity in entities {
         let _ = placement_pair(*entity, view, now, future, placements, future_placements, regions, 0);
@@ -141,7 +147,7 @@ fn placement_pair(
     future: Instant,
     placements: &mut HashMap<Entity, WorldTransform>,
     future_placements: &mut HashMap<Entity, WorldTransform>,
-    regions: &[RegionBounds],
+    regions: &[kinematics::RegionBounds],
     depth: usize,
 ) -> Option<(WorldTransform, WorldTransform)> {
     if let (Some(current), Some(future)) = (placements.get(&entity), future_placements.get(&entity)) {
@@ -162,10 +168,14 @@ fn placement_pair(
         match object.detail().summary.parent {
             Parent::Root => {
                 let state = object.motion_state();
-                current.pose =
-                    WorldPose { position: linear_position(sample, state, now, regions), rotation: state.local_rotation(sample, now) };
-                next.pose =
-                    WorldPose { position: linear_position(sample, state, future, regions), rotation: state.local_rotation(sample, future) };
+                current.pose = WorldPose {
+                    position: linear_position_with_view(view, sample, state, now, phase_out(view, sample, state, now), regions),
+                    rotation: state.local_rotation(sample, now),
+                };
+                next.pose = WorldPose {
+                    position: linear_position_with_view(view, sample, state, future, phase_out(view, sample, state, future), regions),
+                    rotation: state.local_rotation(sample, future),
+                };
             }
             Parent::Resolved(parent) => {
                 let (parent_current, parent_future) =
@@ -215,108 +225,84 @@ fn rotation_delta(angular_velocity: Vec3, elapsed: f64) -> Quat {
     Quat::from_axis_angle((velocity / rate).as_vec3(), angle)
 }
 
-fn linear_position(sample: MotionSample, state: MotionState, now: Instant, regions: &[RegionBounds]) -> DVec3 {
-    let start = sample.transform.pose.position;
-    if sample.is_attachment || (sample.velocity == Vec3::ZERO && sample.acceleration == Vec3::ZERO) {
-        return start;
-    }
-    let elapsed = state.elapsed(now);
-    let time_dilation = f64::from(sample.time_dilation);
-    let effective = kinematics::effective_elapsed(elapsed, time_dilation, true);
-    let predicted = position_at_effective(sample, effective);
-    let assigned_bounds = regions.iter().copied().find(|bounds| bounds.region == sample.region);
-    let Some(mut bounds) =
-        assigned_bounds.filter(|bounds| bounds.contains(start)).or_else(|| regions.iter().copied().find(|bounds| bounds.contains(start)))
-    else {
-        return if assigned_bounds.is_some() { start } else { predicted };
-    };
-    let mut after_effective = 0.0;
-    let mut allowed_effective = effective;
-    let mut last_boundary = start;
-    let max_crossings = regions.len().saturating_mul(8).saturating_add(1);
-    for crossing_index in 0..max_crossings {
-        let Some((crossing_time, point, direction)) = first_region_exit(sample, bounds, after_effective, allowed_effective) else {
-            return if crossing_index == 0 { predicted } else { position_at_effective(sample, allowed_effective) };
-        };
-        last_boundary = point;
-        let probe = point + direction * REGION_EDGE_EPSILON;
-        let Some(next_region) = region_at(probe, regions) else { return point };
-        let Some(next_bounds) = regions.iter().copied().find(|candidate| candidate.region == next_region) else { return point };
-        if crossing_index == 0 {
-            let Some(crossing_elapsed) = raw_elapsed(crossing_time, time_dilation) else { return point };
-            allowed_effective =
-                effective.min(kinematics::effective_elapsed(crossing_elapsed + MAX_REGION_CROSSING_TIME, time_dilation, true));
-        }
-        bounds = next_bounds;
-        after_effective = crossing_time + crossing_time.abs().max(1.0) * f64::EPSILON * 8.0;
-    }
-    last_boundary
+fn phase_out(view: &SceneView, sample: MotionSample, state: MotionState, now: Instant) -> bool {
+    let sampled_at = sample.source.and_then(world::UpdateSource::motion_received_at).unwrap_or(state.sampled_at);
+    view.motion_circuit(sample.region)
+        .is_none_or(|circuit| kinematics::phase_out_needed(sampled_at, now, circuit.last_packet_received_at, circuit.connected))
 }
 
+#[cfg(test)]
+fn linear_position(sample: MotionSample, state: MotionState, now: Instant, regions: &[kinematics::RegionBounds]) -> DVec3 {
+    linear_position_raw(sample, state, now, true, regions)
+}
+
+#[cfg(test)]
 fn position_at_effective(sample: MotionSample, elapsed: f64) -> DVec3 {
     kinematics::position_at_effective(sample.transform.pose.position, sample.velocity, sample.acceleration, elapsed)
 }
 
-fn raw_elapsed(effective: f64, time_dilation: f64) -> Option<f64> {
-    if !time_dilation.is_finite() || time_dilation <= 0.0 {
-        return None;
+fn linear_position_with_view(
+    view: &SceneView,
+    sample: MotionSample,
+    state: MotionState,
+    now: Instant,
+    phase_out: bool,
+    regions: &[kinematics::RegionBounds],
+) -> DVec3 {
+    clamp_motion_height(view, sample, linear_position_raw(sample, state, now, phase_out, regions))
+}
+
+fn linear_position_raw(
+    sample: MotionSample,
+    state: MotionState,
+    now: Instant,
+    phase_out: bool,
+    regions: &[kinematics::RegionBounds],
+) -> DVec3 {
+    if sample.is_attachment || (sample.velocity == Vec3::ZERO && sample.acceleration == Vec3::ZERO) {
+        let start = sample.transform.pose.position;
+        return start;
     }
-    let phase_elapsed = effective / time_dilation;
-    if phase_elapsed <= kinematics::PHASE_OUT_TIME {
-        Some(phase_elapsed)
-    } else if phase_elapsed <= kinematics::PHASE_OUT_TIME + 0.5 {
-        Some(kinematics::MAX_INTERPOLATION_TIME - (5.0 - 2.0 * phase_elapsed).sqrt())
+    let frame_dt = if sample.source.and_then(world::UpdateSource::motion_received_at).is_some() {
+        kinematics::FRAME_INTERVAL.as_secs_f64()
     } else {
-        None
-    }
+        0.0
+    };
+    let lead = kinematics::half_ping_lead(f64::from(sample.time_dilation), sample.ping_delay, frame_dt);
+    let mut projected_sample = sample;
+    projected_sample.transform.pose.position += sample.velocity.as_dvec3() * lead;
+    let elapsed = state.elapsed(now);
+    let time_dilation = f64::from(sample.time_dilation);
+    let effective = kinematics::effective_elapsed(elapsed, time_dilation);
+    let predicted = kinematics::bounded_position(
+        sample.region.get(),
+        projected_sample.transform.pose.position,
+        sample.velocity,
+        sample.acceleration,
+        effective,
+        time_dilation,
+        regions,
+    );
+    kinematics::apply_phase_out(projected_sample.transform.pose.position, predicted, elapsed, phase_out)
 }
 
-fn first_region_exit(sample: MotionSample, bounds: RegionBounds, after_effective: f64, max_effective: f64) -> Option<(f64, DVec3, DVec3)> {
-    let start = sample.transform.pose.position;
-    let velocity = sample.velocity.as_dvec3();
-    let acceleration = sample.acceleration.as_dvec3();
-    let edges = [
-        (start.x, velocity.x, acceleration.x, bounds.origin.x, -1.0, DVec3::NEG_X),
-        (start.x, velocity.x, acceleration.x, bounds.origin.x + REGION_SIZE, 1.0, DVec3::X),
-        (start.y, velocity.y, acceleration.y, bounds.origin.y, -1.0, DVec3::NEG_Y),
-        (start.y, velocity.y, acceleration.y, bounds.origin.y + REGION_SIZE, 1.0, DVec3::Y),
-    ];
-    let mut crossing = None;
-    for (position, velocity, acceleration, edge, direction, vector) in edges {
-        for time in boundary_roots(edge - position, velocity, acceleration) {
-            if !time.is_finite() || time < after_effective || time < 0.0 || time > max_effective {
-                continue;
-            }
-            let derivative = velocity + acceleration * (time - 0.5 * kinematics::PHYSICS_TIMESTEP);
-            if direction * derivative <= 0.0 {
-                continue;
-            }
-            if crossing.is_none_or(|(current, _, _)| time < current) {
-                crossing = Some((time, position_at_effective(sample, time), vector));
-            }
+fn clamp_motion_height(view: &SceneView, sample: MotionSample, mut position: DVec3) -> DVec3 {
+    let ground = view.terrain_height_at(position);
+    if sample.kind == world::Kind::Avatar {
+        if let Some(ground) = ground {
+            position.z = position.z.max(ground + 0.5 * f64::from(sample.transform.scale.z));
         }
+        return position;
     }
-    crossing
-}
-
-fn boundary_roots(distance: f64, velocity: f64, acceleration: f64) -> [f64; 2] {
-    let a = 0.5 * acceleration;
-    let b = velocity - 0.5 * acceleration * kinematics::PHYSICS_TIMESTEP;
-    let c = -distance;
-    if a == 0.0 {
-        let root = if b == 0.0 { f64::NAN } else { -c / b };
-        return [root, f64::NAN];
+    let region_max_height = view
+        .region(sample.region)
+        .and_then(|region| region.summary().info.resolved_origin())
+        .map_or(MAX_REGION_HEIGHT, |origin| origin.z + MAX_REGION_HEIGHT);
+    position.z = position.z.min(region_max_height);
+    if let Some(ground) = ground {
+        position.z = position.z.max(ground - 0.5 * f64::from(sample.transform.scale.length()));
     }
-    let discriminant = b * b - 4.0 * a * c;
-    if discriminant < 0.0 || !discriminant.is_finite() {
-        return [f64::NAN; 2];
-    }
-    let root = discriminant.sqrt();
-    [(-b - root) / (2.0 * a), (-b + root) / (2.0 * a)]
-}
-
-fn region_at(position: DVec3, regions: &[RegionBounds]) -> Option<Region> {
-    regions.iter().find(|bounds| bounds.contains(position)).map(|bounds| bounds.region)
+    position
 }
 
 #[cfg(test)]
@@ -333,6 +319,7 @@ mod tests {
     fn sample(position: DVec3, velocity: Vec3, acceleration: Vec3, angular_velocity: Vec3, is_physical: bool) -> MotionSample {
         MotionSample {
             transform: WorldTransform { pose: WorldPose { position, rotation: Quat::IDENTITY }, scale: Vec3::ONE },
+            kind: world::Kind::Object,
             region: Region::new(1),
             local_position: Vec3::ZERO,
             local_rotation: Quat::IDENTITY,
@@ -341,6 +328,7 @@ mod tests {
             angular_velocity,
             is_physical,
             time_dilation: 1.0,
+            ping_delay: Duration::ZERO,
             motion_update_kind: MotionUpdateKind::Full,
             is_attachment: false,
             source: None,
@@ -366,6 +354,8 @@ mod tests {
         let _ = world.adopt_region(region).expect("region adoption");
         let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("region origin");
         let source = |order| UpdateSource::new(region, order as u32, OrderEvidence::Ordered(order), 0);
+        let terrain = world::TerrainPatch::new(1, 0, Box::new([0.0; world::TERRAIN_PATCH_SAMPLES])).expect("flat terrain patch");
+        let _ = world.observe_terrain_patch(source(1), terrain).expect("terrain patch");
         let mut root =
             ObjectObservation::new(source(1), Uuid::from_u128(1), NonZeroU32::new(1).unwrap(), world::Kind::Object, ParentUpdate::Root);
         root.pose = Some(Pose { position: Some(Vec3::new(20.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
@@ -429,17 +419,32 @@ mod tests {
         let sample = sample(DVec3::ZERO, Vec3::new(2.0, -1.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::ZERO, false);
         let position = position_at_effective(sample, 1.0);
         let expected = DVec3::new(2.0 + 2.0 * (1.0 - kinematics::PHYSICS_TIMESTEP), -1.0 + (1.0 - kinematics::PHYSICS_TIMESTEP), 0.0);
-        assert_eq!(kinematics::effective_elapsed(1.0, 1.0, true), 1.0);
+        assert_eq!(kinematics::effective_elapsed(1.0, 1.0), 1.0);
         close_vec(position, expected);
         assert_eq!(MotionState::new(now).elapsed(now), 0.0);
     }
 
     #[test]
+    fn receipt_time_sample_uses_ping_and_frame_lead() {
+        let received_at = Instant::now();
+        let mut sample = sample(DVec3::ZERO, Vec3::X * 2.0, Vec3::ZERO, Vec3::ZERO, false);
+        sample.time_dilation = 0.5;
+        sample.ping_delay = Duration::from_millis(100);
+        sample.source =
+            Some(UpdateSource::new(Region::new(1), 1, OrderEvidence::Ordered(1), 0).with_motion_timing(received_at, sample.ping_delay));
+        let state = MotionState::new(received_at);
+
+        let position = linear_position_raw(sample, state, received_at + Duration::from_secs(1), false, &[]);
+
+        assert!((position.x - 1.058).abs() < 1e-12);
+    }
+
+    #[test]
     fn interpolation_phases_out_and_stops() {
-        assert_eq!(kinematics::effective_elapsed(2.0, 1.0, true), 2.0);
-        assert_eq!(kinematics::effective_elapsed(2.5, 1.0, true), 2.375);
-        assert_eq!(kinematics::effective_elapsed(3.0, 1.0, true), 2.5);
-        assert_eq!(kinematics::effective_elapsed(12.0, 1.0, true), 2.5);
+        assert_eq!(kinematics::phase_out_scale(2.0, true), 1.0);
+        assert_eq!(kinematics::phase_out_scale(2.5, true), 0.5);
+        assert_eq!(kinematics::phase_out_scale(3.0, true), 0.0);
+        assert_eq!(kinematics::phase_out_scale(12.0, true), 0.0);
     }
 
     #[test]
@@ -659,6 +664,48 @@ mod tests {
     }
 
     #[test]
+    fn healthy_circuit_keeps_extrapolating_past_three_seconds() {
+        let (_scene, mut view) = child_scene(None);
+        let root = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("root is published");
+        let entity = root.detail().summary.entity;
+        let now = root.motion_state().sampled_at + Duration::from_secs(5);
+        view.set_motion_circuits(&[MotionCircuit { region: Region::new(1), last_packet_received_at: now, connected: true }]);
+        let mut placements = HashMap::new();
+        let mut future_placements = HashMap::new();
+        let mut regions = Vec::new();
+
+        fill_placement_pair(&view, now, now + Duration::from_millis(16), &[entity], &mut placements, &mut future_placements, &mut regions);
+
+        close_vec(placements.get(&entity).expect("root placement").pose.position, DVec3::new(30.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn falling_avatar_clamps_to_terrain_plus_half_height() {
+        let (_scene, view) = child_scene(None);
+        let now = Instant::now();
+        let mut falling = sample(DVec3::new(20.0, 1.0, -10.0), Vec3::NEG_Z * 20.0, Vec3::ZERO, Vec3::ZERO, false);
+        falling.kind = world::Kind::Avatar;
+        falling.transform.scale.z = 2.0;
+        let state = MotionState::new(now);
+
+        let position = linear_position_with_view(&view, falling, state, now + Duration::from_secs(1), false, &[]);
+
+        assert_eq!(position.z, 1.0);
+    }
+
+    #[test]
+    fn object_prediction_clamps_to_region_max_height() {
+        let (_scene, view) = child_scene(None);
+        let now = Instant::now();
+        let high = sample(DVec3::new(20.0, 1.0, 5000.0), Vec3::Z, Vec3::ZERO, Vec3::ZERO, false);
+        let state = MotionState::new(now);
+
+        let position = linear_position_with_view(&view, high, state, now + Duration::from_secs(1), false, &[]);
+
+        assert_eq!(position.z, 4096.0);
+    }
+
+    #[test]
     fn redraw_stops_for_stationary_or_invisible_transforms() {
         let stationary = WorldTransform { pose: WorldPose { position: DVec3::ZERO, rotation: Quat::IDENTITY }, scale: Vec3::ONE };
         let moving = WorldTransform { pose: WorldPose { position: DVec3::X, rotation: Quat::IDENTITY }, scale: Vec3::ONE };
@@ -676,8 +723,8 @@ mod tests {
         let moving = sample(DVec3::new(255.0, 20.0, 0.0), Vec3::X * 100.0, Vec3::ZERO, Vec3::ZERO, false);
         let state = MotionState::new(now);
         let regions = [
-            RegionBounds { region: Region::new(1), origin: DVec3::ZERO },
-            RegionBounds { region: Region::new(2), origin: DVec3::new(256.0, 0.0, 0.0) },
+            kinematics::RegionBounds { region_id: Region::new(1).get(), origin: DVec3::ZERO },
+            kinematics::RegionBounds { region_id: Region::new(2).get(), origin: DVec3::new(256.0, 0.0, 0.0) },
         ];
         close_vec(linear_position(moving, state, now + Duration::from_millis(1500), &regions), DVec3::new(356.0, 20.0, 0.0));
     }
@@ -688,8 +735,8 @@ mod tests {
         let moving = sample(DVec3::new(255.0, 20.0, 0.0), Vec3::X * 300.0, Vec3::ZERO, Vec3::ZERO, false);
         let state = MotionState::new(now);
         let regions = [
-            RegionBounds { region: Region::new(1), origin: DVec3::ZERO },
-            RegionBounds { region: Region::new(2), origin: DVec3::new(256.0, 0.0, 0.0) },
+            kinematics::RegionBounds { region_id: Region::new(1).get(), origin: DVec3::ZERO },
+            kinematics::RegionBounds { region_id: Region::new(2).get(), origin: DVec3::new(256.0, 0.0, 0.0) },
         ];
 
         close_vec(linear_position(moving, state, now + Duration::from_millis(900), &regions), DVec3::new(512.0, 20.0, 0.0));
@@ -701,8 +748,8 @@ mod tests {
         let moving = sample(DVec3::new(300.0, 20.0, 0.0), Vec3::X * 300.0, Vec3::ZERO, Vec3::ZERO, false);
         let state = MotionState::new(now);
         let regions = [
-            RegionBounds { region: Region::new(1), origin: DVec3::ZERO },
-            RegionBounds { region: Region::new(2), origin: DVec3::new(256.0, 0.0, 0.0) },
+            kinematics::RegionBounds { region_id: Region::new(1).get(), origin: DVec3::ZERO },
+            kinematics::RegionBounds { region_id: Region::new(2).get(), origin: DVec3::new(256.0, 0.0, 0.0) },
         ];
 
         close_vec(linear_position(moving, state, now + Duration::from_millis(900), &regions), DVec3::new(512.0, 20.0, 0.0));
@@ -713,7 +760,7 @@ mod tests {
         let now = Instant::now();
         let moving = sample(DVec3::new(255.0, 20.0, 0.0), Vec3::X * 100.0, Vec3::ZERO, Vec3::ZERO, false);
         let state = MotionState::new(now);
-        let regions = [RegionBounds { region: Region::new(1), origin: DVec3::ZERO }];
+        let regions = [kinematics::RegionBounds { region_id: Region::new(1).get(), origin: DVec3::ZERO }];
         close_vec(linear_position(moving, state, now + Duration::from_millis(1500), &regions), DVec3::new(256.0, 20.0, 0.0));
     }
 }

@@ -63,6 +63,8 @@ mod memory {
                 source: simulator_address(),
                 sequence: packet.sequence(),
                 packet_order: Ordered(1),
+                received_at: std::time::Instant::now(),
+                ping_delay: std::time::Duration::ZERO,
                 message: packet.into_message(),
             },
             reservation.into_retention(),

@@ -4,6 +4,7 @@ use std::{
     fmt::{self, Display, Formatter},
     mem::size_of,
     num::NonZeroU32,
+    time::{Duration, Instant},
 };
 
 use math::Vec3;
@@ -45,11 +46,22 @@ pub struct UpdateSource {
     pub(super) block_ordinal: u32,
     pub(super) authority: UpdateAuthority,
     motion_update_kind: MotionUpdateKind,
+    motion_received_at: Option<Instant>,
+    motion_ping_delay: Duration,
 }
 
 impl UpdateSource {
     pub const fn new(region: Region, sequence: u32, order: OrderEvidence, block_ordinal: u32) -> Self {
-        Self { region, sequence, order, block_ordinal, authority: UpdateAuthority::Tracked, motion_update_kind: MotionUpdateKind::Full }
+        Self {
+            region,
+            sequence,
+            order,
+            block_ordinal,
+            authority: UpdateAuthority::Tracked,
+            motion_update_kind: MotionUpdateKind::Full,
+            motion_received_at: None,
+            motion_ping_delay: Duration::ZERO,
+        }
     }
 
     pub const fn with_authority(mut self, authority: UpdateAuthority) -> Self {
@@ -62,12 +74,26 @@ impl UpdateSource {
         self
     }
 
+    pub const fn with_motion_timing(mut self, received_at: Instant, ping_delay: Duration) -> Self {
+        self.motion_received_at = Some(received_at);
+        self.motion_ping_delay = ping_delay;
+        self
+    }
+
     pub const fn authority(self) -> UpdateAuthority {
         self.authority
     }
 
     pub const fn motion_update_kind(self) -> MotionUpdateKind {
         self.motion_update_kind
+    }
+
+    pub const fn motion_received_at(self) -> Option<Instant> {
+        self.motion_received_at
+    }
+
+    pub const fn motion_ping_delay(self) -> Duration {
+        self.motion_ping_delay
     }
 
     pub const fn region(self) -> Region {

@@ -70,6 +70,9 @@ impl ObjectCacheSession {
                 let mut operation = decode_cached_object(region, sequence, order, ordinal, reference, &payload, &mut invalid_fields);
                 if operation.is_some() {
                     if let Some(operation) = &mut operation {
+                        if let Some(received_at) = source.motion_received_at() {
+                            operation.set_source(operation.source().with_motion_timing(received_at, source.motion_ping_delay()));
+                        }
                         operation.set_is_physical(reference.update_flags & FLAGS_USE_PHYSICS != 0);
                     }
                     for mut request in object_media_requests(region, sequence, order, &payload) {

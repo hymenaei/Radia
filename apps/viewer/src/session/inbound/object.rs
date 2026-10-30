@@ -1,4 +1,7 @@
-use std::num::{NonZeroU8, NonZeroU32};
+use std::{
+    num::{NonZeroU8, NonZeroU32},
+    time::{Duration, Instant},
+};
 
 use math::{UvTransform, Vec3};
 use protocol::{
@@ -47,6 +50,14 @@ pub(crate) struct ObjectBatch {
     pub(crate) invalid_fields: usize,
 }
 
+impl ObjectBatch {
+    pub(crate) fn stamp_motion(&mut self, received_at: Instant, ping_delay: Duration) {
+        for operation in self.blocks.iter_mut().flatten() {
+            operation.set_source(operation.source().with_motion_timing(received_at, ping_delay));
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ObjectOperation {
     Observe(ObjectObservation),
@@ -69,6 +80,14 @@ impl ObjectOperation {
             Self::Observe(observation) => observation.is_physical = Some(is_physical),
             Self::Patch(patch) => patch.is_physical = Some(is_physical),
             Self::Remove { .. } | Self::Cached { .. } => {}
+        }
+    }
+
+    pub(crate) fn set_source(&mut self, source: UpdateSource) {
+        match self {
+            Self::Observe(observation) => observation.source = source,
+            Self::Patch(patch) => patch.source = source,
+            Self::Remove { source: current, .. } | Self::Cached { source: current, .. } => *current = source,
         }
     }
 

@@ -25,7 +25,7 @@ pub struct Object {
 impl Object {
     pub(in crate::scene) fn new(source: ObjectDetail, lease: Lease) -> Self {
         let animation_clock = source.texture_animation.map(|_| AnimationClock { started_at: Instant::now(), frame_offset: 0.0 });
-        let motion = MotionState::new(Instant::now());
+        let motion = MotionState::new(source.motion_source.and_then(world::UpdateSource::motion_received_at).unwrap_or_else(Instant::now));
         Self {
             data: Arc::new(ObjectData { source, _lease: lease }),
             preparation: None,
@@ -120,6 +120,7 @@ impl Object {
         let is_attachment = detail.attachment_point.is_some();
         Some(MotionSample {
             transform,
+            kind: detail.summary.kind,
             region: detail.summary.address.region(),
             local_position: if is_attachment { Vec3::ZERO } else { detail.summary.local_transform.position().unwrap_or_default() },
             local_rotation: if is_attachment {
@@ -132,6 +133,7 @@ impl Object {
             angular_velocity: detail.angular_velocity.unwrap_or_default(),
             is_physical: detail.is_physical,
             time_dilation: detail.time_dilation,
+            ping_delay: detail.motion_source.map_or(std::time::Duration::ZERO, world::UpdateSource::motion_ping_delay),
             motion_update_kind: detail.motion_source.map_or(MotionUpdateKind::Full, world::UpdateSource::motion_update_kind),
             is_attachment,
             source: detail.motion_source,
@@ -147,7 +149,8 @@ impl Object {
             self.motion = MotionState::new(at);
             return;
         };
-        self.motion = MotionState::updated(previous.motion, previous_sample, next_sample, at);
+        let sampled_at = next_sample.source.and_then(world::UpdateSource::motion_received_at).unwrap_or(at);
+        self.motion = MotionState::updated_at(previous.motion, previous_sample, next_sample, at, sampled_at);
     }
 
     pub fn geometry(&self) -> Geometry {

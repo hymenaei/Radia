@@ -35,7 +35,7 @@ use crate::{
     },
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
     error::Error,
-    event::{EventEnvelope, SimulatorId},
+    event::{CircuitMotionStatus, EventEnvelope, SimulatorId},
 };
 use outbound::{
     MovementSend, OutboundQueue, PendingSend, QueuedMessage, active_queue_class, agent_throttle_message, expire_deferred_retries,
@@ -136,6 +136,14 @@ struct ConnectionTask {
     last_send_was_retry: bool,
     event_delivery_turn: bool,
     packet_rejections: receive::PacketRejections,
+    motion_status_sender: watch::Sender<CircuitMotionStatus>,
+    motion_status_receiver: watch::Receiver<CircuitMotionStatus>,
+}
+
+impl Drop for ConnectionTask {
+    fn drop(&mut self) {
+        self.motion_status_sender.send_modify(|status| status.connected = false);
+    }
 }
 
 impl Drop for SimulatorConnection {

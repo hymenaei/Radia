@@ -189,7 +189,9 @@ impl Mirror {
                         }
                     }
                 } else {
-                    object.motion = super::motion::MotionState::new(now);
+                    object.motion = super::motion::MotionState::new(
+                        object.detail().motion_source.and_then(world::UpdateSource::motion_received_at).unwrap_or(now),
+                    );
                 }
                 self.objects.insert(object.detail().summary.entity, object);
             }

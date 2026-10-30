@@ -103,6 +103,8 @@ async fn apply_with_cache(
             simulator,
             sequence,
             Ordered(u64::from(sequence)),
+            std::time::Instant::now(),
+            std::time::Duration::ZERO,
             message,
             None,
             cache,

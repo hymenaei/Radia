@@ -2,6 +2,7 @@ use std::{
     fmt,
     net::SocketAddr,
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 
 use llsd::Value;
@@ -34,6 +35,13 @@ impl SimulatorId {
     pub(crate) fn allocate() -> Option<Self> {
         NEXT_SIMULATOR_ID.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1)).ok().map(Self)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CircuitMotionStatus {
+    pub last_packet_received_at: Instant,
+    pub ping_delay: Duration,
+    pub connected: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -163,21 +171,89 @@ impl From<Event> for EventEnvelope {
 }
 
 pub enum Event {
-    MfaRequired { challenge: MfaChallenge },
-    LoginAccepted { mfa_hash: Option<String> },
-    SessionReady { simulator_id: SimulatorId, session: Box<AgentSession>, capabilities: Client, login_data: ResponseData },
-    CapabilityEvent { simulator_id: SimulatorId, source: SocketAddr, message: String, body: Value },
-    CapabilityEventBatch { simulator_id: SimulatorId, source: SocketAddr, order: EventQueueBatchOrder, events: Vec<CapabilityEvent> },
-    CapabilityError { simulator_id: SimulatorId, source: SocketAddr, capability: String, reason: String },
-    EventQueueCoverageLost { simulator_id: SimulatorId, source: SocketAddr, reason: String },
-    CoverageLost { loss: crate::coverage::CoverageLoss },
-    SimulatorConnected { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr },
-    SimulatorDisconnected { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr },
-    SimulatorFailed { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr, reason: String },
-    SimulatorConnectFailed { simulator_id: SimulatorId, region_handle: u64, endpoint: SocketAddr },
-    SimulatorCapabilities { simulator_id: SimulatorId, source: SocketAddr, capabilities: Client },
-    SimulatorPromoted { previous_simulator_id: SimulatorId, simulator_id: SimulatorId, session: Box<AgentSession>, capabilities: Client },
-    SimulatorMessage { simulator_id: SimulatorId, source: SocketAddr, sequence: u32, packet_order: PacketOrder, message: Message },
+    MfaRequired {
+        challenge: MfaChallenge,
+    },
+    LoginAccepted {
+        mfa_hash: Option<String>,
+    },
+    SessionReady {
+        simulator_id: SimulatorId,
+        session: Box<AgentSession>,
+        capabilities: Client,
+        login_data: ResponseData,
+    },
+    CapabilityEvent {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        message: String,
+        body: Value,
+    },
+    CapabilityEventBatch {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        order: EventQueueBatchOrder,
+        events: Vec<CapabilityEvent>,
+    },
+    CapabilityError {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        capability: String,
+        reason: String,
+    },
+    EventQueueCoverageLost {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        reason: String,
+    },
+    CoverageLost {
+        loss: crate::coverage::CoverageLoss,
+    },
+    SimulatorConnected {
+        simulator_id: SimulatorId,
+        region_handle: Option<u64>,
+        endpoint: SocketAddr,
+    },
+    SimulatorMotionStatus {
+        simulator_id: SimulatorId,
+        motion_status: watch::Receiver<CircuitMotionStatus>,
+    },
+    SimulatorDisconnected {
+        simulator_id: SimulatorId,
+        region_handle: Option<u64>,
+        endpoint: SocketAddr,
+    },
+    SimulatorFailed {
+        simulator_id: SimulatorId,
+        region_handle: Option<u64>,
+        endpoint: SocketAddr,
+        reason: String,
+    },
+    SimulatorConnectFailed {
+        simulator_id: SimulatorId,
+        region_handle: u64,
+        endpoint: SocketAddr,
+    },
+    SimulatorCapabilities {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        capabilities: Client,
+    },
+    SimulatorPromoted {
+        previous_simulator_id: SimulatorId,
+        simulator_id: SimulatorId,
+        session: Box<AgentSession>,
+        capabilities: Client,
+    },
+    SimulatorMessage {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        sequence: u32,
+        packet_order: PacketOrder,
+        received_at: Instant,
+        ping_delay: Duration,
+        message: Message,
+    },
     SendFailed(String),
     Failed(String),
 }
@@ -234,6 +310,11 @@ impl fmt::Debug for Event {
                 .field("simulator_id", &"[SESSION LOCAL]")
                 .field("region_handle", &"[REDACTED]")
                 .field("endpoint", &"[REDACTED]")
+                .finish(),
+            Self::SimulatorMotionStatus { .. } => formatter
+                .debug_struct("SimulatorMotionStatus")
+                .field("simulator_id", &"[SESSION LOCAL]")
+                .field("motion_status", &"[OMITTED]")
                 .finish(),
             Self::SimulatorDisconnected { .. } => formatter
                 .debug_struct("SimulatorDisconnected")

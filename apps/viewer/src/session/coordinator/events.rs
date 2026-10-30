@@ -1,4 +1,10 @@
-use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[cfg(test)]
 use network::Event;
@@ -84,6 +90,8 @@ pub(super) fn decode_simulator_world_update(
     simulator_id: SimulatorId,
     sequence: u32,
     packet_order: PacketOrder,
+    received_at: Instant,
+    ping_delay: Duration,
     message: &Message,
 ) -> Option<DecodedWorldUpdate> {
     let region = world.region_for(simulator_id)?;
@@ -164,7 +172,10 @@ pub(super) fn decode_simulator_world_update(
         Ok(None) => {}
         Err(_) => return Some(DecodedWorldUpdate::Malformed { invalid_blocks: 1, invalid_fields: 0 }),
     }
-    decode_object_message(region, sequence, order_evidence(packet_order), message).map(DecodedWorldUpdate::Object)
+    decode_object_message(region, sequence, order_evidence(packet_order), message).map(|mut batch| {
+        batch.stamp_motion(received_at, ping_delay);
+        DecodedWorldUpdate::Object(batch)
+    })
 }
 
 fn record_parcel_rejection(world: &mut SessionWorld, simulator_id: SimulatorId, region: world::Region) {
@@ -298,8 +309,9 @@ impl WorldHandoff {
                 self.simulator_connected(world, *simulator_id, *region_handle);
                 None
             }
-            SimulatorMessage { simulator_id, sequence, packet_order, message, .. } => {
-                let update = decode_simulator_world_update(world, *simulator_id, *sequence, *packet_order, message)?;
+            SimulatorMessage { simulator_id, sequence, packet_order, received_at, ping_delay, message, .. } => {
+                let update =
+                    decode_simulator_world_update(world, *simulator_id, *sequence, *packet_order, *received_at, *ping_delay, message)?;
                 self.apply_update(world, *simulator_id, update, agent_id)
             }
             SimulatorDisconnected { simulator_id, .. } | SimulatorFailed { simulator_id, .. } => {
@@ -316,13 +328,15 @@ impl WorldHandoff {
         simulator_id: SimulatorId,
         sequence: u32,
         packet_order: PacketOrder,
+        received_at: Instant,
+        ping_delay: Duration,
         message: &Message,
         agent_id: Option<Uuid>,
         object_cache: &mut ObjectCacheSession,
         on_object_chunk: &mut impl FnMut(Vec<(Option<SimulatorId>, LocalAddress, protocol::messages::CacheMissType)>, Vec<LocalAddress>),
         media_requests: &mut Vec<ObjectMediaRequest>,
     ) -> Option<SimulatorMessageOutcome> {
-        let update = decode_simulator_world_update(world, simulator_id, sequence, packet_order, message)?;
+        let update = decode_simulator_world_update(world, simulator_id, sequence, packet_order, received_at, ping_delay, message)?;
         let mut recovered_media_requests = Vec::new();
         let update = match (update, message) {
             (DecodedWorldUpdate::Object(batch), Message::ObjectUpdateCached(cached)) => {

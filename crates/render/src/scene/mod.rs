@@ -30,6 +30,7 @@ pub use mesh_cache::{MeshKey, PreparedMesh};
 pub use model::{
     ApplyError, Batch, Geometry, HiddenReason, Object, Patch, Placement, RecoveryReason, RegionData, SceneView, Status, ViewVersion,
 };
+pub use motion::MotionCircuit;
 pub use planning::{MeshCompletion, MeshJob};
 pub use reconcile::{
     MAX_BATCH_CHANGES, MAX_OBJECTS, MAX_REGIONS, MAX_RETAINED_BYTES, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler,

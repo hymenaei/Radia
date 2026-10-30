@@ -9,7 +9,7 @@ mod persistence;
 mod presentation;
 
 #[cfg(test)]
-pub(crate) use self::driver::resolve_pending_inventory_moves;
+pub(crate) use self::driver::inventory::resolve_pending_inventory_moves;
 pub(crate) use self::driver::{CredentialPersistence, drain_session};
 #[cfg(test)]
 use self::input::select_drain_input;
@@ -212,7 +212,15 @@ mod tests {
         packet_order: PacketOrder,
         message: Message,
     ) -> Event {
-        SimulatorMessage { simulator_id, source: "127.0.0.1:13000".parse().expect("simulator address"), sequence, packet_order, message }
+        SimulatorMessage {
+            simulator_id,
+            source: "127.0.0.1:13000".parse().expect("simulator address"),
+            sequence,
+            packet_order,
+            received_at: std::time::Instant::now(),
+            ping_delay: std::time::Duration::ZERO,
+            message,
+        }
     }
 
     pub(super) fn chat_message(from_name: &str) -> Message {
@@ -240,7 +248,7 @@ mod tests {
     }
 
     async fn apply_world_cooperatively(world: &mut SessionWorld, handoff: &mut WorldHandoff, event: &Event) {
-        if let Event::SimulatorMessage { simulator_id, sequence, packet_order, message, .. } = event {
+        if let Event::SimulatorMessage { simulator_id, sequence, packet_order, received_at, ping_delay, message, .. } = event {
             let mut object_cache = ObjectCacheSession::new(Grid::Agni);
             let mut media_requests = Vec::new();
             let _ = handoff
@@ -249,6 +257,8 @@ mod tests {
                     *simulator_id,
                     *sequence,
                     *packet_order,
+                    *received_at,
+                    *ping_delay,
                     message,
                     None,
                     &mut object_cache,

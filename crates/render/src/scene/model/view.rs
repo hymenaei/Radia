@@ -1,14 +1,15 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     error::Error,
     fmt::{self, Display, Formatter},
     mem::size_of,
     time::Instant,
 };
 
-use world::{Entity, Region, WorldRevision};
+use world::{Entity, Region, TERRAIN_PATCH_SIZE, TERRAIN_REGION_SIZE, TerrainPatchId, WorldRevision};
 
 use super::{Batch, Change, MeshChange, Mirror, SceneLifetime, Status};
+use crate::scene::motion::MotionCircuit;
 use crate::scene::{Object, Patch, RegionData, Surface, ViewerEnvironment, region_environment::RegionEnvironment};
 
 const CHANGE_HISTORY: usize = 64;
@@ -99,6 +100,7 @@ pub struct SceneView {
     reconcile_marker: SceneChanges,
     replacement_marker: SceneChanges,
     replacement_sequence: Option<u64>,
+    motion_circuits: HashMap<Region, MotionCircuit>,
 }
 
 impl SceneView {
@@ -118,6 +120,7 @@ impl SceneView {
             reconcile_marker: SceneChanges { reconcile_all: true, ..SceneChanges::default() },
             replacement_marker: SceneChanges { full: true, ..SceneChanges::default() },
             replacement_sequence: None,
+            motion_circuits: HashMap::new(),
         }
     }
 
@@ -177,6 +180,14 @@ impl SceneView {
     pub fn patch_count(&self) -> usize {
         if self.session.is_active() { self.mirror.patches.len() } else { 0 }
     }
+    pub fn set_motion_circuits(&mut self, circuits: &[MotionCircuit]) {
+        self.motion_circuits.clear();
+        self.motion_circuits.extend(circuits.iter().copied().map(|circuit| (circuit.region, circuit)));
+    }
+
+    pub(crate) fn motion_circuit(&self, region: Region) -> Option<MotionCircuit> {
+        self.motion_circuits.get(&region).copied()
+    }
     pub fn objects(&self) -> impl Iterator<Item = &Object> {
         self.mirror.objects.values().filter(|_| self.session.is_active())
     }
@@ -195,6 +206,39 @@ impl SceneView {
     }
     pub fn patches(&self) -> impl Iterator<Item = (Region, &Patch)> {
         self.mirror.patches.iter().filter(|_| self.session.is_active()).map(|((region, _), patch)| (*region, patch))
+    }
+
+    pub fn terrain_height_at(&self, position: math::DVec3) -> Option<f64> {
+        if !self.session.is_active() || !position.is_finite() {
+            return None;
+        }
+        let (region, origin) = self.mirror.regions.values().find_map(|region| {
+            let origin = region.summary().info.resolved_origin()?;
+            (position.x >= origin.x
+                && position.x < origin.x + TERRAIN_REGION_SIZE as f64
+                && position.y >= origin.y
+                && position.y < origin.y + TERRAIN_REGION_SIZE as f64)
+                .then_some((region.summary().region, origin))
+        })?;
+        let local_x = position.x - origin.x;
+        let local_y = position.y - origin.y;
+        let patch_x = (local_x / TERRAIN_PATCH_SIZE as f64).floor() as u8;
+        let patch_y = (local_y / TERRAIN_PATCH_SIZE as f64).floor() as u8;
+        let patch_id = TerrainPatchId::new(patch_x, patch_y)?;
+        let patch = self.mirror.patches.get(&(region, patch_id))?;
+        let x = (local_x - f64::from(patch_x) * TERRAIN_PATCH_SIZE as f64).clamp(0.0, (TERRAIN_PATCH_SIZE - 1) as f64);
+        let y = (local_y - f64::from(patch_y) * TERRAIN_PATCH_SIZE as f64).clamp(0.0, (TERRAIN_PATCH_SIZE - 1) as f64);
+        let x0 = x.floor() as usize;
+        let y0 = y.floor() as usize;
+        let x1 = (x0 + 1).min(TERRAIN_PATCH_SIZE - 1);
+        let y1 = (y0 + 1).min(TERRAIN_PATCH_SIZE - 1);
+        let tx = x - x0 as f64;
+        let ty = y - y0 as f64;
+        let heights = patch.source().heights();
+        let height = |x: usize, y: usize| f64::from(heights[y * TERRAIN_PATCH_SIZE + x]);
+        let low = height(x0, y0) * (1.0 - tx) + height(x1, y0) * tx;
+        let high = height(x0, y1) * (1.0 - tx) + height(x1, y1) * tx;
+        Some(origin.z + low * (1.0 - ty) + high * ty)
     }
     pub fn water_height(&self, region: Region) -> Option<f32> {
         if self.session.is_active() { self.mirror.water.get(&region).copied().flatten() } else { None }

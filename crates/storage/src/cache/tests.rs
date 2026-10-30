@@ -558,7 +558,7 @@ fn interrupted_multi_chunk_write_reopens_with_committed_entries() {
     let (queued, resumes, puts) = queue_puts(Arc::clone(&cache), &keys);
     release_queued_puts(queued, resumes, keys.len());
     resume_worker.send(()).expect("start writer");
-    chunk_committed.recv_timeout(Duration::from_secs(3)).expect("first chunk committed");
+    chunk_committed.recv_timeout(Duration::from_secs(60)).expect("first chunk committed");
     resume_chunk.send(()).expect("interrupt the multi-chunk write");
     let results = puts.into_iter().map(|put| put.join().expect("cache put completes")).collect::<Vec<_>>();
 

@@ -28,7 +28,7 @@ use super::{
     inventory_bootstrap::{InventoryBootstrapReport, InventoryWorkerError, spawn_inventory_build},
     inventory_cache::{InventoryCacheEvent, InventoryCacheSession},
     media::ObjectMediaIntake,
-    presentation::{AuthenticationUpdate, PresentationMailbox, SessionReadyUpdate, ViewerUpdate},
+    presentation::{AuthenticationUpdate, PresentationMailbox, SessionEnd, SessionReadyUpdate, ViewerUpdate},
 };
 use crate::{
     asset_coordinator::AssetCoordinator,
@@ -51,6 +51,18 @@ use crate::{
 use crate::session::experience_environment::{EnvironmentInbox, EnvironmentSender};
 
 type Cancellation = Shared<BoxFuture<'static, ()>>;
+
+fn network_end_after_stream_close(disconnect_requested: bool, failure: Option<String>, primary_disconnected: bool) -> SessionEnd {
+    if let Some(failure) = failure {
+        SessionEnd::Failed(failure)
+    } else if disconnect_requested {
+        SessionEnd::Requested
+    } else if primary_disconnected {
+        SessionEnd::Failed("The primary simulator disconnected.".into())
+    } else {
+        SessionEnd::Failed("The network session ended.".into())
+    }
+}
 
 enum DriverInput {
     Session(Input),
@@ -110,6 +122,8 @@ struct SessionDriver {
     runtime: Handle,
     mailbox: PresentationMailbox,
     cancellation: Cancellation,
+    network_failure: Option<String>,
+    primary_disconnected: bool,
     credentials: CredentialPersistence,
     session_world: SessionWorld,
     reads: WorldReadHost,
@@ -194,6 +208,8 @@ impl SessionDriver {
             runtime,
             mailbox,
             cancellation,
+            network_failure: None,
+            primary_disconnected: false,
             credentials,
             session_world,
             reads,
@@ -318,7 +334,10 @@ impl SessionDriver {
                 }
                 DriverInput::InventoryEdit(None) => ControlFlow::Continue(()),
                 DriverInput::Session(input) => match input {
-                    Input::Cancelled => ControlFlow::Break(()),
+                    Input::Cancelled => {
+                        self.mailbox.publish(ViewerUpdate::Ended);
+                        ControlFlow::Break(())
+                    }
                     Input::Event(event) => self.handle_network_event(event).await,
                     Input::InventoryFetch(Some(event)) => {
                         self.handle_inventory_fetch(event);
@@ -400,7 +419,15 @@ impl SessionDriver {
 
     async fn handle_network_event(&mut self, event: Option<Event>) -> ControlFlow<()> {
         let Some(event) = event else {
-            self.mailbox.publish(ViewerUpdate::Failed("The network session ended.".into()));
+            let end = network_end_after_stream_close(
+                self.session_handle.is_disconnect_requested(),
+                self.network_failure.take(),
+                self.primary_disconnected,
+            );
+            self.mailbox.publish(match end {
+                SessionEnd::Requested => ViewerUpdate::Ended,
+                SessionEnd::Failed(error) => ViewerUpdate::Failed(error),
+            });
             return ControlFlow::Break(());
         };
         self.handle_event(event).await
@@ -512,26 +539,8 @@ impl SessionDriver {
                 self.mailbox.publish(ViewerUpdate::Failed(error));
                 ControlFlow::Break(())
             }
-            SimulatorDisconnected { simulator_id, .. } | SimulatorFailed { simulator_id, .. } => {
-                let region = self.session_world.region_for(simulator_id).map(|region| region.get());
-                tracing::info!(simulator = simulator_id.get(), region, "simulator disconnected");
-                self.camera.simulator_disconnected(simulator_id);
-                self.environments.simulator_disconnected(&mut self.session_world, simulator_id);
-                if let Some(region) = self.session_world.region_for(simulator_id) {
-                    self.assets.retire(region);
-                }
-                self.handoff.simulator_disconnected(&mut self.session_world, simulator_id);
-                self.motion_statuses.remove(&simulator_id);
-                self.publish_region_motion();
-                self.object_cache.forget_simulator(simulator_id);
-                self.recovery.cancel_simulator(simulator_id);
-                self.media.forget_simulator(simulator_id);
-                if Some(simulator_id) == self.primary_simulator {
-                    self.primary_simulator = None;
-                    self.camera.request_update();
-                }
-                ControlFlow::Continue(())
-            }
+            SimulatorDisconnected { simulator_id, .. } => self.handle_simulator_disconnect(simulator_id, None),
+            SimulatorFailed { simulator_id, reason, .. } => self.handle_simulator_disconnect(simulator_id, Some(reason)),
             CapabilityEvent { simulator_id, message, body, .. } => {
                 self.handle_inventory_event_queue(&message, &body);
                 self.environments.capability(&mut self.session_world, simulator_id, &message, &body, self.primary_simulator);
@@ -731,6 +740,8 @@ impl SessionDriver {
     ) {
         self.camera.request_update();
         self.media.set_client(simulator_id, capabilities.clone());
+        self.network_failure = None;
+        self.primary_disconnected = false;
         self.primary_simulator = Some(simulator_id);
         self.active_session = Some(session.clone());
         if let Some(login_data) = login_data {
@@ -741,6 +752,35 @@ impl SessionDriver {
         self.region_lookup = Some(lookup);
         self.publish_session_ready_update(simulator_id, session);
         self.start_favorites_load_for_active();
+    }
+
+    fn handle_simulator_disconnect(&mut self, simulator_id: SimulatorId, reason: Option<String>) -> ControlFlow<()> {
+        if self.primary_simulator == Some(simulator_id) {
+            match reason {
+                Some(reason) if !reason.trim().is_empty() => self.network_failure = Some(reason),
+                Some(_) => self.network_failure = Some("The primary simulator failed.".into()),
+                None => self.primary_disconnected = true,
+            }
+        }
+
+        let region = self.session_world.region_for(simulator_id).map(|region| region.get());
+        tracing::info!(simulator = simulator_id.get(), region, "simulator disconnected");
+        self.camera.simulator_disconnected(simulator_id);
+        self.environments.simulator_disconnected(&mut self.session_world, simulator_id);
+        if let Some(region) = self.session_world.region_for(simulator_id) {
+            self.assets.retire(region);
+        }
+        self.handoff.simulator_disconnected(&mut self.session_world, simulator_id);
+        self.motion_statuses.remove(&simulator_id);
+        self.publish_region_motion();
+        self.object_cache.forget_simulator(simulator_id);
+        self.recovery.cancel_simulator(simulator_id);
+        self.media.forget_simulator(simulator_id);
+        if Some(simulator_id) == self.primary_simulator {
+            self.primary_simulator = None;
+            self.camera.request_update();
+        }
+        ControlFlow::Continue(())
     }
 
     fn publish_session_ready_update(&self, simulator_id: SimulatorId, session: AgentSession) {

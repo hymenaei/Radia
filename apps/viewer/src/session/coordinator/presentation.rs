@@ -59,7 +59,12 @@ impl PresentationMailbox {
                 ViewerUpdate::Failed(error) => {
                     state.chat_messages.clear();
                     state.chat_bytes = 0;
-                    state.failure = Some(error);
+                    state.end_session(SessionEnd::Failed(error));
+                }
+                ViewerUpdate::Ended => {
+                    state.chat_messages.clear();
+                    state.chat_bytes = 0;
+                    state.end_session(SessionEnd::Requested);
                 }
                 ViewerUpdate::Favorites(update) => state.favorites = Some(update),
                 ViewerUpdate::FavoriteStoreSaved { generation, result } => {
@@ -112,7 +117,7 @@ pub(crate) struct PresentationSnapshot {
     pub(crate) session_ready: Option<SessionReadyUpdate>,
     pub(crate) region_name: Option<String>,
     pub(crate) chat_messages: VecDeque<ChatMessage>,
-    pub(crate) failure: Option<String>,
+    pub(crate) session_end: Option<SessionEnd>,
     pub(crate) favorites: Option<FavoritesUpdate>,
     pub(crate) favorite_store_saved: Option<(u64, Result<(), FavoriteStoreError>)>,
 }
@@ -120,9 +125,16 @@ pub(crate) struct PresentationSnapshot {
 impl PresentationSnapshot {
     fn from_pending(generation: u64, pending: PendingPresentation) -> Self {
         let PendingPresentation {
-            authentication, session_ready, region_name, chat_messages, failure, favorites, favorite_store_saved, ..
+            authentication,
+            session_ready,
+            region_name,
+            chat_messages,
+            session_end,
+            favorites,
+            favorite_store_saved,
+            ..
         } = pending;
-        Self { generation, authentication, session_ready, region_name, chat_messages, failure, favorites, favorite_store_saved }
+        Self { generation, authentication, session_ready, region_name, chat_messages, session_end, favorites, favorite_store_saved }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -130,7 +142,7 @@ impl PresentationSnapshot {
             && self.session_ready.is_none()
             && self.region_name.is_none()
             && self.chat_messages.is_empty()
-            && self.failure.is_none()
+            && self.session_end.is_none()
             && self.favorites.is_none()
             && self.favorite_store_saved.is_none()
     }
@@ -139,6 +151,12 @@ impl PresentationSnapshot {
 pub(crate) enum AuthenticationUpdate {
     MfaRequired(MfaChallenge),
     CredentialsUpdated { remembered_login: Option<RememberedLogin>, warning: Option<CredentialStoreError> },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum SessionEnd {
+    Requested,
+    Failed(String),
 }
 
 pub(crate) struct SessionReadyUpdate {
@@ -177,12 +195,19 @@ struct PendingPresentation {
     region_name: Option<String>,
     chat_messages: VecDeque<ChatMessage>,
     chat_bytes: usize,
-    failure: Option<String>,
+    session_end: Option<SessionEnd>,
     favorites: Option<FavoritesUpdate>,
     favorite_store_saved: Option<(u64, Result<(), FavoriteStoreError>)>,
 }
 
 impl PendingPresentation {
+    fn end_session(&mut self, end: SessionEnd) {
+        match (&self.session_end, &end) {
+            (Some(SessionEnd::Failed(_)), _) | (Some(SessionEnd::Requested), SessionEnd::Requested) => {}
+            _ => self.session_end = Some(end),
+        }
+    }
+
     fn push_chat(&mut self, message: ChatMessage) {
         let message_bytes = message.from_name.len().saturating_add(message.message.len());
         if message_bytes > MAX_PENDING_CHAT_BYTES {
@@ -209,6 +234,7 @@ pub(crate) enum ViewerUpdate {
     RegionName(String),
     ChatMessage(ChatMessage),
     Failed(String),
+    Ended,
     Favorites(FavoritesUpdate),
     FavoriteStoreSaved { generation: u64, result: Result<(), FavoriteStoreError> },
 }
@@ -255,10 +281,11 @@ mod tests {
             mailbox.publish(ViewerUpdate::ChatMessage(ChatMessage { from_name: "Agent".into(), message: "Hello".into() }));
         }
         mailbox.publish(ViewerUpdate::Failed("connection closed".into()));
+        mailbox.publish(ViewerUpdate::Ended);
 
         let snapshot = futures::executor::block_on(receiver.next()).expect("failure wake");
         assert!(snapshot.chat_messages.is_empty());
-        assert_eq!(snapshot.failure.as_deref(), Some("connection closed"));
+        assert_eq!(snapshot.session_end, Some(SessionEnd::Failed("connection closed".into())));
     }
 
     #[test]

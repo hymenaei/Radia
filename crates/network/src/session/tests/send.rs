@@ -372,11 +372,25 @@ fn session_drop_requests_disconnect() {
     let (disconnect_requested, disconnect_observed) = watch::channel(false);
     let (_worker_finished_sender, worker_finished) = watch::channel(false);
     let handle = SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished };
+    let observation = handle.clone();
     let session = test_session(handle, mpsc::channel(1).1);
 
     drop(session);
 
     assert!(*disconnect_observed.borrow());
+    assert!(observation.is_disconnect_requested());
+}
+
+#[test]
+fn late_disconnect_preserves_worker_end() {
+    let (commands, _command_receiver) = mpsc::channel(1);
+    let (disconnect_requested, _) = watch::channel(false);
+    let (_worker_finished_sender, worker_finished) = watch::channel(true);
+    let handle = SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(Mutex::new(false)), worker_finished };
+
+    handle.request_disconnect();
+
+    assert!(!handle.is_disconnect_requested());
 }
 
 #[tokio::test]

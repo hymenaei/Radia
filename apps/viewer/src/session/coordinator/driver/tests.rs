@@ -11,7 +11,8 @@ use uuid::Uuid;
 use crate::inventory::FolderFetch;
 
 use super::inventory::{apply_inventory_fetch, cache_restore_move_changes, resolve_pending_inventory_moves};
-use super::{MoveExpectation, PendingHandshakeReplies};
+use super::{MoveExpectation, PendingHandshakeReplies, network_end_after_stream_close};
+use crate::session::SessionEnd;
 
 #[test]
 fn pending_handshake_replies_share_one_drain_and_keep_each_reply() {
@@ -29,6 +30,32 @@ fn pending_handshake_replies_share_one_drain_and_keep_each_reply() {
     assert_eq!(pending.take_next(simulator), Some(3));
     assert_eq!(pending.take_next(simulator), None);
     assert!(pending.by_simulator.is_empty());
+}
+
+#[test]
+fn requested_disconnect_ends_normally() {
+    assert_eq!(network_end_after_stream_close(true, None, true), SessionEnd::Requested);
+}
+
+#[test]
+fn stream_close_keeps_simulator_failure() {
+    assert_eq!(
+        network_end_after_stream_close(false, Some("heartbeat timeout".into()), false),
+        SessionEnd::Failed("heartbeat timeout".into())
+    );
+}
+
+#[test]
+fn disconnect_request_keeps_failure() {
+    assert_eq!(
+        network_end_after_stream_close(true, Some("heartbeat timeout".into()), false),
+        SessionEnd::Failed("heartbeat timeout".into())
+    );
+}
+
+#[test]
+fn unexpected_primary_disconnect_fails() {
+    assert_eq!(network_end_after_stream_close(false, None, true), SessionEnd::Failed("The primary simulator disconnected.".into()));
 }
 
 fn category(key: CategoryKey, parent: Option<CategoryKey>, version: ServerVersion, descendent_count: Option<u32>) -> Category {

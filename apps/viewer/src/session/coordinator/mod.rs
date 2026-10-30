@@ -17,7 +17,7 @@ use self::input::select_drain_input;
 pub(crate) use self::inventory_intake::apply_udp as apply_inventory_udp;
 pub(crate) use self::persistence::{WriteLock, save_favorite_store, write_lock};
 pub(crate) use self::presentation::{
-    AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionReadyUpdate, ViewerUpdate,
+    AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd, SessionReadyUpdate, ViewerUpdate,
 };
 
 #[cfg(test)]

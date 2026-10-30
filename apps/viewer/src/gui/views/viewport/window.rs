@@ -718,7 +718,7 @@ impl SceneWindow {
     ) -> DrawActions {
         let scheduled_deadline = self.next_frame;
         if let Some(feed) = &mut self.feed {
-            feed.refresh_motion_circuits();
+            feed.refresh_motion_circuits(now);
         }
         let scene = self.feed.as_ref().zip(observation).map(|(feed, camera)| (&feed.view, camera));
         let avatar_pose = self.feed.as_ref().zip(agent_pose).map(|(feed, pose)| scene::AgentPose::new(feed.agent_id(), pose));

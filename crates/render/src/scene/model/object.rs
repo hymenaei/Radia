@@ -152,6 +152,18 @@ impl Object {
         }
     }
 
+    pub(in crate::scene) fn start_motion_phase_out(&mut self, at: Option<Instant>) {
+        if let Some(sample) = self.motion_sample() {
+            self.motion.start_linear_phase_out(sample, at);
+        }
+    }
+
+    pub(in crate::scene) fn resume_motion_at(&mut self, now: Instant, regions: &[math::motion::RegionBounds]) {
+        if let Some(sample) = self.motion_sample() {
+            self.motion.resume_linear_at(sample, now, regions);
+        }
+    }
+
     pub(super) fn update_motion_from(&mut self, previous: &Self, at: Instant) {
         let (Some(previous_sample), Some(next_sample)) = (previous.motion_sample(), self.motion_sample()) else {
             self.motion = MotionState::new(at);

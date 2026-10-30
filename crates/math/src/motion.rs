@@ -9,6 +9,7 @@ const MAX_REGION_CROSSING_TIME: f64 = 1.0;
 const MAX_REGION_CROSSINGS: usize = 32;
 const REGION_SIZE: f64 = 256.0;
 const REGION_EDGE_EPSILON: f64 = 0.000_001;
+const PHASE_OUT_DURATION: f64 = MAX_INTERPOLATION_TIME - PHASE_OUT_TIME;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RegionBounds {
@@ -25,6 +26,68 @@ impl RegionBounds {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinearTrajectory {
+    start: DVec3,
+    velocity: Vec3,
+    acceleration: Vec3,
+    time_dilation: f64,
+    sampled_at: Instant,
+    phase_out_at: Option<Instant>,
+}
+
+impl LinearTrajectory {
+    pub fn new(start: DVec3, velocity: Vec3, acceleration: Vec3, time_dilation: f64, sampled_at: Instant) -> Self {
+        Self { start, velocity, acceleration, time_dilation, sampled_at, phase_out_at: None }
+    }
+
+    pub fn start_phase_out(&mut self, at: Instant) {
+        self.phase_out_at.get_or_insert(at.max(self.sampled_at));
+    }
+
+    pub fn is_phase_out_settled(self, now: Instant) -> bool {
+        self.phase_out_at.is_some_and(|at| now.saturating_duration_since(at).as_secs_f64() >= PHASE_OUT_DURATION)
+    }
+
+    pub fn position_at(self, region_id: u64, now: Instant, regions: &[RegionBounds]) -> DVec3 {
+        let Some(phase_out_at) = self.phase_out_at.filter(|at| now >= *at) else {
+            return self.normal_position(region_id, now, regions);
+        };
+        let taper_elapsed = now.saturating_duration_since(phase_out_at).as_secs_f64().min(PHASE_OUT_DURATION);
+        let phase_start = self.normal_position(region_id, phase_out_at, regions);
+        if taper_elapsed == 0.0 {
+            return phase_start;
+        }
+        let effective_to_phase =
+            effective_elapsed(phase_out_at.saturating_duration_since(self.sampled_at).as_secs_f64(), self.time_dilation);
+        let dilation = if self.time_dilation.is_finite() { self.time_dilation.clamp(0.0, 1.0) } else { 0.0 };
+        let velocity = self.velocity.as_dvec3() + self.acceleration.as_dvec3() * (effective_to_phase - 0.5 * PHYSICS_TIMESTEP);
+        let wall_velocity = velocity * dilation;
+        let wall_acceleration = self.acceleration.as_dvec3() * (dilation * dilation);
+        let first_integral = taper_elapsed - taper_elapsed * taper_elapsed / (2.0 * PHASE_OUT_DURATION);
+        let second_integral =
+            taper_elapsed * taper_elapsed / 2.0 - taper_elapsed * taper_elapsed * taper_elapsed / (3.0 * PHASE_OUT_DURATION);
+        let displacement = wall_velocity * first_integral + wall_acceleration * second_integral;
+        let average_velocity = (displacement / taper_elapsed).as_vec3();
+        bounded_position(region_id, phase_start, average_velocity, Vec3::ZERO, taper_elapsed, 1.0, regions)
+    }
+
+    pub fn resume_at(&mut self, region_id: u64, now: Instant, regions: &[RegionBounds]) {
+        if self.phase_out_at.is_none() {
+            return;
+        }
+        let position = self.position_at(region_id, now, regions);
+        let effective = effective_elapsed(now.saturating_duration_since(self.sampled_at).as_secs_f64(), self.time_dilation);
+        let velocity = self.velocity + self.acceleration * effective as f32;
+        *self = Self::new(position, velocity, self.acceleration, self.time_dilation, now);
+    }
+
+    fn normal_position(self, region_id: u64, now: Instant, regions: &[RegionBounds]) -> DVec3 {
+        let effective = effective_elapsed(now.saturating_duration_since(self.sampled_at).as_secs_f64(), self.time_dilation);
+        bounded_position(region_id, self.start, self.velocity, self.acceleration, effective, self.time_dilation, regions)
+    }
+}
+
 pub fn half_ping_lead(time_dilation: f64, ping_delay: Option<Duration>, frame_dt: f64) -> f64 {
     if !time_dilation.is_finite() || !frame_dt.is_finite() {
         return 0.0;
@@ -32,9 +95,8 @@ pub fn half_ping_lead(time_dilation: f64, ping_delay: Option<Duration>, frame_dt
     0.5 * time_dilation.clamp(0.0, 1.0) * (ping_delay.map_or(0.0, |delay| delay.as_secs_f64()) + frame_dt.max(0.0))
 }
 
-pub fn phase_out_needed(sampled_at: Instant, now: Instant, last_packet_received_at: Instant, connected: bool) -> bool {
-    now.saturating_duration_since(sampled_at).as_secs_f64() > PHASE_OUT_TIME
-        && (!connected || now.saturating_duration_since(last_packet_received_at) > Duration::from_secs_f64(PHASE_OUT_TIME))
+pub fn circuit_active(now: Instant, last_packet_received_at: Instant, connected: bool) -> bool {
+    connected && now.saturating_duration_since(last_packet_received_at) <= Duration::from_secs_f64(PHASE_OUT_TIME)
 }
 
 pub fn effective_elapsed(elapsed: f64, time_dilation: f64) -> f64 {
@@ -43,31 +105,8 @@ pub fn effective_elapsed(elapsed: f64, time_dilation: f64) -> f64 {
     elapsed * time_dilation
 }
 
-pub fn phase_out_scale(elapsed: f64, phase_out: bool) -> f64 {
-    if !phase_out {
-        return 1.0;
-    }
-    if !elapsed.is_finite() || elapsed >= MAX_INTERPOLATION_TIME {
-        return 0.0;
-    }
-    if elapsed <= PHASE_OUT_TIME {
-        return 1.0;
-    }
-    (MAX_INTERPOLATION_TIME - elapsed) / (MAX_INTERPOLATION_TIME - PHASE_OUT_TIME)
-}
-
 pub fn position_at_effective(start: DVec3, velocity: Vec3, acceleration: Vec3, elapsed: f64) -> DVec3 {
     start + velocity.as_dvec3() * elapsed + acceleration.as_dvec3() * (0.5 * elapsed * (elapsed - PHYSICS_TIMESTEP))
-}
-
-pub fn apply_phase_out(start: DVec3, predicted: DVec3, elapsed: f64, phase_out: bool) -> DVec3 {
-    start + (predicted - start) * phase_out_scale(elapsed, phase_out)
-}
-
-pub fn linear_position(start: DVec3, velocity: Vec3, acceleration: Vec3, elapsed: f64, time_dilation: f64, phase_out: bool) -> DVec3 {
-    let effective = effective_elapsed(elapsed, time_dilation);
-    let predicted = position_at_effective(start, velocity, acceleration, effective);
-    apply_phase_out(start, predicted, elapsed, phase_out)
 }
 
 pub fn bounded_position(
@@ -194,22 +233,60 @@ mod tests {
     }
 
     #[test]
-    fn phase_out_tapers_and_stops() {
-        assert_eq!(phase_out_scale(2.0, true), 1.0);
-        assert_eq!(phase_out_scale(2.5, true), 0.5);
-        assert_eq!(phase_out_scale(3.0, true), 0.0);
-        assert_eq!(phase_out_scale(12.0, true), 0.0);
-        assert_eq!(phase_out_scale(12.0, false), 1.0);
-        assert_eq!(linear_position(DVec3::ZERO, Vec3::X, Vec3::ZERO, 2.5, 1.0, true), DVec3::X * 1.25);
+    fn phase_out_is_continuous_at_start() {
+        let sampled_at = Instant::now();
+        let phase_out_at = sampled_at + Duration::from_secs_f64(PHASE_OUT_TIME);
+        let mut trajectory = LinearTrajectory::new(DVec3::ZERO, Vec3::X, Vec3::ZERO, 1.0, sampled_at);
+        trajectory.start_phase_out(phase_out_at);
+
+        let before = trajectory.position_at(1, phase_out_at - Duration::from_nanos(1), &[]);
+        let at = trajectory.position_at(1, phase_out_at, &[]);
+
+        assert_eq!(at, DVec3::X * PHASE_OUT_TIME);
+        assert!(before.distance(at) < 1.0e-8);
     }
 
     #[test]
-    fn phase_out_requires_a_silent_or_disconnected_circuit() {
+    fn phase_out_moves_forward_without_reversing() {
         let sampled_at = Instant::now();
-        let now = sampled_at + Duration::from_secs(5);
-        assert!(!phase_out_needed(sampled_at, now, now, true));
-        assert!(phase_out_needed(sampled_at, now, now - Duration::from_secs(3), true));
-        assert!(phase_out_needed(sampled_at, now, now, false));
+        let phase_out_at = sampled_at + Duration::from_secs_f64(PHASE_OUT_TIME);
+        let mut trajectory = LinearTrajectory::new(DVec3::ZERO, Vec3::X, Vec3::ZERO, 1.0, sampled_at);
+        trajectory.start_phase_out(phase_out_at);
+        let mut previous = trajectory.position_at(1, phase_out_at, &[]).x;
+
+        for elapsed in [0.25, 0.5, 0.75, PHASE_OUT_DURATION, 2.0] {
+            let next = trajectory.position_at(1, phase_out_at + Duration::from_secs_f64(elapsed), &[]).x;
+            assert!(next >= previous);
+            previous = next;
+        }
+        assert_eq!(previous, PHASE_OUT_TIME + PHASE_OUT_DURATION / 2.0);
+    }
+
+    #[test]
+    fn recovery_rebases_from_displayed_position() {
+        let sampled_at = Instant::now();
+        let phase_out_at = sampled_at + Duration::from_secs_f64(PHASE_OUT_TIME);
+        let recovered_at = phase_out_at + Duration::from_millis(500);
+        let mut trajectory = LinearTrajectory::new(DVec3::ZERO, Vec3::X, Vec3::ZERO, 1.0, sampled_at);
+        trajectory.start_phase_out(phase_out_at);
+        let displayed = trajectory.position_at(1, recovered_at, &[]);
+
+        trajectory.resume_at(1, recovered_at, &[]);
+
+        assert_eq!(trajectory.position_at(1, recovered_at, &[]), displayed);
+        assert_eq!(trajectory.position_at(1, recovered_at + Duration::from_millis(100), &[]), displayed + DVec3::X * 0.1);
+    }
+
+    #[test]
+    fn old_sample_does_not_snap_when_taper_starts() {
+        let sampled_at = Instant::now();
+        let phase_out_at = sampled_at + Duration::from_secs(4);
+        let mut trajectory = LinearTrajectory::new(DVec3::ZERO, Vec3::X, Vec3::ZERO, 1.0, sampled_at);
+        let before = trajectory.position_at(1, phase_out_at, &[]);
+        trajectory.start_phase_out(phase_out_at);
+
+        assert_eq!(trajectory.position_at(1, phase_out_at, &[]), before);
+        assert!(trajectory.position_at(1, phase_out_at + Duration::from_nanos(1), &[]).x >= before.x);
     }
 
     #[test]

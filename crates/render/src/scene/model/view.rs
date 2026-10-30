@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     error::Error,
     fmt::{self, Display, Formatter},
     mem::size_of,
@@ -9,7 +9,6 @@ use std::{
 use world::{Entity, Region, WorldRevision};
 
 use super::{Batch, Change, MeshChange, Mirror, SceneLifetime, Status};
-use crate::scene::motion::MotionCircuit;
 use crate::scene::{Object, Patch, RegionData, Surface, ViewerEnvironment, region_environment::RegionEnvironment};
 
 const CHANGE_HISTORY: usize = 64;
@@ -102,7 +101,6 @@ pub struct SceneView {
     reconcile_marker: SceneChanges,
     replacement_marker: SceneChanges,
     replacement_sequence: Option<u64>,
-    motion_circuits: HashMap<Region, MotionCircuit>,
 }
 
 impl SceneView {
@@ -122,7 +120,6 @@ impl SceneView {
             reconcile_marker: SceneChanges { reconcile_all: true, ..SceneChanges::default() },
             replacement_marker: SceneChanges { full: true, ..SceneChanges::default() },
             replacement_sequence: None,
-            motion_circuits: HashMap::new(),
         }
     }
 
@@ -194,13 +191,16 @@ impl SceneView {
     pub fn patch_count(&self) -> usize {
         if self.session.is_active() { self.mirror.patches.len() } else { 0 }
     }
-    pub fn set_motion_circuits(&mut self, circuits: &[MotionCircuit]) {
-        self.motion_circuits.clear();
-        self.motion_circuits.extend(circuits.iter().copied().map(|circuit| (circuit.region, circuit)));
+    pub fn start_motion_phase_out(&mut self, region: Region, at: Option<Instant>) {
+        for object in self.mirror.objects.values_mut().filter(|object| object.detail().summary.address.region() == region) {
+            object.start_motion_phase_out(at);
+        }
     }
 
-    pub(crate) fn motion_circuit(&self, region: Region) -> Option<MotionCircuit> {
-        self.motion_circuits.get(&region).copied()
+    pub fn resume_motion(&mut self, region: Region, now: Instant, regions: &[math::motion::RegionBounds]) {
+        for object in self.mirror.objects.values_mut().filter(|object| object.detail().summary.address.region() == region) {
+            object.resume_motion_at(now, regions);
+        }
     }
     pub fn objects(&self) -> impl Iterator<Item = &Object> {
         self.mirror.objects.values().filter(|_| self.session.is_active())

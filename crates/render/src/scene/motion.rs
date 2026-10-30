@@ -40,11 +40,12 @@ pub(crate) struct MotionSample {
 pub(crate) struct MotionState {
     sampled_at: Instant,
     angular_offset: Quat,
+    linear_trajectory: Option<kinematics::LinearTrajectory>,
 }
 
 impl MotionState {
     pub(crate) fn new(sampled_at: Instant) -> Self {
-        Self { sampled_at, angular_offset: Quat::IDENTITY }
+        Self { sampled_at, angular_offset: Quat::IDENTITY, linear_trajectory: None }
     }
 
     #[cfg(test)]
@@ -75,7 +76,7 @@ impl MotionState {
         } else {
             Quat::IDENTITY
         };
-        Self { sampled_at, angular_offset }
+        Self { sampled_at, angular_offset, linear_trajectory: Some(linear_trajectory(next, sampled_at)) }
     }
 
     fn elapsed(self, now: Instant) -> f64 {
@@ -85,6 +86,39 @@ impl MotionState {
     fn local_rotation(self, sample: MotionSample, now: Instant) -> Quat {
         local_rotation(sample, self, now)
     }
+
+    pub(in crate::scene) fn start_linear_phase_out(&mut self, sample: MotionSample, at: Option<Instant>) {
+        let mut trajectory = self.linear_trajectory.unwrap_or_else(|| linear_trajectory(sample, self.sampled_at));
+        let phase_out_at = at.map_or(self.sampled_at, |at| at.max(self.sampled_at));
+        trajectory.start_phase_out(phase_out_at.max(self.sampled_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME)));
+        self.linear_trajectory = Some(trajectory);
+    }
+
+    pub(in crate::scene) fn resume_linear_at(&mut self, sample: MotionSample, now: Instant, regions: &[kinematics::RegionBounds]) {
+        let Some(mut trajectory) = self.linear_trajectory else { return };
+        trajectory.resume_at(sample.region.get(), now, regions);
+        self.linear_trajectory = Some(trajectory);
+    }
+
+    fn linear_position(self, sample: MotionSample, now: Instant, regions: &[kinematics::RegionBounds]) -> DVec3 {
+        self.linear_trajectory.unwrap_or_else(|| linear_trajectory(sample, self.sampled_at)).position_at(sample.region.get(), now, regions)
+    }
+}
+
+fn linear_trajectory(sample: MotionSample, sampled_at: Instant) -> kinematics::LinearTrajectory {
+    let frame_dt = if sample.source.and_then(world::UpdateSource::motion_received_at).is_some() {
+        kinematics::FRAME_INTERVAL.as_secs_f64()
+    } else {
+        0.0
+    };
+    let lead = kinematics::half_ping_lead(f64::from(sample.time_dilation), sample.ping_delay, frame_dt);
+    kinematics::LinearTrajectory::new(
+        sample.transform.pose.position + sample.velocity.as_dvec3() * lead,
+        sample.velocity,
+        sample.acceleration,
+        f64::from(sample.time_dilation),
+        sampled_at,
+    )
 }
 
 fn same_motion(previous: MotionSample, next: MotionSample) -> bool {
@@ -192,11 +226,11 @@ fn placement_pair(
             Parent::Root => {
                 let state = object.motion_state();
                 current.pose = WorldPose {
-                    position: linear_position_with_view(view, sample, state, now, phase_out(view, sample, state, now), regions),
+                    position: linear_position_with_view(view, sample, state, now, regions),
                     rotation: state.local_rotation(sample, now),
                 };
                 next.pose = WorldPose {
-                    position: linear_position_with_view(view, sample, state, future, phase_out(view, sample, state, future), regions),
+                    position: linear_position_with_view(view, sample, state, future, regions),
                     rotation: state.local_rotation(sample, future),
                 };
             }
@@ -248,15 +282,9 @@ fn rotation_delta(angular_velocity: Vec3, elapsed: f64) -> Quat {
     Quat::from_axis_angle((velocity / rate).as_vec3(), angle)
 }
 
-fn phase_out(view: &SceneView, sample: MotionSample, state: MotionState, now: Instant) -> bool {
-    let sampled_at = sample.source.and_then(world::UpdateSource::motion_received_at).unwrap_or(state.sampled_at);
-    view.motion_circuit(sample.region)
-        .is_none_or(|circuit| kinematics::phase_out_needed(sampled_at, now, circuit.last_packet_received_at, circuit.connected))
-}
-
 #[cfg(test)]
 fn linear_position(sample: MotionSample, state: MotionState, now: Instant, regions: &[kinematics::RegionBounds]) -> DVec3 {
-    linear_position_raw(sample, state, now, true, regions)
+    linear_position_raw(sample, state, now, regions)
 }
 
 #[cfg(test)]
@@ -269,45 +297,18 @@ fn linear_position_with_view(
     sample: MotionSample,
     state: MotionState,
     now: Instant,
-    phase_out: bool,
     regions: &[kinematics::RegionBounds],
 ) -> DVec3 {
-    let position = linear_position_raw(sample, state, now, phase_out, regions);
+    let position = linear_position_raw(sample, state, now, regions);
     if sample.velocity == Vec3::ZERO && sample.acceleration == Vec3::ZERO { position } else { clamp_motion_height(view, sample, position) }
 }
 
-fn linear_position_raw(
-    sample: MotionSample,
-    state: MotionState,
-    now: Instant,
-    phase_out: bool,
-    regions: &[kinematics::RegionBounds],
-) -> DVec3 {
+fn linear_position_raw(sample: MotionSample, state: MotionState, now: Instant, regions: &[kinematics::RegionBounds]) -> DVec3 {
     if sample.is_attachment || (sample.velocity == Vec3::ZERO && sample.acceleration == Vec3::ZERO) {
         let start = sample.transform.pose.position;
         return start;
     }
-    let frame_dt = if sample.source.and_then(world::UpdateSource::motion_received_at).is_some() {
-        kinematics::FRAME_INTERVAL.as_secs_f64()
-    } else {
-        0.0
-    };
-    let lead = kinematics::half_ping_lead(f64::from(sample.time_dilation), sample.ping_delay, frame_dt);
-    let mut projected_sample = sample;
-    projected_sample.transform.pose.position += sample.velocity.as_dvec3() * lead;
-    let elapsed = state.elapsed(now);
-    let time_dilation = f64::from(sample.time_dilation);
-    let effective = kinematics::effective_elapsed(elapsed, time_dilation);
-    let predicted = kinematics::bounded_position(
-        sample.region.get(),
-        projected_sample.transform.pose.position,
-        sample.velocity,
-        sample.acceleration,
-        effective,
-        time_dilation,
-        regions,
-    );
-    kinematics::apply_phase_out(projected_sample.transform.pose.position, predicted, elapsed, phase_out)
+    state.linear_position(sample, now, regions)
 }
 
 fn clamp_motion_height(view: &SceneView, sample: MotionSample, mut position: DVec3) -> DVec3 {
@@ -502,17 +503,27 @@ mod tests {
             Some(UpdateSource::new(Region::new(1), 1, OrderEvidence::Ordered(1), 0).with_motion_timing(received_at, sample.ping_delay));
         let state = MotionState::new(received_at);
 
-        let position = linear_position_raw(sample, state, received_at + Duration::from_secs(1), false, &[]);
+        let position = linear_position_raw(sample, state, received_at + Duration::from_secs(1), &[]);
 
         assert!((position.x - 1.058).abs() < 1e-12);
     }
 
     #[test]
-    fn interpolation_phases_out_and_stops() {
-        assert_eq!(kinematics::phase_out_scale(2.0, true), 1.0);
-        assert_eq!(kinematics::phase_out_scale(2.5, true), 0.5);
-        assert_eq!(kinematics::phase_out_scale(3.0, true), 0.0);
-        assert_eq!(kinematics::phase_out_scale(12.0, true), 0.0);
+    fn render_prediction_recovers_from_taper_position() {
+        let sampled_at = Instant::now();
+        let phase_out_at = sampled_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
+        let recovered_at = phase_out_at + Duration::from_millis(500);
+        let sample = sample(DVec3::ZERO, Vec3::X, Vec3::ZERO, Vec3::ZERO, false);
+        let mut state = MotionState::new(sampled_at);
+        state.start_linear_phase_out(sample, Some(phase_out_at));
+        let before_taper = linear_position_raw(sample, state, phase_out_at, &[]);
+        let displayed = linear_position_raw(sample, state, recovered_at, &[]);
+
+        state.resume_linear_at(sample, recovered_at, &[]);
+
+        assert_eq!(before_taper, DVec3::X * kinematics::PHASE_OUT_TIME);
+        assert_eq!(linear_position_raw(sample, state, recovered_at, &[]), displayed);
+        assert_eq!(linear_position_raw(sample, state, recovered_at + Duration::from_millis(100), &[]), displayed + DVec3::X * 0.1);
     }
 
     #[test]
@@ -785,12 +796,11 @@ mod tests {
     }
 
     #[test]
-    fn healthy_circuit_keeps_extrapolating_past_three_seconds() {
-        let (_world, _scene, mut view) = child_scene(None);
+    fn motion_keeps_extrapolating_past_three_seconds() {
+        let (_world, _scene, view) = child_scene(None);
         let root = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("root is published");
         let entity = root.detail().summary.entity;
         let now = root.motion_state().sampled_at + Duration::from_secs(5);
-        view.set_motion_circuits(&[MotionCircuit { region: Region::new(1), last_packet_received_at: now, connected: true }]);
         let mut placements = HashMap::new();
         let mut future_placements = HashMap::new();
         let mut regions = Vec::new();
@@ -809,7 +819,7 @@ mod tests {
         falling.transform.scale.z = 2.0;
         let state = MotionState::new(now);
 
-        let position = linear_position_with_view(&view, falling, state, now + Duration::from_secs(1), false, &[]);
+        let position = linear_position_with_view(&view, falling, state, now + Duration::from_secs(1), &[]);
 
         assert_eq!(position.z, 1.0);
     }
@@ -821,7 +831,7 @@ mod tests {
         let high = sample(DVec3::new(20.0, 1.0, 5000.0), Vec3::Z, Vec3::ZERO, Vec3::ZERO, false);
         let state = MotionState::new(now);
 
-        let position = linear_position_with_view(&view, high, state, now + Duration::from_secs(1), false, &[]);
+        let position = linear_position_with_view(&view, high, state, now + Duration::from_secs(1), &[]);
 
         assert_eq!(position.z, 4096.0);
     }
@@ -833,7 +843,7 @@ mod tests {
         let spinning = sample(DVec3::new(20.0, 1.0, -10.0), Vec3::ZERO, Vec3::ZERO, Vec3::Z, false);
         let state = MotionState::new(now);
 
-        let position = linear_position_with_view(&view, spinning, state, now + Duration::from_secs(1), false, &[]);
+        let position = linear_position_with_view(&view, spinning, state, now + Duration::from_secs(1), &[]);
 
         assert_eq!(position.z, -10.0);
     }

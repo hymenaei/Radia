@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     future::{pending, ready},
     num::NonZeroU32,
     time::Duration,
@@ -79,7 +80,7 @@ fn dead_reckoning_uses_constant_velocity() {
     dead_reckoning.replace(Some(sample));
 
     assert!(
-        dead_reckoning.pose(received_at + Duration::from_secs(2), true, &[]).unwrap().position.distance(DVec3::new(14.016, 17.992, 31.004))
+        dead_reckoning.pose(received_at + Duration::from_secs(2), &[]).unwrap().position.distance(DVec3::new(14.016, 17.992, 31.004))
             < 1e-12
     );
 }
@@ -93,7 +94,7 @@ fn dead_reckoning_uses_timestep_acceleration() {
     dead_reckoning.replace(Some(sample));
 
     let expected = 20.0 + 0.5 * 9.0 * (1.0 - 1.0 / 45.0);
-    assert!((dead_reckoning.pose(received_at + Duration::from_secs(1), true, &[]).unwrap().position.y - expected).abs() < 1e-12);
+    assert!((dead_reckoning.pose(received_at + Duration::from_secs(1), &[]).unwrap().position.y - expected).abs() < 1e-12);
 }
 
 #[test]
@@ -106,7 +107,7 @@ fn dead_reckoning_applies_half_ping_lead_with_time_dilation() {
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
 
-    let position = dead_reckoning.pose(received_at + Duration::from_secs(1), false, &[]).unwrap().position;
+    let position = dead_reckoning.pose(received_at + Duration::from_secs(1), &[]).unwrap().position;
 
     assert!((position.x - 11.058).abs() < 1e-12);
 }
@@ -121,7 +122,7 @@ fn dead_reckoning_stops_at_an_unloaded_region_edge() {
     dead_reckoning.replace(Some(sample));
     let regions = [kinematics::RegionBounds { region_id: Region::new(1).get(), origin: DVec3::ZERO }];
 
-    let pose = dead_reckoning.pose(received_at + Duration::from_secs(2), false, &regions).unwrap();
+    let pose = dead_reckoning.pose(received_at + Duration::from_secs(2), &regions).unwrap();
 
     assert_eq!(pose.position.x, 256.0);
 }
@@ -134,22 +135,40 @@ fn new_sample_replaces_state_immediately() {
     let next = AgentMotionSample { position: DVec3::new(400.0, 500.0, 40.0), seed: 2, ..motion_sample(received_at) };
     dead_reckoning.replace(Some(next));
 
-    assert_eq!(dead_reckoning.pose(received_at, true, &[]).unwrap().position, next.position);
+    assert_eq!(dead_reckoning.pose(received_at, &[]).unwrap().position, next.position);
 }
 
 #[test]
-fn dead_reckoning_phases_out_after_three_seconds() {
+fn dead_reckoning_tapers_after_silence() {
     let received_at = Instant::now();
     let mut sample = motion_sample(received_at);
     sample.velocity = Vec3::X;
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
+    dead_reckoning.start_phase_out(Some(received_at + Duration::from_secs(2)));
 
-    assert!((dead_reckoning.pose(received_at + Duration::from_millis(2500), true, &[]).unwrap().position.x - 11.258).abs() < 1e-12);
-    assert!((dead_reckoning.pose(received_at + Duration::from_secs(3), true, &[]).unwrap().position.x - 10.008).abs() < 1e-12);
-    assert!((dead_reckoning.pose(received_at + Duration::from_secs(10), true, &[]).unwrap().position.x - 10.008).abs() < 1e-12);
-    assert!(!dead_reckoning.active(received_at + Duration::from_secs(3) + Duration::from_nanos(1), true));
-    assert!(dead_reckoning.active(received_at + Duration::from_secs(10), false));
+    assert!((dead_reckoning.pose(received_at + Duration::from_millis(2500), &[]).unwrap().position.x - 12.383).abs() < 1e-12);
+    assert!((dead_reckoning.pose(received_at + Duration::from_secs(3), &[]).unwrap().position.x - 12.508).abs() < 1e-12);
+    assert!((dead_reckoning.pose(received_at + Duration::from_secs(10), &[]).unwrap().position.x - 12.508).abs() < 1e-12);
+    assert!(!dead_reckoning.active(received_at + Duration::from_secs(3) + Duration::from_nanos(1)));
+}
+
+#[test]
+fn dead_reckoning_recovers_from_displayed_position() {
+    let received_at = Instant::now();
+    let phase_out_at = received_at + Duration::from_secs(2);
+    let recovered_at = phase_out_at + Duration::from_millis(500);
+    let mut sample = motion_sample(received_at);
+    sample.velocity = Vec3::X;
+    let mut dead_reckoning = DeadReckoning::default();
+    dead_reckoning.replace(Some(sample));
+    dead_reckoning.start_phase_out(Some(phase_out_at));
+    let displayed = dead_reckoning.pose(recovered_at, &[]).unwrap().position;
+
+    dead_reckoning.resume_at(recovered_at, &[]);
+
+    assert_eq!(dead_reckoning.pose(recovered_at, &[]).unwrap().position, displayed);
+    assert_eq!(dead_reckoning.pose(recovered_at + Duration::from_millis(100), &[]).unwrap().position, displayed + DVec3::X * 0.1);
 }
 
 #[test]
@@ -160,10 +179,10 @@ fn negligible_motion_is_idle() {
     sample.acceleration = Vec3::splat(1e-4);
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
-    assert!(!dead_reckoning.active(received_at, false));
+    assert!(!dead_reckoning.active(received_at));
     sample.velocity = Vec3::X * 0.01;
     dead_reckoning.replace(Some(sample));
-    assert!(dead_reckoning.active(received_at, false));
+    assert!(dead_reckoning.active(received_at));
 }
 
 #[test]
@@ -175,7 +194,7 @@ fn non_finite_sample_does_not_replace_valid_state() {
     let invalid = AgentMotionSample { velocity: Vec3::splat(f32::INFINITY), ..valid };
     dead_reckoning.replace(Some(invalid));
 
-    assert_eq!(dead_reckoning.pose(received_at, true, &[]).unwrap().position, valid.position);
+    assert_eq!(dead_reckoning.pose(received_at, &[]).unwrap().position, valid.position);
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -216,7 +235,12 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
         motion_circuits: watch::channel(Vec::new()).1,
         motion_circuit_scratch: Vec::new(),
         motion_region_scratch: Vec::new(),
-        dead_reckoning: DeadReckoning { sample: Some(sample) },
+        motion_active: HashMap::new(),
+        dead_reckoning: {
+            let mut dead_reckoning = DeadReckoning::default();
+            dead_reckoning.replace(Some(sample));
+            dead_reckoning
+        },
         last_movement: None,
         incoming,
         _cancel: cancel,
@@ -280,6 +304,7 @@ async fn terrain_clamp_respects_parenting() {
         motion_circuits: watch::channel(Vec::new()).1,
         motion_circuit_scratch: Vec::new(),
         motion_region_scratch: Vec::new(),
+        motion_active: HashMap::new(),
         dead_reckoning: DeadReckoning::default(),
         last_movement: None,
         incoming,

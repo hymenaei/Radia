@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     sync::OnceLock,
     time::{Duration, Instant},
@@ -36,40 +36,59 @@ const MIN_ACTIVE_MOTION_SQUARED: f32 = 1e-6;
 #[derive(Default)]
 struct DeadReckoning {
     sample: Option<AgentMotionSample>,
+    trajectory: Option<kinematics::LinearTrajectory>,
 }
 
 impl DeadReckoning {
     fn replace(&mut self, sample: Option<AgentMotionSample>) {
         match sample {
-            Some(sample) if sample.is_finite() => self.sample = Some(sample),
+            Some(sample) if sample.is_finite() => {
+                let lead = kinematics::half_ping_lead(
+                    f64::from(sample.time_dilation),
+                    sample.ping_delay,
+                    kinematics::FRAME_INTERVAL.as_secs_f64(),
+                );
+                self.trajectory = Some(kinematics::LinearTrajectory::new(
+                    sample.position + sample.velocity.as_dvec3() * lead,
+                    sample.velocity,
+                    sample.acceleration,
+                    f64::from(sample.time_dilation),
+                    sample.received_at,
+                ));
+                self.sample = Some(sample);
+            }
             Some(_) => {}
-            None => self.sample = None,
+            None => {
+                self.sample = None;
+                self.trajectory = None;
+            }
         }
     }
 
-    fn pose(&self, now: Instant, phase_out: bool, regions: &[kinematics::RegionBounds]) -> Option<WorldPose> {
+    fn start_phase_out(&mut self, at: Option<Instant>) {
+        let Some(sample) = self.sample else { return };
+        if let Some(trajectory) = &mut self.trajectory {
+            let phase_out_at = at.map_or(sample.received_at, |at| at.max(sample.received_at));
+            trajectory.start_phase_out(phase_out_at.max(sample.received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME)));
+        }
+    }
+
+    fn resume_at(&mut self, now: Instant, regions: &[kinematics::RegionBounds]) {
+        let Some(sample) = self.sample else { return };
+        if let Some(trajectory) = &mut self.trajectory {
+            trajectory.resume_at(sample.region.get(), now, regions);
+        }
+    }
+
+    fn pose(&self, now: Instant, regions: &[kinematics::RegionBounds]) -> Option<WorldPose> {
         let sample = self.sample?;
-        let elapsed = now.saturating_duration_since(sample.received_at).as_secs_f64();
-        let lead = kinematics::half_ping_lead(f64::from(sample.time_dilation), sample.ping_delay, kinematics::FRAME_INTERVAL.as_secs_f64());
-        let start = sample.position + sample.velocity.as_dvec3() * lead;
-        let time_dilation = f64::from(sample.time_dilation);
-        let effective = kinematics::effective_elapsed(elapsed, time_dilation);
-        let predicted = kinematics::bounded_position(
-            sample.region.get(),
-            start,
-            sample.velocity,
-            sample.acceleration,
-            effective,
-            time_dilation,
-            regions,
-        );
-        let position = kinematics::apply_phase_out(start, predicted, elapsed, phase_out);
+        let position = self.trajectory?.position_at(sample.region.get(), now, regions);
         Some(sample.pose(position))
     }
 
-    fn active(&self, now: Instant, phase_out: bool) -> bool {
+    fn active(&self, now: Instant) -> bool {
         self.sample.is_some_and(|sample| {
-            (!phase_out || now.saturating_duration_since(sample.received_at) <= Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME))
+            !self.trajectory.is_some_and(|trajectory| trajectory.is_phase_out_settled(now))
                 && (sample.velocity.length_squared() > MIN_ACTIVE_MOTION_SQUARED
                     || sample.acceleration.length_squared() > MIN_ACTIVE_MOTION_SQUARED)
         })
@@ -97,6 +116,7 @@ pub(crate) struct SceneFeed {
     motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
     motion_circuit_scratch: Vec<MotionCircuit>,
     motion_region_scratch: Vec<kinematics::RegionBounds>,
+    motion_active: HashMap<world::Region, bool>,
     dead_reckoning: DeadReckoning,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
@@ -143,6 +163,7 @@ impl SceneFeed {
             motion_circuits,
             motion_circuit_scratch: Vec::new(),
             motion_region_scratch: Vec::new(),
+            motion_active: HashMap::new(),
             dead_reckoning,
             last_movement: None,
             incoming,
@@ -162,13 +183,12 @@ impl SceneFeed {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn camera_pose_and_seed_at(&mut self, now: Instant) -> Option<(WorldPose, (u64, math::Quat))> {
-        self.refresh_motion_circuits();
         if self.agent_motion.has_changed().is_ok_and(|changed| changed) {
             self.dead_reckoning.replace(*self.agent_motion.borrow_and_update());
         }
+        self.refresh_motion_circuits(now);
         let sample = self.dead_reckoning.sample?;
-        let phase_out = self.phase_out_for(sample.region, sample.received_at, now);
-        let mut pose = self.dead_reckoning.pose(now, phase_out, &self.motion_region_scratch)?;
+        let mut pose = self.dead_reckoning.pose(now, &self.motion_region_scratch)?;
         if !sample.parented
             && let Some(ground) = self.view.terrain_height_at(pose.position)
         {
@@ -182,11 +202,10 @@ impl SceneFeed {
     }
 
     pub(crate) fn agent_motion_active(&self, now: Instant) -> bool {
-        let Some(sample) = self.dead_reckoning.sample else { return false };
-        self.dead_reckoning.active(now, self.phase_out_for(sample.region, sample.received_at, now))
+        self.dead_reckoning.active(now)
     }
 
-    pub(crate) fn refresh_motion_circuits(&mut self) {
+    pub(crate) fn refresh_motion_circuits(&mut self, now: Instant) {
         self.motion_region_scratch.clear();
         self.motion_region_scratch.extend(self.view.regions().filter_map(|region| {
             region

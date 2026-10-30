@@ -29,7 +29,7 @@ use crate::{
     gui::window_geometry::observe,
     remembered_login::{self, CredentialStoreError, RememberedLogin},
     session::{
-        AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, Session,
+        AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, Session, SessionEnd,
         SessionReadyUpdate, WriteLock, drain_session, write_lock,
     },
 };
@@ -108,6 +108,14 @@ impl LoginStatus {
         self.session_failure = None;
         self.credential_warning = None;
         self.load_warning = None;
+    }
+
+    fn end_session(&mut self, end: SessionEnd) {
+        self.message = None;
+        self.session_failure = match end {
+            SessionEnd::Requested => None,
+            SessionEnd::Failed(error) => Some(error),
+        };
     }
 
     fn begin_grid_change(&mut self) {
@@ -494,7 +502,7 @@ impl LoginScreen {
             session_ready,
             region_name,
             chat_messages,
-            failure,
+            session_end,
             favorites,
             favorite_store_saved,
             ..
@@ -519,8 +527,8 @@ impl LoginScreen {
 
         self.favorites.apply_saved(favorite_store_saved);
 
-        if let Some(error) = failure {
-            self.end_session(error, cx);
+        if let Some(end) = session_end {
+            self.end_session(end, cx);
         }
 
         cx.notify();
@@ -596,13 +604,15 @@ impl LoginScreen {
         );
     }
 
-    pub(crate) fn end_session(&mut self, error: String, cx: &mut Context<Self>) {
+    pub(crate) fn end_session(&mut self, end: SessionEnd, cx: &mut Context<Self>) {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         crate::gui::scene::end_session(self.session_generation, cx);
-        tracing::warn!(%error, "viewer session ended after a failure");
+        match &end {
+            SessionEnd::Requested => tracing::info!("viewer session ended normally"),
+            SessionEnd::Failed(error) => tracing::warn!(%error, "viewer session ended after a failure"),
+        }
         self.login_phase = LoginPhase::Idle;
-        self.status.message = None;
-        self.status.session_failure = Some(error);
+        self.status.end_session(end);
         self.active_session = None;
         self.shutdown_session.lock().unwrap_or_else(PoisonError::into_inner).take();
         self.session_generation = self.session_generation.wrapping_add(1);
@@ -662,6 +672,7 @@ fn split_username(username: &str) -> Option<(String, String)> {
 mod tests {
     use super::LoginStatus;
     use crate::remembered_login::CredentialStoreError;
+    use crate::session::{PresentationMailbox, ViewerUpdate};
 
     fn credential_error(detail: &str) -> CredentialStoreError {
         CredentialStoreError::Open(detail.to_owned())
@@ -690,5 +701,25 @@ mod tests {
         status.finish_credential_load(Some(warning.clone()));
 
         assert_eq!(status.displayed(Vec::new(), false), Some(warning.to_string()));
+    }
+
+    #[test]
+    fn session_end_reaches_login_status() {
+        let mut status = LoginStatus { session_failure: Some("previous session failed".into()), ..LoginStatus::default() };
+        let (mailbox, mut receiver) = PresentationMailbox::new(1);
+        mailbox.publish(ViewerUpdate::Ended);
+        let end = futures::executor::block_on(receiver.next()).expect("normal end update").session_end.expect("session end");
+
+        status.end_session(end);
+
+        assert_eq!(status.displayed(Vec::new(), false), None);
+
+        let (mailbox, mut receiver) = PresentationMailbox::new(2);
+        mailbox.publish(ViewerUpdate::Failed("heartbeat timeout".into()));
+        let end = futures::executor::block_on(receiver.next()).expect("failure update").session_end.expect("session end");
+
+        status.end_session(end);
+
+        assert_eq!(status.displayed(Vec::new(), false), Some("heartbeat timeout".into()));
     }
 }

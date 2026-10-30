@@ -345,13 +345,19 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    pub fn is_disconnect_requested(&self) -> bool {
+        *self.disconnect_requested.borrow()
+    }
+
     fn request_disconnect(&self) {
         let mut admission_closed = self.command_admission_closed.lock().unwrap_or_else(|error| error.into_inner());
         *admission_closed = true;
-        if !*self.worker_finished.borrow() && !*self.disconnect_requested.borrow() {
-            tracing::info!(lifecycle = "disconnecting", "network lifecycle changed");
+        if !*self.worker_finished.borrow() {
+            if !*self.disconnect_requested.borrow() {
+                tracing::info!(lifecycle = "disconnecting", "network lifecycle changed");
+            }
+            self.disconnect_requested.send_replace(true);
         }
-        self.disconnect_requested.send_replace(true);
     }
 
     pub fn send(&self, message: impl OutboundMessage, delivery: Delivery) -> Result<(), Error> {

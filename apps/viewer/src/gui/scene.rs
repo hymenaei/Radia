@@ -18,7 +18,7 @@ use crate::{
         views::viewport::{Viewport, ViewportError},
     },
     scene_feed::SceneSources,
-    session::{AgentMotionSample, EnvironmentInbox},
+    session::{AgentMotionSample, EnvironmentInbox, SessionEnd},
     world_reader::WorldReader,
 };
 
@@ -204,7 +204,7 @@ fn scene_failed(generation: u64, error: ViewportError, cx: &mut App) {
     if let Some(controller) = controller {
         controller.update(cx, |login, cx| {
             tracing::error!(%error, "scene renderer stopped");
-            login.end_session("Unable to display the world.".into(), cx);
+            login.end_session(SessionEnd::Failed("Unable to display the world.".into()), cx);
         });
     }
 }

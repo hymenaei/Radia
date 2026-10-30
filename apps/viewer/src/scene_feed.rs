@@ -31,6 +31,11 @@ use crate::{
     world_reader::{ReadError, WorldReader},
 };
 
+#[path = "scene_feed/motion_circuit.rs"]
+mod motion_circuit;
+
+use motion_circuit::MotionCircuitWake;
+
 const MIN_ACTIVE_MOTION_SQUARED: f32 = 1e-6;
 
 #[derive(Default)]
@@ -222,13 +227,42 @@ impl SceneFeed {
                 MotionCircuit { region: *region, last_packet_received_at: status.last_packet_received_at, connected: status.connected }
             }));
         }
-        self.view.set_motion_circuits(&self.motion_circuit_scratch);
-    }
-
-    fn phase_out_for(&self, region: world::Region, sampled_at: Instant, now: Instant) -> bool {
-        let status =
-            self.motion_circuits.borrow().iter().find(|(candidate, _)| *candidate == region).map(|(_, receiver)| *receiver.borrow());
-        status.is_none_or(|status| kinematics::phase_out_needed(sampled_at, now, status.last_packet_received_at, status.connected))
+        let mut regions = self.view.regions().map(|region| region.summary().region).collect::<HashSet<_>>();
+        if let Some(sample) = self.dead_reckoning.sample {
+            regions.insert(sample.region);
+        }
+        regions.extend(self.motion_circuit_scratch.iter().map(|circuit| circuit.region));
+        for region in regions.iter().copied() {
+            let circuit = self.motion_circuit_scratch.iter().find(|circuit| circuit.region == region).copied();
+            let active = circuit.is_some_and(|circuit| kinematics::circuit_active(now, circuit.last_packet_received_at, circuit.connected));
+            let previous = self.motion_active.insert(region, active);
+            if previous == Some(active) {
+                continue;
+            }
+            if active {
+                self.view.resume_motion(region, now, &self.motion_region_scratch);
+                if self.dead_reckoning.sample.is_some_and(|sample| sample.region == region) {
+                    self.dead_reckoning.resume_at(now, &self.motion_region_scratch);
+                }
+            } else {
+                let phase_out_at = match previous {
+                    Some(true) => Some(
+                        circuit
+                            .filter(|circuit| circuit.connected)
+                            .map_or(now, |circuit| circuit.last_packet_received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME)),
+                    ),
+                    Some(false) => continue,
+                    None => circuit
+                        .filter(|circuit| circuit.connected)
+                        .map(|circuit| circuit.last_packet_received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME)),
+                };
+                self.view.start_motion_phase_out(region, phase_out_at);
+                if self.dead_reckoning.sample.is_some_and(|sample| sample.region == region) {
+                    self.dead_reckoning.start_phase_out(phase_out_at);
+                }
+            }
+        }
+        self.motion_active.retain(|region, _| regions.contains(region));
     }
 
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {
@@ -415,7 +449,8 @@ async fn run(
     mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     wake: impl Fn(),
 ) {
-    let SceneSources { mut reader, assets, environments, motion_circuits: _ } = sources;
+    let SceneSources { mut reader, assets, environments, motion_circuits } = sources;
+    let mut motion_circuits = MotionCircuitWake::new(motion_circuits);
     let mut environments = environments.take();
     let mut textures = assets.texture_events();
     let mut assets = AssetSubscriptions::new(assets);
@@ -476,6 +511,7 @@ async fn run(
             .fuse();
             let moved = camera.changed().fuse();
             let motion_updated = agent_motion.changed().fuse();
+            let circuit_transition = motion_circuits.wait_for_transition().fuse();
             let available = assets.next().fuse();
             let released = textures.changed().fuse();
             let timer = async {
@@ -486,7 +522,7 @@ async fn run(
                 }
             }
             .fuse();
-            pin_mut!(reading, building, changed, moved, motion_updated, available, released, timer, pushed);
+            pin_mut!(reading, building, changed, moved, motion_updated, circuit_transition, available, released, timer, pushed);
             let mut asset_event = None;
             futures::select_biased! {
                 _ = cancelled => break,
@@ -511,6 +547,7 @@ async fn run(
 
                 result = released => { if result.is_err() { break; } wake(); }
                 result = motion_updated => { if result.is_err() { break; } wake(); }
+                _ = circuit_transition => wake(),
                 result = moved => { if result.is_err() { break; } }
                 result = changed => { if result.is_err() { break; } scene.notify_world_change(); }
                 _ = timer => {}

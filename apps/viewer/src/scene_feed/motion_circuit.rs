@@ -75,7 +75,7 @@ impl MotionCircuitWake {
             list_closed: false,
         };
         let circuits = state.receiver.borrow_and_update().clone();
-        let _ = state.replace(circuits, Instant::now());
+        let _ = state.replace(circuits, tokio::time::Instant::now().into_std());
         state
     }
 
@@ -122,7 +122,9 @@ impl MotionCircuitWake {
                 let circuit = async { if self.watchers.is_empty() { pending().await } else { self.watchers.next().await } }.fuse();
                 let timer = async {
                     match deadline {
-                        Some(deadline) if deadline <= Instant::now() => tokio::task::yield_now().await,
+                        Some(deadline) if tokio::time::Instant::from_std(deadline) <= tokio::time::Instant::now() => {
+                            tokio::task::yield_now().await
+                        }
                         Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
                         None => pending().await,
                     }
@@ -135,7 +137,7 @@ impl MotionCircuitWake {
                     _ = timer => Event::Timer,
                 }
             };
-            let now = Instant::now();
+            let now = tokio::time::Instant::now().into_std();
             match event {
                 Event::List(Ok(())) => {
                     let circuits = self.receiver.borrow_and_update().clone();
@@ -183,26 +185,25 @@ mod tests {
     #[test]
     fn circuit_wakes_only_for_liveness_transitions() {
         let started_at = Instant::now();
+        let silence = Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
+        let taper = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
+        let maximum_interpolation = silence + taper;
         let region = Region::new(1);
         let mut liveness = MotionCircuitLiveness::default();
         let status = |last_packet_received_at| CircuitMotionStatus { last_packet_received_at, measured_ping_delay: None, connected: true };
 
         assert!(liveness.replace(HashMap::from([(region, status(started_at))]), started_at));
-        assert!(
-            !liveness.replace(HashMap::from([(region, status(started_at + Duration::from_secs(1)))]), started_at + Duration::from_secs(1))
-        );
-        assert!(liveness.update(started_at + Duration::from_secs(3) + Duration::from_nanos(1)));
-        assert!(!liveness.update(started_at + Duration::from_secs(4)));
-        assert!(
-            liveness.replace(HashMap::from([(region, status(started_at + Duration::from_secs(4)))]), started_at + Duration::from_secs(4))
-        );
-        assert!(
-            !liveness.replace(HashMap::from([(region, status(started_at + Duration::from_secs(5)))]), started_at + Duration::from_secs(5))
-        );
-        assert!(liveness.replace(HashMap::new(), started_at + Duration::from_secs(6)));
-        assert!(
-            liveness.replace(HashMap::from([(region, status(started_at + Duration::from_secs(6)))]), started_at + Duration::from_secs(6))
-        );
+        let active_packet_at = started_at + silence / 2;
+        assert!(!liveness.replace(HashMap::from([(region, status(active_packet_at))]), active_packet_at));
+        assert!(liveness.update(active_packet_at + silence + Duration::from_nanos(1)));
+        let interpolation_end = active_packet_at + maximum_interpolation;
+        assert!(!liveness.update(interpolation_end));
+        assert!(liveness.replace(HashMap::from([(region, status(interpolation_end))]), interpolation_end));
+        let next_packet_at = interpolation_end + silence / 2;
+        assert!(!liveness.replace(HashMap::from([(region, status(next_packet_at))]), next_packet_at));
+        let removed_at = interpolation_end + maximum_interpolation;
+        assert!(liveness.replace(HashMap::new(), removed_at));
+        assert!(liveness.replace(HashMap::from([(region, status(removed_at))]), removed_at));
     }
 
     #[tokio::test]
@@ -232,5 +233,32 @@ mod tests {
             status.last_packet_received_at = Instant::now();
         });
         assert!(wake.wait_for_transition().await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silence_wakes_once() {
+        let region = Region::new(1);
+        let last_packet_received_at = tokio::time::Instant::now().into_std();
+        let status = CircuitMotionStatus { last_packet_received_at, measured_ping_delay: None, connected: true };
+        let (status_sender, status_receiver) = watch::channel(status);
+        let (_circuits_sender, circuits_receiver) = watch::channel(vec![(region, status_receiver)]);
+        let mut wake = MotionCircuitWake::new(circuits_receiver);
+        let mut transition = Box::pin(wake.wait_for_transition());
+        let silence = Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
+        let later = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME);
+
+        std::assert_matches!(futures::poll!(transition.as_mut()), Poll::Pending);
+        tokio::time::advance(silence).await;
+        std::assert_matches!(futures::poll!(transition.as_mut()), Poll::Pending);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        std::assert_matches!(futures::poll!(transition.as_mut()), Poll::Ready(true));
+        drop(transition);
+
+        let mut pending = Box::pin(wake.wait_for_transition());
+        std::assert_matches!(futures::poll!(pending.as_mut()), Poll::Pending);
+        tokio::time::advance(later).await;
+        std::assert_matches!(futures::poll!(pending.as_mut()), Poll::Pending);
+        drop(pending);
+        drop(status_sender);
     }
 }

@@ -263,6 +263,38 @@ mod tests {
     }
 
     #[test]
+    fn accelerated_taper_preserves_velocity() {
+        let sampled_at = Instant::now();
+        let phase_out_at = sampled_at + Duration::from_secs_f64(PHASE_OUT_TIME);
+        let velocity = Vec3::X * 2.0;
+        let acceleration = Vec3::X * 4.0;
+        let mut trajectory = LinearTrajectory::new(DVec3::ZERO, velocity, acceleration, 1.0, sampled_at);
+        trajectory.start_phase_out(phase_out_at);
+
+        let phase_start = trajectory.position_at(1, phase_out_at, &[]);
+        let slope_interval = Duration::from_secs_f64(PHYSICS_TIMESTEP / 1_000.0);
+        let after_start = trajectory.position_at(1, phase_out_at + slope_interval, &[]);
+        let slope = (after_start - phase_start).as_vec3() / slope_interval.as_secs_f64() as f32;
+        let elapsed = phase_out_at.duration_since(sampled_at).as_secs_f64();
+        let untapered_velocity = velocity + acceleration * (elapsed - 0.5 * PHYSICS_TIMESTEP) as f32;
+
+        assert!((slope - untapered_velocity).length() < 0.001);
+
+        let recovery_at = phase_out_at + Duration::from_secs_f64(PHASE_OUT_DURATION / 2.0);
+        let displayed = trajectory.position_at(1, recovery_at, &[]);
+        trajectory.resume_at(1, recovery_at, &[]);
+        let continuation = Duration::from_secs_f64(PHYSICS_TIMESTEP);
+        let continuation_elapsed = continuation.as_secs_f64();
+        let recovery_elapsed = recovery_at.duration_since(sampled_at).as_secs_f64();
+        let recovery_velocity = velocity + acceleration * (recovery_elapsed - 0.5 * PHYSICS_TIMESTEP) as f32;
+        let expected = displayed
+            + recovery_velocity.as_dvec3() * continuation_elapsed
+            + acceleration.as_dvec3() * (0.5 * continuation_elapsed * continuation_elapsed);
+
+        assert!((trajectory.position_at(1, recovery_at + continuation, &[]) - expected).length() < 1.0e-6);
+    }
+
+    #[test]
     fn recovery_rebases_from_displayed_position() {
         let sampled_at = Instant::now();
         let phase_out_at = sampled_at + Duration::from_secs_f64(PHASE_OUT_TIME);

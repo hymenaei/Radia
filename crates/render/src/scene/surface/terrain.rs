@@ -60,13 +60,27 @@ pub(in crate::scene) fn height_at(mirror: &Mirror, position: DVec3) -> Option<f6
         let y = clamp_y.unwrap_or(y.rem_euclid(TERRAIN_PATCH_SIZE as i32) as usize);
         Some(patch_height(patch, x, y))
     };
-    let low = interpolate_samples(sample(x0, y0), sample(x1, y0), tx)?;
-    let high = interpolate_samples(sample(x0, y1), sample(x1, y1), tx)?;
-    Some(origin.z + low * (1.0 - ty) + high * ty)
+    let interpolate_row = |y| interpolate_samples(|| sample(x0, y), || sample(x1, y), tx);
+    let height = if ty == 0.0 {
+        interpolate_row(y0)?
+    } else if ty == 1.0 {
+        interpolate_row(y1)?
+    } else {
+        let low = interpolate_row(y0)?;
+        let high = interpolate_row(y1)?;
+        low * (1.0 - ty) + high * ty
+    };
+    Some(origin.z + height)
 }
 
-fn interpolate_samples(first: Option<f64>, second: Option<f64>, factor: f64) -> Option<f64> {
-    if factor == 0.0 { first } else { Some(first? * (1.0 - factor) + second? * factor) }
+fn interpolate_samples(first: impl FnOnce() -> Option<f64>, second: impl FnOnce() -> Option<f64>, factor: f64) -> Option<f64> {
+    if factor == 0.0 {
+        first()
+    } else if factor == 1.0 {
+        second()
+    } else {
+        Some(first()? * (1.0 - factor) + second()? * factor)
+    }
 }
 
 impl Terrain {

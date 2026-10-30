@@ -335,6 +335,7 @@ impl Draft {
     fn apply(&mut self, fields: Fields, kind: Kind, origin: Origin, pose_accepted: bool, media_bytes: usize, rejections: &mut Rejections) {
         let field = origin.field();
         let mut motion_observed = false;
+        let mut angular_velocity_accepted = false;
         if let Some(pose) = fields.pose.filter(|_| pose_accepted) {
             if let Some(position) = pose.position {
                 self.state.transform.position = Some(position);
@@ -358,6 +359,7 @@ impl Draft {
             self.state.angular_velocity = Some(value);
             self.ordering.fences.angular_velocity = Some(field);
             motion_observed = true;
+            angular_velocity_accepted = true;
         }
         if let Some(value) = fields.is_physical
             && origin.newer(self.ordering.fences.is_physical)
@@ -384,7 +386,7 @@ impl Draft {
             self.ordering.fences.attachment_point = Some(field);
         }
         if motion_observed {
-            self.state.motion_source = Some(origin.source.with_explicit_angular_velocity(fields.angular_velocity.is_some()));
+            self.state.motion_source = Some(origin.source.with_explicit_angular_velocity(angular_velocity_accepted));
         }
         if self.facet_changes {
             fields.facets.apply(&mut self.facets, origin, kind, media_bytes, rejections);

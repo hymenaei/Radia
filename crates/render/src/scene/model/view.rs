@@ -322,4 +322,12 @@ mod tests {
 
         assert_eq!(view.terrain_height_at(DVec3::new(255.5, 4.0, 0.0)), Some(4.0));
     }
+
+    #[test]
+    fn exact_row_ignores_unloaded_neighbor() {
+        let region = Region::new(1);
+        let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 1, 0, 7.0)]);
+
+        assert_eq!(view.terrain_height_at(DVec3::new(20.0, 15.0, 0.0)), Some(7.0));
+    }
 }

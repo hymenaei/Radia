@@ -90,7 +90,7 @@ impl MotionState {
     pub(in crate::scene) fn start_linear_phase_out(&mut self, sample: MotionSample, at: Option<Instant>) {
         let mut trajectory = self.linear_trajectory.unwrap_or_else(|| linear_trajectory(sample, self.sampled_at));
         let phase_out_at = at.map_or(self.sampled_at, |at| at.max(self.sampled_at));
-        trajectory.start_phase_out(phase_out_at.max(self.sampled_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME)));
+        trajectory.start_phase_out(phase_out_at);
         self.linear_trajectory = Some(trajectory);
     }
 
@@ -524,6 +524,25 @@ mod tests {
         assert_eq!(before_taper, DVec3::X * kinematics::PHASE_OUT_TIME);
         assert_eq!(linear_position_raw(sample, state, recovered_at, &[]), displayed);
         assert_eq!(linear_position_raw(sample, state, recovered_at + Duration::from_millis(100), &[]), displayed + DVec3::X * 0.1);
+    }
+
+    #[test]
+    fn disconnect_tapers_object_early() {
+        let sampled_at = Instant::now();
+        let disconnect_after = Duration::from_secs_f64(kinematics::PHASE_OUT_TIME / 4.0);
+        let disconnected_at = sampled_at + disconnect_after;
+        let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
+        let phase_out_end = disconnected_at + phase_out_duration;
+        let sample = sample(DVec3::ZERO, Vec3::X, Vec3::ZERO, Vec3::ZERO, false);
+        let mut state = MotionState::new(sampled_at);
+        state.start_linear_phase_out(sample, Some(disconnected_at));
+
+        let at_disconnect = linear_position_raw(sample, state, disconnected_at, &[]);
+        let at_end = linear_position_raw(sample, state, phase_out_end, &[]);
+
+        assert_eq!(at_disconnect, DVec3::X * disconnect_after.as_secs_f64());
+        assert_eq!(at_end, at_disconnect + DVec3::X * (phase_out_duration.as_secs_f64() / 2.0));
+        assert_eq!(linear_position_raw(sample, state, phase_out_end + Duration::from_nanos(1), &[]), at_end);
     }
 
     #[test]

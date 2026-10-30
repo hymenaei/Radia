@@ -818,6 +818,31 @@ async fn retry_timeout_tracks_ping() {
 }
 
 #[test]
+fn measured_rtt_uses_ewma() {
+    let mut circuit = Circuit::new();
+    let first_sent_at = Instant::now();
+    let first_ping = circuit.prepare_ping(first_sent_at).expect("prepare first ping").expect("ping id available");
+    let first_packet = Packet::decode(first_ping.bytes()).expect("decode first ping");
+    let Message::StartPingCheck(first) = first_packet.message() else { panic!("prepared first ping has the wrong message") };
+    let first_id = first.ping_id.ping_id;
+    circuit.commit_sent(first_ping, first_sent_at).expect("commit first ping");
+    assert!(circuit.record_ping_response(first_id, first_sent_at + Duration::from_millis(100)));
+    assert_eq!(circuit.measured_ping_delay_average(), Some(Duration::from_millis(100)));
+    assert_eq!(circuit.retry_timeout(), Duration::from_millis(4100));
+
+    let second_sent_at = first_sent_at + Duration::from_secs(1);
+    let second_ping = circuit.prepare_ping(second_sent_at).expect("prepare second ping").expect("ping id available");
+    let second_packet = Packet::decode(second_ping.bytes()).expect("decode second ping");
+    let Message::StartPingCheck(second) = second_packet.message() else { panic!("prepared second ping has the wrong message") };
+    let second_id = second.ping_id.ping_id;
+    circuit.commit_sent(second_ping, second_sent_at).expect("commit second ping");
+    assert!(circuit.record_ping_response(second_id, second_sent_at + Duration::from_millis(300)));
+
+    assert_eq!(circuit.measured_ping_delay_average(), Some(Duration::from_millis(140)));
+    assert_eq!(circuit.retry_timeout(), Duration::from_millis(3580));
+}
+
+#[test]
 fn retry_timeout_backs_off() {
     let circuit = Circuit::new();
     assert_eq!(circuit.retry_timeout_for(0), Duration::from_secs(5));

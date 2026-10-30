@@ -141,23 +141,49 @@ fn new_sample_replaces_state_immediately() {
 #[test]
 fn dead_reckoning_tapers_after_silence() {
     let received_at = Instant::now();
+    let phase_out_at = received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
+    let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
+    let phase_out_end = phase_out_at + phase_out_duration;
     let mut sample = motion_sample(received_at);
     sample.velocity = Vec3::X;
     let mut dead_reckoning = DeadReckoning::default();
     dead_reckoning.replace(Some(sample));
-    dead_reckoning.start_phase_out(Some(received_at + Duration::from_secs(2)));
+    dead_reckoning.start_phase_out(Some(phase_out_at));
 
-    assert!((dead_reckoning.pose(received_at + Duration::from_millis(2500), &[]).unwrap().position.x - 12.383).abs() < 1e-12);
-    assert!((dead_reckoning.pose(received_at + Duration::from_secs(3), &[]).unwrap().position.x - 12.508).abs() < 1e-12);
-    assert!((dead_reckoning.pose(received_at + Duration::from_secs(10), &[]).unwrap().position.x - 12.508).abs() < 1e-12);
-    assert!(!dead_reckoning.active(received_at + Duration::from_secs(3) + Duration::from_nanos(1)));
+    assert!((dead_reckoning.pose(phase_out_at + phase_out_duration / 2, &[]).unwrap().position.x - 12.383).abs() < 1e-12);
+    assert!((dead_reckoning.pose(phase_out_end, &[]).unwrap().position.x - 12.508).abs() < 1e-12);
+    assert!((dead_reckoning.pose(phase_out_end + phase_out_duration, &[]).unwrap().position.x - 12.508).abs() < 1e-12);
+    assert!(!dead_reckoning.active(phase_out_end + Duration::from_nanos(1)));
+}
+
+#[test]
+fn disconnect_tapers_agent_early() {
+    let received_at = Instant::now();
+    let disconnect_at = received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME / 4.0);
+    let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
+    let phase_out_end = disconnect_at + phase_out_duration;
+    let mut sample = motion_sample(received_at);
+    sample.velocity = Vec3::X;
+    let mut dead_reckoning = DeadReckoning::default();
+    dead_reckoning.replace(Some(sample));
+    dead_reckoning.start_phase_out(Some(disconnect_at));
+
+    let at_sample = dead_reckoning.pose(received_at, &[]).unwrap().position;
+    let at_disconnect = dead_reckoning.pose(disconnect_at, &[]).unwrap().position;
+    let at_end = dead_reckoning.pose(phase_out_end, &[]).unwrap().position;
+
+    assert_eq!(at_disconnect, at_sample + Vec3::X.as_dvec3() * (disconnect_at - received_at).as_secs_f64());
+    assert_eq!(at_end, at_disconnect + Vec3::X.as_dvec3() * (phase_out_duration.as_secs_f64() / 2.0));
+    assert_eq!(dead_reckoning.pose(phase_out_end + Duration::from_nanos(1), &[]).unwrap().position, at_end);
+    assert!(!dead_reckoning.active(phase_out_end));
 }
 
 #[test]
 fn dead_reckoning_recovers_from_displayed_position() {
     let received_at = Instant::now();
-    let phase_out_at = received_at + Duration::from_secs(2);
-    let recovered_at = phase_out_at + Duration::from_millis(500);
+    let phase_out_at = received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME);
+    let phase_out_duration = Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME - kinematics::PHASE_OUT_TIME);
+    let recovered_at = phase_out_at + phase_out_duration / 2;
     let mut sample = motion_sample(received_at);
     sample.velocity = Vec3::X;
     let mut dead_reckoning = DeadReckoning::default();

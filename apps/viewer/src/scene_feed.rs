@@ -74,7 +74,7 @@ impl DeadReckoning {
         let Some(sample) = self.sample else { return };
         if let Some(trajectory) = &mut self.trajectory {
             let phase_out_at = at.map_or(sample.received_at, |at| at.max(sample.received_at));
-            trajectory.start_phase_out(phase_out_at.max(sample.received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME)));
+            trajectory.start_phase_out(phase_out_at);
         }
     }
 

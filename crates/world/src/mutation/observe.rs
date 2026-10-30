@@ -395,6 +395,28 @@ mod tests {
     }
 
     #[test]
+    fn stale_omega_marker_stays_clear() {
+        let region = Region::new(32);
+        let mut world = test_world(&[region]);
+        let mut initial = observation(region, 32, 1, 2);
+        initial.angular_velocity = Some(Vec3::ZERO);
+        let introduced = world.observe_object(initial).unwrap();
+        let entity = world.entity(Uuid::from_u128(32)).expect("introduced object");
+        assert_eq!(introduced.outcome, ApplyOutcome::Introduced(entity));
+
+        let mut stale = observation(region, 32, 1, 1);
+        stale.pose = Some(Pose { position: Some(Vec3::new(4.0, 5.0, 6.0)), rotation: None });
+        stale.angular_velocity = Some(Vec3::ZERO);
+        let applied = world.observe_object(stale).unwrap();
+
+        assert_eq!(applied.outcome, ApplyOutcome::Updated(entity));
+        let object = world.object(entity).unwrap();
+        assert_eq!(object.position(), Some(Vec3::new(4.0, 5.0, 6.0)));
+        assert_eq!(object.angular_velocity(), Some(Vec3::ZERO));
+        assert!(!object.motion_source().unwrap().has_explicit_angular_velocity());
+    }
+
+    #[test]
     fn generation_overflow_preserves_bindings() {
         let region = Region::new(27);
         let mut world = test_world(&[region]);

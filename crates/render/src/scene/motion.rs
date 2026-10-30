@@ -65,6 +65,7 @@ impl MotionState {
         if next.motion_update_kind == MotionUpdateKind::Full
             && previous.local_rotation == next.local_rotation
             && next.angular_velocity == Vec3::ZERO
+            && next.source.is_some_and(world::UpdateSource::has_explicit_angular_velocity)
         {
             return Self::new(sampled_at);
         }
@@ -335,6 +336,35 @@ mod tests {
         }
     }
 
+    fn explicit_zero_omega_source() -> UpdateSource {
+        let limits = WorldLimits {
+            max_region_registrations: 1,
+            max_entities: 1,
+            max_entities_per_region: 1,
+            max_tombstones_per_region: 1,
+            max_tombstones: 1,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(1),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(1),
+            max_journal_entries: 4,
+            max_journal_changes: 8,
+            max_region_name_bytes: 8,
+            max_recovery_targets: 1,
+        };
+        let region = Region::new(1);
+        let mut world = World::new(limits);
+        let _ = world.adopt_region(region).expect("region adoption");
+        let mut observation = ObjectObservation::new(
+            UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
+            Uuid::from_u128(1),
+            NonZeroU32::new(1).unwrap(),
+            world::Kind::Object,
+            ParentUpdate::Root,
+        );
+        observation.angular_velocity = Some(Vec3::ZERO);
+        let _ = world.observe_object(observation).expect("object observation");
+        world.object(world.entity(Uuid::from_u128(1)).expect("object entity")).unwrap().motion_source().unwrap()
+    }
+
     fn child_scene(parent_scale: Option<Vec3>) -> (Reconciler, SceneView) {
         let limits = WorldLimits {
             max_region_registrations: 4,
@@ -557,10 +587,23 @@ mod tests {
         let state = MotionState::new(received_at);
         let updated_at = received_at + Duration::from_secs(1);
         let mut update = sample(DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, false);
-        update.source = Some(UpdateSource::new(Region::new(1), 2, OrderEvidence::Ordered(2), 0));
+        update.source = Some(explicit_zero_omega_source());
         let updated = MotionState::updated(state, moving, update, updated_at);
 
         close_rotation(updated.local_rotation(update, updated_at), update.local_rotation);
+    }
+
+    #[test]
+    fn missing_compressed_omega_keeps_spin() {
+        let received_at = Instant::now();
+        let moving = sample(DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z, false);
+        let state = MotionState::new(received_at);
+        let updated_at = received_at + Duration::from_secs(1);
+        let mut update = sample(DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, false);
+        update.source = Some(UpdateSource::new(Region::new(1), 2, OrderEvidence::Ordered(2), 0));
+        let updated = MotionState::updated(state, moving, update, updated_at);
+
+        close_rotation(updated.local_rotation(update, updated_at), Quat::from_rotation_z(1.0));
     }
 
     #[test]

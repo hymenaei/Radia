@@ -46,6 +46,7 @@ pub struct UpdateSource {
     pub(super) block_ordinal: u32,
     pub(super) authority: UpdateAuthority,
     motion_update_kind: MotionUpdateKind,
+    explicit_angular_velocity: bool,
     motion_received_at: Option<Instant>,
     motion_ping_delay: Duration,
 }
@@ -59,6 +60,7 @@ impl UpdateSource {
             block_ordinal,
             authority: UpdateAuthority::Tracked,
             motion_update_kind: MotionUpdateKind::Full,
+            explicit_angular_velocity: false,
             motion_received_at: None,
             motion_ping_delay: Duration::ZERO,
         }
@@ -74,6 +76,11 @@ impl UpdateSource {
         self
     }
 
+    pub(crate) const fn with_explicit_angular_velocity(mut self, explicit: bool) -> Self {
+        self.explicit_angular_velocity = explicit;
+        self
+    }
+
     pub const fn with_motion_timing(mut self, received_at: Instant, ping_delay: Duration) -> Self {
         self.motion_received_at = Some(received_at);
         self.motion_ping_delay = ping_delay;
@@ -86,6 +93,10 @@ impl UpdateSource {
 
     pub const fn motion_update_kind(self) -> MotionUpdateKind {
         self.motion_update_kind
+    }
+
+    pub const fn has_explicit_angular_velocity(self) -> bool {
+        self.explicit_angular_velocity
     }
 
     pub const fn motion_received_at(self) -> Option<Instant> {

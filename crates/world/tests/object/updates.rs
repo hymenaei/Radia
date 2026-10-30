@@ -151,7 +151,9 @@ fn motion_metadata_is_stored_and_authoritative_updates_advance_the_sample() {
     let current = world.object(entity).unwrap();
     assert!(current.is_physical());
     assert_eq!(current.time_dilation(), 0.5);
-    assert_eq!(current.motion_source(), Some(first_source));
+    let motion_source = current.motion_source().unwrap();
+    assert_eq!((motion_source.region(), motion_source.sequence()), (first_source.region(), first_source.sequence()));
+    assert!(motion_source.has_explicit_angular_velocity());
 
     let next_source = source(region, 2);
     let mut update = ObjectPatch::new(next_source, local_id(1));
@@ -162,7 +164,9 @@ fn motion_metadata_is_stored_and_authoritative_updates_advance_the_sample() {
     let applied = world.patch_object(update).unwrap();
 
     assert_eq!(applied.outcome, Updated(entity));
-    assert_eq!(world.object(entity).unwrap().motion_source(), Some(next_source));
+    let motion_source = world.object(entity).unwrap().motion_source().unwrap();
+    assert_eq!((motion_source.region(), motion_source.sequence()), (next_source.region(), next_source.sequence()));
+    assert!(motion_source.has_explicit_angular_velocity());
 }
 
 #[test]

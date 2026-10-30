@@ -384,7 +384,7 @@ impl Draft {
             self.ordering.fences.attachment_point = Some(field);
         }
         if motion_observed {
-            self.state.motion_source = Some(origin.source);
+            self.state.motion_source = Some(origin.source.with_explicit_angular_velocity(fields.angular_velocity.is_some()));
         }
         if self.facet_changes {
             fields.facets.apply(&mut self.facets, origin, kind, media_bytes, rejections);

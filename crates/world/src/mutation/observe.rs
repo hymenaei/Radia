@@ -374,6 +374,27 @@ mod tests {
     }
 
     #[test]
+    fn compressed_source_tracks_missing_omega() {
+        let region = Region::new(29);
+        let mut world = test_world(&[region]);
+        let mut initial = observation(region, 29, 1, 1);
+        initial.angular_velocity = Some(Vec3::ZERO);
+        initial.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X), acceleration: None });
+        let ApplyOutcome::Introduced(entity) = world.observe_object(initial).unwrap().outcome else {
+            panic!("expected object introduction")
+        };
+        assert!(world.object(entity).unwrap().motion_source().unwrap().has_explicit_angular_velocity());
+
+        let mut compressed = observation(region, 29, 1, 2);
+        compressed.linear_motion = Some(LinearMotion { velocity: None, acceleration: Some(Vec3::ZERO) });
+        let _ = world.observe_object(compressed).unwrap();
+
+        let object = world.object(entity).unwrap();
+        assert_eq!(object.angular_velocity(), Some(Vec3::ZERO));
+        assert!(!object.motion_source().unwrap().has_explicit_angular_velocity());
+    }
+
+    #[test]
     fn generation_overflow_preserves_bindings() {
         let region = Region::new(27);
         let mut world = test_world(&[region]);

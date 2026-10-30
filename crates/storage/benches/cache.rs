@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use criterion::{BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput};
 use storage::{Cache, DEFAULT_SIZE_LIMIT, Key, Namespace, NamespaceId, StorageError, UnavailableReason};
 use tempfile::tempdir;
 
@@ -60,34 +60,48 @@ pub(crate) fn bench(c: &mut Criterion) {
 
     group.throughput(Throughput::Elements(1));
     group.bench_function(BenchmarkId::new("put_single", EXISTING_ENTRIES), |b| {
-        let mut sequence = EXISTING_ENTRIES + 1;
-        b.iter(|| {
-            cache_ref.put(key(sequence), vec![0x5a; PAYLOAD_BYTES]).expect("single put");
-            sequence += 1;
-        });
+        let item_key = key(EXISTING_ENTRIES);
+        b.iter_batched(
+            || cache_ref.remove(item_key).expect("reset single insertion"),
+            |_| cache_ref.put(item_key, vec![0x5a; PAYLOAD_BYTES]).expect("single put"),
+            BatchSize::PerIteration,
+        );
+        assert!(cache_ref.remove(item_key).expect("remove inserted entry"));
+        assert_eq!(cache_ref.entry_count(), EXISTING_ENTRIES as usize);
     });
 
     group.throughput(Throughput::Elements(BURST_WRITES as u64));
     group.bench_function(BenchmarkId::new("put_burst_16", EXISTING_ENTRIES), |b| {
-        let mut sequence = EXISTING_ENTRIES + 100_000;
-        b.iter(|| {
-            let barrier = Arc::new(Barrier::new(BURST_WRITES));
-            thread::scope(|scope| {
-                for _ in 0..BURST_WRITES {
-                    let barrier = Arc::clone(&barrier);
-                    let item_key = key(sequence);
-                    sequence += 1;
-                    scope.spawn(move || {
-                        barrier.wait();
-                        put_until_accepted(cache_ref, item_key);
-                    });
+        let keys: [Key; BURST_WRITES] = std::array::from_fn(|index| key(EXISTING_ENTRIES + index as u64));
+        b.iter_batched(
+            || {
+                for item_key in keys {
+                    cache_ref.remove(item_key).expect("reset burst insertion");
                 }
-            });
-        });
+            },
+            |_| {
+                let barrier = Arc::new(Barrier::new(BURST_WRITES));
+                thread::scope(|scope| {
+                    for item_key in keys {
+                        let barrier = Arc::clone(&barrier);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            put_until_accepted(cache_ref, item_key);
+                        });
+                    }
+                });
+            },
+            BatchSize::PerIteration,
+        );
+        for item_key in keys {
+            assert!(cache_ref.remove(item_key).expect("remove burst entry"));
+        }
+        assert_eq!(cache_ref.entry_count(), EXISTING_ENTRIES as usize);
     });
 
     group.throughput(Throughput::Elements(1));
     group.bench_function(BenchmarkId::new("lookup_hit", EXISTING_ENTRIES), |b| {
+        std::assert_matches!(cache_ref.lookup(hit_key), storage::Lookup::Hit(_));
         b.iter(|| black_box(cache_ref.lookup(hit_key)));
     });
     group.finish();
@@ -103,6 +117,7 @@ pub(crate) fn bench(c: &mut Criterion) {
                 let start = Instant::now();
                 let opened = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &NAMESPACES).expect("open replay fixture");
                 measured += start.elapsed();
+                assert_eq!(opened.entry_count(), EXISTING_ENTRIES as usize);
                 opened.shutdown().expect("close replay fixture");
             }
             measured

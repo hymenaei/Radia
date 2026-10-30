@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use egui::{Context, DragValue, Slider, ViewportId};
+use egui::{Context, DragValue, Slider};
 use futures::executor::block_on;
 use render::scene;
 use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
@@ -22,7 +22,8 @@ use winit::{
 
 use super::{
     FRAME_INTERVAL, InputCapture, SharedWindowState,
-    timing::{FrameTimes, next_frame_deadline, redraw_interval, refresh_interval},
+    sit_controls::SitControls,
+    timing::{FrameTimes, display_refresh_interval, next_frame_deadline, redraw_interval},
 };
 use crate::{
     DEFAULT_DRAW_DISTANCE,
@@ -34,11 +35,6 @@ use crate::{
 
 const RECOVERY_DELAY: Duration = Duration::from_millis(500);
 pub(super) const MAX_RECOVERIES: u32 = 3;
-
-fn display_refresh_interval(window: &Window) -> Duration {
-    let millihertz = window.current_monitor().and_then(|monitor| monitor.refresh_rate_millihertz());
-    refresh_interval(millihertz, FRAME_INTERVAL)
-}
 
 #[derive(Debug)]
 pub(crate) enum SceneWindowError {
@@ -115,6 +111,7 @@ pub(super) struct SceneWindow {
     cursor: PhysicalPosition<f64>,
     modifiers: ModifiersState,
     drag: Option<DragState>,
+    sit_controls: SitControls,
 }
 
 impl SceneWindow {
@@ -155,7 +152,7 @@ impl SceneWindow {
             window.request_user_attention(Some(UserAttentionType::Informational));
         }
         let now = Instant::now();
-        let frame_interval = display_refresh_interval(&window);
+        let frame_interval = display_refresh_interval(&window, FRAME_INTERVAL);
         let texture_soft_cap = renderer.texture_soft_cap_mib();
         let (texture_sender, texture_receiver) = mpsc::sync_channel(2);
         Ok(Self {
@@ -194,6 +191,7 @@ impl SceneWindow {
             cursor: PhysicalPosition::new(0.0, 0.0),
             modifiers: ModifiersState::empty(),
             drag: None,
+            sit_controls: SitControls::new(),
         })
     }
 
@@ -251,6 +249,16 @@ impl SceneWindow {
             WindowEvent::MouseInput { button: MouseButton::Left, state, .. } => {
                 self.handle_left_click(*state, capture);
             }
+            WindowEvent::MouseInput { button: MouseButton::Right, state: ElementState::Pressed, .. } => {
+                self.sit_controls.handle_right_click(
+                    capture,
+                    self.renderer.as_ref(),
+                    self.last_camera,
+                    self.cursor,
+                    self.window.inner_size(),
+                    self.dpi,
+                );
+            }
             WindowEvent::MouseWheel { delta, .. } if !capture.consumed && !capture.pointer => {
                 let clicks = match delta {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
@@ -276,6 +284,10 @@ impl SceneWindow {
                     && !capture.consumed
                     && !capture.keyboard =>
             {
+                if self.sit_controls.close_menu() {
+                    self.dirty = true;
+                    return true;
+                }
                 self.release_drag(true);
                 if self.camera_mode == CameraMode::Free {
                     self.transition_to_follow();
@@ -392,7 +404,7 @@ impl SceneWindow {
             };
             let size = self.window.inner_size();
             match renderer.pick(observation, observation.ray([self.cursor.x, self.cursor.y], [size.width, size.height])) {
-                Ok(point) => point,
+                Ok(hit) => hit.map(|hit| hit.position),
                 Err(error) => {
                     tracing::debug!(%error, "scene focus pick exceeded its work limit");
                     return;
@@ -632,9 +644,12 @@ impl SceneWindow {
         let gpu_timing_supported = renderer.gpu_timing_supported();
         let frame_times = self.frame_times.summary();
         self.dpi = self.window.scale_factor();
+        let seated = self.feed.as_mut().is_some_and(SceneFeed::agent_is_seated);
+        self.sit_controls.poll(now);
         let input = self.platform.take_egui_input(&self.window);
         let mut request_chat = false;
         let mut recreate_renderer = false;
+        let mut sit_request = None;
         let output = self.egui.run_ui(input, |root| {
             egui::Window::new("Rendering").default_width(400.0).show(root.ctx(), |ui| {
                 if let Some(camera) = &mut self.camera {
@@ -765,10 +780,12 @@ impl SceneWindow {
                     }
                     recreate_renderer = ui.button("Recreate GPU resources").clicked();
                 });
-                request_chat = ui.button("Nearby chat (F6)").clicked();
             });
+            (request_chat, sit_request) = self.sit_controls.controls_ui(root, seated, self.feed.is_some(), now);
         });
-        self.next_ui = output.viewport_output.get(&ViewportId::ROOT).and_then(|viewport| now.checked_add(viewport.repaint_delay));
+        let repaint_delay = output.viewport_output.get(&egui::ViewportId::ROOT).map(|viewport| viewport.repaint_delay);
+        self.next_ui = self.sit_controls.next_deadline(now, repaint_delay);
+        self.dirty |= self.sit_controls.start_if_requested(sit_request, self.feed.as_ref(), Arc::clone(&self.wake));
         self.platform.handle_platform_output(&self.window, output.platform_output);
         if self.drag.is_some() {
             self.window.set_cursor_visible(false);
@@ -908,7 +925,7 @@ impl SceneWindow {
             });
             return;
         }
-        let display_interval = display_refresh_interval(&self.window);
+        let display_interval = display_refresh_interval(&self.window, FRAME_INTERVAL);
         self.frame_interval = redraw_interval(display_interval, self.focused, self.controls.active() || self.stop_clear_pending);
         let now = Instant::now();
         if self.next_ui.is_some_and(|at| now >= at) {
@@ -989,7 +1006,8 @@ impl PresentationRecovery {
 fn debug_ui(window: &Window) -> (Context, egui_winit::State) {
     let ctx = Context::default();
     ctx.global_style_mut(|style| style.animation_time = 0.0);
-    let state = egui_winit::State::new(ctx.clone(), ViewportId::ROOT, window, Some(window.scale_factor() as f32), window.theme(), None);
+    let state =
+        egui_winit::State::new(ctx.clone(), egui::ViewportId::ROOT, window, Some(window.scale_factor() as f32), window.theme(), None);
     (ctx, state)
 }
 

@@ -31,7 +31,7 @@ use crate::{
     agent_movement::MovementObservation,
     agent_movement::sitting::ScriptControlGrabs,
     asset_coordinator::{AssetHandle, RequestError},
-    session::{AgentMotionSample, EnvironmentInbox, SitCameraOverride, SitResponseState},
+    session::{AgentControlHandle, AgentMotionSample, EnvironmentInbox, SitCameraOverride, SitResponseState},
     world_reader::{ReadError, WorldReader},
 };
 
@@ -133,6 +133,7 @@ pub(crate) struct SceneFeed {
     pub(crate) view: SceneView,
     pub(crate) budget: Budget,
     pub(crate) assets: AssetHandle,
+    agent_control: AgentControlHandle,
     agent_id: Uuid,
     agent: Option<Entity>,
     pub(crate) water_height: Option<f64>,
@@ -162,6 +163,7 @@ impl SceneFeed {
     pub(crate) fn start(
         sources: SceneSources,
         agent_id: Uuid,
+        agent_control: AgentControlHandle,
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
         mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
@@ -208,6 +210,7 @@ impl SceneFeed {
             view,
             budget,
             assets,
+            agent_control,
             agent_id,
             agent: None,
             water_height: None,
@@ -274,6 +277,10 @@ impl SceneFeed {
 
     pub(crate) fn agent_id(&self) -> Uuid {
         self.agent_id
+    }
+
+    pub(crate) fn agent_control(&self) -> &AgentControlHandle {
+        &self.agent_control
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]

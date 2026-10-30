@@ -1,3 +1,4 @@
+mod sit_controls;
 mod timing;
 mod window;
 
@@ -34,7 +35,7 @@ use crate::{
     agent_movement::MovementObservation,
     agent_movement::sitting::ScriptControlGrabs,
     scene_feed::SceneFeed,
-    session::{AgentMotionSample, SitResponseState},
+    session::{AgentControlHandle, AgentMotionSample, SitResponseState},
 };
 
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
@@ -200,6 +201,7 @@ impl Viewport {
         generation: u64,
         sources: crate::scene_feed::SceneSources,
         agent_id: uuid::Uuid,
+        agent_control: AgentControlHandle,
         camera: watch::Sender<Option<scene::Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
         agent_motion: watch::Receiver<Option<AgentMotionSample>>,
@@ -214,6 +216,7 @@ impl Viewport {
             let feed = SceneFeed::start(
                 sources,
                 agent_id,
+                agent_control,
                 camera,
                 movement,
                 agent_motion,

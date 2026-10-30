@@ -5,9 +5,11 @@ use std::{
 };
 
 use math::{DVec3, Quat, Vec3, ray_intersects_bounds, ray_triangle_intersection};
+use uuid::Uuid;
+use world::Kind;
 
-use super::{GeometryRenderer, ShadingMode};
-use crate::scene::{Camera, SharedMesh};
+use super::{GeometryRenderer, ShadingMode, items::CachedItem};
+use crate::scene::{Camera, SharedMesh, SurfaceKind};
 
 const MAX_PICK_TRIANGLES: usize = 250_000;
 
@@ -24,8 +26,36 @@ impl Display for PickError {
 
 impl Error for PickError {}
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PickHit {
+    pub target: PickTarget,
+    pub position: DVec3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PickTarget {
+    Object(PickObject),
+    Terrain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PickObject {
+    pub id: Uuid,
+    pub kind: PickObjectKind,
+    pub position: DVec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PickObjectKind {
+    Prim,
+    Avatar,
+    Unknown(u8),
+}
+
 impl GeometryRenderer {
-    pub(crate) fn pick(&self, camera: Camera, ray: DVec3) -> Result<Option<DVec3>, PickError> {
+    pub(crate) fn pick(&self, camera: Camera, ray: DVec3) -> Result<Option<PickHit>, PickError> {
         let mut query = PickQuery::new(camera, ray);
         if !ray.is_finite() {
             return Ok(None);
@@ -35,10 +65,34 @@ impl GeometryRenderer {
             if !item.pickable {
                 continue;
             }
+            let Some(target) = pick_target(item) else { continue };
             let faces = item.faces.iter().filter(|face| face.slot.is_some()).map(|face| (&face.indices, face.params.double_sided));
-            query.visit_item(&item.mesh, item.position, item.rotation, item.scale, item.shading, faces)?;
+            query.visit_item(&item.mesh, item.position, item.rotation, item.scale, target, item.shading, faces)?;
         }
         Ok(query.result())
+    }
+}
+
+fn pick_target(item: &CachedItem) -> Option<PickTarget> {
+    if let Some(object) = &item.source {
+        let summary = object.detail().summary;
+        let kind = match summary.kind {
+            Kind::Object => PickObjectKind::Prim,
+            Kind::Avatar => PickObjectKind::Avatar,
+            Kind::Unknown(kind) => PickObjectKind::Unknown(kind),
+        };
+        return Some(PickTarget::Object(PickObject {
+            id: summary.id,
+            kind,
+            position: item.position,
+            rotation: item.rotation,
+            scale: item.scale,
+        }));
+    }
+
+    match item.surface_kind? {
+        SurfaceKind::Terrain(_) => Some(PickTarget::Terrain),
+        SurfaceKind::Water => None,
     }
 }
 
@@ -46,13 +100,13 @@ struct PickQuery {
     camera: Camera,
     ray: DVec3,
     closest: f32,
-    found: bool,
+    hit: Option<PickHit>,
     work: usize,
 }
 
 impl PickQuery {
     fn new(camera: Camera, ray: DVec3) -> Self {
-        Self { camera, ray, closest: f32::INFINITY, found: false, work: 0 }
+        Self { camera, ray, closest: f32::INFINITY, hit: None, work: 0 }
     }
 
     fn visit_item<'a>(
@@ -61,6 +115,7 @@ impl PickQuery {
         position: DVec3,
         rotation: Quat,
         scale: Vec3,
+        target: PickTarget,
         shading: ShadingMode,
         faces: impl Iterator<Item = (&'a Range<u32>, bool)>,
     ) -> Result<(), PickError> {
@@ -92,14 +147,14 @@ impl PickQuery {
                     continue;
                 }
                 self.closest = distance;
-                self.found = true;
+                self.hit = Some(PickHit { target, position: self.camera.position() + self.ray * f64::from(distance) });
             }
         }
         Ok(())
     }
 
-    fn result(self) -> Option<DVec3> {
-        self.found.then(|| self.camera.position() + self.ray * f64::from(self.closest))
+    fn result(self) -> Option<PickHit> {
+        self.hit
     }
 }
 
@@ -108,15 +163,16 @@ mod tests {
     use std::ops::Range;
 
     use math::{DVec3, Quat, Vec3};
+    use uuid::Uuid;
 
-    use super::{MAX_PICK_TRIANGLES, PickError, PickQuery};
+    use super::{MAX_PICK_TRIANGLES, PickError, PickObject, PickObjectKind, PickQuery, PickTarget};
     use crate::{
         geometry::{ShadingMode, fixtures},
         scene::{Camera, SharedMesh},
     };
 
     type TestFace = (Range<u32>, bool);
-    type TestItem = (SharedMesh, DVec3, ShadingMode, Vec<TestFace>);
+    type TestItem = (SharedMesh, DVec3, Quat, Vec3, PickTarget, ShadingMode, Vec<TestFace>);
 
     #[test]
     fn backface_needs_double_sided() {
@@ -124,7 +180,7 @@ mod tests {
         let (triangle, indices) = first_triangle(&mesh);
         let (front_camera, center, front_ray) = camera_for_triangle(triangle);
         assert_hit_near(
-            &[(mesh.clone(), DVec3::ZERO, ShadingMode::Studio, vec![(indices.clone(), false)])],
+            &[object_item(mesh.clone(), DVec3::ZERO, 1, PickObjectKind::Prim, ShadingMode::Studio, vec![(indices.clone(), false)])],
             front_camera,
             front_ray,
             center,
@@ -133,23 +189,41 @@ mod tests {
         let back_camera = Camera::new(center + front_ray * 5.0, -front_ray.as_vec3(), 1.0, [128, 128]).unwrap();
         let back_ray = back_camera.direction().as_dvec3();
         assert_eq!(
-            pick_items(&[(mesh.clone(), DVec3::ZERO, ShadingMode::Studio, vec![(indices.clone(), false)])], back_camera, back_ray),
+            pick_items(
+                &[object_item(mesh.clone(), DVec3::ZERO, 1, PickObjectKind::Prim, ShadingMode::Studio, vec![(indices.clone(), false)])],
+                back_camera,
+                back_ray
+            ),
             Ok(None)
         );
-        assert_hit_near(&[(mesh, DVec3::ZERO, ShadingMode::Studio, vec![(indices, true)])], back_camera, back_ray, center);
+        assert_hit_near(
+            &[object_item(mesh, DVec3::ZERO, 1, PickObjectKind::Prim, ShadingMode::Studio, vec![(indices, true)])],
+            back_camera,
+            back_ray,
+            center,
+        );
     }
 
     #[test]
-    fn closest_hit_wins() {
+    fn closest_hit_keeps_identity() {
         let mesh = shared_mesh();
         let (triangle, indices) = first_triangle(&mesh);
         let (camera, center, ray) = camera_for_triangle(triangle);
         let position_at = |distance| camera.position() + ray * distance - center;
+        let first_position = position_at(1.0);
         let items = [
-            (mesh.clone(), position_at(1.0), ShadingMode::Studio, vec![(indices.clone(), false)]),
-            (mesh, position_at(2.0), ShadingMode::Studio, vec![(indices, false)]),
+            object_item(mesh.clone(), first_position, 7, PickObjectKind::Prim, ShadingMode::Studio, vec![(indices.clone(), false)]),
+            object_item(mesh, position_at(2.0), 8, PickObjectKind::Avatar, ShadingMode::Studio, vec![(indices, false)]),
         ];
-        assert_hit_near(&items, camera, ray, camera.position() + ray);
+        let hit = pick_items(&items, camera, ray).unwrap().unwrap();
+        assert!(hit.position.distance(camera.position() + ray) < 1e-4);
+        let PickTarget::Object(object) = hit.target else { panic!("nearest item is an object") };
+        assert_eq!(object.id, Uuid::from_u128(7));
+        assert_eq!(object.kind, PickObjectKind::Prim);
+        let avatar = pick_items(&items[1..], camera, ray).unwrap().unwrap();
+        let PickTarget::Object(object) = avatar.target else { panic!("avatar is an object") };
+        assert_eq!(object.id, Uuid::from_u128(8));
+        assert_eq!(object.kind, PickObjectKind::Avatar);
     }
 
     #[test]
@@ -159,8 +233,8 @@ mod tests {
         let (camera, center, ray) = camera_for_triangle(triangle);
         let position_at = |distance| camera.position() + ray * distance - center;
         let items = [
-            (mesh.clone(), position_at(0.01), ShadingMode::Studio, vec![(indices.clone(), false)]),
-            (mesh, position_at(0.1), ShadingMode::Studio, vec![(indices, false)]),
+            object_item(mesh.clone(), position_at(0.01), 1, PickObjectKind::Prim, ShadingMode::Studio, vec![(indices.clone(), false)]),
+            object_item(mesh, position_at(0.1), 2, PickObjectKind::Prim, ShadingMode::Studio, vec![(indices, false)]),
         ];
         assert_hit_near(&items, camera, ray, camera.position() + ray * 0.1);
     }
@@ -172,10 +246,12 @@ mod tests {
         let (camera, center, ray) = camera_for_triangle(triangle);
         let camera = camera.with_quality(32.0, 1.0).unwrap();
         let position = camera.position() + ray * 40.0 - center;
-        let object = [(mesh.clone(), position, ShadingMode::Studio, vec![(indices.clone(), true)])];
-        let terrain = [(mesh, position, ShadingMode::Terrain, vec![(indices, true)])];
+        let object = [object_item(mesh.clone(), position, 1, PickObjectKind::Prim, ShadingMode::Studio, vec![(indices.clone(), true)])];
+        let terrain = [item(mesh, position, Quat::IDENTITY, Vec3::ONE, PickTarget::Terrain, ShadingMode::Terrain, vec![(indices, true)])];
         assert_eq!(pick_items(&object, camera, ray), Ok(None));
-        assert_hit_near(&terrain, camera, ray, camera.position() + ray * 40.0);
+        let hit = pick_items(&terrain, camera, ray).unwrap().unwrap();
+        assert_eq!(hit.target, PickTarget::Terrain);
+        assert!(hit.position.distance(camera.position() + ray * 40.0) < 1e-4);
     }
 
     #[test]
@@ -185,24 +261,27 @@ mod tests {
         let (camera, _, ray) = camera_for_triangle(triangle);
         let repeated = (0..=MAX_PICK_TRIANGLES).map(|_| (&indices, false));
         let mut query = PickQuery::new(camera, ray);
-        query.visit_item(&mesh, DVec3::new(0.0, 100.0, 0.0), Quat::IDENTITY, Vec3::ONE, ShadingMode::Studio, repeated).unwrap();
+        query
+            .visit_item(&mesh, DVec3::new(0.0, 100.0, 0.0), Quat::IDENTITY, Vec3::ONE, PickTarget::Terrain, ShadingMode::Studio, repeated)
+            .unwrap();
         assert_eq!(query.result(), None);
         let repeated = (0..=MAX_PICK_TRIANGLES).map(|_| (&indices, false));
         let mut query = PickQuery::new(camera, ray);
         assert_eq!(
-            query.visit_item(&mesh, DVec3::ZERO, Quat::IDENTITY, Vec3::ONE, ShadingMode::Studio, repeated),
+            query.visit_item(&mesh, DVec3::ZERO, Quat::IDENTITY, Vec3::ONE, PickTarget::Terrain, ShadingMode::Studio, repeated),
             Err(PickError::TriangleLimitExceeded)
         );
     }
 
-    fn pick_items(items: &[TestItem], camera: Camera, ray: DVec3) -> Result<Option<DVec3>, PickError> {
+    fn pick_items(items: &[TestItem], camera: Camera, ray: DVec3) -> Result<Option<super::PickHit>, PickError> {
         let mut query = PickQuery::new(camera, ray);
-        for (mesh, position, shading, faces) in items {
+        for (mesh, position, rotation, scale, target, shading, faces) in items {
             query.visit_item(
                 mesh,
                 *position,
-                Quat::IDENTITY,
-                Vec3::ONE,
+                *rotation,
+                *scale,
+                *target,
                 *shading,
                 faces.iter().map(|(range, double_sided)| (range, *double_sided)),
             )?;
@@ -239,7 +318,38 @@ mod tests {
 
     fn assert_hit_near(items: &[TestItem], camera: Camera, ray: DVec3, expected: DVec3) {
         let picked = pick_items(items, camera, ray).expect("fixture stays within the pick work limit");
-        let point = picked.expect("expected a ray hit");
+        let point = picked.expect("expected a ray hit").position;
         assert!(point.distance(expected) < 1e-4, "picked {point:?}, expected {expected:?}");
+    }
+
+    fn object_item(
+        mesh: SharedMesh,
+        position: DVec3,
+        id: u128,
+        kind: PickObjectKind,
+        shading: ShadingMode,
+        faces: Vec<TestFace>,
+    ) -> TestItem {
+        item(
+            mesh,
+            position,
+            Quat::IDENTITY,
+            Vec3::ONE,
+            PickTarget::Object(PickObject { id: Uuid::from_u128(id), kind, position, rotation: Quat::IDENTITY, scale: Vec3::ONE }),
+            shading,
+            faces,
+        )
+    }
+
+    fn item(
+        mesh: SharedMesh,
+        position: DVec3,
+        rotation: Quat,
+        scale: Vec3,
+        target: PickTarget,
+        shading: ShadingMode,
+        faces: Vec<TestFace>,
+    ) -> TestItem {
+        (mesh, position, rotation, scale, target, shading, faces)
     }
 }

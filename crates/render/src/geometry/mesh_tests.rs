@@ -710,7 +710,7 @@ fn gpu_agent_pose_override_patches_draw_and_pick() {
     assert_eq!(geometry.pick(camera, old_ray).unwrap(), None, "picking no longer sees the old avatar position");
     let moved_ray = camera.ray([41.0, 64.0], size);
     let moved_hit = geometry.pick(camera, moved_ray).unwrap().expect("predicted avatar position is pickable");
-    assert!(moved_hit.distance(predicted_pose.position) < 1.0, "picked point follows the predicted pose: {moved_hit:?}");
+    assert!(moved_hit.position.distance(predicted_pose.position) < 1.0, "picked point follows the predicted pose: {moved_hit:?}");
 
     let mut encoder = device.create_command_encoder(&Default::default());
     geometry.prepare(&device, &mut encoder, &view, None, camera, size, None);

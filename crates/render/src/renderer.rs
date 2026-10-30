@@ -17,7 +17,7 @@ use wgpu::{
     RequestAdapterOptions, RequestDeviceError, StoreOp, Surface, SurfaceConfiguration, SurfaceTarget, TextureViewDescriptor,
 };
 
-use crate::geometry::{GeometryRenderer, PickError, Stats};
+use crate::geometry::{GeometryRenderer, PickError, PickHit, Stats};
 use crate::gpu_timing::GpuTimings;
 use crate::scene::{AgentPose, Camera, SceneView};
 use crate::texture::{TextureCompletion, TextureJob};
@@ -186,7 +186,7 @@ impl Renderer {
         self.gpu_timings.is_some()
     }
 
-    pub fn pick(&self, camera: Camera, ray: DVec3) -> Result<Option<DVec3>, PickError> {
+    pub fn pick(&self, camera: Camera, ray: DVec3) -> Result<Option<PickHit>, PickError> {
         self.geometry.pick(camera, ray)
     }
 

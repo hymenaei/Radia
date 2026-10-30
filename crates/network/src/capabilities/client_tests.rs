@@ -760,7 +760,7 @@ async fn posts_encode_after_admission() {
     })
     .await
     .expect("admitted POSTs and held requests should finish");
-    assert!(matches!(value, Value::Map(fields) if fields.get("TestCapability") == Some(&Value::String(capability_url.clone()))));
+    std::assert_matches!(value, Value::Map(fields) if fields.get("TestCapability") == Some(&Value::String(capability_url.clone())));
     assert_eq!(bytes, format!("<llsd><map><key>TestCapability</key><string>{capability_url}</string></map></llsd>").into_bytes());
 }
 

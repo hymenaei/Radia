@@ -58,14 +58,14 @@ impl Default for PersistBudget {
 
 impl PersistBudget {
     pub fn persist(&mut self, temporary: NamedTempFile, destination: &Path) -> io::Result<()> {
-        self.persist_with_retry(temporary, destination, thread::sleep)
+        self.persist_with_retry(temporary, destination, |_| {})
     }
 
     fn persist_with_retry(
         &mut self,
         mut temporary: NamedTempFile,
         destination: &Path,
-        mut wait_retry: impl FnMut(Duration),
+        mut before_retry: impl FnMut(Duration),
     ) -> io::Result<()> {
         for attempt in 0..PERSIST_ATTEMPTS {
             match temporary.persist(destination) {
@@ -83,7 +83,8 @@ impl PersistBudget {
                     temporary = failure.file;
                     let delay = (PERSIST_RETRY_DELAY * (1 << attempt)).min(self.remaining);
                     self.remaining -= delay;
-                    wait_retry(delay);
+                    before_retry(delay);
+                    thread::sleep(delay);
                 }
             }
         }
@@ -194,21 +195,18 @@ mod tests {
         let second = directory.path().join("second");
         fs::write(&first, b"original").expect("create first destination");
         fs::write(&second, b"original").expect("create second destination");
-        let mut held = Some(OpenOptions::new().read(true).share_mode(0).open(&first).expect("lock first destination"));
+        let first_held = OpenOptions::new().read(true).share_mode(0).open(&first).expect("lock first destination");
         let mut temporary = NamedTempFile::new_in(directory.path()).expect("stage first replacement");
         temporary.write_all(b"replacement").expect("write replacement");
         let mut budget = PersistBudget::default();
         let mut waited = Duration::ZERO;
-        budget
-            .persist_with_retry(temporary, &first, |delay| {
-                waited += delay;
-                if waited == PERSIST_RETRY_BUDGET {
-                    drop(held.take());
-                }
-            })
-            .expect("replace first file after consuming the budget");
+        let error = budget
+            .persist_with_retry(temporary, &first, |delay| waited += delay)
+            .expect_err("first persistent conflict consumes the retry budget");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(waited, PERSIST_RETRY_BUDGET);
-        assert_eq!(fs::read(&first).expect("read first replacement"), b"replacement");
+        drop(first_held);
+        assert_eq!(fs::read(&first).expect("read first original"), b"original");
 
         let held = OpenOptions::new().read(true).share_mode(0).open(&second).expect("lock second destination");
         let temporary = NamedTempFile::new_in(directory.path()).expect("stage second replacement");

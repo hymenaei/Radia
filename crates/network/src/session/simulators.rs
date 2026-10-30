@@ -52,10 +52,7 @@ pub(super) const EVENT_BACKLOG_WARNING_INTERVAL: Duration = Duration::from_secs(
 pub(super) const MAX_PENDING_REGION_HANDSHAKE_REPLIES: usize = MAX_SIMULATOR_CONNECTIONS;
 pub(super) const MAX_PENDING_LIFECYCLE_EVENTS: usize = 32;
 pub(super) const MAX_PENDING_SESSION_EVENTS: usize = SESSION_APPLICATION_EVENT_CREDIT_CAPACITY + MAX_PENDING_LIFECYCLE_EVENTS;
-#[cfg(not(test))]
 pub(super) const APPLICATION_EVENT_PRESSURE_GRACE_PERIOD: Duration = Duration::from_secs(30);
-#[cfg(test)]
-pub(super) const APPLICATION_EVENT_PRESSURE_GRACE_PERIOD: Duration = Duration::from_secs(1);
 pub(super) const MAX_TRACKED_CAPABILITY_CLIENTS: usize = MAX_SIMULATOR_CONNECTIONS;
 pub(super) const NEIGHBOR_COMMAND_CAPACITY: usize = 8;
 pub(super) const HANDOFF_COMMAND_RETRY_INTERVAL: Duration = Duration::from_millis(10);

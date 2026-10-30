@@ -363,8 +363,9 @@ async fn region_arrival_object_burst_survives_slow_consumer() {
     assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sustained_application_pressure_disconnects() {
+    tokio::time::resume();
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -385,7 +386,14 @@ async fn sustained_application_pressure_disconnects() {
     let rejected_sequence = 22;
     set_sequence(&mut rejected, rejected_sequence);
     simulator.send_to(&rejected, peer).await.expect("send application event beyond test capacity");
-    let mut acknowledged = HashSet::new();
+    simulator.send_to(&start_ping_packet(rejected_sequence + 1, 10, 0), peer).await.expect("fence rejected application admission");
+    let (_, mut acknowledged) = crate::fixtures::simulator::receive_message_with_acknowledgements(
+        &simulator,
+        |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 10),
+    )
+    .await;
+    tokio::time::pause();
+    tokio::time::advance(APPLICATION_EVENT_PRESSURE_GRACE_PERIOD).await;
     let logout = timeout(SIMULATOR_TIMEOUT, async {
         loop {
             let (bytes, _) = receive(&simulator).await;

@@ -47,9 +47,10 @@ cargo test -p <crate> <name>
 cargo test -p <crate> -- --nocapture
 
 # Repeat affected tests under parallel test load
-cargo nextest run --workspace --all-features --stress-duration 10m
-# In a second terminal, once the workspace build has finished
-cargo nextest run -p <crate> --stress-count 200 -E 'test(<name>)'
+cargo nextest archive --workspace --all-features --archive-file target/timing-tests.tar.zst
+cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target/timing-load --stress-duration 20m
+# In a second terminal
+cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target/timing-repeat --stress-count 200 -E 'test(<name>)'
 
 # Manual Windows atomic-replacement stress, 10,000 replacements
 cargo nextest run -p utils -E 'test(atomic_replacement_stress)' --run-ignored only
@@ -61,6 +62,7 @@ cargo nextest run -p utils -E 'test(atomic_replacement_stress)' --run-ignored on
 - Replace `<crate>`, `<name>`, and `<args>` with the relevant values.
 - Optional features may require platform-specific dependencies.
 - Stress runs use the same production constants as ordinary tests. Keep the workspace load running throughout the focused repetition and record both commands and their results.
+- Build the archive after edits are complete and use fresh extraction directories for each validation run. Both runs use the archived executables, so subsequent Cargo builds cannot overwrite running test binaries on Windows.
 
 ## Git hooks
 

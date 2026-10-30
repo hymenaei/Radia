@@ -1,4 +1,7 @@
 use super::*;
+use protocol::messages::CachedObjectReference;
+
+use crate::session::inbound::decode_cached_object;
 
 #[test]
 fn fixture_mapping_preserves_packet_order() {

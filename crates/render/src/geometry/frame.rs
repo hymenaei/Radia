@@ -47,13 +47,9 @@ impl GeometryRenderer {
             let upload_started = Instant::now();
             self.textures.upload(device, encoder, self.epoch);
             times.textures = upload_started.elapsed();
-            if self
-                .prepared
-                .as_ref()
-                .is_some_and(|prepared| {
-                    !motion_was_active && prepared.reusable(&key, self.textures.state(), self.memory.mesh_state(), started)
-                })
-            {
+            if self.prepared.as_ref().is_some_and(|prepared| {
+                !motion_was_active && prepared.reusable(&key, self.textures.state(), self.memory.mesh_state(), started)
+            }) {
                 self.stats.uploaded_bytes = 0;
                 self.memory_stats();
                 self.record_prepare(started, times, 0);
@@ -298,13 +294,7 @@ impl GeometryRenderer {
         self.set_agent_item_pose(agent_id, None, origin, None);
     }
 
-    fn set_agent_item_pose(
-        &mut self,
-        agent_id: Uuid,
-        pose_override: Option<WorldPose>,
-        origin: DVec3,
-        mut update: Option<&mut CacheUpdate>,
-    ) {
+    fn set_agent_item_pose(&mut self, agent_id: Uuid, pose_override: Option<WorldPose>, origin: DVec3, update: Option<&mut CacheUpdate>) {
         let Some(index) = self.cache.index((2, agent_id.as_u128(), 0)) else { return };
         let Some(item) = self.cache.items.get(index) else { return };
         let Some(object) = item.source.as_ref() else { return };
@@ -313,7 +303,7 @@ impl GeometryRenderer {
         }
         let Placement::Ready(transform) = object.placement() else { return };
         let pose = pose_override.unwrap_or(transform.pose);
-        self.set_item_pose(index, pose, origin, update.as_deref_mut());
+        self.set_item_pose(index, pose, origin, update);
     }
 
     fn set_item_pose(&mut self, index: ItemIndex, pose: WorldPose, origin: DVec3, update: Option<&mut CacheUpdate>) {
@@ -347,10 +337,7 @@ impl GeometryRenderer {
         indices.extend(update.pose_items.iter().copied());
         indices.sort_unstable();
         indices.dedup();
-        let entities = indices
-            .iter()
-            .filter_map(|index| self.cache.items.get(*index).and_then(|item| item.entity))
-            .collect::<Vec<_>>();
+        let entities = indices.iter().filter_map(|index| self.cache.items.get(*index).and_then(|item| item.entity)).collect::<Vec<_>>();
         motion::fill_placements(view, now, &entities, &mut self.placements, &mut self.regions);
         motion::fill_placements(view, now + Duration::from_millis(16), &entities, &mut self.future_placements, &mut self.regions);
         for index in indices {

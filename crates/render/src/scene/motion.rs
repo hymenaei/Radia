@@ -667,5 +667,4 @@ mod tests {
         let regions = [RegionBounds { region: Region::new(1), origin: DVec3::ZERO }];
         close_vec(linear_position(moving, state, now + Duration::from_millis(1500), &regions), DVec3::new(256.0, 20.0, 0.0));
     }
-
 }

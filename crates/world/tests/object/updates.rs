@@ -1,8 +1,8 @@
 use super::support::{
     Ambiguous, AmbiguousOrder, AngularVelocity, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, FieldRejectionReason, IgnoredStale,
-    Introduced, InvalidRotation, KindMismatch, LinearMotion, Object, ObjectObservation, ObjectPatch, Pose, Quat, Region, Removed, Root,
-    Scale, Unchanged, Unknown, UnknownObject, UntrustedSource, UpdateSource, Updated, Vec3, address, local_id, object, ordered, source,
-    untracked, uuid, with_region,
+    Introduced, InvalidRotation, KindMismatch, LinearMotion, MotionUpdateKind, Object, ObjectObservation, ObjectPatch, Pose, Quat, Region,
+    Removed, Root, Scale, Unchanged, Unknown, UnknownObject, UntrustedSource, UpdateSource, Updated, Vec3, address, local_id, object,
+    ordered, source, untracked, uuid, with_region,
 };
 
 #[test]
@@ -163,6 +163,63 @@ fn motion_metadata_is_stored_and_authoritative_updates_advance_the_sample() {
 
     assert_eq!(applied.outcome, Updated(entity));
     assert_eq!(world.object(entity).unwrap().motion_source(), Some(next_source));
+}
+
+#[test]
+fn motion_vectors_stay_within_protocol_ranges() {
+    let region = Region::new(73);
+    let mut world = with_region(region);
+    let mut initial = object(source(region, 1), 730, 1, Object, Root);
+    initial.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+    initial.linear_motion = Some(LinearMotion { velocity: Some(Vec3::ZERO), acceleration: Some(Vec3::ZERO) });
+    initial.angular_velocity = Some(Vec3::ZERO);
+    let introduced = world.observe_object(initial).unwrap();
+    let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
+
+    let full_limit = ObjectPatch {
+        linear_motion: LinearMotion { velocity: Some(Vec3::splat(256.0)), acceleration: Some(Vec3::splat(-256.0)) },
+        angular_velocity: Some(Vec3::splat(64.0)),
+        ..ObjectPatch::new(source(region, 2), local_id(1))
+    };
+    assert_eq!(world.patch_object(full_limit).unwrap().outcome, Updated(entity));
+
+    let full_out_of_range = ObjectPatch {
+        linear_motion: LinearMotion { velocity: Some(Vec3::splat(256.1)), acceleration: Some(Vec3::splat(-256.1)) },
+        angular_velocity: Some(Vec3::splat(64.1)),
+        ..ObjectPatch::new(source(region, 3), local_id(1))
+    };
+    let rejected = world.patch_object(full_out_of_range).unwrap();
+    assert_eq!(
+        rejected.rejections.iter().copied().collect::<Vec<_>>(),
+        [
+            FieldRejection { group: FieldGroup::LinearMotion, reason: FieldRejectionReason::InvalidValue { field: "velocity" } },
+            FieldRejection { group: AngularVelocity, reason: FieldRejectionReason::InvalidValue { field: "angular_velocity" } },
+        ]
+    );
+    assert_eq!(
+        world.object(entity).unwrap().linear_motion(),
+        LinearMotion { velocity: Some(Vec3::splat(256.0)), acceleration: Some(Vec3::splat(-256.0)) }
+    );
+    assert_eq!(world.object(entity).unwrap().angular_velocity(), Some(Vec3::splat(64.0)));
+
+    let terse_out_of_range = ObjectPatch {
+        linear_motion: LinearMotion { velocity: Some(Vec3::splat(128.1)), acceleration: Some(Vec3::splat(-64.1)) },
+        angular_velocity: Some(Vec3::splat(64.1)),
+        ..ObjectPatch::new(source(region, 4).with_motion_update_kind(MotionUpdateKind::Terse), local_id(1))
+    };
+    let rejected = world.patch_object(terse_out_of_range).unwrap();
+    assert_eq!(
+        rejected.rejections.iter().copied().collect::<Vec<_>>(),
+        [
+            FieldRejection { group: FieldGroup::LinearMotion, reason: FieldRejectionReason::InvalidValue { field: "velocity" } },
+            FieldRejection { group: AngularVelocity, reason: FieldRejectionReason::InvalidValue { field: "angular_velocity" } },
+        ]
+    );
+    assert_eq!(
+        world.object(entity).unwrap().linear_motion(),
+        LinearMotion { velocity: Some(Vec3::splat(256.0)), acceleration: Some(Vec3::splat(-256.0)) }
+    );
+    assert_eq!(world.object(entity).unwrap().angular_velocity(), Some(Vec3::splat(64.0)));
 }
 
 #[test]

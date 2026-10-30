@@ -7,16 +7,22 @@ use crate::UpdateAuthority::{Tracked, Untracked};
 use crate::history::WorldChangeClasses;
 use crate::update::FieldStamp;
 use crate::{
-    Appearance, ApplyError, AttachmentPoint, FieldGroup, FieldRejectionReason, FieldUpdate, Kind, LinearMotion, ObjectObservation,
-    ObjectPatch, Parent, ParentUpdate, Pose, Rejections, UpdateAuthority, WorldPose,
+    Appearance, ApplyError, AttachmentPoint, FieldGroup, FieldRejectionReason, FieldUpdate, Kind, LinearMotion, MotionUpdateKind,
+    ObjectObservation, ObjectPatch, Parent, ParentUpdate, Pose, Rejections, UpdateAuthority, WorldPose,
 };
 use crate::{Fences, ObjectOrdering, ObjectState, ParentRejectionBarrier};
 
 pub(super) use super::facet::Origin;
 
+const FULL_MOTION_COMPONENT_LIMIT: f32 = 256.0;
+const TERSE_VELOCITY_COMPONENT_LIMIT: f32 = 128.0;
+const TERSE_ACCELERATION_COMPONENT_LIMIT: f32 = 64.0;
+const ANGULAR_VELOCITY_COMPONENT_LIMIT: f32 = 64.0;
+
 pub(super) struct Fields {
     pub(super) pose: Option<Pose>,
     linear_motion: LinearMotion,
+    motion_update_kind: MotionUpdateKind,
     angular_velocity: Option<Vec3>,
     is_physical: Option<bool>,
     time_dilation: Option<f32>,
@@ -34,6 +40,7 @@ impl Fields {
         Self {
             pose: observation.pose,
             linear_motion: observation.linear_motion.unwrap_or_default(),
+            motion_update_kind: observation.source.motion_update_kind(),
             angular_velocity: observation.angular_velocity,
             is_physical: observation.is_physical,
             time_dilation: observation.time_dilation,
@@ -54,6 +61,7 @@ impl Fields {
         let fields = Self {
             pose: patch.pose,
             linear_motion: patch.linear_motion,
+            motion_update_kind: patch.source.motion_update_kind(),
             angular_velocity: patch.angular_velocity,
             is_physical: patch.is_physical,
             time_dilation: patch.time_dilation,
@@ -146,11 +154,19 @@ impl Fields {
             }
         }
         let motion = self.linear_motion;
-        if let Err(reason) = validate_vec3(motion.velocity, "velocity").and(validate_vec3(motion.acceleration, "acceleration")) {
+        let (velocity_limit, acceleration_limit) = match self.motion_update_kind {
+            MotionUpdateKind::Full => (FULL_MOTION_COMPONENT_LIMIT, FULL_MOTION_COMPONENT_LIMIT),
+            MotionUpdateKind::Terse => (TERSE_VELOCITY_COMPONENT_LIMIT, TERSE_ACCELERATION_COMPONENT_LIMIT),
+        };
+        if let Err(reason) = validate_motion_vec3(motion.velocity, "velocity", velocity_limit).and(validate_motion_vec3(
+            motion.acceleration,
+            "acceleration",
+            acceleration_limit,
+        )) {
             rejections.reject(FieldGroup::LinearMotion, reason);
             self.linear_motion = LinearMotion::default();
         }
-        if let Err(reason) = validate_vec3(self.angular_velocity, "angular_velocity") {
+        if let Err(reason) = validate_motion_vec3(self.angular_velocity, "angular_velocity", ANGULAR_VELOCITY_COMPONENT_LIMIT) {
             rejections.reject(FieldGroup::AngularVelocity, reason);
             self.angular_velocity = None;
         }
@@ -424,6 +440,10 @@ pub(super) fn validate_uuid(id: Uuid, field: &'static str) -> Result<(), ApplyEr
 
 pub(super) fn validate_vec3(value: Option<Vec3>, field: &'static str) -> Result<(), FieldRejectionReason> {
     if value.is_some_and(|value| !value.is_finite()) { Err(InvalidValue { field }) } else { Ok(()) }
+}
+
+fn validate_motion_vec3(value: Option<Vec3>, field: &'static str, limit: f32) -> Result<(), FieldRejectionReason> {
+    if value.is_some_and(|value| !value.is_finite() || value.abs().max_element() > limit) { Err(InvalidValue { field }) } else { Ok(()) }
 }
 
 pub(super) fn normalized_rotation(value: Quat) -> Result<Quat, FieldRejectionReason> {

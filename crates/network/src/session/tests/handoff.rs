@@ -719,9 +719,6 @@ async fn handoff_waits_for_matching_movement() {
         next_neighbor_event(&mut event_receiver).await,
         Event::SimulatorMotionStatus { simulator_id: id, .. } if id == simulator_id
     );
-    let mut buffer = [0; 65_535];
-    std::assert_matches!(clone_udp_socket(&neighbor).expect("inspect destination endpoint").recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
-
     let mut handshake = test_fixture("region_handshake.hex");
     handshake[0] |= 0x40;
     set_sequence(&mut handshake, 41);
@@ -745,10 +742,18 @@ async fn handoff_waits_for_matching_movement() {
         .await
         .expect("queue application handshake reply");
     response.await.expect("handshake reply completion remains open").expect("handshake reply reaches simulator");
-    std::assert_matches!(
-        receive_message(&neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))).await.message(),
-        Message::RegionHandshakeReply(_)
-    );
+    let handshake_reply = loop {
+        let (bytes, _) = receive(&neighbor).await;
+        let packet = Packet::decode(&bytes).expect("decode destination circuit traffic");
+        assert!(
+            !matches!(packet.message(), Message::CompleteAgentMovement(_)),
+            "movement completion must follow the destination handshake reply"
+        );
+        if matches!(packet.message(), Message::RegionHandshakeReply(_)) {
+            break packet;
+        }
+    };
+    std::assert_matches!(handshake_reply.message(), Message::RegionHandshakeReply(_));
     std::assert_matches!(
         receive_message(&neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))).await.message(),
         Message::CompleteAgentMovement(_)

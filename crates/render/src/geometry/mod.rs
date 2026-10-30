@@ -28,6 +28,7 @@ use world::{Entity, WorldTransform};
 
 use self::cache::FrameCache;
 use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
+use self::items::ItemIndex;
 use self::mesh::GpuMesh;
 use self::storage::Storage;
 use crate::scene::{AgentPose, Camera, MeshId, ViewVersion, motion::RegionBounds};
@@ -223,6 +224,8 @@ pub(crate) struct GeometryRenderer {
     mesh_budget_blocked: HashSet<MeshId>,
     placements: HashMap<Entity, WorldTransform>,
     future_placements: HashMap<Entity, WorldTransform>,
+    motion_indices: Vec<ItemIndex>,
+    motion_entities: Vec<Entity>,
     regions: Vec<RegionBounds>,
     motion_redraw: bool,
     epoch: u64,
@@ -274,6 +277,8 @@ impl GeometryRenderer {
             mesh_budget_blocked: HashSet::new(),
             placements: HashMap::new(),
             future_placements: HashMap::new(),
+            motion_indices: Vec::new(),
+            motion_entities: Vec::new(),
             regions: Vec::new(),
             motion_redraw: false,
             epoch: 0,

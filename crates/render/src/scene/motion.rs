@@ -98,58 +98,91 @@ impl RegionBounds {
     }
 }
 
-pub(crate) fn fill_placements(
+pub(crate) fn needs_evaluation(view: &SceneView, entity: Entity) -> bool {
+    motion_in_chain(view, entity, 0)
+}
+
+fn motion_in_chain(view: &SceneView, entity: Entity, depth: usize) -> bool {
+    if depth > MAX_PARENT_EDGES {
+        return false;
+    }
+    let Some(object) = view.object(entity) else { return false };
+    let Some(sample) = object.motion_sample() else { return false };
+    if sample.velocity != Vec3::ZERO || sample.acceleration != Vec3::ZERO || sample.angular_velocity != Vec3::ZERO {
+        return true;
+    }
+    match object.detail().summary.parent {
+        Parent::Resolved(parent) => motion_in_chain(view, parent, depth + 1),
+        Parent::Root | Parent::Unknown | Parent::Pending { .. } => false,
+    }
+}
+
+pub(crate) fn fill_placement_pair(
     view: &SceneView,
     now: Instant,
+    future: Instant,
     entities: &[Entity],
     placements: &mut HashMap<Entity, WorldTransform>,
+    future_placements: &mut HashMap<Entity, WorldTransform>,
     regions: &mut Vec<RegionBounds>,
 ) {
     placements.clear();
+    future_placements.clear();
     regions.clear();
     regions.extend(view.regions().filter_map(|region| {
         region.summary().info.resolved_origin().map(|origin| RegionBounds { region: region.summary().region, origin })
     }));
     for entity in entities {
-        let _ = placement(*entity, view, now, placements, regions, 0);
+        let _ = placement_pair(*entity, view, now, future, placements, future_placements, regions, 0);
     }
 }
 
-fn placement(
+fn placement_pair(
     entity: Entity,
     view: &SceneView,
     now: Instant,
+    future: Instant,
     placements: &mut HashMap<Entity, WorldTransform>,
+    future_placements: &mut HashMap<Entity, WorldTransform>,
     regions: &[RegionBounds],
     depth: usize,
-) -> Option<WorldTransform> {
-    if let Some(transform) = placements.get(&entity) {
-        return Some(*transform);
+) -> Option<(WorldTransform, WorldTransform)> {
+    if let (Some(current), Some(future)) = (placements.get(&entity), future_placements.get(&entity)) {
+        return Some((*current, *future));
     }
     if depth > MAX_PARENT_EDGES {
         return None;
     }
     let object = view.object(entity)?;
     let sample = object.motion_sample()?;
-    let mut transform = sample.transform;
+    let mut current = sample.transform;
+    let mut next = sample.transform;
     if sample.is_attachment {
-        transform.pose.rotation = object.motion_state().local_rotation(sample, now);
+        let state = object.motion_state();
+        current.pose.rotation = state.local_rotation(sample, now);
+        next.pose.rotation = state.local_rotation(sample, future);
     } else {
         match object.detail().summary.parent {
             Parent::Root => {
                 let state = object.motion_state();
-                transform.pose =
+                current.pose =
                     WorldPose { position: linear_position(sample, state, now, regions), rotation: state.local_rotation(sample, now) };
+                next.pose =
+                    WorldPose { position: linear_position(sample, state, future, regions), rotation: state.local_rotation(sample, future) };
             }
             Parent::Resolved(parent) => {
-                let parent_transform = placement(parent, view, now, placements, regions, depth + 1)?;
-                transform = child_transform(parent_transform, sample, object.motion_state(), now);
+                let (parent_current, parent_future) =
+                    placement_pair(parent, view, now, future, placements, future_placements, regions, depth + 1)?;
+                let state = object.motion_state();
+                current = child_transform(parent_current, sample, state, now);
+                next = child_transform(parent_future, sample, state, future);
             }
             Parent::Unknown | Parent::Pending { .. } => {}
         }
     }
-    placements.insert(entity, transform);
-    Some(transform)
+    placements.insert(entity, current);
+    future_placements.insert(entity, next);
+    Some((current, next))
 }
 
 fn child_transform(parent: WorldTransform, sample: MotionSample, state: MotionState, now: Instant) -> WorldTransform {
@@ -622,12 +655,23 @@ mod tests {
             let child_entity = child.detail().summary.entity;
             let at = root.motion_state().sampled_at + Duration::from_millis(500);
             let mut placements = HashMap::new();
+            let mut future_placements = HashMap::new();
             let mut regions = Vec::new();
 
-            fill_placements(&view, at, &[child_entity], &mut placements, &mut regions);
+            assert!(needs_evaluation(&view, child_entity));
+            fill_placement_pair(
+                &view,
+                at,
+                at + Duration::from_millis(16),
+                &[child_entity],
+                &mut placements,
+                &mut future_placements,
+                &mut regions,
+            );
 
             let transform = placements.get(&child_entity).expect("child placement follows its parent");
             close_vec(transform.pose.position, DVec3::new(24.0, 0.0, 0.0));
+            assert!(future_placements.contains_key(&child_entity));
         }
     }
 

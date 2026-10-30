@@ -329,18 +329,43 @@ impl GeometryRenderer {
         agent_id: Option<Uuid>,
         update: &mut CacheUpdate,
     ) {
-        let mut indices = if all_objects {
-            self.cache.items.iter().filter_map(|(index, item)| item.entity.map(|_| index)).collect()
+        self.motion_indices.clear();
+        self.motion_entities.clear();
+        if all_objects {
+            for (index, item) in self.cache.items.iter() {
+                if let Some(entity) = item.entity
+                    && motion::needs_evaluation(view, entity)
+                {
+                    self.motion_indices.push(index);
+                }
+            }
         } else {
-            self.cache.candidates.clone()
-        };
-        indices.extend(update.pose_items.iter().copied());
-        indices.sort_unstable();
-        indices.dedup();
-        let entities = indices.iter().filter_map(|index| self.cache.items.get(*index).and_then(|item| item.entity)).collect::<Vec<_>>();
-        motion::fill_placements(view, now, &entities, &mut self.placements, &mut self.regions);
-        motion::fill_placements(view, now + Duration::from_millis(16), &entities, &mut self.future_placements, &mut self.regions);
-        for index in indices {
+            for index in self.cache.candidates.iter().chain(&update.pose_items).copied() {
+                if let Some(entity) = self.cache.items.get(index).and_then(|item| item.entity)
+                    && motion::needs_evaluation(view, entity)
+                {
+                    self.motion_indices.push(index);
+                }
+            }
+        }
+        self.motion_indices.sort_unstable();
+        self.motion_indices.dedup();
+        for index in &self.motion_indices {
+            if let Some(entity) = self.cache.items.get(*index).and_then(|item| item.entity) {
+                self.motion_entities.push(entity);
+            }
+        }
+        motion::fill_placement_pair(
+            view,
+            now,
+            now + Duration::from_millis(16),
+            &self.motion_entities,
+            &mut self.placements,
+            &mut self.future_placements,
+            &mut self.regions,
+        );
+        for motion_index in 0..self.motion_indices.len() {
+            let index = self.motion_indices[motion_index];
             let Some(item) = self.cache.items.get(index) else { continue };
             let Some(entity) = item.entity else { continue };
             let Some(object) = view.object(entity) else { continue };

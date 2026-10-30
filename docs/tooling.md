@@ -48,8 +48,10 @@ cargo test -p <crate> -- --nocapture
 
 # Repeat affected tests under parallel test load
 cargo nextest archive --workspace --all-features --archive-file target/timing-tests.tar.zst
+mkdir target/timing-load
 cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target/timing-load --stress-duration 20m
 # In a second terminal
+mkdir target/timing-repeat
 cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target/timing-repeat --stress-count 200 -E 'test(<name>)'
 
 # Manual Windows atomic-replacement stress, 10,000 replacements

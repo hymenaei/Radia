@@ -8,10 +8,12 @@ use std::{
 
 use llsd::Value;
 use protocol::{lludp::Message, login::ResponseData};
+#[cfg(test)]
+use tokio::time;
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::{AbortHandle, Id, JoinError, JoinSet},
-    time::{self, Instant},
+    time::Instant,
 };
 use url::Url;
 use uuid::Uuid;
@@ -47,6 +49,7 @@ pub(in crate::session) use tests::publish_primary_terminal_event;
 pub(super) const SESSION_TIMEOUT: Duration = Duration::from_secs(40);
 pub(super) const EVENT_BACKLOG_WARNING_THRESHOLD: usize = MAX_PENDING_SIMULATOR_EVENTS / 2;
 pub(super) const EVENT_BACKLOG_WARNING_INTERVAL: Duration = Duration::from_secs(10);
+pub(super) const MAX_PENDING_REGION_HANDSHAKE_REPLIES: usize = MAX_SIMULATOR_CONNECTIONS;
 pub(super) const MAX_PENDING_LIFECYCLE_EVENTS: usize = 32;
 pub(super) const MAX_PENDING_SESSION_EVENTS: usize = SESSION_APPLICATION_EVENT_CREDIT_CAPACITY + MAX_PENDING_LIFECYCLE_EVENTS;
 #[cfg(not(test))]
@@ -108,6 +111,7 @@ impl SimulatorConnectionState {
                 self.pending_handoff_command = Some(match command {
                     SimulatorCommand::PrepareHandoff(target) => HandoffCommand::Prepare(target),
                     SimulatorCommand::CancelHandoff => HandoffCommand::Cancel,
+                    SimulatorCommand::ReplyRegionHandshake { .. } => unreachable!("handshake replies are not deferred handoff commands"),
                     SimulatorCommand::Send { .. } => unreachable!("only handoff control commands are deferred"),
                 });
             }
@@ -650,6 +654,7 @@ pub(super) struct RunState {
     pub(super) preconnect_events: PreconnectEvents,
     pub(super) pending_events: VecDeque<EventEnvelope>,
     pub(super) pending_lifecycle_events: usize,
+    pub(super) pending_region_handshake_replies: VecDeque<(SimulatorId, SimulatorCommand)>,
     pub(super) logout_deadline: Option<Instant>,
 }
 
@@ -667,11 +672,13 @@ impl RunState {
             preconnect_events: PreconnectEvents::default(),
             pending_events: VecDeque::with_capacity(MAX_PENDING_SESSION_EVENTS),
             pending_lifecycle_events: 0,
+            pending_region_handshake_replies: VecDeque::with_capacity(MAX_PENDING_REGION_HANDSHAKE_REPLIES),
             logout_deadline: None,
         }
     }
 }
 
+#[cfg(test)]
 pub(super) async fn retry_pending_handoff_commands(retry: &mut time::Interval, connections: &mut HashMap<u64, SimulatorConnectionState>) {
     retry.tick().await;
     for connection in connections.values_mut() {

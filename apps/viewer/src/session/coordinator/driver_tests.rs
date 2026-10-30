@@ -8,7 +8,28 @@ use tokio::sync::oneshot;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
-use super::{FolderFetch, MoveExpectation, apply_inventory_fetch, cache_restore_move_changes, resolve_pending_inventory_moves};
+use super::{
+    FolderFetch, MoveExpectation, PendingHandshakeReplies, apply_inventory_fetch, cache_restore_move_changes,
+    resolve_pending_inventory_moves,
+};
+
+#[test]
+fn pending_handshake_replies_share_one_drain_and_keep_each_reply() {
+    let simulator = network::SimulatorId::new(7);
+    let mut pending = PendingHandshakeReplies::default();
+
+    assert!(pending.queue(simulator, 3));
+    assert!(!pending.queue(simulator, 3));
+    assert!(!pending.queue(simulator, 3));
+    assert_eq!(pending.by_simulator.len(), 1);
+    assert_eq!(pending.by_simulator.get(&simulator).map(|reply| reply.remaining), Some(3));
+
+    assert_eq!(pending.take_next(simulator), Some(3));
+    assert_eq!(pending.take_next(simulator), Some(3));
+    assert_eq!(pending.take_next(simulator), Some(3));
+    assert_eq!(pending.take_next(simulator), None);
+    assert!(pending.by_simulator.is_empty());
+}
 
 fn category(key: CategoryKey, parent: Option<CategoryKey>, version: ServerVersion, descendent_count: Option<u32>) -> Category {
     Category {

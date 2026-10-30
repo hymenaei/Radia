@@ -17,14 +17,20 @@ async fn run_enable_overflow_keeps_primary_responsive() {
     let send_announcements = async {
         for index in 0..addresses.len() {
             announce_neighbor(primary, primary_peer, addresses[index], regions[index], first_sequence + index as u32).await;
+            tokio::task::yield_now().await;
         }
     };
     let observe_announcements = async {
         let mut seen = vec![false; addresses.len()];
         let mut rejected_endpoint = None;
-        timeout(WAIT, async {
-            while seen.iter().any(|received| !received) || rejected_endpoint.is_none() {
-                match next_event(events).await {
+        let mut event_channel_closed = false;
+        let observed = timeout(WAIT, async {
+            while (seen.iter().any(|received| !received) || rejected_endpoint.is_none()) && !event_channel_closed {
+                let Some(event) = events.recv().await else {
+                    event_channel_closed = true;
+                    break;
+                };
+                match event.into_event() {
                     Event::SimulatorMessage { simulator_id, sequence, message: Message::EnableSimulator(_), .. }
                         if simulator_id == primary_id && (first_sequence..first_sequence + addresses.len() as u32).contains(&sequence) =>
                     {
@@ -39,12 +45,21 @@ async fn run_enable_overflow_keeps_primary_responsive() {
                 }
             }
         })
-        .await
-        .expect("primary should process all neighbor announcements");
-        (seen, rejected_endpoint)
+        .await;
+        (seen, rejected_endpoint, event_channel_closed, observed.is_err())
     };
 
-    let (_, (seen, rejected_endpoint)) = tokio::join!(send_announcements, observe_announcements);
+    let (_, (seen, rejected_endpoint, event_channel_closed, timed_out)) = tokio::join!(send_announcements, observe_announcements);
+    if event_channel_closed {
+        let client = timeout(WAIT, &mut harness.client).await;
+        panic!("primary closed its event channel; session result: {client:?}");
+    }
+    assert!(
+        !timed_out,
+        "primary should process all neighbor announcements: saw {} of {}, rejected={rejected_endpoint:?}",
+        seen.iter().filter(|received| **received).count(),
+        seen.len()
+    );
     assert!(seen.into_iter().all(|received| received));
     assert_eq!(rejected_endpoint, addresses.last().copied());
 

@@ -428,6 +428,19 @@ async fn mfa_continuation() {
     assert_eq!(movement, expected_complete_movement(movement_packet.sequence()));
 
     simulator.send_to(&reliable_fixture("region_handshake.hex", 22), peer).await.expect("send RegionHandshake");
+    let simulator_id = loop {
+        match login_next_event(&mut events).await {
+            Event::SimulatorMessage { simulator_id, message: Message::RegionHandshake(_), .. } => break simulator_id,
+            Event::Failed(error) => panic!("client failed before the region handshake: {error}"),
+            _ => {}
+        }
+    };
+    let (completed, response) = oneshot::channel();
+    commands
+        .send(Command::ReplyRegionHandshake { simulator_id, flags: 0, completed })
+        .await
+        .expect("queue application RegionHandshakeReply");
+    response.await.expect("handshake reply completion remains open").expect("handshake reply reaches simulator");
     let (reply, reply_packet) =
         receive_client_message(&simulator, peer, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
     assert_eq!(reply, with_appended_ack(expected_fixture("region_handshake_reply.hex", reply_packet.sequence()), 22));

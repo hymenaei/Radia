@@ -568,7 +568,11 @@ fn fresh_full_observation_satisfies_cached_recovery_but_stale_and_partial_update
         &mut session,
         simulator_id,
         region,
-        ObjectOperation::Cached { source: UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0), local_id },
+        ObjectOperation::Cached {
+            source: UpdateSource::new(region, 2, OrderEvidence::Ordered(2), 0),
+            local_id,
+            cache_miss_type: protocol::messages::CacheMissType::Full,
+        },
     );
     assert_eq!(cached.recovery_targets().collect::<Vec<_>>(), [address]);
 
@@ -585,7 +589,11 @@ fn fresh_full_observation_satisfies_cached_recovery_but_stale_and_partial_update
         &mut session,
         simulator_id,
         region,
-        ObjectOperation::Cached { source: UpdateSource::new(region, 4, OrderEvidence::Ordered(4), 0), local_id },
+        ObjectOperation::Cached {
+            source: UpdateSource::new(region, 4, OrderEvidence::Ordered(4), 0),
+            local_id,
+            cache_miss_type: protocol::messages::CacheMissType::Full,
+        },
     );
     assert_eq!(cached.recovery_targets().collect::<Vec<_>>(), [address]);
     let stale = apply_one(

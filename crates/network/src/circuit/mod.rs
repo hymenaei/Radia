@@ -101,6 +101,7 @@ pub(super) struct SimulatorConnection {
     use_circuit_sequence: u32,
     handoff: Option<HandoffTarget>,
     handoff_role_generation: Option<u64>,
+    region_handshake_reply_sent: bool,
     movement_requested: bool,
     initial_movement_sent: bool,
     primary_state: PrimaryState,
@@ -124,6 +125,7 @@ struct ConnectionTask {
     pending_events: VecDeque<EventEnvelope>,
     pending_notifications: VecDeque<SimulatorEvent>,
     outbound: OutboundQueue,
+    pending_handshake_reply: Option<QueuedMessage>,
     pending_send: Option<PendingSend>,
     deferred_retries: HashMap<u32, Instant>,
     priority_logout: Option<QueuedMessage>,
@@ -198,6 +200,7 @@ impl SimulatorConnection {
             use_circuit_sequence,
             handoff: None,
             handoff_role_generation: None,
+            region_handshake_reply_sent: false,
             movement_requested: false,
             initial_movement_sent: false,
             primary_state: if is_primary { PrimaryState::Connecting } else { PrimaryState::Neighbor { generation: 0 } },
@@ -227,6 +230,7 @@ impl SimulatorConnection {
             || outbound.has_handoff_movement()
             || pending_send
                 .is_some_and(|pending| pending.queued_message.as_ref().is_some_and(|queued| queued.movement == MovementSend::Handoff))
+            || outbound.is_full(TrafficClass::Deadline, active_queue_class(pending_send))
         {
             return Ok(());
         }

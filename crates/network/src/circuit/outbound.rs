@@ -46,6 +46,12 @@ pub(super) struct QueuedMessage {
     pub(super) movement: MovementSend,
 }
 
+impl QueuedMessage {
+    pub(super) fn age_exempt(&self) -> bool {
+        matches!(&self.message, Message::RegionHandshakeReply(_))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum MovementSend {
     None,
@@ -132,7 +138,7 @@ impl OutboundQueue {
         let mut expired = Vec::new();
         let mut retained = VecDeque::with_capacity(self.messages.len());
         while let Some(queued) = self.messages.pop_front() {
-            if now.saturating_duration_since(queued.queued_at) >= MAX_SEND_AGE {
+            if !queued.age_exempt() && now.saturating_duration_since(queued.queued_at) >= MAX_SEND_AGE {
                 self.charged_bytes = self.charged_bytes.saturating_sub(OUTBOUND_SEND_CHARGE_BYTES);
                 expired.push(queued);
             } else {
@@ -244,8 +250,10 @@ pub(super) fn traffic_priority(class: TrafficClass) -> u8 {
 
 pub(super) fn expire_pending_send(pending: &mut Option<PendingSend>, now: Instant) -> Option<PendingSendExpiration> {
     let current = pending.as_ref()?;
-    let queued_expired =
-        current.queued_message.as_ref().is_some_and(|queued| now.saturating_duration_since(queued.queued_at) >= MAX_SEND_AGE);
+    let queued_expired = current
+        .queued_message
+        .as_ref()
+        .is_some_and(|queued| !queued.age_exempt() && now.saturating_duration_since(queued.queued_at) >= MAX_SEND_AGE);
     let retry_expired = current.retry_deadline.is_some_and(|deadline| now >= deadline);
     if !queued_expired && !retry_expired {
         return None;

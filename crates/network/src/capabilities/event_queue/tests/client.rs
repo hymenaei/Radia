@@ -695,7 +695,7 @@ async fn primary_event_queue_404_keeps_active_session_connected() {
     let (event_sender, event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let mut events = EventReceiver::new(event_receiver);
     let (disconnect, disconnect_requested) = watch::channel(false);
-    let worker = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let worker = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let seed_request = server.next_request();
     let poll_request = server.next_request();

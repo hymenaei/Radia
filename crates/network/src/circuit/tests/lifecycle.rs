@@ -73,6 +73,104 @@ async fn fill_promoted_outbound_queue(
     pending_response
 }
 
+#[tokio::test(start_paused = true)]
+async fn handshake_reply_waits_for_outbound_space() {
+    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");
+    let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
+    let agent_session = session(simulator.local_addr().expect("read simulator address"));
+    let budget = OutboundBudget::new(crate::DEFAULT_UPSTREAM_BYTES_PER_SECOND.get());
+    let mut connection = connect_test_connection(
+        simulator_id,
+        agent_session.clone(),
+        Some(42),
+        CoverageLossLedger::new(),
+        None,
+        Some(budget.handle()),
+        None,
+        None,
+    )
+    .await
+    .expect("connect simulator");
+    let (send_gate, pause_sends, send_entered) = new_send_gate();
+    set_send_gate(Arc::get_mut(&mut connection.socket).expect("test connection owns its socket"), send_gate);
+    let (events, mut received_events) = mpsc::channel(16);
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let (requests, _requests) = mpsc::channel(1);
+    let (commands, command_receiver) = mpsc::channel(16);
+    let (_logout, logout_receiver) = mpsc::channel(1);
+    let task = spawn(connection.run(events, shutdown_receiver, requests, command_receiver, logout_receiver, SimulatorMemoryBudget::new()));
+
+    let (use_circuit, peer) = receive_packet(&simulator).await;
+    send_ack(&simulator, peer, use_circuit.sequence()).await;
+    receive_connected(&mut received_events).await;
+    pause_sends.send_replace(true);
+
+    let send_control = |ping_id: u8| {
+        let (completed, _) = oneshot::channel();
+        SimulatorCommand::Send {
+            message: Message::CompletePingCheck(CompletePingCheck { ping_id: PingId { ping_id } }),
+            delivery: Delivery::Unreliable,
+            completed: Some(completed),
+            cancel_target: None,
+            report_failure: false,
+        }
+    };
+    commands.send(send_control(1)).await.expect("queue active control send");
+    timeout(WAIT, send_entered.notified()).await.expect("active send reaches the paused transport");
+    for ping_id in 2..=u8::try_from(MAX_PENDING_SENDS).expect("send queue size fits u8") {
+        commands.send(send_control(ping_id)).await.expect("fill outbound queue");
+    }
+
+    let (completed, response) = oneshot::channel();
+    let reply = Message::RegionHandshakeReply(protocol::messages::RegionHandshakeReply {
+        agent_data: protocol::messages::region::region_handshake_reply::AgentData {
+            agent_id: agent_session.agent_id,
+            session_id: agent_session.session_id,
+        },
+        region_info: protocol::messages::region::region_handshake_reply::RegionInfo { flags: 0 },
+    });
+    commands.send(SimulatorCommand::ReplyRegionHandshake { message: reply, completed }).await.expect("queue handshake reply command");
+    let mut response = response;
+    assert!(timeout(Duration::from_millis(25), &mut response).await.is_err());
+
+    advance(MAX_SEND_AGE + Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    std::assert_matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+    advance(MAX_SEND_AGE + Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+    std::assert_matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty));
+
+    pause_sends.send_replace(false);
+    let mut handshake_replies = 0;
+    while handshake_replies == 0 {
+        let (packet, peer) = timeout(WAIT, receive_packet(&simulator)).await.expect("outbound queue drains");
+        match packet.message() {
+            Message::CompletePingCheck(_) => {}
+            Message::RegionHandshakeReply(_) => {
+                handshake_replies += 1;
+                send_ack(&simulator, peer, packet.sequence()).await;
+            }
+            _ => panic!("unexpected message while draining outbound queue"),
+        }
+    }
+    assert_eq!(handshake_replies, 1);
+    assert!(response.await.expect("handshake reply completion").is_ok());
+
+    commands.send(send_control(200)).await.expect("queue a send after the aged reply");
+    loop {
+        let (packet, peer) = timeout(WAIT, receive_packet(&simulator)).await.expect("connection stays active after aged reply");
+        match packet.message() {
+            Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 200 => break,
+            Message::StartPingCheck(_) => send_ack(&simulator, peer, packet.sequence()).await,
+            _ => panic!("unexpected message after aged handshake reply"),
+        }
+    }
+
+    shutdown.send_replace(true);
+    assert!(timeout(WAIT, task).await.expect("join connection task").expect("connection task").is_ok());
+    budget.shutdown().await;
+}
+
 #[tokio::test]
 async fn primary_sends_agent_throttle_after_matching_movement_complete() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind simulator");

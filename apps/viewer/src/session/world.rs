@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use network::SimulatorId;
+use protocol::messages::CacheMissType;
 use uuid::Uuid;
 use world::{
     Appearance, Applied, ApplyError,
@@ -23,7 +24,7 @@ const MAX_WORLD_TOMBSTONES: usize = 16_384;
 const MAX_WORLD_JOURNAL_ENTRIES: usize = 4_096;
 const MAX_REGION_NAME_BYTES: usize = 256;
 const MAX_INGEST_DIAGNOSTIC_ADDRESSES: usize = 8;
-const MAX_OBJECTS_PER_INTAKE_QUANTUM: usize = 32;
+pub(super) const MAX_OBJECTS_PER_INTAKE_QUANTUM: usize = 32;
 const PARCEL_REJECTION_LOG_INTERVAL: u64 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,7 +44,7 @@ pub(super) enum RegistrationError {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum BlockOutcome {
     Invalid,
-    RecoveryRequired(LocalAddress),
+    RecoveryRequired { address: LocalAddress, cache_miss_type: CacheMissType },
     Applied { address: Option<LocalAddress>, applied: Applied, recovered: Option<LocalAddress> },
     Rejected { address: Option<LocalAddress>, error: ApplyError },
 }
@@ -58,7 +59,7 @@ impl BlockOutcome {
 
     fn address(&self) -> Option<LocalAddress> {
         match self {
-            Self::RecoveryRequired(address) => Some(*address),
+            Self::RecoveryRequired { address, .. } => Some(*address),
             Self::Applied { address, .. } | Self::Rejected { address, .. } => *address,
             Self::Invalid => None,
         }
@@ -109,13 +110,23 @@ impl IngestSummary {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn recovery_targets(&self) -> impl Iterator<Item = LocalAddress> + '_ {
+        self.recovery_requests().map(|(address, _)| address)
+    }
+
+    pub(super) fn recovery_requests(&self) -> impl Iterator<Item = (LocalAddress, CacheMissType)> + '_ {
         self.blocks.iter().flat_map(|block| {
             let required = match block {
-                BlockOutcome::RecoveryRequired(address) => Some(*address),
+                BlockOutcome::RecoveryRequired { address, cache_miss_type } => Some((*address, *cache_miss_type)),
                 _ => None,
             };
-            required.into_iter().chain(block.applied().into_iter().flat_map(|applied| applied.recovery.requests.iter().copied()))
+            required.into_iter().chain(
+                block
+                    .applied()
+                    .into_iter()
+                    .flat_map(|applied| applied.recovery.requests.iter().copied().map(|address| (address, CacheMissType::Full))),
+            )
         })
     }
 
@@ -192,7 +203,7 @@ impl IngestSummary {
                         }
                     }
                 }
-                BlockOutcome::Invalid | BlockOutcome::RecoveryRequired(_) => {}
+                BlockOutcome::Invalid | BlockOutcome::RecoveryRequired { .. } => {}
             }
             if rejected
                 && rejected_address_count < MAX_INGEST_DIAGNOSTIC_ADDRESSES
@@ -413,9 +424,9 @@ impl SessionWorld {
         summary.invalid_fields = batch.invalid_fields;
         for operation in batch.blocks {
             let outcome = match operation {
-                Some(ObjectOperation::Cached { source, local_id }) => {
+                Some(ObjectOperation::Cached { source, local_id, cache_miss_type }) => {
                     let address = LocalAddress::new(source.region(), local_id);
-                    BlockOutcome::RecoveryRequired(address)
+                    BlockOutcome::RecoveryRequired { address, cache_miss_type }
                 }
                 Some(operation) => {
                     let address = operation.address();
@@ -438,7 +449,7 @@ impl SessionWorld {
         &mut self,
         simulator_id: SimulatorId,
         batch: ObjectBatch,
-        mut on_chunk: impl FnMut(&IngestSummary, Vec<(Option<SimulatorId>, LocalAddress)>, Vec<LocalAddress>),
+        mut on_chunk: impl FnMut(&IngestSummary, Vec<(Option<SimulatorId>, LocalAddress, CacheMissType)>, Vec<LocalAddress>),
     ) -> Option<IngestSummary> {
         let ObjectBatch { region, region_handle, blocks, invalid_blocks, invalid_fields } = batch;
         let mut remaining = blocks.into_iter().peekable();
@@ -460,7 +471,10 @@ impl SessionWorld {
                     invalid_fields: if summary.is_none() { invalid_fields } else { 0 },
                 },
             )?;
-            let recovery_targets = part.recovery_targets().map(|address| (self.simulator_for_region(address.region()), address)).collect();
+            let recovery_targets = part
+                .recovery_requests()
+                .map(|(address, cache_miss_type)| (self.simulator_for_region(address.region()), address, cache_miss_type))
+                .collect();
             let recovery_cancellations = part.recovery_cancellation_addresses().collect();
             on_chunk(&part, recovery_targets, recovery_cancellations);
             match &mut summary {

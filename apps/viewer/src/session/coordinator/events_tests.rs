@@ -8,9 +8,10 @@ use network::{
 use protocol::{
     lludp::Message,
     lludp::Message::{ImprovedTerseObjectUpdate, KillObject, ObjectUpdate, ObjectUpdateCached},
-    messages::{CacheMissType::Full, RequestAgentData, object::kill_object},
+    messages::{CacheMissType::Full, CachedObjectReference, ObjectUpdateCached as CachedUpdate, RequestAgentData, object::kill_object},
 };
 use test_support::lludp::vectors;
+use tokio::runtime::Handle;
 use uuid::Uuid;
 use world::{
     Applied,
@@ -24,8 +25,9 @@ use crate::session::coordinator::tests::apply_world_event;
 use crate::session::coordinator::tests::{
     agent_observation, agent_update, fixture_packet, region_handshake, simulator_message, simulator_message_at_order,
 };
-use crate::session::inbound::{ObjectBatch, ObjectOperation};
+use crate::session::inbound::{ObjectBatch, ObjectMediaRequest, ObjectOperation};
 use crate::session::{
+    object_cache::{ObjectCacheEvent, ObjectCacheSession},
     recovery::recovery_request,
     world::{IngestStatus, SessionWorld, viewer_world_limits},
 };
@@ -68,6 +70,221 @@ fn begin_world_handoff(
     *world_primary = handoff.world_primary;
     *promoted_target = handoff.promoted_target;
     result
+}
+
+fn assert_public_world_invariants(world: &SessionWorld, region: Region) {
+    let state = world.world();
+    let mut object_views = state.objects();
+    let objects = object_views.iter().collect::<Vec<_>>();
+    assert_eq!(objects.len(), state.object_count());
+    for object in objects {
+        let entity = state.entity_at(object.address()).expect("live object address remains indexed");
+        assert_eq!(state.object(entity).map(|indexed| indexed.id()), Some(object.id()));
+        if let Parent::Resolved(parent) = object.parent() {
+            assert!(state.object(parent).is_some(), "resolved parent remains live");
+        }
+    }
+    assert_eq!(state.objects_in_region(region).count(), state.object_count());
+}
+
+async fn apply_with_cache(
+    world: &mut SessionWorld,
+    handoff: &mut WorldHandoff,
+    cache: &mut ObjectCacheSession,
+    simulator: network::SimulatorId,
+    sequence: u32,
+    message: &Message,
+) -> (Vec<(Option<network::SimulatorId>, LocalAddress, protocol::messages::CacheMissType)>, Vec<ObjectMediaRequest>) {
+    let mut recovery = Vec::new();
+    let mut media_requests = Vec::new();
+    let _ = handoff
+        .apply_message_cooperatively(
+            world,
+            simulator,
+            sequence,
+            Ordered(u64::from(sequence)),
+            message,
+            None,
+            cache,
+            &mut |targets, _| recovery.extend(targets),
+            &mut media_requests,
+        )
+        .await;
+    (recovery, media_requests)
+}
+
+async fn load_object_cache(cache: &mut ObjectCacheSession, simulator: network::SimulatorId) {
+    await_cache_write(cache).await;
+    if cache.begin_region_load(simulator, &Handle::current()).is_some() {
+        return;
+    }
+    loop {
+        let event = cache.next_event().await.expect("region cache load completes");
+        if cache.handle_event(event).is_some() {
+            return;
+        }
+    }
+}
+
+async fn await_cache_write(cache: &mut ObjectCacheSession) {
+    loop {
+        let event = cache.next_event().await.expect("cache worker returns the write result");
+        let is_write = matches!(&event, ObjectCacheEvent::WriteApplied { .. } | ObjectCacheEvent::WriteDropped { .. });
+        let _ = cache.handle_event(event);
+        if is_write {
+            return;
+        }
+    }
+}
+
+#[tokio::test]
+async fn interleaved_cached_full_and_terse_updates_preserve_world_indexes() {
+    let directory = tempfile::tempdir().expect("create isolated cache directory");
+    let simulator = simulator_id();
+    let mut cache = crate::session::object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
+    let Message::RegionHandshake(mut handshake) = fixture_packet(vectors::REGION_HANDSHAKE).into_message() else {
+        panic!("region handshake fixture should decode as a handshake");
+    };
+    handshake.region_info1.cache_id = Uuid::from_u128(0x9876);
+    let Some(info) = &mut handshake.region_info2 else { panic!("test handshake includes region identity") };
+    info.region_id = Uuid::from_u128(0x5432);
+    cache.set_region_identity(simulator, &handshake);
+
+    let region_handle = 0x2222_0000_0000_0002;
+    let mut world = SessionWorld::new(viewer_world_limits());
+    world.register_simulator(simulator, Some(RegionHandle::new(region_handle))).expect("register region");
+    let region = world.region_for(simulator).expect("region exists");
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut world, simulator, Uuid::nil());
+    let mut full = fixture_packet(vectors::OBJECT_UPDATE).into_message();
+    let ObjectUpdate(update) = &mut full else { panic!("full object fixture should decode as an update") };
+    update.region_data.region_handle = region_handle;
+    update.objects[1].parent_local_id = update.objects[0].local_id;
+    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 1, &full).await;
+    cache.record_update(simulator, full.clone());
+    load_object_cache(&mut cache, simulator).await;
+    assert_public_world_invariants(&world, region);
+
+    let make_cached = |message: &Message| {
+        let Message::ObjectUpdate(update) = message else { panic!("cached source is a full update") };
+        Message::ObjectUpdateCached(CachedUpdate {
+            region_data: update.region_data,
+            objects: update
+                .objects
+                .iter()
+                .map(|object| CachedObjectReference { local_id: object.local_id, crc: object.crc, update_flags: object.update_flags })
+                .collect(),
+        })
+    };
+    let cached = make_cached(&full);
+    let before_live_hit = world.world().revision();
+    assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 2, &cached).await.0.is_empty());
+    assert_eq!(world.world().revision(), before_live_hit);
+    assert_public_world_invariants(&world, region);
+
+    let parent_local_id = match &full {
+        Message::ObjectUpdate(update) => update.objects[0].local_id,
+        _ => unreachable!(),
+    };
+    let parent_id = match &full {
+        Message::ObjectUpdate(update) => update.objects[0].id,
+        _ => unreachable!(),
+    };
+    let mut terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).into_message();
+    let ImprovedTerseObjectUpdate(update) = &mut terse else { panic!("terse fixture should decode as an update") };
+    update.region_data.region_handle = region_handle;
+    let object = update.objects[0].as_decoded_mut().expect("terse fixture object is valid");
+    object.local_id = parent_local_id;
+    object.motion.position = Vec3::new(31.0, 42.0, 53.0);
+    object.motion.rotation = Quat::IDENTITY;
+    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 3, &terse).await;
+    cache.record_update(simulator, terse.clone());
+    assert_public_world_invariants(&world, region);
+
+    let before_probe = world.world().revision();
+    let (recovery, _) = apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 4, &make_cached(&full)).await;
+    assert!(recovery.is_empty());
+    assert_eq!(world.world().revision(), before_probe);
+    let parent = world.world().object(world.world().entity(parent_id).expect("parent object remains live")).expect("parent object exists");
+    assert_eq!(parent.transform().position(), Some(Vec3::new(31.0, 42.0, 53.0)));
+
+    let Message::ObjectUpdate(update) = &mut full else { unreachable!() };
+    update.objects[0].crc = update.objects[0].crc.wrapping_add(1);
+    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 5, &full).await;
+    cache.record_update(simulator, full.clone());
+    await_cache_write(&mut cache).await;
+    assert_public_world_invariants(&world, region);
+
+    let cached = make_cached(&full);
+    assert!(apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 6, &cached).await.0.is_empty());
+    assert_public_world_invariants(&world, region);
+
+    let child_local_id = match &full {
+        Message::ObjectUpdate(update) => update.objects[1].local_id,
+        _ => unreachable!(),
+    };
+    let mut terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).into_message();
+    let ImprovedTerseObjectUpdate(update) = &mut terse else { unreachable!() };
+    update.region_data.region_handle = region_handle;
+    let object = update.objects[0].as_decoded_mut().expect("terse fixture object is valid");
+    object.local_id = child_local_id;
+    object.motion.position = Vec3::new(-5.0, 7.0, 11.0);
+    object.motion.rotation = Quat::IDENTITY;
+    apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 7, &terse).await;
+    cache.record_update(simulator, terse);
+    assert_public_world_invariants(&world, region);
+    cache.close().await;
+}
+
+#[tokio::test]
+async fn recovered_cached_object_media_reaches_session_handoff() {
+    let directory = tempfile::tempdir().expect("create isolated cache directory");
+    let simulator = simulator_id();
+    let mut cache = crate::session::object_cache::open_for_test(directory.path().join("objects.sqlite"), network::Grid::Agni);
+    let Message::RegionHandshake(mut handshake) = fixture_packet(vectors::REGION_HANDSHAKE).into_message() else {
+        panic!("region handshake fixture should decode as a handshake");
+    };
+    handshake.region_info1.cache_id = Uuid::from_u128(0x9876);
+    let Some(info) = &mut handshake.region_info2 else { panic!("test handshake includes region identity") };
+    info.region_id = Uuid::from_u128(0x5432);
+    cache.set_region_identity(simulator, &handshake);
+
+    let region_handle = 0x2222_0000_0000_0002;
+    let mut world = SessionWorld::new(viewer_world_limits());
+    world.register_simulator(simulator, Some(RegionHandle::new(region_handle))).expect("register region");
+    let region = world.region_for(simulator).expect("region exists");
+    let mut handoff = WorldHandoff::default();
+    handoff.session_ready(&mut world, simulator, Uuid::nil());
+
+    let mut full = fixture_packet(vectors::OBJECT_UPDATE).into_message();
+    let ObjectUpdate(update) = &mut full else { panic!("full object fixture should decode as an update") };
+    update.region_data.region_handle = region_handle;
+    update.objects.truncate(1);
+    update.objects[0].parent_local_id = 0;
+    let object_id = Uuid::from_u128(0xabcde);
+    update.objects[0].pcode = 9;
+    update.objects[0].id = object_id;
+    update.objects[0].media_url = "x-mv:12/00000000-0000-0000-0000-000000000001".into();
+    cache.record_update(simulator, full.clone());
+    load_object_cache(&mut cache, simulator).await;
+
+    let ObjectUpdate(update) = &full else { unreachable!() };
+    let cached = Message::ObjectUpdateCached(CachedUpdate {
+        region_data: update.region_data,
+        objects: update
+            .objects
+            .iter()
+            .map(|object| CachedObjectReference { local_id: object.local_id, crc: object.crc, update_flags: object.update_flags })
+            .collect(),
+    });
+    let (recovery, media_requests) = apply_with_cache(&mut world, &mut handoff, &mut cache, simulator, 2, &cached).await;
+
+    assert!(recovery.is_empty());
+    assert_eq!(media_requests.len(), 1);
+    assert_eq!(media_requests[0].object_id, object_id);
+    assert_eq!(media_requests[0].version, 12);
+    assert_public_world_invariants(&world, region);
+    cache.close().await;
 }
 
 fn complete_promoted_handoff(

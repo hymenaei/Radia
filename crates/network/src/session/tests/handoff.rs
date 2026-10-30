@@ -671,7 +671,7 @@ async fn handoff_waits_for_matching_movement() {
     let (event_sender, mut event_receiver) = mpsc::channel(8);
     let (shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
-    let (_command_sender, commands) = mpsc::channel(1);
+    let (command_sender, commands) = mpsc::channel(1);
     let mut connection = connect_test_neighbor(simulator_id, session.clone(), region_handle).await.expect("connect destination circuit");
     crate::circuit::test_values::set_handoff(
         &mut connection,
@@ -700,6 +700,25 @@ async fn handoff_waits_for_matching_movement() {
     set_sequence(&mut handshake, 41);
     neighbor.send_to(&handshake, peer).await.expect("send destination region handshake");
     std::assert_matches!(
+        next_neighbor_event(&mut event_receiver).await,
+        Event::SimulatorMessage { simulator_id: id, message: Message::RegionHandshake(_), .. } if id == simulator_id
+    );
+    let (completed, response) = oneshot::channel();
+    command_sender
+        .send(SimulatorCommand::ReplyRegionHandshake {
+            message: Message::RegionHandshakeReply(protocol::messages::RegionHandshakeReply {
+                agent_data: protocol::messages::region::region_handshake_reply::AgentData {
+                    agent_id: session.agent_id,
+                    session_id: session.session_id,
+                },
+                region_info: protocol::messages::region::region_handshake_reply::RegionInfo { flags: 0 },
+            }),
+            completed,
+        })
+        .await
+        .expect("queue application handshake reply");
+    response.await.expect("handshake reply completion remains open").expect("handshake reply reaches simulator");
+    std::assert_matches!(
         receive_message(&neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))).await.message(),
         Message::RegionHandshakeReply(_)
     );
@@ -707,11 +726,6 @@ async fn handoff_waits_for_matching_movement() {
         receive_message(&neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))).await.message(),
         Message::CompleteAgentMovement(_)
     );
-    std::assert_matches!(
-        next_neighbor_event(&mut event_receiver).await,
-        Event::SimulatorMessage { message: Message::RegionHandshake(_), .. }
-    );
-
     let wrong = movement_complete_packet(42, session.agent_id, Uuid::from_u128(99), region_handle);
     neighbor.send_to(&wrong, peer).await.expect("send wrong-session movement completion");
     let matching = movement_complete_packet(43, session.agent_id, session.session_id, region_handle);

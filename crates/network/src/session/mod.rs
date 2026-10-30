@@ -54,13 +54,14 @@ use neighbors::{neighbor_completion_event, neighbor_event_queue_failure};
 #[cfg(test)]
 use routing::{EventQueueOutcome, PreconnectEvents, PreconnectOutcome, queue_simulator_event, queue_until_connected};
 use runtime::{RuntimeAction, SessionDispatcher};
+#[cfg(test)]
+use simulators::retry_pending_handoff_commands;
 use simulators::{
     APPLICATION_EVENT_PRESSURE_GRACE_PERIOD, ConnectionQueueFailure, ConnectionTaskResult, EVENT_BACKLOG_WARNING_INTERVAL,
     EVENT_BACKLOG_WARNING_THRESHOLD, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffCommand, MAX_PENDING_LIFECYCLE_EVENTS,
     MAX_PENDING_SESSION_EVENTS, NEIGHBOR_COMMAND_CAPACITY, NeighborEventQueueJoin, PrimaryRoute, RunState, RuntimeInputs, SESSION_TIMEOUT,
     SessionRuntime, SessionRuntimeOptions, SessionState, SimulatorCapabilitySession, SimulatorConnectionState, is_current_simulator,
-    queue_connection_message, queue_primary_message, remove_simulator_capability, retry_pending_handoff_commands,
-    track_capability_requests,
+    queue_connection_message, queue_primary_message, remove_simulator_capability, track_capability_requests,
 };
 use startup::SessionStartup;
 #[cfg(test)]
@@ -391,6 +392,49 @@ impl SessionHandle {
         }
     }
 
+    pub async fn reply_region_handshake(&self, simulator_id: SimulatorId, flags: u32) -> Result<(), Error> {
+        let mut disconnect_requested = self.disconnect_requested.subscribe();
+        let (completed, response) = oneshot::channel();
+        {
+            let admission_closed = self.command_admission_closed.lock().unwrap_or_else(|error| error.into_inner());
+            if *admission_closed || *self.disconnect_requested.borrow() || *self.worker_finished.borrow() {
+                return Err(Error::SessionClosed);
+            }
+        }
+        let command = Command::ReplyRegionHandshake { simulator_id, flags, completed };
+        tokio::select! {
+            biased;
+            _ = disconnect_requested.changed() => return Err(Error::SessionClosed),
+            result = self.commands.send(command) => result.map_err(|_| Error::SessionClosed)?,
+        }
+        tokio::select! {
+            biased;
+            _ = disconnect_requested.changed() => Err(Error::SessionClosed),
+            result = response => result.map_err(|_| {
+                if *self.disconnect_requested.borrow() || *self.worker_finished.borrow() || self.commands.is_closed() {
+                    Error::SessionClosed
+                } else {
+                    Error::SimulatorConnectionClosed
+                }
+            })?,
+        }
+    }
+
+    pub fn try_reply_region_handshake(&self, simulator_id: SimulatorId, flags: u32) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+        let (completed, response) = oneshot::channel();
+        {
+            let admission_closed = self.command_admission_closed.lock().unwrap_or_else(|error| error.into_inner());
+            if *admission_closed || *self.disconnect_requested.borrow() || *self.worker_finished.borrow() {
+                return Err(Error::SessionClosed);
+            }
+            self.commands.try_send(Command::ReplyRegionHandshake { simulator_id, flags, completed }).map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => Error::CommandQueueFull,
+                mpsc::error::TrySendError::Closed(_) => Error::SessionClosed,
+            })?;
+        }
+        Ok(response)
+    }
+
     pub async fn disconnect(&self) {
         self.request_disconnect();
         let mut worker_finished = self.worker_finished.clone();
@@ -406,6 +450,7 @@ pub(crate) enum Command {
     SubmitMfaCode(String),
     SendMessage { message: Message, delivery: Delivery },
     SendTo { simulator_id: SimulatorId, message: Message, delivery: Delivery, completed: oneshot::Sender<Result<(), Error>> },
+    ReplyRegionHandshake { simulator_id: SimulatorId, flags: u32, completed: oneshot::Sender<Result<(), Error>> },
 }
 
 impl outbound_message::Sealed for TeleportCancel {}

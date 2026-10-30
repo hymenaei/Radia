@@ -3,6 +3,7 @@ use super::disconnect::{
     expected_zerocoded_reply, packet_ack_contains, receive_primary_connected, server_ack_many, with_appended_ack,
 };
 use super::*;
+use crate::session::SessionHandle;
 use tokio::task::yield_now;
 
 #[tokio::test]
@@ -12,7 +13,7 @@ async fn handshake_chat_logout() {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
@@ -96,7 +97,10 @@ async fn handshake_chat_logout() {
     assert_eq!(message.chat_data.from_name, "Ada");
     assert_eq!(message.chat_data.message, "Hi");
     yield_now().await;
-    assert!(matches!(events.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    match events.try_recv() {
+        Err(mpsc::error::TryRecvError::Empty) => {}
+        _ => panic!("event queue should be empty"),
+    }
 
     disconnect_signal.send_replace(true);
     let (logout, logout_peer) = receive(&simulator).await;
@@ -114,13 +118,73 @@ async fn handshake_chat_logout() {
 }
 
 #[tokio::test]
+async fn region_handshake_reply_is_explicit_and_preserves_application_flags() {
+    let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
+    let session = login_session(simulator.local_addr().expect("simulator address"));
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (event_sender, mut events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
+    let (disconnect_signal, disconnect_requested) = watch::channel(false);
+    let (_, worker_finished) = watch::channel(false);
+    let handle = SessionHandle {
+        commands: commands.clone(),
+        disconnect_requested: disconnect_signal.clone(),
+        command_admission_closed: Arc::new(std::sync::Mutex::new(false)),
+        worker_finished,
+    };
+    let connection = connect_runtime(session, ResponseData::default()).await.expect("connect simulator runtime");
+    let terminal = event_sender.clone().try_reserve_owned().expect("reserve terminal event slot");
+    let client = spawn(connection.run(command_receiver, event_sender, disconnect_requested, terminal));
+
+    let (_, peer) = receive(&simulator).await;
+    simulator.send_to(&server_ack_many(20, &[1]), peer).await.expect("ack circuit establishment");
+    assert_eq!(receive(&simulator).await.0, expected_complete_movement(2));
+    simulator.send_to(&server_ack_many(21, &[2]), peer).await.expect("ack movement request");
+
+    for (sequence, flags, server_ack) in [(22, 7, 25), (23, 5, 26), (24, 7, 27)] {
+        let mut handshake = test_fixture("region_handshake.hex");
+        handshake[0] |= 0x40;
+        set_sequence(&mut handshake, sequence);
+        simulator.send_to(&handshake, peer).await.expect("send region handshake");
+        receive_ack(&simulator, sequence).await;
+        let simulator_id = loop {
+            if let Event::SimulatorMessage { simulator_id, message: Message::RegionHandshake(_), .. } = next_event(&mut events).await {
+                break simulator_id;
+            }
+        };
+        assert_no_datagram(&simulator);
+
+        let response = handle.try_reply_region_handshake(simulator_id, flags).expect("queue explicit handshake reply");
+        response.await.expect("network completion remains connected").expect("handshake reply is transmitted");
+        let reply = receive_message(&simulator, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
+        std::assert_matches!(reply.message(), Message::RegionHandshakeReply(reply) if reply.region_info.flags == flags);
+        simulator.send_to(&server_ack_many(server_ack, &[reply.sequence()]), peer).await.expect("ack explicit handshake reply");
+    }
+
+    disconnect_signal.send_replace(true);
+    receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
+    timeout(SIMULATOR_TIMEOUT, client).await.expect("session task stops").expect("session task does not panic").expect("clean shutdown");
+}
+
+#[test]
+fn region_handshake_reply_reports_a_full_command_queue_without_waiting() {
+    let (commands, _receiver) = mpsc::channel(1);
+    commands.try_send(Command::SubmitMfaCode("123456".into())).expect("fill command queue");
+    let (disconnect_requested, _) = watch::channel(false);
+    let (_, worker_finished) = watch::channel(false);
+    let handle =
+        SessionHandle { commands, disconnect_requested, command_admission_closed: Arc::new(std::sync::Mutex::new(false)), worker_finished };
+
+    std::assert_matches!(handle.try_reply_region_handshake(SimulatorId::new(1), 7), Err(Error::CommandQueueFull));
+}
+
+#[tokio::test]
 async fn handshake_survives_application_backlog() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
@@ -187,10 +251,10 @@ async fn handshake_survives_application_backlog() {
 async fn closed_receiver_logs_out() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, mut events) = mpsc::channel(SESSION_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (_disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));
@@ -212,7 +276,14 @@ async fn closed_receiver_logs_out() {
     set_sequence(&mut movement_complete, 23);
     drop(events);
     simulator.send_to(&movement_complete, peer).await.expect("send packet as receiver closes");
-    assert_eq!(receive(&simulator).await.0, expected_fixture("logout_request.hex", 4, true));
+    let throttle = Packet::decode(&receive(&simulator).await.0).expect("decode agent throttle");
+    assert_eq!(throttle.sequence(), 4);
+    std::assert_matches!(throttle.message(), Message::AgentThrottle(_));
+    assert!(throttle.appended_acks().contains(&23));
+    let logout = Packet::decode(&receive(&simulator).await.0).expect("decode logout request");
+    assert_eq!(logout.sequence(), 5);
+    assert!(logout.is_reliable());
+    std::assert_matches!(logout.message(), Message::LogoutRequest(_));
 
     assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_ok());
     assert_no_datagram(&simulator);
@@ -222,10 +293,10 @@ async fn closed_receiver_logs_out() {
 async fn disconnect_blocks_movement() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
-    let (_commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (event_sender, _events) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let (disconnect_signal, disconnect_requested) = watch::channel(false);
-    let client = spawn(run_session(session, command_receiver, event_sender, disconnect_requested));
+    let client = spawn(run_session(session, commands.clone(), command_receiver, event_sender, disconnect_requested));
 
     let (use_circuit, peer) = receive(&simulator).await;
     assert_eq!(use_circuit, expected_fixture("use_circuit_code.hex", 1, true));

@@ -169,7 +169,7 @@ pub(super) async fn run_client(
                                 return Ok(());
                             }
                         }
-                        Some(Command::SendTo { completed, .. }) => {
+                        Some(Command::SendTo { completed, .. }) | Some(Command::ReplyRegionHandshake { completed, .. }) => {
                             if let Err(error) = completed.send(Err(Error::SimulatorNotReady)) {
                                 drop(error);
                             }

@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use world::{Entity, Region, TERRAIN_PATCH_SIZE, TERRAIN_REGION_SIZE, TerrainPatchId, WorldRevision};
+use world::{Entity, Region, WorldRevision};
 
 use super::{Batch, Change, MeshChange, Mirror, SceneLifetime, Status};
 use crate::scene::motion::MotionCircuit;
@@ -212,33 +212,7 @@ impl SceneView {
         if !self.session.is_active() || !position.is_finite() {
             return None;
         }
-        let (region, origin) = self.mirror.regions.values().find_map(|region| {
-            let origin = region.summary().info.resolved_origin()?;
-            (position.x >= origin.x
-                && position.x < origin.x + TERRAIN_REGION_SIZE as f64
-                && position.y >= origin.y
-                && position.y < origin.y + TERRAIN_REGION_SIZE as f64)
-                .then_some((region.summary().region, origin))
-        })?;
-        let local_x = position.x - origin.x;
-        let local_y = position.y - origin.y;
-        let patch_x = (local_x / TERRAIN_PATCH_SIZE as f64).floor() as u8;
-        let patch_y = (local_y / TERRAIN_PATCH_SIZE as f64).floor() as u8;
-        let patch_id = TerrainPatchId::new(patch_x, patch_y)?;
-        let patch = self.mirror.patches.get(&(region, patch_id))?;
-        let x = (local_x - f64::from(patch_x) * TERRAIN_PATCH_SIZE as f64).clamp(0.0, (TERRAIN_PATCH_SIZE - 1) as f64);
-        let y = (local_y - f64::from(patch_y) * TERRAIN_PATCH_SIZE as f64).clamp(0.0, (TERRAIN_PATCH_SIZE - 1) as f64);
-        let x0 = x.floor() as usize;
-        let y0 = y.floor() as usize;
-        let x1 = (x0 + 1).min(TERRAIN_PATCH_SIZE - 1);
-        let y1 = (y0 + 1).min(TERRAIN_PATCH_SIZE - 1);
-        let tx = x - x0 as f64;
-        let ty = y - y0 as f64;
-        let heights = patch.source().heights();
-        let height = |x: usize, y: usize| f64::from(heights[y * TERRAIN_PATCH_SIZE + x]);
-        let low = height(x0, y0) * (1.0 - tx) + height(x1, y0) * tx;
-        let high = height(x0, y1) * (1.0 - tx) + height(x1, y1) * tx;
-        Some(origin.z + low * (1.0 - ty) + high * ty)
+        crate::scene::surface::terrain_height_at(&self.mirror, position)
     }
     pub fn water_height(&self, region: Region) -> Option<f32> {
         if self.session.is_active() { self.mirror.water.get(&region).copied().flatten() } else { None }
@@ -270,7 +244,32 @@ impl SceneView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::Reconciler;
+    use math::DVec3;
+    use world::{RegionInfo, RegionSummary, TERRAIN_PATCH_SAMPLES, TerrainPatch};
+
+    use crate::scene::model::SceneLifetime;
+    use crate::scene::{Budget, Reconciler};
+
+    fn terrain_view(regions: &[(Region, DVec3)], patches: &[(Region, u8, u8, f32)]) -> SceneView {
+        let budget = Budget::default();
+        let mut view = SceneView::new(SceneLifetime::new());
+        for &(region, origin) in regions {
+            view.mirror.regions.insert(
+                region,
+                RegionData::new(
+                    RegionSummary { region, info: RegionInfo { origin: Some(origin), ..RegionInfo::default() }, terrain_settings: None },
+                    budget.reserve(size_of::<RegionSummary>()).expect("region lease"),
+                ),
+            );
+        }
+        for &(region, x, y, height) in patches {
+            let patch = TerrainPatch::new(x, y, Box::new([height; TERRAIN_PATCH_SAMPLES])).expect("terrain patch");
+            view.mirror
+                .patches
+                .insert((region, patch.id()), Patch::new(patch, budget.reserve(size_of::<TerrainPatch>()).expect("patch lease")));
+        }
+        view
+    }
 
     #[test]
     fn status_change_requests_reconciliation_without_full_rebuild() {
@@ -283,5 +282,30 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert!(changes[0].reconcile_all);
         assert!(!changes[0].full);
+    }
+
+    #[test]
+    fn terrain_height_interpolates_across_patch_seam() {
+        let region = Region::new(1);
+        let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 0, 0, 0.0), (region, 1, 0, 16.0)]);
+
+        assert_eq!(view.terrain_height_at(DVec3::new(15.5, 4.0, 0.0)), Some(8.0));
+    }
+
+    #[test]
+    fn terrain_height_interpolates_across_region_seam() {
+        let west = Region::new(1);
+        let east = Region::new(2);
+        let view = terrain_view(&[(west, DVec3::ZERO), (east, DVec3::new(256.0, 0.0, 0.0))], &[(west, 15, 0, 4.0), (east, 0, 0, 20.0)]);
+
+        assert_eq!(view.terrain_height_at(DVec3::new(255.5, 4.0, 0.0)), Some(12.0));
+    }
+
+    #[test]
+    fn unloaded_region_neighbor_clamps_to_mesh_edge() {
+        let region = Region::new(1);
+        let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 15, 0, 4.0)]);
+
+        assert_eq!(view.terrain_height_at(DVec3::new(255.5, 4.0, 0.0)), Some(4.0));
     }
 }

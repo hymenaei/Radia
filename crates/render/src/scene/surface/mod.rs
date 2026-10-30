@@ -15,6 +15,7 @@ use world::{Region, TerrainPatchId};
 use assets::mesh::Mesh;
 
 use self::terrain::Terrain;
+pub(in crate::scene) use self::terrain::height_at as terrain_height_at;
 use crate::scene::{Budget, MeshBuildError, PreparedMesh, SharedMesh, budget::MeshWork, mesh::retained_bytes, model::Mirror};
 
 type Key = (SurfaceKind, Region);

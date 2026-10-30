@@ -18,9 +18,9 @@ use protocol::{
 use utils::AssetId;
 use uuid::Uuid;
 use world::{
-    Appearance, AttachmentPoint, FaceAppearance, FieldUpdate, Kind, LinearMotion, LocalAddress, ObjectObservation, ObjectPatch,
-    OrderEvidence, ParentUpdate, PbrMaterialAssignments, Pose, PrimShape, Region, RegionHandle, SculptFlags, SculptType, Shape,
-    SurfaceAppearance, TextureAnimation, TextureMapping, UpdateSource,
+    Appearance, AttachmentPoint, FaceAppearance, FieldUpdate, Kind, LinearMotion, LocalAddress, MotionUpdateKind, ObjectObservation,
+    ObjectPatch, OrderEvidence, ParentUpdate, PbrMaterialAssignments, Pose, PrimShape, Region, RegionHandle, SculptFlags, SculptType,
+    Shape, SurfaceAppearance, TextureAnimation, TextureMapping, UpdateSource,
 };
 
 use crate::session::object_media::media_version;
@@ -409,6 +409,7 @@ fn terse_patch(
     time_dilation: Option<f32>,
     invalid_fields: &mut usize,
 ) -> Result<ObjectOperation, InvalidBlock> {
+    let source = source.with_motion_update_kind(MotionUpdateKind::Terse);
     let mut patch = ObjectPatch::new(source, local_id(block.local_id)?);
     patch.pose = Some(Pose { position: Some(block.motion.position), rotation: Some(block.motion.rotation) });
     patch.linear_motion = LinearMotion { velocity: Some(block.motion.velocity), acceleration: Some(block.motion.acceleration) };

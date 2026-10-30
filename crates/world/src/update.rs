@@ -30,6 +30,13 @@ pub enum UpdateAuthority {
     Untracked,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MotionUpdateKind {
+    #[default]
+    Full,
+    Terse,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UpdateSource {
     pub(super) region: Region,
@@ -37,11 +44,12 @@ pub struct UpdateSource {
     pub(super) order: OrderEvidence,
     pub(super) block_ordinal: u32,
     pub(super) authority: UpdateAuthority,
+    motion_update_kind: MotionUpdateKind,
 }
 
 impl UpdateSource {
     pub const fn new(region: Region, sequence: u32, order: OrderEvidence, block_ordinal: u32) -> Self {
-        Self { region, sequence, order, block_ordinal, authority: UpdateAuthority::Tracked }
+        Self { region, sequence, order, block_ordinal, authority: UpdateAuthority::Tracked, motion_update_kind: MotionUpdateKind::Full }
     }
 
     pub const fn with_authority(mut self, authority: UpdateAuthority) -> Self {
@@ -49,8 +57,17 @@ impl UpdateSource {
         self
     }
 
+    pub const fn with_motion_update_kind(mut self, kind: MotionUpdateKind) -> Self {
+        self.motion_update_kind = kind;
+        self
+    }
+
     pub const fn authority(self) -> UpdateAuthority {
         self.authority
+    }
+
+    pub const fn motion_update_kind(self) -> MotionUpdateKind {
+        self.motion_update_kind
     }
 
     pub const fn region(self) -> Region {

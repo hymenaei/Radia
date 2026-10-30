@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use math::Vec3;
-use world::{Kind, ObjectDetail, PrimShape, Shape, WorldTransform, WorldTransformState};
+use world::{Kind, MotionUpdateKind, ObjectDetail, PrimShape, Shape, WorldTransform, WorldTransformState};
 
 use crate::material::FaceMaterial;
 use crate::scene::{
@@ -132,6 +132,7 @@ impl Object {
             angular_velocity: detail.angular_velocity.unwrap_or_default(),
             is_physical: detail.is_physical,
             time_dilation: detail.time_dilation,
+            motion_update_kind: detail.motion_source.map_or(MotionUpdateKind::Full, world::UpdateSource::motion_update_kind),
             is_attachment,
             source: detail.motion_source,
         })

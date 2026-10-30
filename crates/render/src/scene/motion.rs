@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Instant};
 
 use math::{DVec3, Quat, Vec3};
-use world::{Entity, Parent, Region, WorldPose, WorldTransform};
+use world::{Entity, MotionUpdateKind, Parent, Region, WorldPose, WorldTransform};
 
 use super::SceneView;
 
@@ -24,6 +24,7 @@ pub(crate) struct MotionSample {
     pub(crate) angular_velocity: Vec3,
     pub(crate) is_physical: bool,
     pub(crate) time_dilation: f32,
+    pub(crate) motion_update_kind: MotionUpdateKind,
     pub(crate) is_attachment: bool,
     pub(crate) source: Option<world::UpdateSource>,
 }
@@ -42,6 +43,12 @@ impl MotionState {
     pub(crate) fn updated(previous_state: Self, previous: MotionSample, next: MotionSample, at: Instant) -> Self {
         if same_motion(previous, next) {
             return previous_state;
+        }
+        if next.motion_update_kind == MotionUpdateKind::Full
+            && previous.local_rotation == next.local_rotation
+            && next.angular_velocity == Vec3::ZERO
+        {
+            return Self::new(at);
         }
         let physical_velocity_changed = next.is_physical && previous.angular_velocity != next.angular_velocity;
         let angular_offset = if previous.local_rotation == next.local_rotation && !physical_velocity_changed {
@@ -71,6 +78,7 @@ fn same_motion(previous: MotionSample, next: MotionSample) -> bool {
         && previous.angular_velocity == next.angular_velocity
         && previous.is_physical == next.is_physical
         && previous.time_dilation == next.time_dilation
+        && previous.motion_update_kind == next.motion_update_kind
         && previous.is_attachment == next.is_attachment
         && previous.source == next.source
 }
@@ -317,6 +325,7 @@ mod tests {
             angular_velocity,
             is_physical,
             time_dilation: 1.0,
+            motion_update_kind: MotionUpdateKind::Full,
             is_attachment: false,
             source: None,
         }
@@ -518,6 +527,19 @@ mod tests {
         stopped.local_rotation = state.local_rotation(moving, update_at);
         let next_state = MotionState::updated(state, moving, stopped, update_at);
         close_rotation(next_state.local_rotation(stopped, update_at + Duration::from_secs(2)), stopped.local_rotation);
+    }
+
+    #[test]
+    fn full_zero_omega_resets_rotation_to_base() {
+        let received_at = Instant::now();
+        let moving = sample(DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::Z, false);
+        let state = MotionState::new(received_at);
+        let updated_at = received_at + Duration::from_secs(1);
+        let mut update = sample(DVec3::ZERO, Vec3::ZERO, Vec3::ZERO, Vec3::ZERO, false);
+        update.source = Some(UpdateSource::new(Region::new(1), 2, OrderEvidence::Ordered(2), 0));
+        let updated = MotionState::updated(state, moving, update, updated_at);
+
+        close_rotation(updated.local_rotation(update, updated_at), update.local_rotation);
     }
 
     #[test]

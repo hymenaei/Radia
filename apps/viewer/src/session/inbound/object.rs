@@ -64,6 +64,14 @@ impl ObjectOperation {
         }
     }
 
+    pub(crate) fn set_is_physical(&mut self, is_physical: bool) {
+        match self {
+            Self::Observe(observation) => observation.is_physical = Some(is_physical),
+            Self::Patch(patch) => patch.is_physical = Some(is_physical),
+            Self::Remove { .. } | Self::Cached { .. } => {}
+        }
+    }
+
     pub(crate) fn address(&self) -> LocalAddress {
         let (source, local_id) = match self {
             Self::Observe(observation) => (observation.source, observation.local_id),

@@ -178,14 +178,14 @@ fn motion_vectors_stay_within_protocol_ranges() {
 
     let full_limit = ObjectPatch {
         linear_motion: LinearMotion { velocity: Some(Vec3::splat(256.0)), acceleration: Some(Vec3::splat(-256.0)) },
-        angular_velocity: Some(Vec3::splat(64.0)),
+        angular_velocity: Some(Vec3::splat(256.0)),
         ..ObjectPatch::new(source(region, 2), local_id(1))
     };
     assert_eq!(world.patch_object(full_limit).unwrap().outcome, Updated(entity));
 
     let full_out_of_range = ObjectPatch {
         linear_motion: LinearMotion { velocity: Some(Vec3::splat(256.1)), acceleration: Some(Vec3::splat(-256.1)) },
-        angular_velocity: Some(Vec3::splat(64.1)),
+        angular_velocity: Some(Vec3::splat(256.1)),
         ..ObjectPatch::new(source(region, 3), local_id(1))
     };
     let rejected = world.patch_object(full_out_of_range).unwrap();
@@ -200,7 +200,7 @@ fn motion_vectors_stay_within_protocol_ranges() {
         world.object(entity).unwrap().linear_motion(),
         LinearMotion { velocity: Some(Vec3::splat(256.0)), acceleration: Some(Vec3::splat(-256.0)) }
     );
-    assert_eq!(world.object(entity).unwrap().angular_velocity(), Some(Vec3::splat(64.0)));
+    assert_eq!(world.object(entity).unwrap().angular_velocity(), Some(Vec3::splat(256.0)));
 
     let terse_out_of_range = ObjectPatch {
         linear_motion: LinearMotion { velocity: Some(Vec3::splat(128.1)), acceleration: Some(Vec3::splat(-64.1)) },
@@ -219,7 +219,7 @@ fn motion_vectors_stay_within_protocol_ranges() {
         world.object(entity).unwrap().linear_motion(),
         LinearMotion { velocity: Some(Vec3::splat(256.0)), acceleration: Some(Vec3::splat(-256.0)) }
     );
-    assert_eq!(world.object(entity).unwrap().angular_velocity(), Some(Vec3::splat(64.0)));
+    assert_eq!(world.object(entity).unwrap().angular_velocity(), Some(Vec3::splat(256.0)));
 }
 
 #[test]

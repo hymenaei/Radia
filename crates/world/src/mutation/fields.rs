@@ -166,7 +166,11 @@ impl Fields {
             rejections.reject(FieldGroup::LinearMotion, reason);
             self.linear_motion = LinearMotion::default();
         }
-        if let Err(reason) = validate_motion_vec3(self.angular_velocity, "angular_velocity", ANGULAR_VELOCITY_COMPONENT_LIMIT) {
+        let angular_velocity_limit = match self.motion_update_kind {
+            MotionUpdateKind::Full => FULL_MOTION_COMPONENT_LIMIT,
+            MotionUpdateKind::Terse => ANGULAR_VELOCITY_COMPONENT_LIMIT,
+        };
+        if let Err(reason) = validate_motion_vec3(self.angular_velocity, "angular_velocity", angular_velocity_limit) {
             rejections.reject(FieldGroup::AngularVelocity, reason);
             self.angular_velocity = None;
         }

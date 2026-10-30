@@ -14,7 +14,7 @@ use crate::{Fences, ObjectOrdering, ObjectState, ParentRejectionBarrier};
 
 pub(super) use super::facet::Origin;
 
-const FULL_MOTION_COMPONENT_LIMIT: f32 = 256.0;
+const MOTION_COMPONENT_SANITY_LIMIT: f32 = 4096.0;
 const TERSE_VELOCITY_COMPONENT_LIMIT: f32 = 128.0;
 const TERSE_ACCELERATION_COMPONENT_LIMIT: f32 = 64.0;
 const ANGULAR_VELOCITY_COMPONENT_LIMIT: f32 = 64.0;
@@ -155,7 +155,7 @@ impl Fields {
         }
         let motion = self.linear_motion;
         let (velocity_limit, acceleration_limit) = match self.motion_update_kind {
-            MotionUpdateKind::Full => (FULL_MOTION_COMPONENT_LIMIT, FULL_MOTION_COMPONENT_LIMIT),
+            MotionUpdateKind::Full => (MOTION_COMPONENT_SANITY_LIMIT, MOTION_COMPONENT_SANITY_LIMIT),
             MotionUpdateKind::Terse => (TERSE_VELOCITY_COMPONENT_LIMIT, TERSE_ACCELERATION_COMPONENT_LIMIT),
         };
         if let Err(reason) = validate_motion_vec3(motion.velocity, "velocity", velocity_limit).and(validate_motion_vec3(
@@ -167,7 +167,7 @@ impl Fields {
             self.linear_motion = LinearMotion::default();
         }
         let angular_velocity_limit = match self.motion_update_kind {
-            MotionUpdateKind::Full => FULL_MOTION_COMPONENT_LIMIT,
+            MotionUpdateKind::Full => MOTION_COMPONENT_SANITY_LIMIT,
             MotionUpdateKind::Terse => ANGULAR_VELOCITY_COMPONENT_LIMIT,
         };
         if let Err(reason) = validate_motion_vec3(self.angular_velocity, "angular_velocity", angular_velocity_limit) {

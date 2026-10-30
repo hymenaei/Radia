@@ -278,8 +278,8 @@ mod tests {
     use uuid::Uuid;
 
     use crate::{
-        ApplyError, ApplyError::RevisionExhausted, ApplyOutcome, Kind, LinearMotion, LocalAddress, ObjectObservation,
-        OrderEvidence::Ordered, ParentUpdate::Root, Pose, Region, UpdateSource, WorldRevision,
+        ApplyError, ApplyError::RevisionExhausted, ApplyOutcome, Kind, LinearMotion, LocalAddress, MotionUpdateKind, ObjectObservation,
+        ObjectPatch, OrderEvidence::Ordered, ParentUpdate::Root, Pose, Region, UpdateSource, WorldRevision,
     };
 
     use crate::mutation::tests::{observation, test_world};
@@ -335,6 +335,42 @@ mod tests {
         assert_eq!(current.scale(), Some(Vec3::splat(1.5)));
         assert_eq!(current.linear_motion(), LinearMotion { velocity: Some(Vec3::X), acceleration: Some(Vec3::Y) });
         assert_eq!(current.angular_velocity(), Some(Vec3::Z));
+    }
+
+    #[test]
+    fn full_and_terse_motion_bounds() {
+        let region = Region::new(28);
+        let mut world = test_world(&[region]);
+        let mut full = observation(region, 28, 1, 1);
+        full.linear_motion = Some(LinearMotion { velocity: Some(Vec3::splat(1024.0)), acceleration: Some(Vec3::splat(-1024.0)) });
+        full.angular_velocity = Some(Vec3::splat(1024.0));
+        let ApplyOutcome::Introduced(entity) = world.observe_object(full).unwrap().outcome else { panic!("expected object introduction") };
+
+        let accepted = world.object(entity).unwrap();
+        assert_eq!(accepted.linear_motion().velocity, Some(Vec3::splat(1024.0)));
+        assert_eq!(accepted.linear_motion().acceleration, Some(Vec3::splat(-1024.0)));
+        assert_eq!(accepted.angular_velocity(), Some(Vec3::splat(1024.0)));
+
+        let mut absurd = observation(region, 28, 1, 2);
+        absurd.linear_motion = Some(LinearMotion { velocity: Some(Vec3::splat(f32::MAX)), acceleration: None });
+        absurd.angular_velocity = Some(Vec3::splat(f32::MAX));
+        let rejected = world.observe_object(absurd).unwrap();
+        assert!(!rejected.rejections.is_empty());
+        let accepted = world.object(entity).unwrap();
+        assert_eq!(accepted.linear_motion().velocity, Some(Vec3::splat(1024.0)));
+        assert_eq!(accepted.angular_velocity(), Some(Vec3::splat(1024.0)));
+
+        let mut terse = ObjectPatch::new(
+            UpdateSource::new(region, 3, Ordered(3), 0).with_motion_update_kind(MotionUpdateKind::Terse),
+            NonZeroU32::new(1).unwrap(),
+        );
+        terse.linear_motion = LinearMotion { velocity: Some(Vec3::splat(128.0)), acceleration: Some(Vec3::splat(64.0)) };
+        terse.angular_velocity = Some(Vec3::splat(64.0));
+        let _ = world.patch_object(terse).unwrap();
+        let accepted = world.object(entity).unwrap();
+        assert_eq!(accepted.linear_motion().velocity, Some(Vec3::splat(128.0)));
+        assert_eq!(accepted.linear_motion().acceleration, Some(Vec3::splat(64.0)));
+        assert_eq!(accepted.angular_velocity(), Some(Vec3::splat(64.0)));
     }
 
     #[test]

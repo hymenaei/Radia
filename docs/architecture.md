@@ -104,11 +104,11 @@ The inventory cache uses one `inventory.sqlite` file below the default cache dir
 
 ### `crates/test-support`
 
-Provides shared LLUDP vectors and a hex parser, texture samples with independent pixel expectations, and synchronous allocation measurements. Production crates use it only as a dev-dependency. Network keeps its process-wide probes local because they measure a different scope.
+Provides shared LLUDP vectors and a hex parser, texture samples with independent pixel expectations, synchronous allocation measurements, and a subprocess test helper with bounded readiness waits and child cleanup. Production crates use it only as a dev-dependency. Network keeps its process-wide probes local because they measure a different scope.
 
 ### `crates/utils`
 
-Provides shared domain ID newtypes and small general-purpose helpers such as atomic file replacement. ID wrappers keep UUID representation private, and domain-specific validity rules stay with each owning type. It has no subsystem dependencies.
+Provides shared domain ID newtypes and small general-purpose helpers such as atomic file replacement. Settings writers and the payload cache share bounded retries for permission-denied replacements, preserving the destination on failure. A cache commit shares one retry budget across its staged files, so backoff does not grow with batch size. ID wrappers keep UUID representation private, and domain-specific validity rules stay with each owning type. It has no subsystem dependencies.
 
 ### `crates/world`
 

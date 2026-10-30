@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tempfile::tempdir;
@@ -122,13 +122,20 @@ fn set_limit_enforces_once_per_writer_batch() {
         first_limit.join().expect("first limit thread").expect("set first cache limit");
         final_limit.join().expect("final limit thread").expect("set final cache limit");
         limit_started.recv_timeout(Duration::from_secs(3)).expect("limit command finished");
-        assert_eq!(cache.entry_count(), 8, "the final limit is enforced before the following put");
 
+        let (limit_cycle, resume_limit_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
+        let (put_cycle, resume_put_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
         resume_limit.send(()).expect("resume writer after limit batch");
+        limit_cycle.recv_timeout(Duration::from_secs(3)).expect("limit batch completes before the next put");
+        let entries_after_limit = cache.entry_count();
+        resume_limit_cycle.send(()).expect("allow the next put batch");
         put.join().expect("put thread").expect("later put uses the final limit");
+        put_cycle.recv_timeout(Duration::from_secs(3)).expect("put batch completes before idle maintenance");
+        assert_eq!(entries_after_limit, 8, "the limit batch enforces once before the following put");
+        assert_eq!(cache.entry_count(), 1);
+        assert!(cache.accounted_size() <= cache.size_limit());
+        resume_put_cycle.send(()).expect("resume idle maintenance");
     });
-    assert_eq!(cache.entry_count(), 1);
-    assert!(cache.accounted_size() <= cache.size_limit());
     cache.shutdown().expect("close cache");
 }
 
@@ -426,6 +433,7 @@ fn maintenance_failure_backs_off_until_command() {
         cache.put(same_shard_key(id), vec![1; 1024]).expect("fill cache");
     }
     let limit = cache.accounted_size();
+    cache.read_state.hooks.set_time(Instant::now());
     cache.arm_fault(WritePoint::IndexBatchFailure);
     let (limit_replied, resume_limit) = cache.pause_at(WritePoint::SetLimitReplied);
     cache.set_size_limit(limit).expect("set current cache limit");
@@ -442,12 +450,24 @@ fn maintenance_failure_backs_off_until_command() {
     assert_eq!(cache.entry_count(), usize::from(ENTRIES));
 
     let (retry_started, resume_retry_started) = cache.pause_at(WritePoint::MaintenanceStarted);
-    resume_first_finished.send(()).expect("resume failed maintenance result");
-    assert_matches!(retry_started.recv_timeout(Duration::from_millis(40)), Err(std::sync::mpsc::RecvTimeoutError::Timeout));
-
     let (retry_finished, resume_retry_finished) = cache.pause_at(WritePoint::MaintenanceFinished);
-    assert!(!cache.remove(same_shard_key(u16::MAX)).expect("remove absent key"));
-    retry_started.recv_timeout(Duration::from_millis(40)).expect("queued command resumes maintenance");
+    let (failed_cycle, resume_failed_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
+    resume_first_finished.send(()).expect("resume failed maintenance result");
+    failed_cycle.recv_timeout(Duration::from_secs(3)).expect("failed maintenance cycle completed");
+    let (deferred_cycle, resume_deferred_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
+    resume_failed_cycle.send(()).expect("resume after maintenance failure");
+    deferred_cycle.recv_timeout(Duration::from_secs(3)).expect("idle maintenance deferred before deadline");
+    assert_matches!(retry_started.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+    let (limit_queued, resume_limit_queued) = cache.pause_at(WritePoint::SetLimitQueued);
+    let command = {
+        let cache = Arc::clone(&cache);
+        thread::spawn(move || cache.set_size_limit(limit))
+    };
+    limit_queued.recv_timeout(Duration::from_secs(3)).expect("command queued during backoff");
+    resume_limit_queued.send(()).expect("release queued command");
+    resume_deferred_cycle.send(()).expect("process queued command before deadline");
+    command.join().expect("limit command completes").expect("retain cache limit");
+    retry_started.recv_timeout(Duration::from_secs(3)).expect("maintenance resumes after command");
     resume_retry_started.send(()).expect("resume retried maintenance");
     retry_finished.recv_timeout(Duration::from_secs(3)).expect("retried maintenance finished");
     assert_eq!(cache.entry_count(), usize::from(ENTRIES) - 32);

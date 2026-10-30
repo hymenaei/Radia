@@ -51,6 +51,30 @@ struct QueueBatch {
     closed: bool,
 }
 
+struct MaintenanceRetry {
+    deadline: Option<Instant>,
+    delay: Duration,
+}
+
+impl MaintenanceRetry {
+    fn new() -> Self {
+        Self { deadline: None, delay: MAINTENANCE_RETRY_INITIAL }
+    }
+
+    fn ready(&self, now: Instant) -> bool {
+        self.deadline.is_none_or(|deadline| now >= deadline)
+    }
+
+    fn failed(&mut self, now: Instant) {
+        self.deadline = Some(now + self.delay);
+        self.delay = (self.delay * 2).min(MAINTENANCE_RETRY_MAX);
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
 impl WriteQueue {
     pub fn try_send(&self, command: Command, bytes: usize) -> Result<(), StorageError> {
         let mut state = lock(&self.state);
@@ -138,16 +162,14 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
     if state.hooks.check(super::WritePoint::WriterReady).is_err() {
         return;
     }
-    let mut maintenance_retry_at = None;
-    let mut maintenance_retry_delay = MAINTENANCE_RETRY_INITIAL;
+    let mut maintenance_retry = MaintenanceRetry::new();
     let mut maintenance_warning_open = false;
     loop {
         let batch = queue.receive_batch();
         let idle = batch.commands.is_empty();
         let contains_put = batch.commands.iter().any(|queued| matches!(&queued.command, Command::Put { .. }));
         if !idle {
-            maintenance_retry_at = None;
-            maintenance_retry_delay = MAINTENANCE_RETRY_INITIAL;
+            maintenance_retry.reset();
         }
         state.evictions_this_batch = 0;
         let mut commands = batch.commands.into_iter().peekable();
@@ -252,18 +274,16 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
         let watermark = low_watermark(state.size_limit, state.empty_cache_size());
         let maintenance_eligible = !batch.closed && !limit_enforcement_attempted && (idle || !contains_put);
         if maintenance_eligible && state.accounted_size() <= watermark {
-            maintenance_retry_at = None;
-            maintenance_retry_delay = MAINTENANCE_RETRY_INITIAL;
+            maintenance_retry.reset();
             maintenance_warning_open = false;
-        } else if maintenance_eligible && maintenance_retry_at.is_none_or(|deadline| Instant::now() >= deadline) {
+        } else if maintenance_eligible && maintenance_retry.ready(state.hooks.now()) {
             #[cfg(test)]
             if state.hooks.check(super::WritePoint::MaintenanceStarted).is_err() {
                 return;
             }
             match state.enforce_limit(watermark) {
                 Ok(()) => {
-                    maintenance_retry_at = None;
-                    maintenance_retry_delay = MAINTENANCE_RETRY_INITIAL;
+                    maintenance_retry.reset();
                     maintenance_warning_open = false;
                 }
                 Err(error) => {
@@ -271,8 +291,7 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
                         tracing::warn!(error = %error, "cache limit enforcement failed");
                         maintenance_warning_open = true;
                     }
-                    maintenance_retry_at = Some(Instant::now() + maintenance_retry_delay);
-                    maintenance_retry_delay = (maintenance_retry_delay * 2).min(MAINTENANCE_RETRY_MAX);
+                    maintenance_retry.failed(state.hooks.now());
                 }
             }
             #[cfg(test)]
@@ -293,5 +312,52 @@ pub(in crate::cache) fn writer_loop(mut state: WorkerState, queue: Arc<WriteQueu
             }
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_waits_for_deadline() {
+        let mut retry = MaintenanceRetry::new();
+        let now = Instant::now();
+        assert!(retry.ready(now));
+        retry.failed(now);
+        assert!(!retry.ready(now));
+        assert!(!retry.ready(now + MAINTENANCE_RETRY_INITIAL - Duration::from_nanos(1)));
+        assert!(retry.ready(now + MAINTENANCE_RETRY_INITIAL));
+    }
+
+    #[test]
+    fn failures_back_off_to_cap() {
+        let mut retry = MaintenanceRetry::new();
+        let mut now = Instant::now();
+        for delay in [
+            MAINTENANCE_RETRY_INITIAL,
+            MAINTENANCE_RETRY_INITIAL * 2,
+            MAINTENANCE_RETRY_INITIAL * 4,
+            MAINTENANCE_RETRY_INITIAL * 8,
+            MAINTENANCE_RETRY_MAX,
+            MAINTENANCE_RETRY_MAX,
+        ] {
+            retry.failed(now);
+            assert!(!retry.ready(now + delay - Duration::from_nanos(1)));
+            now += delay;
+            assert!(retry.ready(now));
+        }
+    }
+
+    #[test]
+    fn reset_clears_backoff() {
+        let mut retry = MaintenanceRetry::new();
+        let now = Instant::now();
+        retry.failed(now);
+        retry.failed(now);
+        retry.reset();
+        assert!(retry.ready(now));
+        retry.failed(now);
+        assert!(retry.ready(now + MAINTENANCE_RETRY_INITIAL));
     }
 }

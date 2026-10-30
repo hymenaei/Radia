@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     str::{self, from_utf8},
@@ -14,9 +15,8 @@ use std::{
 use reqwest::Url;
 use tokio::{sync::mpsc, time::timeout};
 
-pub(crate) use crate::capabilities::client_with_request_timeout;
-
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+const RESPONSE_HOLD_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) struct LocalServer {
     address: SocketAddr,
@@ -54,11 +54,15 @@ impl LocalServer {
 
 pub(crate) struct ConcurrentCapabilityTestServer {
     base: Url,
-    requests: mpsc::UnboundedReceiver<()>,
-    response_release: std_mpsc::Sender<()>,
-    request_count: usize,
-    released_responses: usize,
+    requests: mpsc::UnboundedReceiver<ConcurrentCapabilityRequest>,
+    response_releases: Arc<Mutex<HashMap<usize, std_mpsc::Sender<()>>>>,
     worker: Option<thread::JoinHandle<usize>>,
+}
+
+pub(crate) struct ConcurrentCapabilityRequest {
+    id: usize,
+    pub(crate) path: String,
+    pub(crate) bytes: Vec<u8>,
 }
 
 impl ConcurrentCapabilityTestServer {
@@ -71,32 +75,41 @@ impl ConcurrentCapabilityTestServer {
         let body = format!("<llsd><map><key>TestCapability</key><string>{capability_url}</string></map></llsd>");
         let response = response(200, "OK", "application/llsd+xml", None, &body);
         let (request_sender, requests) = mpsc::unbounded_channel();
-        let (response_release, response_releases) = std_mpsc::channel();
-        let response_releases = Arc::new(Mutex::new(response_releases));
+        let response_releases = Arc::new(Mutex::new(HashMap::with_capacity(request_count)));
+        let worker_response_releases = Arc::clone(&response_releases);
         let worker = thread::spawn(move || {
             let active = Arc::new(AtomicUsize::new(0));
             let maximum_active = Arc::new(AtomicUsize::new(0));
             let mut handlers = Vec::with_capacity(request_count);
-            for _ in 0..request_count {
+            for id in 0..request_count {
                 let (mut stream, _) = listener.accept().expect("accept capability concurrency request");
                 stream.set_read_timeout(Some(TEST_TIMEOUT)).expect("set concurrency request timeout");
                 let response = response.clone();
                 let active = Arc::clone(&active);
                 let maximum_active = Arc::clone(&maximum_active);
                 let request_sender = request_sender.clone();
-                let response_releases = Arc::clone(&response_releases);
+                let response_releases = Arc::clone(&worker_response_releases);
                 handlers.push(thread::spawn(move || {
-                    let _request = read_request(&mut stream);
+                    let bytes = read_request(&mut stream);
+                    let path = request_line(&bytes).split_whitespace().nth(1).expect("capability request path").to_owned();
                     let active_count = active.fetch_add(1, Ordering::Relaxed) + 1;
                     maximum_active.fetch_max(active_count, Ordering::Relaxed);
-                    let _ = request_sender.send(());
-                    response_releases
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .recv_timeout(TEST_TIMEOUT)
-                        .expect("test should release the capability response");
+                    let (response_release, response_released) = std_mpsc::channel();
+                    response_releases.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, response_release);
+                    request_sender.send(ConcurrentCapabilityRequest { id, path, bytes }).expect("test should receive capability request");
+                    response_released.recv_timeout(RESPONSE_HOLD_TIMEOUT).expect("test should release the capability response");
                     active.fetch_sub(1, Ordering::Relaxed);
-                    let _ = stream.write_all(&response);
+                    match stream.write_all(&response) {
+                        Ok(()) => {}
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::BrokenPipe
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::ConnectionAborted
+                            ) => {}
+                        Err(error) => panic!("write capability response: {error}"),
+                    }
                 }));
             }
             drop(request_sender);
@@ -105,7 +118,7 @@ impl ConcurrentCapabilityTestServer {
             }
             maximum_active.load(Ordering::Relaxed)
         });
-        Self { base, requests, response_release, request_count, released_responses: 0, worker: Some(worker) }
+        Self { base, requests, response_releases, worker: Some(worker) }
     }
 
     pub(crate) fn url(&self, path: &str) -> Url {
@@ -114,21 +127,30 @@ impl ConcurrentCapabilityTestServer {
         url
     }
 
-    pub(crate) async fn next_request(&mut self) {
+    pub(crate) async fn next_request(&mut self) -> ConcurrentCapabilityRequest {
         timeout(TEST_TIMEOUT, self.requests.recv())
             .await
             .expect("HTTP request should reach capability server")
-            .expect("capability server request stream should remain open");
+            .expect("capability server request stream should remain open")
     }
 
-    pub(crate) fn release_response(&mut self) {
-        self.response_release.send(()).expect("capability response worker should remain open");
-        self.released_responses += 1;
+    pub(crate) fn release_response(&mut self, request: ConcurrentCapabilityRequest) {
+        let response_release = self
+            .response_releases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&request.id)
+            .expect("capability request response should still be held");
+        response_release.send(()).expect("capability response worker should remain open");
     }
 
     pub(crate) fn finish(mut self) -> usize {
-        for _ in 0..self.request_count.saturating_sub(self.released_responses) {
-            self.response_release.send(()).expect("capability response worker should remain open");
+        let response_releases = {
+            let mut response_releases = self.response_releases.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *response_releases)
+        };
+        for response_release in response_releases.into_values() {
+            response_release.send(()).unwrap_or(());
         }
         self.worker.take().expect("concurrency server worker").join().expect("concurrency server should stop")
     }
@@ -213,8 +235,9 @@ impl EventQueueBudgetTestServer {
         }
     }
 
-    pub(crate) fn finish(mut self) {
+    pub(crate) fn finish(mut self) -> usize {
         self.worker.take().expect("budget server worker").join().expect("event queue budget server should stop");
+        self.polls.try_iter().count()
     }
 }
 

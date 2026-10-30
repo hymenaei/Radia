@@ -292,20 +292,19 @@ fn string_value(value: &Value) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::{future::poll_fn, sync::Arc, task::Poll, time::Duration};
+    use std::{future::poll_fn, sync::Arc, task::Poll};
 
     use llsd::Value;
-    use tokio::task::yield_now;
+    use tokio::{task::yield_now, time};
     use url::Url;
 
     use crate::{
         Error,
         capabilities::{CapabilityBudget, CapabilityUrl, Client},
-        fixtures::http::client_with_request_timeout,
         http::{self, ErrorKind},
     };
 
-    use crate::capabilities::budget::{MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS};
+    use crate::capabilities::budget::{MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS, REQUEST_TIMEOUT};
 
     #[tokio::test]
     async fn cancel_before_admission_releases_no_slot() {
@@ -334,30 +333,23 @@ mod tests {
         assert_eq!(budget.ordinary_requests.available_permits(), MAX_CONCURRENT_CAPABILITY_REQUESTS);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn deadline_covers_admission_wait() {
         let budget = CapabilityBudget::new();
-        let client = client_with_request_timeout(
-            Client::new_with_budget(Url::parse("http://127.0.0.1:9/seed").expect("seed URL"), budget.clone())
-                .expect("active Tokio runtime"),
-            Duration::from_millis(30),
-        );
+        let client = Client::new_with_budget(Url::parse("http://127.0.0.1:9/seed").expect("seed URL"), budget.clone())
+            .expect("active Tokio runtime");
         let url = CapabilityUrl::parse("http://127.0.0.1:9/capability").expect("capability URL");
         let held = Arc::clone(&budget.ordinary_requests)
             .acquire_many_owned(MAX_CONCURRENT_CAPABILITY_REQUESTS as u32)
             .await
             .expect("hold every ordinary request slot");
 
-        let error = client
-            .get_bytes_with_response_limit(&url, MAX_CAPABILITY_RESPONSE_BYTES)
-            .await
-            .expect_err("a request waiting for admission must hit its deadline");
+        let mut request = Box::pin(client.get_bytes_with_response_limit(&url, MAX_CAPABILITY_RESPONSE_BYTES));
+        assert!(poll_fn(|context| Poll::Ready(request.as_mut().poll(context))).await.is_pending());
+        time::advance(REQUEST_TIMEOUT).await;
+        let error = request.await.expect_err("a request waiting for admission must hit its deadline");
 
-        std::assert_matches!(
-            error,
-            Error::CapabilityHttp(http::Error { kind: ErrorKind::Timeout, status: None, elapsed, .. })
-                if elapsed >= Duration::from_millis(20) && elapsed < Duration::from_millis(500)
-        );
+        std::assert_matches!(error, Error::CapabilityHttp(http::Error { kind: ErrorKind::Timeout, status: None, .. }));
         assert_eq!(budget.ordinary_requests.available_permits(), 0);
         drop(held);
         assert_eq!(budget.ordinary_requests.available_permits(), MAX_CONCURRENT_CAPABILITY_REQUESTS);

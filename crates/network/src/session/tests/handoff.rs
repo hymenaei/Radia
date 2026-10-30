@@ -323,15 +323,38 @@ impl TeleportFinishScenario {
             );
         }
         self.harness.primary.send_to(&ack(31, sent.sequence()), self.harness.primary_peer).await.expect("ack explicit former-primary send");
-        assert!(
-            timeout(
-                Duration::from_millis(50),
-                receive_message(&self.harness.primary, |message| matches!(message, Message::RequestMultipleObjects(_)))
-            )
+        let mut fence = object_request();
+        if let Message::RequestMultipleObjects(request) = &mut fence {
+            request.objects[0].local_id = 78;
+        }
+        let (completed, response) = oneshot::channel();
+        self.harness
+            .commands
+            .send(Command::SendTo { simulator_id: self.harness.primary_id, message: fence, delivery: Delivery::Reliable, completed })
             .await
-            .is_err(),
-            "the queued default send must not also reach the former primary"
-        );
+            .expect("queue former-primary send fence");
+        timeout(WAIT, async {
+            loop {
+                let (bytes, _) = receive_udp(&self.harness.primary).await;
+                let packet = Packet::decode(&bytes).expect("decode former-primary traffic");
+                if packet.is_resent() && packet.sequence() == sent.sequence() {
+                    self.harness
+                        .primary
+                        .send_to(&ack(32, packet.sequence()), self.harness.primary_peer)
+                        .await
+                        .expect("ack repeated explicit send");
+                    continue;
+                }
+                if let Message::RequestMultipleObjects(request) = packet.message() {
+                    assert_eq!(request.objects[0].local_id, 78, "the default send must not reach the former primary before its send fence");
+                    self.harness.primary.send_to(&ack(32, packet.sequence()), self.harness.primary_peer).await.expect("ack send fence");
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("former-primary send fence arrives");
+        response.await.expect("send fence response").expect("send fence completes");
         let wrong_region = self.target_region + 1;
         let mut demoted_movement = movement_complete_packet(50, self.session.agent_id, self.session.session_id, wrong_region);
         demoted_movement[0] |= 0x40;
@@ -696,9 +719,6 @@ async fn handoff_waits_for_matching_movement() {
         next_neighbor_event(&mut event_receiver).await,
         Event::SimulatorMotionStatus { simulator_id: id, .. } if id == simulator_id
     );
-    let mut buffer = [0; 65_535];
-    assert!(timeout(Duration::from_millis(50), neighbor.recv_from(&mut buffer)).await.is_err());
-
     let mut handshake = test_fixture("region_handshake.hex");
     handshake[0] |= 0x40;
     set_sequence(&mut handshake, 41);
@@ -722,10 +742,18 @@ async fn handoff_waits_for_matching_movement() {
         .await
         .expect("queue application handshake reply");
     response.await.expect("handshake reply completion remains open").expect("handshake reply reaches simulator");
-    std::assert_matches!(
-        receive_message(&neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))).await.message(),
-        Message::RegionHandshakeReply(_)
-    );
+    let handshake_reply = loop {
+        let (bytes, _) = receive(&neighbor).await;
+        let packet = Packet::decode(&bytes).expect("decode destination circuit traffic");
+        assert!(
+            !matches!(packet.message(), Message::CompleteAgentMovement(_)),
+            "movement completion must follow the destination handshake reply"
+        );
+        if matches!(packet.message(), Message::RegionHandshakeReply(_)) {
+            break packet;
+        }
+    };
+    std::assert_matches!(handshake_reply.message(), Message::RegionHandshakeReply(_));
     std::assert_matches!(
         receive_message(&neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))).await.message(),
         Message::CompleteAgentMovement(_)
@@ -746,7 +774,7 @@ async fn handoff_waits_for_matching_movement() {
     assert_eq!(movement.data.region_handle, region_handle);
 
     shutdown_signal.send_replace(true);
-    assert!(timeout(Duration::from_millis(200), task).await.expect("destination stops").expect("destination task").is_ok());
+    assert!(timeout(WAIT, task).await.expect("destination stops").expect("destination task").is_ok());
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     future::{Future, poll_fn},
     io::{self, ErrorKind},
     sync::Arc,
@@ -14,7 +15,6 @@ use serde::Serialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net, runtime,
-    sync::Notify,
     task::{JoinSet, spawn},
     time::timeout,
 };
@@ -24,6 +24,7 @@ use crate::capabilities::budget::{
     MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS,
     MAX_SEED_CAPABILITY_RESPONSE_BYTES,
 };
+use crate::fixtures::event_queue::decode_request_body;
 use crate::fixtures::{
     http::{ConcurrentCapabilityTestServer, LocalServer, llsd_response, response},
     simulator::{test_simulator_id, test_source},
@@ -51,7 +52,6 @@ fn byte_response(status: u16, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> 
 #[derive(Clone, Default)]
 struct SerializationProbe {
     count: Arc<AtomicUsize>,
-    serialized: Arc<Notify>,
 }
 
 impl Serialize for SerializationProbe {
@@ -60,7 +60,6 @@ impl Serialize for SerializationProbe {
         S: serde::Serializer,
     {
         self.count.fetch_add(1, Ordering::Relaxed);
-        self.serialized.notify_one();
         serializer.serialize_str("admitted")
     }
 }
@@ -682,8 +681,11 @@ async fn posts_encode_after_admission() {
         let url = held_url.clone();
         held_requests.spawn(async move { client.get_bytes_with_response_limit(&url, MAX_CAPABILITY_RESPONSE_BYTES).await });
     }
+    let mut held = Vec::with_capacity(MAX_CONCURRENT_CAPABILITY_REQUESTS);
     for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
-        server.next_request().await;
+        let request = server.next_request().await;
+        assert_eq!(request.path, "/held");
+        held.push(request);
     }
 
     let value_probe = SerializationProbe::default();
@@ -696,40 +698,70 @@ async fn posts_encode_after_admission() {
     assert_eq!(value_probe.count.load(Ordering::Relaxed), 0, "LLSD value POST must wait before serializing");
     assert_eq!(bytes_probe.count.load(Ordering::Relaxed), 0, "raw body POST must wait before serializing");
 
-    server.release_response();
+    server.release_response(held.pop().expect("one held request"));
     timeout(TEST_TIMEOUT, held_requests.join_next())
         .await
         .expect("a held request should finish")
         .expect("one held request task")
         .expect("held request task should succeed")
         .expect("held request should return a body");
-    assert!(poll_fn(|context| Poll::Ready(value_post.as_mut().poll(context))).await.is_pending());
-    timeout(TEST_TIMEOUT, value_probe.serialized.notified()).await.expect("value POST should serialize after admission");
-    assert_eq!(value_probe.count.load(Ordering::Relaxed), 1);
-    server.next_request().await;
+    let value_admitted_first = timeout(
+        TEST_TIMEOUT,
+        poll_fn(|context| {
+            let _ = value_post.as_mut().poll(context);
+            let _ = bytes_post.as_mut().poll(context);
+            let value_count = value_probe.count.load(Ordering::Relaxed);
+            let bytes_count = bytes_probe.count.load(Ordering::Relaxed);
+            if value_count + bytes_count == 1 { Poll::Ready(value_count == 1) } else { Poll::Pending }
+        }),
+    )
+    .await
+    .expect("one POST should serialize after admission");
+    assert_eq!(value_probe.count.load(Ordering::Relaxed), if value_admitted_first { 1 } else { 0 });
+    assert_eq!(bytes_probe.count.load(Ordering::Relaxed), if value_admitted_first { 0 } else { 1 });
+    let first_post = server.next_request().await;
+    assert_eq!(first_post.path, "/post");
+    assert_eq!(decode_request_body(&first_post.bytes), Value::String("admitted".into()));
 
-    server.release_response();
+    server.release_response(held.pop().expect("another held request"));
     timeout(TEST_TIMEOUT, held_requests.join_next())
         .await
         .expect("another held request should finish")
         .expect("one held request task")
         .expect("held request task should succeed")
         .expect("held request should return a body");
-    assert!(poll_fn(|context| Poll::Ready(bytes_post.as_mut().poll(context))).await.is_pending());
-    timeout(TEST_TIMEOUT, bytes_probe.serialized.notified()).await.expect("raw body POST should serialize after admission");
+    timeout(
+        TEST_TIMEOUT,
+        poll_fn(|context| {
+            let _ = value_post.as_mut().poll(context);
+            let _ = bytes_post.as_mut().poll(context);
+            let value_count = value_probe.count.load(Ordering::Relaxed);
+            let bytes_count = bytes_probe.count.load(Ordering::Relaxed);
+            if value_count + bytes_count == 2 { Poll::Ready(()) } else { Poll::Pending }
+        }),
+    )
+    .await
+    .expect("second POST should serialize after admission");
+    assert_eq!(value_probe.count.load(Ordering::Relaxed), 1);
     assert_eq!(bytes_probe.count.load(Ordering::Relaxed), 1);
-    server.next_request().await;
+    let second_post = server.next_request().await;
+    assert_eq!(second_post.path, "/post");
+    assert_eq!(decode_request_body(&second_post.bytes), Value::String("admitted".into()));
 
+    let capability_url = server.url("/capability").to_string();
     server.finish();
-    timeout(TEST_TIMEOUT, async {
+    let (value, bytes) = timeout(TEST_TIMEOUT, async {
         while let Some(request) = held_requests.join_next().await {
             request.expect("held request task should finish").expect("held request should succeed");
         }
-        value_post.await.expect("LLSD POST should succeed");
-        bytes_post.await.expect("raw body POST should succeed");
+        let value = value_post.await.expect("LLSD POST should succeed");
+        let bytes = bytes_post.await.expect("raw body POST should succeed");
+        (value, bytes)
     })
     .await
     .expect("admitted POSTs and held requests should finish");
+    std::assert_matches!(value, Value::Map(fields) if fields.get("TestCapability") == Some(&Value::String(capability_url.clone())));
+    assert_eq!(bytes, format!("<llsd><map><key>TestCapability</key><string>{capability_url}</string></map></llsd>").into_bytes());
 }
 
 #[tokio::test]
@@ -788,12 +820,13 @@ async fn requests_limit_concurrency() {
         requests.spawn(async move { client.request_capabilities(&["TestCapability"]).await });
     }
 
+    let mut in_flight = VecDeque::with_capacity(MAX_CONCURRENT_CAPABILITY_REQUESTS);
     for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
-        server.next_request().await;
+        in_flight.push_back(server.next_request().await);
     }
     for _ in MAX_CONCURRENT_CAPABILITY_REQUESTS..request_count {
-        server.release_response();
-        server.next_request().await;
+        server.release_response(in_flight.pop_front().expect("one request occupies each admitted slot"));
+        in_flight.push_back(server.next_request().await);
     }
     let maximum_active = server.finish();
 
@@ -823,12 +856,13 @@ async fn shared_budget_bounds_requests() {
         requests.spawn(async move { client.request_capabilities(&["TestCapability"]).await });
     }
 
+    let mut in_flight = VecDeque::with_capacity(MAX_CONCURRENT_CAPABILITY_REQUESTS);
     for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
-        server.next_request().await;
+        in_flight.push_back(server.next_request().await);
     }
     for _ in MAX_CONCURRENT_CAPABILITY_REQUESTS..request_count {
-        server.release_response();
-        server.next_request().await;
+        server.release_response(in_flight.pop_front().expect("one request occupies each admitted slot"));
+        in_flight.push_back(server.next_request().await);
     }
     let maximum_active = server.finish();
 

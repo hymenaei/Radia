@@ -255,20 +255,32 @@ pub(in crate::circuit) async fn run_budget_retry(role: ConnectionRole) {
     let sequence = 700u32;
     wire[0] |= 0x40;
     wire[1..5].copy_from_slice(&sequence.to_be_bytes());
+    let mut coverage_changed = coverage.subscribe();
     simulator.send_to(&wire, peer).await.expect("send packet while memory admission is full");
-
-    let admission_loss = timeout(Duration::from_millis(100), async {
+    timeout(WAIT, async {
         loop {
-            let (packet, _) = receive_packet(&simulator).await;
-            if packet.appended_acks().contains(&sequence)
-                || matches!(packet.message(), Message::PacketAck(message) if message.packets.iter().any(|ack| ack.id == sequence))
-            {
+            if coverage.snapshot().losses.iter().any(|loss| {
+                matches!(loss, CoverageLoss::Source(record)
+                    if record.watermark.simulator_id == simulator_id
+                        && record.watermark.source == CoverageSource::Lludp
+                        && record.reason == CoverageLossReason::RetainedMemoryAdmission)
+            }) {
                 break;
             }
+            coverage_changed.changed().await.expect("coverage ledger remains open");
         }
     })
+    .await
+    .expect("memory rejection is recorded before inspecting acknowledgements");
+    drop(full_budget);
+    let fence = Packet::new(sequence + 1, crate::fixtures::circuit::start_ping(77, 0)).encode().expect("encode admission fence");
+    simulator.send_to(&fence, peer).await.expect("fence rejected memory admission");
+    let (_, acknowledgements) = crate::fixtures::simulator::receive_message_with_acknowledgements(
+        &simulator,
+        |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 77),
+    )
     .await;
-    assert!(admission_loss.is_err(), "memory-rejected reliable packet must not be acknowledged");
+    assert!(!acknowledgements.contains(&sequence), "memory-rejected reliable packet must not be acknowledged");
     assert!(
         coverage.snapshot().losses.iter().any(|loss| matches!(
             loss,
@@ -280,7 +292,6 @@ pub(in crate::circuit) async fn run_budget_retry(role: ConnectionRole) {
         "memory rejection must remain visible to Session coverage handling"
     );
 
-    drop(full_budget);
     simulator.send_to(&wire, peer).await.expect("retry after byte budget recovers");
     receive_ack(&simulator, sequence).await;
     std::assert_matches!(receive_message_event(&mut received_events, sequence).await, Event::SimulatorMessage { .. });

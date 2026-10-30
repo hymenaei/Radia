@@ -2,7 +2,7 @@ use std::{
     collections::HashSet,
     env,
     error::Error,
-    io::{BufRead, BufReader, Write},
+    io::Write,
     process::{Command, Stdio},
     sync::Arc,
     sync::mpsc,
@@ -12,6 +12,7 @@ use futures::executor::block_on;
 use rusqlite::{Connection, Transaction};
 use storage::sqlite::{MAX_QUEUED_BATCHES, OpenStatus, RecoveryReason, SqliteBatch, SqliteError};
 use tempfile::tempdir;
+use test_support::process::TestProcess;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
@@ -943,33 +944,17 @@ fn cold_and_warm_restore_measurement_at_one_hundred_thousand_items() -> Result<(
 fn interrupted_batch_keeps_cached_folder_incomplete() -> Result<(), Box<dyn Error>> {
     let directory = tempdir()?;
     seed_cache(directory.path(), 7)?;
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    command
         .arg("--exact")
         .arg("cache::tests::inventory_cache_process_helper")
         .arg("--nocapture")
         .env("RADIA_INVENTORY_CACHE_PROCESS_PATH", directory.path())
         .env("RADIA_INVENTORY_CACHE_PROCESS_MODE", "crash")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-    let stdout = child.stdout.take().ok_or("child stdout missing")?;
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    let mut output = String::new();
-    loop {
-        line.clear();
-        if reader.read_line(&mut line)? == 0 {
-            let status = child.wait()?;
-            return Err(format!("cache crash helper exited before opening its transaction: {status}; output: {output}").into());
-        }
-        if line.trim() == "transaction-open" {
-            break;
-        }
-        output.push_str(&line);
-    }
+        .stderr(Stdio::inherit());
+    let mut child = TestProcess::spawn(&mut command)?;
+    child.wait_for_stdout("transaction-open")?;
     child.kill()?;
-    let _ = child.wait()?;
 
     let mut current = fixture(7)?;
     let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", current.agent, None)?;
@@ -1005,31 +990,16 @@ fn two_processes_write_shared_library_scope() -> Result<(), Box<dyn Error>> {
     )?;
     let after = parent.inventory.snapshot();
 
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut command = Command::new(std::env::current_exe()?);
+    command
         .arg("--exact")
         .arg("cache::tests::inventory_cache_process_helper")
         .arg("--nocapture")
         .env("RADIA_INVENTORY_CACHE_PROCESS_PATH", directory.path())
         .env("RADIA_INVENTORY_CACHE_PROCESS_MODE", "write")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()?;
-    let stdout = child.stdout.take().ok_or("child stdout missing")?;
-    let mut reader = BufReader::new(stdout);
-    let mut line = String::new();
-    let mut output = String::new();
-    loop {
-        line.clear();
-        if reader.read_line(&mut line)? == 0 {
-            let status = child.wait()?;
-            return Err(format!("cache write helper exited before readiness: {status}; output: {output}").into());
-        }
-        if line.trim() == "write-lock-held" {
-            break;
-        }
-        output.push_str(&line);
-    }
+        .stderr(Stdio::inherit());
+    let mut child = TestProcess::spawn(&mut command)?;
+    child.wait_for_stdout("write-lock-held")?;
 
     let write = cache.submit_changeset(&changes, &before, &after)?;
     let InventoryCacheWrite { result, control, identity, owners } = write;
@@ -1038,8 +1008,8 @@ fn two_processes_write_shared_library_scope() -> Result<(), Box<dyn Error>> {
         Err(error) => Err(error),
     };
     std::assert_matches!(busy, Err(SqliteError::Busy));
-    child.stdin.take().ok_or("child stdin missing")?.write_all(b"go\n")?;
-    assert!(child.wait()?.success());
+    child.write_stdin(b"go\n")?;
+    assert!(child.wait()?.success(), "child process failed; stdout: {}", child.stdout());
 
     let failed_write = InventoryCacheWrite { result: Err(SqliteError::Busy), control, identity, owners };
     std::assert_matches!(block_on(failed_write.wait()), Err(InventoryCacheError::Sqlite(SqliteError::Busy)));
@@ -1109,7 +1079,7 @@ fn inventory_cache_process_helper() -> Result<(), Box<dyn Error>> {
             Ok(())
         })?;
         let receipt = cache.db.submit_batches(vec![invalidate, partial])?;
-        let _ = block_on(receipt.wait());
+        block_on(receipt.wait())?;
         return Ok(());
     }
 

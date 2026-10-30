@@ -5,26 +5,6 @@ use super::disconnect::{
 };
 use super::*;
 use tokio::time::Instant;
-
-async fn collect_acknowledged_packets(simulator: &UdpSocket, duration: Duration) -> HashSet<u32> {
-    let deadline = Instant::now() + duration;
-    let mut acknowledged = HashSet::new();
-    let mut buffer = [0; 65_535];
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return acknowledged;
-        }
-        let received = timeout(remaining, simulator.recv_from(&mut buffer)).await;
-        let Ok(Ok((size, _))) = received else { return acknowledged };
-        let packet = Packet::decode(&buffer[..size]).expect("decode simulator acknowledgement traffic");
-        acknowledged.extend(packet.appended_acks().iter().copied());
-        if let Message::PacketAck(message) = packet.message() {
-            acknowledged.extend(message.packets.iter().map(|packet| packet.id));
-        }
-    }
-}
-
 async fn wait_for_acknowledgement(simulator: &UdpSocket, sequence: u32, duration: Duration) {
     let deadline = Instant::now() + duration;
     let mut buffer = [0; 65_535];
@@ -72,11 +52,11 @@ async fn ping_reacks_recent_duplicate() {
     chat[0] |= RESENT_FLAG;
     simulator.send_to(&chat, peer).await.expect("resend acknowledged chat");
     receive_ack(&simulator, 100).await;
-    assert!(timeout(Duration::from_millis(50), events.recv()).await.is_err(), "recent reliable duplicate should not be dispatched twice");
+    assert_eq!(events.try_recv().err(), Some(mpsc::error::TryRecvError::Empty));
 
     disconnect_signal.send_replace(true);
     receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
-    assert!(timeout(Duration::from_millis(200), client).await.expect("disconnect should finish").expect("session task").is_ok());
+    assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("disconnect should finish").expect("session task").is_ok());
 }
 
 #[tokio::test]
@@ -132,7 +112,7 @@ async fn shutdown_preempts_chat() {
     assert!(logout.is_reliable());
     assert_eq!(logout.message(), &logout_message());
     assert!(
-        timeout(Duration::from_millis(200), client)
+        timeout(SIMULATOR_TIMEOUT, client)
             .await
             .expect("shutdown should not wait for a simulator reply")
             .expect("session task should not panic")
@@ -177,7 +157,7 @@ async fn backpressure_keeps_acks() {
     disconnect_signal.send_replace(true);
     assert_eq!(receive(&simulator).await.0, expected_fixture("logout_request.hex", 5, true));
     assert!(
-        timeout(Duration::from_millis(200), client)
+        timeout(SIMULATOR_TIMEOUT, client)
             .await
             .expect("disconnect should not wait for a simulator reply")
             .expect("session task should not panic")
@@ -254,7 +234,7 @@ async fn ping_survives_backpressure() {
     .expect("disconnect should be handled while events are queued");
     std::assert_matches!(logout.message(), Message::LogoutRequest(_));
     assert!(
-        timeout(Duration::from_millis(200), client)
+        timeout(SIMULATOR_TIMEOUT, client)
             .await
             .expect("disconnect should not wait for a simulator reply")
             .expect("session task should not panic")
@@ -328,7 +308,12 @@ async fn region_arrival_object_burst_survives_slow_consumer() {
     rejected_update[0] |= 0x40;
     set_sequence(&mut rejected_update, rejected_sequence);
     simulator.send_to(&rejected_update, peer).await.expect("send update beyond the application-event bound");
-    let rejected_acks = collect_acknowledged_packets(&simulator, Duration::from_millis(150)).await;
+    simulator.send_to(&start_ping_packet(rejected_sequence + 1, 10, 0), peer).await.expect("fence rejected object admission");
+    let (_, rejected_acks) = crate::fixtures::simulator::receive_message_with_acknowledgements(
+        &simulator,
+        |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 10),
+    )
+    .await;
     assert!(!rejected_acks.contains(&rejected_sequence), "a reliable update rejected for lack of credit must remain unacknowledged");
     assert!(
         coverage_losses
@@ -343,8 +328,7 @@ async fn region_arrival_object_burst_survives_slow_consumer() {
     let mut retry = rejected_update;
     retry[0] |= RESENT_FLAG;
     simulator.send_to(&retry, peer).await.expect("retry the reliable update after a credit is released");
-    let retry_acks = collect_acknowledged_packets(&simulator, Duration::from_millis(200)).await;
-    assert!(retry_acks.contains(&rejected_sequence), "the simulator retry must be acknowledged after capacity returns");
+    wait_for_acknowledgement(&simulator, rejected_sequence, SIMULATOR_TIMEOUT).await;
 
     let mut received = HashSet::with_capacity(OBJECT_COUNT + 1);
     received.insert(first_sequence);
@@ -372,16 +356,16 @@ async fn region_arrival_object_burst_survives_slow_consumer() {
         set_sequence(&mut update, sequence);
         simulator.send_to(&update, peer).await.expect("fill the viewer event channel before disconnect");
     }
-    let pending_acks = collect_acknowledged_packets(&simulator, Duration::from_millis(200)).await;
-    assert!(pending_acks.contains(&last_pending_sequence));
+    wait_for_acknowledgement(&simulator, last_pending_sequence, SIMULATOR_TIMEOUT).await;
 
     disconnect_signal.send_replace(true);
     receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
     assert!(timeout(SIMULATOR_TIMEOUT, client).await.expect("session should stop").expect("session task should not panic").is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sustained_application_pressure_disconnects() {
+    tokio::time::resume();
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let session = login_session(simulator.local_addr().expect("simulator address"));
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -402,13 +386,33 @@ async fn sustained_application_pressure_disconnects() {
     let rejected_sequence = 22;
     set_sequence(&mut rejected, rejected_sequence);
     simulator.send_to(&rejected, peer).await.expect("send application event beyond test capacity");
-    let rejected_acks = collect_acknowledged_packets(&simulator, Duration::from_millis(150)).await;
-    assert!(!rejected_acks.contains(&rejected_sequence), "the rejected reliable packet must stay unacknowledged");
-
+    simulator.send_to(&start_ping_packet(rejected_sequence + 1, 10, 0), peer).await.expect("fence rejected application admission");
+    let (_, mut acknowledged) = crate::fixtures::simulator::receive_message_with_acknowledgements(
+        &simulator,
+        |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 10),
+    )
+    .await;
+    tokio::time::pause();
+    let first_half = APPLICATION_EVENT_PRESSURE_GRACE_PERIOD / 2;
+    advance(first_half).await;
+    tokio::time::resume();
+    simulator.send_to(&start_ping_packet(rejected_sequence + 2, 11, 0), peer).await.expect("refresh keepalive during pressure");
+    let (_, keepalive_acks) = crate::fixtures::simulator::receive_message_with_acknowledgements(
+        &simulator,
+        |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 11),
+    )
+    .await;
+    acknowledged.extend(keepalive_acks);
+    tokio::time::pause();
+    advance(APPLICATION_EVENT_PRESSURE_GRACE_PERIOD - first_half + Duration::from_millis(1)).await;
     let logout = timeout(SIMULATOR_TIMEOUT, async {
         loop {
             let (bytes, _) = receive(&simulator).await;
             let packet = Packet::decode(&bytes).expect("decode simulator disconnect traffic");
+            acknowledged.extend(packet.appended_acks().iter().copied());
+            if let Message::PacketAck(message) = packet.message() {
+                acknowledged.extend(message.packets.iter().map(|item| item.id));
+            }
             if matches!(packet.message(), Message::LogoutRequest(_)) {
                 break packet;
             }
@@ -417,6 +421,7 @@ async fn sustained_application_pressure_disconnects() {
     .await
     .expect("sustained pressure should send logout after the grace period");
     std::assert_matches!(logout.message(), Message::LogoutRequest(_));
+    assert!(!acknowledged.contains(&rejected_sequence), "the rejected reliable packet must stay unacknowledged");
     std::assert_matches!(
         timeout(SIMULATOR_TIMEOUT, client).await.expect("pressure disconnect should finish").expect("session task should not panic"),
         Err(crate::session::SessionError::SustainedApplicationEventPressure)

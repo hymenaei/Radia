@@ -42,18 +42,18 @@ async fn run_queued_target_does_not_follow_neighbor_replacement() {
     );
 
     let mut buffer = [0; 65_535];
-    let deadline = Instant::now() + Duration::from_millis(50);
+    let observer = clone_udp_socket(&replacement).expect("inspect replacement endpoint");
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match timeout(remaining, replacement.recv_from(&mut buffer)).await {
-            Ok(Ok((size, _))) => {
+        match observer.recv_from(&mut buffer) {
+            Ok((size, _)) => {
                 let packet = Packet::decode(&buffer[..size]).expect("decode replacement traffic");
                 assert!(
                     !matches!(packet.message(), Message::RequestMultipleObjects(_)),
                     "a queued send for the retired simulator ID must not reach its replacement"
                 );
             }
-            Err(_) | Ok(Err(_)) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("read replacement traffic: {error}"),
         }
     }
 
@@ -70,7 +70,7 @@ async fn run_neighbor_targets_and_replacements() {
         receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
     assert_eq!(sent_peer, harness.neighbor_peer);
     let mut buffer = [0; 65_535];
-    assert!(timeout(Duration::from_millis(50), harness.primary.recv_from(&mut buffer)).await.is_err());
+    std::assert_matches!(clone_udp_socket(&harness.primary).expect("inspect primary endpoint").recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
 
     let mut disable = test_fixture("disable_simulator.hex");
     set_sequence(&mut disable, 42);
@@ -165,7 +165,7 @@ async fn primary_intro_precedes_early_udp_data() {
 
     disconnect.send_replace(true);
     receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
-    assert!(timeout(Duration::from_millis(200), client).await.expect("disconnect should finish").expect("client task").is_ok());
+    assert!(timeout(WAIT, client).await.expect("disconnect should finish").expect("client task").is_ok());
     drop(commands);
 }
 
@@ -370,9 +370,10 @@ async fn neighbor_circuits_are_independent() {
     set_sequence(&mut chat, 43);
     harness.neighbor.send_to(&chat, neighbor_peer).await.expect("send after neighbor disabled");
     let mut buffer = [0; 65_535];
-    match timeout(Duration::from_millis(50), harness.neighbor.recv_from(&mut buffer)).await {
-        Err(_) | Ok(Err(_)) => {}
-        Ok(Ok((size, _))) => {
+    match clone_udp_socket(&harness.neighbor).expect("inspect disabled neighbor endpoint").recv_from(&mut buffer) {
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ConnectionReset) => {}
+        Err(error) => panic!("read disabled neighbor traffic: {error}"),
+        Ok((size, _)) => {
             panic!("disabled circuit sent another packet: {:?}", Packet::decode(&buffer[..size]).expect("decode packet").message())
         }
     }

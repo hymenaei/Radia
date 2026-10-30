@@ -22,7 +22,7 @@ use std::{
     net::SocketAddr,
     sync::Arc,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use llsd::{Map, Value};
@@ -56,6 +56,7 @@ use crate::fixtures::{
     circuit::{SendGate, SimulatorMemoryBudgetTestExt, new_send_gate, set_send_gate},
     event_with_coverage_watermark, event_with_retained_bytes, event_with_retention,
     session::{receive_client_message, receive_udp, server_ack, set_sequence, test_fixture},
+    simulator::clone_udp_socket,
     test_simulator_id,
 };
 use crate::session::simulators::publish_primary_terminal_event;
@@ -66,7 +67,9 @@ use crate::{
         HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PRECONNECT_EVENTS,
         NeighborEventQueueOutcome, SimulatorCommand, SimulatorEvent, UdpTransport,
         admission::{MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES},
-        lludp::{Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, RESENT_FLAG, ReceiveError},
+        lludp::{
+            Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, PING_INTERVAL, RESENT_FLAG, ReceiveError,
+        },
         pacing::{OutboundBudget, OutboundBudgetHandle},
         queue_neighbor_event,
     },
@@ -101,11 +104,15 @@ pub(super) fn relay_handshake_events(
     events: mpsc::Sender<EventEnvelope>,
     commands: mpsc::Sender<Command>,
     capacity: usize,
-) -> (mpsc::Sender<EventEnvelope>, JoinHandle<()>) {
+) -> (mpsc::Sender<EventEnvelope>, JoinHandle<()>, watch::Receiver<Option<u32>>) {
     let commands = commands.downgrade();
     let (runtime_events, mut incoming) = mpsc::channel::<EventEnvelope>(capacity);
+    let (observed, observation) = watch::channel(None);
     let relay = spawn(async move {
         while let Some(event) = incoming.recv().await {
+            if let Event::SimulatorMessage { sequence, .. } = &event.event {
+                observed.send_replace(Some(*sequence));
+            }
             if let Event::SimulatorMessage { simulator_id, message: Message::RegionHandshake(_), .. } = &event.event {
                 let (completed, response) = oneshot::channel();
                 if let Some(commands) = commands.upgrade()
@@ -119,7 +126,7 @@ pub(super) fn relay_handshake_events(
             }
         }
     });
-    (runtime_events, relay)
+    (runtime_events, relay, observation)
 }
 
 struct NeighborHarness {
@@ -134,6 +141,7 @@ struct NeighborHarness {
     events: mpsc::Receiver<EventEnvelope>,
     disconnect: watch::Sender<bool>,
     packet_memory: SimulatorMemoryBudget,
+    coverage: CoverageLossLedger,
     client: JoinHandle<Result<(), crate::session::SessionError>>,
     pause_sends: watch::Sender<bool>,
     send_entered: Arc<Notify>,
@@ -143,7 +151,7 @@ impl NeighborHarness {
     async fn shutdown(self) {
         self.disconnect.send_replace(true);
         receive_message(&self.primary, |message| matches!(message, Message::LogoutRequest(_))).await;
-        assert!(timeout(Duration::from_millis(200), self.client).await.expect("disconnect should finish").expect("client task").is_ok());
+        assert!(timeout(WAIT, self.client).await.expect("disconnect should finish").expect("client task").is_ok());
     }
 }
 
@@ -167,7 +175,7 @@ pub(crate) async fn run_session_with_options(
 ) -> Result<(), crate::session::SessionError> {
     let failure_events = events.clone();
     let mut failure_shutdown = disconnect_requested.clone();
-    let (session_events, relay) = relay_handshake_events(events, command_sender, SESSION_EVENT_CAPACITY);
+    let (session_events, relay, _) = relay_handshake_events(events, command_sender, SESSION_EVENT_CAPACITY);
     let terminal_event_permit = session_events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
     let result = async {
         let connection = SessionRuntime::connect(session, ResponseData::default(), options)
@@ -419,7 +427,8 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
     .await
     .expect("connect primary simulator");
     let packet_memory = connection.packet_memory.clone();
-    let (session_events, relay) = relay_handshake_events(event_sender.clone(), commands.clone(), TEST_EVENT_CAPACITY);
+    let coverage = connection.coverage_losses.clone();
+    let (session_events, relay, _) = relay_handshake_events(event_sender.clone(), commands.clone(), TEST_EVENT_CAPACITY);
     let terminal = session_events.clone().reserve_owned().await.expect("reserve terminal event");
     let client = spawn(connection.run(command_receiver, session_events, disconnect_requested, terminal));
     drop(relay);
@@ -487,6 +496,7 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
         events,
         disconnect,
         packet_memory,
+        coverage,
         client,
         pause_sends,
         send_entered,

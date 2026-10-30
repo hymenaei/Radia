@@ -9,10 +9,12 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
+    time::Instant,
 };
 
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, NamedTempFile};
+use utils::PersistBudget;
 
 #[cfg(test)]
 use std::sync::{
@@ -30,7 +32,7 @@ use crate::{
     cache::eviction::Lru,
     sqlite::{MAX_BATCH_ROWS, SqliteError},
 };
-use disk::{DATA_TEMP_PREFIX, delete_data, fail_temporary, persist_with_retry, remove_path};
+use disk::{DATA_TEMP_PREFIX, delete_data, fail_temporary, remove_path};
 use support::{clone_error, is_index_file, is_simulated_crash, lock, mutations, read_map, simulated_crash_error, write_map};
 
 pub(in crate::cache) use queue::{Command, WriteQueue, writer_loop};
@@ -83,6 +85,8 @@ struct TestPause {
 #[derive(Default)]
 pub(super) struct FaultHooks {
     #[cfg(test)]
+    time: Mutex<Option<Instant>>,
+    #[cfg(test)]
     fail_at: AtomicUsize,
     #[cfg(test)]
     fail_after: AtomicUsize,
@@ -91,6 +95,19 @@ pub(super) struct FaultHooks {
 }
 
 impl FaultHooks {
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(now) = *lock(&self.time) {
+            return now;
+        }
+        Instant::now()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_time(&self, now: Instant) {
+        *lock(&self.time) = Some(now);
+    }
+
     fn write_data_payload(&self, file: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
         #[cfg(test)]
         if self.fail_at.load(Ordering::Acquire) == WritePoint::DataWritePartial as usize {
@@ -225,6 +242,8 @@ pub(super) struct WorkerState {
     hooks: Arc<FaultHooks>,
     sweep: Vec<(PathBuf, ReadDir)>,
     sweep_complete: bool,
+    invalid_cleanup_failures: usize,
+    touch_flush_failures: usize,
 }
 
 impl WorkerState {
@@ -277,6 +296,8 @@ impl WorkerState {
             hooks,
             sweep: Vec::new(),
             sweep_complete: false,
+            invalid_cleanup_failures: 0,
+            touch_flush_failures: 0,
         };
         state.update_accounted_size();
         Ok(state)
@@ -478,8 +499,9 @@ impl WorkerState {
             Ok(replacing) => replacing,
             Err(error) => return Err(self.commit_failure_before_commit(&eviction_marks, error)),
         };
+        let mut persist_budget = PersistBudget::default();
         for (data, destination) in staged_files {
-            if let Err(error) = persist_with_retry(data.temp, &destination).map_err(StorageError::Io) {
+            if let Err(error) = persist_budget.persist(data.temp, &destination).map_err(StorageError::Io) {
                 self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error), &eviction_marks);
                 return Err(CommitFailure { committed, error });
             }
@@ -798,8 +820,18 @@ impl WorkerState {
     }
 
     fn drain_touches_best_effort(&mut self) {
-        if let Err(error) = self.drain_touches() {
-            tracing::warn!(error = %error, "cache usage metadata could not be persisted");
+        match self.drain_touches() {
+            Err(error) => {
+                if self.touch_flush_failures == 0 {
+                    tracing::warn!(error = %error, "cache usage metadata could not be persisted; retrying");
+                }
+                self.touch_flush_failures = self.touch_flush_failures.saturating_add(1);
+            }
+            Ok(()) if self.touch_flush_failures != 0 => {
+                tracing::debug!(failed_attempts = self.touch_flush_failures, "cache usage metadata persistence recovered");
+                self.touch_flush_failures = 0;
+            }
+            Ok(()) => {}
         }
     }
 
@@ -880,9 +912,12 @@ impl WorkerState {
             let mut pending = lock(&self.read_state.invalid);
             std::mem::take(&mut *pending)
         };
+        let mut failures = 0usize;
+        let mut first_error = None;
         for (key, entry) in invalid {
             if let Err(error) = self.remove_invalid(key, Arc::clone(&entry)) {
-                tracing::warn!(error = %error, "failed to remove a corrupt cache entry");
+                failures = failures.saturating_add(1);
+                first_error.get_or_insert(error);
                 let current = read_map(&self.read_state.entries).get(&key).cloned();
                 if current.as_ref().is_some_and(|current| Arc::ptr_eq(current, &entry))
                     && current.is_some_and(|current| current.state.load(Ordering::Acquire) == ENTRY_INVALID)
@@ -890,6 +925,15 @@ impl WorkerState {
                     lock(&self.read_state.invalid).insert(key, entry);
                 }
             }
+        }
+        if let Some(error) = first_error {
+            if self.invalid_cleanup_failures == 0 {
+                tracing::warn!(failed_removals = failures, error = %error, "corrupt cache entry cleanup failed; retrying");
+            }
+            self.invalid_cleanup_failures = self.invalid_cleanup_failures.saturating_add(failures);
+        } else if self.invalid_cleanup_failures != 0 {
+            tracing::debug!(failed_attempts = self.invalid_cleanup_failures, "corrupt cache entry cleanup recovered");
+            self.invalid_cleanup_failures = 0;
         }
     }
 

@@ -1,5 +1,33 @@
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn zero_retry_after_does_not_advance_virtual_time() {
+    let (events, _received_events) = mpsc::channel(1);
+    let (_shutdown, shutdown_requested) = watch::channel(false);
+    let (_session_closed, session_closed) = watch::channel(false);
+    let simulator_id = test_simulator_id(1);
+    let source = test_source();
+    let stop = Stop::new(shutdown_requested, session_closed);
+    let mut pending_loss = pending_event_queue_loss(&events, simulator_id, source, &stop);
+    let mut error_count = 0;
+    let started = tokio::time::Instant::now();
+
+    let outcome = retry_event_queue_with_hint(
+        simulator_id,
+        &mut error_count,
+        source,
+        &events,
+        "EventQueueGet returned HTTP 503.".into(),
+        Some(Duration::ZERO),
+        &stop,
+        &mut pending_loss,
+    )
+    .await;
+
+    assert_eq!(outcome, RetryOutcome::Retry);
+    assert_eq!(tokio::time::Instant::now() - started, Duration::ZERO);
+}
+
 #[tokio::test]
 async fn retry_limit_is_terminal() {
     let mut error_count = MAX_EVENT_QUEUE_ERRORS;
@@ -166,7 +194,7 @@ async fn rate_limit_retries() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn event_queue_retry_after_keeps_ack() {
-    let server = EventQueueTestServer::start(|base| {
+    let mut server = EventQueueTestServer::start(|base| {
         let mut event_url = base.clone();
         event_url.set_path("/event-queue");
         vec![
@@ -187,27 +215,21 @@ async fn event_queue_retry_after_keeps_ack() {
         .start_event_queue(test_simulator_id(1), test_source(), event_sender, shutdown_requested, coverage_losses.clone())
         .expect("start event queue");
 
-    let seed = server.next_request();
-    let first_poll = server.next_request();
+    let seed = timeout(CLIENT_TEST_TIMEOUT, server.next_request_async()).await.expect("seed lookup should arrive");
+    let first_poll = timeout(CLIENT_TEST_TIMEOUT, server.next_request_async()).await.expect("first poll should arrive");
     assert!(request_line(&seed).starts_with("POST /seed HTTP/1.1"));
     assert_eq!(map_field(&decode_request_body(&first_poll), "ack"), Some(&Value::Undefined));
 
-    let retry_499_at = Instant::now();
-    let after_499_poll = server.next_request();
-    assert!(retry_499_at.elapsed() < Duration::from_millis(750), "499 Retry-After: 0 should bypass the default backoff");
+    let after_499_poll = timeout(CLIENT_TEST_TIMEOUT, server.next_request_async()).await.expect("499 Retry-After: 0 should retry");
     assert_eq!(map_field(&decode_request_body(&after_499_poll), "ack"), Some(&Value::Undefined), "499 retry keeps the previous ACK");
-    let retry_429_at = Instant::now();
-    let after_429_poll = server.next_request();
-    assert!(retry_429_at.elapsed() < Duration::from_millis(750), "Retry-After: 0 should bypass the default one-second backoff");
+    let after_429_poll = timeout(CLIENT_TEST_TIMEOUT, server.next_request_async()).await.expect("429 Retry-After: 0 should retry");
     assert_eq!(map_field(&decode_request_body(&after_429_poll), "ack"), Some(&Value::Undefined), "429 retry keeps the previous ACK");
-    let retry_503_at = Instant::now();
-    let after_503_poll = server.next_request();
-    assert!(retry_503_at.elapsed() < Duration::from_millis(750), "503 Retry-After: 0 should bypass the default backoff");
+    let after_503_poll = timeout(CLIENT_TEST_TIMEOUT, server.next_request_async()).await.expect("503 Retry-After: 0 should retry");
     assert_eq!(map_field(&decode_request_body(&after_503_poll), "ack"), Some(&Value::Undefined), "503 retry keeps the previous ACK");
 
     let batch = timeout(TEST_TIMEOUT, received_events.recv()).await.expect("admitted EventQueue batch").expect("event channel stays open");
     std::assert_matches!(batch, Event::CapabilityEventBatch { events, .. } if events.len() == 2);
-    let next_poll = server.next_request();
+    let next_poll = timeout(CLIENT_TEST_TIMEOUT, server.next_request_async()).await.expect("acknowledged batch should continue polling");
     assert_eq!(
         map_field(&decode_request_body(&next_poll), "ack"),
         Some(&Value::Integer(5)),
@@ -217,7 +239,7 @@ async fn event_queue_retry_after_keeps_ack() {
     assert!(receive_poll_error(&mut received_events).await.contains("HTTP 404"));
     assert!(!coverage_losses.snapshot().losses.is_empty(), "a possibly lost poll response must remain durable");
     assert_eq!(task.wait().await, EventQueueExit::StoppedWithCoverageLoss);
-    assert!(server.finish().is_empty(), "all expected requests were observed and no extra retry should be sent");
+    assert_eq!(server.finish().len(), 6, "all expected requests were sent and no extra retry should be sent");
 }
 
 #[tokio::test(flavor = "multi_thread")]

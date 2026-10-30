@@ -46,12 +46,25 @@ cargo nextest run -p <crate> --run-ignored only
 cargo test -p <crate> <name>
 cargo test -p <crate> -- --nocapture
 
+# Repeat affected tests under parallel test load
+cargo nextest archive --workspace --all-features --archive-file target/timing-tests.tar.zst
+mkdir target/timing-load
+cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target/timing-load --stress-duration 20m
+# In a second terminal
+mkdir target/timing-repeat
+cargo nextest run --archive-file target/timing-tests.tar.zst --extract-to target/timing-repeat --stress-count 200 -E 'test(<name>)'
+
+# Manual Windows atomic-replacement stress, 10,000 replacements
+cargo nextest run -p utils -E 'test(atomic_replacement_stress)' --run-ignored only
+
 ```
 
 - `cargo lint` checks all targets and features with warnings denied.
 - `cargo xtest` runs Nextest with all features, but does not explicitly select the workspace. Add `--workspace` when needed.
 - Replace `<crate>`, `<name>`, and `<args>` with the relevant values.
 - Optional features may require platform-specific dependencies.
+- Stress runs use the same production constants as ordinary tests. Keep the workspace load running throughout the focused repetition and record both commands and their results.
+- Build the archive after edits are complete and use fresh extraction directories for each validation run. Both runs use the archived executables, so subsequent Cargo builds cannot overwrite running test binaries on Windows.
 
 ## Git hooks
 
@@ -175,6 +188,8 @@ cargo bench -p <crate> -- <filter> --sample-size 200 --warm-up-time 5 --measurem
 ```
 
 Each crate has one `main` benchmark target. Replace the package and Criterion filter as needed. The inventory package name is version-qualified because a dependency also uses `inventory`. For example, `cargo bench -p render -- reconcile` selects reconciliation benchmarks. The protocol receive benchmark is `cargo bench -p protocol -- receive_pipeline`. It reports packets per second for mixed packet framing, preflight, and decode. It does not include circuit deduplication or ack bookkeeping.
+
+Storage's insertion benchmarks start each sample with 50,000 existing entries and reset inserted keys outside the measured operation. The lookup and reopen benchmarks verify that same fixture size. Run timing baselines without concurrent tests or builds; the parallel workspace load above is for flakiness validation.
 
 - `cargo perf` runs workspace benchmarks with 200 samples, a 5-second warm-up, and a 15-second measurement. `cargo perf-quick` uses 30 samples, a 1-second warm-up, a 3-second measurement, and no plot. Use `cargo bench -p <crate> -- <filter> ...` for a focused run.
 - `cargo profile`: viewer profiling build with Tracy.

@@ -7750,7 +7750,9 @@ dependencies = [
  "rusqlite",
  "sha2 0.11.1",
  "tempfile",
+ "test-support",
  "tracing",
+ "utils",
 ]
 
 [[package]]

@@ -38,6 +38,11 @@ const CIRCUIT_CODE: u32 = 0x1122_3344;
 pub(super) const FOLDER_ID: &str = "12345678-1234-5678-1234-567812345678";
 pub(super) const CLIENT_TIMEOUT: Duration = Duration::from_secs(3);
 
+pub(super) struct EventProbe {
+    pub events: mpsc::Sender<EventEnvelope>,
+    pub observed: watch::Receiver<Option<u32>>,
+}
+
 pub(super) fn test_session(handle: SessionHandle, events: mpsc::Receiver<EventEnvelope>) -> Session {
     test_session_with_coverage(handle, events, CoverageLossLedger::new())
 }
@@ -140,24 +145,6 @@ pub(super) async fn fake_http_with_mfa(
     (format!("http://{address}/login.cgi"), poll_observed, worker)
 }
 
-pub(super) async fn fake_mfa_challenge_server() -> (String, JoinHandle<bool>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake MFA server");
-    let address = listener.local_addr().expect("read fake MFA address");
-    let worker = spawn(async move {
-        let (mut stream, _) = timeout(CLIENT_TIMEOUT, listener.accept()).await.expect("accept login request").expect("login request");
-        let request = read_http_request(&mut stream).await;
-        assert!(request_line(&request).starts_with("POST /login.cgi HTTP/1.1"));
-        stream.write_all(&response(200, "OK", "text/xml", None, mfa_challenge_xml())).await.expect("write MFA challenge");
-
-        match timeout(Duration::from_millis(150), listener.accept()).await {
-            Err(_) => false,
-            Ok(Ok((_stream, _))) => true,
-            Ok(Err(error)) => panic!("accept unexpected login request: {error}"),
-        }
-    });
-    (format!("http://{address}/login.cgi"), worker)
-}
-
 pub(super) async fn fake_pending_login_server() -> (String, oneshot::Receiver<()>, JoinHandle<bool>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake login server");
     let address = listener.local_addr().expect("read fake login address");
@@ -170,6 +157,28 @@ pub(super) async fn fake_pending_login_server() -> (String, oneshot::Receiver<()
         matches!(timeout(CLIENT_TIMEOUT, stream.read(&mut byte)).await, Ok(Ok(0)))
     });
     (format!("http://{address}/login.cgi"), request_observed, worker)
+}
+
+pub(super) async fn fake_mfa_challenge_server() -> (String, oneshot::Sender<()>, JoinHandle<bool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind fake MFA server");
+    let address = listener.local_addr().expect("read fake MFA server address");
+    let (stop, stop_requested) = oneshot::channel();
+    let worker = spawn(async move {
+        let (mut stream, _) =
+            timeout(CLIENT_TIMEOUT, listener.accept()).await.expect("accept MFA login request").expect("MFA login request");
+        let request = read_http_request(&mut stream).await;
+        assert!(request_line(&request).starts_with("POST /login.cgi HTTP/1.1"));
+        stream.write_all(&response(200, "OK", "text/xml", None, mfa_challenge_xml())).await.expect("write MFA challenge");
+        stop_requested.await.expect("test should stop fake MFA server");
+        let listener = listener.into_std().expect("take stopped MFA listener");
+        listener.set_nonblocking(true).expect("inspect pending MFA connections without blocking");
+        match listener.accept() {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) => panic!("check for an unexpected MFA response request: {error}"),
+        }
+    });
+    (format!("http://{address}/login.cgi"), stop, worker)
 }
 
 pub(super) fn test_credentials() -> LoginCredentials {
@@ -187,28 +196,28 @@ pub(super) fn spawn_test_session(login_url: String) -> (Session, SessionHandle, 
     spawn_session_client(test_credentials(), login_url)
 }
 
-pub(super) fn spawn_test_session_with_event_sender(
+pub(super) fn spawn_test_session_with_event_probe(
     login_url: String,
-) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>, mpsc::Sender<EventEnvelope>) {
-    spawn_session_client_with_event_sender(test_credentials(), login_url)
+) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>, EventProbe) {
+    spawn_session_client_with_event_probe(test_credentials(), login_url)
 }
 
 pub(super) fn spawn_session_client(
     credentials: LoginCredentials,
     login_url: String,
 ) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>) {
-    let (session, handle, worker, _) = spawn_session_client_with_event_sender(credentials, login_url);
+    let (session, handle, worker, _) = spawn_session_client_with_event_probe(credentials, login_url);
     (session, handle, worker)
 }
 
-pub(super) fn spawn_session_client_with_event_sender(
+pub(super) fn spawn_session_client_with_event_probe(
     credentials: LoginCredentials,
     login_url: String,
-) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>, mpsc::Sender<EventEnvelope>) {
+) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>, EventProbe) {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let retained_events = events.clone();
-    let (runtime_events, relay) =
+    let (runtime_events, relay, observed) =
         super::relay_handshake_events(events, commands.clone(), CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let terminal_event_permit = runtime_events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
     let coverage_losses = CoverageLossLedger::new();
@@ -249,7 +258,7 @@ pub(super) fn spawn_session_client_with_event_sender(
         worker_finished_sender.send_replace(true);
         result
     });
-    (session, handle, worker, retained_events)
+    (session, handle, worker, EventProbe { events: retained_events, observed })
 }
 
 pub(super) fn spawn_network_thread_session(
@@ -258,7 +267,7 @@ pub(super) fn spawn_network_thread_session(
 ) -> (Session, SessionHandle, JoinHandle<Result<(), SessionError>>) {
     let (commands, command_receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (events, event_receiver) = mpsc::channel(CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
-    let (runtime_events, relay) =
+    let (runtime_events, relay, _) =
         super::relay_handshake_events(events, commands.clone(), CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY);
     let terminal_event_permit = runtime_events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
     let coverage_losses = CoverageLossLedger::new();

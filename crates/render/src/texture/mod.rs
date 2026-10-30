@@ -11,6 +11,7 @@ use std::{
         Arc, OnceLock, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use assets::{
@@ -31,6 +32,7 @@ const DEFAULT_SOFT_CAP: usize = 1024 * 1024 * 1024;
 const STAGING_BYTES: usize = 48 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_JOBS: usize = 2;
+const FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const TERRAIN_ALPHA_RAMP_WIDTH: u32 = 256;
 pub(crate) const TERRAIN_ALPHA_RAMP: &[u8; 256] = include_bytes!("../terrain_alpha_ramp.r8");
 
@@ -251,6 +253,8 @@ pub(crate) struct Textures {
     revision: u64,
     queue: Queue,
     memory: Arc<Accounting>,
+    conversion_failures: u64,
+    last_failure_warning: Option<Instant>,
     entries: HashMap<TextureId, TextureEntry>,
     cap_bytes: Arc<AtomicUsize>,
     soft_cap: usize,
@@ -450,6 +454,8 @@ impl Textures {
             revision: 0,
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
+            conversion_failures: 0,
+            last_failure_warning: None,
             entries: HashMap::new(),
             cap_bytes: Arc::new(AtomicUsize::new(0)),
             soft_cap: DEFAULT_SOFT_CAP,
@@ -559,7 +565,18 @@ impl Textures {
             Conversion::Failed { failure, .. } => {
                 entry.state = if failure == Failure::Cancelled { TextureUploadState::Dormant } else { TextureUploadState::Failed(failure) };
                 if failure != Failure::Cancelled {
-                    tracing::warn!(?failure, "texture preparation failed");
+                    self.conversion_failures = self.conversion_failures.saturating_add(1);
+                    let now = Instant::now();
+                    if self.last_failure_warning.is_none_or(|last| now.saturating_duration_since(last) >= FAILURE_LOG_INTERVAL) {
+                        tracing::warn!(
+                            failures = self.conversion_failures,
+                            sample_texture = ?completion.id,
+                            sample_failure = ?failure,
+                            "texture preparation failures"
+                        );
+                        self.conversion_failures = 0;
+                        self.last_failure_warning = Some(now);
+                    }
                 }
             }
         }

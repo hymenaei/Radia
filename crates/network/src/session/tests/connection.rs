@@ -50,19 +50,43 @@ async fn neighbor_pressure_keeps_primary_live_inner() {
     second_chat[0] |= 0x40;
     set_sequence(&mut second_chat, 51);
     second_neighbor.send_to(&second_chat, second_peer).await.expect("send second neighbor payload under pressure");
-    harness.primary.send_to(&start_ping_packet(32, 7, 0), harness.primary_peer).await.expect("send primary ping under pressure");
+    harness.primary.send_to(&start_ping_packet(32, 7, 0), harness.primary_peer).await.expect("send primary ping under neighbor pressure");
     receive_message(&harness.primary, |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 7)).await;
-    assert!(
-        timeout(Duration::from_millis(100), receive_ack(&harness.neighbor, 41)).await.is_err(),
-        "neighbor payload rejected by memory admission must stay unacknowledged"
-    );
-    assert!(
-        timeout(Duration::from_millis(100), receive_ack(&second_neighbor, 51)).await.is_err(),
-        "second neighbor payload rejected by memory admission must stay unacknowledged"
-    );
+    let mut coverage_changed = harness.coverage.subscribe();
+    timeout(WAIT, async {
+        loop {
+            let snapshot = harness.coverage.snapshot();
+            if [harness.neighbor_id, second_id].into_iter().all(|id| {
+                snapshot.losses.iter().any(|loss| {
+                    matches!(loss, CoverageLoss::Source(record)
+                    if record.watermark.simulator_id == id
+                        && record.watermark.source == CoverageSource::Lludp
+                        && record.reason == CoverageLossReason::RetainedMemoryAdmission)
+                })
+            }) {
+                break;
+            }
+            coverage_changed.changed().await.expect("coverage ledger remains active");
+        }
+    })
+    .await
+    .expect("both neighbor packets are rejected before memory recovery");
     assert_eq!(harness.packet_memory.global_available_bytes(), MAX_QUEUED_SIMULATOR_EVENT_BYTES - MAX_QUEUED_NEIGHBOR_EVENT_BYTES);
-
     drop(neighbor_budget);
+    harness.neighbor.send_to(&start_ping_packet(42, 8, 0), harness.neighbor_peer).await.expect("fence first neighbor rejection");
+    second_neighbor.send_to(&start_ping_packet(52, 9, 0), second_peer).await.expect("fence second neighbor rejection");
+    let (_, first_acks) = crate::fixtures::simulator::receive_message_with_acknowledgements(
+        &harness.neighbor,
+        |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 8),
+    )
+    .await;
+    let (_, second_acks) = crate::fixtures::simulator::receive_message_with_acknowledgements(
+        &second_neighbor,
+        |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 9),
+    )
+    .await;
+    assert!(!first_acks.contains(&41), "first neighbor rejection must remain unacknowledged");
+    assert!(!second_acks.contains(&51), "second neighbor rejection must remain unacknowledged");
     harness.neighbor.send_to(&chat, harness.neighbor_peer).await.expect("retry neighbor payload after budget recovery");
     second_neighbor.send_to(&second_chat, second_peer).await.expect("retry second neighbor payload after budget recovery");
     receive_ack(&harness.neighbor, 41).await;
@@ -264,10 +288,8 @@ async fn neighbor_intro_precedes_early_udp_data() {
     chat[0] |= 0x40;
     set_sequence(&mut chat, 41);
     neighbor.send_to(&chat, peer).await.expect("send data before circuit acknowledgement");
-    assert!(
-        timeout(Duration::from_millis(50), event_receiver.recv()).await.is_err(),
-        "application data must wait for the simulator introduction"
-    );
+    receive_ack(&neighbor, 41).await;
+    assert_eq!(event_receiver.try_recv().err(), Some(mpsc::error::TryRecvError::Empty));
 
     neighbor.send_to(&ack(40, 1), peer).await.expect("ack neighbor circuit");
     std::assert_matches!(
@@ -284,7 +306,7 @@ async fn neighbor_intro_precedes_early_udp_data() {
     );
 
     shutdown_signal.send_replace(true);
-    assert!(timeout(Duration::from_millis(200), task).await.expect("neighbor stops").expect("neighbor task").is_ok());
+    assert!(timeout(TEST_TIMEOUT, task).await.expect("neighbor stops").expect("neighbor task").is_ok());
 }
 
 #[tokio::test]
@@ -370,7 +392,7 @@ async fn neighbor_task_limit_preserves_current() {
         Message::CompletePingCheck(message) if message.ping_id.ping_id == 7
     );
     let mut buffer = [0; 65_535];
-    assert!(timeout(Duration::from_millis(50), rejected.recv_from(&mut buffer)).await.is_err());
+    std::assert_matches!(rejected.try_recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
 
     for _ in 0..MAX_NEIGHBOR_SIMULATORS {
         let Some(Err(error)) = setup.state.neighbors.join_next().await else {
@@ -581,7 +603,7 @@ async fn neighbor_backpressure_controls() {
 
     disconnect_signal.send_replace(true);
     receive_message(&primary, |message| matches!(message, Message::LogoutRequest(_))).await;
-    assert!(timeout(Duration::from_millis(200), client).await.expect("disconnect should finish").expect("client task").is_ok());
+    assert!(timeout(TEST_TIMEOUT, client).await.expect("disconnect should finish").expect("client task").is_ok());
 }
 
 #[test]

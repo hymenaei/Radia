@@ -16,6 +16,8 @@ use crate::session::object_cache::{
 };
 use crate::session::world::MAX_OBJECTS_PER_INTAKE_QUANTUM;
 
+const FLAGS_USE_PHYSICS: u32 = 1;
+
 impl ObjectCacheSession {
     pub(in crate::session) async fn resolve_cached(
         &mut self,
@@ -65,8 +67,14 @@ impl ObjectCacheSession {
                 };
                 set_region_data(&mut payload, update.region_data);
                 let ordinal = u32::try_from(index).ok()?;
-                let operation = decode_cached_object(region, sequence, order, ordinal, reference, &payload, &mut invalid_fields);
+                let mut operation = decode_cached_object(region, sequence, order, ordinal, reference, &payload, &mut invalid_fields);
                 if operation.is_some() {
+                    if let Some(operation) = &mut operation {
+                        if let Some(received_at) = source.motion_received_at() {
+                            operation.set_source(operation.source().with_motion_timing(received_at, source.motion_ping_delay()));
+                        }
+                        operation.set_is_physical(reference.update_flags & FLAGS_USE_PHYSICS != 0);
+                    }
                     for mut request in object_media_requests(region, sequence, order, &payload) {
                         request.source = UpdateSource::new(region, sequence, order, ordinal);
                         media_requests.push(request);
@@ -349,6 +357,33 @@ mod tests {
             assert_eq!(requests[0].local_id.get(), local_id);
             assert_eq!(requests[0].version, 12);
         }
+        cache.close().await;
+    }
+
+    #[tokio::test]
+    async fn cached_hit_uses_reference_physics_flag() {
+        let directory = tempfile::tempdir().expect("create isolated cache directory");
+        let mut cache = open_cache(directory.path().join("objects.sqlite"));
+        assert_eq!(load_region(&mut cache).await, 7);
+        let mut full = fixture_message(vectors::OBJECT_UPDATE);
+        let Message::ObjectUpdate(update) = &mut full else { panic!("fixture should be a full object update") };
+        update.objects.truncate(1);
+        update.objects[0].update_flags |= FLAGS_USE_PHYSICS;
+        update.region_data.region_handle = REGION_HANDLE;
+        let object_id = update.objects[0].id;
+        let (region_data, mut references) = cached_references(&full);
+        references[0].update_flags &= !FLAGS_USE_PHYSICS;
+        cache.record_update(SIMULATOR, full);
+        flush(&mut cache).await;
+
+        let cached = cached_message(region_data, references);
+        let batch = decoded_cached_batch(&cached, 80);
+        let (batch, _) = cache.resolve_cached(SIMULATOR, REGION, 80, OrderEvidence::Ordered(80), |_| false, &cached, batch).await;
+        let mut world = region_world();
+        let summary = world.apply_object_batch(SIMULATOR, batch).expect("registered simulator applies the cached hit");
+        assert!(summary.blocks.iter().all(|block| block.applied().is_some()));
+        let entity = world.world().entity(object_id).expect("cached object was restored");
+        assert!(!world.world().object(entity).expect("restored object is live").is_physical());
         cache.close().await;
     }
 

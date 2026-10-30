@@ -14,7 +14,7 @@ use crate::{
     },
     material::FaceParams,
     pipeline::COLOR,
-    scene::{AgentPose, Camera, Object, Placement, SceneView, texture_animation},
+    scene::{AgentPose, Camera, Object, Placement, SceneView, motion, texture_animation},
 };
 
 use super::{FramePreparation, FramePreparationKey, GeometryRenderer, PrepareTimes, ShadingMode, Stats};
@@ -41,15 +41,15 @@ impl GeometryRenderer {
         self.stats.animated_faces_changed = 0;
         let key = FramePreparationKey { version: view.version(), camera, agent_pose, size, water_height };
         let same = self.prepared.as_ref().is_some_and(|prepared| prepared.key == key);
+        let motion_was_active = self.motion_redraw;
+        self.motion_redraw = false;
         if same {
             let upload_started = Instant::now();
             self.textures.upload(device, encoder, self.epoch);
             times.textures = upload_started.elapsed();
-            if self
-                .prepared
-                .as_ref()
-                .is_some_and(|prepared| prepared.reusable(&key, self.textures.state(), self.memory.mesh_state(), started))
-            {
+            if self.prepared.as_ref().is_some_and(|prepared| {
+                !motion_was_active && prepared.reusable(&key, self.textures.state(), self.memory.mesh_state(), started)
+            }) {
                 self.stats.uploaded_bytes = 0;
                 self.memory_stats();
                 self.record_prepare(started, times, 0);
@@ -68,6 +68,8 @@ impl GeometryRenderer {
         let visibility_started = Instant::now();
         let mut update = self.update_cache(view);
         self.apply_agent_pose(agent_pose, origin, &mut update);
+        let update_all_motion = update.full_visibility || camera_changed;
+        self.update_object_motion(view, started, origin, update_all_motion, agent_pose.map(AgentPose::agent_id), &mut update);
         self.stats.items_updated = update.items_updated;
         update.pose_items.sort_unstable();
         update.pose_items.dedup();
@@ -132,6 +134,20 @@ impl GeometryRenderer {
         }
         times.meshes = meshes_started.elapsed();
         let visible_changed = rebuild_visible && self.cache.visible != self.cache.next_visible;
+        let visible = if visible_changed { &self.cache.next_visible } else { &self.cache.visible };
+        let agent_id = agent_pose.map(AgentPose::agent_id);
+        self.motion_redraw = visible.iter().copied().any(|index| {
+            let Some(item) = self.cache.items.get(index) else { return false };
+            let Some(entity) = item.entity else { return false };
+            let Some(object) = view.object(entity) else { return false };
+            if is_agent_pose_override(object.detail().summary.kind, object.detail().summary.id, agent_id) {
+                return false;
+            }
+            match (self.placements.get(&entity), self.future_placements.get(&entity)) {
+                (Some(current), Some(future)) => motion::should_redraw(true, *current, *future),
+                _ => false,
+            }
+        });
         let layout = !self.draw_list.valid() || update.layout_changed || origin_rebased || visible_changed;
 
         let draw_list_started = Instant::now();
@@ -278,30 +294,86 @@ impl GeometryRenderer {
         self.set_agent_item_pose(agent_id, None, origin, None);
     }
 
-    fn set_agent_item_pose(
-        &mut self,
-        agent_id: Uuid,
-        pose_override: Option<WorldPose>,
-        origin: DVec3,
-        mut update: Option<&mut CacheUpdate>,
-    ) {
+    fn set_agent_item_pose(&mut self, agent_id: Uuid, pose_override: Option<WorldPose>, origin: DVec3, update: Option<&mut CacheUpdate>) {
         let Some(index) = self.cache.index((2, agent_id.as_u128(), 0)) else { return };
-        let Some(item) = self.cache.items.get_mut(index) else { return };
+        let Some(item) = self.cache.items.get(index) else { return };
         let Some(object) = item.source.as_ref() else { return };
         if object.detail().summary.kind != Kind::Avatar {
             return;
         }
         let Placement::Ready(transform) = object.placement() else { return };
         let pose = pose_override.unwrap_or(transform.pose);
+        self.set_item_pose(index, pose, origin, update);
+    }
+
+    fn set_item_pose(&mut self, index: ItemIndex, pose: WorldPose, origin: DVec3, update: Option<&mut CacheUpdate>) {
+        let Some(item) = self.cache.items.get_mut(index) else { return };
         if item.position == pose.position && item.rotation == pose.rotation {
             return;
         }
         item.position = pose.position;
         item.rotation = pose.rotation;
         item.transform = instance_base(item.position, item.rotation, item.scale, origin);
-        if let Some(update) = &mut update {
+        if let Some(update) = update {
             update.pose_items.push(index);
             update.items_updated += 1;
+        }
+    }
+
+    fn update_object_motion(
+        &mut self,
+        view: &SceneView,
+        now: Instant,
+        origin: DVec3,
+        all_objects: bool,
+        agent_id: Option<Uuid>,
+        update: &mut CacheUpdate,
+    ) {
+        self.motion_indices.clear();
+        self.motion_entities.clear();
+        if all_objects || !update.motion_changed.is_empty() {
+            for (index, item) in self.cache.items.iter() {
+                if let Some(entity) = item.entity
+                    && (motion::needs_evaluation(view, entity) || motion::has_changed_ancestor(view, entity, &update.motion_changed))
+                {
+                    self.motion_indices.push(index);
+                }
+            }
+        } else {
+            for index in self.cache.candidates.iter().chain(&update.pose_items).copied() {
+                if let Some(entity) = self.cache.items.get(index).and_then(|item| item.entity)
+                    && motion::needs_evaluation(view, entity)
+                {
+                    self.motion_indices.push(index);
+                }
+            }
+        }
+        self.motion_indices.sort_unstable();
+        self.motion_indices.dedup();
+        for index in &self.motion_indices {
+            if let Some(entity) = self.cache.items.get(*index).and_then(|item| item.entity) {
+                self.motion_entities.push(entity);
+            }
+        }
+        motion::fill_placement_pair(
+            view,
+            now,
+            now + Duration::from_millis(16),
+            &self.motion_entities,
+            &mut self.placements,
+            &mut self.future_placements,
+            &mut self.regions,
+        );
+        for motion_index in 0..self.motion_indices.len() {
+            let index = self.motion_indices[motion_index];
+            let Some(item) = self.cache.items.get(index) else { continue };
+            let Some(entity) = item.entity else { continue };
+            let Some(object) = view.object(entity) else { continue };
+            if is_agent_pose_override(object.detail().summary.kind, object.detail().summary.id, agent_id) {
+                continue;
+            }
+            let Some(pose) = self.placements.get(&entity).map(|transform| transform.pose) else { continue };
+            self.set_item_pose(index, pose, origin, Some(update));
         }
     }
 
@@ -408,6 +480,10 @@ impl GeometryRenderer {
             );
         }
     }
+}
+
+fn is_agent_pose_override(kind: Kind, object_id: Uuid, agent_id: Option<Uuid>) -> bool {
+    kind == Kind::Avatar && agent_id == Some(object_id)
 }
 
 fn current_params(source: Option<&Object>, shading: ShadingMode, face: &CachedFace, now: Instant) -> FaceParams {
@@ -553,6 +629,15 @@ mod tests {
         assert!(!prepared.reusable(&prepare_key(&view), state, MeshState::default(), deadline));
         prepared.animation_deadline = None;
         assert!(!prepared.needs_frame(state, MeshState::default(), deadline));
+    }
+
+    #[test]
+    fn agent_override_skips_object_motion() {
+        let agent = Uuid::from_u128(1);
+
+        assert!(is_agent_pose_override(Kind::Avatar, agent, Some(agent)));
+        assert!(!is_agent_pose_override(Kind::Avatar, Uuid::from_u128(2), Some(agent)));
+        assert!(!is_agent_pose_override(Kind::Object, agent, Some(agent)));
     }
 
     #[test]

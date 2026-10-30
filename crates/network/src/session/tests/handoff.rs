@@ -692,6 +692,10 @@ async fn handoff_waits_for_matching_movement() {
         next_neighbor_event(&mut event_receiver).await,
         Event::SimulatorConnected { simulator_id: id, region_handle: Some(handle), .. } if id == simulator_id && handle == region_handle
     );
+    std::assert_matches!(
+        next_neighbor_event(&mut event_receiver).await,
+        Event::SimulatorMotionStatus { simulator_id: id, .. } if id == simulator_id
+    );
     let mut buffer = [0; 65_535];
     assert!(timeout(Duration::from_millis(50), neighbor.recv_from(&mut buffer)).await.is_err());
 

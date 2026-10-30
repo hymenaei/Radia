@@ -151,6 +151,8 @@ pub(crate) struct SessionReadyUpdate {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<network::CircuitMotionStatus>)>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,
     pub(crate) region_name: Option<String>,
@@ -268,7 +270,15 @@ mod tests {
         let address = "127.0.0.1:13000".parse().unwrap();
         for (order, name) in [(10, "Initial"), (20, "Renamed"), (15, "Stale")] {
             let message = region_handshake(name);
-            decode_simulator_world_update(&mut world, simulator, order, Ordered(u64::from(order)), &message);
+            decode_simulator_world_update(
+                &mut world,
+                simulator,
+                order,
+                Ordered(u64::from(order)),
+                std::time::Instant::now(),
+                None,
+                &message,
+            );
             handle_simulator_message(SimulatorScope::Primary, address, &message, None, None, world.region_name(simulator), &mailbox);
         }
         let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");

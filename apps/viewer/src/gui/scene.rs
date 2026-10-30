@@ -77,12 +77,13 @@ pub(crate) fn start_session(
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
     agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+    motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<network::CircuitMotionStatus>)>>,
     cx: &mut App,
 ) {
     if start_scene(generation, cx) {
         connect_world(
             generation,
-            SceneSources { reader: reader.clone(), environments, assets: assets.clone() },
+            SceneSources { reader: reader.clone(), environments, assets: assets.clone(), motion_circuits },
             agent_id,
             camera,
             movement,

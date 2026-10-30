@@ -276,6 +276,10 @@ async fn neighbor_intro_precedes_early_udp_data() {
     );
     std::assert_matches!(
         next_neighbor_event(&mut event_receiver).await,
+        Event::SimulatorMotionStatus { simulator_id: id, motion_status } if id == simulator_id && motion_status.borrow().connected
+    );
+    std::assert_matches!(
+        next_neighbor_event(&mut event_receiver).await,
         Event::SimulatorMessage { simulator_id: id, sequence: 41, message: Message::ChatFromSimulator(_), .. } if id == simulator_id
     );
 

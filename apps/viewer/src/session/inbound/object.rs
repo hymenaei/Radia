@@ -1,4 +1,7 @@
-use std::num::{NonZeroU8, NonZeroU32};
+use std::{
+    num::{NonZeroU8, NonZeroU32},
+    time::{Duration, Instant},
+};
 
 use math::{UvTransform, Vec3};
 use protocol::{
@@ -18,15 +21,16 @@ use protocol::{
 use utils::AssetId;
 use uuid::Uuid;
 use world::{
-    Appearance, AttachmentPoint, FaceAppearance, FieldUpdate, Kind, LinearMotion, LocalAddress, ObjectObservation, ObjectPatch,
-    OrderEvidence, ParentUpdate, PbrMaterialAssignments, Pose, PrimShape, Region, RegionHandle, SculptFlags, SculptType, Shape,
-    SurfaceAppearance, TextureAnimation, TextureMapping, UpdateSource,
+    Appearance, AttachmentPoint, FaceAppearance, FieldUpdate, Kind, LinearMotion, LocalAddress, MotionUpdateKind, ObjectObservation,
+    ObjectPatch, OrderEvidence, ParentUpdate, PbrMaterialAssignments, Pose, PrimShape, Region, RegionHandle, SculptFlags, SculptType,
+    Shape, SurfaceAppearance, TextureAnimation, TextureMapping, UpdateSource,
 };
 
 use crate::session::object_media::media_version;
 
 const VOLUME_PCODE: u8 = 9;
 const LEGACY_AVATAR_PCODE: u8 = 47;
+const FLAGS_USE_PHYSICS: u32 = 1;
 const SCULPT_EXTRA_PARAM_TYPE: u16 = 0x0030;
 const MESH_EXTRA_PARAM_TYPE: u16 = 0x0060;
 const RENDER_MATERIAL_EXTRA_PARAM_TYPE: u16 = 0x0080;
@@ -46,6 +50,14 @@ pub(crate) struct ObjectBatch {
     pub(crate) invalid_fields: usize,
 }
 
+impl ObjectBatch {
+    pub(crate) fn stamp_motion(&mut self, received_at: Instant, ping_delay: Option<Duration>) {
+        for operation in self.blocks.iter_mut().flatten() {
+            operation.set_source(operation.source().with_motion_timing(received_at, ping_delay));
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ObjectOperation {
     Observe(ObjectObservation),
@@ -60,6 +72,22 @@ impl ObjectOperation {
             Self::Observe(observation) => observation.source,
             Self::Patch(patch) => patch.source,
             Self::Remove { source, .. } | Self::Cached { source, .. } => *source,
+        }
+    }
+
+    pub(crate) fn set_is_physical(&mut self, is_physical: bool) {
+        match self {
+            Self::Observe(observation) => observation.is_physical = Some(is_physical),
+            Self::Patch(patch) => patch.is_physical = Some(is_physical),
+            Self::Remove { .. } | Self::Cached { .. } => {}
+        }
+    }
+
+    pub(crate) fn set_source(&mut self, source: UpdateSource) {
+        match self {
+            Self::Observe(observation) => observation.source = source,
+            Self::Patch(patch) => patch.source = source,
+            Self::Remove { source: current, .. } | Self::Cached { source: current, .. } => *current = source,
         }
     }
 
@@ -83,20 +111,21 @@ pub(in crate::session) fn decode_cached_object(
     invalid_fields: &mut usize,
 ) -> Option<ObjectOperation> {
     let source = UpdateSource::new(region, sequence, order, block_ordinal);
+    let time_dilation = object_time_dilation(message);
     match message {
         ObjectUpdate(update) if update.objects.len() == 1 => {
             let [object] = update.objects.as_slice() else { return None };
             if object.local_id != reference.local_id || object.crc != reference.crc {
                 return None;
             }
-            full_observation(object, source, invalid_fields).ok()
+            full_observation(object, source, time_dilation, invalid_fields).ok()
         }
         ObjectUpdateCompressed(update) if update.objects.len() == 1 => {
             let [object] = update.objects.as_slice() else { return None };
             if object.local_id != reference.local_id || object.crc != reference.crc {
                 return None;
             }
-            compressed_observation(object, source, invalid_fields).ok()
+            compressed_observation(object, source, time_dilation, invalid_fields).ok()
         }
         _ => None,
     }
@@ -123,15 +152,28 @@ struct ObjectClassification {
 pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderEvidence, message: &Message) -> Option<ObjectBatch> {
     let mut invalid_blocks = 0;
     let mut invalid_fields = 0;
+    let time_dilation = object_time_dilation(message);
     let blocks = match message {
-        ObjectUpdate(update) => {
-            map_blocks(region, sequence, order, &update.objects, full_observation, &mut invalid_blocks, &mut invalid_fields)
-        }
-        ObjectUpdateCompressed(update) => {
-            map_blocks(region, sequence, order, &update.objects, compressed_observation, &mut invalid_blocks, &mut invalid_fields)
-        }
+        ObjectUpdate(update) => map_blocks(
+            region,
+            sequence,
+            order,
+            &update.objects,
+            |block, source, fields| full_observation(block, source, time_dilation, fields),
+            &mut invalid_blocks,
+            &mut invalid_fields,
+        ),
+        ObjectUpdateCompressed(update) => map_blocks(
+            region,
+            sequence,
+            order,
+            &update.objects,
+            |block, source, fields| compressed_observation(block, source, time_dilation, fields),
+            &mut invalid_blocks,
+            &mut invalid_fields,
+        ),
         ImprovedTerseObjectUpdate(update) => {
-            map_terse_blocks(region, sequence, order, &update.objects, &mut invalid_blocks, &mut invalid_fields)
+            map_terse_blocks(region, sequence, order, &update.objects, time_dilation, &mut invalid_blocks, &mut invalid_fields)
         }
         ObjectUpdateCached(update) => {
             map_blocks(region, sequence, order, &update.objects, cached_patch, &mut invalid_blocks, &mut invalid_fields)
@@ -171,6 +213,16 @@ pub(crate) fn decode_object_message(region: Region, sequence: u32, order: OrderE
     };
 
     Some(ObjectBatch { region, region_handle: object_region_handle(message), blocks, invalid_blocks, invalid_fields })
+}
+
+fn object_time_dilation(message: &Message) -> Option<f32> {
+    let value = match message {
+        ObjectUpdate(update) => update.region_data.time_dilation,
+        ObjectUpdateCompressed(update) => update.region_data.time_dilation,
+        ImprovedTerseObjectUpdate(update) => update.region_data.time_dilation,
+        _ => return None,
+    };
+    Some(f32::from(value) / f32::from(u16::MAX))
 }
 
 pub(in crate::session) fn object_media_requests(
@@ -270,6 +322,7 @@ fn map_terse_blocks(
     sequence: u32,
     order: OrderEvidence,
     blocks: &[improved_terse_object_update::ObjectBlock],
+    time_dilation: Option<f32>,
     invalid_blocks: &mut usize,
     invalid_fields: &mut usize,
 ) -> Vec<Option<ObjectOperation>> {
@@ -280,7 +333,7 @@ fn map_terse_blocks(
             let operation = match block {
                 improved_terse_object_update::ObjectBlock::Decoded(block) => {
                     let source = u32::try_from(index).ok().map(|ordinal| UpdateSource::new(region, sequence, order, ordinal));
-                    source.and_then(|source| terse_patch(block, source, invalid_fields).ok())
+                    source.and_then(|source| terse_patch(block, source, time_dilation, invalid_fields).ok())
                 }
                 improved_terse_object_update::ObjectBlock::Malformed { .. } => None,
             };
@@ -292,7 +345,12 @@ fn map_terse_blocks(
         .collect()
 }
 
-fn full_observation(block: &ObjectData, source: UpdateSource, invalid_fields: &mut usize) -> Result<ObjectOperation, InvalidBlock> {
+fn full_observation(
+    block: &ObjectData,
+    source: UpdateSource,
+    time_dilation: Option<f32>,
+    invalid_fields: &mut usize,
+) -> Result<ObjectOperation, InvalidBlock> {
     let id = non_nil_uuid(block.id)?;
     let local_id = local_id(block.local_id)?;
     let classification = object_classification(block.pcode, Some(block.shape), &block.extra_parameters, invalid_fields);
@@ -315,6 +373,8 @@ fn full_observation(block: &ObjectData, source: UpdateSource, invalid_fields: &m
         pose: Some(Pose { position: Some(block.motion.position), rotation: Some(block.motion.rotation) }),
         linear_motion: Some(LinearMotion { velocity: Some(block.motion.velocity), acceleration: Some(block.motion.acceleration) }),
         angular_velocity: Some(block.motion.angular_velocity),
+        is_physical: Some(block.update_flags & FLAGS_USE_PHYSICS != 0),
+        time_dilation,
         scale: Some(block.scale),
         attachment_point: attachment_point(block.state),
         shape: classification.shape,
@@ -328,6 +388,7 @@ fn full_observation(block: &ObjectData, source: UpdateSource, invalid_fields: &m
 fn compressed_observation(
     block: &object_update_compressed::ObjectData,
     source: UpdateSource,
+    time_dilation: Option<f32>,
     invalid_fields: &mut usize,
 ) -> Result<ObjectOperation, InvalidBlock> {
     let id = non_nil_uuid(block.id)?;
@@ -357,6 +418,8 @@ fn compressed_observation(
         pose: Some(Pose { position: Some(block.position), rotation: Some(block.rotation) }),
         linear_motion: Some(LinearMotion { velocity: None, acceleration: Some(Vec3::ZERO) }),
         angular_velocity: block.angular_velocity,
+        is_physical: Some(block.update_flags & FLAGS_USE_PHYSICS != 0),
+        time_dilation,
         scale: Some(block.scale),
         attachment_point: attachment_point(block.state),
         shape: classification.shape,
@@ -370,12 +433,15 @@ fn compressed_observation(
 fn terse_patch(
     block: &improved_terse_object_update::ObjectData,
     source: UpdateSource,
+    time_dilation: Option<f32>,
     invalid_fields: &mut usize,
 ) -> Result<ObjectOperation, InvalidBlock> {
+    let source = source.with_motion_update_kind(MotionUpdateKind::Terse);
     let mut patch = ObjectPatch::new(source, local_id(block.local_id)?);
     patch.pose = Some(Pose { position: Some(block.motion.position), rotation: Some(block.motion.rotation) });
     patch.linear_motion = LinearMotion { velocity: Some(block.motion.velocity), acceleration: Some(block.motion.acceleration) };
     patch.angular_velocity = Some(block.motion.angular_velocity);
+    patch.time_dilation = time_dilation;
     patch.attachment_point = attachment_point(block.state);
     if !block.avatar {
         let (value, invalid) = decoded_surface_appearance(improved_terse_object_update::decode_texture_entry(&block.texture_entry));

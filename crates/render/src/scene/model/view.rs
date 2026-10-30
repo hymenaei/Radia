@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fmt::{self, Display, Formatter},
     mem::size_of,
+    time::Instant,
 };
 
 use world::{Entity, Region, WorldRevision};
@@ -19,6 +20,7 @@ pub(crate) struct SceneChanges {
     pub(crate) surfaces: Vec<(Region, crate::scene::SurfaceKind)>,
     pub(crate) regions: Vec<Region>,
     pub(crate) retired: Vec<Region>,
+    pub(crate) motion_changed: Vec<Entity>,
     pub(crate) full: bool,
     pub(crate) reconcile_all: bool,
 }
@@ -52,6 +54,7 @@ impl SceneChanges {
             + self.surfaces.capacity() * size_of::<(Region, crate::scene::SurfaceKind)>()
             + self.regions.capacity() * size_of::<Region>()
             + self.retired.capacity() * size_of::<Region>()
+            + self.motion_changed.capacity() * size_of::<Entity>()
     }
 }
 
@@ -128,14 +131,27 @@ impl SceneView {
             return Err(ApplyError::OutOfOrder);
         }
         let mut changes = SceneChanges::from_batch(&batch);
+        if !batch.replace {
+            for change in &batch.changes {
+                if let Change::Object(object) = change {
+                    let entity = object.detail().summary.entity;
+                    if self.mirror.objects.get(&entity).is_some_and(|previous| object.motion_changed_from(previous))
+                        && !changes.motion_changed.contains(&entity)
+                    {
+                        changes.motion_changed.push(entity);
+                    }
+                }
+            }
+        }
         if changes.retained_bytes() > CHANGE_HISTORY_BYTES {
             changes = SceneChanges { reconcile_all: true, ..SceneChanges::default() };
         }
         if batch.replace {
             self.mirror = Mirror::default();
         }
+        let now = Instant::now();
         for change in batch.changes {
-            self.mirror.apply(change);
+            self.mirror.apply_at(change, now);
         }
         self.sequence = batch.sequence;
         if batch.replace {
@@ -175,6 +191,17 @@ impl SceneView {
     pub fn patch_count(&self) -> usize {
         if self.session.is_active() { self.mirror.patches.len() } else { 0 }
     }
+    pub fn start_motion_phase_out(&mut self, region: Region, at: Option<Instant>) {
+        for object in self.mirror.objects.values_mut().filter(|object| object.detail().summary.address.region() == region) {
+            object.start_motion_phase_out(at);
+        }
+    }
+
+    pub fn resume_motion(&mut self, region: Region, now: Instant, regions: &[math::motion::RegionBounds]) {
+        for object in self.mirror.objects.values_mut().filter(|object| object.detail().summary.address.region() == region) {
+            object.resume_motion_at(now, regions);
+        }
+    }
     pub fn objects(&self) -> impl Iterator<Item = &Object> {
         self.mirror.objects.values().filter(|_| self.session.is_active())
     }
@@ -193,6 +220,13 @@ impl SceneView {
     }
     pub fn patches(&self) -> impl Iterator<Item = (Region, &Patch)> {
         self.mirror.patches.iter().filter(|_| self.session.is_active()).map(|((region, _), patch)| (*region, patch))
+    }
+
+    pub fn terrain_height_at(&self, position: math::DVec3) -> Option<f64> {
+        if !self.session.is_active() || !position.is_finite() {
+            return None;
+        }
+        crate::scene::surface::terrain_height_at(&self.mirror, position)
     }
     pub fn water_height(&self, region: Region) -> Option<f32> {
         if self.session.is_active() { self.mirror.water.get(&region).copied().flatten() } else { None }
@@ -224,7 +258,32 @@ impl SceneView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::Reconciler;
+    use math::DVec3;
+    use world::{RegionInfo, RegionSummary, TERRAIN_PATCH_SAMPLES, TerrainPatch};
+
+    use crate::scene::model::SceneLifetime;
+    use crate::scene::{Budget, Reconciler};
+
+    fn terrain_view(regions: &[(Region, DVec3)], patches: &[(Region, u8, u8, f32)]) -> SceneView {
+        let budget = Budget::default();
+        let mut view = SceneView::new(SceneLifetime::new());
+        for &(region, origin) in regions {
+            view.mirror.regions.insert(
+                region,
+                RegionData::new(
+                    RegionSummary { region, info: RegionInfo { origin: Some(origin), ..RegionInfo::default() }, terrain_settings: None },
+                    budget.reserve(size_of::<RegionSummary>()).expect("region lease"),
+                ),
+            );
+        }
+        for &(region, x, y, height) in patches {
+            let patch = TerrainPatch::new(x, y, Box::new([height; TERRAIN_PATCH_SAMPLES])).expect("terrain patch");
+            view.mirror
+                .patches
+                .insert((region, patch.id()), Patch::new(patch, budget.reserve(size_of::<TerrainPatch>()).expect("patch lease")));
+        }
+        view
+    }
 
     #[test]
     fn status_change_requests_reconciliation_without_full_rebuild() {
@@ -237,5 +296,38 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert!(changes[0].reconcile_all);
         assert!(!changes[0].full);
+    }
+
+    #[test]
+    fn terrain_height_interpolates_across_patch_seam() {
+        let region = Region::new(1);
+        let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 0, 0, 0.0), (region, 1, 0, 16.0)]);
+
+        assert_eq!(view.terrain_height_at(DVec3::new(15.5, 4.0, 0.0)), Some(8.0));
+    }
+
+    #[test]
+    fn terrain_height_interpolates_across_region_seam() {
+        let west = Region::new(1);
+        let east = Region::new(2);
+        let view = terrain_view(&[(west, DVec3::ZERO), (east, DVec3::new(256.0, 0.0, 0.0))], &[(west, 15, 0, 4.0), (east, 0, 0, 20.0)]);
+
+        assert_eq!(view.terrain_height_at(DVec3::new(255.5, 4.0, 0.0)), Some(12.0));
+    }
+
+    #[test]
+    fn unloaded_region_neighbor_clamps_to_mesh_edge() {
+        let region = Region::new(1);
+        let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 15, 0, 4.0)]);
+
+        assert_eq!(view.terrain_height_at(DVec3::new(255.5, 4.0, 0.0)), Some(4.0));
+    }
+
+    #[test]
+    fn exact_row_ignores_unloaded_neighbor() {
+        let region = Region::new(1);
+        let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 1, 0, 7.0)]);
+
+        assert_eq!(view.terrain_height_at(DVec3::new(20.0, 15.0, 0.0)), Some(7.0));
     }
 }

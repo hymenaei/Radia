@@ -20,9 +20,9 @@ pub(super) use world::{Appearance, Shape};
 pub(super) use world::{
     AvatarAppearanceUpdate, AvatarTextureSlot, AvatarTextureSlots, AvatarVisualParamIndex, FaceAppearance, FieldRejection,
     FieldRejectionReason, FieldUpdate, Kind, LinearMotion, LocalAddress, MAX_AVATAR_TEXTURE_SLOTS, MAX_PBR_MATERIAL_BINDINGS, MediaEntry,
-    ObjectMediaUpdate, ObjectObservation, ObjectPatch, ParentUpdate, PbrMaterialAssignments, PbrMaterialAssignmentsError, Pose, Region,
-    RegionInfo, SculptFlags, SculptType, SitTarget, SurfaceAppearance, SurfaceAppearanceError, TextureAnimation, TextureAnimationError,
-    UpdateAuthority, UpdateSource, World, WorldLimits,
+    MotionUpdateKind, ObjectMediaUpdate, ObjectObservation, ObjectPatch, ParentUpdate, PbrMaterialAssignments, PbrMaterialAssignmentsError,
+    Pose, Region, RegionInfo, SculptFlags, SculptType, SitTarget, SurfaceAppearance, SurfaceAppearanceError, TextureAnimation,
+    TextureAnimationError, UpdateAuthority, UpdateSource, World, WorldLimits,
 };
 
 pub(super) fn limits() -> WorldLimits {

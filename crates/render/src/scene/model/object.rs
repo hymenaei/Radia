@@ -1,10 +1,16 @@
 use std::{sync::Arc, time::Instant};
 
 use math::Vec3;
-use world::{Kind, ObjectDetail, PrimShape, Shape, WorldTransform, WorldTransformState};
+use world::{Kind, MotionUpdateKind, ObjectDetail, PrimShape, Shape, WorldTransform, WorldTransformState};
 
 use crate::material::FaceMaterial;
-use crate::scene::{MeshKey, PreparedMesh, SharedMesh, asset_demand::Materials, budget::Lease, texture_animation};
+use crate::scene::{
+    MeshKey, PreparedMesh, SharedMesh,
+    asset_demand::Materials,
+    budget::Lease,
+    motion::{MotionSample, MotionState},
+    texture_animation,
+};
 
 #[derive(Clone)]
 pub struct Object {
@@ -13,12 +19,21 @@ pub struct Object {
     pub(super) mesh: Option<(MeshKey, SharedMesh)>,
     pub(super) materials: Option<Materials>,
     animation_clock: Option<AnimationClock>,
+    pub(super) motion: MotionState,
 }
 
 impl Object {
     pub(in crate::scene) fn new(source: ObjectDetail, lease: Lease) -> Self {
         let animation_clock = source.texture_animation.map(|_| AnimationClock { started_at: Instant::now(), frame_offset: 0.0 });
-        Self { data: Arc::new(ObjectData { source, _lease: lease }), preparation: None, mesh: None, materials: None, animation_clock }
+        let motion = MotionState::new(source.motion_source.and_then(world::UpdateSource::motion_received_at).unwrap_or_else(Instant::now));
+        Self {
+            data: Arc::new(ObjectData { source, _lease: lease }),
+            preparation: None,
+            mesh: None,
+            materials: None,
+            animation_clock,
+            motion,
+        }
     }
 
     pub fn detail(&self) -> &ObjectDetail {
@@ -93,6 +108,69 @@ impl Object {
             return Placement::Hidden(HiddenReason::InvalidDimensions);
         }
         Placement::Ready(transform)
+    }
+
+    pub(in crate::scene) fn motion_sample(&self) -> Option<MotionSample> {
+        let detail = self.detail();
+        let transform = match detail.world_transform {
+            Ok(WorldTransformState::Resolved(transform)) => transform,
+            Ok(WorldTransformState::MissingScale(pose)) => WorldTransform { pose, scale: Vec3::ONE },
+            Ok(WorldTransformState::Provisional { .. } | WorldTransformState::Unresolved(_)) | Err(_) => return None,
+        };
+        let is_attachment = detail.attachment_point.is_some();
+        Some(MotionSample {
+            transform,
+            kind: detail.summary.kind,
+            region: detail.summary.address.region(),
+            local_position: if is_attachment { Vec3::ZERO } else { detail.summary.local_transform.position().unwrap_or_default() },
+            local_rotation: if is_attachment {
+                transform.pose.rotation
+            } else {
+                detail.summary.local_transform.rotation().unwrap_or(transform.pose.rotation)
+            },
+            velocity: detail.linear_motion.velocity.unwrap_or_default(),
+            acceleration: detail.linear_motion.acceleration.unwrap_or_default(),
+            angular_velocity: detail.angular_velocity.unwrap_or_default(),
+            is_physical: detail.is_physical,
+            time_dilation: detail.time_dilation,
+            ping_delay: detail.motion_source.and_then(world::UpdateSource::motion_ping_delay),
+            motion_update_kind: detail.motion_source.map_or(MotionUpdateKind::Full, world::UpdateSource::motion_update_kind),
+            is_attachment,
+            source: detail.motion_source,
+        })
+    }
+
+    pub(in crate::scene) fn motion_state(&self) -> MotionState {
+        self.motion
+    }
+
+    pub(crate) fn motion_changed_from(&self, previous: &Self) -> bool {
+        match (previous.motion_sample(), self.motion_sample()) {
+            (Some(previous), Some(next)) => crate::scene::motion::motion_changed(previous, next),
+            (None, None) => false,
+            _ => true,
+        }
+    }
+
+    pub(in crate::scene) fn start_motion_phase_out(&mut self, at: Option<Instant>) {
+        if let Some(sample) = self.motion_sample() {
+            self.motion.start_linear_phase_out(sample, at);
+        }
+    }
+
+    pub(in crate::scene) fn resume_motion_at(&mut self, now: Instant, regions: &[math::motion::RegionBounds]) {
+        if let Some(sample) = self.motion_sample() {
+            self.motion.resume_linear_at(sample, now, regions);
+        }
+    }
+
+    pub(super) fn update_motion_from(&mut self, previous: &Self, at: Instant) {
+        let (Some(previous_sample), Some(next_sample)) = (previous.motion_sample(), self.motion_sample()) else {
+            self.motion = MotionState::new(at);
+            return;
+        };
+        let sampled_at = next_sample.source.and_then(world::UpdateSource::motion_received_at).unwrap_or(at);
+        self.motion = MotionState::updated_at(previous.motion, previous_sample, next_sample, at, sampled_at);
     }
 
     pub fn geometry(&self) -> Geometry {

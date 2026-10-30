@@ -7,17 +7,25 @@ use crate::UpdateAuthority::{Tracked, Untracked};
 use crate::history::WorldChangeClasses;
 use crate::update::FieldStamp;
 use crate::{
-    Appearance, ApplyError, AttachmentPoint, FieldGroup, FieldRejectionReason, FieldUpdate, Kind, LinearMotion, ObjectObservation,
-    ObjectPatch, Parent, ParentUpdate, Pose, Rejections, UpdateAuthority, WorldPose,
+    Appearance, ApplyError, AttachmentPoint, FieldGroup, FieldRejectionReason, FieldUpdate, Kind, LinearMotion, MotionUpdateKind,
+    ObjectObservation, ObjectPatch, Parent, ParentUpdate, Pose, Rejections, UpdateAuthority, WorldPose,
 };
 use crate::{Fences, ObjectOrdering, ObjectState, ParentRejectionBarrier};
 
 pub(super) use super::facet::Origin;
 
+const MOTION_COMPONENT_SANITY_LIMIT: f32 = 4096.0;
+const TERSE_VELOCITY_COMPONENT_LIMIT: f32 = 128.0;
+const TERSE_ACCELERATION_COMPONENT_LIMIT: f32 = 64.0;
+const ANGULAR_VELOCITY_COMPONENT_LIMIT: f32 = 64.0;
+
 pub(super) struct Fields {
     pub(super) pose: Option<Pose>,
     linear_motion: LinearMotion,
+    motion_update_kind: MotionUpdateKind,
     angular_velocity: Option<Vec3>,
+    is_physical: Option<bool>,
+    time_dilation: Option<f32>,
     scale: Option<Vec3>,
     pub(super) attachment_point: FieldUpdate<AttachmentPoint>,
     pub(super) facets: FacetUpdates,
@@ -32,7 +40,10 @@ impl Fields {
         Self {
             pose: observation.pose,
             linear_motion: observation.linear_motion.unwrap_or_default(),
+            motion_update_kind: observation.source.motion_update_kind(),
             angular_velocity: observation.angular_velocity,
+            is_physical: observation.is_physical,
+            time_dilation: observation.time_dilation,
             scale: observation.scale,
             attachment_point: observation.attachment_point,
             facets: FacetUpdates {
@@ -50,7 +61,10 @@ impl Fields {
         let fields = Self {
             pose: patch.pose,
             linear_motion: patch.linear_motion,
+            motion_update_kind: patch.source.motion_update_kind(),
             angular_velocity: patch.angular_velocity,
+            is_physical: patch.is_physical,
+            time_dilation: patch.time_dilation,
             scale: patch.scale,
             attachment_point: patch.attachment_point,
             facets: FacetUpdates {
@@ -76,6 +90,8 @@ impl Fields {
         self.has_pose()
             || !self.linear_motion.is_empty()
             || self.angular_velocity.is_some()
+            || self.is_physical.is_some()
+            || self.time_dilation.is_some()
             || self.scale.is_some()
             || self.attachment_point.is_present()
             || self.facets.orders_binding()
@@ -91,6 +107,8 @@ impl Fields {
             || (self.has_pose() && origin.newer(fences.pose))
             || (!self.linear_motion.is_empty() && origin.newer(fences.linear_motion))
             || (self.angular_velocity.is_some() && origin.newer(fences.angular_velocity))
+            || (self.is_physical.is_some() && origin.newer(fences.is_physical))
+            || (self.time_dilation.is_some() && origin.newer(fences.time_dilation))
             || (self.scale.is_some() && origin.newer(fences.scale))
             || (self.attachment_point.is_present() && origin.newer(fences.attachment_point))
             || self.facets.has_newer(facets, kind, origin)
@@ -136,13 +154,29 @@ impl Fields {
             }
         }
         let motion = self.linear_motion;
-        if let Err(reason) = validate_vec3(motion.velocity, "velocity").and(validate_vec3(motion.acceleration, "acceleration")) {
+        let (velocity_limit, acceleration_limit) = match self.motion_update_kind {
+            MotionUpdateKind::Full => (MOTION_COMPONENT_SANITY_LIMIT, MOTION_COMPONENT_SANITY_LIMIT),
+            MotionUpdateKind::Terse => (TERSE_VELOCITY_COMPONENT_LIMIT, TERSE_ACCELERATION_COMPONENT_LIMIT),
+        };
+        if let Err(reason) = validate_motion_vec3(motion.velocity, "velocity", velocity_limit).and(validate_motion_vec3(
+            motion.acceleration,
+            "acceleration",
+            acceleration_limit,
+        )) {
             rejections.reject(FieldGroup::LinearMotion, reason);
             self.linear_motion = LinearMotion::default();
         }
-        if let Err(reason) = validate_vec3(self.angular_velocity, "angular_velocity") {
+        let angular_velocity_limit = match self.motion_update_kind {
+            MotionUpdateKind::Full => MOTION_COMPONENT_SANITY_LIMIT,
+            MotionUpdateKind::Terse => ANGULAR_VELOCITY_COMPONENT_LIMIT,
+        };
+        if let Err(reason) = validate_motion_vec3(self.angular_velocity, "angular_velocity", angular_velocity_limit) {
             rejections.reject(FieldGroup::AngularVelocity, reason);
             self.angular_velocity = None;
+        }
+        if self.time_dilation.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
+            rejections.reject(FieldGroup::TimeDilation, InvalidValue { field: "time_dilation" });
+            self.time_dilation = None;
         }
         if let Err(reason) = validate_vec3(self.scale, "scale") {
             rejections.reject(FieldGroup::Scale, reason);
@@ -177,6 +211,8 @@ impl Fields {
             (FieldGroup::Pose, self.has_pose(), tracked(fences.pose)),
             (FieldGroup::LinearMotion, !self.linear_motion.is_empty(), tracked(fences.linear_motion)),
             (FieldGroup::AngularVelocity, self.angular_velocity.is_some(), tracked(fences.angular_velocity)),
+            (FieldGroup::Physical, self.is_physical.is_some(), tracked(fences.is_physical)),
+            (FieldGroup::TimeDilation, self.time_dilation.is_some(), tracked(fences.time_dilation)),
             (FieldGroup::Scale, self.scale.is_some(), tracked(fences.scale)),
             (FieldGroup::AttachmentPoint, self.attachment_point.is_present(), tracked(fences.attachment_point)),
         ];
@@ -298,6 +334,8 @@ impl Draft {
 
     fn apply(&mut self, fields: Fields, kind: Kind, origin: Origin, pose_accepted: bool, media_bytes: usize, rejections: &mut Rejections) {
         let field = origin.field();
+        let mut motion_observed = false;
+        let mut angular_velocity_accepted = false;
         if let Some(pose) = fields.pose.filter(|_| pose_accepted) {
             if let Some(position) = pose.position {
                 self.state.transform.position = Some(position);
@@ -308,16 +346,34 @@ impl Draft {
                 self.state.transform.rotation = Some(rotation);
             }
             self.ordering.fences.pose = Some(field);
+            motion_observed = true;
         }
         if !fields.linear_motion.is_empty() && origin.newer(self.ordering.fences.linear_motion) {
             self.state.linear_motion.merge(fields.linear_motion);
             self.ordering.fences.linear_motion = Some(field);
+            motion_observed = true;
         }
         if let Some(value) = fields.angular_velocity
             && origin.newer(self.ordering.fences.angular_velocity)
         {
             self.state.angular_velocity = Some(value);
             self.ordering.fences.angular_velocity = Some(field);
+            motion_observed = true;
+            angular_velocity_accepted = true;
+        }
+        if let Some(value) = fields.is_physical
+            && origin.newer(self.ordering.fences.is_physical)
+        {
+            self.state.is_physical = value;
+            self.ordering.fences.is_physical = Some(field);
+            motion_observed = true;
+        }
+        if let Some(value) = fields.time_dilation
+            && origin.newer(self.ordering.fences.time_dilation)
+        {
+            self.state.time_dilation = value;
+            self.ordering.fences.time_dilation = Some(field);
+            motion_observed = true;
         }
         if let Some(value) = fields.scale
             && origin.newer(self.ordering.fences.scale)
@@ -328,6 +384,9 @@ impl Draft {
         if fields.attachment_point.is_present() && origin.newer(self.ordering.fences.attachment_point) {
             self.state.attachment_point = apply_field_update(self.state.attachment_point, fields.attachment_point);
             self.ordering.fences.attachment_point = Some(field);
+        }
+        if motion_observed {
+            self.state.motion_source = Some(origin.source.with_explicit_angular_velocity(angular_velocity_accepted));
         }
         if self.facet_changes {
             fields.facets.apply(&mut self.facets, origin, kind, media_bytes, rejections);
@@ -347,7 +406,12 @@ impl Draft {
         {
             classes |= WorldChangeClasses::POSE;
         }
-        if before.linear_motion != after.linear_motion || before.angular_velocity != after.angular_velocity {
+        if before.linear_motion != after.linear_motion
+            || before.angular_velocity != after.angular_velocity
+            || before.is_physical != after.is_physical
+            || before.time_dilation != after.time_dilation
+            || before.motion_source != after.motion_source
+        {
             classes |= WorldChangeClasses::MOTION;
         }
         if before.transform.scale() != after.transform.scale() {
@@ -382,6 +446,10 @@ pub(super) fn validate_uuid(id: Uuid, field: &'static str) -> Result<(), ApplyEr
 
 pub(super) fn validate_vec3(value: Option<Vec3>, field: &'static str) -> Result<(), FieldRejectionReason> {
     if value.is_some_and(|value| !value.is_finite()) { Err(InvalidValue { field }) } else { Ok(()) }
+}
+
+fn validate_motion_vec3(value: Option<Vec3>, field: &'static str, limit: f32) -> Result<(), FieldRejectionReason> {
+    if value.is_some_and(|value| !value.is_finite() || value.abs().max_element() > limit) { Err(InvalidValue { field }) } else { Ok(()) }
 }
 
 pub(super) fn normalized_rotation(value: Quat) -> Result<Quat, FieldRejectionReason> {

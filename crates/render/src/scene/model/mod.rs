@@ -12,6 +12,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use assets::TextureHandle;
@@ -170,11 +171,16 @@ impl Mirror {
     }
 
     pub(in crate::scene) fn apply(&mut self, change: Change) {
+        self.apply_at(change, Instant::now());
+    }
+
+    pub(in crate::scene) fn apply_at(&mut self, change: Change, now: Instant) {
         match change {
             Change::ViewerEnvironment(environment) => self.viewer_environment = environment,
             Change::Object(mut object) => {
                 if let Some(old) = self.objects.get(&object.detail().summary.entity) {
-                    object.inherit_animation_timing(old, std::time::Instant::now());
+                    object.inherit_animation_timing(old, now);
+                    object.update_motion_from(old, now);
                     if old.geometry() == object.geometry() && object.preparation.is_none() {
                         object.preparation = old.preparation.clone();
                         object.mesh = old.mesh.clone();
@@ -182,6 +188,10 @@ impl Mirror {
                             object.materials = old.materials.clone();
                         }
                     }
+                } else {
+                    object.motion = super::motion::MotionState::new(
+                        object.detail().motion_source.and_then(world::UpdateSource::motion_received_at).unwrap_or(now),
+                    );
                 }
                 self.objects.insert(object.detail().summary.entity, object);
             }

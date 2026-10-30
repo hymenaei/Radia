@@ -651,6 +651,11 @@ pub(super) async fn run(
     ack_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let mut ping_timer = time::interval_at(Instant::now() + PING_INTERVAL, PING_INTERVAL);
     ping_timer.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let (motion_status_sender, motion_status_receiver) = watch::channel(super::CircuitMotionStatus {
+        last_packet_received_at: Instant::now().into_std(),
+        measured_ping_delay: connection.circuit.measured_ping_delay_average(),
+        connected: false,
+    });
     ConnectionTask {
         connection,
         events,
@@ -675,6 +680,8 @@ pub(super) async fn run(
         last_send_was_retry: false,
         event_delivery_turn: false,
         packet_rejections: PacketRejections::default(),
+        motion_status_sender,
+        motion_status_receiver,
     }
     .run()
     .await

@@ -146,11 +146,14 @@ pub(in crate::circuit) async fn receive_ack(socket: &UdpSocket, sequence: u32) {
 }
 
 pub(in crate::circuit) async fn receive_connected(events: &mut mpsc::Receiver<SimulatorEvent>) {
+    let mut connected = false;
     loop {
-        if let Some(SimulatorEvent::Simulator(event)) = events.recv().await
-            && matches!(event.into_event(), Event::SimulatorConnected { .. })
-        {
-            break;
+        if let Some(SimulatorEvent::Simulator(event)) = events.recv().await {
+            match event.into_event() {
+                Event::SimulatorConnected { .. } => connected = true,
+                Event::SimulatorMotionStatus { .. } if connected => break,
+                _ => {}
+            }
         }
     }
 }

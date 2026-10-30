@@ -1,5 +1,6 @@
 mod frustum;
 mod intersection;
+pub mod motion;
 
 pub use self::frustum::Frustum;
 pub use self::intersection::{ray_intersects_bounds, ray_triangle_intersection};

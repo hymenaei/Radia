@@ -270,13 +270,16 @@ mod tests {
     }
 
     #[test]
-    fn noop_updates_need_no_revision() {
+    fn repeated_motion_samples_reset_prediction_but_non_motion_noops_need_no_revision() {
         let region = Region::new(27);
         let mut world = World::new(limits(4));
         assert_region_revision(world.adopt_region(region).unwrap().outcome);
         let mut initial = observation(region, 1, 270, 1);
         initial.pose = Some(Pose { position: Some(Vec3::X), rotation: None });
-        assert_revision(world.observe_object(initial).unwrap());
+        let introduced = world.observe_object(initial).unwrap();
+        let ApplyOutcome::Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
+        assert!(introduced.revision.is_some());
+        let initial_revision = world.revision();
         world.journal.revision = WorldRevision(u64::MAX);
         let stale = ObjectPatch {
             pose: Some(Pose { position: Some(Vec3::Y), rotation: None }),
@@ -284,11 +287,13 @@ mod tests {
         };
         assert_eq!(world.patch_object(stale).unwrap().outcome, ApplyOutcome::Unchanged);
 
+        world.journal.revision = initial_revision;
         let same_pose = ObjectPatch {
             pose: Some(Pose { position: Some(Vec3::X), rotation: None }),
             ..ObjectPatch::new(UpdateSource::new(region, 2, Ordered(2), 0), NonZeroU32::new(1).unwrap())
         };
-        assert_eq!(world.patch_object(same_pose).unwrap().outcome, ApplyOutcome::Unchanged);
+        assert_eq!(world.patch_object(same_pose).unwrap().outcome, ApplyOutcome::Updated(entity));
+        world.journal.revision = WorldRevision(u64::MAX);
         assert_eq!(world.observe_object(observation(region, 3, 270, 1)).unwrap().outcome, ApplyOutcome::Unchanged);
         assert_eq!(world.revision(), WorldRevision(u64::MAX));
     }

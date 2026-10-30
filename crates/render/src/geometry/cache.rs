@@ -91,6 +91,7 @@ impl GeometryRenderer {
         let mut full = changes.is_none();
         let mut reconcile_all = false;
         let mut regions = Vec::new();
+        let mut motion_changed = HashSet::new();
         self.cache.changed_objects.clear();
         self.cache.changed_surfaces.clear();
         self.cache.retired_regions.clear();
@@ -99,6 +100,7 @@ impl GeometryRenderer {
                 full |= change.full;
                 reconcile_all |= change.reconcile_all;
                 regions.extend(change.regions.iter().copied());
+                motion_changed.extend(change.motion_changed.iter().copied());
                 self.cache.changed_objects.extend(change.objects.iter().copied());
                 self.cache.changed_surfaces.extend(change.surfaces.iter().copied());
                 self.cache.retired_regions.extend(change.retired.iter().copied());
@@ -152,7 +154,10 @@ impl GeometryRenderer {
             return update;
         }
 
-        let mut update = CacheUpdate::default();
+        if reconcile_all {
+            motion_changed.extend(view.objects().map(|object| object.detail().summary.entity));
+        }
+        let mut update = CacheUpdate { motion_changed, ..CacheUpdate::default() };
         if reconcile_all {
             self.reconcile_snapshot(view, &mut update);
         } else {
@@ -591,6 +596,7 @@ pub(super) struct CacheUpdate {
     pub(super) full_visibility: bool,
     pub(super) mesh_dirty: bool,
     pub(super) background: Vec<Entity>,
+    pub(super) motion_changed: HashSet<Entity>,
     pub(super) pose_items: Vec<ItemIndex>,
     pub(super) parameter_items: Vec<ItemIndex>,
 }

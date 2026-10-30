@@ -250,7 +250,8 @@ fn linear_position_with_view(
     phase_out: bool,
     regions: &[kinematics::RegionBounds],
 ) -> DVec3 {
-    clamp_motion_height(view, sample, linear_position_raw(sample, state, now, phase_out, regions))
+    let position = linear_position_raw(sample, state, now, phase_out, regions);
+    if sample.velocity == Vec3::ZERO && sample.acceleration == Vec3::ZERO { position } else { clamp_motion_height(view, sample, position) }
 }
 
 fn linear_position_raw(
@@ -746,6 +747,18 @@ mod tests {
         let position = linear_position_with_view(&view, high, state, now + Duration::from_secs(1), false, &[]);
 
         assert_eq!(position.z, 4096.0);
+    }
+
+    #[test]
+    fn angular_only_object_keeps_authoritative_height() {
+        let (_scene, view) = child_scene(None);
+        let now = Instant::now();
+        let spinning = sample(DVec3::new(20.0, 1.0, -10.0), Vec3::ZERO, Vec3::ZERO, Vec3::Z, false);
+        let state = MotionState::new(now);
+
+        let position = linear_position_with_view(&view, spinning, state, now + Duration::from_secs(1), false, &[]);
+
+        assert_eq!(position.z, -10.0);
     }
 
     #[test]

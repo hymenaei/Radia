@@ -12,6 +12,7 @@ use futures::{
     pin_mut,
     stream::FuturesUnordered,
 };
+use math::motion::{self as kinematics};
 use render::scene::{
     ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, Object, ReadFailure, ReadJob, ReadQuery, ReadReply,
     ReconcileStep, Reconciler, SceneView,
@@ -29,7 +30,6 @@ use crate::{
     world_reader::{ReadError, WorldReader},
 };
 
-const MAX_UPDATE_INTERPOLATION_TIME: Duration = Duration::from_secs(3);
 const MIN_ACTIVE_MOTION_SQUARED: f32 = 1e-6;
 
 #[derive(Default)]
@@ -48,15 +48,14 @@ impl DeadReckoning {
 
     fn pose(&self, now: Instant) -> Option<WorldPose> {
         let sample = self.sample?;
-        let time = now.saturating_duration_since(sample.received_at).min(MAX_UPDATE_INTERPOLATION_TIME).as_secs_f64();
-        let position =
-            sample.position + sample.velocity.as_dvec3() * time + sample.acceleration.as_dvec3() * (0.5 * time * (time - 1.0 / 45.0));
+        let elapsed = now.saturating_duration_since(sample.received_at).as_secs_f64();
+        let position = kinematics::linear_position(sample.position, sample.velocity, sample.acceleration, elapsed, 1.0, true);
         Some(sample.pose(position))
     }
 
     fn active(&self, now: Instant) -> bool {
         self.sample.is_some_and(|sample| {
-            now.saturating_duration_since(sample.received_at) <= MAX_UPDATE_INTERPOLATION_TIME
+            now.saturating_duration_since(sample.received_at) <= Duration::from_secs_f64(kinematics::MAX_INTERPOLATION_TIME)
                 && (sample.velocity.length_squared() > MIN_ACTIVE_MOTION_SQUARED
                     || sample.acceleration.length_squared() > MIN_ACTIVE_MOTION_SQUARED)
         })
@@ -552,15 +551,15 @@ mod tests {
     }
 
     #[test]
-    fn dead_reckoning_holds_position_after_three_seconds() {
+    fn dead_reckoning_phases_out_after_three_seconds() {
         let received_at = Instant::now();
         let mut sample = motion_sample(received_at);
         sample.velocity = Vec3::X;
         let mut dead_reckoning = DeadReckoning::default();
         dead_reckoning.replace(Some(sample));
 
-        assert_eq!(dead_reckoning.pose(received_at + Duration::from_secs(3)).unwrap().position.x, 13.0);
-        assert_eq!(dead_reckoning.pose(received_at + Duration::from_secs(10)).unwrap().position.x, 13.0);
+        assert_eq!(dead_reckoning.pose(received_at + Duration::from_secs(3)).unwrap().position.x, 12.5);
+        assert_eq!(dead_reckoning.pose(received_at + Duration::from_secs(10)).unwrap().position.x, 12.5);
         assert!(!dead_reckoning.active(received_at + Duration::from_secs(3) + Duration::from_nanos(1)));
     }
 

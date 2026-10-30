@@ -1,13 +1,10 @@
 use std::{collections::HashMap, time::Instant};
 
-use math::{DVec3, Quat, Vec3};
+use math::{DVec3, Quat, Vec3, motion as kinematics};
 use world::{Entity, MotionUpdateKind, Parent, Region, WorldPose, WorldTransform};
 
 use super::SceneView;
 
-const PHYSICS_TIMESTEP: f64 = 1.0 / 45.0;
-const PHASE_OUT_TIME: f64 = 2.0;
-const MAX_INTERPOLATION_TIME: f64 = 3.0;
 const MAX_REGION_CROSSING_TIME: f64 = 1.0;
 const REGION_SIZE: f64 = 256.0;
 const REGION_EDGE_EPSILON: f64 = 0.000_001;
@@ -225,7 +222,7 @@ fn linear_position(sample: MotionSample, state: MotionState, now: Instant, regio
     }
     let elapsed = state.elapsed(now);
     let time_dilation = f64::from(sample.time_dilation);
-    let effective = effective_elapsed(elapsed, time_dilation);
+    let effective = kinematics::effective_elapsed(elapsed, time_dilation, true);
     let predicted = position_at_effective(sample, effective);
     let assigned_bounds = regions.iter().copied().find(|bounds| bounds.region == sample.region);
     let Some(mut bounds) =
@@ -247,7 +244,8 @@ fn linear_position(sample: MotionSample, state: MotionState, now: Instant, regio
         let Some(next_bounds) = regions.iter().copied().find(|candidate| candidate.region == next_region) else { return point };
         if crossing_index == 0 {
             let Some(crossing_elapsed) = raw_elapsed(crossing_time, time_dilation) else { return point };
-            allowed_effective = effective.min(effective_elapsed(crossing_elapsed + MAX_REGION_CROSSING_TIME, time_dilation));
+            allowed_effective =
+                effective.min(kinematics::effective_elapsed(crossing_elapsed + MAX_REGION_CROSSING_TIME, time_dilation, true));
         }
         bounds = next_bounds;
         after_effective = crossing_time + crossing_time.abs().max(1.0) * f64::EPSILON * 8.0;
@@ -256,22 +254,7 @@ fn linear_position(sample: MotionSample, state: MotionState, now: Instant, regio
 }
 
 fn position_at_effective(sample: MotionSample, elapsed: f64) -> DVec3 {
-    let velocity = sample.velocity.as_dvec3();
-    let acceleration = sample.acceleration.as_dvec3();
-    sample.transform.pose.position + velocity * elapsed + acceleration * (0.5 * elapsed * (elapsed - PHYSICS_TIMESTEP))
-}
-
-fn effective_elapsed(elapsed: f64, time_dilation: f64) -> f64 {
-    let elapsed = elapsed.max(0.0);
-    let phase_elapsed = if elapsed <= PHASE_OUT_TIME {
-        elapsed
-    } else if elapsed < MAX_INTERPOLATION_TIME {
-        let phase = elapsed - PHASE_OUT_TIME;
-        PHASE_OUT_TIME + phase - 0.5 * phase * phase
-    } else {
-        PHASE_OUT_TIME + 0.5
-    };
-    phase_elapsed * time_dilation
+    kinematics::position_at_effective(sample.transform.pose.position, sample.velocity, sample.acceleration, elapsed)
 }
 
 fn raw_elapsed(effective: f64, time_dilation: f64) -> Option<f64> {
@@ -279,10 +262,10 @@ fn raw_elapsed(effective: f64, time_dilation: f64) -> Option<f64> {
         return None;
     }
     let phase_elapsed = effective / time_dilation;
-    if phase_elapsed <= PHASE_OUT_TIME {
+    if phase_elapsed <= kinematics::PHASE_OUT_TIME {
         Some(phase_elapsed)
-    } else if phase_elapsed <= PHASE_OUT_TIME + 0.5 {
-        Some(MAX_INTERPOLATION_TIME - (5.0 - 2.0 * phase_elapsed).sqrt())
+    } else if phase_elapsed <= kinematics::PHASE_OUT_TIME + 0.5 {
+        Some(kinematics::MAX_INTERPOLATION_TIME - (5.0 - 2.0 * phase_elapsed).sqrt())
     } else {
         None
     }
@@ -304,7 +287,7 @@ fn first_region_exit(sample: MotionSample, bounds: RegionBounds, after_effective
             if !time.is_finite() || time < after_effective || time < 0.0 || time > max_effective {
                 continue;
             }
-            let derivative = velocity + acceleration * (time - 0.5 * PHYSICS_TIMESTEP);
+            let derivative = velocity + acceleration * (time - 0.5 * kinematics::PHYSICS_TIMESTEP);
             if direction * derivative <= 0.0 {
                 continue;
             }
@@ -318,7 +301,7 @@ fn first_region_exit(sample: MotionSample, bounds: RegionBounds, after_effective
 
 fn boundary_roots(distance: f64, velocity: f64, acceleration: f64) -> [f64; 2] {
     let a = 0.5 * acceleration;
-    let b = velocity - 0.5 * acceleration * PHYSICS_TIMESTEP;
+    let b = velocity - 0.5 * acceleration * kinematics::PHYSICS_TIMESTEP;
     let c = -distance;
     if a == 0.0 {
         let root = if b == 0.0 { f64::NAN } else { -c / b };
@@ -445,18 +428,18 @@ mod tests {
         let now = Instant::now();
         let sample = sample(DVec3::ZERO, Vec3::new(2.0, -1.0, 0.0), Vec3::new(4.0, 2.0, 0.0), Vec3::ZERO, false);
         let position = position_at_effective(sample, 1.0);
-        let expected = DVec3::new(2.0 + 2.0 * (1.0 - PHYSICS_TIMESTEP), -1.0 + (1.0 - PHYSICS_TIMESTEP), 0.0);
-        assert_eq!(effective_elapsed(1.0, 1.0), 1.0);
+        let expected = DVec3::new(2.0 + 2.0 * (1.0 - kinematics::PHYSICS_TIMESTEP), -1.0 + (1.0 - kinematics::PHYSICS_TIMESTEP), 0.0);
+        assert_eq!(kinematics::effective_elapsed(1.0, 1.0, true), 1.0);
         close_vec(position, expected);
         assert_eq!(MotionState::new(now).elapsed(now), 0.0);
     }
 
     #[test]
     fn interpolation_phases_out_and_stops() {
-        assert_eq!(effective_elapsed(2.0, 1.0), 2.0);
-        assert_eq!(effective_elapsed(2.5, 1.0), 2.375);
-        assert_eq!(effective_elapsed(3.0, 1.0), 2.5);
-        assert_eq!(effective_elapsed(12.0, 1.0), 2.5);
+        assert_eq!(kinematics::effective_elapsed(2.0, 1.0, true), 2.0);
+        assert_eq!(kinematics::effective_elapsed(2.5, 1.0, true), 2.375);
+        assert_eq!(kinematics::effective_elapsed(3.0, 1.0, true), 2.5);
+        assert_eq!(kinematics::effective_elapsed(12.0, 1.0, true), 2.5);
     }
 
     #[test]

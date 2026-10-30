@@ -304,7 +304,6 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         pose_seed: 0,
         sit_response: watch::channel(None).1,
-        accepted_sit_response: None,
         last_movement: None,
         incoming,
         _cancel: cancel,
@@ -377,7 +376,6 @@ async fn terrain_clamp_respects_parenting() {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         pose_seed: 0,
         sit_response: watch::channel(None).1,
-        accepted_sit_response: None,
         last_movement: None,
         incoming,
         _cancel: cancel,
@@ -506,7 +504,6 @@ async fn pending_parent_does_not_block_flight() {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         pose_seed: 0,
         sit_response,
-        accepted_sit_response: None,
         last_movement: None,
         incoming,
         _cancel: cancel,
@@ -520,11 +517,11 @@ async fn pending_parent_does_not_block_flight() {
     assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0x0000_2000);
 
     let camera = SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) };
-    sit_response_sender.send_replace(Some(SitResponseState { object_id: seat_id, accepted: true, camera_override: Some(camera) }));
-    assert!(feed.agent_is_seated(), "an accepted response blocks flight until World confirms the parent");
-    let mut seated_controls = HeldControls::default();
-    assert!(!seated_controls.toggle_flying(feed.agent_is_seated()));
-    assert_eq!(seated_controls.observation(false, Quat::IDENTITY).control_flags, 0);
+    sit_response_sender.send_replace(Some(SitResponseState { object_id: seat_id, camera_override: Some(camera) }));
+    assert!(!feed.agent_is_seated(), "an accepted response does not mark the avatar seated before World confirms its parent");
+    let mut pending_controls = HeldControls::default();
+    assert!(pending_controls.toggle_flying(feed.agent_is_seated()));
+    assert_eq!(pending_controls.observation(false, Quat::IDENTITY).control_flags, 0x0000_2000);
     feed.drain().unwrap();
     assert_eq!(feed.sit_camera_pose(), None, "an unresolved parent does not produce a seat camera pose");
 
@@ -536,13 +533,18 @@ async fn pending_parent_does_not_block_flight() {
     advance_scene(&world, &mut scene, &sender, &mut feed);
     std::assert_matches!(feed.agent().expect("agent remains observed").detail().summary.parent, Parent::Resolved(_));
     assert!(feed.agent_is_seated());
-    assert_eq!(feed.accepted_sit_response, None);
-    assert_eq!(feed.sit_camera_pose(), Some((camera, WorldPose { position: DVec3::new(4.0, 5.0, 6.0), rotation: Quat::IDENTITY })));
+    assert_eq!(
+        feed.sit_camera_pose(),
+        Some((seat_id, camera, WorldPose { position: DVec3::new(4.0, 5.0, 6.0), rotation: Quat::IDENTITY }))
+    );
 
-    sit_response_sender.send_replace(Some(SitResponseState { object_id: seat_id, accepted: false, camera_override: Some(camera) }));
+    sit_response_sender.send_replace(Some(SitResponseState { object_id: seat_id, camera_override: Some(camera) }));
     feed.drain().unwrap();
     assert!(feed.agent_is_seated(), "World parent state remains authoritative after stand is requested");
-    assert_eq!(feed.sit_camera_pose(), Some((camera, WorldPose { position: DVec3::new(4.0, 5.0, 6.0), rotation: Quat::IDENTITY })));
+    assert_eq!(
+        feed.sit_camera_pose(),
+        Some((seat_id, camera, WorldPose { position: DVec3::new(4.0, 5.0, 6.0), rotation: Quat::IDENTITY }))
+    );
 
     let _ = world.remove_object(UpdateSource::new(region, 3, Ordered(3), 0), seat_local_id).unwrap();
     advance_scene(&world, &mut scene, &sender, &mut feed);

@@ -24,6 +24,7 @@ pub(crate) const SIT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum AgentControlError {
     InvalidObject,
     InvalidOffset,
+    InvalidSitResponse,
     Busy,
     QueueFull,
     SessionEnded,
@@ -36,6 +37,7 @@ impl fmt::Display for AgentControlError {
         formatter.write_str(match self {
             Self::InvalidObject => "the sit target is invalid",
             Self::InvalidOffset => "the sit offset is invalid",
+            Self::InvalidSitResponse => "the simulator returned an invalid sit target",
             Self::Busy => "a sit request is already pending",
             Self::QueueFull => "the agent control queue is full",
             Self::SessionEnded => "the agent session ended",
@@ -50,6 +52,7 @@ impl Error for AgentControlError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SitOutcome {
     Accepted { auto_pilot: bool, force_mouselook: bool },
+    UnsupportedAutoPilot,
     Refused,
     TimedOut,
     Cancelled,
@@ -103,7 +106,6 @@ pub(crate) struct SitCameraOverride {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SitResponseState {
     pub(crate) object_id: Uuid,
-    pub(crate) accepted: bool,
     pub(crate) camera_override: Option<SitCameraOverride>,
 }
 
@@ -148,10 +150,15 @@ impl AgentControlState {
                 None => pending().await,
             }
         };
-        tokio::select! {
+        let command = tokio::select! {
             biased;
-            command = self.commands.recv() => AgentControlEvent::Command(command),
-            _ = timeout => AgentControlEvent::SitTimedOut,
+            _ = timeout => return AgentControlEvent::SitTimedOut,
+            command = self.commands.recv() => command,
+        };
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            AgentControlEvent::SitTimedOut
+        } else {
+            AgentControlEvent::Command(command)
         }
     }
 
@@ -183,7 +190,7 @@ impl AgentControlState {
         if !self.pending_sit.as_ref().is_some_and(|pending| pending.simulator == simulator && pending.object_id == object_id) {
             return false;
         }
-        self.set_sit_response(Some(SitResponseState { object_id, accepted: true, camera_override }));
+        self.set_sit_response(Some(SitResponseState { object_id, camera_override }));
         if let Some(pending) = self.pending_sit.take()
             && pending.reply.send(Ok(SitOutcome::Accepted { auto_pilot, force_mouselook })).is_err()
         {
@@ -224,14 +231,13 @@ impl AgentControlState {
         }
     }
 
-    pub(crate) fn clear_sit_acceptance(&self) {
+    pub(crate) fn clear_sit_response_without_camera(&self) {
         self.sit_response.send_if_modified(|previous| {
-            let Some(mut response) = *previous else { return false };
-            if !response.accepted {
+            let Some(response) = *previous else { return false };
+            if response.camera_override.is_some() {
                 return false;
             }
-            response.accepted = false;
-            *previous = response.camera_override.is_some().then_some(response);
+            *previous = None;
             true
         });
     }
@@ -326,7 +332,7 @@ pub(super) fn process_agent_control_command<T: SitTransport>(
                 return;
             }
             agent_control.cancel_sit(SitOutcome::Cancelled);
-            agent_control.clear_sit_acceptance();
+            agent_control.clear_sit_response_without_camera();
             if reply.send(Ok(())).is_err() {
                 tracing::trace!("ground-sit caller stopped before receiving the queued outcome");
             }
@@ -345,7 +351,7 @@ pub(super) fn process_agent_control_command<T: SitTransport>(
                 return;
             }
             agent_control.cancel_sit(SitOutcome::Cancelled);
-            agent_control.clear_sit_acceptance();
+            agent_control.clear_sit_response_without_camera();
             if reply.send(Ok(())).is_err() {
                 tracing::trace!("stand-up caller stopped before receiving the queued outcome");
             }
@@ -363,6 +369,14 @@ pub(super) fn process_sit_response<T: SitTransport>(
 ) {
     let Some(response) = decode_sit_response(message) else { return };
     if !agent_control.expects_response(simulator, response.object_id) {
+        return;
+    }
+    if response.target.is_none() {
+        agent_control.fail_sit(AgentControlError::InvalidSitResponse);
+        return;
+    }
+    if response.auto_pilot {
+        agent_control.complete_sit(simulator, Ok(SitOutcome::UnsupportedAutoPilot));
         return;
     }
     let Some((agent_id, session_id)) = active_agent else {
@@ -419,14 +433,20 @@ mod tests {
 
     use crate::test_helpers::simulator_id;
 
-    use super::{AgentControlEvent, AgentControlState, Command, SIT_RESPONSE_TIMEOUT, SitCameraOverride, SitOutcome, SitResponseState};
+    use super::{
+        AgentControlError, AgentControlEvent, AgentControlState, COMMAND_CAPACITY, Command, SIT_RESPONSE_TIMEOUT, SitCameraOverride,
+        SitOutcome, SitResponseState,
+    };
 
     #[tokio::test(start_paused = true)]
     async fn sit_request_times_out() {
         let (handle, mut state, _) = AgentControlState::new();
         let object_id = Uuid::from_u128(3);
         let simulator = simulator_id();
-        let call = tokio::spawn(async move { handle.sit_on_object(object_id, Vec3::ZERO).await });
+        let call = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.sit_on_object(object_id, Vec3::ZERO).await }
+        });
         let AgentControlEvent::Command(Some(Command::SitOnObject { reply, .. })) = state.next_event().await else {
             panic!("object-sit command")
         };
@@ -435,6 +455,33 @@ mod tests {
         std::assert_matches!(state.next_event().await, AgentControlEvent::SitTimedOut);
         state.timeout_sit();
         assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::TimedOut));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expired_deadline_precedes_queued_commands() {
+        let (handle, mut state, _) = AgentControlState::new();
+        let object_id = Uuid::from_u128(4);
+        let simulator = simulator_id();
+        let mut call = Box::pin(handle.sit_on_object(object_id, Vec3::ZERO));
+        assert!(futures::poll!(&mut call).is_pending());
+        let AgentControlEvent::Command(Some(Command::SitOnObject { reply, .. })) = state.next_event().await else {
+            panic!("object-sit command")
+        };
+        state.begin_sit(object_id, simulator, reply);
+
+        let mut queued_calls = Vec::new();
+        for _ in 0..COMMAND_CAPACITY {
+            let mut queued = Box::pin(handle.sit_on_object(Uuid::from_u128(10), Vec3::ZERO));
+            assert!(futures::poll!(&mut queued).is_pending());
+            queued_calls.push(queued);
+        }
+        let mut overflow = Box::pin(handle.sit_on_object(Uuid::from_u128(11), Vec3::ZERO));
+        std::assert_matches!(futures::poll!(&mut overflow), std::task::Poll::Ready(Err(AgentControlError::QueueFull)));
+        advance(SIT_RESPONSE_TIMEOUT).await;
+
+        std::assert_matches!(state.next_event().await, AgentControlEvent::SitTimedOut);
+        state.timeout_sit();
+        assert_eq!(call.await, Ok(SitOutcome::TimedOut));
     }
 
     #[tokio::test]
@@ -468,9 +515,9 @@ mod tests {
         state.begin_sit(object_id, simulator, reply);
         assert!(state.accept_sit(simulator, object_id, true, false, Some(camera_override)));
 
-        assert_eq!(*response.borrow(), Some(SitResponseState { object_id, accepted: true, camera_override: Some(camera_override) }));
-        state.clear_sit_acceptance();
-        assert_eq!(*response.borrow(), Some(SitResponseState { object_id, accepted: false, camera_override: Some(camera_override) }));
+        assert_eq!(*response.borrow(), Some(SitResponseState { object_id, camera_override: Some(camera_override) }));
+        state.clear_sit_response_without_camera();
+        assert_eq!(*response.borrow(), Some(SitResponseState { object_id, camera_override: Some(camera_override) }));
     }
 
     #[test]

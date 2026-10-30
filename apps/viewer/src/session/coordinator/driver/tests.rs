@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{cell::Cell, collections::HashMap, sync::Arc};
 
 use ::inventory::{
     AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryLimits, InventoryNodeId, InventoryNodeKey,
@@ -95,6 +95,26 @@ impl SitTransport for LoopbackSitTransport<'_> {
     }
 }
 
+#[derive(Default)]
+struct RecordingSitTransport {
+    requests: Cell<usize>,
+    sits: Cell<usize>,
+}
+
+impl SitTransport for RecordingSitTransport {
+    fn send_request(&self, _: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error> {
+        assert_eq!(delivery, Delivery::Reliable);
+        self.requests.set(self.requests.get() + 1);
+        Ok(())
+    }
+
+    fn send_sit(&self, _: AgentSit, delivery: Delivery) -> Result<(), network::Error> {
+        assert_eq!(delivery, Delivery::Reliable);
+        self.sits.set(self.sits.get() + 1);
+        Ok(())
+    }
+}
+
 async fn receive_loopback_message(socket: &tokio::net::UdpSocket) -> Message {
     let mut bytes = [0; 2048];
     let (length, _) = socket.recv_from(&mut bytes).await.expect("loopback packet");
@@ -121,11 +141,11 @@ fn alert_message(message: &[u8]) -> Message {
     )
 }
 
-fn sit_response(object_id: Uuid) -> Message {
+fn sit_response(object_id: Uuid, auto_pilot: bool) -> Message {
     Message::AvatarSitResponse(AvatarSitResponse {
         sit_object: SitObject { id: Some(object_id) },
         sit_transform: SitTransform {
-            auto_pilot: Some(true),
+            auto_pilot: Some(auto_pilot),
             sit_position: Some(Vec3::new(4.0, 5.0, 6.0)),
             sit_rotation: Some(Quat::IDENTITY),
             camera_eye_offset: Some(Vec3::new(2.0, 0.0, 1.0)),
@@ -367,7 +387,7 @@ async fn unrelated_alert_preserves_pending_sit() {
     let alert = receive_loopback_message(&viewer_socket).await;
     std::assert_matches!(handle_sit_alert(&mut agent_control, Some(simulator), simulator, &alert), false);
 
-    send_loopback_message(&simulator_socket, viewer_address, sit_response(object_id)).await;
+    send_loopback_message(&simulator_socket, viewer_address, sit_response(object_id, false)).await;
     let response = receive_loopback_message(&viewer_socket).await;
     let mut camera = CameraUplink::new();
     camera.movement_sender().send_replace(Some(crate::agent_movement::MovementObservation {
@@ -378,16 +398,89 @@ async fn unrelated_alert_preserves_pending_sit() {
     }));
     process_sit_response(&transport, &mut agent_control, &mut camera, simulator, Some((agent_id, session_id)), &response);
     assert_eq!(receive_loopback_message(&simulator_socket).await, Message::AgentSit(AgentSit { agent_id, session_id }));
-    assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: true, force_mouselook: false }));
+    assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: false, force_mouselook: false }));
     assert_eq!(camera.movement_sender().borrow().expect("current movement").control_flags & crate::agent_movement::FLY, 0);
     assert_eq!(
         *camera_updates.borrow(),
         Some(SitResponseState {
             object_id,
-            accepted: true,
             camera_override: Some(SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) }),
         })
     );
+}
+
+#[tokio::test]
+async fn invalid_sit_target_fails_without_sending_agent_sit() {
+    use crate::{
+        session::{AgentControlError, AgentControlEvent, AgentControlState, CameraUplink},
+        test_helpers::simulator_id,
+    };
+
+    let simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x68);
+    let session_id = Uuid::from_u128(0x69);
+    for (index, missing_position) in [true, false].into_iter().enumerate() {
+        let object_id = Uuid::from_u128(0x70 + index as u128);
+        let (handle, mut agent_control, sit_updates) = AgentControlState::new();
+        let call = tokio::spawn(async move { handle.sit_on_object(object_id, Vec3::ZERO).await });
+        let AgentControlEvent::Command(Some(command)) = agent_control.next_event().await else { panic!("sit command") };
+        let transport = RecordingSitTransport::default();
+        let mut camera = CameraUplink::new();
+        process_agent_control_command(&transport, &mut agent_control, &mut camera, Some(simulator), Some((agent_id, session_id)), command);
+
+        let Message::AvatarSitResponse(mut response) = sit_response(object_id, false) else { panic!("sit response") };
+        if missing_position {
+            response.sit_transform.sit_position = None;
+        } else {
+            response.sit_transform.sit_rotation = Some(Quat::from_xyzw(0.0, 0.0, 0.0, 0.0));
+        }
+        process_sit_response(
+            &transport,
+            &mut agent_control,
+            &mut camera,
+            simulator,
+            Some((agent_id, session_id)),
+            &Message::AvatarSitResponse(response),
+        );
+
+        assert_eq!(call.await.expect("sit task"), Err(AgentControlError::InvalidSitResponse));
+        assert_eq!(transport.requests.get(), 1);
+        assert_eq!(transport.sits.get(), 0);
+        assert_eq!(*sit_updates.borrow(), None);
+    }
+}
+
+#[tokio::test]
+async fn auto_pilot_sit_returns_unsupported_without_sitting() {
+    use crate::{
+        session::{AgentControlEvent, AgentControlState, CameraUplink, SitOutcome},
+        test_helpers::simulator_id,
+    };
+
+    let simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x7a);
+    let session_id = Uuid::from_u128(0x7b);
+    let object_id = Uuid::from_u128(0x7c);
+    let (handle, mut agent_control, sit_updates) = AgentControlState::new();
+    let call = tokio::spawn(async move { handle.sit_on_object(object_id, Vec3::ZERO).await });
+    let AgentControlEvent::Command(Some(command)) = agent_control.next_event().await else { panic!("sit command") };
+    let transport = RecordingSitTransport::default();
+    let mut camera = CameraUplink::new();
+    process_agent_control_command(&transport, &mut agent_control, &mut camera, Some(simulator), Some((agent_id, session_id)), command);
+
+    process_sit_response(
+        &transport,
+        &mut agent_control,
+        &mut camera,
+        simulator,
+        Some((agent_id, session_id)),
+        &sit_response(object_id, true),
+    );
+
+    assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::UnsupportedAutoPilot));
+    assert_eq!(transport.requests.get(), 1);
+    assert_eq!(transport.sits.get(), 0);
+    assert_eq!(*sit_updates.borrow(), None);
 }
 
 #[tokio::test]
@@ -546,9 +639,9 @@ async fn action_overflow_preserves_sit() {
     process_agent_control_command(&transport, &mut agent_control, &mut camera, Some(simulator), Some((agent_id, session_id)), command);
     assert_eq!(stand.await.expect("stand task"), Err(AgentControlError::QueueFull));
 
-    send_loopback_message(&simulator_socket, viewer_socket.local_addr().expect("viewer address"), sit_response(object_id)).await;
+    send_loopback_message(&simulator_socket, viewer_socket.local_addr().expect("viewer address"), sit_response(object_id, false)).await;
     let response = receive_loopback_message(&viewer_socket).await;
     process_sit_response(&transport, &mut agent_control, &mut camera, simulator, Some((agent_id, session_id)), &response);
     assert_eq!(receive_loopback_message(&simulator_socket).await, Message::AgentSit(AgentSit { agent_id, session_id }));
-    assert_eq!(sit.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: true, force_mouselook: false }));
+    assert_eq!(sit.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: false, force_mouselook: false }));
 }

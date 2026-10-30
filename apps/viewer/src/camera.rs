@@ -7,6 +7,7 @@ use std::{
 use math::Vec3;
 use math::{DQuat, DVec3};
 use render::scene;
+use uuid::Uuid;
 use world::WorldPose;
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -45,7 +46,7 @@ pub(crate) struct FollowCamera {
     focus_offset: DVec3,
     offset: DVec3,
     minimum: f64,
-    sit_camera: Option<SitCameraOverride>,
+    sit_camera: Option<(Uuid, SitCameraOverride)>,
     last_target: Option<(DVec3, DVec3)>,
 }
 
@@ -74,20 +75,20 @@ impl FollowCamera {
     pub(crate) fn follow_with_sit_camera(
         &mut self,
         pose: WorldPose,
-        sit_camera: Option<(SitCameraOverride, WorldPose)>,
+        sit_camera: Option<(Uuid, SitCameraOverride, WorldPose)>,
         viewport: [u32; 2],
         draw_distance: f32,
         lod_factor: f32,
         now: Instant,
     ) -> Option<scene::Camera> {
-        let current_sit_camera = sit_camera.map(|(camera, _)| camera);
+        let current_sit_camera = sit_camera.map(|(object_id, camera, _)| (object_id, camera));
         if self.sit_camera != current_sit_camera {
             let (position, focus) = self.current_position_and_focus(pose, now);
             self.transition_from(position, focus, now);
             self.sit_camera = current_sit_camera;
         }
         let (target_position, target_focus) = match sit_camera {
-            Some((camera, seat_pose)) => (
+            Some((_, camera, seat_pose)) => (
                 seat_pose.position + (seat_pose.rotation * camera.eye_offset).as_dvec3(),
                 seat_pose.position + (seat_pose.rotation * camera.at_offset).as_dvec3(),
             ),
@@ -515,9 +516,17 @@ mod tests {
         let mut follow = FollowCamera::default();
         let now = Instant::now();
         let sit_camera = SitCameraOverride { eye_offset: eye, at_offset: at };
-        follow.follow_with_sit_camera(pose, Some((sit_camera, pose)), [1280, 720], 128.0, 1.0, now).expect("entering sit camera");
+        let seat_id = Uuid::from_u128(1);
+        follow.follow_with_sit_camera(pose, Some((seat_id, sit_camera, pose)), [1280, 720], 128.0, 1.0, now).expect("entering sit camera");
         let camera = follow
-            .follow_with_sit_camera(pose, Some((sit_camera, pose)), [1280, 720], 128.0, 1.0, now + FOCUS_TIME + Duration::from_secs(1))
+            .follow_with_sit_camera(
+                pose,
+                Some((seat_id, sit_camera, pose)),
+                [1280, 720],
+                128.0,
+                1.0,
+                now + FOCUS_TIME + Duration::from_secs(1),
+            )
             .expect("settled sit camera");
 
         assert!((camera.position() - (pose.position + DVec3::new(0.0, 2.0, 1.0))).length() < 1e-6);
@@ -530,18 +539,19 @@ mod tests {
         let pose = WorldPose { position: DVec3::new(100.0, 200.0, 30.0), rotation: math::Quat::IDENTITY };
         let sit_pose = WorldPose { position: pose.position + DVec3::new(2.0, 0.0, 1.0), ..pose };
         let sit_camera = SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) };
+        let seat_id = Uuid::from_u128(1);
         let transition_start = start + Duration::from_millis(1);
         let mut camera = FollowCamera::default();
         let standing = camera.follow_with_sit_camera(pose, None, [1280, 720], 128.0, 1.0, start).expect("standing camera");
         let entering = camera
-            .follow_with_sit_camera(sit_pose, Some((sit_camera, sit_pose)), [1280, 720], 128.0, 1.0, transition_start)
+            .follow_with_sit_camera(sit_pose, Some((seat_id, sit_camera, sit_pose)), [1280, 720], 128.0, 1.0, transition_start)
             .expect("camera while entering the seat");
         assert_eq!(entering.position(), standing.position());
         assert_eq!(entering.direction(), standing.direction());
 
         let seated_at = transition_start + FOCUS_TIME;
         let seated = camera
-            .follow_with_sit_camera(sit_pose, Some((sit_camera, sit_pose)), [1280, 720], 128.0, 1.0, seated_at)
+            .follow_with_sit_camera(sit_pose, Some((seat_id, sit_camera, sit_pose)), [1280, 720], 128.0, 1.0, seated_at)
             .expect("seated camera");
         let leaving = camera
             .follow_with_sit_camera(pose, None, [1280, 720], 128.0, 1.0, seated_at + Duration::from_millis(1))
@@ -558,11 +568,55 @@ mod tests {
     }
 
     #[test]
+    fn switching_seats_with_same_camera_offsets_transitions() {
+        let start = Instant::now();
+        let first_pose = WorldPose { position: DVec3::new(100.0, 200.0, 30.0), rotation: math::Quat::IDENTITY };
+        let second_pose = WorldPose { position: DVec3::new(180.0, 40.0, 22.0), rotation: math::Quat::IDENTITY };
+        let first_seat = Uuid::from_u128(1);
+        let second_seat = Uuid::from_u128(2);
+        let sit_camera = SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) };
+        let mut camera = FollowCamera::default();
+        camera
+            .follow_with_sit_camera(first_pose, Some((first_seat, sit_camera, first_pose)), [1280, 720], 128.0, 1.0, start)
+            .expect("first seat camera");
+        let seated = camera
+            .follow_with_sit_camera(
+                first_pose,
+                Some((first_seat, sit_camera, first_pose)),
+                [1280, 720],
+                128.0,
+                1.0,
+                start + FOCUS_TIME + Duration::from_secs(1),
+            )
+            .expect("settled first seat camera");
+        let switch_at = start + FOCUS_TIME + Duration::from_secs(1) + Duration::from_millis(1);
+        let switching = camera
+            .follow_with_sit_camera(second_pose, Some((second_seat, sit_camera, second_pose)), [1280, 720], 128.0, 1.0, switch_at)
+            .expect("camera at seat switch");
+        assert_eq!(switching.position(), seated.position());
+        assert_eq!(switching.direction(), seated.direction());
+
+        let settled = camera
+            .follow_with_sit_camera(
+                second_pose,
+                Some((second_seat, sit_camera, second_pose)),
+                [1280, 720],
+                128.0,
+                1.0,
+                switch_at + FOCUS_TIME,
+            )
+            .expect("settled second seat camera");
+        assert!((settled.position() - (second_pose.position + DVec3::new(2.0, 0.0, 1.0))).length() < 1e-6);
+        assert!(settled.direction().distance(Vec3::new(-1.0, 0.0, 0.0)) < 1e-6);
+    }
+
+    #[test]
     fn returning_from_free_camera_preserves_live_view_when_sitting() {
         let start = Instant::now();
         let pose = WorldPose { position: DVec3::new(100.0, 200.0, 30.0), rotation: math::Quat::IDENTITY };
         let sit_pose = WorldPose { position: pose.position + DVec3::new(2.0, 0.0, 1.0), ..pose };
         let sit_camera = SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) };
+        let seat_id = Uuid::from_u128(1);
         let mut camera = FollowCamera::default();
         camera.follow_with_sit_camera(pose, None, [1280, 720], 128.0, 1.0, start).expect("standing camera");
 
@@ -571,7 +625,14 @@ mod tests {
         let returned_at = start + Duration::from_millis(1);
         camera.transition_from(free_position, free_focus, returned_at);
         let returned = camera
-            .follow_with_sit_camera(pose, Some((sit_camera, sit_pose)), [1280, 720], 128.0, 1.0, returned_at + Duration::from_millis(1))
+            .follow_with_sit_camera(
+                pose,
+                Some((seat_id, sit_camera, sit_pose)),
+                [1280, 720],
+                128.0,
+                1.0,
+                returned_at + Duration::from_millis(1),
+            )
             .expect("follow camera after returning from free mode");
 
         assert_eq!(returned.position(), free_position);

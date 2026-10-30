@@ -133,7 +133,6 @@ pub(crate) struct SceneFeed {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pose_seed: u64,
     sit_response: watch::Receiver<Option<SitResponseState>>,
-    accepted_sit_response: Option<Uuid>,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
@@ -160,7 +159,6 @@ impl SceneFeed {
         let observations = camera.subscribe();
         let agent_motions = agent_motion.clone();
         let sit_response_updates = sit_response.clone();
-        let accepted_sit_response = (*sit_response.borrow()).filter(|response| response.accepted).map(|response| response.object_id);
         let mut dead_reckoning = DeadReckoning::default();
         dead_reckoning.replace(*agent_motion.borrow_and_update());
         drop(
@@ -192,7 +190,6 @@ impl SceneFeed {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             pose_seed: 0,
             sit_response,
-            accepted_sit_response,
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -248,9 +245,7 @@ impl SceneFeed {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn agent_is_seated(&mut self) -> bool {
-        self.update_sit_response();
-        self.accepted_sit_response.is_some()
-            || self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_)))
+        self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_)))
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -324,7 +319,7 @@ impl SceneFeed {
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    pub(crate) fn sit_camera_pose(&self) -> Option<(SitCameraOverride, WorldPose)> {
+    pub(crate) fn sit_camera_pose(&self) -> Option<(Uuid, SitCameraOverride, WorldPose)> {
         let response = (*self.sit_response.borrow())?;
         let camera = response.camera_override?;
         let agent = self.agent()?;
@@ -339,7 +334,7 @@ impl SceneFeed {
             WorldTransformState::Provisional { pose, .. } => pose,
             WorldTransformState::Unresolved(_) => return None,
         };
-        Some((camera, pose))
+        Some((response.object_id, camera, pose))
     }
 
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {
@@ -376,7 +371,6 @@ impl SceneFeed {
     pub(crate) fn drain(&mut self) -> Result<(), ApplyError> {
         if self.view.status() == render::scene::Status::Closed {
             self.agent = None;
-            self.accepted_sit_response = None;
             self.water_height = None;
             self.incoming.close();
             while let Ok(batch) = self.incoming.try_recv() {
@@ -397,18 +391,7 @@ impl SceneFeed {
                 tracing::info!(status = ?self.view.status(), objects = self.view.object_count(), regions = self.view.region_count(), patches = self.view.patch_count(), revision = self.view.revision().map(|r| r.get()), "scene reconciliation status changed");
             }
         }
-        self.update_sit_response();
         Ok(())
-    }
-
-    fn update_sit_response(&mut self) {
-        if self.sit_response.has_changed().is_ok_and(|changed| changed) {
-            self.accepted_sit_response =
-                (*self.sit_response.borrow_and_update()).filter(|response| response.accepted).map(|response| response.object_id);
-        }
-        if self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_))) {
-            self.accepted_sit_response = None;
-        }
     }
 }
 

@@ -122,15 +122,16 @@ fn set_limit_enforces_once_per_writer_batch() {
         first_limit.join().expect("first limit thread").expect("set first cache limit");
         final_limit.join().expect("final limit thread").expect("set final cache limit");
         limit_started.recv_timeout(Duration::from_secs(3)).expect("limit command finished");
-        assert_eq!(cache.entry_count(), 8, "the final limit is enforced before the following put");
 
         let (limit_cycle, resume_limit_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
         let (put_cycle, resume_put_cycle) = cache.pause_at(WritePoint::MaintenanceCycleComplete);
         resume_limit.send(()).expect("resume writer after limit batch");
         limit_cycle.recv_timeout(Duration::from_secs(3)).expect("limit batch completes before the next put");
+        let entries_after_limit = cache.entry_count();
         resume_limit_cycle.send(()).expect("allow the next put batch");
         put.join().expect("put thread").expect("later put uses the final limit");
         put_cycle.recv_timeout(Duration::from_secs(3)).expect("put batch completes before idle maintenance");
+        assert_eq!(entries_after_limit, 8, "the limit batch enforces once before the following put");
         assert_eq!(cache.entry_count(), 1);
         assert!(cache.accounted_size() <= cache.size_limit());
         resume_put_cycle.send(()).expect("resume idle maintenance");

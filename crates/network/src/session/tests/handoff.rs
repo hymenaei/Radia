@@ -337,6 +337,14 @@ impl TeleportFinishScenario {
             loop {
                 let (bytes, _) = receive_udp(&self.harness.primary).await;
                 let packet = Packet::decode(&bytes).expect("decode former-primary traffic");
+                if packet.is_resent() && packet.sequence() == sent.sequence() {
+                    self.harness
+                        .primary
+                        .send_to(&ack(32, packet.sequence()), self.harness.primary_peer)
+                        .await
+                        .expect("ack repeated explicit send");
+                    continue;
+                }
                 if let Message::RequestMultipleObjects(request) = packet.message() {
                     assert_eq!(request.objects[0].local_id, 78, "the default send must not reach the former primary before its send fence");
                     self.harness.primary.send_to(&ack(32, packet.sequence()), self.harness.primary_peer).await.expect("ack send fence");

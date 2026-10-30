@@ -631,5 +631,5 @@ pub(crate) mod test_values {
 }
 
 #[cfg(test)]
-#[path = "tests/client.rs"]
+#[path = "client_tests.rs"]
 mod tests;

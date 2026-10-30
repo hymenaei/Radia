@@ -144,6 +144,14 @@ impl Object {
         self.motion
     }
 
+    pub(crate) fn motion_changed_from(&self, previous: &Self) -> bool {
+        match (previous.motion_sample(), self.motion_sample()) {
+            (Some(previous), Some(next)) => crate::scene::motion::motion_changed(previous, next),
+            (None, None) => false,
+            _ => true,
+        }
+    }
+
     pub(super) fn update_motion_from(&mut self, previous: &Self, at: Instant) {
         let (Some(previous_sample), Some(next_sample)) = (previous.motion_sample(), self.motion_sample()) else {
             self.motion = MotionState::new(at);

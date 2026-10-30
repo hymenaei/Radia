@@ -21,6 +21,7 @@ pub(crate) struct SceneChanges {
     pub(crate) surfaces: Vec<(Region, crate::scene::SurfaceKind)>,
     pub(crate) regions: Vec<Region>,
     pub(crate) retired: Vec<Region>,
+    pub(crate) motion_changed: Vec<Entity>,
     pub(crate) full: bool,
     pub(crate) reconcile_all: bool,
 }
@@ -54,6 +55,7 @@ impl SceneChanges {
             + self.surfaces.capacity() * size_of::<(Region, crate::scene::SurfaceKind)>()
             + self.regions.capacity() * size_of::<Region>()
             + self.retired.capacity() * size_of::<Region>()
+            + self.motion_changed.capacity() * size_of::<Entity>()
     }
 }
 
@@ -132,6 +134,18 @@ impl SceneView {
             return Err(ApplyError::OutOfOrder);
         }
         let mut changes = SceneChanges::from_batch(&batch);
+        if !batch.replace {
+            for change in &batch.changes {
+                if let Change::Object(object) = change {
+                    let entity = object.detail().summary.entity;
+                    if self.mirror.objects.get(&entity).is_some_and(|previous| object.motion_changed_from(previous))
+                        && !changes.motion_changed.contains(&entity)
+                    {
+                        changes.motion_changed.push(entity);
+                    }
+                }
+            }
+        }
         if changes.retained_bytes() > CHANGE_HISTORY_BYTES {
             changes = SceneChanges { reconcile_all: true, ..SceneChanges::default() };
         }

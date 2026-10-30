@@ -331,10 +331,10 @@ impl GeometryRenderer {
     ) {
         self.motion_indices.clear();
         self.motion_entities.clear();
-        if all_objects {
+        if all_objects || !update.motion_changed.is_empty() {
             for (index, item) in self.cache.items.iter() {
                 if let Some(entity) = item.entity
-                    && motion::needs_evaluation(view, entity)
+                    && (motion::needs_evaluation(view, entity) || motion::has_changed_ancestor(view, entity, &update.motion_changed))
                 {
                     self.motion_indices.push(index);
                 }

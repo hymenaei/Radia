@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -102,8 +102,30 @@ fn same_motion(previous: MotionSample, next: MotionSample) -> bool {
         && previous.source == next.source
 }
 
+pub(in crate::scene) fn motion_changed(previous: MotionSample, next: MotionSample) -> bool {
+    !same_motion(previous, next)
+}
+
 pub(crate) fn needs_evaluation(view: &SceneView, entity: Entity) -> bool {
     motion_in_chain(view, entity, 0)
+}
+
+pub(crate) fn has_changed_ancestor(view: &SceneView, entity: Entity, changed: &HashSet<Entity>) -> bool {
+    let mut ancestor = view.object(entity).and_then(|object| match object.detail().summary.parent {
+        Parent::Resolved(parent) => Some(parent),
+        Parent::Root | Parent::Unknown | Parent::Pending { .. } => None,
+    });
+    for _ in 0..MAX_PARENT_EDGES {
+        let Some(entity) = ancestor else { return false };
+        if changed.contains(&entity) {
+            return true;
+        }
+        ancestor = view.object(entity).and_then(|object| match object.detail().summary.parent {
+            Parent::Resolved(parent) => Some(parent),
+            Parent::Root | Parent::Unknown | Parent::Pending { .. } => None,
+        });
+    }
+    false
 }
 
 fn motion_in_chain(view: &SceneView, entity: Entity, depth: usize) -> bool {
@@ -366,7 +388,15 @@ mod tests {
         world.object(world.entity(Uuid::from_u128(1)).expect("object entity")).unwrap().motion_source().unwrap()
     }
 
-    fn child_scene(parent_scale: Option<Vec3>) -> (Reconciler, SceneView) {
+    fn child_scene(parent_scale: Option<Vec3>) -> (World, Reconciler, SceneView) {
+        child_scene_with_motion(parent_scale, Vec3::X * 2.0, None)
+    }
+
+    fn child_scene_with_motion(
+        parent_scale: Option<Vec3>,
+        parent_velocity: Vec3,
+        parent_angular_velocity: Option<Vec3>,
+    ) -> (World, Reconciler, SceneView) {
         let limits = WorldLimits {
             max_region_registrations: 4,
             max_entities: 16,
@@ -390,7 +420,8 @@ mod tests {
         let mut root =
             ObjectObservation::new(source(1), Uuid::from_u128(1), NonZeroU32::new(1).unwrap(), world::Kind::Object, ParentUpdate::Root);
         root.pose = Some(Pose { position: Some(Vec3::new(20.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
-        root.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X * 2.0), acceleration: None });
+        root.linear_motion = Some(LinearMotion { velocity: Some(parent_velocity), acceleration: None });
+        root.angular_velocity = parent_angular_velocity;
         root.scale = parent_scale;
         let _ = world.observe_object(root).expect("root observation");
         let mut child = ObjectObservation::new(
@@ -405,6 +436,15 @@ mod tests {
         let _ = world.observe_object(child).expect("child observation");
 
         let (mut scene, mut view) = Reconciler::new(Budget::default());
+        reconcile_scene(&mut scene, &mut view, &world, false);
+        assert_eq!(view.object_count(), 2, "both linkset objects are published");
+        (world, scene, view)
+    }
+
+    fn reconcile_scene(scene: &mut Reconciler, view: &mut SceneView, world: &World, notify: bool) {
+        if notify {
+            scene.notify_world_change();
+        }
         let mut now = Instant::now();
         for _ in 0..10_000 {
             match scene.poll(now) {
@@ -425,10 +465,7 @@ mod tests {
                 ReconcileStep::Publish(batch) => view.apply(batch).expect("scene publication"),
                 ReconcileStep::Continue => {}
                 ReconcileStep::Wait(until) => now = until,
-                ReconcileStep::Idle => {
-                    assert_eq!(view.object_count(), 2, "both linkset objects are published");
-                    return (scene, view);
-                }
+                ReconcileStep::Idle => return,
                 ReconcileStep::Asset(_) => panic!("motion fixture unexpectedly requests an asset"),
                 ReconcileStep::Closed => panic!("motion fixture scene unexpectedly closes"),
             }
@@ -680,7 +717,7 @@ mod tests {
     #[test]
     fn linkset_child_follows_parent_without_drawable_dimensions() {
         for scale in [None, Some(Vec3::ZERO)] {
-            let (_scene, view) = child_scene(scale);
+            let (_world, _scene, view) = child_scene(scale);
             let root = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("root is published");
             let child = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(2)).expect("child is published");
             std::assert_matches!(root.placement(), crate::scene::Placement::Hidden(_));
@@ -708,8 +745,48 @@ mod tests {
     }
 
     #[test]
+    fn stopped_parent_repositions_linkset_child() {
+        let (mut world, mut scene, mut view) = child_scene_with_motion(None, Vec3::ZERO, Some(Vec3::Z));
+        let parent_id = Uuid::from_u128(1);
+        let child_id = Uuid::from_u128(2);
+        let parent_entity = view.object(world.entity(parent_id).expect("parent entity")).expect("parent object").detail().summary.entity;
+        let child_entity = view.object(world.entity(child_id).expect("child entity")).expect("child object").detail().summary.entity;
+        let previous = view.object(parent_entity).expect("spinning parent").clone();
+        let now = previous.motion_state().sampled_at + Duration::from_secs(1);
+        let mut placements = HashMap::new();
+        let mut future_placements = HashMap::new();
+        let mut regions = Vec::new();
+        fill_placement_pair(&view, now, now, &[child_entity], &mut placements, &mut future_placements, &mut regions);
+        let spinning_child = placements.get(&child_entity).expect("animated child placement").pose.position;
+        assert!(spinning_child.distance(DVec3::new(23.0, 0.0, 0.0)) > 1.0);
+        let version = view.version();
+
+        let mut stopped = ObjectObservation::new(
+            UpdateSource::new(Region::new(1), 3, OrderEvidence::Ordered(3), 0),
+            parent_id,
+            NonZeroU32::new(1).unwrap(),
+            world::Kind::Object,
+            ParentUpdate::Root,
+        );
+        stopped.pose = Some(Pose { position: Some(Vec3::new(20.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+        stopped.linear_motion = Some(LinearMotion { velocity: Some(Vec3::ZERO), acceleration: Some(Vec3::ZERO) });
+        stopped.angular_velocity = Some(Vec3::ZERO);
+        let _ = world.observe_object(stopped).expect("stopped parent update");
+        reconcile_scene(&mut scene, &mut view, &world, true);
+
+        let parent = view.object(parent_entity).expect("updated parent");
+        assert!(parent.motion_changed_from(&previous));
+        assert!(has_changed_ancestor(&view, child_entity, &HashSet::from([parent_entity])));
+        assert!(view.changes_since(&version).unwrap().any(|change| change.motion_changed.contains(&parent_entity)));
+        let now = parent.motion_state().sampled_at + Duration::from_millis(16);
+        fill_placement_pair(&view, now, now, &[child_entity], &mut placements, &mut future_placements, &mut regions);
+
+        close_vec(placements.get(&child_entity).expect("final child placement").pose.position, DVec3::new(23.0, 0.0, 0.0));
+    }
+
+    #[test]
     fn healthy_circuit_keeps_extrapolating_past_three_seconds() {
-        let (_scene, mut view) = child_scene(None);
+        let (_world, _scene, mut view) = child_scene(None);
         let root = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("root is published");
         let entity = root.detail().summary.entity;
         let now = root.motion_state().sampled_at + Duration::from_secs(5);
@@ -725,7 +802,7 @@ mod tests {
 
     #[test]
     fn falling_avatar_clamps_to_terrain_plus_half_height() {
-        let (_scene, view) = child_scene(None);
+        let (_world, _scene, view) = child_scene(None);
         let now = Instant::now();
         let mut falling = sample(DVec3::new(20.0, 1.0, -10.0), Vec3::NEG_Z * 20.0, Vec3::ZERO, Vec3::ZERO, false);
         falling.kind = world::Kind::Avatar;
@@ -739,7 +816,7 @@ mod tests {
 
     #[test]
     fn object_prediction_clamps_to_region_max_height() {
-        let (_scene, view) = child_scene(None);
+        let (_world, _scene, view) = child_scene(None);
         let now = Instant::now();
         let high = sample(DVec3::new(20.0, 1.0, 5000.0), Vec3::Z, Vec3::ZERO, Vec3::ZERO, false);
         let state = MotionState::new(now);
@@ -751,7 +828,7 @@ mod tests {
 
     #[test]
     fn angular_only_object_keeps_authoritative_height() {
-        let (_scene, view) = child_scene(None);
+        let (_world, _scene, view) = child_scene(None);
         let now = Instant::now();
         let spinning = sample(DVec3::new(20.0, 1.0, -10.0), Vec3::ZERO, Vec3::ZERO, Vec3::Z, false);
         let state = MotionState::new(now);

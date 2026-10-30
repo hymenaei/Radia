@@ -1,3 +1,5 @@
+use std::{future::poll_fn, task::Poll};
+
 use super::*;
 use crate::fixtures::event_queue::EventQueueBudgetHarness;
 
@@ -44,13 +46,24 @@ async fn shared_budget_bounds_event_polls() {
     waiting_client.close_session();
     let waiting_exit = timeout(CLIENT_TEST_TIMEOUT, waiting_task.wait()).await;
 
+    let mut primary_waiter = Box::pin(Arc::clone(&harness.budget.primary_event_queues).acquire_owned());
+    let mut neighbor_waiter = Box::pin(Arc::clone(&harness.budget.neighbor_event_queues).acquire_owned());
+    std::assert_matches!(
+        poll_fn(|context| Poll::Ready((primary_waiter.as_mut().poll(context), neighbor_waiter.as_mut().poll(context)))).await,
+        (Poll::Pending, Poll::Pending)
+    );
+
     assert_eq!(harness.budget.queued_event_bytes.available_permits(), 0, "active polls reserved the complete batch budget");
     write_response(polls.pop().expect("one event poll to release"), event_batch_response(5, &["First", "Second"]));
     let decoded_batch = timeout(CLIENT_TEST_TIMEOUT, harness.budget.queued_event_bytes.acquire())
         .await
         .expect("decoded batch releases unused byte admission")
         .expect("batch budget remains open");
-    assert_eq!(available_event_queue_permits(&harness.budget), 0, "a decoded batch holds its poll slot while forwarding is blocked");
+    std::assert_matches!(
+        poll_fn(|context| Poll::Ready((primary_waiter.as_mut().poll(context), neighbor_waiter.as_mut().poll(context)))).await,
+        (Poll::Pending, Poll::Pending),
+        "a decoded batch holds its poll slot while forwarding is blocked"
+    );
     drop(decoded_batch);
     std::assert_matches!(
         timeout(CLIENT_TEST_TIMEOUT, received_events.recv()).await.expect("held event channel item").expect("event channel remains open"),
@@ -62,6 +75,16 @@ async fn shared_budget_bounds_event_polls() {
         .expect("event channel remains open");
     let forwarded_batch = matches!(batch_event, Event::CapabilityEventBatch { events, .. }
         if events.iter().map(|event| event.message.as_str()).collect::<Vec<_>>() == ["First", "Second"]);
+    let released = timeout(CLIENT_TEST_TIMEOUT, async {
+        tokio::select! {
+            permit = &mut primary_waiter => permit,
+            permit = &mut neighbor_waiter => permit,
+        }
+    })
+    .await
+    .expect("forwarding releases the poll slot")
+    .expect("poll budget remains open");
+    drop((primary_waiter, neighbor_waiter, released));
     polls.push(active_server.next_poll());
 
     shutdown.send_replace(true);
@@ -243,6 +266,9 @@ async fn waiting_event_queue_gets_slot_after_active_poll_stops() {
     }
     let mut active_polls = (0..MAX_CONCURRENT_EVENT_QUEUES - 1).map(|_| active_server.next_poll()).collect::<Vec<_>>();
 
+    let mut next_neighbor_slot = Box::pin(Arc::clone(&budget.neighbor_event_queues).acquire_owned());
+    assert!(poll_fn(|context| Poll::Ready(next_neighbor_slot.as_mut().poll(context).is_pending())).await);
+
     let waiting_task = waiting_client
         .start_event_queue(
             test_simulator_id(MAX_CONCURRENT_EVENT_QUEUES as u64),
@@ -265,9 +291,19 @@ async fn waiting_event_queue_gets_slot_after_active_poll_stops() {
         .expect("start primary EventQueue");
     primary_server.next_seed();
     let primary_poll = primary_server.next_poll();
-    assert_eq!(available_event_queue_permits(&budget), 0, "the primary and neighbor poll slots are fully admitted");
+    let mut next_primary_slot = Box::pin(Arc::clone(&budget.primary_event_queues).acquire_owned());
+    std::assert_matches!(
+        poll_fn(|context| Poll::Ready((next_primary_slot.as_mut().poll(context), next_neighbor_slot.as_mut().poll(context)))).await,
+        (Poll::Pending, Poll::Pending),
+        "active polls retain both role budgets"
+    );
 
     active_polls.remove(0).write_all(&response(404, "Not Found", "text/plain", None, "stopped")).expect("stop one active EventQueue poll");
+    let released = timeout(CLIENT_TEST_TIMEOUT, next_neighbor_slot)
+        .await
+        .expect("stopped poll releases its neighbor slot")
+        .expect("neighbor budget remains open");
+    drop((released, next_primary_slot));
     let waiting_poll = waiting_server.next_poll();
 
     shutdown.send_replace(true);

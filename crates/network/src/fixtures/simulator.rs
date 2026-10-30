@@ -1,4 +1,4 @@
-use std::{collections::HashSet, net::SocketAddr, time::Duration};
+use std::{collections::HashSet, io, net::SocketAddr, time::Duration};
 
 use protocol::{
     lludp::{Message, Packet},
@@ -16,6 +16,22 @@ pub(crate) const fn test_simulator_id(generation: u64) -> SimulatorId {
 
 pub(crate) fn test_source() -> SocketAddr {
     "127.0.0.1:13000".parse().expect("fixture simulator endpoint")
+}
+
+pub(crate) fn clone_udp_socket(socket: &UdpSocket) -> io::Result<std::net::UdpSocket> {
+    #[cfg(unix)]
+    let owned = {
+        use std::os::fd::AsFd;
+        socket.as_fd().try_clone_to_owned()?
+    };
+    #[cfg(windows)]
+    let owned = {
+        use std::os::windows::io::AsSocket;
+        socket.as_socket().try_clone_to_owned()?
+    };
+    let socket = std::net::UdpSocket::from(owned);
+    socket.set_nonblocking(true)?;
+    Ok(socket)
 }
 
 pub(crate) async fn receive_udp(socket: &UdpSocket) -> (Vec<u8>, SocketAddr) {

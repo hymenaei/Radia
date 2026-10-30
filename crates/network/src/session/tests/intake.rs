@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::login::*;
-use super::send::targeted_send_handle;
+use super::send::{chat_message_with_text, targeted_send_handle};
 use super::*;
 use crate::event::send_client_event;
 use tokio::task::yield_now;
@@ -386,7 +386,8 @@ async fn session_drop_cancels_active_saturated_session() {
     let simulator = UdpSocket::bind("127.0.0.1:0").await.expect("bind fake simulator");
     let simulator_address = simulator.local_addr().expect("read simulator address");
     let (login_url, poll_started, http_task) = fake_http(simulator_address.port()).await;
-    let (mut session, retained_handle, worker, event_sender) = spawn_test_session_with_event_sender(login_url);
+    let (mut session, retained_handle, worker, mut probe) = spawn_test_session_with_event_probe(login_url);
+    let event_sender = &probe.events;
 
     std::assert_matches!(next_event(&mut session.events).await, Event::LoginAccepted { .. });
     let (use_circuit, peer) = receive_udp(&simulator).await;
@@ -440,8 +441,30 @@ async fn session_drop_cancels_active_saturated_session() {
     .await
     .expect("the client should process reliable control while events are saturated");
     assert!(!*retained_handle.worker_finished.borrow());
-    let mut buffer = [0; 65_535];
-    std::assert_matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
+    timeout(CLIENT_TIMEOUT, probe.observed.wait_for(|sequence| *sequence == Some(25)))
+        .await
+        .expect("session manager forwards the saturated chat")
+        .expect("event relay remains active");
+    retained_handle
+        .send(chat_message_with_text("session remains active".into()), Delivery::Reliable)
+        .expect("queue session progress fence");
+    let packet = timeout(CLIENT_TIMEOUT, async {
+        loop {
+            let (bytes, _) = receive_udp(&simulator).await;
+            let packet = Packet::decode(&bytes).expect("decode session progress fence");
+            match packet.message() {
+                Message::LogoutRequest(_) => panic!("a queued application event must not log out the session"),
+                Message::ChatFromViewer(message) => {
+                    assert_eq!(message.chat_data.message, "session remains active");
+                    break packet;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("session progress fence arrives");
+    simulator.send_to(&server_ack(26, packet.sequence()), peer).await.expect("ack session progress fence");
 
     drop(session);
     let (_, logout) = receive_client_message(&simulator, peer, |message| matches!(message, Message::LogoutRequest(_))).await;

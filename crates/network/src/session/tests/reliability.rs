@@ -393,7 +393,18 @@ async fn sustained_application_pressure_disconnects() {
     )
     .await;
     tokio::time::pause();
-    tokio::time::advance(APPLICATION_EVENT_PRESSURE_GRACE_PERIOD).await;
+    let first_half = APPLICATION_EVENT_PRESSURE_GRACE_PERIOD / 2;
+    advance(first_half).await;
+    tokio::time::resume();
+    simulator.send_to(&start_ping_packet(rejected_sequence + 2, 11, 0), peer).await.expect("refresh keepalive during pressure");
+    let (_, keepalive_acks) = crate::fixtures::simulator::receive_message_with_acknowledgements(
+        &simulator,
+        |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 11),
+    )
+    .await;
+    acknowledged.extend(keepalive_acks);
+    tokio::time::pause();
+    advance(APPLICATION_EVENT_PRESSURE_GRACE_PERIOD - first_half + Duration::from_millis(1)).await;
     let logout = timeout(SIMULATOR_TIMEOUT, async {
         loop {
             let (bytes, _) = receive(&simulator).await;

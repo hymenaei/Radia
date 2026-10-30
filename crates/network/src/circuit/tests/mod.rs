@@ -272,20 +272,14 @@ pub(in crate::circuit) async fn run_budget_retry(role: ConnectionRole) {
     })
     .await
     .expect("memory rejection is recorded before inspecting acknowledgements");
-    let mut buffer = [0; 65_535];
-    let mut acknowledged = false;
-    loop {
-        match simulator.try_recv_from(&mut buffer) {
-            Ok((size, _)) => {
-                let packet = Packet::decode(&buffer[..size]).expect("decode simulator acknowledgement traffic");
-                acknowledged |= packet.appended_acks().contains(&sequence)
-                    || matches!(packet.message(), Message::PacketAck(message) if message.packets.iter().any(|ack| ack.id == sequence));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(error) => panic!("read simulator acknowledgement traffic: {error}"),
-        }
-    }
-    assert!(!acknowledged, "memory-rejected reliable packet must not be acknowledged");
+    let fence = Packet::new(sequence + 1, crate::fixtures::circuit::start_ping(77, 0)).encode().expect("encode admission fence");
+    simulator.send_to(&fence, peer).await.expect("fence rejected memory admission");
+    let (_, acknowledgements) = crate::fixtures::simulator::receive_message_with_acknowledgements(
+        &simulator,
+        |message| matches!(message, Message::CompletePingCheck(ping) if ping.ping_id.ping_id == 77),
+    )
+    .await;
+    assert!(!acknowledgements.contains(&sequence), "memory-rejected reliable packet must not be acknowledged");
     assert!(
         coverage.snapshot().losses.iter().any(|loss| matches!(
             loss,

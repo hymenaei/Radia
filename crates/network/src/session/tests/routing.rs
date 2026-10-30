@@ -42,8 +42,9 @@ async fn run_queued_target_does_not_follow_neighbor_replacement() {
     );
 
     let mut buffer = [0; 65_535];
+    let observer = clone_udp_socket(&replacement).expect("inspect replacement endpoint");
     loop {
-        match replacement.try_recv_from(&mut buffer) {
+        match observer.recv_from(&mut buffer) {
             Ok((size, _)) => {
                 let packet = Packet::decode(&buffer[..size]).expect("decode replacement traffic");
                 assert!(
@@ -69,7 +70,7 @@ async fn run_neighbor_targets_and_replacements() {
         receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
     assert_eq!(sent_peer, harness.neighbor_peer);
     let mut buffer = [0; 65_535];
-    std::assert_matches!(harness.primary.try_recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
+    std::assert_matches!(clone_udp_socket(&harness.primary).expect("inspect primary endpoint").recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
 
     let mut disable = test_fixture("disable_simulator.hex");
     set_sequence(&mut disable, 42);
@@ -369,7 +370,7 @@ async fn neighbor_circuits_are_independent() {
     set_sequence(&mut chat, 43);
     harness.neighbor.send_to(&chat, neighbor_peer).await.expect("send after neighbor disabled");
     let mut buffer = [0; 65_535];
-    match harness.neighbor.try_recv_from(&mut buffer) {
+    match clone_udp_socket(&harness.neighbor).expect("inspect disabled neighbor endpoint").recv_from(&mut buffer) {
         Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ConnectionReset) => {}
         Err(error) => panic!("read disabled neighbor traffic: {error}"),
         Ok((size, _)) => {

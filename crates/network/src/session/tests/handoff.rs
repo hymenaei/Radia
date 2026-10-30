@@ -323,20 +323,30 @@ impl TeleportFinishScenario {
             );
         }
         self.harness.primary.send_to(&ack(31, sent.sequence()), self.harness.primary_peer).await.expect("ack explicit former-primary send");
-        let mut buffer = [0; 65_535];
-        loop {
-            match self.harness.primary.try_recv_from(&mut buffer) {
-                Ok((size, _)) => {
-                    let packet = Packet::decode(&buffer[..size]).expect("decode former-primary traffic");
-                    assert!(
-                        !matches!(packet.message(), Message::RequestMultipleObjects(_)),
-                        "the queued default send must not also reach the former primary"
-                    );
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => panic!("read former-primary traffic: {error}"),
-            }
+        let mut fence = object_request();
+        if let Message::RequestMultipleObjects(request) = &mut fence {
+            request.objects[0].local_id = 78;
         }
+        let (completed, response) = oneshot::channel();
+        self.harness
+            .commands
+            .send(Command::SendTo { simulator_id: self.harness.primary_id, message: fence, delivery: Delivery::Reliable, completed })
+            .await
+            .expect("queue former-primary send fence");
+        timeout(WAIT, async {
+            loop {
+                let (bytes, _) = receive_udp(&self.harness.primary).await;
+                let packet = Packet::decode(&bytes).expect("decode former-primary traffic");
+                if let Message::RequestMultipleObjects(request) = packet.message() {
+                    assert_eq!(request.objects[0].local_id, 78, "the default send must not reach the former primary before its send fence");
+                    self.harness.primary.send_to(&ack(32, packet.sequence()), self.harness.primary_peer).await.expect("ack send fence");
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("former-primary send fence arrives");
+        response.await.expect("send fence response").expect("send fence completes");
         let wrong_region = self.target_region + 1;
         let mut demoted_movement = movement_complete_packet(50, self.session.agent_id, self.session.session_id, wrong_region);
         demoted_movement[0] |= 0x40;
@@ -702,7 +712,7 @@ async fn handoff_waits_for_matching_movement() {
         Event::SimulatorMotionStatus { simulator_id: id, .. } if id == simulator_id
     );
     let mut buffer = [0; 65_535];
-    std::assert_matches!(neighbor.try_recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
+    std::assert_matches!(clone_udp_socket(&neighbor).expect("inspect destination endpoint").recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
 
     let mut handshake = test_fixture("region_handshake.hex");
     handshake[0] |= 0x40;

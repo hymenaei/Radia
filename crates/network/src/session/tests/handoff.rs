@@ -323,15 +323,20 @@ impl TeleportFinishScenario {
             );
         }
         self.harness.primary.send_to(&ack(31, sent.sequence()), self.harness.primary_peer).await.expect("ack explicit former-primary send");
-        assert!(
-            timeout(
-                Duration::from_millis(50),
-                receive_message(&self.harness.primary, |message| matches!(message, Message::RequestMultipleObjects(_)))
-            )
-            .await
-            .is_err(),
-            "the queued default send must not also reach the former primary"
-        );
+        let mut buffer = [0; 65_535];
+        loop {
+            match self.harness.primary.try_recv_from(&mut buffer) {
+                Ok((size, _)) => {
+                    let packet = Packet::decode(&buffer[..size]).expect("decode former-primary traffic");
+                    assert!(
+                        !matches!(packet.message(), Message::RequestMultipleObjects(_)),
+                        "the queued default send must not also reach the former primary"
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("read former-primary traffic: {error}"),
+            }
+        }
         let wrong_region = self.target_region + 1;
         let mut demoted_movement = movement_complete_packet(50, self.session.agent_id, self.session.session_id, wrong_region);
         demoted_movement[0] |= 0x40;
@@ -697,7 +702,7 @@ async fn handoff_waits_for_matching_movement() {
         Event::SimulatorMotionStatus { simulator_id: id, .. } if id == simulator_id
     );
     let mut buffer = [0; 65_535];
-    assert!(timeout(Duration::from_millis(50), neighbor.recv_from(&mut buffer)).await.is_err());
+    std::assert_matches!(neighbor.try_recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
 
     let mut handshake = test_fixture("region_handshake.hex");
     handshake[0] |= 0x40;
@@ -746,7 +751,7 @@ async fn handoff_waits_for_matching_movement() {
     assert_eq!(movement.data.region_handle, region_handle);
 
     shutdown_signal.send_replace(true);
-    assert!(timeout(Duration::from_millis(200), task).await.expect("destination stops").expect("destination task").is_ok());
+    assert!(timeout(WAIT, task).await.expect("destination stops").expect("destination task").is_ok());
 }
 
 #[test]

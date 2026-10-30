@@ -619,17 +619,5 @@ fn encode_request<Request: Serialize + ?Sized>(payload: &Request) -> Result<Vec<
 }
 
 #[cfg(test)]
-pub(crate) mod test_values {
-    use std::time::Duration;
-
-    use super::Client;
-
-    pub(crate) fn client_with_request_timeout(mut client: Client, timeout: Duration) -> Client {
-        client.request_timeout = timeout;
-        client
-    }
-}
-
-#[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;

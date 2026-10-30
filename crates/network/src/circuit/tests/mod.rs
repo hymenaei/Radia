@@ -255,20 +255,37 @@ pub(in crate::circuit) async fn run_budget_retry(role: ConnectionRole) {
     let sequence = 700u32;
     wire[0] |= 0x40;
     wire[1..5].copy_from_slice(&sequence.to_be_bytes());
+    let mut coverage_changed = coverage.subscribe();
     simulator.send_to(&wire, peer).await.expect("send packet while memory admission is full");
-
-    let admission_loss = timeout(Duration::from_millis(100), async {
+    timeout(WAIT, async {
         loop {
-            let (packet, _) = receive_packet(&simulator).await;
-            if packet.appended_acks().contains(&sequence)
-                || matches!(packet.message(), Message::PacketAck(message) if message.packets.iter().any(|ack| ack.id == sequence))
-            {
+            if coverage.snapshot().losses.iter().any(|loss| {
+                matches!(loss, CoverageLoss::Source(record)
+                    if record.watermark.simulator_id == simulator_id
+                        && record.watermark.source == CoverageSource::Lludp
+                        && record.reason == CoverageLossReason::RetainedMemoryAdmission)
+            }) {
                 break;
             }
+            coverage_changed.changed().await.expect("coverage ledger remains open");
         }
     })
-    .await;
-    assert!(admission_loss.is_err(), "memory-rejected reliable packet must not be acknowledged");
+    .await
+    .expect("memory rejection is recorded before inspecting acknowledgements");
+    let mut buffer = [0; 65_535];
+    let mut acknowledged = false;
+    loop {
+        match simulator.try_recv_from(&mut buffer) {
+            Ok((size, _)) => {
+                let packet = Packet::decode(&buffer[..size]).expect("decode simulator acknowledgement traffic");
+                acknowledged |= packet.appended_acks().contains(&sequence)
+                    || matches!(packet.message(), Message::PacketAck(message) if message.packets.iter().any(|ack| ack.id == sequence));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("read simulator acknowledgement traffic: {error}"),
+        }
+    }
+    assert!(!acknowledged, "memory-rejected reliable packet must not be acknowledged");
     assert!(
         coverage.snapshot().losses.iter().any(|loss| matches!(
             loss,

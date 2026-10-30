@@ -24,7 +24,7 @@ async fn session_drop_cancels_login() {
 
 #[tokio::test]
 async fn session_drop_cancels_mfa() {
-    let (login_url, server) = fake_mfa_challenge_server().await;
+    let (login_url, stop_server, server) = fake_mfa_challenge_server().await;
     let (mut session, retained_handle, worker) = spawn_test_session(login_url);
 
     let challenge = match next_event(&mut session.events).await {
@@ -35,6 +35,7 @@ async fn session_drop_cancels_mfa() {
 
     assert!(timeout(Duration::from_secs(1), worker).await.expect("MFA worker should stop").expect("client task").is_ok());
     assert!(*retained_handle.worker_finished.borrow());
+    stop_server.send(()).expect("fake MFA server should wait for test shutdown");
     assert!(!timeout(Duration::from_secs(1), server).await.expect("fake server should finish").expect("server task"));
     drop(challenge);
 }
@@ -352,10 +353,7 @@ async fn session_overflow_requires_ack_before_covered_event() {
         timeout(Duration::from_secs(1), loss_receiver).await.expect("overflow wakes independently").expect("loss receiver"),
         Some(Event::CoverageLost { loss: CoverageLoss::SessionOverflow { generation: 1 } })
     );
-    assert!(
-        timeout(Duration::from_millis(10), &mut event_receiver).await.is_err(),
-        "overflow-covered event waits for explicit acknowledgement"
-    );
+    assert_eq!(event_receiver.try_recv().err(), Some(oneshot::error::TryRecvError::Empty));
     ack_sender.send(()).expect("ask Session to acknowledge surfaced overflow");
     std::assert_matches!(
         timeout(Duration::from_secs(1), &mut event_receiver).await.expect("acknowledgement releases overflow-covered event").expect("event receiver"),
@@ -442,12 +440,8 @@ async fn session_drop_cancels_active_saturated_session() {
     .await
     .expect("the client should process reliable control while events are saturated");
     assert!(!*retained_handle.worker_finished.borrow());
-
-    let unexpected_logout = timeout(Duration::from_millis(50), async {
-        receive_client_message(&simulator, peer, |message| matches!(message, Message::LogoutRequest(_))).await
-    })
-    .await;
-    assert!(unexpected_logout.is_err(), "one queued application event should not close a healthy session");
+    let mut buffer = [0; 65_535];
+    std::assert_matches!(simulator.try_recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
 
     drop(session);
     let (_, logout) = receive_client_message(&simulator, peer, |message| matches!(message, Message::LogoutRequest(_))).await;

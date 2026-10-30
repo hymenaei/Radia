@@ -4,15 +4,17 @@ use crate::fixtures::event_queue::EventQueueBudgetHarness;
 #[tokio::test(flavor = "multi_thread")]
 async fn shared_budget_bounds_event_polls() {
     let task_count = MAX_CONCURRENT_EVENT_QUEUES + 1;
-    let server = EventQueueBudgetTestServer::start();
+    let active_server = EventQueueBudgetTestServer::start();
+    let waiting_server = EventQueueBudgetTestServer::start();
     let harness = EventQueueBudgetHarness::new(1);
-    let clients = (0..2).map(|_| harness.client(server.url("/seed"))).collect::<Vec<_>>();
+    let clients = (0..2).map(|_| harness.client(active_server.url("/seed"))).collect::<Vec<_>>();
     let events = harness.events.clone();
+    let waiting_client = harness.client(waiting_server.url("/seed"));
     events.try_send(EventEnvelope::new(Event::SendFailed("hold event forwarding".into()))).expect("fill the application event channel");
     let shutdown = harness.shutdown.clone();
     let mut tasks = Vec::with_capacity(task_count);
 
-    for index in 0..task_count {
+    for index in 0..MAX_CONCURRENT_EVENT_QUEUES {
         let client = clients[index % clients.len()].clone();
         let task = if index == 0 {
             harness.start_with_role(&client, test_simulator_id(index as u64 + 1), test_source(), CoverageLossLedger::new(), true)
@@ -23,45 +25,44 @@ async fn shared_budget_bounds_event_polls() {
     }
     let mut received_events = EventReceiver::new(harness.received_events);
 
-    let mut polls = (0..MAX_CONCURRENT_EVENT_QUEUES).map(|_| server.next_poll()).collect::<Vec<_>>();
-    for _ in 0..task_count {
-        server.next_seed();
+    let mut polls = (0..MAX_CONCURRENT_EVENT_QUEUES).map(|_| active_server.next_poll()).collect::<Vec<_>>();
+    for _ in 0..MAX_CONCURRENT_EVENT_QUEUES {
+        active_server.next_seed();
     }
-    let unexpected_poll = server.polls.recv_timeout(Duration::from_millis(150)).ok();
-    let admitted = unexpected_poll.is_none();
-    let mut forwarded_batch = false;
+    let waiting_task = waiting_client
+        .start_event_queue(
+            test_simulator_id(task_count as u64),
+            test_source(),
+            harness.events.clone(),
+            harness.shutdown_requested.clone(),
+            CoverageLossLedger::new(),
+        )
+        .expect("start waiting event queue");
+    waiting_server.next_seed();
+    assert_eq!(available_event_queue_permits(&harness.budget), 0, "all event queue permits are held by active polls");
 
-    if admitted {
-        let wait_started = Instant::now();
-        write_response(polls.pop().expect("one event poll to release"), event_batch_response(5, &["First", "Second"]));
-        std::assert_matches!(
-            timeout(CLIENT_TEST_TIMEOUT, received_events.recv()).await.expect("held event channel item").expect("event channel remains open"),
-            Event::SendFailed(message) if message == "hold event forwarding"
-        );
-        timeout(CLIENT_TEST_TIMEOUT, async {
-            while received_events.is_empty() {
-                yield_now().await;
-            }
-        })
+    waiting_client.close_session();
+    let waiting_exit = timeout(CLIENT_TEST_TIMEOUT, waiting_task.wait()).await;
+
+    assert_eq!(harness.budget.queued_event_bytes.available_permits(), 0, "active polls reserved the complete batch budget");
+    write_response(polls.pop().expect("one event poll to release"), event_batch_response(5, &["First", "Second"]));
+    let decoded_batch = timeout(CLIENT_TEST_TIMEOUT, harness.budget.queued_event_bytes.acquire())
         .await
-        .expect("first event should fill the application channel");
-        let no_poll_while_forwarding = server.polls.recv_timeout(Duration::from_millis(150)).is_err();
-        let batch_event = timeout(CLIENT_TEST_TIMEOUT, received_events.recv())
-            .await
-            .expect("complete decoded batch should be forwarded")
-            .expect("event channel remains open");
-        let next_poll = server.next_poll();
-        let observed_wait = wait_started.elapsed();
-        eprintln!(
-            "observed EventQueue wait from confirmed contention to next server poll (includes slot release and HTTP handling): {observed_wait:?}"
-        );
-        polls.push(next_poll);
-        forwarded_batch = no_poll_while_forwarding
-            && matches!(batch_event, Event::CapabilityEventBatch { events, .. }
-                        if events.iter().map(|event| event.message.as_str()).collect::<Vec<_>>() == ["First", "Second"]);
-    } else if let Some(poll) = unexpected_poll {
-        polls.push(poll);
-    }
+        .expect("decoded batch releases unused byte admission")
+        .expect("batch budget remains open");
+    assert_eq!(available_event_queue_permits(&harness.budget), 0, "a decoded batch holds its poll slot while forwarding is blocked");
+    drop(decoded_batch);
+    std::assert_matches!(
+        timeout(CLIENT_TEST_TIMEOUT, received_events.recv()).await.expect("held event channel item").expect("event channel remains open"),
+        Event::SendFailed(message) if message == "hold event forwarding"
+    );
+    let batch_event = timeout(CLIENT_TEST_TIMEOUT, received_events.recv())
+        .await
+        .expect("complete decoded batch should be forwarded")
+        .expect("event channel remains open");
+    let forwarded_batch = matches!(batch_event, Event::CapabilityEventBatch { events, .. }
+        if events.iter().map(|event| event.message.as_str()).collect::<Vec<_>>() == ["First", "Second"]);
+    polls.push(active_server.next_poll());
 
     shutdown.send_replace(true);
     drop(polls);
@@ -73,11 +74,13 @@ async fn shared_budget_bounds_event_polls() {
     })
     .await
     .expect("all event queue tasks should stop");
-    server.stop();
-    server.finish();
+    active_server.stop();
+    waiting_server.stop();
+    assert_eq!(active_server.finish(), 0, "all active polls were observed");
+    assert_eq!(waiting_server.finish(), 0, "a queue waiting for admission never polled before it closed");
 
-    assert!(admitted, "a shared EventQueueGet permit must hold until the batch is decoded and forwarded");
-    assert!(forwarded_batch, "the permit must remain held until every decoded event is forwarded");
+    assert_eq!(waiting_exit.expect("session close should cancel permit acquisition"), EventQueueExit::Stopped);
+    assert!(forwarded_batch, "the complete decoded batch is forwarded before the active poll starts again");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -189,10 +192,10 @@ async fn event_poll_wait_cancels_on_close() {
         )
         .expect("start waiting event queue");
     server.next_seed();
-    assert!(server.polls.recv_timeout(Duration::from_millis(150)).is_err(), "the waiting queue must not start a poll");
+    assert_eq!(available_event_queue_permits(&budget), 0, "all event queue poll slots are occupied");
 
     waiting_client.close_session();
-    let waiting_exit = timeout(Duration::from_millis(500), waiting_task.wait()).await;
+    let waiting_exit = timeout(CLIENT_TEST_TIMEOUT, waiting_task.wait()).await;
     shutdown.send_replace(true);
     drop(polls);
 
@@ -204,7 +207,7 @@ async fn event_poll_wait_cancels_on_close() {
     .await
     .expect("admitted event queues should stop");
     server.stop();
-    server.finish();
+    assert_eq!(server.finish(), 0, "the waiting queue never starts a poll while all slots are occupied");
 
     assert_eq!(waiting_exit.expect("session close should cancel permit acquisition"), EventQueueExit::Stopped);
 }
@@ -217,7 +220,7 @@ async fn waiting_event_queue_gets_slot_after_active_poll_stops() {
     let budget = CapabilityBudget::new();
     let active_client = Client::new_with_budget(active_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
     let waiting_client = Client::new_with_budget(waiting_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
-    let primary_client = Client::new_with_budget(primary_server.url("/seed"), budget).expect("active Tokio runtime");
+    let primary_client = Client::new_with_budget(primary_server.url("/seed"), budget.clone()).expect("active Tokio runtime");
     let (events, _received_events) = mpsc::channel(CLIENT_EVENT_CAPACITY);
     let (shutdown, shutdown_requested) = watch::channel(false);
     let mut active_tasks = Vec::with_capacity(MAX_CONCURRENT_EVENT_QUEUES - 1);
@@ -261,17 +264,11 @@ async fn waiting_event_queue_gets_slot_after_active_poll_stops() {
         )
         .expect("start primary EventQueue");
     primary_server.next_seed();
-    let primary_poll =
-        primary_server.polls.recv_timeout(Duration::from_secs(1)).expect("the primary EventQueue uses its reserved poll slot");
-    assert!(waiting_server.polls.recv_timeout(Duration::from_millis(150)).is_err(), "neighbor polls cannot take the reserved primary slot");
+    let primary_poll = primary_server.next_poll();
+    assert_eq!(available_event_queue_permits(&budget), 0, "the primary and neighbor poll slots are fully admitted");
 
     active_polls.remove(0).write_all(&response(404, "Not Found", "text/plain", None, "stopped")).expect("stop one active EventQueue poll");
-    let released_at = Instant::now();
-    let waiting_poll = waiting_server
-        .polls
-        .recv_timeout(Duration::from_secs(1))
-        .expect("a queued simulator should use the released EventQueue slot promptly");
-    assert!(released_at.elapsed() < Duration::from_secs(1), "a queued simulator should use the released EventQueue slot promptly");
+    let waiting_poll = waiting_server.next_poll();
 
     shutdown.send_replace(true);
     drop((active_polls, waiting_poll, primary_poll));
@@ -283,9 +280,9 @@ async fn waiting_event_queue_gets_slot_after_active_poll_stops() {
     active_server.stop();
     waiting_server.stop();
     primary_server.stop();
-    active_server.finish();
-    waiting_server.finish();
-    primary_server.finish();
+    assert_eq!(active_server.finish(), 0, "all active poll requests were observed");
+    assert_eq!(waiting_server.finish(), 0, "the waiting poll was observed");
+    assert_eq!(primary_server.finish(), 0, "the primary poll was observed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -378,9 +375,9 @@ async fn primary_event_queue_slot_follows_role_changes() {
     neighbor_server.stop();
     old_primary_server.stop();
     new_primary_server.stop();
-    neighbor_server.finish();
-    old_primary_server.finish();
-    new_primary_server.finish();
+    assert_eq!(neighbor_server.finish(), 0, "all neighbor polls were observed");
+    assert_eq!(old_primary_server.finish(), 0, "all former primary polls were observed");
+    assert_eq!(new_primary_server.finish(), 0, "all new primary polls were observed");
 }
 
 #[tokio::test(flavor = "multi_thread")]

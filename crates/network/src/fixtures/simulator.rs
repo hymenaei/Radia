@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{collections::HashSet, net::SocketAddr, time::Duration};
 
 use protocol::{
     lludp::{Message, Packet},
@@ -34,6 +34,28 @@ pub(crate) async fn receive_message(socket: &UdpSocket, expected: impl Fn(&Messa
             let packet = Packet::decode(&bytes).expect("decode local simulator packet");
             if expected(packet.message()) {
                 return packet;
+            }
+        }
+    })
+    .await
+    .expect("receive expected local simulator message")
+}
+
+pub(crate) async fn receive_message_with_acknowledgements(
+    socket: &UdpSocket,
+    expected: impl Fn(&Message) -> bool,
+) -> (Packet, HashSet<u32>) {
+    timeout(TEST_TIMEOUT, async {
+        let mut acknowledgements = HashSet::new();
+        loop {
+            let (bytes, _) = receive_udp(socket).await;
+            let packet = Packet::decode(&bytes).expect("decode local simulator packet");
+            acknowledgements.extend(packet.appended_acks().iter().copied());
+            if let Message::PacketAck(message) = packet.message() {
+                acknowledgements.extend(message.packets.iter().map(|ack| ack.id));
+            }
+            if expected(packet.message()) {
+                return (packet, acknowledgements);
             }
         }
     })

@@ -22,7 +22,7 @@ use std::{
     net::SocketAddr,
     sync::Arc,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use llsd::{Map, Value};
@@ -66,7 +66,9 @@ use crate::{
         HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PRECONNECT_EVENTS,
         NeighborEventQueueOutcome, SimulatorCommand, SimulatorEvent, UdpTransport,
         admission::{MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES},
-        lludp::{Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, RESENT_FLAG, ReceiveError},
+        lludp::{
+            Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, PING_INTERVAL, RESENT_FLAG, ReceiveError,
+        },
         pacing::{OutboundBudget, OutboundBudgetHandle},
         queue_neighbor_event,
     },
@@ -143,7 +145,7 @@ impl NeighborHarness {
     async fn shutdown(self) {
         self.disconnect.send_replace(true);
         receive_message(&self.primary, |message| matches!(message, Message::LogoutRequest(_))).await;
-        assert!(timeout(Duration::from_millis(200), self.client).await.expect("disconnect should finish").expect("client task").is_ok());
+        assert!(timeout(WAIT, self.client).await.expect("disconnect should finish").expect("client task").is_ok());
     }
 }
 

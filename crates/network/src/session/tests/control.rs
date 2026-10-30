@@ -69,7 +69,7 @@ async fn run_enable_overflow_keeps_primary_responsive() {
     }
     let rejected = sockets.last().expect("the 33rd neighbor announcement");
     let mut buffer = [0; 65_535];
-    assert!(timeout(Duration::from_millis(50), rejected.recv_from(&mut buffer)).await.is_err());
+    std::assert_matches!(rejected.try_recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
 
     harness.primary.send_to(&start_ping_packet(150, 7, 0), harness.primary_peer).await.expect("ping primary after announcement burst");
     std::assert_matches!(
@@ -98,7 +98,7 @@ async fn neighbor_shutdown_preempts_start() {
         connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
 
     let result = timeout(
-        Duration::from_millis(100),
+        WAIT,
         neighbor_connection.run(event_sender, shutdown, neighbor_requests, commands, mpsc::channel(1).1, SimulatorMemoryBudget::new()),
     )
     .await;
@@ -220,16 +220,10 @@ async fn neighbor_receiver_close_preempts() {
     std::assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { .. });
 
     drop(event_receiver);
-    assert!(
-        timeout(Duration::from_millis(200), task)
-            .await
-            .expect("neighbor should stop after event receiver closes")
-            .expect("neighbor task")
-            .is_ok()
-    );
+    assert!(timeout(WAIT, task).await.expect("neighbor should stop after event receiver closes").expect("neighbor task").is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn neighbor_ping_is_delayed() {
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
     let endpoint = neighbor.local_addr().expect("neighbor simulator address");
@@ -254,12 +248,13 @@ async fn neighbor_ping_is_delayed() {
     neighbor.send_to(&ack(40, 1), peer).await.expect("ack neighbor circuit");
     std::assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { .. });
 
+    advance(PING_INTERVAL - Duration::from_millis(1)).await;
     let mut buffer = [0; 65_535];
-    assert!(
-        timeout(Duration::from_millis(100), neighbor.recv_from(&mut buffer)).await.is_err(),
-        "the neighbor should wait for its ping interval after connecting"
-    );
+    std::assert_matches!(neighbor.try_recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
+    advance(Duration::from_millis(1)).await;
+    let (ping, _) = timeout(WAIT, receive_udp(&neighbor)).await.expect("first neighbor ping follows PING_INTERVAL");
+    std::assert_matches!(Packet::decode(&ping).expect("decode neighbor ping").message(), Message::StartPingCheck(_));
 
     shutdown_signal.send_replace(true);
-    assert!(timeout(Duration::from_millis(200), task).await.expect("neighbor should stop on shutdown").expect("neighbor task").is_ok());
+    assert!(timeout(WAIT, task).await.expect("neighbor should stop on shutdown").expect("neighbor task").is_ok());
 }

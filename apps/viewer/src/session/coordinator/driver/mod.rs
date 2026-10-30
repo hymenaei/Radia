@@ -14,10 +14,11 @@ use futures::{
     executor::block_on,
     future::{BoxFuture, Shared},
 };
-use network::{AgentSession, CoverageLoss, CoverageSource, Event, Grid, PacketOrder, SimulatorId, capabilities::Client};
+use network::{
+    AgentSession, CircuitMotionStatus, CoverageLoss, CoverageSource, Event, Grid, PacketOrder, SimulatorId, capabilities::Client,
+};
 use protocol::{lludp::Message, login::ResponseData, messages::RequestAgentData};
 use tokio::{runtime::Handle, sync::watch};
-use tracing::Instrument;
 use world::UpdateSource;
 
 use super::{
@@ -445,6 +446,7 @@ impl SessionDriver {
         agent_control::process_sit_response(
             &self.session_handle,
             &mut self.agent_control,
+            &mut self.camera,
             simulator,
             self.active_session.as_ref().map(|session| (session.agent_id, session.session_id)),
             message,
@@ -850,7 +852,7 @@ impl SessionDriver {
             motion_circuits: self.region_motion_sender.subscribe(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             assets: self.assets.handle(),
-            session: session.clone(),
+            session,
             agent_control: self.agent_control_handle.clone(),
             region_name: self.session_world.region_name(simulator_id).map(str::to_owned),
             inventory_updates: self.inventory_changes.subscribe(),

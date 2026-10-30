@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 
 use math::{DVec3, Quat, Vec3};
 use network::{AgentSession, Delivery, Error, SessionHandle, SimulatorId};
@@ -11,12 +11,13 @@ use tokio::{
 use uuid::Uuid;
 
 use super::agent;
-use crate::agent_movement::{BODY_ROTATION_DOT_THRESHOLD, MovementAction, MovementObservation};
+use crate::agent_movement::{BODY_ROTATION_DOT_THRESHOLD, FLY, MovementAction, MovementObservation};
 
 const MIN_UPDATE_INTERVAL: Duration = Duration::from_millis(8);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 const CAMERA_POSITION_THRESHOLD: f64 = 0.01;
 const CAMERA_AXIS_THRESHOLD: f32 = 0.1f32.to_radians();
+const MAX_PENDING_ACTIONS: usize = 16;
 
 pub(crate) struct CameraUplink {
     camera: watch::Sender<Option<Camera>>,
@@ -31,7 +32,7 @@ pub(crate) struct CameraUplink {
     followup_at: Option<Instant>,
     last_always_run: Option<(SimulatorId, Uuid, Uuid, bool)>,
     always_run_retry_at: Option<Instant>,
-    pending_action: Option<MovementAction>,
+    pending_actions: VecDeque<MovementAction>,
 }
 
 #[derive(Clone, Copy)]
@@ -81,7 +82,7 @@ impl CameraUplink {
             followup_at: None,
             last_always_run: None,
             always_run_retry_at: None,
-            pending_action: None,
+            pending_actions: VecDeque::new(),
         }
     }
 
@@ -103,9 +104,22 @@ impl CameraUplink {
         }
     }
 
-    pub(crate) fn request_action(&mut self, action: MovementAction) {
-        self.pending_action = Some(action);
+    pub(crate) fn request_action(&mut self, action: MovementAction) -> bool {
+        if self.pending_actions.len() >= MAX_PENDING_ACTIONS {
+            return false;
+        }
+        self.pending_actions.push_back(action);
         self.request_update();
+        true
+    }
+
+    pub(crate) fn clear_flying(&self) {
+        self.movement.send_if_modified(|current| {
+            let Some(movement) = current else { return false };
+            let previous = movement.control_flags;
+            movement.control_flags &= !FLY;
+            movement.control_flags != previous
+        });
     }
 
     pub(crate) async fn next_tick(&mut self) -> Instant {
@@ -183,7 +197,7 @@ impl CameraUplink {
             always_run: false,
             stop_sequence: 0,
         });
-        let action = self.pending_action;
+        let action = self.pending_actions.front().copied();
         if let Some(action) = action {
             movement = movement.with_action(action);
         }
@@ -222,7 +236,7 @@ impl CameraUplink {
         let any_change = context_changed || camera_changed || body_changed;
         let keepalive_due = self.last_sent_at.is_none_or(|sent| now.saturating_duration_since(sent) >= KEEPALIVE_INTERVAL);
         let followup_due = self.followup_at.is_some_and(|deadline| now >= deadline);
-        let forced = previous.is_none() || context_changed || control_changed;
+        let forced = previous.is_none() || context_changed || control_changed || action.is_some();
         let min_interval_elapsed = self.last_sent_at.is_none_or(|sent| now.saturating_duration_since(sent) >= MIN_UPDATE_INTERVAL);
         if !forced && any_change && !min_interval_elapsed {
             self.pending_at = self.last_sent_at.map(|sent| sent + MIN_UPDATE_INTERVAL);
@@ -242,12 +256,13 @@ impl CameraUplink {
                     self.last_sent_at = Some(now);
                     self.followup_at = control_changed.then_some(now + MIN_UPDATE_INTERVAL);
                     if action.is_some() {
-                        self.pending_action = None;
+                        self.pending_actions.pop_front();
                         self.pending_at = Some(now + MIN_UPDATE_INTERVAL);
                     }
-                    if previous
-                        .is_none_or(|previous| previous.simulator != simulator || previous.camera.draw_distance() != camera.draw_distance())
-                    {
+                    if previous.is_none_or(|previous| {
+                        previous.simulator != simulator
+                            || previous.camera.is_none_or(|last_camera| last_camera.draw_distance() != camera.draw_distance())
+                    }) {
                         tracing::debug!(draw_distance = camera.draw_distance(), "simulator viewing distance updated");
                     }
                 }
@@ -324,6 +339,7 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     use std::net::UdpSocket;
 
+    use crate::agent_movement::{FLY, MovementAction};
     use crate::test_helpers::simulator_id;
     use futures::FutureExt;
     use math::{DVec3, Quat, Vec3};
@@ -352,7 +368,6 @@ mod tests {
         agent_movement::{HeldControls, KeyBinding, MovementKey},
         camera::FollowCamera,
         session::world::{SessionWorld, viewer_world_limits},
-        test_helpers::simulator_id,
     };
 
     use super::{CameraUplink, KEEPALIVE_INTERVAL, MIN_UPDATE_INTERVAL, UplinkMessage, camera_changed};
@@ -688,6 +703,7 @@ mod tests {
         assert_eq!(sent.len(), 4);
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     #[tokio::test]
     async fn sit_actions_reach_simulator() {
         let receiver = TokioUdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
@@ -702,7 +718,7 @@ mod tests {
         let movement = controls.observation(false, Quat::IDENTITY);
         let camera = view(DVec3::ZERO, Vec3::X);
 
-        uplink.request_action(MovementAction::SitOnGround);
+        assert!(uplink.request_action(MovementAction::SitOnGround));
         send_loopback(&mut uplink, simulator, agent_id, session_id, camera, movement, &sender, destination, &mut sequence);
         let first = receive_packet(&receiver).await;
         let update = match first {
@@ -716,7 +732,7 @@ mod tests {
         let Message::AgentUpdate(update) = receive_packet(&receiver).await else { panic!("cleared ground-sit AgentUpdate") };
         assert_eq!(update.agent_data.control_flags, 0x0000_0401);
 
-        uplink.request_action(MovementAction::StandUp);
+        assert!(uplink.request_action(MovementAction::StandUp));
         send_loopback(&mut uplink, simulator, agent_id, session_id, None::<Camera>, movement, &sender, destination, &mut sequence);
         let Message::AgentUpdate(update) = receive_packet(&receiver).await else { panic!("stand-up AgentUpdate") };
         assert_eq!(update.agent_data.control_flags, 0x0001_0401);
@@ -724,6 +740,56 @@ mod tests {
         send_loopback(&mut uplink, simulator, agent_id, session_id, None::<Camera>, movement, &sender, destination, &mut sequence);
         let Message::AgentUpdate(update) = receive_packet(&receiver).await else { panic!("cleared stand-up AgentUpdate") };
         assert_eq!(update.agent_data.control_flags, 0x0000_0401);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[tokio::test(start_paused = true)]
+    async fn queued_actions_reach_simulator_in_order() {
+        let receiver = TokioUdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
+        let sender = UdpSocket::bind("127.0.0.1:0").expect("bind loopback viewer");
+        let destination = receiver.local_addr().expect("simulator address");
+        let simulator = simulator_id();
+        let (agent_id, session_id) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut sequence = 1;
+        let mut uplink = CameraUplink::new();
+        let movement = crate::agent_movement::MovementObservation::default();
+        let camera = view(DVec3::ZERO, Vec3::X);
+
+        assert!(uplink.request_action(MovementAction::SitOnGround));
+        assert!(uplink.request_action(MovementAction::StandUp));
+        send_loopback(&mut uplink, simulator, agent_id, session_id, camera, movement, &sender, destination, &mut sequence);
+        let first = receive_packet(&receiver).await;
+        let update = match first {
+            Message::SetAlwaysRun(_) => receive_packet(&receiver).await,
+            message => message,
+        };
+        let Message::AgentUpdate(update) = update else { panic!("first queued action") };
+        assert_eq!(update.agent_data.control_flags, MovementAction::SitOnGround.control_flag());
+
+        advance(MIN_UPDATE_INTERVAL).await;
+        send_loopback(&mut uplink, simulator, agent_id, session_id, None::<Camera>, movement, &sender, destination, &mut sequence);
+        let Message::AgentUpdate(update) = receive_packet(&receiver).await else { panic!("second queued action") };
+        assert_eq!(update.agent_data.control_flags, MovementAction::StandUp.control_flag());
+    }
+
+    #[test]
+    fn pending_actions_are_bounded() {
+        let mut uplink = CameraUplink::new();
+        for _ in 0..super::MAX_PENDING_ACTIONS {
+            assert!(uplink.request_action(MovementAction::SitOnGround));
+        }
+        assert!(!uplink.request_action(MovementAction::StandUp));
+    }
+
+    #[test]
+    fn clearing_flight_updates_pending_movement() {
+        let uplink = CameraUplink::new();
+        let movement = crate::agent_movement::MovementObservation { control_flags: FLY, ..Default::default() };
+        uplink.movement.send_replace(Some(movement));
+
+        uplink.clear_flying();
+
+        assert_eq!(uplink.movements.borrow().expect("movement observation").control_flags & FLY, 0);
     }
 
     #[tokio::test(start_paused = true)]

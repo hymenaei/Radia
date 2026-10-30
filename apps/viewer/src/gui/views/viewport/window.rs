@@ -490,6 +490,9 @@ impl SceneWindow {
         let (pose, seed) = self.agent_pose_and_seed_at(now);
         self.ensure_camera(pose);
         let seated = self.feed.as_mut().is_some_and(SceneFeed::agent_is_seated);
+        if seated {
+            self.controls.clear_flying();
+        }
         let body_rotation = self.body_rotation.update(seed, if seated { 0.0 } else { self.controls.yaw(self.modifiers.shift_key()) }, now);
         let rotation = if seated { pose.map_or(body_rotation, |pose| pose.rotation) } else { body_rotation };
         let movement: MovementObservation = self.controls.observation(self.modifiers.shift_key(), rotation);

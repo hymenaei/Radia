@@ -369,9 +369,17 @@ async fn unrelated_alert_preserves_pending_sit() {
 
     send_loopback_message(&simulator_socket, viewer_address, sit_response(object_id)).await;
     let response = receive_loopback_message(&viewer_socket).await;
-    process_sit_response(&transport, &mut agent_control, simulator, Some((agent_id, session_id)), &response);
+    let mut camera = CameraUplink::new();
+    camera.movement_sender().send_replace(Some(crate::agent_movement::MovementObservation {
+        control_flags: crate::agent_movement::FLY,
+        body_rotation: Quat::IDENTITY,
+        always_run: false,
+        stop_sequence: 0,
+    }));
+    process_sit_response(&transport, &mut agent_control, &mut camera, simulator, Some((agent_id, session_id)), &response);
     assert_eq!(receive_loopback_message(&simulator_socket).await, Message::AgentSit(AgentSit { agent_id, session_id }));
     assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: true, force_mouselook: false }));
+    assert_eq!(camera.movement_sender().borrow().expect("current movement").control_flags & crate::agent_movement::FLY, 0);
     assert_eq!(
         *camera_updates.borrow(),
         Some(SitResponseState {
@@ -482,4 +490,65 @@ async fn queue_full_send_keeps_sit_intake_live() {
     let next_simulator_event = alert_message(b"SitFailed");
     assert!(handle_sit_alert(&mut agent_control, Some(simulator), simulator, &next_simulator_event));
     assert_eq!(pending.await.expect("pending sit task"), Ok(SitOutcome::Refused));
+}
+
+#[tokio::test]
+async fn action_overflow_preserves_sit() {
+    use crate::{
+        session::{AgentControlError, AgentControlEvent, AgentControlState, CameraUplink, SitOutcome},
+        test_helpers::simulator_id,
+    };
+
+    let simulator_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
+    let viewer_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback viewer");
+    let simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x91);
+    let session_id = Uuid::from_u128(0x92);
+    let object_id = Uuid::from_u128(0x93);
+    let (handle, mut agent_control, _) = AgentControlState::new();
+    let transport = LoopbackSitTransport {
+        socket: &viewer_socket,
+        destination: simulator_socket.local_addr().expect("simulator address"),
+        sequence: std::sync::atomic::AtomicU32::new(1),
+    };
+    let mut camera = CameraUplink::new();
+
+    loop {
+        let ground_sit = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.sit_on_ground().await }
+        });
+        let AgentControlEvent::Command(Some(command)) = agent_control.next_event().await else { panic!("ground-sit command") };
+        process_agent_control_command(&transport, &mut agent_control, &mut camera, Some(simulator), Some((agent_id, session_id)), command);
+        match ground_sit.await.expect("ground-sit task") {
+            Ok(()) => {}
+            Err(AgentControlError::QueueFull) => break,
+            result => panic!("unexpected ground-sit result: {result:?}"),
+        }
+    }
+
+    let sit = tokio::spawn({
+        let handle = handle.clone();
+        async move { handle.sit_on_object(object_id, Vec3::ZERO).await }
+    });
+    let AgentControlEvent::Command(Some(command)) = agent_control.next_event().await else { panic!("sit command") };
+    process_agent_control_command(&transport, &mut agent_control, &mut camera, Some(simulator), Some((agent_id, session_id)), command);
+    assert_eq!(
+        receive_loopback_message(&simulator_socket).await,
+        Message::AgentRequestSit(AgentRequestSit {
+            agent_data: SitAgentData { agent_id, session_id },
+            target_object: TargetObject { target_id: object_id, offset: Vec3::ZERO },
+        })
+    );
+
+    let stand = tokio::spawn(async move { handle.stand_up().await });
+    let AgentControlEvent::Command(Some(command)) = agent_control.next_event().await else { panic!("stand-up command") };
+    process_agent_control_command(&transport, &mut agent_control, &mut camera, Some(simulator), Some((agent_id, session_id)), command);
+    assert_eq!(stand.await.expect("stand task"), Err(AgentControlError::QueueFull));
+
+    send_loopback_message(&simulator_socket, viewer_socket.local_addr().expect("viewer address"), sit_response(object_id)).await;
+    let response = receive_loopback_message(&viewer_socket).await;
+    process_sit_response(&transport, &mut agent_control, &mut camera, simulator, Some((agent_id, session_id)), &response);
+    assert_eq!(receive_loopback_message(&simulator_socket).await, Message::AgentSit(AgentSit { agent_id, session_id }));
+    assert_eq!(sit.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: true, force_mouselook: false }));
 }

@@ -528,13 +528,8 @@ async fn pending_parent_does_not_block_flight() {
     feed.drain().unwrap();
     assert_eq!(feed.sit_camera_pose(), None, "an unresolved parent does not produce a seat camera pose");
 
-    let mut seat = ObjectObservation::new(
-        UpdateSource::new(region, 2, Ordered(2), 0),
-        seat_id,
-        seat_local_id,
-        Kind::Object,
-        ParentUpdate::Root,
-    );
+    let mut seat =
+        ObjectObservation::new(UpdateSource::new(region, 2, Ordered(2), 0), seat_id, seat_local_id, Kind::Object, ParentUpdate::Root);
     seat.pose = Some(Pose { position: Some(Vec3::new(4.0, 5.0, 6.0)), rotation: Some(Quat::IDENTITY) });
     seat.scale = Some(Vec3::ONE);
     let _ = world.observe_object(seat).unwrap();
@@ -585,13 +580,14 @@ async fn pending_asset_preserves_scene() {
     let assets = AssetCoordinator::new(Handle::current(), pending(), None);
     let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
+    let (_sit_response_sender, sit_response) = watch::channel(None);
     let mut feed = SceneFeed::start(
         SceneSources { reader: reads.reader(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
         Uuid::from_u128(2),
         watch::channel(None).0,
         watch::channel(None).0,
         agent_motion,
-        watch::channel(None).1,
+        sit_response,
         Handle::current(),
         || {},
     );
@@ -645,13 +641,14 @@ async fn stalled_publication_preserves_intake() {
     let assets = AssetCoordinator::new(Handle::current(), pending(), None);
     let (pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
+    let (_sit_response_sender, sit_response) = watch::channel(None);
     let mut feed = SceneFeed::start(
         SceneSources { reader: reader.clone(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
         Uuid::from_u128(1),
         watch::channel(None).0,
         watch::channel(None).0,
         agent_motion,
-        watch::channel(None).1,
+        sit_response,
         Handle::current(),
         || {},
     );

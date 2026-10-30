@@ -3,7 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use math::{DQuat, DVec3, Vec3};
+#[cfg(test)]
+use math::Vec3;
+use math::{DQuat, DVec3};
 use render::scene;
 use world::WorldPose;
 
@@ -13,9 +15,9 @@ use winit::event::ElementState;
 use winit::keyboard::Key;
 
 use crate::DEFAULT_DRAW_DISTANCE;
-use crate::session::SitCameraOverride;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::agent_movement::{HeldControls, KeyBinding};
+use crate::session::SitCameraOverride;
 
 const FOCUS_TIME: Duration = Duration::from_millis(400);
 const FOLLOW_SMOOTHING_HALF_LIFE: f64 = 0.02;
@@ -69,17 +71,6 @@ impl FollowCamera {
         Self::build_camera(position, focus, viewport, draw_distance, lod_factor)
     }
 
-    pub(crate) fn follow(
-        &mut self,
-        pose: WorldPose,
-        viewport: [u32; 2],
-        draw_distance: f32,
-        lod_factor: f32,
-        now: Instant,
-    ) -> Option<scene::Camera> {
-        self.follow_with_sit_camera(pose, None, viewport, draw_distance, lod_factor, now)
-    }
-
     pub(crate) fn follow_with_sit_camera(
         &mut self,
         pose: WorldPose,
@@ -107,21 +98,6 @@ impl FollowCamera {
     }
 
     fn build_camera(position: DVec3, focus: DVec3, viewport: [u32; 2], draw_distance: f32, lod_factor: f32) -> Option<scene::Camera> {
-        scene::Camera::new(position, (focus - position).as_vec3(), FRAC_PI_3, viewport)
-            .and_then(|camera| camera.with_quality(f64::from(draw_distance), f64::from(lod_factor)))
-            .ok()
-    }
-
-    pub(crate) fn scene_camera_override(
-        pose: WorldPose,
-        eye_offset: Vec3,
-        at_offset: Vec3,
-        viewport: [u32; 2],
-        draw_distance: f32,
-        lod_factor: f32,
-    ) -> Option<scene::Camera> {
-        let position = pose.position + (pose.rotation * eye_offset).as_dvec3();
-        let focus = pose.position + (pose.rotation * at_offset).as_dvec3();
         scene::Camera::new(position, (focus - position).as_vec3(), FRAC_PI_3, viewport)
             .and_then(|camera| camera.with_quality(f64::from(draw_distance), f64::from(lod_factor)))
             .ok()
@@ -231,6 +207,7 @@ impl FollowCamera {
         self.camera_offset = Some(position - focus);
         self.updated_at = Some(now);
         self.transition = Some(Transition { start: now, position, focus });
+        self.last_target = Some((position, focus));
     }
 }
 
@@ -398,10 +375,11 @@ mod tests {
         let start = Instant::now();
         let pose = WorldPose { position: DVec3::new(10.0, 20.0, 30.0), rotation: math::Quat::IDENTITY };
         let mut camera = FollowCamera::default();
-        let first = camera.follow(pose, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
+        let first = camera.follow_with_sit_camera(pose, None, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
         let translated = WorldPose { position: pose.position + DVec3::new(100.0, -50.0, 20.0), ..pose };
-        let second =
-            camera.follow(translated, [1280, 720], 512.0, 1.0, start + Duration::from_millis(10)).expect("translated follow camera");
+        let second = camera
+            .follow_with_sit_camera(translated, None, [1280, 720], 512.0, 1.0, start + Duration::from_millis(10))
+            .expect("translated follow camera");
 
         assert_eq!(second.position() - first.position(), DVec3::new(100.0, -50.0, 20.0));
         assert!(!camera.moving(translated, start + Duration::from_millis(10)));
@@ -412,15 +390,19 @@ mod tests {
         let start = Instant::now();
         let pose = WorldPose { position: DVec3::ZERO, rotation: math::Quat::IDENTITY };
         let mut camera = FollowCamera::default();
-        camera.follow(pose, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
+        camera.follow_with_sit_camera(pose, None, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
         let turned = WorldPose { rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2), ..pose };
-        let halfway = camera.follow(turned, [1280, 720], 512.0, 1.0, start + Duration::from_millis(20)).expect("turned follow camera");
+        let halfway = camera
+            .follow_with_sit_camera(turned, None, [1280, 720], 512.0, 1.0, start + Duration::from_millis(20))
+            .expect("turned follow camera");
         let (target, target_focus) = FollowCamera::position_and_focus(turned);
         assert!(halfway.position().distance(target) > 0.01, "camera offset should lag the avatar turn");
         let (_, focus) = camera.current_position_and_focus(turned, start + Duration::from_millis(20));
         assert_eq!(focus, target_focus);
 
-        let converged = camera.follow(turned, [1280, 720], 512.0, 1.0, start + Duration::from_secs(1)).expect("converged follow camera");
+        let converged = camera
+            .follow_with_sit_camera(turned, None, [1280, 720], 512.0, 1.0, start + Duration::from_secs(1))
+            .expect("converged follow camera");
         assert!(converged.position().distance(target) < 0.01);
         assert!(!camera.moving(turned, start + Duration::from_secs(1)));
     }
@@ -430,11 +412,13 @@ mod tests {
         let start = Instant::now();
         let pose = WorldPose { position: DVec3::ZERO, rotation: math::Quat::IDENTITY };
         let mut camera = FollowCamera::default();
-        camera.follow(pose, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
+        camera.follow_with_sit_camera(pose, None, [1280, 720], 512.0, 1.0, start).expect("initial follow camera");
         camera.offset = DVec3::new(-100.0, 0.0, 0.0);
         let (target, _) = camera.target_position_and_focus(pose);
 
-        let snapped = camera.follow(pose, [1280, 720], 512.0, 1.0, start + Duration::from_millis(10)).expect("snapped follow camera");
+        let snapped = camera
+            .follow_with_sit_camera(pose, None, [1280, 720], 512.0, 1.0, start + Duration::from_millis(10))
+            .expect("snapped follow camera");
         assert!(snapped.position().distance(target) < 1e-9);
         assert!(!camera.moving(pose, start + Duration::from_millis(10)));
     }
@@ -528,10 +512,70 @@ mod tests {
             WorldPose { position: DVec3::new(100.0, 200.0, 30.0), rotation: math::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2) };
         let eye = Vec3::new(2.0, 0.0, 1.0);
         let at = Vec3::new(0.0, 0.0, 1.0);
-        let camera = FollowCamera::scene_camera_override(pose, eye, at, [1280, 720], 128.0, 1.0).expect("valid sit camera");
+        let mut follow = FollowCamera::default();
+        let now = Instant::now();
+        let sit_camera = SitCameraOverride { eye_offset: eye, at_offset: at };
+        follow.follow_with_sit_camera(pose, Some((sit_camera, pose)), [1280, 720], 128.0, 1.0, now).expect("entering sit camera");
+        let camera = follow
+            .follow_with_sit_camera(pose, Some((sit_camera, pose)), [1280, 720], 128.0, 1.0, now + FOCUS_TIME + Duration::from_secs(1))
+            .expect("settled sit camera");
 
         assert!((camera.position() - (pose.position + DVec3::new(0.0, 2.0, 1.0))).length() < 1e-6);
         assert!(camera.direction().distance(Vec3::new(0.0, -1.0, 0.0)) < 1e-6);
+    }
+
+    #[test]
+    fn sit_camera_transitions_without_snapping() {
+        let start = Instant::now();
+        let pose = WorldPose { position: DVec3::new(100.0, 200.0, 30.0), rotation: math::Quat::IDENTITY };
+        let sit_pose = WorldPose { position: pose.position + DVec3::new(2.0, 0.0, 1.0), ..pose };
+        let sit_camera = SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) };
+        let transition_start = start + Duration::from_millis(1);
+        let mut camera = FollowCamera::default();
+        let standing = camera.follow_with_sit_camera(pose, None, [1280, 720], 128.0, 1.0, start).expect("standing camera");
+        let entering = camera
+            .follow_with_sit_camera(sit_pose, Some((sit_camera, sit_pose)), [1280, 720], 128.0, 1.0, transition_start)
+            .expect("camera while entering the seat");
+        assert_eq!(entering.position(), standing.position());
+        assert_eq!(entering.direction(), standing.direction());
+
+        let seated_at = transition_start + FOCUS_TIME;
+        let seated = camera
+            .follow_with_sit_camera(sit_pose, Some((sit_camera, sit_pose)), [1280, 720], 128.0, 1.0, seated_at)
+            .expect("seated camera");
+        let leaving = camera
+            .follow_with_sit_camera(pose, None, [1280, 720], 128.0, 1.0, seated_at + Duration::from_millis(1))
+            .expect("camera while leaving the seat");
+        assert_eq!(leaving.position(), seated.position());
+        assert_eq!(leaving.direction(), seated.direction());
+
+        let standing_again = camera
+            .follow_with_sit_camera(pose, None, [1280, 720], 128.0, 1.0, seated_at + FOCUS_TIME + Duration::from_millis(1))
+            .expect("standing camera after transition");
+        let expected = FollowCamera::scene_camera(pose, [1280, 720], 128.0, 1.0).expect("default follow camera");
+        assert!(standing_again.position().distance(expected.position()) < 0.001);
+        assert!(standing_again.direction().distance(expected.direction()) < 1e-5);
+    }
+
+    #[test]
+    fn returning_from_free_camera_preserves_live_view_when_sitting() {
+        let start = Instant::now();
+        let pose = WorldPose { position: DVec3::new(100.0, 200.0, 30.0), rotation: math::Quat::IDENTITY };
+        let sit_pose = WorldPose { position: pose.position + DVec3::new(2.0, 0.0, 1.0), ..pose };
+        let sit_camera = SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) };
+        let mut camera = FollowCamera::default();
+        camera.follow_with_sit_camera(pose, None, [1280, 720], 128.0, 1.0, start).expect("standing camera");
+
+        let free_position = pose.position + DVec3::new(-8.0, 2.0, 4.0);
+        let free_focus = pose.position + DVec3::new(1.0, 1.0, 1.0);
+        let returned_at = start + Duration::from_millis(1);
+        camera.transition_from(free_position, free_focus, returned_at);
+        let returned = camera
+            .follow_with_sit_camera(pose, Some((sit_camera, sit_pose)), [1280, 720], 128.0, 1.0, returned_at + Duration::from_millis(1))
+            .expect("follow camera after returning from free mode");
+
+        assert_eq!(returned.position(), free_position);
+        assert!(returned.direction().distance((free_focus - free_position).as_vec3().normalize()) < 1e-6);
     }
 
     #[test]

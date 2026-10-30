@@ -1,5 +1,5 @@
-mod agent_motion;
 mod agent_control;
+mod agent_motion;
 mod coordinator;
 mod environment;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -13,9 +13,9 @@ mod region_lookup;
 mod terrain;
 mod world;
 
-pub(crate) use agent_motion::{AgentMotionPublisher, AgentMotionSample};
 pub use agent_control::{AgentControlError, AgentControlHandle, SitOutcome};
 pub(crate) use agent_control::{AgentControlEvent, AgentControlState, SitCameraOverride, SitResponseState};
+pub(crate) use agent_motion::{AgentMotionPublisher, AgentMotionSample};
 pub(crate) use coordinator::{
     AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd,
     SessionReadyUpdate, ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,

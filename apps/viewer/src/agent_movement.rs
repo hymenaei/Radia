@@ -19,7 +19,7 @@ const YAW_NEG: u32 = 0x0000_0200;
 const FAST_AT: u32 = 0x0000_0400;
 const FAST_LEFT: u32 = 0x0000_0800;
 const FAST_UP: u32 = 0x0000_1000;
-const FLY: u32 = 0x0000_2000;
+pub(crate) const FLY: u32 = 0x0000_2000;
 pub(crate) const STOP: u32 = 0x0000_4000;
 const SIT_ON_GROUND: u32 = 0x0002_0000;
 const STAND_UP: u32 = 0x0001_0000;
@@ -205,6 +205,10 @@ impl HeldControls {
         }
         self.flying = !self.flying;
         true
+    }
+
+    pub(crate) fn clear_flying(&mut self) {
+        self.flying = false;
     }
 
     pub(crate) fn toggle_run(&mut self) {
@@ -406,6 +410,17 @@ mod tests {
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags & FLY, FLY);
 
         controls.toggle_flying(true);
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags & FLY, 0);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn sitting_clears_flying() {
+        let mut controls = HeldControls::default();
+        controls.toggle_flying(false);
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags & FLY, FLY);
+
+        controls.clear_flying();
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags & FLY, 0);
     }
 

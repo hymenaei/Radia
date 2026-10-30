@@ -319,9 +319,14 @@ pub(super) fn process_agent_control_command<T: SitTransport>(
                 }
                 return;
             }
+            if !camera.request_action(MovementAction::SitOnGround) {
+                if reply.send(Err(AgentControlError::QueueFull)).is_err() {
+                    tracing::trace!("ground-sit caller stopped before receiving the queue outcome");
+                }
+                return;
+            }
             agent_control.cancel_sit(SitOutcome::Cancelled);
             agent_control.clear_sit_acceptance();
-            camera.request_action(MovementAction::SitOnGround);
             if reply.send(Ok(())).is_err() {
                 tracing::trace!("ground-sit caller stopped before receiving the queued outcome");
             }
@@ -333,9 +338,14 @@ pub(super) fn process_agent_control_command<T: SitTransport>(
                 }
                 return;
             }
+            if !camera.request_action(MovementAction::StandUp) {
+                if reply.send(Err(AgentControlError::QueueFull)).is_err() {
+                    tracing::trace!("stand-up caller stopped before receiving the queue outcome");
+                }
+                return;
+            }
             agent_control.cancel_sit(SitOutcome::Cancelled);
             agent_control.clear_sit_acceptance();
-            camera.request_action(MovementAction::StandUp);
             if reply.send(Ok(())).is_err() {
                 tracing::trace!("stand-up caller stopped before receiving the queued outcome");
             }
@@ -346,6 +356,7 @@ pub(super) fn process_agent_control_command<T: SitTransport>(
 pub(super) fn process_sit_response<T: SitTransport>(
     transport: &T,
     agent_control: &mut AgentControlState,
+    camera: &mut crate::session::CameraUplink,
     simulator: SimulatorId,
     active_agent: Option<(Uuid, Uuid)>,
     message: &Message,
@@ -361,13 +372,15 @@ pub(super) fn process_sit_response<T: SitTransport>(
     let sit = AgentSit { agent_id, session_id };
     match transport.send_sit(sit, Delivery::Reliable) {
         Ok(()) => {
-            agent_control.accept_sit(
+            if agent_control.accept_sit(
                 simulator,
                 response.object_id,
                 response.auto_pilot,
                 response.force_mouselook,
                 response.camera_override,
-            );
+            ) {
+                camera.clear_flying();
+            }
         }
         Err(error) => {
             tracing::debug!(simulator = simulator.get(), %error, "sit acceptance could not be queued");

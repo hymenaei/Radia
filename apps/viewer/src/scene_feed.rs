@@ -164,22 +164,10 @@ impl SceneFeed {
         let mut dead_reckoning = DeadReckoning::default();
         dead_reckoning.replace(*agent_motion.borrow_and_update());
         drop(
-            runtime
-                .clone()
-                .spawn(
-                    run(
-                        scene,
-                        sources,
-                        sender,
-                        runtime.clone(),
-                        cancelled,
-                        observations,
-                        agent_motions,
-                        sit_response_updates,
-                        wake,
-                    )
+            runtime.clone().spawn(
+                run(scene, sources, sender, runtime.clone(), cancelled, observations, agent_motions, sit_response_updates, wake)
                     .in_current_span(),
-                ),
+            ),
         );
         Self {
             runtime,

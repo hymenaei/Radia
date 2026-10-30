@@ -19,6 +19,7 @@ pub(crate) struct AgentMotionSample {
     pub(crate) acceleration: Vec3,
     pub(crate) time_dilation: f32,
     pub(crate) ping_delay: Option<Duration>,
+    pub(crate) parented: bool,
     pub(crate) simulator_rotation: Quat,
     pub(crate) received_at: Instant,
     pub(crate) seed: u64,
@@ -95,6 +96,7 @@ impl AgentMotionPublisher {
             acceleration: Vec3::ZERO,
             time_dilation: 1.0,
             ping_delay,
+            parented: false,
             simulator_rotation,
             received_at,
             seed: self.seed.wrapping_add(1),
@@ -119,7 +121,8 @@ impl AgentMotionPublisher {
         let motion = agent.linear_motion();
         let source = agent.motion_source();
         let received_at = source.and_then(world::UpdateSource::motion_received_at).unwrap_or(received_at);
-        let (velocity, acceleration) = if matches!(agent.parent(), Parent::Resolved(_) | Parent::Pending { .. }) {
+        let parented = matches!(agent.parent(), Parent::Resolved(_) | Parent::Pending { .. });
+        let (velocity, acceleration) = if parented {
             (Vec3::ZERO, Vec3::ZERO)
         } else {
             (motion.velocity.unwrap_or_default(), motion.acceleration.unwrap_or_default())
@@ -138,6 +141,7 @@ impl AgentMotionPublisher {
             acceleration,
             time_dilation: agent.time_dilation(),
             ping_delay: source.and_then(world::UpdateSource::motion_ping_delay),
+            parented,
             simulator_rotation: pose.rotation,
             received_at,
             seed: self.seed,
@@ -341,6 +345,7 @@ mod tests {
             acceleration: Vec3::ZERO,
             time_dilation: 1.0,
             ping_delay: None,
+            parented: false,
             simulator_rotation: Quat::IDENTITY,
             received_at: std::time::Instant::now(),
             seed: 0,

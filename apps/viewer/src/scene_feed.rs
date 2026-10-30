@@ -169,7 +169,9 @@ impl SceneFeed {
         let sample = self.dead_reckoning.sample?;
         let phase_out = self.phase_out_for(sample.region, sample.received_at, now);
         let mut pose = self.dead_reckoning.pose(now, phase_out, &self.motion_region_scratch)?;
-        if let Some(ground) = self.view.terrain_height_at(pose.position) {
+        if !sample.parented
+            && let Some(ground) = self.view.terrain_height_at(pose.position)
+        {
             pose.position.z = pose.position.z.max(ground + 0.5 * f64::from(sample.scale.z));
         }
         Some((pose, (sample.seed, sample.simulator_rotation)))

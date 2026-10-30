@@ -63,6 +63,7 @@ fn motion_sample(received_at: Instant) -> AgentMotionSample {
         acceleration: Vec3::ZERO,
         time_dilation: 1.0,
         ping_delay: None,
+        parented: false,
         simulator_rotation: Quat::IDENTITY,
         received_at,
         seed: 1,
@@ -190,6 +191,7 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
         acceleration: Vec3::ZERO,
         time_dilation: 1.0,
         ping_delay: None,
+        parented: false,
         simulator_rotation: Quat::IDENTITY,
         received_at: now,
         seed: 1,
@@ -230,7 +232,7 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
 }
 
 #[tokio::test]
-async fn water_height_follows_agent_region() {
+async fn terrain_clamp_respects_parenting() {
     let mut world = world();
     let agent = Uuid::from_u128(1);
     for region in [Region::new(1), Region::new(2)] {
@@ -345,6 +347,14 @@ async fn water_height_follows_agent_region() {
     feed.dead_reckoning.replace(Some(falling_agent));
     let pose = feed.camera_pose_at(received_at + Duration::from_secs(1)).expect("self motion pose");
     assert_eq!(pose.position.z, 12.5);
+
+    let mut seated_agent = motion_sample(received_at);
+    seated_agent.region = Region::new(2);
+    seated_agent.position = DVec3::new(266.0, 10.0, -10.0);
+    seated_agent.parented = true;
+    feed.dead_reckoning.replace(Some(seated_agent));
+    let pose = feed.camera_pose_at(received_at).expect("seated self motion pose");
+    assert_eq!(pose.position.z, -10.0);
 }
 
 #[tokio::test]

@@ -769,25 +769,35 @@ proptest! {
         let small_limit = MIN_SIZE_LIMIT + 8192;
         cache.set_size_limit(small_limit).expect("lower cache limit");
         reconcile_after_eviction(&cache, &mut model)?;
-        for _ in 0..20 {
-            cache.clear().expect("clear small cache");
-            model.clear();
-            prop_assert!(cache.accounted_size() <= small_limit);
-            prop_assert_eq!(cache.entry_count(), model.len());
-        }
-        for revision in 0..20u8 {
-            let bytes = vec![revision; 32];
-            cache.arm_fault(WritePoint::IndexBatchCommitted);
-            let result = cache.put(key(0), bytes.clone());
-            prop_assert!(result.is_ok(), "the row committed before the crash hook");
-            cache.simulate_crash().expect("simulate replacement crash");
-            model.insert(0, bytes);
-            cache = Cache::open(directory.path(), small_limit, &TEST_NAMESPACES).expect("reopen after committed replacement");
-            prop_assert!(cache.accounted_size() <= small_limit);
-            check_model(&cache, &model)?;
-        }
+        prop_assert!(cache.accounted_size() <= small_limit);
+        check_model(&cache, &model)?;
         cache.shutdown().expect("close final cache");
     }
+}
+
+#[test]
+fn small_limit_survives_repeated_recovery() {
+    let directory = tempdir().expect("cache directory");
+    let small_limit = MIN_SIZE_LIMIT + 8192;
+    let mut cache = Cache::open(directory.path(), small_limit, &TEST_NAMESPACES).expect("open small cache");
+    cache.put(key(0), vec![0; 32]).expect("populate small cache");
+    for _ in 0..20 {
+        cache.clear().expect("clear small cache");
+        assert!(cache.accounted_size() <= small_limit);
+        assert_eq!(cache.entry_count(), 0);
+        std::assert_matches!(cache.lookup(key(0)), Lookup::Miss);
+    }
+    for revision in 0..20u8 {
+        let bytes = vec![revision; 32];
+        cache.arm_fault(WritePoint::IndexBatchCommitted);
+        cache.put(key(0), bytes.clone()).expect("row committed before the crash hook");
+        cache.simulate_crash().expect("simulate replacement crash");
+        cache = Cache::open(directory.path(), small_limit, &TEST_NAMESPACES).expect("reopen after committed replacement");
+        assert!(cache.accounted_size() <= small_limit);
+        assert_eq!(cache.entry_count(), 1);
+        std::assert_matches!(cache.lookup(key(0)), Lookup::Hit(value) if value.bytes.as_slice() == bytes);
+    }
+    cache.shutdown().expect("close recovered cache");
 }
 
 fn check_model(cache: &Cache, model: &HashMap<u16, Vec<u8>>) -> Result<(), TestCaseError> {

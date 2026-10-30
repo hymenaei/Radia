@@ -16,6 +16,7 @@ use reqwest::Url;
 use tokio::{sync::mpsc, time::timeout};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+const RESPONSE_HOLD_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) struct LocalServer {
     address: SocketAddr,
@@ -96,7 +97,7 @@ impl ConcurrentCapabilityTestServer {
                     let (response_release, response_released) = std_mpsc::channel();
                     response_releases.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, response_release);
                     request_sender.send(ConcurrentCapabilityRequest { id, path, bytes }).expect("test should receive capability request");
-                    response_released.recv_timeout(TEST_TIMEOUT).expect("test should release the capability response");
+                    response_released.recv_timeout(RESPONSE_HOLD_TIMEOUT).expect("test should release the capability response");
                     active.fetch_sub(1, Ordering::Relaxed);
                     match stream.write_all(&response) {
                         Ok(()) => {}

@@ -753,6 +753,7 @@ impl SessionDriver {
             movement: self.camera.movement_sender(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             agent_motion: self.agent_motion.receiver(),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             motion_circuits: self.region_motion_sender.subscribe(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             assets: self.assets.handle(),

@@ -51,6 +51,9 @@ cargo nextest run --workspace --all-features --stress-duration 10m
 # In a second terminal, once the workspace build has finished
 cargo nextest run -p <crate> --stress-count 200 -E 'test(<name>)'
 
+# Manual Windows atomic-replacement stress, 10,000 replacements
+cargo nextest run -p utils -E 'test(atomic_replacement_stress)' --run-ignored only
+
 ```
 
 - `cargo lint` checks all targets and features with warnings denied.

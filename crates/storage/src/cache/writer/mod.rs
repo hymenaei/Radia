@@ -14,6 +14,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, NamedTempFile};
+use utils::persist_atomic;
 
 #[cfg(test)]
 use std::sync::{
@@ -31,7 +32,7 @@ use crate::{
     cache::eviction::Lru,
     sqlite::{MAX_BATCH_ROWS, SqliteError},
 };
-use disk::{DATA_TEMP_PREFIX, delete_data, fail_temporary, persist_with_retry, remove_path};
+use disk::{DATA_TEMP_PREFIX, delete_data, fail_temporary, remove_path};
 use support::{clone_error, is_index_file, is_simulated_crash, lock, mutations, read_map, simulated_crash_error, write_map};
 
 pub(in crate::cache) use queue::{Command, WriteQueue, writer_loop};
@@ -499,7 +500,7 @@ impl WorkerState {
             Err(error) => return Err(self.commit_failure_before_commit(&eviction_marks, error)),
         };
         for (data, destination) in staged_files {
-            if let Err(error) = persist_with_retry(data.temp, &destination).map_err(StorageError::Io) {
+            if let Err(error) = persist_atomic(data.temp, &destination).map_err(StorageError::Io) {
                 self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error), &eviction_marks);
                 return Err(CommitFailure { committed, error });
             }

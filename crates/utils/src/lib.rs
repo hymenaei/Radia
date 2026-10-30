@@ -1,10 +1,15 @@
 use std::{
     io::{self, Write},
     path::Path,
+    thread,
+    time::Duration,
 };
 
 use tempfile::NamedTempFile;
 use uuid::Uuid;
+
+const PERSIST_ATTEMPTS: usize = 4;
+const PERSIST_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 macro_rules! ids {
     ($($name:ident),+ $(,)?) => {
@@ -55,8 +60,30 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     let mut temporary = NamedTempFile::new_in(parent)?;
     temporary.write_all(contents)?;
     temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error)?;
-    Ok(())
+    persist_atomic(temporary, path)
+}
+
+pub fn persist_atomic(temporary: NamedTempFile, destination: &Path) -> io::Result<()> {
+    persist_with_retry(temporary, destination, |attempt| thread::sleep(PERSIST_RETRY_DELAY * (1 << attempt)))
+}
+
+fn persist_with_retry(mut temporary: NamedTempFile, destination: &Path, mut wait_retry: impl FnMut(usize)) -> io::Result<()> {
+    for attempt in 0..PERSIST_ATTEMPTS {
+        match temporary.persist(destination) {
+            Ok(file) => {
+                drop(file);
+                return Ok(());
+            }
+            Err(failure) => {
+                if failure.error.kind() != io::ErrorKind::PermissionDenied || attempt + 1 == PERSIST_ATTEMPTS {
+                    return Err(failure.error);
+                }
+                temporary = failure.file;
+                wait_retry(attempt);
+            }
+        }
+    }
+    unreachable!("persistence returns on its final attempt")
 }
 
 #[cfg(test)]
@@ -95,5 +122,49 @@ mod tests {
         assert!(write_atomic(&destination, b"replacement").is_err(), "replacing a directory must fail");
         assert_eq!(fs::read(destination.join("original")).expect("read original data"), b"keep");
         assert_eq!(fs::read_dir(directory.path()).expect("read directory").count(), 1, "failed writes must remove temporary files");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replacement_survives_transient_lock() {
+        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
+
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("settings.json");
+        fs::write(&path, b"original").expect("create destination");
+        let mut held = Some(OpenOptions::new().read(true).share_mode(0).open(&path).expect("lock destination"));
+        let mut temporary = NamedTempFile::new_in(directory.path()).expect("stage replacement");
+        temporary.write_all(b"replacement").expect("write replacement");
+
+        persist_with_retry(temporary, &path, |_| drop(held.take())).expect("replace after the conflicting handle closes");
+
+        assert_eq!(fs::read(&path).expect("read replacement"), b"replacement");
+        assert_eq!(fs::read_dir(directory.path()).expect("read directory").count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_destination_keeps_contents() {
+        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
+
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("settings.json");
+        fs::write(&path, b"original").expect("create destination");
+        let held = OpenOptions::new().read(true).share_mode(0).open(&path).expect("lock destination");
+
+        let error = write_atomic(&path, b"replacement").expect_err("a persistent sharing conflict must fail");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        drop(held);
+        assert_eq!(fs::read(&path).expect("read original"), b"original");
+        assert_eq!(fs::read_dir(directory.path()).expect("read directory").count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "manual Windows replacement stress; run with --run-ignored only"]
+    fn atomic_replacement_stress() {
+        for _ in 0..10_000 {
+            atomic_write_replaces_contents();
+        }
     }
 }

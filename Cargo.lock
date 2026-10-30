@@ -7752,6 +7752,7 @@ dependencies = [
  "tempfile",
  "test-support",
  "tracing",
+ "utils",
 ]
 
 [[package]]

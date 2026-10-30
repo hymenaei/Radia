@@ -14,7 +14,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, NamedTempFile};
-use utils::persist_atomic;
+use utils::PersistBudget;
 
 #[cfg(test)]
 use std::sync::{
@@ -499,8 +499,9 @@ impl WorkerState {
             Ok(replacing) => replacing,
             Err(error) => return Err(self.commit_failure_before_commit(&eviction_marks, error)),
         };
+        let mut persist_budget = PersistBudget::default();
         for (data, destination) in staged_files {
-            if let Err(error) = persist_atomic(data.temp, &destination).map_err(StorageError::Io) {
+            if let Err(error) = persist_budget.persist(data.temp, &destination).map_err(StorageError::Io) {
                 self.finish_failed_replacements(&replacing, &renamed, &changes, &committed, is_simulated_crash(&error), &eviction_marks);
                 return Err(CommitFailure { committed, error });
             }

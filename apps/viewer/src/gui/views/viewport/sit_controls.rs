@@ -3,9 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use egui::{Align2, Area, Button, Context, Frame, Id, Order, Pos2, Ui, Vec2};
+use egui::{Align2, Area, Button, Context, Frame, Id, LayerId, Order, Popup, PopupCloseBehavior, PopupKind, Pos2, Ui, Vec2};
 use math::{DVec3, Vec3};
-use render::{PickHit, PickObject, PickObjectKind, PickTarget, scene::Camera};
+use render::{PickHit, PickObject, PickObjectKind, PickTarget, Renderer, scene::Camera};
 use uuid::Uuid;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use world::{CLICK_ACTION_SIT, Kind};
@@ -21,6 +21,42 @@ const OFFSET_COMPONENT_EPSILON: f32 = 0.0001;
 const OFFSET_BIAS_START: f32 = 0.1;
 const OFFSET_BIAS_END: f32 = 0.7;
 const NOTICE_DURATION: Duration = Duration::from_secs(4);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SitMenuEvent {
+    OutsideClick,
+    Escape,
+    Chosen,
+    RightClickElsewhere,
+    FocusLost,
+    MovementKey,
+    CameraDragStarted,
+    TargetDisappeared,
+    SessionEnded,
+}
+
+pub(super) fn sit_request_for_left_click(
+    renderer: Option<&Renderer>,
+    camera: Option<Camera>,
+    feed: Option<&mut SceneFeed>,
+    cursor: PhysicalPosition<f64>,
+    size: PhysicalSize<u32>,
+) -> Option<SitRequest> {
+    let (Some(renderer), Some(camera)) = (renderer, camera) else { return None };
+    let ray = camera.ray([cursor.x, cursor.y], [size.width, size.height]);
+    let hit = match renderer.pick(camera, ray) {
+        Ok(Some(hit)) => hit,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::debug!(%error, "scene sit-action pick exceeded its work limit");
+            return None;
+        }
+    };
+    let PickTarget::Object(object) = hit.target else { return None };
+    let feed = feed?;
+    let root_click_action = feed.pick_root_click_action(object);
+    sit_click_request(hit, camera, ray, root_click_action, feed.agent_available(), feed.agent_is_seated())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ToggleAction {
@@ -73,6 +109,7 @@ impl SitToggle {
 pub(super) struct SitControls {
     toggle: SitToggle,
     menu: Option<SitMenu>,
+    next_menu_id: u64,
     sender: SyncSender<SitCompletion>,
     receiver: Receiver<SitCompletion>,
     notice: Option<(String, Instant)>,
@@ -81,17 +118,61 @@ pub(super) struct SitControls {
 impl SitControls {
     pub(super) fn new() -> Self {
         let (sender, receiver) = mpsc::sync_channel(1);
-        Self { toggle: SitToggle::default(), menu: None, sender, receiver, notice: None }
+        Self { toggle: SitToggle::default(), menu: None, next_menu_id: 0, sender, receiver, notice: None }
     }
 
     pub(super) fn menu_open(&self) -> bool {
         self.menu.is_some()
     }
 
-    pub(super) fn close_menu(&mut self) -> bool {
-        let was_open = self.menu.is_some();
-        self.menu = None;
-        was_open
+    pub(super) fn handle_menu_event(&mut self, event: SitMenuEvent) -> bool {
+        let closes = matches!(
+            event,
+            SitMenuEvent::OutsideClick
+                | SitMenuEvent::Escape
+                | SitMenuEvent::Chosen
+                | SitMenuEvent::RightClickElsewhere
+                | SitMenuEvent::FocusLost
+                | SitMenuEvent::MovementKey
+                | SitMenuEvent::CameraDragStarted
+                | SitMenuEvent::TargetDisappeared
+                | SitMenuEvent::SessionEnded
+        );
+        closes && self.menu.take().is_some()
+    }
+
+    pub(super) fn handle_left_click_while_menu_open(&mut self, captured_by_egui: bool) -> bool {
+        if self.menu.is_none() {
+            return false;
+        }
+        if !captured_by_egui {
+            self.handle_menu_event(SitMenuEvent::OutsideClick);
+        }
+        true
+    }
+
+    pub(super) fn handle_right_click_while_menu_open(&mut self, captured_by_egui: bool) -> bool {
+        if self.menu.is_none() {
+            return !captured_by_egui;
+        }
+        self.handle_menu_event(if captured_by_egui { SitMenuEvent::OutsideClick } else { SitMenuEvent::RightClickElsewhere });
+        !captured_by_egui
+    }
+
+    fn open_menu(&mut self, mut menu: SitMenu) {
+        self.next_menu_id = self.next_menu_id.wrapping_add(1);
+        menu.popup_id = Id::unique(("radia-viewport-sit-menu", self.next_menu_id));
+        self.menu = Some(menu);
+    }
+
+    pub(super) fn reconcile_menu(&mut self, feed: Option<&SceneFeed>) -> bool {
+        let Some(menu) = &self.menu else { return false };
+        match feed {
+            None => self.handle_menu_event(SitMenuEvent::SessionEnded),
+            Some(feed) if !feed.agent_available() => self.handle_menu_event(SitMenuEvent::SessionEnded),
+            Some(feed) if !feed.knows_pick(menu.object) => self.handle_menu_event(SitMenuEvent::TargetDisappeared),
+            Some(_) => false,
+        }
     }
 
     pub(super) fn handle_right_click(
@@ -104,10 +185,10 @@ impl SitControls {
         size: PhysicalSize<u32>,
         dpi: f64,
     ) {
-        if capture.consumed || capture.pointer {
+        let may_pick = self.handle_right_click_while_menu_open(capture.consumed || capture.pointer);
+        if !may_pick {
             return;
         }
-        self.close_menu();
         let (Some(camera), Some(renderer)) = (camera, renderer) else { return };
         let ray = camera.ray([cursor.x, cursor.y], [size.width, size.height]);
         let hit = match renderer.pick(camera, ray) {
@@ -131,7 +212,7 @@ impl SitControls {
                     && let Some((_, offset)) = sit_here_target(hit, camera, ray)
                     && let Some(root_id) = feed.root_object_id(object.id)
                 {
-                    self.menu = Some(SitMenu { object, root_id, offset, position });
+                    self.open_menu(SitMenu { object, root_id, offset, position, popup_id: Id::NULL });
                 }
             }
         }
@@ -169,31 +250,42 @@ impl SitControls {
     }
 
     pub(super) fn overlays(&mut self, context: &Context, now: Instant, feed: Option<&SceneFeed>) -> Option<SitRequest> {
+        self.reconcile_menu(feed);
         let mut request = None;
         if let Some(menu) = &self.menu {
+            let menu = *menu;
             let world_knows_object = feed.is_some_and(|feed| feed.knows_pick(menu.object));
             let sitting_on_target = feed.is_some_and(|feed| feed.agent_is_sitting_on(menu.root_id));
-            let response =
-                Area::new(Id::unique("radia-viewport-sit-menu")).order(Order::Foreground).fixed_pos(menu.position).show(context, |ui| {
-                    Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_min_width(96.0);
-                        if ui
-                            .add_enabled(
-                                menu.enabled(world_knows_object, self.toggle.is_pending()),
-                                Button::new(menu.label(sitting_on_target)),
-                            )
-                            .clicked()
-                        {
-                            request = Some(menu.request(sitting_on_target));
-                        }
-                    });
+            let mut open = true;
+            let layer_id = LayerId::new(PopupKind::Menu.order(), menu.popup_id);
+            Popup::new(menu.popup_id, context.clone(), menu.position, layer_id)
+                .kind(PopupKind::Menu)
+                .layout(egui::Layout::top_down_justified(egui::Align::Min))
+                .style(egui::containers::menu::menu_style)
+                .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+                .open_bool(&mut open)
+                .show(|ui| {
+                    ui.set_min_width(96.0);
+                    if ui
+                        .add_enabled(menu.enabled(world_knows_object, self.toggle.is_pending()), Button::new(menu.label(sitting_on_target)))
+                        .clicked()
+                    {
+                        request = Some(menu.request(sitting_on_target));
+                    }
                 });
-            if context.input(|input| input.pointer.any_click()) && !response.response.contains_pointer() {
-                self.menu = None;
+            if request.is_some() {
+                self.handle_menu_event(SitMenuEvent::Chosen);
+            } else if !open {
+                let event = if context.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    SitMenuEvent::Escape
+                } else {
+                    SitMenuEvent::OutsideClick
+                };
+                self.handle_menu_event(event);
             }
         }
         if context.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.menu = None;
+            self.handle_menu_event(SitMenuEvent::Escape);
         }
         if self.notice.as_ref().is_some_and(|(_, expires)| now >= *expires) {
             self.notice = None;
@@ -224,7 +316,7 @@ impl SitControls {
         if !self.toggle.begin() {
             return false;
         }
-        self.menu = None;
+        self.handle_menu_event(SitMenuEvent::Chosen);
         let sender = self.sender.clone();
         let agent_control = feed.agent_control().clone();
         let runtime = feed.runtime.clone();
@@ -276,11 +368,13 @@ pub(super) enum SitRequest {
     Stand,
 }
 
+#[derive(Clone, Copy)]
 struct SitMenu {
     object: PickObject,
     root_id: Uuid,
     offset: Vec3,
     position: Pos2,
+    popup_id: Id,
 }
 
 impl SitMenu {
@@ -414,11 +508,15 @@ pub(crate) fn agent_request_sit_offset(hit: DVec3, object: PickObject, camera: C
 mod tests {
     use std::num::NonZeroU32;
 
+    use egui::Id;
     use math::{DVec3, Quat, Vec3};
     use render::{PickHit, PickObject, PickObjectKind, PickTarget, scene::Camera};
     use uuid::Uuid;
 
-    use super::{SitMenu, SitRequest, SitToggle, ToggleAction, agent_request_sit_offset, sit_click_request, sit_here_target};
+    use super::{
+        SitControls, SitMenu, SitMenuEvent, SitRequest, SitToggle, ToggleAction, agent_request_sit_offset, sit_click_request,
+        sit_here_target,
+    };
     use world::{CLICK_ACTION_DISABLED, CLICK_ACTION_SIT, Kind};
 
     #[test]
@@ -460,6 +558,7 @@ mod tests {
             root_id: Uuid::from_u128(9),
             offset: Vec3::X,
             position: egui::Pos2::ZERO,
+            popup_id: Id::NULL,
         };
         assert_eq!(menu.label(false), "Sit Here");
         std::assert_matches!(menu.request(false), SitRequest::Object { id, offset } if id == Uuid::from_u128(9) && offset == Vec3::X);
@@ -468,6 +567,76 @@ mod tests {
         assert!(menu.enabled(true, false));
         assert!(!menu.enabled(false, false));
         assert!(!menu.enabled(true, true));
+    }
+
+    fn test_sit_menu() -> SitMenu {
+        SitMenu {
+            object: PickObject {
+                id: Uuid::from_u128(9),
+                local_id: NonZeroU32::new(10).unwrap(),
+                kind: PickObjectKind::Prim,
+                click_action: 0,
+                position: DVec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            root_id: Uuid::from_u128(9),
+            offset: Vec3::X,
+            position: egui::Pos2::ZERO,
+            popup_id: Id::NULL,
+        }
+    }
+
+    #[test]
+    fn menu_dismissal_events_close_the_open_menu() {
+        let events = [
+            SitMenuEvent::OutsideClick,
+            SitMenuEvent::Escape,
+            SitMenuEvent::Chosen,
+            SitMenuEvent::RightClickElsewhere,
+            SitMenuEvent::FocusLost,
+            SitMenuEvent::MovementKey,
+            SitMenuEvent::CameraDragStarted,
+            SitMenuEvent::TargetDisappeared,
+            SitMenuEvent::SessionEnded,
+        ];
+        for event in events {
+            let mut controls = SitControls::new();
+            controls.open_menu(test_sit_menu());
+
+            assert!(controls.handle_menu_event(event), "{event:?} should close the open menu");
+            assert!(!controls.menu_open());
+            assert!(!controls.handle_menu_event(event));
+        }
+
+        let mut controls = SitControls::new();
+        controls.open_menu(test_sit_menu());
+        assert!(controls.handle_left_click_while_menu_open(true));
+        assert!(controls.menu_open());
+    }
+
+    #[test]
+    fn menu_left_click_is_consumed_and_right_click_reopens_only_outside_ui() {
+        let mut controls = SitControls::new();
+        controls.open_menu(test_sit_menu());
+        assert!(controls.handle_left_click_while_menu_open(true));
+        assert!(controls.menu_open());
+        assert!(controls.handle_left_click_while_menu_open(false));
+        assert!(!controls.menu_open());
+
+        controls.open_menu(test_sit_menu());
+        let first_popup_id = controls.menu.expect("opened sit menu").popup_id;
+        assert!(controls.handle_right_click_while_menu_open(false));
+        assert!(!controls.menu_open());
+        let position = egui::pos2(32.0, 64.0);
+        controls.open_menu(SitMenu { position, ..test_sit_menu() });
+        let new_menu = controls.menu.expect("right-click opens a menu at the new target");
+        assert_eq!(new_menu.position, position);
+        assert_ne!(new_menu.popup_id, first_popup_id);
+
+        controls.open_menu(test_sit_menu());
+        assert!(!controls.handle_right_click_while_menu_open(true));
+        assert!(!controls.menu_open());
     }
 
     #[test]

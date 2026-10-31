@@ -8,7 +8,7 @@ use std::{
 use egui::{Context, DragValue, Slider};
 use futures::executor::block_on;
 use render::scene;
-use render::{CompressionQuality, Overlay, PickTarget, Renderer, Retirement, TextureCompletion};
+use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
 use tracing::Instrument;
 #[cfg(target_os = "linux")]
 use winit::platform::startup_notify::{EventLoopExtStartupNotify, WindowAttributesExtStartupNotify, reset_activation_token_env};
@@ -23,7 +23,7 @@ use winit::{
 use super::{
     FRAME_INTERVAL, InputCapture, SharedWindowState,
     recovery::{PresentationRecovery, RecoveryAttempt},
-    sit_controls::{SitControls, SitRequest, sit_click_request},
+    sit_controls::{SitControls, SitMenuEvent, sit_request_for_left_click},
     timing::{FrameTimes, display_refresh_interval, next_frame_deadline, redraw_interval},
 };
 use crate::{
@@ -234,7 +234,7 @@ impl SceneWindow {
                 tracing::info!(focused, "viewport focus changed");
                 self.focused = *focused;
                 if !focused {
-                    self.sit_controls.close_menu();
+                    self.sit_controls.handle_menu_event(SitMenuEvent::FocusLost);
                     self.release_drag(false);
                     self.modifiers = ModifiersState::empty();
                 }
@@ -279,14 +279,19 @@ impl SceneWindow {
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
                     && event.logical_key == Key::Named(NamedKey::Escape)
+                    && self.sit_controls.menu_open() =>
+            {
+                self.sit_controls.handle_menu_event(SitMenuEvent::Escape);
+                self.synchronize_control_input();
+                self.dirty = true;
+                return true;
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && event.logical_key == Key::Named(NamedKey::Escape)
                     && !capture.consumed
                     && !capture.keyboard =>
             {
-                if self.sit_controls.close_menu() {
-                    self.synchronize_control_input();
-                    self.dirty = true;
-                    return true;
-                }
                 self.release_drag(true);
                 if self.camera_mode == CameraMode::Free {
                     self.transition_to_follow();
@@ -297,7 +302,7 @@ impl SceneWindow {
                     && event.state == ElementState::Pressed
                     && matches!(KeyBinding::from_key(&event.logical_key), Some(KeyBinding::Movement(_)))
                 {
-                    self.sit_controls.close_menu();
+                    self.sit_controls.handle_menu_event(SitMenuEvent::MovementKey);
                     self.synchronize_control_input();
                     self.dirty = true;
                     if capture.consumed || capture.keyboard {
@@ -371,6 +376,7 @@ impl SceneWindow {
             feed.drain()?;
             self.dirty |= before != feed.view.version();
         }
+        self.sit_controls.reconcile_menu(self.feed.as_ref());
         self.synchronize_control_input();
         Ok(())
     }
@@ -400,13 +406,24 @@ impl SceneWindow {
             self.release_drag(true);
             return;
         }
+        if self.sit_controls.handle_left_click_while_menu_open(capture.consumed || capture.pointer) {
+            self.synchronize_control_input();
+            self.dirty = true;
+            return;
+        }
         if capture.consumed || capture.pointer {
             return;
         }
 
         if !self.modifiers.alt_key() {
             if self.modifiers.is_empty()
-                && let Some(request) = self.sit_request_for_left_click()
+                && let Some(request) = sit_request_for_left_click(
+                    self.renderer.as_ref(),
+                    self.last_camera,
+                    self.feed.as_mut(),
+                    self.cursor,
+                    self.window.inner_size(),
+                )
                 && self.sit_controls.start_if_requested(Some(request), self.feed.as_ref(), Arc::clone(&self.wake))
             {
                 self.egui.memory_mut(|memory| {
@@ -442,28 +459,6 @@ impl SceneWindow {
         }
     }
 
-    fn sit_request_for_left_click(&mut self) -> Option<SitRequest> {
-        let (Some(renderer), Some(camera)) = (&self.renderer, self.last_camera) else {
-            return None;
-        };
-        let size = self.window.inner_size();
-        let ray = camera.ray([self.cursor.x, self.cursor.y], [size.width, size.height]);
-        let hit = match renderer.pick(camera, ray) {
-            Ok(Some(hit)) => hit,
-            Ok(None) => return None,
-            Err(error) => {
-                tracing::debug!(%error, "scene sit-action pick exceeded its work limit");
-                return None;
-            }
-        };
-        let PickTarget::Object(object) = hit.target else { return None };
-        let feed = self.feed.as_mut()?;
-        let root_click_action = feed.pick_root_click_action(object);
-        let seated = feed.agent_is_seated();
-        let agent_available = feed.agent_available();
-        sit_click_request(hit, camera, ray, root_click_action, agent_available, seated)
-    }
-
     pub(super) fn drag_camera(&mut self, (dx, dy): (f64, f64)) {
         let Some(drag) = &mut self.drag else {
             return;
@@ -497,7 +492,7 @@ impl SceneWindow {
         let center = PhysicalPosition::new(f64::from(size.width) * 0.5, f64::from(size.height) * 0.5);
         match self.window.set_cursor_grab(CursorGrabMode::Confined) {
             Ok(()) => {
-                self.sit_controls.close_menu();
+                self.sit_controls.handle_menu_event(SitMenuEvent::CameraDragStarted);
                 self.synchronize_control_input();
                 self.window.set_cursor_visible(false);
                 self.drag = Some(DragState { origin, travel: [0.0; 2] });
@@ -722,6 +717,7 @@ impl SceneWindow {
         let mut sit_request = None;
         let output = self.egui.run_ui(input, |root| {
             egui::Window::new("Rendering").default_width(400.0).show(root.ctx(), |ui| {
+                (request_chat, sit_request) = self.sit_controls.controls_ui(ui, seated, agent_available, controls_available);
                 if let Some(camera) = &mut self.camera {
                     ui.add(Slider::new(&mut camera.draw_distance, 32.0..=1024.0).text("Draw distance").suffix(" m"));
                     ui.add(Slider::new(&mut camera.lod_factor, 0.25..=4.0).text("LOD factor"))
@@ -849,7 +845,6 @@ impl SceneWindow {
                         ui.label(format!("GPU recreations: {}", self.recoveries));
                     }
                     recreate_renderer = ui.button("Recreate GPU resources").clicked();
-                    (request_chat, sit_request) = self.sit_controls.controls_ui(ui, seated, agent_available, controls_available);
                 });
             });
             let menu_request = self.sit_controls.overlays(root.ctx(), now, self.feed.as_ref());

@@ -1,3 +1,4 @@
+use math::Quat;
 use protocol::{
     lludp::{FieldValue, Message},
     types::{MAX_TEXTURE_FACES, decode_texture_entry},
@@ -99,7 +100,10 @@ pub(crate) fn decode_sit_response(message: &Message) -> Option<SitResponseUpdate
     }
     let transform = &message.sit_transform;
     let target = transform.sit_position.zip(transform.sit_rotation).and_then(|(position, rotation)| {
-        (position.is_finite() && rotation.is_finite() && rotation.length_squared() > 0.0).then_some(SitTarget { position, rotation })
+        if !position.is_finite() {
+            return None;
+        }
+        Some(SitTarget { position, rotation: normalized_sit_rotation(rotation)? })
     });
     let camera_override = transform.camera_eye_offset.zip(transform.camera_at_offset).and_then(|(eye_offset, at_offset)| {
         (eye_offset.is_finite() && at_offset.is_finite() && eye_offset.distance(at_offset) > 0.001)
@@ -113,6 +117,23 @@ pub(crate) fn decode_sit_response(message: &Message) -> Option<SitResponseUpdate
         force_mouselook: transform.force_mouselook.unwrap_or(false),
         camera_override,
     })
+}
+
+fn normalized_sit_rotation(rotation: Quat) -> Option<Quat> {
+    const U16_SQUARED_NORM_ERROR: f32 = 4.0 / 65_535.0 + 48.0 / (65_535.0 * 65_535.0);
+    const F32_ROUNDING_ERROR: f32 = 8.0 * f32::EPSILON;
+    const NORM_SQUARED_TOLERANCE: f32 = U16_SQUARED_NORM_ERROR + F32_ROUNDING_ERROR;
+
+    let norm_squared = rotation.length_squared();
+    if !rotation.is_finite()
+        || !norm_squared.is_finite()
+        || norm_squared <= f32::EPSILON
+        || (norm_squared - 1.0).abs() > NORM_SQUARED_TOLERANCE
+    {
+        None
+    } else {
+        Some(rotation.normalize())
+    }
 }
 
 pub(crate) fn decode_sit_animation(message: &Message) -> Option<SitAnimationUpdate> {
@@ -261,6 +282,30 @@ mod tests {
         let camera = response.camera_override.unwrap();
         assert_eq!(camera.eye_offset, Vec3::X);
         assert_eq!(camera.at_offset, Vec3::Y);
+    }
+
+    #[test]
+    fn sit_response_normalizes_wire_rotation_and_rejects_non_unit_rotation() {
+        let message = |rotation| {
+            Message::AvatarSitResponse(AvatarSitResponse {
+                sit_object: SitObject { id: Some(Uuid::from_u128(8)) },
+                sit_transform: SitTransform {
+                    auto_pilot: Some(false),
+                    sit_position: Some(Vec3::new(1.0, 2.0, 3.0)),
+                    sit_rotation: Some(rotation),
+                    camera_eye_offset: None,
+                    camera_at_offset: None,
+                    force_mouselook: Some(false),
+                },
+            })
+        };
+        let quantized = Quat::from_xyzw(0.0, 0.0, 0.0, 1.00001);
+        let update = decode_sit_response(&message(quantized)).expect("sit response");
+        let target = update.target.expect("accepted quantization drift");
+        assert_eq!(target.rotation, Quat::IDENTITY);
+
+        let update = decode_sit_response(&message(Quat::from_xyzw(0.0, 0.0, 0.0, 1.2))).expect("sit response");
+        assert_eq!(update.target, None);
     }
 
     #[test]

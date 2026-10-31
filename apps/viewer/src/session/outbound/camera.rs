@@ -371,7 +371,7 @@ mod tests {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     use crate::{
-        agent_movement::{HeldControls, KeyBinding, MovementKey},
+        agent_movement::{HeldControls, KeyBinding, MovementKey, SittingCameraInput},
         camera::FollowCamera,
         session::world::{SessionWorld, viewer_world_limits},
     };
@@ -630,7 +630,9 @@ mod tests {
 
         assert_eq!(world.world().entity(agent_id), None, "the visible region still has no self-avatar World pose");
         let pose = world::WorldPose { position: origin + DVec3::new(128.0, 128.0, 24.0), rotation: Quat::IDENTITY };
-        let camera = FollowCamera::scene_camera(pose, [720, 720], 64.0, 1.0).expect("seeded follow camera");
+        let camera = FollowCamera::default()
+            .follow_with_sit_input(pose, None, SittingCameraInput::default(), [720, 720], 64.0, 1.0, std::time::Instant::now())
+            .expect("seeded follow camera");
         uplink.camera.send_replace(Some(camera));
 
         let mut sent = Vec::new();

@@ -182,6 +182,8 @@ pub(crate) struct SessionReadyUpdate {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) sit_response: watch::Receiver<Option<SitResponseState>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) stand_pending: watch::Receiver<bool>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
 }
 

@@ -79,6 +79,7 @@ pub(crate) fn start_session(
     agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<network::CircuitMotionStatus>)>>,
     sit_response: watch::Receiver<Option<SitResponseState>>,
+    stand_pending: watch::Receiver<bool>,
     sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
     cx: &mut App,
 ) {
@@ -91,6 +92,7 @@ pub(crate) fn start_session(
             movement,
             agent_motion,
             sit_response,
+            stand_pending,
             sit_control_grabs,
             cx,
         );
@@ -163,6 +165,7 @@ fn connect_world(
     movement: watch::Sender<Option<MovementObservation>>,
     agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     sit_response: watch::Receiver<Option<SitResponseState>>,
+    stand_pending: watch::Receiver<bool>,
     sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
     cx: &mut App,
 ) {
@@ -179,6 +182,7 @@ fn connect_world(
             movement,
             agent_motion,
             sit_response,
+            stand_pending,
             sit_control_grabs,
             service_runtime(cx),
         );

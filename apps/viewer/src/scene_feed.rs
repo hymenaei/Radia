@@ -41,6 +41,23 @@ use motion_circuit::MotionCircuitWake;
 
 const MIN_ACTIVE_MOTION_SQUARED: f32 = 1e-6;
 
+fn same_view_linkset(view: &SceneView, first: Uuid, second: Uuid) -> bool {
+    first == second || view_linkset_root(view, first).is_some_and(|root| view_linkset_root(view, second) == Some(root))
+}
+
+fn view_linkset_root(view: &SceneView, object_id: Uuid) -> Option<Uuid> {
+    let mut entity = view.objects().find(|object| object.detail().summary.id == object_id)?.detail().summary.entity;
+    for _ in 0..=view.object_count() {
+        let object = view.object(entity)?;
+        match object.detail().summary.parent {
+            Parent::Root => return Some(object.detail().summary.id),
+            Parent::Resolved(parent) => entity = parent,
+            Parent::Unknown | Parent::Pending { .. } => return None,
+        }
+    }
+    None
+}
+
 #[derive(Default)]
 struct DeadReckoning {
     sample: Option<AgentMotionSample>,
@@ -133,6 +150,7 @@ pub(crate) struct SceneFeed {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pose_seed: u64,
     sit_response: watch::Receiver<Option<SitResponseState>>,
+    stand_pending: watch::Receiver<bool>,
     sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
@@ -147,6 +165,7 @@ impl SceneFeed {
         movement: watch::Sender<Option<MovementObservation>>,
         mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
         sit_response: watch::Receiver<Option<SitResponseState>>,
+        stand_pending: watch::Receiver<bool>,
         sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
@@ -161,6 +180,7 @@ impl SceneFeed {
         let observations = camera.subscribe();
         let agent_motions = agent_motion.clone();
         let sit_response_updates = sit_response.clone();
+        let stand_pending_updates = stand_pending.clone();
         let sit_control_grab_updates = sit_control_grabs.clone();
         let mut dead_reckoning = DeadReckoning::default();
         dead_reckoning.replace(*agent_motion.borrow_and_update());
@@ -175,6 +195,7 @@ impl SceneFeed {
                     observations,
                     agent_motions,
                     sit_response_updates,
+                    stand_pending_updates,
                     sit_control_grab_updates,
                     wake,
                 )
@@ -204,6 +225,7 @@ impl SceneFeed {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             pose_seed: 0,
             sit_response,
+            stand_pending,
             sit_control_grabs,
             last_movement: None,
             incoming,
@@ -264,6 +286,11 @@ impl SceneFeed {
             matches!(agent.detail().summary.parent, Parent::Resolved(_))
                 || self.dead_reckoning.sample.is_some_and(|sample| sample.ground_sitting)
         })
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn sitting_input_active(&mut self) -> bool {
+        self.agent_is_seated() && !*self.stand_pending.borrow()
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -338,21 +365,25 @@ impl SceneFeed {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn sit_camera_pose(&self) -> Option<(Uuid, Option<SitCameraOverride>, WorldPose)> {
+        if *self.stand_pending.borrow() {
+            return None;
+        }
         let response = (*self.sit_response.borrow())?;
         let agent = self.agent()?;
         let Parent::Resolved(seat_entity) = agent.detail().summary.parent else { return None };
         let seat = self.view.object(seat_entity)?;
         let seat_id = seat.detail().summary.id;
-        if seat_id != response.object_id && seat_id != response.requested_object_id {
+        if !same_view_linkset(&self.view, seat_id, response.object_id) {
             return None;
         }
-        let pose = match seat.detail().world_transform.ok()? {
+        let reference = self.view.objects().find(|object| object.detail().summary.id == response.object_id)?;
+        let pose = match reference.detail().world_transform.ok()? {
             WorldTransformState::Resolved(transform) => transform.pose,
             WorldTransformState::MissingScale(pose) => pose,
             WorldTransformState::Provisional { pose, .. } => pose,
             WorldTransformState::Unresolved(_) => return None,
         };
-        Some((seat_id, response.camera_override, pose))
+        Some((response.object_id, response.camera_override, pose))
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -547,6 +578,7 @@ async fn run(
     mut camera: watch::Receiver<Option<Camera>>,
     mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     mut sit_response: watch::Receiver<Option<SitResponseState>>,
+    mut stand_pending: watch::Receiver<bool>,
     mut sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
     wake: impl Fn(),
 ) {
@@ -614,6 +646,7 @@ async fn run(
             let motion_updated = agent_motion.changed().fuse();
             let circuit_transition = motion_circuits.wait_for_transition().fuse();
             let camera_overridden = sit_response.changed().fuse();
+            let stand_requested = stand_pending.changed().fuse();
             let controls_grabbed = sit_control_grabs.changed().fuse();
             let available = assets.next().fuse();
             let released = textures.changed().fuse();
@@ -633,6 +666,7 @@ async fn run(
                 motion_updated,
                 circuit_transition,
                 camera_overridden,
+                stand_requested,
                 controls_grabbed,
                 available,
                 released,
@@ -666,6 +700,7 @@ async fn run(
                 _ = circuit_transition => wake(),
                 result = moved => { if result.is_err() { break; } }
                 result = camera_overridden => { if result.is_err() { break; } wake(); }
+                result = stand_requested => { if result.is_err() { break; } wake(); }
                 result = controls_grabbed => { if result.is_err() { break; } wake(); }
                 result = changed => { if result.is_err() { break; } scene.notify_world_change(); }
                 _ = timer => {}

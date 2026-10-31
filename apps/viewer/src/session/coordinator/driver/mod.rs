@@ -1,3 +1,4 @@
+mod control;
 pub(super) mod inventory;
 
 use std::{
@@ -17,11 +18,7 @@ use futures::{
 use network::{
     AgentSession, CircuitMotionStatus, CoverageLoss, CoverageSource, Event, Grid, PacketOrder, SimulatorId, capabilities::Client,
 };
-use protocol::{
-    lludp::{FieldValue, Message},
-    login::ResponseData,
-    messages::RequestAgentData,
-};
+use protocol::{lludp::Message, login::ResponseData, messages::RequestAgentData};
 use tokio::{runtime::Handle, sync::watch};
 use world::UpdateSource;
 
@@ -42,9 +39,9 @@ use crate::{
     session::{
         AgentControlEvent, AgentControlHandle, AgentControlState, AgentMotionPublisher, CameraUplink, RegionLookup, Session, SessionHandle,
         SitOutcome, SitResponseState,
-        agent_control::{self, AgentControlError, Command as AgentControlCommand},
+        agent_control::{self, AgentControlError},
         environment::{Completion, EnvironmentIntake},
-        inbound::{decode_sit_animation, object_media_requests},
+        inbound::object_media_requests,
         object_cache::{ObjectCacheEvent, ObjectCacheSession},
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
         recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error, warn_unrecovered},
@@ -78,42 +75,6 @@ enum DriverInput {
     ObjectCache(Option<ObjectCacheEvent>),
     InventoryEdit(Option<InventoryEditEvent>),
     InventoryBootstrap(Result<Result<(Inventory, InventoryBootstrapReport), InventoryWorkerError>, tokio::task::JoinError>),
-}
-
-#[derive(Default)]
-struct PendingHandshakeReplies {
-    by_simulator: HashMap<SimulatorId, PendingHandshakeReply>,
-}
-
-struct PendingHandshakeReply {
-    flags: u32,
-    remaining: usize,
-}
-
-impl PendingHandshakeReplies {
-    fn queue(&mut self, simulator_id: SimulatorId, flags: u32) -> bool {
-        match self.by_simulator.get_mut(&simulator_id) {
-            Some(reply) => {
-                reply.flags = flags;
-                reply.remaining = reply.remaining.saturating_add(1);
-                false
-            }
-            None => {
-                self.by_simulator.insert(simulator_id, PendingHandshakeReply { flags, remaining: 1 });
-                true
-            }
-        }
-    }
-
-    fn take_next(&mut self, simulator_id: SimulatorId) -> Option<u32> {
-        if self.by_simulator.get(&simulator_id).is_some_and(|reply| reply.remaining == 0) {
-            self.by_simulator.remove(&simulator_id);
-            return None;
-        }
-        let reply = self.by_simulator.get_mut(&simulator_id)?;
-        reply.remaining -= 1;
-        Some(reply.flags)
-    }
 }
 
 pub(crate) struct CredentialPersistence {
@@ -154,7 +115,7 @@ struct SessionDriver {
     inventory: Option<Inventory>,
     inventory_cache: InventoryCacheSession,
     object_cache: ObjectCacheSession,
-    pending_handshake_replies: Arc<Mutex<PendingHandshakeReplies>>,
+    pending_handshake_replies: Arc<Mutex<control::PendingHandshakeReplies>>,
     inventory_changes: watch::Sender<Option<InventorySnapshot>>,
     rejected_inventory_blocks: u64,
     inventory_fetch: InventoryFetchController,
@@ -173,6 +134,7 @@ struct SessionDriver {
     agent_control: AgentControlState,
     agent_control_handle: AgentControlHandle,
     sit_response: watch::Receiver<Option<SitResponseState>>,
+    stand_pending: watch::Receiver<bool>,
     control_grabs: ScriptControlGrabs,
     control_grabs_sender: watch::Sender<ScriptControlGrabs>,
     region_lookup: Option<RegionLookup>,
@@ -206,7 +168,7 @@ impl SessionDriver {
         let assets = AssetCoordinator::new(runtime.clone(), cancellation.clone(), cache);
         let camera = CameraUplink::new();
         let (region_motion_sender, _) = watch::channel(Vec::new());
-        let (agent_control_handle, agent_control, sit_response) = AgentControlState::new();
+        let (agent_control_handle, agent_control, sit_response, stand_pending) = AgentControlState::new();
         let (control_grabs_sender, _) = watch::channel(ScriptControlGrabs::default());
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
@@ -215,7 +177,7 @@ impl SessionDriver {
         let inventory_fetch = InventoryFetchController::new(inventory_edits.handle());
         let mut object_cache = ObjectCacheSession::new(credentials.grid);
         object_cache.start(&runtime);
-        let pending_handshake_replies = Arc::new(Mutex::new(PendingHandshakeReplies::default()));
+        let pending_handshake_replies = Arc::new(Mutex::new(control::PendingHandshakeReplies::default()));
 
         Self {
             session,
@@ -266,6 +228,7 @@ impl SessionDriver {
             agent_control,
             agent_control_handle,
             sit_response,
+            stand_pending,
             control_grabs: ScriptControlGrabs::default(),
             control_grabs_sender,
             region_lookup: None,
@@ -338,7 +301,7 @@ impl SessionDriver {
                 DriverInput::InventoryCache(None) => ControlFlow::Continue(()),
                 DriverInput::ObjectCache(Some(event)) => {
                     if let Some((simulator_id, flags)) = self.object_cache.handle_event(event) {
-                        reply_region_handshake(
+                        control::reply_region_handshake(
                             &self.runtime,
                             Arc::clone(&self.pending_handshake_replies),
                             self.session_handle.clone(),
@@ -431,65 +394,6 @@ impl SessionDriver {
             .and_then(|simulator| self.session_world.region_for(simulator))
             .and_then(|region| self.session_world.world().region(region))
             .and_then(|info| info.resolved_origin())
-    }
-
-    fn handle_agent_control_event(&mut self, event: AgentControlEvent) {
-        match event {
-            AgentControlEvent::Command(Some(command)) => self.handle_agent_control_command(command),
-            AgentControlEvent::Command(None) => {}
-            AgentControlEvent::SitTimedOut => self.agent_control.timeout_sit(),
-        }
-    }
-
-    fn handle_agent_control_command(&mut self, command: AgentControlCommand) {
-        agent_control::process_agent_control_command(
-            &self.session_handle,
-            &mut self.agent_control,
-            &mut self.camera,
-            self.primary_simulator,
-            self.active_session.as_ref().map(|session| (session.agent_id, session.session_id)),
-            command,
-        );
-    }
-
-    fn handle_sit_response(&mut self, simulator: SimulatorId, message: &Message) {
-        agent_control::process_sit_response(&mut self.agent_control, &mut self.camera, self.session_world.world(), simulator, message);
-    }
-
-    fn update_control_grabs(&mut self, simulator: SimulatorId, message: &Message) {
-        if self.primary_simulator != Some(simulator) {
-            return;
-        }
-        if let Some(changes) = decode_script_control_changes(message) {
-            let changed = changes
-                .into_iter()
-                .fold(false, |changed, (take, controls, pass_to_agent)| self.control_grabs.apply(take, controls, pass_to_agent) || changed);
-            if changed {
-                self.control_grabs_sender.send_replace(self.control_grabs);
-            }
-        } else if message.name() == "ForceScriptControlRelease"
-            && self.active_session.as_ref().is_some_and(|session| script_control_release_matches(message, session))
-            && self.control_grabs.clear()
-        {
-            self.control_grabs_sender.send_replace(self.control_grabs);
-        }
-    }
-
-    fn handle_agent_sit_animation(&mut self, simulator: SimulatorId, received_at: std::time::Instant, message: &Message) {
-        let Some(update) = decode_sit_animation(message) else { return };
-        if self.primary_simulator != Some(simulator)
-            || !self.active_session.as_ref().is_some_and(|session| session.agent_id == update.agent_id)
-            || !self.agent_motion.set_ground_sitting(update.ground_sitting)
-        {
-            return;
-        }
-        tracing::debug!(
-            simulator = simulator.get(),
-            agent = %update.agent_id,
-            ground_sitting = update.ground_sitting,
-            "agent sit animation changed"
-        );
-        self.publish_world_agent_motion(received_at);
     }
 
     fn handle_media_result(&mut self, result: Option<ObjectMediaResult>) {
@@ -719,7 +623,7 @@ impl SessionDriver {
         if let Message::RegionHandshake(handshake) = &message {
             self.object_cache.set_region_identity(simulator_id, handshake);
             if let Some(flags) = self.object_cache.begin_region_load(simulator_id, &self.runtime) {
-                reply_region_handshake(
+                control::reply_region_handshake(
                     &self.runtime,
                     Arc::clone(&self.pending_handshake_replies),
                     self.session_handle.clone(),
@@ -907,6 +811,8 @@ impl SessionDriver {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             sit_response: self.sit_response.clone(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
+            stand_pending: self.stand_pending.clone(),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             sit_control_grabs: self.control_grabs_sender.subscribe(),
         }));
     }
@@ -930,6 +836,9 @@ impl SessionDriver {
     fn publish_world_agent_motion(&mut self, received_at: std::time::Instant) {
         let Some(agent_id) = self.active_session.as_ref().map(|session| session.agent_id) else { return };
         self.agent_motion.publish_world(self.session_world.world(), agent_id, received_at);
+        if let Some(simulator) = self.primary_simulator {
+            self.agent_control.observe_world(self.session_world.world(), simulator, agent_id, self.agent_motion.ground_sitting());
+        }
     }
 
     fn publish_region_motion(&mut self) {
@@ -1028,86 +937,6 @@ impl SessionDriver {
             tracing::warn!(simulator = simulator_id.get(), region, %error, "could not retire simulator world region on session shutdown");
         }
     }
-}
-
-fn decode_script_control_changes(message: &Message) -> Option<Vec<(bool, u32, bool)>> {
-    let Message::Schema(message) = message else { return None };
-    let schema = message.schema();
-    if schema.name != "ScriptControlChange" || schema.blocks.first()?.name != "Data" {
-        return None;
-    }
-    message
-        .blocks()
-        .first()?
-        .instances
-        .iter()
-        .map(|instance| {
-            let [FieldValue::Bool(take), FieldValue::U32(controls), FieldValue::Bool(pass_to_agent)] = instance.fields.as_slice() else {
-                return None;
-            };
-            Some((*take, *controls, *pass_to_agent))
-        })
-        .collect()
-}
-
-fn script_control_release_matches(message: &Message, session: &AgentSession) -> bool {
-    let Message::Schema(message) = message else { return false };
-    let schema = message.schema();
-    if schema.name != "ForceScriptControlRelease" || schema.blocks.first().is_none_or(|block| block.name != "AgentData") {
-        return false;
-    }
-    let Some(instance) = message.blocks().first().and_then(|block| block.instances.first()) else { return false };
-    matches!(instance.fields.as_slice(), [FieldValue::Uuid(agent_id), FieldValue::Uuid(session_id)] if *agent_id == session.agent_id && *session_id == session.session_id)
-}
-
-fn reply_region_handshake(
-    runtime: &Handle,
-    pending_replies: Arc<Mutex<PendingHandshakeReplies>>,
-    session_handle: SessionHandle,
-    simulator_id: SimulatorId,
-    flags: u32,
-) {
-    let mut pending = pending_replies.lock().unwrap_or_else(|error| error.into_inner());
-    if !pending.by_simulator.contains_key(&simulator_id) {
-        match session_handle.try_reply_region_handshake(simulator_id, flags) {
-            Ok(response) => {
-                drop(pending);
-                drop(runtime.spawn(async move {
-                    match response.await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
-                        }
-                        Err(_) => {
-                            tracing::warn!(simulator = simulator_id.get(), "region handshake reply ended with the network session");
-                        }
-                    }
-                }));
-                return;
-            }
-            Err(network::Error::CommandQueueFull) => {}
-            Err(error) => {
-                tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
-                return;
-            }
-        }
-    }
-    let should_drain = pending.queue(simulator_id, flags);
-    drop(pending);
-    if !should_drain {
-        return;
-    }
-    drop(runtime.spawn(async move {
-        loop {
-            let next_flags = pending_replies.lock().unwrap_or_else(|error| error.into_inner()).take_next(simulator_id);
-            let Some(next_flags) = next_flags else { break };
-            if let Err(error) = session_handle.reply_region_handshake(simulator_id, next_flags).await {
-                tracing::warn!(simulator = simulator_id.get(), %error, "region handshake reply could not be sent");
-                pending_replies.lock().unwrap_or_else(|error| error.into_inner()).by_simulator.remove(&simulator_id);
-                break;
-            }
-        }
-    }));
 }
 
 #[tracing::instrument(name = "viewer.session", level = "info", skip_all)]

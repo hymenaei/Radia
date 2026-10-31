@@ -203,16 +203,27 @@ impl Viewport {
         movement: watch::Sender<Option<MovementObservation>>,
         agent_motion: watch::Receiver<Option<AgentMotionSample>>,
         sit_response: watch::Receiver<Option<SitResponseState>>,
+        stand_pending: watch::Receiver<bool>,
         sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
         runtime: Handle,
     ) {
         let requested = self.shared.requested.lock().unwrap_or_else(PoisonError::into_inner);
         if requested.generation == generation && requested.visible {
             let shared = Arc::clone(&self.shared);
-            let feed =
-                SceneFeed::start(sources, agent_id, camera, movement, agent_motion, sit_response, sit_control_grabs, runtime, move || {
+            let feed = SceneFeed::start(
+                sources,
+                agent_id,
+                camera,
+                movement,
+                agent_motion,
+                sit_response,
+                stand_pending,
+                sit_control_grabs,
+                runtime,
+                move || {
                     shared.wake();
-                });
+                },
+            );
             *self.shared.feed.lock().unwrap_or_else(PoisonError::into_inner) = Some((generation, feed));
             self.shared.wake();
         }

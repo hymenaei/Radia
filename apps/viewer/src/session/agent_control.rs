@@ -130,6 +130,7 @@ struct PendingSit {
     simulator: SimulatorId,
     deadline: Instant,
     reply: oneshot::Sender<Result<SitOutcome, AgentControlError>>,
+    acceptance: Option<(SitResponseState, SitOutcome)>,
 }
 
 pub(crate) struct AgentControlState {
@@ -137,16 +138,19 @@ pub(crate) struct AgentControlState {
     pending_sit: Option<PendingSit>,
     next_sit_response_generation: u64,
     sit_response: watch::Sender<Option<SitResponseState>>,
+    stand_pending: watch::Sender<bool>,
 }
 
 impl AgentControlState {
-    pub(crate) fn new() -> (AgentControlHandle, Self, watch::Receiver<Option<SitResponseState>>) {
+    pub(crate) fn new() -> (AgentControlHandle, Self, watch::Receiver<Option<SitResponseState>>, watch::Receiver<bool>) {
         let (sender, commands) = mpsc::channel(COMMAND_CAPACITY);
         let (sit_response, sit_updates) = watch::channel(None);
+        let (stand_pending, stand_updates) = watch::channel(false);
         (
             AgentControlHandle { commands: sender },
-            Self { commands, pending_sit: None, next_sit_response_generation: 0, sit_response },
+            Self { commands, pending_sit: None, next_sit_response_generation: 0, sit_response, stand_pending },
             sit_updates,
+            stand_updates,
         )
     }
 
@@ -176,7 +180,8 @@ impl AgentControlState {
         simulator: SimulatorId,
         reply: oneshot::Sender<Result<SitOutcome, AgentControlError>>,
     ) {
-        self.pending_sit = Some(PendingSit { object_id, simulator, deadline: Instant::now() + SIT_RESPONSE_TIMEOUT, reply });
+        self.pending_sit =
+            Some(PendingSit { object_id, simulator, deadline: Instant::now() + SIT_RESPONSE_TIMEOUT, reply, acceptance: None });
     }
 
     pub(crate) fn has_pending_sit(&self) -> bool {
@@ -184,9 +189,12 @@ impl AgentControlState {
     }
 
     pub(crate) fn expects_response(&self, world: &World, simulator: SimulatorId, object_id: Uuid) -> bool {
-        self.pending_sit
-            .as_ref()
-            .is_some_and(|pending| pending.simulator == simulator && same_sit_linkset(world, pending.object_id, object_id))
+        self.pending_sit.as_ref().is_some_and(|pending| {
+            pending.simulator == simulator
+                && pending.acceptance.is_none()
+                && Instant::now() < pending.deadline
+                && same_sit_linkset(world, pending.object_id, object_id)
+        })
     }
 
     pub(crate) fn accept_sit(
@@ -197,19 +205,44 @@ impl AgentControlState {
         force_mouselook: bool,
         camera_override: Option<SitCameraOverride>,
     ) -> bool {
-        let Some(pending) = self.pending_sit.as_ref().filter(|pending| pending.simulator == simulator) else {
+        if self.pending_sit.as_ref().is_some_and(|pending| Instant::now() >= pending.deadline) {
+            self.timeout_sit();
+            return false;
+        }
+        let Some(pending) = self.pending_sit.as_ref().filter(|pending| pending.simulator == simulator && pending.acceptance.is_none())
+        else {
             return false;
         };
         let requested_object_id = pending.object_id;
         let generation = self.next_sit_response_generation;
         self.next_sit_response_generation = generation.wrapping_add(1);
-        self.set_sit_response(Some(SitResponseState { generation, object_id, requested_object_id, camera_override, force_mouselook }));
-        if let Some(pending) = self.pending_sit.take()
-            && pending.reply.send(Ok(SitOutcome::Accepted { auto_pilot, force_mouselook })).is_err()
-        {
-            tracing::trace!("sit caller stopped before receiving acceptance");
-        }
+        let response = SitResponseState { generation, object_id, requested_object_id, camera_override, force_mouselook };
+        let outcome = SitOutcome::Accepted { auto_pilot, force_mouselook };
+        self.set_sit_response(Some(response));
+        self.pending_sit.as_mut().expect("pending sit was checked").acceptance = Some((response, outcome));
         true
+    }
+
+    pub(crate) fn observe_world(&mut self, world: &World, simulator: SimulatorId, agent_id: Uuid, ground_sitting: bool) {
+        self.timeout_sit();
+        let (parent_id, standing_confirmed) = world
+            .entity(agent_id)
+            .and_then(|entity| world.object(entity))
+            .map(|agent| match agent.parent() {
+                Parent::Resolved(parent) => (world.object(parent).map(|object| object.id()), false),
+                Parent::Root => (None, !ground_sitting),
+                Parent::Unknown | Parent::Pending { .. } => (None, false),
+            })
+            .unwrap_or((None, false));
+        if let Some((response, outcome)) = self.pending_sit.as_ref().and_then(|pending| {
+            (pending.simulator == simulator && Instant::now() < pending.deadline).then_some(pending.acceptance).flatten()
+        }) && parent_id.is_some_and(|parent_id| same_sit_linkset(world, response.object_id, parent_id))
+        {
+            self.complete_sit(simulator, Ok(outcome));
+        }
+        if standing_confirmed && *self.stand_pending.borrow() {
+            self.stand_pending.send_replace(false);
+        }
     }
 
     pub(crate) fn refuse_sit(&mut self, simulator: SimulatorId) -> bool {
@@ -218,6 +251,9 @@ impl AgentControlState {
 
     pub(crate) fn cancel_sit(&mut self, outcome: SitOutcome) {
         if let Some(pending) = self.pending_sit.take() {
+            if let Some((response, _)) = pending.acceptance {
+                self.clear_sit_response_generation(response.generation);
+            }
             tracing::debug!(simulator = pending.simulator.get(), object = %pending.object_id, ?outcome, "sit outcome completed");
             if pending.reply.send(Ok(outcome)).is_err() {
                 tracing::trace!("sit caller stopped before receiving cancellation");
@@ -233,6 +269,9 @@ impl AgentControlState {
 
     pub(crate) fn fail_sit(&mut self, error: AgentControlError) {
         if let Some(pending) = self.pending_sit.take() {
+            if let Some((response, _)) = pending.acceptance {
+                self.clear_sit_response_generation(response.generation);
+            }
             tracing::debug!(simulator = pending.simulator.get(), object = %pending.object_id, %error, "sit outcome failed");
             if pending.reply.send(Err(error)).is_err() {
                 tracing::trace!("sit caller stopped before receiving failure");
@@ -257,17 +296,48 @@ impl AgentControlState {
         });
     }
 
+    fn set_stand_pending(&self, pending: bool) {
+        self.stand_pending.send_if_modified(|previous| {
+            if *previous == pending {
+                false
+            } else {
+                *previous = pending;
+                true
+            }
+        });
+    }
+
     fn complete_sit(&mut self, simulator: SimulatorId, outcome: Result<SitOutcome, AgentControlError>) -> bool {
         if !self.pending_sit.as_ref().is_some_and(|pending| pending.simulator == simulator) {
             return false;
         }
+        if self.pending_sit.as_ref().is_some_and(|pending| Instant::now() >= pending.deadline) {
+            self.timeout_sit();
+            return true;
+        }
         if let Some(pending) = self.pending_sit.take() {
+            if !matches!(outcome, Ok(SitOutcome::Accepted { .. }))
+                && let Some((response, _)) = pending.acceptance
+            {
+                self.clear_sit_response_generation(response.generation);
+            }
             tracing::debug!(simulator = pending.simulator.get(), object = %pending.object_id, ?outcome, "sit outcome completed");
             if pending.reply.send(outcome).is_err() {
                 tracing::trace!("sit caller stopped before receiving outcome");
             }
         }
         true
+    }
+
+    fn clear_sit_response_generation(&self, generation: u64) {
+        self.sit_response.send_if_modified(|previous| {
+            if previous.is_some_and(|response| response.generation == generation) {
+                *previous = None;
+                true
+            } else {
+                false
+            }
+        });
     }
 
     fn set_sit_response(&self, response: Option<SitResponseState>) {
@@ -282,7 +352,7 @@ impl AgentControlState {
     }
 }
 
-fn same_sit_linkset(world: &World, requested_object_id: Uuid, response_object_id: Uuid) -> bool {
+pub(crate) fn same_sit_linkset(world: &World, requested_object_id: Uuid, response_object_id: Uuid) -> bool {
     requested_object_id == response_object_id
         || linkset_root(world, requested_object_id)
             .is_some_and(|requested_root| linkset_root(world, response_object_id) == Some(requested_root))
@@ -383,6 +453,7 @@ pub(super) fn process_agent_control_command<T: SitRequestTransport>(
                 }
                 return;
             }
+            agent_control.set_stand_pending(true);
             agent_control.cancel_sit(SitOutcome::Cancelled);
             agent_control.clear_sit_response_without_camera();
             if reply.send(Ok(())).is_err() {
@@ -399,6 +470,7 @@ pub(super) fn process_sit_response(
     simulator: SimulatorId,
     message: &Message,
 ) {
+    agent_control.timeout_sit();
     let Some(response) = decode_sit_response(message) else {
         if message.name() == "AvatarSitResponse" {
             tracing::debug!(simulator = simulator.get(), matched = false, "received invalid AvatarSitResponse");
@@ -432,7 +504,7 @@ pub(super) fn process_sit_response(
             simulator = simulator.get(),
             object = %response.object_id,
             auto_pilot = response.auto_pilot,
-            "sit outcome accepted"
+            "sit response accepted; awaiting World parent"
         );
     }
 }
@@ -474,7 +546,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn sit_request_times_out() {
-        let (handle, mut state, _) = AgentControlState::new();
+        let (handle, mut state, _, _) = AgentControlState::new();
         let object_id = Uuid::from_u128(3);
         let simulator = simulator_id();
         let call = tokio::spawn({
@@ -492,8 +564,85 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn late_response_cannot_accept_after_production_deadline() {
+        let (handle, mut state, sit_response, _) = AgentControlState::new();
+        let object_id = Uuid::from_u128(5);
+        let simulator = simulator_id();
+        let call = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.sit_on_object(object_id, Vec3::ZERO).await }
+        });
+        let AgentControlEvent::Command(Some(Command::SitOnObject { reply, .. })) = state.next_event().await else {
+            panic!("object-sit command")
+        };
+        state.begin_sit(object_id, simulator, reply);
+        advance(SIT_RESPONSE_TIMEOUT).await;
+
+        assert!(!state.accept_sit(simulator, object_id, true, false, None));
+        assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::TimedOut));
+        assert_eq!(*sit_response.borrow(), None);
+        assert!(!state.has_pending_sit());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accepted_response_times_out_if_world_never_parents_agent() {
+        let (handle, mut state, sit_response, _) = AgentControlState::new();
+        let object_id = Uuid::from_u128(6);
+        let simulator = simulator_id();
+        let call = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.sit_on_object(object_id, Vec3::ZERO).await }
+        });
+        let AgentControlEvent::Command(Some(Command::SitOnObject { reply, .. })) = state.next_event().await else {
+            panic!("object-sit command")
+        };
+        state.begin_sit(object_id, simulator, reply);
+        assert!(state.accept_sit(simulator, object_id, true, false, None));
+        assert!(!call.is_finished());
+        assert!(sit_response.borrow().is_some());
+
+        advance(SIT_RESPONSE_TIMEOUT).await;
+        state.timeout_sit();
+
+        assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::TimedOut));
+        assert_eq!(*sit_response.borrow(), None);
+        assert!(!state.has_pending_sit());
+    }
+
+    #[test]
+    fn stand_pending_remains_until_world_confirms_the_agent_is_unparented() {
+        let simulator = simulator_id();
+        let agent_id = Uuid::from_u128(7);
+        let region = world::Region::new(1);
+        let agent_local_id = std::num::NonZeroU32::new(1).expect("agent local ID");
+        let unresolved_parent = std::num::NonZeroU32::new(99).expect("unresolved parent local ID");
+        let mut world = world::World::new(crate::session::world::viewer_world_limits());
+        let _ = world.adopt_region(region).expect("region");
+        let _ = world
+            .observe_object(world::ObjectObservation::new(
+                world::UpdateSource::new(region, 1, world::OrderEvidence::Ordered(1), 0),
+                agent_id,
+                agent_local_id,
+                world::Kind::Avatar,
+                world::ParentUpdate::Local(unresolved_parent),
+            ))
+            .expect("agent with pending parent");
+
+        let (_, mut state, _, stand_pending) = AgentControlState::new();
+        state.set_stand_pending(true);
+        state.observe_world(&world, simulator, agent_id, false);
+        assert!(*stand_pending.borrow(), "an unresolved parent does not confirm that the agent stood");
+
+        let mut patch = world::ObjectPatch::new(world::UpdateSource::new(region, 2, world::OrderEvidence::Ordered(2), 0), agent_local_id);
+        patch.parent = Some(world::ParentUpdate::Root);
+        let _ = world.patch_object(patch).expect("agent unparent update");
+        state.observe_world(&world, simulator, agent_id, false);
+        assert!(!*stand_pending.borrow(), "World confirming a root parent completes the stand transition");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn expired_deadline_precedes_queued_commands() {
-        let (handle, mut state, _) = AgentControlState::new();
+        let (handle, mut state, _, _) = AgentControlState::new();
         let object_id = Uuid::from_u128(4);
         let simulator = simulator_id();
         let mut call = Box::pin(handle.sit_on_object(object_id, Vec3::ZERO));
@@ -520,7 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn stand_cancels_pending_sit() {
-        let (handle, mut state, _) = AgentControlState::new();
+        let (handle, mut state, _, _) = AgentControlState::new();
         let object_id = Uuid::from_u128(3);
         let simulator = simulator_id();
         let sit = tokio::spawn({
@@ -541,7 +690,7 @@ mod tests {
 
     #[test]
     fn stand_keeps_camera_override() {
-        let (_, mut state, response) = AgentControlState::new();
+        let (_, mut state, response, _) = AgentControlState::new();
         let (reply, _result) = oneshot::channel();
         let simulator = simulator_id();
         let object_id = Uuid::from_u128(3);
@@ -573,8 +722,8 @@ mod tests {
     }
 
     #[test]
-    fn dropped_reply_clears_pending_sit() {
-        let (_, mut state, _) = AgentControlState::new();
+    fn dropped_reply_stays_pending_until_world_confirmation_or_timeout() {
+        let (_, mut state, _, _) = AgentControlState::new();
         let (reply, response) = oneshot::channel();
         let simulator = simulator_id();
         let object_id = Uuid::from_u128(3);
@@ -582,12 +731,14 @@ mod tests {
         drop(response);
 
         std::assert_matches!(state.accept_sit(simulator, object_id, true, false, None), true);
+        std::assert_matches!(state.has_pending_sit(), true);
+        state.cancel_sit(SitOutcome::Cancelled);
         std::assert_matches!(state.has_pending_sit(), false);
     }
 
     #[test]
     fn invalid_sit_target_is_rejected() {
-        let (handle, _, _) = AgentControlState::new();
+        let (handle, _, _, _) = AgentControlState::new();
         assert_eq!(
             futures::executor::block_on(handle.sit_on_object(Uuid::nil(), Vec3::ZERO)),
             Err(super::AgentControlError::InvalidObject)

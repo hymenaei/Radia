@@ -107,6 +107,7 @@ pub(super) struct SceneWindow {
     camera_mode: CameraMode,
     controls: HeldControls,
     body_rotation: BodyRotation,
+    was_seated: bool,
     sit_response_generation: Option<u64>,
     stop_clear_pending: bool,
     last_camera: Option<scene::Camera>,
@@ -185,6 +186,7 @@ impl SceneWindow {
             camera_mode: CameraMode::Follow,
             controls: HeldControls::default(),
             body_rotation: BodyRotation::default(),
+            was_seated: false,
             sit_response_generation: None,
             stop_clear_pending: false,
             last_camera: None,
@@ -281,6 +283,7 @@ impl SceneWindow {
             WindowEvent::KeyboardInput { event, .. } => {
                 let was_free = self.camera_mode == CameraMode::Free;
                 let seated = self.feed.as_mut().is_some_and(SceneFeed::agent_is_seated);
+                let sitting_input_active = self.feed.as_mut().is_some_and(SceneFeed::sitting_input_active);
                 let reset_sitting_orbit = !was_free
                     && self.camera_mode == CameraMode::Follow
                     && should_reset_sitting_orbit(
@@ -288,7 +291,7 @@ impl SceneWindow {
                         event.state,
                         event.repeat,
                         capture.consumed || capture.keyboard,
-                        seated,
+                        sitting_input_active,
                         self.modifiers.alt_key(),
                         self.modifiers.control_key(),
                         self.modifiers.shift_key(),
@@ -337,6 +340,7 @@ impl SceneWindow {
             && generation == self.generation
         {
             self.feed = Some(feed);
+            self.was_seated = false;
             self.dirty = true;
         }
         if let Some(feed) = &mut self.feed {
@@ -471,12 +475,10 @@ impl SceneWindow {
 
     fn reset_sitting_camera(&mut self) {
         let now = Instant::now();
-        let (pose, seed) = self.agent_pose_and_seed_at(now);
-        self.body_rotation.update(seed, 0.0, now);
-        if let Some(pose) = pose
-            && let Some(rotation) = self.follow_camera.reset_after_sitting_camera_input(pose, now)
-        {
-            self.body_rotation.reset_axes(rotation);
+        let (pose, _) = self.agent_pose_and_seed_at(now);
+        if let Some(pose) = pose {
+            self.body_rotation.reset_axes(pose.rotation);
+            self.follow_camera.reset_after_sitting(pose, now);
         }
     }
 
@@ -524,6 +526,11 @@ impl SceneWindow {
         let (pose, seed) = self.agent_pose_and_seed_at(now);
         self.ensure_camera(pose);
         let seated = self.feed.as_mut().is_some_and(SceneFeed::agent_is_seated);
+        let sitting_input_active = self.feed.as_mut().is_some_and(SceneFeed::sitting_input_active);
+        if self.was_seated && !seated {
+            self.reset_sitting_camera();
+        }
+        self.was_seated = seated;
         let sit_response_generation = self.feed.as_ref().and_then(SceneFeed::sit_response_generation);
         if seated || sit_response_generation.is_some_and(|generation| Some(generation) != self.sit_response_generation) {
             self.controls.clear_flying();
@@ -532,7 +539,7 @@ impl SceneWindow {
         let sit_camera = self.feed.as_ref().and_then(SceneFeed::sit_camera_pose);
         let sit_camera_enabled = sit_camera.as_ref().is_some_and(|(_, camera, _)| camera.is_some());
         let grabs = self.feed.as_ref().map_or_else(ScriptControlGrabs::default, SceneFeed::sit_control_grabs);
-        let sitting_actions = seated.then(|| {
+        let sitting_actions = sitting_input_active.then(|| {
             self.controls.sitting_actions(
                 self.modifiers.shift_key(),
                 self.modifiers.alt_key(),
@@ -542,7 +549,8 @@ impl SceneWindow {
                 now,
             )
         });
-        let body_rotation = self.body_rotation.update(seed, if seated { 0.0 } else { self.controls.yaw(self.modifiers.shift_key()) }, now);
+        let body_rotation =
+            self.body_rotation.update(seed, if sitting_input_active { 0.0 } else { self.controls.yaw(self.modifiers.shift_key()) }, now);
         let rotation = if seated { pose.map_or(body_rotation, |pose| pose.rotation) } else { body_rotation };
         let movement: MovementObservation = match sitting_actions {
             Some(actions) => self.controls.sitting_observation(rotation, actions),

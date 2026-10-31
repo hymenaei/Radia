@@ -3,8 +3,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(test)]
-use math::Vec3;
 use math::{DQuat, DVec3};
 use render::scene;
 use uuid::Uuid;
@@ -69,12 +67,6 @@ impl Default for FollowCamera {
 }
 
 impl FollowCamera {
-    #[cfg(test)]
-    pub(crate) fn scene_camera(pose: WorldPose, viewport: [u32; 2], draw_distance: f32, lod_factor: f32) -> Option<scene::Camera> {
-        let (position, focus) = Self::position_and_focus(pose);
-        Self::build_camera(position, focus, viewport, draw_distance, lod_factor)
-    }
-
     pub(crate) fn follow_with_sit_input(
         &mut self,
         pose: WorldPose,
@@ -110,36 +102,10 @@ impl FollowCamera {
         Self::build_camera(position, focus, viewport, draw_distance, lod_factor)
     }
 
-    #[cfg(test)]
-    fn follow_with_sit_camera(
-        &mut self,
-        pose: WorldPose,
-        sit_camera: Option<(Uuid, SitCameraOverride, WorldPose)>,
-        viewport: [u32; 2],
-        draw_distance: f32,
-        lod_factor: f32,
-        now: Instant,
-    ) -> Option<scene::Camera> {
-        self.follow_with_sit_input(
-            pose,
-            sit_camera.map(|(id, camera, pose)| (id, Some(camera), pose)),
-            SittingCameraInput::default(),
-            viewport,
-            draw_distance,
-            lod_factor,
-            now,
-        )
-    }
-
     fn build_camera(position: DVec3, focus: DVec3, viewport: [u32; 2], draw_distance: f32, lod_factor: f32) -> Option<scene::Camera> {
         scene::Camera::new(position, (focus - position).as_vec3(), FRAC_PI_3, viewport)
             .and_then(|camera| camera.with_quality(f64::from(draw_distance), f64::from(lod_factor)))
             .ok()
-    }
-
-    #[cfg(test)]
-    fn position_and_focus(pose: WorldPose) -> (DVec3, DVec3) {
-        Self::view_for_offsets(pose, DVec3::new(1.0, 0.0, 1.0), DVec3::new(-4.0, 0.0, -0.25))
     }
 
     fn view_for_offsets(pose: WorldPose, focus_offset: DVec3, offset: DVec3) -> (DVec3, DVec3) {
@@ -180,19 +146,16 @@ impl FollowCamera {
         self.offset = (rotation.conjugate() * offset.as_vec3()).as_dvec3();
     }
 
-    pub(crate) fn reset_after_sitting_camera_input(&mut self, pose: WorldPose, now: Instant) -> Option<math::Quat> {
-        if !self.sitting_camera_changed {
-            return None;
+    pub(crate) fn reset_after_sitting(&mut self, pose: WorldPose, now: Instant) -> bool {
+        if !self.sitting_camera_changed && self.sit_camera.is_none() {
+            return false;
         }
         let (position, focus) = self.current_position_and_focus(pose, now);
-        let direction = focus - position;
-        let forward = math::Vec3::new(direction.x as f32, direction.y as f32, 0.0).try_normalize();
-        let rotation = forward.map_or(pose.rotation, |forward| math::Quat::from_rotation_z(forward.y.atan2(forward.x)));
         self.offset = DVec3::new(-4.0, 0.0, -0.25);
         self.focus_offset = DVec3::new(1.0, 0.0, 1.0);
         self.sitting_camera_changed = false;
         self.transition_from(position, focus, now);
-        Some(rotation)
+        true
     }
 
     pub(crate) fn drag(&mut self, delta: [f64; 2], width: f64, control: bool, shift: bool, draw_distance: f32) {
@@ -301,12 +264,6 @@ impl OrbitCamera {
             draw_distance: DEFAULT_DRAW_DISTANCE,
             lod_factor: 1.0,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_follow_pose(pose: WorldPose, draw_distance: f32, lod_factor: f32) -> Self {
-        let (position, focus) = FollowCamera::position_and_focus(pose);
-        Self { focus, offset: position - focus, minimum: 0.5, transition: None, draw_distance, lod_factor }
     }
 
     pub(crate) fn from_follow_view(position: DVec3, focus: DVec3, draw_distance: f32, lod_factor: f32) -> Self {

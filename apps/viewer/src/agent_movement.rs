@@ -483,11 +483,9 @@ impl HeldControls {
             }
         } else if sit_camera_enabled || grabs.contains(YAW_POS | YAW_NEG) || self.is_running() {
             if left {
-                self.note_sitting_run_press(MovementKey::TurnLeft);
                 actions.control_flags |= YAW_POS;
             }
             if right {
-                self.note_sitting_run_press(MovementKey::TurnRight);
                 actions.control_flags |= YAW_NEG;
             }
         } else {
@@ -917,6 +915,29 @@ mod tests {
         let stopped =
             controls.sitting_actions(false, false, false, false, ScriptControlGrabs::default(), start + Duration::from_millis(200));
         assert!(!controls.sitting_observation(Quat::IDENTITY, stopped).always_run);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn seated_camera_turn_keys_do_not_trigger_tap_run() {
+        let start = Instant::now();
+        let left = Key::Character("a".into());
+        let mut controls = HeldControls::default();
+        let mut grabs = ScriptControlGrabs::default();
+        assert!(grabs.apply(true, YAW_POS, false));
+
+        controls.keyboard_event_at(&left, ElementState::Pressed, false, false, true, start).expect("first turn press");
+        assert_eq!(controls.sitting_actions(false, false, false, false, grabs, start).control_flags, YAW_POS);
+        controls
+            .keyboard_event_at(&left, ElementState::Released, false, false, true, start + Duration::from_millis(50))
+            .expect("first turn release");
+        controls
+            .keyboard_event_at(&left, ElementState::Pressed, false, false, true, start + Duration::from_millis(150))
+            .expect("second turn press");
+
+        let second = controls.sitting_actions(false, false, false, false, grabs, start + Duration::from_millis(150));
+        assert_eq!(second.control_flags, YAW_POS);
+        assert!(!controls.sitting_observation(Quat::IDENTITY, second).always_run);
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]

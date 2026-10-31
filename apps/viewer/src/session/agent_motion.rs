@@ -71,6 +71,10 @@ impl AgentMotionPublisher {
         true
     }
 
+    pub(crate) fn ground_sitting(&self) -> bool {
+        self.ground_sitting
+    }
+
     pub(crate) fn publish_arrival(
         &mut self,
         agent_id: Uuid,

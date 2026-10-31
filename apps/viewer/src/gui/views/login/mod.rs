@@ -29,8 +29,8 @@ use crate::{
     gui::window_geometry::observe,
     remembered_login::{self, CredentialStoreError, RememberedLogin},
     session::{
-        AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, Session, SessionEnd,
-        SessionReadyUpdate, WriteLock, drain_session, write_lock,
+        AgentControlHandle, AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot,
+        Session, SessionEnd, SessionReadyUpdate, WriteLock, drain_session, write_lock,
     },
 };
 
@@ -175,6 +175,7 @@ struct ActiveSession {
 
 struct ReadySession {
     session: AgentSession,
+    agent_control: AgentControlHandle,
     inventory_updates: watch::Receiver<Option<InventorySnapshot>>,
     inventory_fetch: Option<InventoryFetchHandle>,
 }
@@ -190,6 +191,11 @@ impl ActiveSession {
 }
 
 impl LoginScreen {
+    #[allow(dead_code)]
+    pub(crate) fn agent_control(&self) -> Option<AgentControlHandle> {
+        self.active_session.as_ref()?.ready.as_ref().map(|ready| ready.agent_control.clone())
+    }
+
     pub fn request_inventory_folder(&self, folder: CategoryKey) -> Result<(), InventoryFetchRequestError> {
         let handle = self
             .active_session
@@ -555,6 +561,7 @@ impl LoginScreen {
 
     fn apply_session_ready(&mut self, ready: SessionReadyUpdate, cx: &mut Context<Self>) {
         let session = ready.session;
+        let agent_control = ready.agent_control;
         let region_name = ready.region_name;
         let inventory_updates = ready.inventory_updates;
         let inventory_fetch = ready.inventory_fetch;
@@ -575,7 +582,7 @@ impl LoginScreen {
         let username = self.username.read(cx).value();
         self.favorites.prepare_session(session.grid, session.agent_id, &username, Some(mailbox), cx);
         if let Some(active) = &mut self.active_session {
-            active.ready = Some(ReadySession { session: session.clone(), inventory_updates, inventory_fetch });
+            active.ready = Some(ReadySession { session: session.clone(), agent_control, inventory_updates, inventory_fetch });
         }
         if let Some(folder) = favorite_folder
             && let Err(error) = self.request_inventory_folder(folder)
@@ -600,6 +607,9 @@ impl LoginScreen {
             ready.movement,
             ready.agent_motion,
             ready.motion_circuits,
+            ready.sit_response,
+            ready.stand_pending,
+            ready.sit_control_grabs,
             cx,
         );
     }

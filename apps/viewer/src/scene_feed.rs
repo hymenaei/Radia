@@ -22,12 +22,16 @@ use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 use uuid::Uuid;
-use world::{Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, WorldPose};
+use world::{
+    Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, Parent, WorldPose,
+    WorldTransformState,
+};
 
 use crate::{
     agent_movement::MovementObservation,
+    agent_movement::sitting::ScriptControlGrabs,
     asset_coordinator::{AssetHandle, RequestError},
-    session::{AgentMotionSample, EnvironmentInbox},
+    session::{AgentMotionSample, EnvironmentInbox, SitCameraOverride, SitResponseState},
     world_reader::{ReadError, WorldReader},
 };
 
@@ -37,6 +41,23 @@ mod motion_circuit;
 use motion_circuit::MotionCircuitWake;
 
 const MIN_ACTIVE_MOTION_SQUARED: f32 = 1e-6;
+
+fn same_view_linkset(view: &SceneView, first: Uuid, second: Uuid) -> bool {
+    first == second || view_linkset_root(view, first).is_some_and(|root| view_linkset_root(view, second) == Some(root))
+}
+
+fn view_linkset_root(view: &SceneView, object_id: Uuid) -> Option<Uuid> {
+    let mut entity = view.objects().find(|object| object.detail().summary.id == object_id)?.detail().summary.entity;
+    for _ in 0..=view.object_count() {
+        let object = view.object(entity)?;
+        match object.detail().summary.parent {
+            Parent::Root => return Some(object.detail().summary.id),
+            Parent::Resolved(parent) => entity = parent,
+            Parent::Unknown | Parent::Pending { .. } => return None,
+        }
+    }
+    None
+}
 
 #[derive(Default)]
 struct DeadReckoning {
@@ -123,6 +144,15 @@ pub(crate) struct SceneFeed {
     motion_region_scratch: Vec<kinematics::RegionBounds>,
     motion_active: HashMap<world::Region, bool>,
     dead_reckoning: DeadReckoning,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    motion_source_seed: Option<u64>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    motion_source_seated: Option<bool>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pose_seed: u64,
+    sit_response: watch::Receiver<Option<SitResponseState>>,
+    stand_pending: watch::Receiver<bool>,
+    sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
@@ -135,6 +165,9 @@ impl SceneFeed {
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
         mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+        sit_response: watch::Receiver<Option<SitResponseState>>,
+        stand_pending: watch::Receiver<bool>,
+        sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
@@ -147,12 +180,28 @@ impl SceneFeed {
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
         let agent_motions = agent_motion.clone();
+        let sit_response_updates = sit_response.clone();
+        let stand_pending_updates = stand_pending.clone();
+        let sit_control_grab_updates = sit_control_grabs.clone();
         let mut dead_reckoning = DeadReckoning::default();
         dead_reckoning.replace(*agent_motion.borrow_and_update());
         drop(
-            runtime
-                .clone()
-                .spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, agent_motions, wake).in_current_span()),
+            runtime.clone().spawn(
+                run(
+                    scene,
+                    sources,
+                    sender,
+                    runtime.clone(),
+                    cancelled,
+                    observations,
+                    agent_motions,
+                    sit_response_updates,
+                    stand_pending_updates,
+                    sit_control_grab_updates,
+                    wake,
+                )
+                .in_current_span(),
+            ),
         );
         Self {
             runtime,
@@ -170,6 +219,15 @@ impl SceneFeed {
             motion_region_scratch: Vec::new(),
             motion_active: HashMap::new(),
             dead_reckoning,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            motion_source_seed: None,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            motion_source_seated: None,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            pose_seed: 0,
+            sit_response,
+            stand_pending,
+            sit_control_grabs,
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -193,21 +251,62 @@ impl SceneFeed {
         }
         self.refresh_motion_circuits(now);
         let sample = self.dead_reckoning.sample?;
+        let seated = self.agent_is_seated();
+        let seed = self.pose_seed(sample.seed, seated);
+        if seated {
+            let agent = self.agent()?;
+            let pose = match agent.detail().world_transform.ok()? {
+                WorldTransformState::Resolved(transform) => transform.pose,
+                WorldTransformState::MissingScale(pose) => pose,
+                WorldTransformState::Provisional { pose, .. } => pose,
+                WorldTransformState::Unresolved(_) => return None,
+            };
+            return Some((pose, (seed, pose.rotation)));
+        }
         let mut pose = self.dead_reckoning.pose(now, &self.motion_region_scratch)?;
         if !sample.parented
             && let Some(ground) = self.view.terrain_height_at(pose.position)
         {
             pose.position.z = pose.position.z.max(ground + 0.5 * f64::from(sample.scale.z));
         }
-        Some((pose, (sample.seed, sample.simulator_rotation)))
+        Some((pose, (seed, sample.simulator_rotation)))
     }
 
     pub(crate) fn agent_id(&self) -> Uuid {
         self.agent_id
     }
 
-    pub(crate) fn agent_motion_active(&self, now: Instant) -> bool {
-        self.dead_reckoning.active(now)
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn agent_motion_active(&mut self, now: Instant) -> bool {
+        !self.agent_is_seated() && self.dead_reckoning.active(now)
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn agent_is_seated(&mut self) -> bool {
+        self.agent().is_some_and(|agent| {
+            matches!(agent.detail().summary.parent, Parent::Resolved(_))
+                || self.dead_reckoning.sample.is_some_and(|sample| sample.ground_sitting)
+        })
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn sitting_input_active(&mut self) -> bool {
+        self.agent_is_seated() && !*self.stand_pending.borrow()
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn agent(&self) -> Option<&Object> {
+        self.agent.and_then(|entity| self.view.object(entity))
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    fn pose_seed(&mut self, source_seed: u64, seated: bool) -> u64 {
+        if self.motion_source_seed != Some(source_seed) || self.motion_source_seated != Some(seated) {
+            self.motion_source_seed = Some(source_seed);
+            self.motion_source_seated = Some(seated);
+            self.pose_seed = self.pose_seed.wrapping_add(1);
+        }
+        self.pose_seed
     }
 
     pub(crate) fn refresh_motion_circuits(&mut self, now: Instant) {
@@ -263,6 +362,38 @@ impl SceneFeed {
             }
         }
         self.motion_active.retain(|region, _| regions.contains(region));
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn sit_camera_pose(&self) -> Option<(Uuid, Option<SitCameraOverride>, WorldPose)> {
+        if *self.stand_pending.borrow() {
+            return None;
+        }
+        let response = (*self.sit_response.borrow())?;
+        let agent = self.agent()?;
+        let Parent::Resolved(seat_entity) = agent.detail().summary.parent else { return None };
+        let seat = self.view.object(seat_entity)?;
+        let seat_id = seat.detail().summary.id;
+        if !same_view_linkset(&self.view, seat_id, response.object_id) {
+            return None;
+        }
+        let reference = self.view.objects().find(|object| object.detail().summary.id == response.object_id)?;
+        let pose = match reference.detail().world_transform.ok()? {
+            WorldTransformState::Resolved(transform) => transform.pose,
+            WorldTransformState::MissingScale(pose) => pose,
+            WorldTransformState::Provisional { pose, .. } => pose,
+            WorldTransformState::Unresolved(_) => return None,
+        };
+        Some((response.object_id, response.camera_override, pose))
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn sit_control_grabs(&self) -> ScriptControlGrabs {
+        *self.sit_control_grabs.borrow()
+    }
+
+    pub(crate) fn sit_response_generation(&self) -> Option<u64> {
+        (*self.sit_response.borrow()).map(|response| response.generation)
     }
 
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {
@@ -447,6 +578,9 @@ async fn run(
     cancelled: oneshot::Receiver<()>,
     mut camera: watch::Receiver<Option<Camera>>,
     mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+    mut sit_response: watch::Receiver<Option<SitResponseState>>,
+    mut stand_pending: watch::Receiver<bool>,
+    mut sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
     wake: impl Fn(),
 ) {
     let SceneSources { mut reader, assets, environments, motion_circuits } = sources;
@@ -512,6 +646,9 @@ async fn run(
             let moved = camera.changed().fuse();
             let motion_updated = agent_motion.changed().fuse();
             let circuit_transition = motion_circuits.wait_for_transition().fuse();
+            let camera_overridden = sit_response.changed().fuse();
+            let stand_requested = stand_pending.changed().fuse();
+            let controls_grabbed = sit_control_grabs.changed().fuse();
             let available = assets.next().fuse();
             let released = textures.changed().fuse();
             let timer = async {
@@ -522,7 +659,21 @@ async fn run(
                 }
             }
             .fuse();
-            pin_mut!(reading, building, changed, moved, motion_updated, circuit_transition, available, released, timer, pushed);
+            pin_mut!(
+                reading,
+                building,
+                changed,
+                moved,
+                motion_updated,
+                circuit_transition,
+                camera_overridden,
+                stand_requested,
+                controls_grabbed,
+                available,
+                released,
+                timer,
+                pushed
+            );
             let mut asset_event = None;
             futures::select_biased! {
                 _ = cancelled => break,
@@ -549,6 +700,9 @@ async fn run(
                 result = motion_updated => { if result.is_err() { break; } wake(); }
                 _ = circuit_transition => wake(),
                 result = moved => { if result.is_err() { break; } }
+                result = camera_overridden => { if result.is_err() { break; } wake(); }
+                result = stand_requested => { if result.is_err() { break; } wake(); }
+                result = controls_grabbed => { if result.is_err() { break; } wake(); }
                 result = changed => { if result.is_err() { break; } scene.notify_world_change(); }
                 _ = timer => {}
             }

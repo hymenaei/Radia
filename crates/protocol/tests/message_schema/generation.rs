@@ -30,7 +30,7 @@ fn schema_covers_messages() {
 
 #[test]
 fn typed_inventory_matches_schema_and_fixtures() {
-    assert_eq!(TYPED_MESSAGE_COVERAGE.len(), 48);
+    assert_eq!(TYPED_MESSAGE_COVERAGE.len(), 50);
     let mut schema_conforming = 0;
     let mut semantic_overrides = 0;
     let mut compatibility_overrides = 0;

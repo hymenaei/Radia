@@ -15,14 +15,15 @@ use uuid::Uuid;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::{
     agent_movement::MovementObservation,
+    agent_movement::sitting::ScriptControlGrabs,
     asset_coordinator::AssetHandle,
-    session::{AgentMotionSample, experience_environment::EnvironmentInbox},
+    session::{AgentMotionSample, agent_control::SitResponseState, experience_environment::EnvironmentInbox},
     world_reader::WorldReader,
 };
 use crate::{
     inventory::{FavoriteLocation, InventoryFetchHandle, favorite_store::FavoriteStoreError, favorites::FavoritesError},
     remembered_login::{CredentialStoreError, RememberedLogin},
-    session::ChatMessage,
+    session::{ChatMessage, agent_control::AgentControlHandle},
 };
 
 const MAX_PENDING_CHAT_MESSAGES: usize = 64;
@@ -173,11 +174,18 @@ pub(crate) struct SessionReadyUpdate {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,
+    pub(crate) agent_control: AgentControlHandle,
     pub(crate) region_name: Option<String>,
     pub(crate) inventory_updates: watch::Receiver<Option<InventorySnapshot>>,
     pub(crate) inventory_fetch: Option<InventoryFetchHandle>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) world_reader: WorldReader,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) sit_response: watch::Receiver<Option<SitResponseState>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) stand_pending: watch::Receiver<bool>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
 }
 
 pub(crate) struct FavoritesUpdate {

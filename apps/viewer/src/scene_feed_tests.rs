@@ -55,6 +55,36 @@ fn world() -> World {
     })
 }
 
+fn advance_scene(world: &World, scene: &mut Reconciler, sender: &mpsc::Sender<Batch>, feed: &mut SceneFeed) {
+    scene.notify_world_change();
+    let now = Instant::now();
+    for _ in 0..1000 {
+        match scene.poll(now) {
+            ReconcileStep::Read(job) => {
+                let reply = match job.query() {
+                    ReadQuery::Barrier => Ok(ReadReply::Barrier(world.read_barrier())),
+                    ReadQuery::Objects(cursor) => world.object_list_page(*cursor, 256).map(ReadReply::Objects),
+                    ReadQuery::Regions(cursor) => world.region_page(*cursor, 64).map(ReadReply::Regions),
+                    ReadQuery::Details(entities) => world.object_detail_batch(entities).map(ReadReply::Details),
+                    ReadQuery::Changes(cursor) => world.change_page(*cursor, 256).map(ReadReply::Changes),
+                    ReadQuery::Terrain(region, cursor) => world.terrain_page(*region, *cursor, 8).map(ReadReply::Terrain),
+                    ReadQuery::Environment(region) => Ok(ReadReply::Environment(world.environment(*region))),
+                };
+                scene.complete_read(job, reply.map_err(ReadFailure::World), now);
+            }
+            ReconcileStep::Publish(batch) => {
+                sender.try_send(batch).unwrap();
+                feed.drain().unwrap();
+            }
+            ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
+            ReconcileStep::Continue => {}
+            ReconcileStep::Idle => return,
+            _ => panic!("expected scene reconciliation"),
+        }
+    }
+    panic!("scene did not settle");
+}
+
 fn motion_sample(received_at: Instant) -> AgentMotionSample {
     AgentMotionSample {
         region: Region::new(1),
@@ -65,6 +95,7 @@ fn motion_sample(received_at: Instant) -> AgentMotionSample {
         time_dilation: 1.0,
         ping_delay: None,
         parented: false,
+        ground_sitting: false,
         simulator_rotation: Quat::IDENTITY,
         received_at,
         seed: 1,
@@ -237,6 +268,7 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
         time_dilation: 1.0,
         ping_delay: None,
         parented: false,
+        ground_sitting: false,
         simulator_rotation: Quat::IDENTITY,
         received_at: now,
         seed: 1,
@@ -267,6 +299,15 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
             dead_reckoning.replace(Some(sample));
             dead_reckoning
         },
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        motion_source_seed: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        motion_source_seated: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        pose_seed: 0,
+        sit_response: watch::channel(None).1,
+        stand_pending: watch::channel(false).1,
+        sit_control_grabs: watch::channel(Default::default()).1,
         last_movement: None,
         incoming,
         _cancel: cancel,
@@ -332,6 +373,15 @@ async fn terrain_clamp_respects_parenting() {
         motion_region_scratch: Vec::new(),
         motion_active: HashMap::new(),
         dead_reckoning: DeadReckoning::default(),
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        motion_source_seed: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        motion_source_seated: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        pose_seed: 0,
+        sit_response: watch::channel(None).1,
+        stand_pending: watch::channel(false).1,
+        sit_control_grabs: watch::channel(Default::default()).1,
         last_movement: None,
         incoming,
         _cancel: cancel,
@@ -408,6 +458,173 @@ async fn terrain_clamp_respects_parenting() {
     assert_eq!(pose.position.z, -10.0);
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[tokio::test]
+async fn pending_parent_does_not_block_flight() {
+    use crate::agent_movement::HeldControls;
+
+    let mut world = world();
+    let region = Region::new(1);
+    let agent_id = Uuid::from_u128(1);
+    let seat_id = Uuid::from_u128(2);
+    let child_id = Uuid::from_u128(3);
+    let agent_local_id = NonZeroU32::new(1).unwrap();
+    let seat_local_id = NonZeroU32::new(2).unwrap();
+    let child_local_id = NonZeroU32::new(3).unwrap();
+    let _ = world.adopt_region(region).unwrap();
+    let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap();
+    let _ = world
+        .observe_object(ObjectObservation::new(
+            UpdateSource::new(region, 1, Ordered(1), 0),
+            agent_id,
+            agent_local_id,
+            Kind::Avatar,
+            ParentUpdate::Local(child_local_id),
+        ))
+        .unwrap();
+
+    let budget = Budget::default();
+    let (mut scene, view) = Reconciler::new(budget.clone());
+    let (sender, incoming) = mpsc::channel(1);
+    let (cancel, _) = oneshot::channel();
+    let (sit_response_sender, sit_response) = watch::channel(None);
+    let (stand_pending_sender, stand_pending) = watch::channel(false);
+    let (agent_motion_sender, agent_motion) = watch::channel(None);
+    let assets = AssetCoordinator::new(Handle::current(), pending(), None);
+    let mut feed = SceneFeed {
+        runtime: Handle::current(),
+        view,
+        budget,
+        assets: assets.handle(),
+        agent_id,
+        agent: None,
+        water_height: None,
+        camera: watch::channel(None).0,
+        movement: watch::channel(None).0,
+        agent_motion,
+        motion_circuits: watch::channel(Vec::new()).1,
+        motion_circuit_scratch: Vec::new(),
+        motion_region_scratch: Vec::new(),
+        motion_active: HashMap::new(),
+        dead_reckoning: DeadReckoning::default(),
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        motion_source_seed: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        motion_source_seated: None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        pose_seed: 0,
+        sit_response,
+        stand_pending,
+        sit_control_grabs: watch::channel(Default::default()).1,
+        last_movement: None,
+        incoming,
+        _cancel: cancel,
+    };
+
+    advance_scene(&world, &mut scene, &sender, &mut feed);
+    std::assert_matches!(feed.agent().expect("agent is observed").detail().summary.parent, Parent::Pending { .. });
+    assert!(!feed.agent_is_seated());
+    let mut controls = HeldControls::default();
+    controls.toggle_flying(feed.agent_is_seated());
+    assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0x0000_2000);
+
+    let camera = SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) };
+    sit_response_sender.send_replace(Some(SitResponseState {
+        generation: 1,
+        object_id: seat_id,
+        requested_object_id: child_id,
+        camera_override: Some(camera),
+        force_mouselook: false,
+    }));
+    assert!(!feed.agent_is_seated(), "an accepted response does not mark the avatar seated before World confirms its parent");
+    let mut pending_controls = HeldControls::default();
+    assert!(pending_controls.toggle_flying(feed.agent_is_seated()));
+    assert_eq!(pending_controls.observation(false, Quat::IDENTITY).control_flags, 0x0000_2000);
+    feed.drain().unwrap();
+    assert_eq!(feed.sit_camera_pose(), None, "an unresolved parent does not produce a seat camera pose");
+
+    let mut seat =
+        ObjectObservation::new(UpdateSource::new(region, 2, Ordered(2), 0), seat_id, seat_local_id, Kind::Object, ParentUpdate::Root);
+    let seat_rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    seat.pose = Some(Pose { position: Some(Vec3::new(4.0, 5.0, 6.0)), rotation: Some(seat_rotation) });
+    seat.scale = Some(Vec3::ONE);
+    let _ = world.observe_object(seat).unwrap();
+    let mut child = ObjectObservation::new(
+        UpdateSource::new(region, 3, Ordered(3), 0),
+        child_id,
+        child_local_id,
+        Kind::Object,
+        ParentUpdate::Local(seat_local_id),
+    );
+    child.pose = Some(Pose { position: Some(Vec3::new(10.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+    child.scale = Some(Vec3::ONE);
+    let _ = world.observe_object(child).unwrap();
+    advance_scene(&world, &mut scene, &sender, &mut feed);
+    std::assert_matches!(feed.agent().expect("agent remains observed").detail().summary.parent, Parent::Resolved(_));
+    assert!(feed.agent_is_seated());
+    assert!(feed.sitting_input_active());
+    let (camera_seat_id, camera_override, camera_pose) = feed.sit_camera_pose().expect("sit camera resolves from response root");
+    assert_eq!(camera_seat_id, seat_id);
+    assert_eq!(camera_override, Some(camera));
+    assert_eq!(camera_pose.position, DVec3::new(4.0, 5.0, 6.0));
+    assert!(camera_pose.rotation.dot(seat_rotation).abs() > 1.0 - 1e-6);
+
+    stand_pending_sender.send_replace(true);
+    assert!(feed.agent_is_seated(), "the World parent remains authoritative while a stand request is pending");
+    assert!(!feed.sitting_input_active(), "the pending stand switches input back to walking mode");
+    assert_eq!(feed.sit_camera_pose(), None, "the pending stand clears the seat camera reference");
+
+    sit_response_sender.send_replace(Some(SitResponseState {
+        generation: 2,
+        object_id: seat_id,
+        requested_object_id: child_id,
+        camera_override: None,
+        force_mouselook: false,
+    }));
+    feed.drain().unwrap();
+    assert!(feed.agent_is_seated(), "World parent state remains authoritative after stand is requested");
+    assert_eq!(feed.sit_camera_pose(), None, "the pending stand keeps the sit camera inactive");
+
+    let _ = world.remove_object(UpdateSource::new(region, 4, Ordered(4), 0), child_local_id).unwrap();
+    advance_scene(&world, &mut scene, &sender, &mut feed);
+    std::assert_matches!(feed.agent().expect("agent remains observed").detail().summary.parent, Parent::Pending { .. });
+    assert!(!feed.agent_is_seated(), "a removed seat returns the parent to unresolved without implying a sit");
+    assert_eq!(feed.sit_camera_pose(), None, "the camera override ends when World unparents the avatar");
+
+    let mut standing_agent =
+        ObjectObservation::new(UpdateSource::new(region, 5, Ordered(5), 0), agent_id, agent_local_id, Kind::Avatar, ParentUpdate::Root);
+    standing_agent.pose = Some(Pose { position: Some(Vec3::new(10.0, 20.0, 30.0)), rotation: Some(Quat::IDENTITY) });
+    standing_agent.scale = Some(Vec3::ONE);
+    let _ = world.observe_object(standing_agent).unwrap();
+    advance_scene(&world, &mut scene, &sender, &mut feed);
+
+    let seated_at = Instant::now();
+    let mut ground_sit = motion_sample(seated_at);
+    ground_sit.velocity = Vec3::X;
+    ground_sit.ground_sitting = true;
+    agent_motion_sender.send_replace(Some(ground_sit));
+    let (ground_pose, ground_seed) = feed.camera_pose_and_seed_at(seated_at + Duration::from_secs(1)).expect("ground sit pose");
+    assert_eq!(ground_pose.position, DVec3::new(10.0, 20.0, 30.0));
+    assert!(feed.agent_is_seated());
+    let mut ground_controls = HeldControls::default();
+    assert!(!ground_controls.toggle_flying(feed.agent_is_seated()));
+    assert!(!feed.agent_motion_active(seated_at + Duration::from_secs(1)));
+
+    let standing_at = seated_at + Duration::from_secs(2);
+    let standing_sample = AgentMotionSample {
+        position: DVec3::new(40.0, 50.0, 60.0),
+        received_at: standing_at,
+        seed: ground_sit.seed.wrapping_add(1),
+        ground_sitting: false,
+        ..ground_sit
+    };
+    agent_motion_sender.send_replace(Some(standing_sample));
+    let (standing_pose, standing_seed) = feed.camera_pose_and_seed_at(standing_at + Duration::from_secs(2)).expect("standing pose");
+    assert!(!feed.agent_is_seated());
+    assert!(standing_seed.0 > ground_seed.0);
+    assert!((standing_pose.position - (standing_sample.position + DVec3::new(2.0, 0.0, 0.0))).length() < 0.02);
+}
+
 #[tokio::test]
 async fn pending_asset_preserves_scene() {
     let mut world = world();
@@ -437,12 +654,18 @@ async fn pending_asset_preserves_scene() {
     let assets = AssetCoordinator::new(Handle::current(), pending(), None);
     let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
+    let (_sit_response_sender, sit_response) = watch::channel(None);
+    let (_sit_control_grab_sender, sit_control_grabs) = watch::channel(Default::default());
+    let (_stand_pending_sender, stand_pending) = watch::channel(false);
     let mut feed = SceneFeed::start(
         SceneSources { reader: reads.reader(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
         Uuid::from_u128(2),
         watch::channel(None).0,
         watch::channel(None).0,
         agent_motion,
+        sit_response,
+        stand_pending,
+        sit_control_grabs,
         Handle::current(),
         || {},
     );
@@ -496,12 +719,18 @@ async fn stalled_publication_preserves_intake() {
     let assets = AssetCoordinator::new(Handle::current(), pending(), None);
     let (pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
+    let (_sit_response_sender, sit_response) = watch::channel(None);
+    let (_sit_control_grab_sender, sit_control_grabs) = watch::channel(Default::default());
+    let (_stand_pending_sender, stand_pending) = watch::channel(false);
     let mut feed = SceneFeed::start(
         SceneSources { reader: reader.clone(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
         Uuid::from_u128(1),
         watch::channel(None).0,
         watch::channel(None).0,
         agent_motion,
+        sit_response,
+        stand_pending,
+        sit_control_grabs,
         Handle::current(),
         || {},
     );

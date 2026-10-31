@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::{
     agent_movement::MovementObservation,
+    agent_movement::sitting::ScriptControlGrabs,
     asset_coordinator::AssetHandle,
     gui::{
         AppLifecycle,
@@ -18,7 +19,7 @@ use crate::{
         views::viewport::{Viewport, ViewportError},
     },
     scene_feed::SceneSources,
-    session::{AgentMotionSample, EnvironmentInbox, SessionEnd},
+    session::{AgentMotionSample, EnvironmentInbox, SessionEnd, SitResponseState},
     world_reader::WorldReader,
 };
 
@@ -78,6 +79,9 @@ pub(crate) fn start_session(
     movement: watch::Sender<Option<MovementObservation>>,
     agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<network::CircuitMotionStatus>)>>,
+    sit_response: watch::Receiver<Option<SitResponseState>>,
+    stand_pending: watch::Receiver<bool>,
+    sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
     cx: &mut App,
 ) {
     if start_scene(generation, cx) {
@@ -88,6 +92,9 @@ pub(crate) fn start_session(
             camera,
             movement,
             agent_motion,
+            sit_response,
+            stand_pending,
+            sit_control_grabs,
             cx,
         );
     }
@@ -158,6 +165,9 @@ fn connect_world(
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
     agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+    sit_response: watch::Receiver<Option<SitResponseState>>,
+    stand_pending: watch::Receiver<bool>,
+    sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
     cx: &mut App,
 ) {
     let lifecycle = cx.global::<AppLifecycle>();
@@ -165,7 +175,18 @@ fn connect_world(
         && lifecycle.scene.main.is_current(generation)
         && let Some(viewport) = &lifecycle.scene.viewport
     {
-        viewport.connect_world(generation, sources, agent_id, camera, movement, agent_motion, service_runtime(cx));
+        viewport.connect_world(
+            generation,
+            sources,
+            agent_id,
+            camera,
+            movement,
+            agent_motion,
+            sit_response,
+            stand_pending,
+            sit_control_grabs,
+            service_runtime(cx),
+        );
     }
 }
 

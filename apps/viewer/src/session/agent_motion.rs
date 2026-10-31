@@ -20,6 +20,7 @@ pub(crate) struct AgentMotionSample {
     pub(crate) time_dilation: f32,
     pub(crate) ping_delay: Option<Duration>,
     pub(crate) parented: bool,
+    pub(crate) ground_sitting: bool,
     pub(crate) simulator_rotation: Quat,
     pub(crate) received_at: Instant,
     pub(crate) seed: u64,
@@ -47,16 +48,31 @@ impl AgentMotionSample {
 pub(crate) struct AgentMotionPublisher {
     sender: watch::Sender<Option<AgentMotionSample>>,
     seed: u64,
+    parent: Option<Parent>,
+    ground_sitting: bool,
 }
 
 impl AgentMotionPublisher {
     pub(crate) fn new() -> Self {
         let (sender, _) = watch::channel(None);
-        Self { sender, seed: 0 }
+        Self { sender, seed: 0, parent: None, ground_sitting: false }
     }
 
     pub(crate) fn receiver(&self) -> watch::Receiver<Option<AgentMotionSample>> {
         self.sender.subscribe()
+    }
+
+    pub(crate) fn set_ground_sitting(&mut self, ground_sitting: bool) -> bool {
+        if self.ground_sitting == ground_sitting {
+            return false;
+        }
+        self.ground_sitting = ground_sitting;
+        self.seed = self.seed.wrapping_add(1);
+        true
+    }
+
+    pub(crate) fn ground_sitting(&self) -> bool {
+        self.ground_sitting
     }
 
     pub(crate) fn publish_arrival(
@@ -97,6 +113,7 @@ impl AgentMotionPublisher {
             time_dilation: 1.0,
             ping_delay,
             parented: false,
+            ground_sitting: self.ground_sitting,
             simulator_rotation,
             received_at,
             seed: self.seed.wrapping_add(1),
@@ -109,9 +126,20 @@ impl AgentMotionPublisher {
         true
     }
 
-    pub(crate) fn publish_world(&self, world: &World, agent_id: Uuid, received_at: Instant) -> bool {
+    pub(crate) fn publish_world(&mut self, world: &World, agent_id: Uuid, received_at: Instant) -> bool {
         let Some(entity) = world.entity(agent_id) else { return false };
         let Some(agent) = world.object(entity) else { return false };
+        let parent = agent.parent();
+        if self.parent != Some(parent) {
+            let previous_parent = self.parent;
+            self.seed = self.seed.wrapping_add(1);
+            let parent_id = match parent {
+                Parent::Resolved(entity) => world.object(entity).map(|object| object.id()),
+                Parent::Unknown | Parent::Root | Parent::Pending { .. } => None,
+            };
+            tracing::debug!(agent = %agent_id, previous = ?previous_parent, parent = ?parent_id, state = ?parent, "agent parent changed");
+        }
+        self.parent = Some(parent);
         let Ok(transform) = agent.world_transform() else { return false };
         let pose = match transform {
             WorldTransformState::Resolved(transform) => transform.pose,
@@ -121,7 +149,7 @@ impl AgentMotionPublisher {
         let motion = agent.linear_motion();
         let source = agent.motion_source();
         let received_at = source.and_then(world::UpdateSource::motion_received_at).unwrap_or(received_at);
-        let parented = matches!(agent.parent(), Parent::Resolved(_) | Parent::Pending { .. });
+        let parented = matches!(parent, Parent::Resolved(_) | Parent::Pending { .. });
         let (velocity, acceleration) = if parented {
             (Vec3::ZERO, Vec3::ZERO)
         } else {
@@ -142,6 +170,7 @@ impl AgentMotionPublisher {
             time_dilation: agent.time_dilation(),
             ping_delay: source.and_then(world::UpdateSource::motion_ping_delay),
             parented,
+            ground_sitting: self.ground_sitting,
             simulator_rotation: pose.rotation,
             received_at,
             seed: self.seed,
@@ -262,7 +291,7 @@ mod tests {
         agent.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X), acceleration: Some(Vec3::Y) });
         let _ = world.observe_object(agent).expect("agent observation");
 
-        let publisher = AgentMotionPublisher::new();
+        let mut publisher = AgentMotionPublisher::new();
         let now = std::time::Instant::now();
         assert!(publisher.publish_world(&world, agent_id, now));
         let sample = publisher.receiver().borrow().expect("world sample");
@@ -270,6 +299,66 @@ mod tests {
         assert_eq!(sample.velocity, Vec3::ZERO);
         assert_eq!(sample.acceleration, Vec3::ZERO);
         assert_eq!(sample.received_at, now);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn standing_parent_update_reseeds_body_rotation_from_world_pose() {
+        let mut world = World::new(viewer_world_limits());
+        let region = Region::new(1);
+        let _ = world.adopt_region(region).expect("region");
+        let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("region origin");
+        let agent_id = Uuid::from_u128(1);
+        world.set_self_agent(agent_id).expect("self agent");
+        let seat_rotation = Quat::from_rotation_z(0.7);
+        let sitting_rotation = Quat::from_rotation_z(-0.2);
+        let source = UpdateSource::new(region, 1, Ordered(1), 0);
+        let mut seat = ObjectObservation::new(
+            source,
+            Uuid::from_u128(2),
+            NonZeroU32::new(1).expect("seat local ID"),
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        seat.pose = Some(Pose { position: Some(Vec3::new(10.0, 20.0, 0.0)), rotation: Some(seat_rotation) });
+        let _ = world.observe_object(seat).expect("seat observation");
+        let mut agent = ObjectObservation::new(
+            source,
+            agent_id,
+            NonZeroU32::new(2).expect("agent local ID"),
+            Kind::Avatar,
+            ParentUpdate::Local(NonZeroU32::new(1).expect("seat local ID")),
+        );
+        agent.pose = Some(Pose { position: Some(Vec3::new(0.0, 0.0, 1.0)), rotation: Some(sitting_rotation) });
+        let _ = world.observe_object(agent).expect("agent observation");
+
+        let mut publisher = AgentMotionPublisher::new();
+        let now = std::time::Instant::now();
+        assert!(publisher.publish_world(&world, agent_id, now));
+        let seated = publisher.receiver().borrow().expect("seated sample");
+        assert!(seated.parented);
+        assert!((seated.simulator_rotation * Vec3::X).distance((seat_rotation * sitting_rotation) * Vec3::X) < 1e-6);
+
+        let standing_rotation = Quat::from_rotation_z(1.1);
+        let mut agent = ObjectObservation::new(
+            UpdateSource::new(region, 1, Ordered(2), 0),
+            agent_id,
+            NonZeroU32::new(2).expect("agent local ID"),
+            Kind::Avatar,
+            ParentUpdate::Root,
+        );
+        agent.pose = Some(Pose { position: Some(Vec3::new(11.0, 20.0, 1.0)), rotation: Some(standing_rotation) });
+        let _ = world.observe_object(agent).expect("standing agent update");
+        assert!(publisher.publish_world(&world, agent_id, now + Duration::from_millis(20)));
+        let standing = publisher.receiver().borrow().expect("standing sample");
+        assert!(!standing.parented);
+        assert!(standing.seed > seated.seed);
+        assert!((standing.simulator_rotation * Vec3::X).distance(standing_rotation * Vec3::X) < 1e-6);
+
+        let mut body_rotation = crate::agent_movement::BodyRotation::default();
+        body_rotation.update(Some((seated.seed, seated.simulator_rotation)), 0.0, now);
+        body_rotation.update(Some((standing.seed, standing.simulator_rotation)), 0.0, now + Duration::from_millis(20));
+        assert!((body_rotation.current() * Vec3::X).distance(standing_rotation * Vec3::X) < 1e-6);
     }
 
     #[test]
@@ -296,7 +385,7 @@ mod tests {
         agent.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X), acceleration: Some(Vec3::Y) });
         let _ = world.observe_object(agent).expect("agent observation");
 
-        let publisher = AgentMotionPublisher::new();
+        let mut publisher = AgentMotionPublisher::new();
         let now = received_at + Duration::from_millis(100);
         assert!(publisher.publish_world(&world, agent_id, now));
         let sample = publisher.receiver().borrow().expect("world sample");
@@ -327,12 +416,46 @@ mod tests {
         agent.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X * 1.0e30), acceleration: Some(Vec3::Y) });
         let _ = world.observe_object(agent).expect("agent observation");
 
-        let publisher = AgentMotionPublisher::new();
+        let mut publisher = AgentMotionPublisher::new();
         assert!(publisher.publish_world(&world, agent_id, std::time::Instant::now()));
         let sample = publisher.receiver().borrow().expect("world sample");
         assert_eq!(sample.position, DVec3::new(10.0, 20.0, 3.0));
         assert_eq!(sample.velocity, Vec3::ZERO);
         assert_eq!(sample.acceleration, Vec3::ZERO);
+    }
+
+    #[test]
+    fn ground_sit_animation_reseeds_motion() {
+        let mut world = World::new(viewer_world_limits());
+        let region = Region::new(1);
+        let _ = world.adopt_region(region).expect("region");
+        let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("region origin");
+        let agent_id = Uuid::from_u128(3);
+        let mut agent = ObjectObservation::new(
+            UpdateSource::new(region, 1, Ordered(1), 0),
+            agent_id,
+            NonZeroU32::new(1).expect("agent local ID"),
+            Kind::Avatar,
+            ParentUpdate::Root,
+        );
+        agent.pose = Some(Pose { position: Some(Vec3::new(10.0, 20.0, 30.0)), rotation: Some(Quat::IDENTITY) });
+        agent.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X), acceleration: Some(Vec3::ZERO) });
+        let _ = world.observe_object(agent).expect("agent observation");
+
+        let mut publisher = AgentMotionPublisher::new();
+        let now = std::time::Instant::now();
+        assert!(publisher.publish_world(&world, agent_id, now));
+        let standing = publisher.receiver().borrow().expect("standing motion");
+        assert!(publisher.set_ground_sitting(true));
+        assert!(publisher.publish_world(&world, agent_id, now + Duration::from_secs(1)));
+        let sitting = publisher.receiver().borrow().expect("sitting motion");
+        assert!(sitting.ground_sitting);
+        assert!(sitting.seed > standing.seed);
+        assert!(publisher.set_ground_sitting(false));
+        assert!(publisher.publish_world(&world, agent_id, now + Duration::from_secs(2)));
+        let standing_again = publisher.receiver().borrow().expect("standing motion after ground sit");
+        assert!(!standing_again.ground_sitting);
+        assert!(standing_again.seed > sitting.seed);
     }
 
     #[test]
@@ -346,6 +469,7 @@ mod tests {
             time_dilation: 1.0,
             ping_delay: None,
             parented: false,
+            ground_sitting: false,
             simulator_rotation: Quat::IDENTITY,
             received_at: std::time::Instant::now(),
             seed: 0,

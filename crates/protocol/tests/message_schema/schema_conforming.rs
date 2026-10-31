@@ -56,6 +56,11 @@ pub(crate) fn schema_conforming_fields(message: &Message) -> Option<Vec<BlockVal
             FieldValue::Uuid(message.agent_data.session_id),
             FieldValue::U32(message.agent_data.circuit_code),
         ])]),
+        Message::AgentRequestSit(message) => Some(vec![
+            one(vec![FieldValue::Uuid(message.agent_data.agent_id), FieldValue::Uuid(message.agent_data.session_id)]),
+            one(vec![FieldValue::Uuid(message.target_object.target_id), FieldValue::Vector3(message.target_object.offset)]),
+        ]),
+        Message::AgentSit(message) => Some(vec![one(vec![FieldValue::Uuid(message.agent_id), FieldValue::Uuid(message.session_id)])]),
         Message::RegionHandshake(_) => None,
         Message::RegionHandshakeReply(message) => Some(vec![
             one(vec![FieldValue::Uuid(message.agent_data.agent_id), FieldValue::Uuid(message.agent_data.session_id)]),

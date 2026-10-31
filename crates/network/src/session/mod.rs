@@ -26,8 +26,8 @@ use std::{
 
 use protocol::lludp::Message;
 use protocol::messages::{
-    AgentUpdate, ChatFromViewer, MapBlockRequest, MoveInventoryFolder, MoveInventoryItem, RegionHandleRequest, RequestMultipleObjects,
-    SetAlwaysRun, TeleportCancel,
+    AgentRequestSit, AgentUpdate, ChatFromViewer, MapBlockRequest, MoveInventoryFolder, MoveInventoryItem, RegionHandleRequest,
+    RequestMultipleObjects, SetAlwaysRun, TeleportCancel,
 };
 use tokio::sync::{
     mpsc::{self, Receiver, Sender},
@@ -466,6 +466,10 @@ impl OutboundMessage for TeleportCancel {}
 impl outbound_message::Sealed for AgentUpdate {}
 
 impl OutboundMessage for AgentUpdate {}
+
+impl outbound_message::Sealed for AgentRequestSit {}
+
+impl OutboundMessage for AgentRequestSit {}
 
 impl outbound_message::Sealed for SetAlwaysRun {}
 

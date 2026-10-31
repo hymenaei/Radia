@@ -8,6 +8,7 @@ use network::{
 use protocol::{
     lludp::Message,
     lludp::Message::{ImprovedTerseObjectUpdate, KillObject, ObjectUpdate, ObjectUpdateCached},
+    lludp::Packet,
     messages::{CacheMissType::Full, CachedObjectReference, ObjectUpdateCached as CachedUpdate, RequestAgentData, object::kill_object},
 };
 use test_support::lludp::vectors;
@@ -17,7 +18,7 @@ use world::{
     Applied,
     ApplyOutcome::{Deferred, Introduced, TombstoneRecorded, Unchanged},
     DeferredReason::AmbiguousOrder,
-    LocalAddress, ObjectObservation, Parent, Pose, Region, RegionHandle, UpdateSource,
+    Kind, LocalAddress, ObjectObservation, Parent, ParentUpdate, Pose, Region, RegionHandle, UpdateSource,
 };
 
 use crate::session::coordinator::events::{MovementCompleteOutcome, PendingWorldHandoff, WorldHandoff};
@@ -345,6 +346,63 @@ fn region_connection_lifecycle() {
     assert!(apply_world_event(&mut intake, &simulator_message(simulator_id, 1, region_handshake("late"))).is_none());
 }
 
+#[tokio::test]
+async fn seat_removal_preserves_parenting() {
+    let simulator_id = simulator_id();
+    let simulator = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
+    let viewer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback viewer");
+    let seat_id = Uuid::from_u128(0x51);
+    let agent_id = Uuid::from_u128(0x52);
+    let seat_local_id = NonZeroU32::new(10).expect("seat local id");
+    let agent_local_id = NonZeroU32::new(11).expect("agent local id");
+    let mut intake = SessionWorld::new(viewer_world_limits());
+    let region = intake.register_simulator(simulator_id, None).expect("register simulator");
+    intake.set_self_agent(simulator_id, agent_id);
+    let seat = ObjectObservation::new(
+        UpdateSource::new(region, 1, world::OrderEvidence::Ordered(1), 0),
+        seat_id,
+        seat_local_id,
+        Kind::Object,
+        ParentUpdate::Root,
+    );
+    let mut agent = ObjectObservation::new(
+        UpdateSource::new(region, 2, world::OrderEvidence::Ordered(2), 0),
+        agent_id,
+        agent_local_id,
+        Kind::Avatar,
+        ParentUpdate::Local(seat_local_id),
+    );
+    agent.pose = Some(Pose { position: Some(Vec3::new(2.0, 3.0, 4.0)), rotation: Some(Quat::IDENTITY) });
+    intake
+        .apply_object_batch(
+            simulator_id,
+            ObjectBatch {
+                region,
+                region_handle: None,
+                blocks: vec![Some(ObjectOperation::Observe(seat)), Some(ObjectOperation::Observe(agent))],
+                invalid_blocks: 0,
+                invalid_fields: 0,
+            },
+        )
+        .expect("apply seat and avatar");
+    let seat_entity = intake.world().entity(seat_id).expect("seat entity");
+    let agent_entity = intake.world().entity(agent_id).expect("avatar entity");
+    assert_eq!(intake.world().object(agent_entity).expect("avatar").parent(), Parent::Resolved(seat_entity));
+
+    let removal =
+        Message::KillObject(kill_object::KillObject { object_data: vec![kill_object::ObjectData { local_id: seat_local_id.get() }] });
+    let bytes = Packet::new(3, removal).encode().expect("encode seat removal");
+    simulator.send_to(&bytes, viewer.local_addr().expect("viewer address")).await.expect("send seat removal");
+    let mut bytes = [0; 2048];
+    let (length, _) = viewer.recv_from(&mut bytes).await.expect("receive seat removal");
+    let message = Packet::decode(&bytes[..length]).expect("decode seat removal").message().clone();
+    std::assert_matches!(message, Message::KillObject(_));
+    apply_world_event(&mut intake, &simulator_message(simulator_id, 3, message)).expect("apply simulator seat removal");
+
+    let parent = intake.world().object(agent_entity).expect("avatar remains in world").parent();
+    std::assert_matches!(parent, Parent::Pending { expected_uuid: Some(id), .. } if id == seat_id);
+}
+
 #[test]
 fn authenticated_primary_movement_complete_resolves_region_origin() {
     let primary_simulator = simulator_id();
@@ -596,7 +654,7 @@ fn newer_handoff_conflicts_invalidate_observation() {
     )
     .expect("apply stale kill");
     let result = summary.blocks[0].applied().expect("recorded kill");
-    assert!(matches!(&result.outcome, TombstoneRecorded(address) if *address == removed_address));
+    std::assert_matches!(&result.outcome, TombstoneRecorded(address) if *address == removed_address);
     assert!(observations.contains_key(&destination_id));
 
     apply_world_event_with_handoff(
@@ -795,7 +853,7 @@ fn unknown_removal_cancels_recovery() {
     for (block, address) in summary.blocks.iter().zip(&addresses) {
         let result = block.applied().expect("recorded tombstone");
         assert_eq!(result.revision, None);
-        assert!(matches!(&result.outcome, TombstoneRecorded(recorded) if recorded == address));
+        std::assert_matches!(&result.outcome, TombstoneRecorded(recorded) if recorded == address);
     }
     assert_eq!(summary.recovery_cancellation_addresses().collect::<Vec<_>>(), addresses);
 }
@@ -810,13 +868,13 @@ fn repeated_removal_keeps_recovery() {
 
     let (_, first) = apply_world_event(&mut intake, &simulator_message(simulator_id, 1, message.clone())).expect("registered simulator");
     let first_result = first.blocks[0].applied().expect("recorded tombstone");
-    assert!(matches!(&first_result.outcome, TombstoneRecorded(_)));
+    std::assert_matches!(&first_result.outcome, TombstoneRecorded(_));
 
     let (_, repeated) = apply_world_event(&mut intake, &simulator_message(simulator_id, 1, message)).expect("registered simulator");
     let repeated_result = repeated.blocks[0].applied().expect("unchanged removal");
 
     assert_eq!(repeated_result.revision, None);
-    assert!(matches!(&repeated_result.outcome, Unchanged));
+    std::assert_matches!(&repeated_result.outcome, Unchanged);
     assert_eq!(repeated.recovery_cancellation_addresses().count(), 0);
 }
 
@@ -845,10 +903,10 @@ fn object_update_order_schedules_recovery() {
     {
         let state = intake.world();
         let child = state.object(state.entity(child_id).unwrap()).unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             child.parent(),
             Parent::Resolved(parent) if state.object(parent).unwrap().id() == parent_id
-        ));
+        );
     }
 
     let mut terse = fixture_packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE).message().clone();

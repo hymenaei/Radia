@@ -37,15 +37,23 @@ impl SitToggle {
         if seated { "Stand Up" } else { "Sit Down" }
     }
 
-    pub(crate) fn action(&self, seated: bool) -> Option<ToggleAction> {
-        if self.pending {
+    pub(crate) fn action(&self, seated: bool, available: bool) -> Option<ToggleAction> {
+        if self.pending || !available {
             return None;
         }
         Some(if seated { ToggleAction::StandUp } else { ToggleAction::SitOnGround })
     }
 
+    pub(crate) fn visible(&self, agent_available: bool) -> bool {
+        agent_available
+    }
+
     fn is_pending(&self) -> bool {
         self.pending
+    }
+
+    fn enabled(&self, agent_available: bool, controls_available: bool) -> bool {
+        self.visible(agent_available) && controls_available && !self.pending
     }
 
     fn begin(&mut self) -> bool {
@@ -75,8 +83,8 @@ impl SitControls {
         Self { toggle: SitToggle::default(), menu: None, sender, receiver, notice: None }
     }
 
-    pub(super) fn open_menu(&mut self, hit: PickHit, camera: Camera, ray: DVec3, position: Pos2) {
-        self.menu = sit_here_target(hit, camera, ray).map(|(id, offset)| SitMenu { id, offset, position });
+    pub(super) fn menu_open(&self) -> bool {
+        self.menu.is_some()
     }
 
     pub(super) fn close_menu(&mut self) -> bool {
@@ -89,6 +97,7 @@ impl SitControls {
         &mut self,
         capture: super::InputCapture,
         renderer: Option<&render::Renderer>,
+        feed: Option<&SceneFeed>,
         camera: Option<Camera>,
         cursor: PhysicalPosition<f64>,
         size: PhysicalSize<u32>,
@@ -109,13 +118,30 @@ impl SitControls {
         };
         if let Some(hit) = hit {
             let position = egui::pos2((cursor.x / dpi) as f32, (cursor.y / dpi) as f32);
-            self.open_menu(hit, camera, ray, position);
+            if let PickTarget::Object(object) = hit.target {
+                let world_knows_object = feed.is_some_and(|feed| feed.knows_pick(object));
+                tracing::debug!(
+                    object_local_id = object.local_id.get(),
+                    object_id = %object.id,
+                    world_knows_object,
+                    "viewport object picked"
+                );
+                if let Some(feed) = feed.filter(|_| world_knows_object)
+                    && let Some((_, offset)) = sit_here_target(hit, camera, ray)
+                    && let Some(root_id) = feed.root_object_id(object.id)
+                {
+                    self.menu = Some(SitMenu { object, root_id, offset, position });
+                }
+            }
         }
     }
 
-    pub(super) fn button(&mut self, ui: &mut Ui, seated: bool, available: bool) -> Option<SitRequest> {
-        let action = self.toggle.action(seated);
-        let response = ui.add_enabled(available && !self.toggle.is_pending(), Button::new(self.toggle.label(seated)));
+    pub(super) fn button(&mut self, ui: &mut Ui, seated: bool, agent_available: bool, controls_available: bool) -> Option<SitRequest> {
+        if !self.toggle.visible(agent_available) {
+            return None;
+        }
+        let action = self.toggle.action(seated, controls_available);
+        let response = ui.add_enabled(self.toggle.enabled(agent_available, controls_available), Button::new(self.toggle.label(seated)));
         if response.clicked() {
             return match action? {
                 ToggleAction::SitOnGround => Some(SitRequest::Ground),
@@ -125,29 +151,39 @@ impl SitControls {
         None
     }
 
-    pub(super) fn controls_ui(&mut self, root: &mut Ui, seated: bool, available: bool, now: Instant) -> (bool, Option<SitRequest>) {
+    pub(super) fn controls_ui(
+        &mut self,
+        controls: &mut Ui,
+        seated: bool,
+        agent_available: bool,
+        controls_available: bool,
+    ) -> (bool, Option<SitRequest>) {
         let mut request_chat = false;
         let mut sit_request = None;
-        root.horizontal(|ui| {
+        controls.horizontal(|ui| {
             request_chat = ui.button("Nearby chat (F6)").clicked();
-            sit_request = self.button(ui, seated, available);
+            sit_request = self.button(ui, seated, agent_available, controls_available);
         });
-        let menu_request = self.overlays(root.ctx(), now);
-        if sit_request.is_none() {
-            sit_request = menu_request;
-        }
         (request_chat, sit_request)
     }
 
-    pub(super) fn overlays(&mut self, context: &Context, now: Instant) -> Option<SitRequest> {
+    pub(super) fn overlays(&mut self, context: &Context, now: Instant, feed: Option<&SceneFeed>) -> Option<SitRequest> {
         let mut request = None;
         if let Some(menu) = &self.menu {
+            let world_knows_object = feed.is_some_and(|feed| feed.knows_pick(menu.object));
+            let sitting_on_target = feed.is_some_and(|feed| feed.agent_is_sitting_on(menu.root_id));
             let response =
                 Area::new(Id::unique("radia-viewport-sit-menu")).order(Order::Foreground).fixed_pos(menu.position).show(context, |ui| {
                     Frame::popup(ui.style()).show(ui, |ui| {
                         ui.set_min_width(96.0);
-                        if ui.add_enabled(!self.toggle.is_pending(), Button::new("Sit Here")).clicked() {
-                            request = Some(SitRequest::Object { id: menu.id, offset: menu.offset });
+                        if ui
+                            .add_enabled(
+                                menu.enabled(world_knows_object, self.toggle.is_pending()),
+                                Button::new(menu.label(sitting_on_target)),
+                            )
+                            .clicked()
+                        {
+                            request = Some(menu.request(sitting_on_target));
                         }
                     });
                 });
@@ -232,6 +268,7 @@ impl SitControls {
     }
 }
 
+#[derive(Debug)]
 pub(super) enum SitRequest {
     Object { id: Uuid, offset: Vec3 },
     Ground,
@@ -239,9 +276,24 @@ pub(super) enum SitRequest {
 }
 
 struct SitMenu {
-    id: Uuid,
+    object: PickObject,
+    root_id: Uuid,
     offset: Vec3,
     position: Pos2,
+}
+
+impl SitMenu {
+    fn label(&self, sitting_on_target: bool) -> &'static str {
+        if sitting_on_target { "Stand Up" } else { "Sit Here" }
+    }
+
+    fn request(&self, sitting_on_target: bool) -> SitRequest {
+        if sitting_on_target { SitRequest::Stand } else { SitRequest::Object { id: self.object.id, offset: self.offset } }
+    }
+
+    fn enabled(&self, world_knows_object: bool, pending: bool) -> bool {
+        world_knows_object && !pending
+    }
 }
 
 enum SitCompletion {
@@ -338,24 +390,60 @@ pub(crate) fn agent_request_sit_offset(hit: DVec3, object: PickObject, camera: C
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use math::{DVec3, Quat, Vec3};
     use render::{PickHit, PickObject, PickObjectKind, PickTarget, scene::Camera};
     use uuid::Uuid;
 
-    use super::{SitToggle, ToggleAction, agent_request_sit_offset, sit_here_target};
+    use super::{SitMenu, SitRequest, SitToggle, ToggleAction, agent_request_sit_offset, sit_here_target};
 
     #[test]
     fn toggle_tracks_world_state() {
         let mut toggle = SitToggle::default();
         assert_eq!(toggle.label(false), "Sit Down");
-        assert_eq!(toggle.action(false), Some(ToggleAction::SitOnGround));
+        assert_eq!(toggle.action(false, true), Some(ToggleAction::SitOnGround));
         assert_eq!(toggle.label(true), "Stand Up");
-        assert_eq!(toggle.action(true), Some(ToggleAction::StandUp));
+        assert_eq!(toggle.action(true, true), Some(ToggleAction::StandUp));
         assert!(toggle.begin());
-        assert_eq!(toggle.action(false), None);
-        assert_eq!(toggle.action(true), None);
+        assert_eq!(toggle.action(false, true), None);
+        assert_eq!(toggle.action(true, true), None);
         toggle.complete();
-        assert_eq!(toggle.action(false), Some(ToggleAction::SitOnGround));
+        assert_eq!(toggle.action(false, true), Some(ToggleAction::SitOnGround));
+    }
+
+    #[test]
+    fn toggle_requires_agent_and_controls() {
+        let toggle = SitToggle::default();
+        assert!(!toggle.visible(false));
+        assert!(!toggle.enabled(false, true));
+        assert!(!toggle.enabled(true, false));
+        assert!(toggle.enabled(true, true));
+        assert_eq!(toggle.action(false, false), None);
+    }
+
+    #[test]
+    fn sit_menu_stands_on_current_target() {
+        let menu = SitMenu {
+            object: PickObject {
+                id: Uuid::from_u128(9),
+                local_id: NonZeroU32::new(10).unwrap(),
+                kind: PickObjectKind::Prim,
+                position: DVec3::ZERO,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            },
+            root_id: Uuid::from_u128(9),
+            offset: Vec3::X,
+            position: egui::Pos2::ZERO,
+        };
+        assert_eq!(menu.label(false), "Sit Here");
+        std::assert_matches!(menu.request(false), SitRequest::Object { id, offset } if id == Uuid::from_u128(9) && offset == Vec3::X);
+        assert_eq!(menu.label(true), "Stand Up");
+        std::assert_matches!(menu.request(true), SitRequest::Stand);
+        assert!(menu.enabled(true, false));
+        assert!(!menu.enabled(false, false));
+        assert!(!menu.enabled(true, true));
     }
 
     #[test]
@@ -363,6 +451,7 @@ mod tests {
         let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
         let object = PickObject {
             id: Uuid::from_u128(7),
+            local_id: NonZeroU32::new(1).unwrap(),
             kind: PickObjectKind::Prim,
             position: DVec3::new(10.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
@@ -379,6 +468,7 @@ mod tests {
         let camera = Camera::new(DVec3::new(0.0, -10.0, 0.0), Vec3::Y, 1.0, [128, 128]).unwrap();
         let object = PickObject {
             id: Uuid::from_u128(8),
+            local_id: NonZeroU32::new(2).unwrap(),
             kind: PickObjectKind::Prim,
             position: DVec3::ZERO,
             rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
@@ -396,6 +486,7 @@ mod tests {
         let id = Uuid::from_u128(0x123456789abcdef00123456789abcdef);
         let object = PickObject {
             id,
+            local_id: NonZeroU32::new(3).unwrap(),
             kind: PickObjectKind::Prim,
             position: DVec3::new(10.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
@@ -411,6 +502,7 @@ mod tests {
         let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
         let object = PickObject {
             id: Uuid::from_u128(9),
+            local_id: NonZeroU32::new(4).unwrap(),
             kind: PickObjectKind::Avatar,
             position: DVec3::new(10.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,

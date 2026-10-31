@@ -608,6 +608,7 @@ impl LoginScreen {
             viewport_agent_control,
             ready.camera,
             ready.movement,
+            ready.movement_availability,
             ready.agent_motion,
             ready.motion_circuits,
             ready.sit_response,

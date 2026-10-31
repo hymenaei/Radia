@@ -106,6 +106,7 @@ pub(crate) struct HeldControls {
     temporary_run_mode: Option<sitting::SittingRunMode>,
     stop_pending: bool,
     stop_sequence: u64,
+    input_enabled: bool,
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -206,11 +207,11 @@ impl HeldControls {
             };
             return Some((binding, changed));
         }
+        if !self.input_enabled || captured {
+            return None;
+        }
         if repeat {
             return Some((binding, false));
-        }
-        if captured {
-            return None;
         }
         let changed = match binding {
             KeyBinding::Movement(key) => self.set_pressed_at(key, true, now),
@@ -225,6 +226,17 @@ impl HeldControls {
             }
         };
         Some((binding, changed))
+    }
+
+    pub(crate) fn set_input_enabled(&mut self, enabled: bool) -> bool {
+        if self.input_enabled == enabled {
+            return false;
+        }
+        self.input_enabled = enabled;
+        if !enabled {
+            self.release_all();
+        }
+        true
     }
 
     pub(crate) fn toggle_flying(&mut self, seated: bool) -> bool {
@@ -259,11 +271,6 @@ impl HeldControls {
         self.pressed_at = [None; 12];
         self.reset_sitting_run();
         self.request_stop();
-    }
-
-    pub(crate) fn release_and_observe(&mut self, body_rotation: Quat) -> MovementObservation {
-        self.release_all();
-        self.observation(false, body_rotation)
     }
 
     pub(crate) fn active(&self) -> bool {
@@ -427,8 +434,30 @@ mod tests {
         assert_eq!(controls.keyboard_event(&key, ElementState::Pressed, false, true, false), None);
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
 
+        controls.set_input_enabled(true);
         controls.keyboard_event(&key, ElementState::Pressed, false, false, false).expect("forward press");
         controls.keyboard_event(&key, ElementState::Released, false, true, false).expect("forward release");
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn unavailable_controls_clear_held_keys() {
+        let mut controls = HeldControls::default();
+        let jump = Key::Character("e".into());
+        assert_eq!(controls.keyboard_event(&jump, ElementState::Pressed, false, false, false), None);
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
+
+        controls.set_input_enabled(true);
+        controls.keyboard_event(&jump, ElementState::Released, false, true, false).expect("late jump release");
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
+
+        controls.keyboard_event(&jump, ElementState::Pressed, false, false, false).expect("jump press");
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, UP_POS | FAST_UP);
+
+        controls.set_input_enabled(false);
+        assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, STOP);
+        controls.set_input_enabled(true);
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
     }
 
@@ -442,7 +471,8 @@ mod tests {
         assert_eq!(movement.control_flags, AT_POS | FAST_AT | FLY);
         assert!(movement.always_run);
 
-        let stopped = controls.release_and_observe(Quat::IDENTITY);
+        controls.release_all();
+        let stopped = controls.observation(false, Quat::IDENTITY);
         assert_eq!(stopped.control_flags, STOP | FLY);
         assert!(stopped.stop_sequence > movement.stop_sequence);
         assert!(stopped.always_run);
@@ -466,6 +496,7 @@ mod tests {
     #[test]
     fn seated_movement_keys_do_not_stand() {
         let mut controls = HeldControls::default();
+        controls.set_input_enabled(true);
         for (key, expected) in [("w", AT_POS | FAST_AT), ("e", UP_POS | FAST_UP)] {
             let key = Key::Character(key.into());
             controls.keyboard_event(&key, ElementState::Pressed, false, false, true).expect("seated movement press");

@@ -117,6 +117,7 @@ fn picked_focus_detaches_and_escape_returns_to_follow() {
 fn uncaptured_movement_returns_to_follow() {
     let mut mode = CameraMode::Free;
     let mut controls = HeldControls::default();
+    controls.set_input_enabled(true);
 
     assert_eq!(
         handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, false, false),
@@ -131,6 +132,7 @@ fn uncaptured_movement_returns_to_follow() {
 fn egui_captured_movement_does_not_return_to_follow() {
     let mut mode = CameraMode::Free;
     let mut controls = HeldControls::default();
+    controls.set_input_enabled(true);
 
     assert_eq!(
         handle_keyboard_input(&mut controls, &mut mode, &Key::Character("w".into()), ElementState::Pressed, false, true, false),
@@ -148,6 +150,7 @@ fn flight_run_and_stop_keys_return_to_follow() {
     for key in [Key::Character("f".into()), Key::Character("r".into()), Key::Named(NamedKey::Space)] {
         let mut mode = CameraMode::Free;
         let mut controls = HeldControls::default();
+        controls.set_input_enabled(true);
 
         let binding = KeyBinding::from_key(&key).expect("mapped camera-return key");
         assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &key, ElementState::Pressed, false, false, false), Some(true));

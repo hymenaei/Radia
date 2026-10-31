@@ -1,3 +1,4 @@
+mod recovery;
 mod sit_controls;
 mod timing;
 mod window;
@@ -30,7 +31,10 @@ use winit::{
     window::WindowId,
 };
 
-use self::window::{MAX_RECOVERIES, SceneWindow, SceneWindowError};
+use self::{
+    recovery::MAX_RECOVERIES,
+    window::{SceneWindow, SceneWindowError},
+};
 use crate::{
     agent_movement::MovementObservation,
     agent_movement::sitting::ScriptControlGrabs,
@@ -204,6 +208,7 @@ impl Viewport {
         agent_control: AgentControlHandle,
         camera: watch::Sender<Option<scene::Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
+        movement_availability: watch::Receiver<bool>,
         agent_motion: watch::Receiver<Option<AgentMotionSample>>,
         sit_response: watch::Receiver<Option<SitResponseState>>,
         stand_pending: watch::Receiver<bool>,
@@ -219,6 +224,7 @@ impl Viewport {
                 agent_control,
                 camera,
                 movement,
+                movement_availability,
                 agent_motion,
                 sit_response,
                 stand_pending,

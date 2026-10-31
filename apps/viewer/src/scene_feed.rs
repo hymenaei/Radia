@@ -139,6 +139,7 @@ pub(crate) struct SceneFeed {
     pub(crate) water_height: Option<f64>,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
+    movement_availability: watch::Receiver<bool>,
     agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
     motion_circuit_scratch: Vec<MotionCircuit>,
@@ -166,6 +167,7 @@ impl SceneFeed {
         agent_control: AgentControlHandle,
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
+        movement_availability: watch::Receiver<bool>,
         mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
         sit_response: watch::Receiver<Option<SitResponseState>>,
         stand_pending: watch::Receiver<bool>,
@@ -181,6 +183,7 @@ impl SceneFeed {
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
+        let movement_availability_updates = movement_availability.clone();
         let agent_motions = agent_motion.clone();
         let sit_response_updates = sit_response.clone();
         let stand_pending_updates = stand_pending.clone();
@@ -196,6 +199,7 @@ impl SceneFeed {
                     runtime.clone(),
                     cancelled,
                     observations,
+                    movement_availability_updates,
                     agent_motions,
                     sit_response_updates,
                     stand_pending_updates,
@@ -216,6 +220,7 @@ impl SceneFeed {
             water_height: None,
             camera,
             movement,
+            movement_availability,
             agent_motion,
             motion_circuits,
             motion_circuit_scratch: Vec::new(),
@@ -281,6 +286,43 @@ impl SceneFeed {
 
     pub(crate) fn agent_control(&self) -> &AgentControlHandle {
         &self.agent_control
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn movement_controls_available(&mut self) -> bool {
+        if self.movement_availability.has_changed().is_err() {
+            return false;
+        }
+        *self.movement_availability.borrow_and_update()
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn agent_available(&self) -> bool {
+        self.agent().is_some()
+    }
+
+    pub(crate) fn knows_pick(&self, pick: render::PickObject) -> bool {
+        self.view.objects().any(|object| {
+            let summary = object.detail().summary;
+            summary.id == pick.id && summary.address.local_id() == pick.local_id
+        })
+    }
+
+    pub(crate) fn root_object_id(&self, id: Uuid) -> Option<Uuid> {
+        let mut object = self.view.objects().find(|object| object.detail().summary.id == id)?;
+        loop {
+            match object.detail().summary.parent {
+                Parent::Resolved(parent) => object = self.view.object(parent)?,
+                _ => return Some(object.detail().summary.id),
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn agent_is_sitting_on(&self, id: Uuid) -> bool {
+        let Some(agent) = self.agent() else { return false };
+        let Parent::Resolved(parent) = agent.detail().summary.parent else { return false };
+        self.view.object(parent).and_then(|object| self.root_object_id(object.detail().summary.id)) == Some(id)
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -584,6 +626,7 @@ async fn run(
     runtime: Handle,
     cancelled: oneshot::Receiver<()>,
     mut camera: watch::Receiver<Option<Camera>>,
+    mut movement_availability: watch::Receiver<bool>,
     mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     mut sit_response: watch::Receiver<Option<SitResponseState>>,
     mut stand_pending: watch::Receiver<bool>,
@@ -651,6 +694,7 @@ async fn run(
             }
             .fuse();
             let moved = camera.changed().fuse();
+            let controls_available = movement_availability.changed().fuse();
             let motion_updated = agent_motion.changed().fuse();
             let circuit_transition = motion_circuits.wait_for_transition().fuse();
             let camera_overridden = sit_response.changed().fuse();
@@ -679,6 +723,7 @@ async fn run(
                 available,
                 released,
                 timer,
+                controls_available,
                 pushed
             );
             let mut asset_event = None;
@@ -704,6 +749,7 @@ async fn run(
                 event = available => asset_event = event,
 
                 result = released => { if result.is_err() { break; } wake(); }
+                result = controls_available => { if result.is_err() { break; } wake(); }
                 result = motion_updated => { if result.is_err() { break; } wake(); }
                 _ = circuit_transition => wake(),
                 result = moved => { if result.is_err() { break; } }

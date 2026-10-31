@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt::{self, Display, Formatter},
+    num::NonZeroU32,
     ops::Range,
 };
 
@@ -41,6 +42,7 @@ pub enum PickTarget {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickObject {
     pub id: Uuid,
+    pub local_id: NonZeroU32,
     pub kind: PickObjectKind,
     pub position: DVec3,
     pub rotation: Quat,
@@ -83,6 +85,7 @@ fn pick_target(item: &CachedItem) -> Option<PickTarget> {
         };
         return Some(PickTarget::Object(PickObject {
             id: summary.id,
+            local_id: summary.address.local_id(),
             kind,
             position: item.position,
             rotation: item.rotation,
@@ -160,12 +163,12 @@ impl PickQuery {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Range;
+    use std::{num::NonZeroU32, ops::Range};
 
     use math::{DVec3, Quat, Vec3};
     use uuid::Uuid;
 
-    use super::{MAX_PICK_TRIANGLES, PickError, PickObject, PickObjectKind, PickQuery, PickTarget};
+    use super::{CachedItem, MAX_PICK_TRIANGLES, PickError, PickObject, PickObjectKind, PickQuery, PickTarget};
     use crate::{
         geometry::{ShadingMode, fixtures},
         scene::{Camera, SharedMesh},
@@ -219,11 +222,47 @@ mod tests {
         assert!(hit.position.distance(camera.position() + ray) < 1e-4);
         let PickTarget::Object(object) = hit.target else { panic!("nearest item is an object") };
         assert_eq!(object.id, Uuid::from_u128(7));
+        assert_eq!(object.local_id, NonZeroU32::new(8).unwrap());
         assert_eq!(object.kind, PickObjectKind::Prim);
         let avatar = pick_items(&items[1..], camera, ray).unwrap().unwrap();
         let PickTarget::Object(object) = avatar.target else { panic!("avatar is an object") };
         assert_eq!(object.id, Uuid::from_u128(8));
+        assert_eq!(object.local_id, NonZeroU32::new(9).unwrap());
         assert_eq!(object.kind, PickObjectKind::Avatar);
+    }
+
+    #[test]
+    fn pick_target_uses_world_full_and_local_object_ids() {
+        let (_scene, view, _) = fixtures::scene(255);
+        let object = view.objects().find(|object| object.detail().summary.kind == world::Kind::Object).expect("fixture prim");
+        let summary = object.detail().summary;
+        let (_, mesh) = object.mesh().expect("fixture mesh");
+        let crate::scene::Placement::Ready(transform) = object.placement() else { panic!("fixture object has a placement") };
+        let item = CachedItem {
+            id: (0, 0, 0),
+            entity: Some(summary.entity),
+            region: summary.address.region(),
+            mesh: mesh.clone(),
+            info: crate::geometry::items::mesh_info(mesh),
+            position: transform.pose.position,
+            rotation: transform.pose.rotation,
+            scale: transform.scale,
+            transform: [0; crate::geometry::TRANSFORM_BYTES],
+            pickable: true,
+            shading: ShadingMode::Studio,
+            terrain_textures: None,
+            terrain_composition: None,
+            surface_kind: None,
+            source: Some(object.clone()),
+            faces: Vec::new(),
+            animated_faces: Vec::new(),
+            animation_deadline: None,
+            parameters_dirty: false,
+        };
+        let Some(PickTarget::Object(pick)) = super::pick_target(&item) else { panic!("fixture object pick target") };
+        assert_eq!(pick.id, summary.id);
+        assert_eq!(pick.local_id, summary.address.local_id());
+        assert_eq!(pick.kind, PickObjectKind::Prim);
     }
 
     #[test]
@@ -335,7 +374,14 @@ mod tests {
             position,
             Quat::IDENTITY,
             Vec3::ONE,
-            PickTarget::Object(PickObject { id: Uuid::from_u128(id), kind, position, rotation: Quat::IDENTITY, scale: Vec3::ONE }),
+            PickTarget::Object(PickObject {
+                id: Uuid::from_u128(id),
+                local_id: NonZeroU32::new(id as u32 + 1).unwrap(),
+                kind,
+                position,
+                rotation: Quat::IDENTITY,
+                scale: Vec3::ONE,
+            }),
             shading,
             faces,
         )

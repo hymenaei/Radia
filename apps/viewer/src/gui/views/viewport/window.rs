@@ -27,7 +27,7 @@ use super::{
 use crate::{
     DEFAULT_DRAW_DISTANCE,
     agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP, ScriptControlGrabs, SittingCameraInput},
-    camera::{CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
+    camera::{CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input, should_reset_sitting_orbit},
     scene_feed::SceneFeed,
 };
 
@@ -281,6 +281,18 @@ impl SceneWindow {
             WindowEvent::KeyboardInput { event, .. } => {
                 let was_free = self.camera_mode == CameraMode::Free;
                 let seated = self.feed.as_mut().is_some_and(SceneFeed::agent_is_seated);
+                let reset_sitting_orbit = !was_free
+                    && self.camera_mode == CameraMode::Follow
+                    && should_reset_sitting_orbit(
+                        &event.logical_key,
+                        event.state,
+                        event.repeat,
+                        capture.consumed || capture.keyboard,
+                        seated,
+                        self.modifiers.alt_key(),
+                        self.modifiers.control_key(),
+                        self.modifiers.shift_key(),
+                    );
                 let Some(changed) = handle_keyboard_input(
                     &mut self.controls,
                     &mut self.camera_mode,
@@ -294,6 +306,9 @@ impl SceneWindow {
                 };
                 if changed {
                     self.dirty = true;
+                    if reset_sitting_orbit {
+                        self.reset_sitting_camera();
+                    }
                 }
                 if was_free && self.camera_mode == CameraMode::Follow {
                     self.transition_to_follow();
@@ -452,6 +467,17 @@ impl SceneWindow {
         }
         self.camera_mode.return_to_follow();
         self.dirty = true;
+    }
+
+    fn reset_sitting_camera(&mut self) {
+        let now = Instant::now();
+        let (pose, seed) = self.agent_pose_and_seed_at(now);
+        self.body_rotation.update(seed, 0.0, now);
+        if let Some(pose) = pose
+            && let Some(rotation) = self.follow_camera.reset_after_sitting_camera_input(pose, now)
+        {
+            self.body_rotation.reset_axes(rotation);
+        }
     }
 
     fn ensure_camera(&mut self, pose: Option<world::WorldPose>) {

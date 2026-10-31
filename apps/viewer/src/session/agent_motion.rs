@@ -297,6 +297,66 @@ mod tests {
         assert_eq!(sample.received_at, now);
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn standing_parent_update_reseeds_body_rotation_from_world_pose() {
+        let mut world = World::new(viewer_world_limits());
+        let region = Region::new(1);
+        let _ = world.adopt_region(region).expect("region");
+        let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).expect("region origin");
+        let agent_id = Uuid::from_u128(1);
+        world.set_self_agent(agent_id).expect("self agent");
+        let seat_rotation = Quat::from_rotation_z(0.7);
+        let sitting_rotation = Quat::from_rotation_z(-0.2);
+        let source = UpdateSource::new(region, 1, Ordered(1), 0);
+        let mut seat = ObjectObservation::new(
+            source,
+            Uuid::from_u128(2),
+            NonZeroU32::new(1).expect("seat local ID"),
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        seat.pose = Some(Pose { position: Some(Vec3::new(10.0, 20.0, 0.0)), rotation: Some(seat_rotation) });
+        let _ = world.observe_object(seat).expect("seat observation");
+        let mut agent = ObjectObservation::new(
+            source,
+            agent_id,
+            NonZeroU32::new(2).expect("agent local ID"),
+            Kind::Avatar,
+            ParentUpdate::Local(NonZeroU32::new(1).expect("seat local ID")),
+        );
+        agent.pose = Some(Pose { position: Some(Vec3::new(0.0, 0.0, 1.0)), rotation: Some(sitting_rotation) });
+        let _ = world.observe_object(agent).expect("agent observation");
+
+        let mut publisher = AgentMotionPublisher::new();
+        let now = std::time::Instant::now();
+        assert!(publisher.publish_world(&world, agent_id, now));
+        let seated = publisher.receiver().borrow().expect("seated sample");
+        assert!(seated.parented);
+        assert!((seated.simulator_rotation * Vec3::X).distance((seat_rotation * sitting_rotation) * Vec3::X) < 1e-6);
+
+        let standing_rotation = Quat::from_rotation_z(1.1);
+        let mut agent = ObjectObservation::new(
+            UpdateSource::new(region, 1, Ordered(2), 0),
+            agent_id,
+            NonZeroU32::new(2).expect("agent local ID"),
+            Kind::Avatar,
+            ParentUpdate::Root,
+        );
+        agent.pose = Some(Pose { position: Some(Vec3::new(11.0, 20.0, 1.0)), rotation: Some(standing_rotation) });
+        let _ = world.observe_object(agent).expect("standing agent update");
+        assert!(publisher.publish_world(&world, agent_id, now + Duration::from_millis(20)));
+        let standing = publisher.receiver().borrow().expect("standing sample");
+        assert!(!standing.parented);
+        assert!(standing.seed > seated.seed);
+        assert!((standing.simulator_rotation * Vec3::X).distance(standing_rotation * Vec3::X) < 1e-6);
+
+        let mut body_rotation = crate::agent_movement::BodyRotation::default();
+        body_rotation.update(Some((seated.seed, seated.simulator_rotation)), 0.0, now);
+        body_rotation.update(Some((standing.seed, standing.simulator_rotation)), 0.0, now + Duration::from_millis(20));
+        assert!((body_rotation.current() * Vec3::X).distance(standing_rotation * Vec3::X) < 1e-6);
+    }
+
     #[test]
     fn root_agent_publishes_world_motion() {
         let mut world = World::new(viewer_world_limits());

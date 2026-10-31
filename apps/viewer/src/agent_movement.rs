@@ -613,6 +613,12 @@ impl BodyRotation {
         self.current
     }
 
+    pub(crate) fn reset_axes(&mut self, rotation: Quat) {
+        if let Some(rotation) = yaw_rotation(rotation) {
+            self.current = rotation;
+        }
+    }
+
     pub(crate) fn update(&mut self, seed: Option<(u64, Quat)>, yaw: f32, now: Instant) -> Quat {
         if let Some((generation, rotation)) = seed
             && self.seed != Some(generation)

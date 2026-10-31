@@ -107,6 +107,20 @@ mod tests {
     }
 
     #[test]
+    fn standing_update_uses_body_and_camera_axes() {
+        let position = DVec3::new(10.0, 20.0, 30.0);
+        let rotation = Quat::from_rotation_z(0.7);
+        let facing = rotation * Vec3::X;
+        let view = Camera::new(position - DVec3::new(4.0, 0.0, 0.25), facing + Vec3::Z * 0.25, 1.0, [1280, 720]).unwrap();
+        let movement = MovementObservation { control_flags: 0x0000_0401, body_rotation: rotation, ..idle_movement() };
+        let data = movement_camera(Uuid::nil(), Uuid::nil(), view, DVec3::ZERO, movement).unwrap().agent_data;
+
+        assert_eq!(data.control_flags, 0x0000_0401);
+        assert_eq!(data.body_rotation, rotation);
+        assert!(data.camera_at_axis.distance((facing + Vec3::Z * 0.25).normalize()) < 1e-6);
+    }
+
+    #[test]
     fn default_update_matches_fixture() {
         let agent_id = Uuid::parse_str("ffeeddcc-bbaa-9988-7766-554433221100").expect("fixture agent UUID");
         let session_id = Uuid::parse_str("00112233-4455-6677-8899-aabbccddeeff").expect("fixture session UUID");

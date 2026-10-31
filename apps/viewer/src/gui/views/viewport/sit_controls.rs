@@ -36,12 +36,12 @@ pub(super) enum SitMenuEvent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SelfMenuPick {
+enum SelfMenuPick {
     Avatar,
     Attachment,
 }
 
-pub(crate) fn classify_self_menu_pick(pick: PickObject, agent_id: Uuid, root_id: Option<Uuid>) -> Option<SelfMenuPick> {
+fn classify_self_menu_pick(pick: PickObject, agent_id: Uuid, root_id: Option<Uuid>) -> Option<SelfMenuPick> {
     match pick.kind {
         PickObjectKind::Avatar if pick.id == agent_id => Some(SelfMenuPick::Avatar),
         PickObjectKind::Prim if root_id == Some(agent_id) => Some(SelfMenuPick::Attachment),
@@ -49,13 +49,7 @@ pub(crate) fn classify_self_menu_pick(pick: PickObject, agent_id: Uuid, root_id:
     }
 }
 
-pub(crate) fn self_sit_menu_item(
-    agent_available: bool,
-    seated: bool,
-    editing_appearance: bool,
-    flying: bool,
-    pending: bool,
-) -> Option<SitMenuItem> {
+fn self_sit_menu_item(agent_available: bool, seated: bool, editing_appearance: bool, flying: bool, pending: bool) -> Option<SitMenuItem> {
     if !agent_available {
         return None;
     }
@@ -90,7 +84,6 @@ pub(super) fn sit_request_for_left_click(
 pub(super) struct SitControls {
     pending: bool,
     menu: Option<SitMenu>,
-    next_menu_id: u64,
     sender: SyncSender<SitCompletion>,
     receiver: Receiver<SitCompletion>,
     notice: Option<(String, Instant)>,
@@ -99,7 +92,7 @@ pub(super) struct SitControls {
 impl SitControls {
     pub(super) fn new() -> Self {
         let (sender, receiver) = mpsc::sync_channel(1);
-        Self { pending: false, menu: None, next_menu_id: 0, sender, receiver, notice: None }
+        Self { pending: false, menu: None, sender, receiver, notice: None }
     }
 
     pub(super) fn menu_open(&self) -> bool {
@@ -141,8 +134,7 @@ impl SitControls {
     }
 
     fn open_menu(&mut self, mut menu: SitMenu) {
-        self.next_menu_id = self.next_menu_id.wrapping_add(1);
-        menu.popup_id = Id::unique(("radia-viewport-sit-menu", self.next_menu_id));
+        menu.popup_id = Id::unique("radia-viewport-sit-menu");
         self.menu = Some(menu);
     }
 
@@ -322,7 +314,7 @@ impl SitControls {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum SitRequest {
+pub(super) enum SitRequest {
     Object { id: Uuid, offset: Vec3 },
     Ground,
     Stand,
@@ -342,10 +334,10 @@ enum SitMenuTarget {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct SitMenuItem {
-    pub(crate) label: &'static str,
-    pub(crate) request: SitRequest,
-    pub(crate) enabled: bool,
+struct SitMenuItem {
+    label: &'static str,
+    request: SitRequest,
+    enabled: bool,
 }
 
 impl SitMenu {
@@ -367,13 +359,7 @@ impl SitMenu {
     }
 }
 
-pub(crate) fn object_sit_menu_item(
-    object: PickObject,
-    offset: Vec3,
-    sitting_on_target: bool,
-    world_knows_object: bool,
-    pending: bool,
-) -> SitMenuItem {
+fn object_sit_menu_item(object: PickObject, offset: Vec3, sitting_on_target: bool, world_knows_object: bool, pending: bool) -> SitMenuItem {
     SitMenuItem {
         label: if sitting_on_target { "Stand Up" } else { "Sit Here" },
         request: if sitting_on_target { SitRequest::Stand } else { SitRequest::Object { id: object.id, offset } },
@@ -429,7 +415,7 @@ pub(super) fn sit_click_request(
     Some(SitRequest::Object { id: object.id, offset })
 }
 
-pub(crate) fn agent_request_sit_offset(hit: DVec3, object: PickObject, camera: Camera, ray: DVec3) -> Option<Vec3> {
+fn agent_request_sit_offset(hit: DVec3, object: PickObject, camera: Camera, ray: DVec3) -> Option<Vec3> {
     if !hit.is_finite() || !object.position.is_finite() || !object.scale.is_finite() || !object.rotation.is_finite() || !ray.is_finite() {
         return None;
     }
@@ -629,7 +615,7 @@ mod tests {
         controls.open_menu(SitMenu { position, ..test_sit_menu() });
         let new_menu = controls.menu.expect("right-click opens a menu at the new target");
         assert_eq!(new_menu.position, position);
-        assert_ne!(new_menu.popup_id, first_popup_id);
+        assert_eq!(new_menu.popup_id, first_popup_id);
 
         controls.open_menu(test_sit_menu());
         assert!(!controls.handle_right_click_while_menu_open(true));

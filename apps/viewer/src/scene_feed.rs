@@ -28,7 +28,8 @@ use world::{
 };
 
 use crate::{
-    agent_movement::{MovementObservation, ScriptControlGrabs},
+    agent_movement::MovementObservation,
+    agent_movement::sitting::ScriptControlGrabs,
     asset_coordinator::{AssetHandle, RequestError},
     session::{AgentMotionSample, EnvironmentInbox, SitCameraOverride, SitResponseState},
     world_reader::{ReadError, WorldReader},

@@ -32,7 +32,7 @@ use super::{
     presentation::{AuthenticationUpdate, PresentationMailbox, SessionEnd, SessionReadyUpdate, ViewerUpdate},
 };
 use crate::{
-    agent_movement::ScriptControlGrabs,
+    agent_movement::sitting::ScriptControlGrabs,
     asset_coordinator::AssetCoordinator,
     inventory::{InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError, MoveExpectation},
     remembered_login::{self, RememberedLogin},

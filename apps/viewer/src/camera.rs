@@ -14,7 +14,7 @@ use winit::event::ElementState;
 use winit::keyboard::Key;
 
 use crate::DEFAULT_DRAW_DISTANCE;
-use crate::agent_movement::SittingCameraInput;
+use crate::agent_movement::sitting::SittingCameraInput;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::agent_movement::{HeldControls, KeyBinding, MovementKey};
 use crate::session::SitCameraOverride;

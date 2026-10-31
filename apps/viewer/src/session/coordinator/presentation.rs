@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::{
-    agent_movement::{MovementObservation, ScriptControlGrabs},
+    agent_movement::MovementObservation,
+    agent_movement::sitting::ScriptControlGrabs,
     asset_coordinator::AssetHandle,
     session::{AgentMotionSample, agent_control::SitResponseState, experience_environment::EnvironmentInbox},
     world_reader::WorldReader,

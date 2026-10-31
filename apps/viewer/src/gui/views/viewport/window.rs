@@ -26,7 +26,8 @@ use super::{
 };
 use crate::{
     DEFAULT_DRAW_DISTANCE,
-    agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP, ScriptControlGrabs, SittingCameraInput},
+    agent_movement::sitting::{ScriptControlGrabs, SittingCameraInput},
+    agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
     camera::{CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input, should_reset_sitting_orbit},
     scene_feed::SceneFeed,
 };

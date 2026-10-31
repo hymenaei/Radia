@@ -13,7 +13,7 @@ use winit::{event::ElementState, keyboard::Key};
 use super::{CameraMode, FOCUS_TIME, FollowCamera, OrbitCamera};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use super::{handle_keyboard_input, should_reset_sitting_orbit};
-use crate::agent_movement::SittingCameraInput;
+use crate::agent_movement::sitting::SittingCameraInput;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::agent_movement::{HeldControls, KeyBinding};
 use crate::session::SitCameraOverride;
@@ -436,7 +436,7 @@ fn ground_sitting_keys_orbit_the_camera() {
         false,
         false,
         false,
-        crate::agent_movement::ScriptControlGrabs::default(),
+        crate::agent_movement::sitting::ScriptControlGrabs::default(),
         start + Duration::from_secs(1),
     );
     assert_eq!(actions.control_flags, 0);
@@ -470,7 +470,7 @@ fn object_sitting_without_offsets_orbits_the_camera() {
         false,
         false,
         false,
-        crate::agent_movement::ScriptControlGrabs::default(),
+        crate::agent_movement::sitting::ScriptControlGrabs::default(),
         start + Duration::from_secs(1),
     );
     assert_eq!(actions.control_flags, 0);
@@ -623,7 +623,7 @@ fn object_sit_camera_forwards_sitting_keys() {
         false,
         false,
         true,
-        crate::agent_movement::ScriptControlGrabs::default(),
+        crate::agent_movement::sitting::ScriptControlGrabs::default(),
         now + Duration::from_secs(1),
     );
     assert_eq!(actions.camera, SittingCameraInput::default());

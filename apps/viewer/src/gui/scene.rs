@@ -9,7 +9,8 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::{
-    agent_movement::{MovementObservation, ScriptControlGrabs},
+    agent_movement::MovementObservation,
+    agent_movement::sitting::ScriptControlGrabs,
     asset_coordinator::AssetHandle,
     gui::{
         AppLifecycle,

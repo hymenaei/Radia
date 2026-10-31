@@ -31,7 +31,8 @@ use winit::{
 
 use self::window::{MAX_RECOVERIES, SceneWindow, SceneWindowError};
 use crate::{
-    agent_movement::{MovementObservation, ScriptControlGrabs},
+    agent_movement::MovementObservation,
+    agent_movement::sitting::ScriptControlGrabs,
     scene_feed::SceneFeed,
     session::{AgentMotionSample, SitResponseState},
 };

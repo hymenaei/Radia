@@ -245,7 +245,10 @@ impl SceneFeed {
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) fn agent_is_seated(&mut self) -> bool {
-        self.agent().is_some_and(|agent| matches!(agent.detail().summary.parent, Parent::Resolved(_)))
+        self.agent().is_some_and(|agent| {
+            matches!(agent.detail().summary.parent, Parent::Resolved(_))
+                || self.dead_reckoning.sample.is_some_and(|sample| sample.ground_sitting)
+        })
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -325,7 +328,8 @@ impl SceneFeed {
         let agent = self.agent()?;
         let Parent::Resolved(seat_entity) = agent.detail().summary.parent else { return None };
         let seat = self.view.object(seat_entity)?;
-        if seat.detail().summary.id != response.object_id {
+        let seat_id = seat.detail().summary.id;
+        if seat_id != response.object_id && seat_id != response.requested_object_id {
             return None;
         }
         let pose = match seat.detail().world_transform.ok()? {
@@ -334,7 +338,7 @@ impl SceneFeed {
             WorldTransformState::Provisional { pose, .. } => pose,
             WorldTransformState::Unresolved(_) => return None,
         };
-        Some((response.object_id, camera, pose))
+        Some((seat_id, camera, pose))
     }
 
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {

@@ -39,7 +39,7 @@ use crate::{
         SitOutcome, SitResponseState,
         agent_control::{self, AgentControlError, Command as AgentControlCommand},
         environment::{Completion, EnvironmentIntake},
-        inbound::object_media_requests,
+        inbound::{decode_sit_animation, object_media_requests},
         object_cache::{ObjectCacheEvent, ObjectCacheSession},
         object_media::{ObjectMediaFetcher, ObjectMediaResult},
         recovery::{RecoveryCompletion, RecoveryIntake, ScheduledRecovery, retryable_send_error, simulator_lost_error, warn_unrecovered},
@@ -447,10 +447,28 @@ impl SessionDriver {
             &self.session_handle,
             &mut self.agent_control,
             &mut self.camera,
+            self.session_world.world(),
             simulator,
             self.active_session.as_ref().map(|session| (session.agent_id, session.session_id)),
             message,
         );
+    }
+
+    fn handle_agent_sit_animation(&mut self, simulator: SimulatorId, received_at: std::time::Instant, message: &Message) {
+        let Some(update) = decode_sit_animation(message) else { return };
+        if self.primary_simulator != Some(simulator)
+            || !self.active_session.as_ref().is_some_and(|session| session.agent_id == update.agent_id)
+            || !self.agent_motion.set_ground_sitting(update.ground_sitting)
+        {
+            return;
+        }
+        tracing::debug!(
+            simulator = simulator.get(),
+            agent = %update.agent_id,
+            ground_sitting = update.ground_sitting,
+            "agent sit animation changed"
+        );
+        self.publish_world_agent_motion(received_at);
     }
 
     fn handle_media_result(&mut self, result: Option<ObjectMediaResult>) {
@@ -738,6 +756,7 @@ impl SessionDriver {
         if touched_agent && self.primary_simulator == Some(simulator_id) {
             self.publish_world_agent_motion(received_at);
         }
+        self.handle_agent_sit_animation(simulator_id, received_at, &message);
 
         self.environments.simulator_message(&mut self.session_world, simulator_id, packet_order, &message, self.primary_simulator);
         for request in media_requests {

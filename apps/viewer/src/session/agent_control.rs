@@ -14,6 +14,7 @@ use tokio::{
     time::{Instant, sleep_until},
 };
 use uuid::Uuid;
+use world::{Parent, World};
 
 use crate::{agent_movement::MovementAction, session::inbound::decode_sit_response};
 
@@ -106,6 +107,7 @@ pub(crate) struct SitCameraOverride {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SitResponseState {
     pub(crate) object_id: Uuid,
+    pub(crate) requested_object_id: Uuid,
     pub(crate) camera_override: Option<SitCameraOverride>,
 }
 
@@ -175,8 +177,10 @@ impl AgentControlState {
         self.pending_sit.is_some()
     }
 
-    pub(crate) fn expects_response(&self, simulator: SimulatorId, object_id: Uuid) -> bool {
-        self.pending_sit.as_ref().is_some_and(|pending| pending.simulator == simulator && pending.object_id == object_id)
+    pub(crate) fn expects_response(&self, world: &World, simulator: SimulatorId, object_id: Uuid) -> bool {
+        self.pending_sit
+            .as_ref()
+            .is_some_and(|pending| pending.simulator == simulator && same_sit_linkset(world, pending.object_id, object_id))
     }
 
     pub(crate) fn accept_sit(
@@ -187,10 +191,11 @@ impl AgentControlState {
         force_mouselook: bool,
         camera_override: Option<SitCameraOverride>,
     ) -> bool {
-        if !self.pending_sit.as_ref().is_some_and(|pending| pending.simulator == simulator && pending.object_id == object_id) {
+        let Some(pending) = self.pending_sit.as_ref().filter(|pending| pending.simulator == simulator) else {
             return false;
-        }
-        self.set_sit_response(Some(SitResponseState { object_id, camera_override }));
+        };
+        let requested_object_id = pending.object_id;
+        self.set_sit_response(Some(SitResponseState { object_id, requested_object_id, camera_override }));
         if let Some(pending) = self.pending_sit.take()
             && pending.reply.send(Ok(SitOutcome::Accepted { auto_pilot, force_mouselook })).is_err()
         {
@@ -204,10 +209,11 @@ impl AgentControlState {
     }
 
     pub(crate) fn cancel_sit(&mut self, outcome: SitOutcome) {
-        if let Some(pending) = self.pending_sit.take()
-            && pending.reply.send(Ok(outcome)).is_err()
-        {
-            tracing::trace!("sit caller stopped before receiving cancellation");
+        if let Some(pending) = self.pending_sit.take() {
+            tracing::debug!(simulator = pending.simulator.get(), object = %pending.object_id, ?outcome, "sit outcome completed");
+            if pending.reply.send(Ok(outcome)).is_err() {
+                tracing::trace!("sit caller stopped before receiving cancellation");
+            }
         }
     }
 
@@ -218,10 +224,11 @@ impl AgentControlState {
     }
 
     pub(crate) fn fail_sit(&mut self, error: AgentControlError) {
-        if let Some(pending) = self.pending_sit.take()
-            && pending.reply.send(Err(error)).is_err()
-        {
-            tracing::trace!("sit caller stopped before receiving failure");
+        if let Some(pending) = self.pending_sit.take() {
+            tracing::debug!(simulator = pending.simulator.get(), object = %pending.object_id, %error, "sit outcome failed");
+            if pending.reply.send(Err(error)).is_err() {
+                tracing::trace!("sit caller stopped before receiving failure");
+            }
         }
     }
 
@@ -246,10 +253,11 @@ impl AgentControlState {
         if !self.pending_sit.as_ref().is_some_and(|pending| pending.simulator == simulator) {
             return false;
         }
-        if let Some(pending) = self.pending_sit.take()
-            && pending.reply.send(outcome).is_err()
-        {
-            tracing::trace!("sit caller stopped before receiving outcome");
+        if let Some(pending) = self.pending_sit.take() {
+            tracing::debug!(simulator = pending.simulator.get(), object = %pending.object_id, ?outcome, "sit outcome completed");
+            if pending.reply.send(outcome).is_err() {
+                tracing::trace!("sit caller stopped before receiving outcome");
+            }
         }
         true
     }
@@ -264,6 +272,25 @@ impl AgentControlState {
             }
         });
     }
+}
+
+fn same_sit_linkset(world: &World, requested_object_id: Uuid, response_object_id: Uuid) -> bool {
+    requested_object_id == response_object_id
+        || linkset_root(world, requested_object_id)
+            .is_some_and(|requested_root| linkset_root(world, response_object_id) == Some(requested_root))
+}
+
+fn linkset_root(world: &World, object_id: Uuid) -> Option<Uuid> {
+    let mut entity = world.entity(object_id)?;
+    for _ in 0..=world.object_count() {
+        let object = world.object(entity)?;
+        match object.parent() {
+            Parent::Root => return Some(object.id()),
+            Parent::Resolved(parent) => entity = parent,
+            Parent::Unknown | Parent::Pending { .. } => return None,
+        }
+    }
+    None
 }
 
 pub(super) trait SitTransport {
@@ -309,7 +336,10 @@ pub(super) fn process_agent_control_command<T: SitTransport>(
                 target_object: TargetObject { target_id: object_id, offset },
             };
             match transport.send_request(request, Delivery::Reliable) {
-                Ok(()) => agent_control.begin_sit(object_id, simulator, reply),
+                Ok(()) => {
+                    tracing::debug!(simulator = simulator.get(), target = %object_id, offset = ?offset, "sent AgentRequestSit");
+                    agent_control.begin_sit(object_id, simulator, reply);
+                }
                 Err(error) => {
                     tracing::debug!(simulator = simulator.get(), %error, "sit request could not be queued");
                     if reply.send(Err(AgentControlError::SendFailed)).is_err() {
@@ -363,15 +393,30 @@ pub(super) fn process_sit_response<T: SitTransport>(
     transport: &T,
     agent_control: &mut AgentControlState,
     camera: &mut crate::session::CameraUplink,
+    world: &World,
     simulator: SimulatorId,
     active_agent: Option<(Uuid, Uuid)>,
     message: &Message,
 ) {
-    let Some(response) = decode_sit_response(message) else { return };
-    if !agent_control.expects_response(simulator, response.object_id) {
+    let Some(response) = decode_sit_response(message) else {
+        if message.name() == "AvatarSitResponse" {
+            tracing::debug!(simulator = simulator.get(), matched = false, "received invalid AvatarSitResponse");
+        }
+        return;
+    };
+    let matched = agent_control.expects_response(world, simulator, response.object_id);
+    tracing::debug!(
+        simulator = simulator.get(),
+        object = %response.object_id,
+        auto_pilot = response.auto_pilot,
+        matched,
+        "received AvatarSitResponse"
+    );
+    if !matched {
         return;
     }
     if response.target.is_none() {
+        tracing::debug!(simulator = simulator.get(), object = %response.object_id, "sit response has no valid target transform");
         agent_control.fail_sit(AgentControlError::InvalidSitResponse);
         return;
     }
@@ -386,6 +431,7 @@ pub(super) fn process_sit_response<T: SitTransport>(
     let sit = AgentSit { agent_id, session_id };
     match transport.send_sit(sit, Delivery::Reliable) {
         Ok(()) => {
+            tracing::debug!(simulator = simulator.get(), object = %response.object_id, "sent AgentSit");
             if agent_control.accept_sit(
                 simulator,
                 response.object_id,
@@ -394,6 +440,7 @@ pub(super) fn process_sit_response<T: SitTransport>(
                 response.camera_override,
             ) {
                 camera.clear_flying();
+                tracing::debug!(simulator = simulator.get(), object = %response.object_id, "sit outcome accepted");
             }
         }
         Err(error) => {
@@ -515,9 +562,15 @@ mod tests {
         state.begin_sit(object_id, simulator, reply);
         assert!(state.accept_sit(simulator, object_id, true, false, Some(camera_override)));
 
-        assert_eq!(*response.borrow(), Some(SitResponseState { object_id, camera_override: Some(camera_override) }));
+        assert_eq!(
+            *response.borrow(),
+            Some(SitResponseState { object_id, requested_object_id: object_id, camera_override: Some(camera_override) })
+        );
         state.clear_sit_response_without_camera();
-        assert_eq!(*response.borrow(), Some(SitResponseState { object_id, camera_override: Some(camera_override) }));
+        assert_eq!(
+            *response.borrow(),
+            Some(SitResponseState { object_id, requested_object_id: object_id, camera_override: Some(camera_override) })
+        );
     }
 
     #[test]

@@ -95,6 +95,7 @@ fn motion_sample(received_at: Instant) -> AgentMotionSample {
         time_dilation: 1.0,
         ping_delay: None,
         parented: false,
+        ground_sitting: false,
         simulator_rotation: Quat::IDENTITY,
         received_at,
         seed: 1,
@@ -267,6 +268,7 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
         time_dilation: 1.0,
         ping_delay: None,
         parented: false,
+        ground_sitting: false,
         simulator_rotation: Quat::IDENTITY,
         received_at: now,
         seed: 1,
@@ -480,6 +482,7 @@ async fn pending_parent_does_not_block_flight() {
     let (sender, incoming) = mpsc::channel(1);
     let (cancel, _) = oneshot::channel();
     let (sit_response_sender, sit_response) = watch::channel(None);
+    let (agent_motion_sender, agent_motion) = watch::channel(None);
     let assets = AssetCoordinator::new(Handle::current(), pending(), None);
     let mut feed = SceneFeed {
         runtime: Handle::current(),
@@ -491,7 +494,7 @@ async fn pending_parent_does_not_block_flight() {
         water_height: None,
         camera: watch::channel(None).0,
         movement: watch::channel(None).0,
-        agent_motion: watch::channel(None).1,
+        agent_motion,
         motion_circuits: watch::channel(Vec::new()).1,
         motion_circuit_scratch: Vec::new(),
         motion_region_scratch: Vec::new(),
@@ -517,7 +520,11 @@ async fn pending_parent_does_not_block_flight() {
     assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0x0000_2000);
 
     let camera = SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) };
-    sit_response_sender.send_replace(Some(SitResponseState { object_id: seat_id, camera_override: Some(camera) }));
+    sit_response_sender.send_replace(Some(SitResponseState {
+        object_id: seat_id,
+        requested_object_id: seat_id,
+        camera_override: Some(camera),
+    }));
     assert!(!feed.agent_is_seated(), "an accepted response does not mark the avatar seated before World confirms its parent");
     let mut pending_controls = HeldControls::default();
     assert!(pending_controls.toggle_flying(feed.agent_is_seated()));
@@ -538,7 +545,11 @@ async fn pending_parent_does_not_block_flight() {
         Some((seat_id, camera, WorldPose { position: DVec3::new(4.0, 5.0, 6.0), rotation: Quat::IDENTITY }))
     );
 
-    sit_response_sender.send_replace(Some(SitResponseState { object_id: seat_id, camera_override: Some(camera) }));
+    sit_response_sender.send_replace(Some(SitResponseState {
+        object_id: seat_id,
+        requested_object_id: seat_id,
+        camera_override: Some(camera),
+    }));
     feed.drain().unwrap();
     assert!(feed.agent_is_seated(), "World parent state remains authoritative after stand is requested");
     assert_eq!(
@@ -551,6 +562,39 @@ async fn pending_parent_does_not_block_flight() {
     std::assert_matches!(feed.agent().expect("agent remains observed").detail().summary.parent, Parent::Pending { .. });
     assert!(!feed.agent_is_seated(), "a removed seat returns the parent to unresolved without implying a sit");
     assert_eq!(feed.sit_camera_pose(), None, "the camera override ends when World unparents the avatar");
+
+    let mut standing_agent =
+        ObjectObservation::new(UpdateSource::new(region, 4, Ordered(4), 0), agent_id, agent_local_id, Kind::Avatar, ParentUpdate::Root);
+    standing_agent.pose = Some(Pose { position: Some(Vec3::new(10.0, 20.0, 30.0)), rotation: Some(Quat::IDENTITY) });
+    standing_agent.scale = Some(Vec3::ONE);
+    let _ = world.observe_object(standing_agent).unwrap();
+    advance_scene(&world, &mut scene, &sender, &mut feed);
+
+    let seated_at = Instant::now();
+    let mut ground_sit = motion_sample(seated_at);
+    ground_sit.velocity = Vec3::X;
+    ground_sit.ground_sitting = true;
+    agent_motion_sender.send_replace(Some(ground_sit));
+    let (ground_pose, ground_seed) = feed.camera_pose_and_seed_at(seated_at + Duration::from_secs(1)).expect("ground sit pose");
+    assert_eq!(ground_pose.position, DVec3::new(10.0, 20.0, 30.0));
+    assert!(feed.agent_is_seated());
+    let mut ground_controls = HeldControls::default();
+    assert!(!ground_controls.toggle_flying(feed.agent_is_seated()));
+    assert!(!feed.agent_motion_active(seated_at + Duration::from_secs(1)));
+
+    let standing_at = seated_at + Duration::from_secs(2);
+    let standing_sample = AgentMotionSample {
+        position: DVec3::new(40.0, 50.0, 60.0),
+        received_at: standing_at,
+        seed: ground_sit.seed.wrapping_add(1),
+        ground_sitting: false,
+        ..ground_sit
+    };
+    agent_motion_sender.send_replace(Some(standing_sample));
+    let (standing_pose, standing_seed) = feed.camera_pose_and_seed_at(standing_at + Duration::from_secs(2)).expect("standing pose");
+    assert!(!feed.agent_is_seated());
+    assert!(standing_seed.0 > ground_seed.0);
+    assert!((standing_pose.position - (standing_sample.position + DVec3::new(2.0, 0.0, 0.0))).length() < 0.02);
 }
 
 #[tokio::test]

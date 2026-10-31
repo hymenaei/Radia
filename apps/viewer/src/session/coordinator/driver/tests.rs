@@ -14,11 +14,15 @@ use protocol::{
         agent::avatar_sit_response::{SitObject, SitTransform},
     },
 };
+use std::num::NonZeroU32;
 use tokio::sync::oneshot;
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
 
-use crate::inventory::FolderFetch;
+use crate::{
+    inventory::FolderFetch,
+    session::{SitCameraOverride, SitResponseState},
+};
 
 use super::inventory::{apply_inventory_fetch, cache_restore_move_changes, resolve_pending_inventory_moves};
 use super::{MoveExpectation, PendingHandshakeReplies, network_end_after_stream_close};
@@ -121,6 +125,12 @@ async fn receive_loopback_message(socket: &tokio::net::UdpSocket) -> Message {
     Packet::decode(&bytes[..length]).expect("valid loopback packet").message().clone()
 }
 
+fn try_receive_loopback_message(socket: &tokio::net::UdpSocket) -> Option<Message> {
+    let mut bytes = [0; 2048];
+    let (length, _) = socket.try_recv_from(&mut bytes).ok()?;
+    Some(Packet::decode(&bytes[..length]).expect("valid loopback packet").message().clone())
+}
+
 async fn send_loopback_message(socket: &tokio::net::UdpSocket, destination: std::net::SocketAddr, message: Message) {
     let bytes = Packet::new(1, message).encode().expect("encode loopback packet");
     socket.send_to(&bytes, destination).await.expect("send loopback packet");
@@ -153,6 +163,40 @@ fn sit_response(object_id: Uuid, auto_pilot: bool) -> Message {
             force_mouselook: Some(false),
         },
     })
+}
+
+fn sit_world_with_linkset(root_id: Uuid, child_id: Uuid) -> world::World {
+    use world::{Kind, ObjectObservation, OrderEvidence::Ordered, ParentUpdate, Region, RegionInfo, UpdateSource, World};
+
+    let mut world = World::new(crate::session::world::viewer_world_limits());
+    let region = Region::new(1);
+    let _ = world.adopt_region(region).expect("region");
+    let _ = world.patch_region(region, RegionInfo { origin: Some(math::DVec3::ZERO), ..RegionInfo::default() }).expect("region origin");
+    let root_local_id = NonZeroU32::new(1).expect("root local ID");
+    let child_local_id = NonZeroU32::new(2).expect("child local ID");
+    let _ = world
+        .observe_object(ObjectObservation::new(
+            UpdateSource::new(region, 1, Ordered(1), 0),
+            root_id,
+            root_local_id,
+            Kind::Object,
+            ParentUpdate::Root,
+        ))
+        .expect("root object");
+    let _ = world
+        .observe_object(ObjectObservation::new(
+            UpdateSource::new(region, 2, Ordered(2), 0),
+            child_id,
+            child_local_id,
+            Kind::Object,
+            ParentUpdate::Local(root_local_id),
+        ))
+        .expect("child object");
+    world
+}
+
+fn empty_sit_world() -> world::World {
+    world::World::new(crate::session::world::viewer_world_limits())
 }
 
 fn category(key: CategoryKey, parent: Option<CategoryKey>, version: ServerVersion, descendent_count: Option<u32>) -> Category {
@@ -396,7 +440,8 @@ async fn unrelated_alert_preserves_pending_sit() {
         always_run: false,
         stop_sequence: 0,
     }));
-    process_sit_response(&transport, &mut agent_control, &mut camera, simulator, Some((agent_id, session_id)), &response);
+    let world = sit_world_with_linkset(object_id, Uuid::from_u128(0x64));
+    process_sit_response(&transport, &mut agent_control, &mut camera, &world, simulator, Some((agent_id, session_id)), &response);
     assert_eq!(receive_loopback_message(&simulator_socket).await, Message::AgentSit(AgentSit { agent_id, session_id }));
     assert_eq!(call.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: false, force_mouselook: false }));
     assert_eq!(camera.movement_sender().borrow().expect("current movement").control_flags & crate::agent_movement::FLY, 0);
@@ -404,6 +449,56 @@ async fn unrelated_alert_preserves_pending_sit() {
         *camera_updates.borrow(),
         Some(SitResponseState {
             object_id,
+            requested_object_id: object_id,
+            camera_override: Some(SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) }),
+        })
+    );
+}
+
+#[tokio::test]
+async fn root_response_accepts_child_sit() {
+    use crate::{
+        session::{AgentControlEvent, AgentControlState, CameraUplink},
+        test_helpers::simulator_id,
+    };
+
+    let simulator_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback simulator");
+    let viewer_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind loopback viewer");
+    let simulator = simulator_id();
+    let agent_id = Uuid::from_u128(0x91);
+    let session_id = Uuid::from_u128(0x92);
+    let root_id = Uuid::from_u128(0x93);
+    let child_id = Uuid::from_u128(0x94);
+    let world = sit_world_with_linkset(root_id, child_id);
+    let (handle, mut agent_control, sit_updates) = AgentControlState::new();
+    let call = tokio::spawn(async move { handle.sit_on_object(child_id, Vec3::ZERO).await });
+    let AgentControlEvent::Command(Some(command)) = agent_control.next_event().await else { panic!("sit command") };
+    let transport = LoopbackSitTransport {
+        socket: &viewer_socket,
+        destination: simulator_socket.local_addr().expect("simulator address"),
+        sequence: std::sync::atomic::AtomicU32::new(1),
+    };
+    let mut camera = CameraUplink::new();
+    process_agent_control_command(&transport, &mut agent_control, &mut camera, Some(simulator), Some((agent_id, session_id)), command);
+    assert_eq!(
+        receive_loopback_message(&simulator_socket).await,
+        Message::AgentRequestSit(AgentRequestSit {
+            agent_data: SitAgentData { agent_id, session_id },
+            target_object: TargetObject { target_id: child_id, offset: Vec3::ZERO },
+        })
+    );
+
+    send_loopback_message(&simulator_socket, viewer_socket.local_addr().expect("viewer address"), sit_response(root_id, false)).await;
+    let response = receive_loopback_message(&viewer_socket).await;
+    process_sit_response(&transport, &mut agent_control, &mut camera, &world, simulator, Some((agent_id, session_id)), &response);
+
+    assert_eq!(try_receive_loopback_message(&simulator_socket), Some(Message::AgentSit(AgentSit { agent_id, session_id })));
+    assert_eq!(call.await.expect("sit task"), Ok(crate::session::SitOutcome::Accepted { auto_pilot: false, force_mouselook: false }));
+    assert_eq!(
+        *sit_updates.borrow(),
+        Some(SitResponseState {
+            object_id: root_id,
+            requested_object_id: child_id,
             camera_override: Some(SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) }),
         })
     );
@@ -419,6 +514,7 @@ async fn invalid_sit_target_fails_without_sending_agent_sit() {
     let simulator = simulator_id();
     let agent_id = Uuid::from_u128(0x68);
     let session_id = Uuid::from_u128(0x69);
+    let world = empty_sit_world();
     for (index, missing_position) in [true, false].into_iter().enumerate() {
         let object_id = Uuid::from_u128(0x70 + index as u128);
         let (handle, mut agent_control, sit_updates) = AgentControlState::new();
@@ -438,6 +534,7 @@ async fn invalid_sit_target_fails_without_sending_agent_sit() {
             &transport,
             &mut agent_control,
             &mut camera,
+            &world,
             simulator,
             Some((agent_id, session_id)),
             &Message::AvatarSitResponse(response),
@@ -461,6 +558,7 @@ async fn auto_pilot_sit_returns_unsupported_without_sitting() {
     let agent_id = Uuid::from_u128(0x7a);
     let session_id = Uuid::from_u128(0x7b);
     let object_id = Uuid::from_u128(0x7c);
+    let world = empty_sit_world();
     let (handle, mut agent_control, sit_updates) = AgentControlState::new();
     let call = tokio::spawn(async move { handle.sit_on_object(object_id, Vec3::ZERO).await });
     let AgentControlEvent::Command(Some(command)) = agent_control.next_event().await else { panic!("sit command") };
@@ -472,6 +570,7 @@ async fn auto_pilot_sit_returns_unsupported_without_sitting() {
         &transport,
         &mut agent_control,
         &mut camera,
+        &world,
         simulator,
         Some((agent_id, session_id)),
         &sit_response(object_id, true),
@@ -598,6 +697,7 @@ async fn action_overflow_preserves_sit() {
     let agent_id = Uuid::from_u128(0x91);
     let session_id = Uuid::from_u128(0x92);
     let object_id = Uuid::from_u128(0x93);
+    let world = empty_sit_world();
     let (handle, mut agent_control, _) = AgentControlState::new();
     let transport = LoopbackSitTransport {
         socket: &viewer_socket,
@@ -641,7 +741,7 @@ async fn action_overflow_preserves_sit() {
 
     send_loopback_message(&simulator_socket, viewer_socket.local_addr().expect("viewer address"), sit_response(object_id, false)).await;
     let response = receive_loopback_message(&viewer_socket).await;
-    process_sit_response(&transport, &mut agent_control, &mut camera, simulator, Some((agent_id, session_id)), &response);
+    process_sit_response(&transport, &mut agent_control, &mut camera, &world, simulator, Some((agent_id, session_id)), &response);
     assert_eq!(receive_loopback_message(&simulator_socket).await, Message::AgentSit(AgentSit { agent_id, session_id }));
     assert_eq!(sit.await.expect("sit task"), Ok(SitOutcome::Accepted { auto_pilot: false, force_mouselook: false }));
 }

@@ -1,5 +1,5 @@
 use protocol::{
-    lludp::Message,
+    lludp::{FieldValue, Message},
     types::{MAX_TEXTURE_FACES, decode_texture_entry},
 };
 use utils::AssetId;
@@ -12,6 +12,13 @@ use world::{
 use crate::session::agent_control::SitCameraOverride;
 
 const MAX_AVATAR_TEXTURE_ENTRY_BYTES: usize = 4095;
+const SIT_GROUND_CONSTRAINED_ANIMATION: Uuid = Uuid::from_u128(0x1a2b_d58e_87ff_0df8_0b4c_53e0_47b0_bb6e);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SitAnimationUpdate {
+    pub(crate) agent_id: Uuid,
+    pub(crate) ground_sitting: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SitTargetUpdate {
@@ -108,6 +115,23 @@ pub(crate) fn decode_sit_response(message: &Message) -> Option<SitResponseUpdate
     })
 }
 
+pub(crate) fn decode_sit_animation(message: &Message) -> Option<SitAnimationUpdate> {
+    if message.name() != "AvatarAnimation" {
+        return None;
+    }
+    let Message::Schema(message) = message else { return None };
+    let sender = message.blocks().first()?.instances.first()?.fields.first()?;
+    let FieldValue::Uuid(agent_id) = sender else { return None };
+    if agent_id.is_nil() {
+        return None;
+    }
+    let ground_sitting = message.blocks().get(1)?.instances.iter().try_fold(false, |sitting, animation| {
+        let [FieldValue::Uuid(animation_id), FieldValue::S32(_)] = animation.fields.as_slice() else { return None };
+        Some(sitting || *animation_id == SIT_GROUND_CONSTRAINED_ANIMATION)
+    })?;
+    Some(SitAnimationUpdate { agent_id: *agent_id, ground_sitting })
+}
+
 fn decode_avatar_textures(bytes: &[u8]) -> Result<Option<AvatarTextureSlots>, ()> {
     if bytes.len() > MAX_AVATAR_TEXTURE_ENTRY_BYTES {
         return Err(());
@@ -129,7 +153,7 @@ fn decode_avatar_textures(bytes: &[u8]) -> Result<Option<AvatarTextureSlots>, ()
 mod tests {
     use math::{Quat, Vec3};
     use protocol::{
-        lludp::Message,
+        lludp::{BlockValues, FieldValue, Message, Packet, SchemaMessage},
         messages::{
             AvatarAppearance, AvatarSitResponse,
             agent::{
@@ -143,7 +167,7 @@ mod tests {
     use uuid::Uuid;
     use world::{AvatarTextureSlot, AvatarVisualParamIndex};
 
-    use super::{decode_avatar_appearance_update, decode_sit_response, decode_sit_target_update};
+    use super::{decode_avatar_appearance_update, decode_sit_animation, decode_sit_response, decode_sit_target_update};
 
     fn avatar_message(texture_entry: Vec<u8>, params: &[u8], appearance: Option<(u8, i32)>) -> Message {
         Message::AvatarAppearance(AvatarAppearance {
@@ -176,6 +200,29 @@ mod tests {
         bytes.extend_from_slice(&[0; 6]);
         bytes.extend_from_slice(&[0; 16]);
         bytes
+    }
+
+    fn avatar_animation(agent_id: Uuid, animations: &[Uuid]) -> Message {
+        let schema = SchemaMessage::schema_by_name("AvatarAnimation").expect("AvatarAnimation schema");
+        let animations = animations
+            .iter()
+            .enumerate()
+            .map(|(sequence, animation)| {
+                protocol::lludp::BlockInstance::new(vec![FieldValue::Uuid(*animation), FieldValue::S32(sequence as i32)])
+            })
+            .collect();
+        Message::Schema(
+            SchemaMessage::new(
+                schema,
+                vec![
+                    BlockValues::single(vec![FieldValue::Uuid(agent_id)]),
+                    BlockValues::new(animations),
+                    BlockValues::new(Vec::new()),
+                    BlockValues::new(Vec::new()),
+                ],
+            )
+            .expect("valid AvatarAnimation message"),
+        )
     }
 
     #[test]
@@ -214,6 +261,28 @@ mod tests {
         let camera = response.camera_override.unwrap();
         assert_eq!(camera.eye_offset, Vec3::X);
         assert_eq!(camera.at_offset, Vec3::Y);
+    }
+
+    #[test]
+    fn ground_sit_animation_decodes_from_wire() {
+        let agent_id = Uuid::from_u128(9);
+        let ground_sit = Uuid::from_u128(0x1a2b_d58e_87ff_0df8_0b4c_53e0_47b0_bb6e);
+        let sit = Uuid::from_u128(0x1a5f_e8ac_a804_8a5d_7cbd_56bd_8318_4568);
+        let sit_ground = Uuid::from_u128(0x1c76_00d6_661f_b87b_efe2_d742_1eb9_3c86);
+        let sit_to_stand = Uuid::from_u128(0xa8de_e56f_2eae_9e7a_05a2_6fb9_2b97_e21e);
+        let bytes = Packet::new(1, avatar_animation(agent_id, &[sit, sit_ground, sit_to_stand, ground_sit]))
+            .encode()
+            .expect("encode AvatarAnimation packet");
+        let packet = Packet::decode(&bytes).expect("decode AvatarAnimation packet");
+        let update = decode_sit_animation(packet.message()).expect("ground sit animation update");
+
+        assert_eq!(update.agent_id, agent_id);
+        assert!(update.ground_sitting);
+        let packet = Packet::decode(
+            &Packet::new(2, avatar_animation(agent_id, &[sit, sit_ground, sit_to_stand])).encode().expect("encode standing packet"),
+        )
+        .expect("decode standing packet");
+        assert!(!decode_sit_animation(packet.message()).expect("standing animation update").ground_sitting);
     }
 
     #[test]

@@ -256,6 +256,12 @@ impl CameraUplink {
                     self.last_sent_at = Some(now);
                     self.followup_at = control_changed.then_some(now + MIN_UPDATE_INTERVAL);
                     if action.is_some() {
+                        tracing::debug!(
+                            simulator = simulator.get(),
+                            ?action,
+                            flags = movement.control_flags,
+                            "sent one-shot sit control flag"
+                        );
                         self.pending_actions.pop_front();
                         self.pending_at = Some(now + MIN_UPDATE_INTERVAL);
                     }

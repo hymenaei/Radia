@@ -44,6 +44,7 @@ pub struct PickObject {
     pub id: Uuid,
     pub local_id: NonZeroU32,
     pub kind: PickObjectKind,
+    pub click_action: u8,
     pub position: DVec3,
     pub rotation: Quat,
     pub scale: Vec3,
@@ -87,6 +88,7 @@ fn pick_target(item: &CachedItem) -> Option<PickTarget> {
             id: summary.id,
             local_id: summary.address.local_id(),
             kind,
+            click_action: summary.click_action,
             position: item.position,
             rotation: item.rotation,
             scale: item.scale,
@@ -234,7 +236,7 @@ mod tests {
     #[test]
     fn pick_target_uses_world_full_and_local_object_ids() {
         let (_scene, view, _) = fixtures::scene(255);
-        let object = view.objects().find(|object| object.detail().summary.kind == world::Kind::Object).expect("fixture prim");
+        let object = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("fixture sit prim");
         let summary = object.detail().summary;
         let (_, mesh) = object.mesh().expect("fixture mesh");
         let crate::scene::Placement::Ready(transform) = object.placement() else { panic!("fixture object has a placement") };
@@ -263,6 +265,7 @@ mod tests {
         assert_eq!(pick.id, summary.id);
         assert_eq!(pick.local_id, summary.address.local_id());
         assert_eq!(pick.kind, PickObjectKind::Prim);
+        assert_eq!(pick.click_action, world::CLICK_ACTION_SIT);
     }
 
     #[test]
@@ -378,6 +381,7 @@ mod tests {
                 id: Uuid::from_u128(id),
                 local_id: NonZeroU32::new(id as u32 + 1).unwrap(),
                 kind,
+                click_action: 0,
                 position,
                 rotation: Quat::IDENTITY,
                 scale: Vec3::ONE,

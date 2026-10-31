@@ -45,6 +45,7 @@ pub struct ObjectSummary {
     pub parent: Parent,
     pub local_transform: Transform,
     pub pose: Result<PoseState, PoseError>,
+    pub click_action: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -329,6 +330,7 @@ impl World {
             parent: object.parent(),
             local_transform: object.transform(),
             pose,
+            click_action: object.click_action(),
         };
         let parent_id = match summary.parent {
             Parent::Resolved(parent) => self.object(parent).map(|object| object.id()),

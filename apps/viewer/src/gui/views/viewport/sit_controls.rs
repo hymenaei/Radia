@@ -8,6 +8,7 @@ use math::{DVec3, Vec3};
 use render::{PickHit, PickObject, PickObjectKind, PickTarget, scene::Camera};
 use uuid::Uuid;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
+use world::{CLICK_ACTION_SIT, Kind};
 
 use crate::{
     scene_feed::SceneFeed,
@@ -323,6 +324,27 @@ fn sit_here_target(hit: PickHit, camera: Camera, ray: DVec3) -> Option<(Uuid, Ve
     Some((object.id, offset))
 }
 
+pub(super) fn sit_click_request(
+    hit: PickHit,
+    camera: Camera,
+    ray: DVec3,
+    root_click_action: Option<(Kind, u8)>,
+    agent_available: bool,
+    seated: bool,
+) -> Option<SitRequest> {
+    let PickTarget::Object(object) = hit.target else { return None };
+    let (root_kind, root_action) = root_click_action?;
+    if object.kind != PickObjectKind::Prim || root_kind != Kind::Object || !agent_available || seated {
+        return None;
+    }
+    let click_action = if object.click_action == 0 { root_action } else { object.click_action };
+    if click_action != CLICK_ACTION_SIT {
+        return None;
+    }
+    let offset = agent_request_sit_offset(hit.position, object, camera, ray)?;
+    Some(SitRequest::Object { id: object.id, offset })
+}
+
 pub(crate) fn agent_request_sit_offset(hit: DVec3, object: PickObject, camera: Camera, ray: DVec3) -> Option<Vec3> {
     if !hit.is_finite() || !object.position.is_finite() || !object.scale.is_finite() || !object.rotation.is_finite() || !ray.is_finite() {
         return None;
@@ -396,7 +418,8 @@ mod tests {
     use render::{PickHit, PickObject, PickObjectKind, PickTarget, scene::Camera};
     use uuid::Uuid;
 
-    use super::{SitMenu, SitRequest, SitToggle, ToggleAction, agent_request_sit_offset, sit_here_target};
+    use super::{SitMenu, SitRequest, SitToggle, ToggleAction, agent_request_sit_offset, sit_click_request, sit_here_target};
+    use world::{CLICK_ACTION_DISABLED, CLICK_ACTION_SIT, Kind};
 
     #[test]
     fn toggle_tracks_world_state() {
@@ -429,6 +452,7 @@ mod tests {
                 id: Uuid::from_u128(9),
                 local_id: NonZeroU32::new(10).unwrap(),
                 kind: PickObjectKind::Prim,
+                click_action: 0,
                 position: DVec3::ZERO,
                 rotation: Quat::IDENTITY,
                 scale: Vec3::ONE,
@@ -453,6 +477,7 @@ mod tests {
             id: Uuid::from_u128(7),
             local_id: NonZeroU32::new(1).unwrap(),
             kind: PickObjectKind::Prim,
+            click_action: 0,
             position: DVec3::new(10.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
             scale: Vec3::splat(2.0),
@@ -470,6 +495,7 @@ mod tests {
             id: Uuid::from_u128(8),
             local_id: NonZeroU32::new(2).unwrap(),
             kind: PickObjectKind::Prim,
+            click_action: 0,
             position: DVec3::ZERO,
             rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
             scale: Vec3::splat(2.0),
@@ -488,6 +514,7 @@ mod tests {
             id,
             local_id: NonZeroU32::new(3).unwrap(),
             kind: PickObjectKind::Prim,
+            click_action: 0,
             position: DVec3::new(10.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
             scale: Vec3::splat(2.0),
@@ -498,12 +525,56 @@ mod tests {
     }
 
     #[test]
+    fn sit_click_uses_clicked_or_root_action() {
+        let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
+        let id = Uuid::from_u128(0x123456789abcdef00123456789abcdef);
+        let object = PickObject {
+            id,
+            local_id: NonZeroU32::new(5).unwrap(),
+            kind: PickObjectKind::Prim,
+            click_action: 0,
+            position: DVec3::new(10.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::splat(2.0),
+        };
+        let hit = PickHit { target: PickTarget::Object(object), position: DVec3::new(9.0, 0.0, 0.0) };
+        let request = sit_click_request(hit, camera, DVec3::X, Some((Kind::Object, CLICK_ACTION_SIT)), true, false).unwrap();
+        std::assert_matches!(request, SitRequest::Object { id: target, .. } if target == id);
+
+        let clicked = PickObject { click_action: CLICK_ACTION_SIT, ..object };
+        let hit = PickHit { target: PickTarget::Object(clicked), ..hit };
+        let request = sit_click_request(hit, camera, DVec3::X, Some((Kind::Object, 0)), true, false).unwrap();
+        std::assert_matches!(request, SitRequest::Object { id: target, .. } if target == id);
+        assert!(sit_click_request(hit, camera, DVec3::X, Some((Kind::Avatar, CLICK_ACTION_SIT)), true, false).is_none());
+        let disabled = PickObject { click_action: CLICK_ACTION_DISABLED, ..object };
+        let hit = PickHit { target: PickTarget::Object(disabled), ..hit };
+        assert!(sit_click_request(hit, camera, DVec3::X, Some((Kind::Object, CLICK_ACTION_SIT)), true, false).is_none());
+    }
+
+    #[test]
+    fn sit_click_while_seated_does_not_stand() {
+        let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
+        let object = PickObject {
+            id: Uuid::from_u128(10),
+            local_id: NonZeroU32::new(6).unwrap(),
+            kind: PickObjectKind::Prim,
+            click_action: CLICK_ACTION_SIT,
+            position: DVec3::new(10.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::splat(2.0),
+        };
+        let hit = PickHit { target: PickTarget::Object(object), position: DVec3::new(9.0, 0.0, 0.0) };
+        assert!(sit_click_request(hit, camera, DVec3::X, Some((Kind::Object, 0)), true, true).is_none());
+    }
+
+    #[test]
     fn non_prims_cannot_sit_here() {
         let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
         let object = PickObject {
             id: Uuid::from_u128(9),
             local_id: NonZeroU32::new(4).unwrap(),
             kind: PickObjectKind::Avatar,
+            click_action: 0,
             position: DVec3::new(10.0, 0.0, 0.0),
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,

@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 use uuid::Uuid;
 use world::{
-    Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, Parent, WorldPose,
+    Entity, Kind, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, Parent, WorldPose,
     WorldTransformState,
 };
 
@@ -314,6 +314,20 @@ impl SceneFeed {
             match object.detail().summary.parent {
                 Parent::Resolved(parent) => object = self.view.object(parent)?,
                 _ => return Some(object.detail().summary.id),
+            }
+        }
+    }
+
+    pub(crate) fn pick_root_click_action(&self, pick: render::PickObject) -> Option<(Kind, u8)> {
+        let mut object = self.view.objects().find(|object| {
+            let summary = object.detail().summary;
+            summary.id == pick.id && summary.address.local_id() == pick.local_id
+        })?;
+        loop {
+            let summary = object.detail().summary;
+            match summary.parent {
+                Parent::Resolved(parent) => object = self.view.object(parent)?,
+                Parent::Unknown | Parent::Root | Parent::Pending { .. } => return Some((summary.kind, summary.click_action)),
             }
         }
     }

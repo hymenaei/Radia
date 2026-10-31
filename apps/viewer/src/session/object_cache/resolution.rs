@@ -258,6 +258,7 @@ mod tests {
     use crate::session::inbound::decode_object_message;
     use crate::session::object_cache::ObjectCacheEvent;
     use crate::session::object_cache::test_support::*;
+    use world::CLICK_ACTION_SIT;
     #[tokio::test]
     async fn full_and_compressed_payloads_survive_restart_and_resolve_as_hits() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");
@@ -268,10 +269,19 @@ mod tests {
 
         for fixture in [vectors::OBJECT_UPDATE, vectors::OBJECT_UPDATE_COMPRESSED_TYPED] {
             let mut update = fixture_message(fixture);
-            if let Message::ObjectUpdateCompressed(update) = &mut update {
-                for object in &mut update.objects {
-                    object.local_id = object.local_id.saturating_add(10_000);
+            match &mut update {
+                Message::ObjectUpdate(update) => {
+                    for object in &mut update.objects {
+                        object.click_action = CLICK_ACTION_SIT;
+                    }
                 }
+                Message::ObjectUpdateCompressed(update) => {
+                    for object in &mut update.objects {
+                        object.local_id = object.local_id.saturating_add(10_000);
+                        object.click_action = CLICK_ACTION_SIT;
+                    }
+                }
+                _ => panic!("fixture should be a full or compressed update"),
             }
             let (_, references) = cached_references(&update);
             cache.record_update(SIMULATOR, update.clone());
@@ -309,6 +319,9 @@ mod tests {
                     .iter()
                     .all(|operation| { matches!(operation, Some(super::ObjectOperation::Observe(_) | super::ObjectOperation::Patch(_))) })
             );
+            assert!(resolved.blocks.iter().all(|operation| {
+                matches!(operation, Some(super::ObjectOperation::Observe(observation)) if observation.click_action == Some(CLICK_ACTION_SIT))
+            }));
         }
         reopened.close().await;
     }

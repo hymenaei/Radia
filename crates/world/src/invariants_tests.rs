@@ -4,15 +4,15 @@ use math::{Quat, Vec3};
 use uuid::Uuid;
 
 use crate::ApplyError::InvalidValue;
-use crate::ApplyOutcome::{Introduced, Unchanged, Updated};
+use crate::ApplyOutcome::{IgnoredStale, Introduced, Unchanged, Updated};
 use crate::FieldRejectionReason::ParentCycle;
 use crate::FieldUpdate;
 use crate::Kind::{Avatar, Object};
 use crate::OrderEvidence::Ordered;
 use crate::ParentUpdate::{Local, Root};
 use crate::{
-    Appearance, AttachmentPoint, FieldGroup, FieldRejection, ObjectObservation, ObjectPatch, Parent, ParentUpdate, Pose, Region,
-    RegionInfo, UpdateSource, World, WorldLimits,
+    Appearance, AttachmentPoint, CLICK_ACTION_SIT, FieldGroup, FieldRejection, ObjectObservation, ObjectPatch, Parent, ParentUpdate, Pose,
+    Region, RegionInfo, UpdateSource, World, WorldLimits,
 };
 
 fn limits() -> WorldLimits {
@@ -178,4 +178,28 @@ fn cycle_checks_follow_parents_beyond_the_pose_limit() {
         }
         assert_eq!(world.check_invariants(), Ok(()));
     }
+}
+
+#[test]
+fn click_action_tracks_newer_observations() {
+    let region = Region::new(300);
+    let id = uuid(900);
+    let mut world = World::new(limits());
+    let _ = world.adopt_region(region).unwrap();
+    let mut initial = object(source(region, 1), 900, 1, Root);
+    initial.click_action = Some(CLICK_ACTION_SIT);
+    let Introduced(entity) = world.observe_object(initial).unwrap().outcome else { panic!("expected an introduced object") };
+    assert_eq!(world.object(entity).unwrap().click_action(), CLICK_ACTION_SIT);
+    assert_eq!(world.object_detail(entity).unwrap().summary.click_action, CLICK_ACTION_SIT);
+
+    let mut update = object(source(region, 3), 900, 1, Root);
+    update.click_action = Some(0);
+    assert_eq!(world.observe_object(update).unwrap().outcome, Updated(entity));
+    assert_eq!(world.object(entity).unwrap().click_action(), 0);
+
+    let mut stale = object(source(region, 2), 900, 1, Root);
+    stale.click_action = Some(CLICK_ACTION_SIT);
+    assert_eq!(world.observe_object(stale).unwrap().outcome, IgnoredStale);
+    assert_eq!(world.object_detail(entity).unwrap().summary.click_action, 0);
+    assert_eq!(world.entity(id), Some(entity));
 }

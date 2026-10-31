@@ -8,7 +8,7 @@ use std::{
 use egui::{Context, DragValue, Slider};
 use futures::executor::block_on;
 use render::scene;
-use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
+use render::{CompressionQuality, Overlay, PickTarget, Renderer, Retirement, TextureCompletion};
 use tracing::Instrument;
 #[cfg(target_os = "linux")]
 use winit::platform::startup_notify::{EventLoopExtStartupNotify, WindowAttributesExtStartupNotify, reset_activation_token_env};
@@ -23,7 +23,7 @@ use winit::{
 use super::{
     FRAME_INTERVAL, InputCapture, SharedWindowState,
     recovery::{PresentationRecovery, RecoveryAttempt},
-    sit_controls::SitControls,
+    sit_controls::{SitControls, SitRequest, sit_click_request},
     timing::{FrameTimes, display_refresh_interval, next_frame_deadline, redraw_interval},
 };
 use crate::{
@@ -405,6 +405,18 @@ impl SceneWindow {
         }
 
         if !self.modifiers.alt_key() {
+            if self.modifiers.is_empty()
+                && let Some(request) = self.sit_request_for_left_click()
+                && self.sit_controls.start_if_requested(Some(request), self.feed.as_ref(), Arc::clone(&self.wake))
+            {
+                self.egui.memory_mut(|memory| {
+                    if let Some(id) = memory.focused() {
+                        memory.surrender_focus(id);
+                    }
+                });
+                self.dirty = true;
+                return;
+            }
             self.start_drag();
             return;
         }
@@ -428,6 +440,28 @@ impl SceneWindow {
             camera.focus(point, Instant::now());
             self.start_drag();
         }
+    }
+
+    fn sit_request_for_left_click(&mut self) -> Option<SitRequest> {
+        let (Some(renderer), Some(camera)) = (&self.renderer, self.last_camera) else {
+            return None;
+        };
+        let size = self.window.inner_size();
+        let ray = camera.ray([self.cursor.x, self.cursor.y], [size.width, size.height]);
+        let hit = match renderer.pick(camera, ray) {
+            Ok(Some(hit)) => hit,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::debug!(%error, "scene sit-action pick exceeded its work limit");
+                return None;
+            }
+        };
+        let PickTarget::Object(object) = hit.target else { return None };
+        let feed = self.feed.as_mut()?;
+        let root_click_action = feed.pick_root_click_action(object);
+        let seated = feed.agent_is_seated();
+        let agent_available = feed.agent_available();
+        sit_click_request(hit, camera, ray, root_click_action, agent_available, seated)
     }
 
     pub(super) fn drag_camera(&mut self, (dx, dy): (f64, f64)) {

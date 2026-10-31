@@ -96,6 +96,10 @@ impl<'a> Object<'a> {
         self.record.state.time_dilation
     }
 
+    pub fn click_action(&self) -> u8 {
+        self.record.state.click_action
+    }
+
     pub fn motion_source(&self) -> Option<UpdateSource> {
         self.record.state.motion_source
     }

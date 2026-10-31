@@ -26,6 +26,7 @@ pub(super) struct Fields {
     angular_velocity: Option<Vec3>,
     is_physical: Option<bool>,
     time_dilation: Option<f32>,
+    click_action: Option<u8>,
     scale: Option<Vec3>,
     pub(super) attachment_point: FieldUpdate<AttachmentPoint>,
     pub(super) facets: FacetUpdates,
@@ -44,6 +45,7 @@ impl Fields {
             angular_velocity: observation.angular_velocity,
             is_physical: observation.is_physical,
             time_dilation: observation.time_dilation,
+            click_action: observation.click_action,
             scale: observation.scale,
             attachment_point: observation.attachment_point,
             facets: FacetUpdates {
@@ -65,6 +67,7 @@ impl Fields {
             angular_velocity: patch.angular_velocity,
             is_physical: patch.is_physical,
             time_dilation: patch.time_dilation,
+            click_action: None,
             scale: patch.scale,
             attachment_point: patch.attachment_point,
             facets: FacetUpdates {
@@ -92,6 +95,7 @@ impl Fields {
             || self.angular_velocity.is_some()
             || self.is_physical.is_some()
             || self.time_dilation.is_some()
+            || self.click_action.is_some()
             || self.scale.is_some()
             || self.attachment_point.is_present()
             || self.facets.orders_binding()
@@ -109,6 +113,7 @@ impl Fields {
             || (self.angular_velocity.is_some() && origin.newer(fences.angular_velocity))
             || (self.is_physical.is_some() && origin.newer(fences.is_physical))
             || (self.time_dilation.is_some() && origin.newer(fences.time_dilation))
+            || (self.click_action.is_some() && origin.newer(fences.click_action))
             || (self.scale.is_some() && origin.newer(fences.scale))
             || (self.attachment_point.is_present() && origin.newer(fences.attachment_point))
             || self.facets.has_newer(facets, kind, origin)
@@ -213,6 +218,7 @@ impl Fields {
             (FieldGroup::AngularVelocity, self.angular_velocity.is_some(), tracked(fences.angular_velocity)),
             (FieldGroup::Physical, self.is_physical.is_some(), tracked(fences.is_physical)),
             (FieldGroup::TimeDilation, self.time_dilation.is_some(), tracked(fences.time_dilation)),
+            (FieldGroup::ClickAction, self.click_action.is_some(), tracked(fences.click_action)),
             (FieldGroup::Scale, self.scale.is_some(), tracked(fences.scale)),
             (FieldGroup::AttachmentPoint, self.attachment_point.is_present(), tracked(fences.attachment_point)),
         ];
@@ -375,6 +381,12 @@ impl Draft {
             self.ordering.fences.time_dilation = Some(field);
             motion_observed = true;
         }
+        if let Some(value) = fields.click_action
+            && origin.newer(self.ordering.fences.click_action)
+        {
+            self.state.click_action = value;
+            self.ordering.fences.click_action = Some(field);
+        }
         if let Some(value) = fields.scale
             && origin.newer(self.ordering.fences.scale)
         {
@@ -419,6 +431,9 @@ impl Draft {
         }
         if before.parent != after_parent || before.attachment_point != after.attachment_point {
             classes |= WorldChangeClasses::RELATIONSHIP;
+        }
+        if before.click_action != after.click_action {
+            classes |= WorldChangeClasses::INTERACTION;
         }
         if self.facet_changes {
             classes |= self.facets.changed_classes(&self.base);

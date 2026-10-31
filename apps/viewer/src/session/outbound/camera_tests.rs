@@ -576,12 +576,8 @@ fn movement_availability_tracks_session_state() {
     let simulator = simulator_id();
     let mut uplink = CameraUplink::new();
     let mut availability = uplink.movement_availability();
-    let movement = crate::agent_movement::MovementObservation {
-        control_flags: 0,
-        body_rotation: Quat::IDENTITY,
-        always_run: false,
-        stop_sequence: 0,
-    };
+    let movement =
+        crate::agent_movement::MovementObservation { control_flags: 0, body_rotation: Quat::IDENTITY, always_run: false, stop_sequence: 0 };
     assert!(!*availability.borrow_and_update());
 
     uplink.tick_with(

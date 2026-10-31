@@ -451,10 +451,7 @@ mod tests {
         let jump = Key::Character("e".into());
         assert_eq!(controls.keyboard_event(&jump, ElementState::Pressed, false, false, false), None);
         assert_eq!(controls.keyboard_event(&jump, ElementState::Pressed, false, false, true), None);
-        assert_eq!(
-            controls.sitting_actions(false, false, false, false, ScriptControlGrabs::default(), Instant::now()),
-            super::SittingActions::default()
-        );
+        assert_eq!(controls.sitting_actions(false, false, false, false, ScriptControlGrabs::default(), Instant::now()), Default::default());
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
 
         controls.set_input_enabled(true);

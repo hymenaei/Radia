@@ -17,7 +17,11 @@ use futures::{
 use network::{
     AgentSession, CircuitMotionStatus, CoverageLoss, CoverageSource, Event, Grid, PacketOrder, SimulatorId, capabilities::Client,
 };
-use protocol::{lludp::Message, login::ResponseData, messages::RequestAgentData};
+use protocol::{
+    lludp::{FieldValue, Message},
+    login::ResponseData,
+    messages::RequestAgentData,
+};
 use tokio::{runtime::Handle, sync::watch};
 use world::UpdateSource;
 
@@ -31,6 +35,7 @@ use super::{
     presentation::{AuthenticationUpdate, PresentationMailbox, SessionEnd, SessionReadyUpdate, ViewerUpdate},
 };
 use crate::{
+    agent_movement::ScriptControlGrabs,
     asset_coordinator::AssetCoordinator,
     inventory::{InventoryEditController, InventoryEditEvent, InventoryFetchController, InventoryFetchError, MoveExpectation},
     remembered_login::{self, RememberedLogin},
@@ -168,6 +173,8 @@ struct SessionDriver {
     agent_control: AgentControlState,
     agent_control_handle: AgentControlHandle,
     sit_response: watch::Receiver<Option<SitResponseState>>,
+    control_grabs: ScriptControlGrabs,
+    control_grabs_sender: watch::Sender<ScriptControlGrabs>,
     region_lookup: Option<RegionLookup>,
     media: ObjectMediaIntake,
     recovery: RecoveryIntake,
@@ -200,6 +207,7 @@ impl SessionDriver {
         let camera = CameraUplink::new();
         let (region_motion_sender, _) = watch::channel(Vec::new());
         let (agent_control_handle, agent_control, sit_response) = AgentControlState::new();
+        let (control_grabs_sender, _) = watch::channel(ScriptControlGrabs::default());
         let media = ObjectMediaIntake::new(ObjectMediaFetcher::new(runtime.clone(), cancellation.clone()));
         let recovery = RecoveryIntake::new();
         let (inventory_changes, _) = watch::channel(None);
@@ -258,6 +266,8 @@ impl SessionDriver {
             agent_control,
             agent_control_handle,
             sit_response,
+            control_grabs: ScriptControlGrabs::default(),
+            control_grabs_sender,
             region_lookup: None,
             media,
             recovery,
@@ -444,6 +454,25 @@ impl SessionDriver {
 
     fn handle_sit_response(&mut self, simulator: SimulatorId, message: &Message) {
         agent_control::process_sit_response(&mut self.agent_control, &mut self.camera, self.session_world.world(), simulator, message);
+    }
+
+    fn update_control_grabs(&mut self, simulator: SimulatorId, message: &Message) {
+        if self.primary_simulator != Some(simulator) {
+            return;
+        }
+        if let Some(changes) = decode_script_control_changes(message) {
+            let changed = changes
+                .into_iter()
+                .fold(false, |changed, (take, controls, pass_to_agent)| self.control_grabs.apply(take, controls, pass_to_agent) || changed);
+            if changed {
+                self.control_grabs_sender.send_replace(self.control_grabs);
+            }
+        } else if message.name() == "ForceScriptControlRelease"
+            && self.active_session.as_ref().is_some_and(|session| script_control_release_matches(message, session))
+            && self.control_grabs.clear()
+        {
+            self.control_grabs_sender.send_replace(self.control_grabs);
+        }
     }
 
     fn handle_agent_sit_animation(&mut self, simulator: SimulatorId, received_at: std::time::Instant, message: &Message) {
@@ -749,6 +778,7 @@ impl SessionDriver {
             self.publish_world_agent_motion(received_at);
         }
         self.handle_agent_sit_animation(simulator_id, received_at, &message);
+        self.update_control_grabs(simulator_id, &message);
 
         self.environments.simulator_message(&mut self.session_world, simulator_id, packet_order, &message, self.primary_simulator);
         for request in media_requests {
@@ -808,6 +838,8 @@ impl SessionDriver {
         self.network_failure = None;
         self.primary_disconnected = false;
         self.primary_simulator = Some(simulator_id);
+        self.control_grabs.clear();
+        self.control_grabs_sender.send_replace(self.control_grabs);
         self.active_session = Some(session.clone());
         if let Some(login_data) = login_data {
             self.active_login_data = Some(login_data);
@@ -844,6 +876,8 @@ impl SessionDriver {
         if Some(simulator_id) == self.primary_simulator {
             self.agent_control.cancel_sit(SitOutcome::SimulatorChanged);
             self.primary_simulator = None;
+            self.control_grabs.clear();
+            self.control_grabs_sender.send_replace(self.control_grabs);
             self.camera.request_update();
         }
         ControlFlow::Continue(())
@@ -872,6 +906,7 @@ impl SessionDriver {
             world_reader: self.reads.reader(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             sit_response: self.sit_response.clone(),
+            sit_control_grabs: self.control_grabs_sender.subscribe(),
         }));
     }
 
@@ -992,6 +1027,36 @@ impl SessionDriver {
             tracing::warn!(simulator = simulator_id.get(), region, %error, "could not retire simulator world region on session shutdown");
         }
     }
+}
+
+fn decode_script_control_changes(message: &Message) -> Option<Vec<(bool, u32, bool)>> {
+    let Message::Schema(message) = message else { return None };
+    let schema = message.schema();
+    if schema.name != "ScriptControlChange" || schema.blocks.first()?.name != "Data" {
+        return None;
+    }
+    message
+        .blocks()
+        .first()?
+        .instances
+        .iter()
+        .map(|instance| {
+            let [FieldValue::Bool(take), FieldValue::U32(controls), FieldValue::Bool(pass_to_agent)] = instance.fields.as_slice() else {
+                return None;
+            };
+            Some((*take, *controls, *pass_to_agent))
+        })
+        .collect()
+}
+
+fn script_control_release_matches(message: &Message, session: &AgentSession) -> bool {
+    let Message::Schema(message) = message else { return false };
+    let schema = message.schema();
+    if schema.name != "ForceScriptControlRelease" || schema.blocks.first().is_none_or(|block| block.name != "AgentData") {
+        return false;
+    }
+    let Some(instance) = message.blocks().first().and_then(|block| block.instances.first()) else { return false };
+    matches!(instance.fields.as_slice(), [FieldValue::Uuid(agent_id), FieldValue::Uuid(session_id)] if *agent_id == session.agent_id && *session_id == session.session_id)
 }
 
 fn reply_region_handshake(

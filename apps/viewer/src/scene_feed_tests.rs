@@ -306,6 +306,7 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         pose_seed: 0,
         sit_response: watch::channel(None).1,
+        sit_control_grabs: watch::channel(Default::default()).1,
         last_movement: None,
         incoming,
         _cancel: cancel,
@@ -378,6 +379,7 @@ async fn terrain_clamp_respects_parenting() {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         pose_seed: 0,
         sit_response: watch::channel(None).1,
+        sit_control_grabs: watch::channel(Default::default()).1,
         last_movement: None,
         incoming,
         _cancel: cancel,
@@ -507,6 +509,7 @@ async fn pending_parent_does_not_block_flight() {
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         pose_seed: 0,
         sit_response,
+        sit_control_grabs: watch::channel(Default::default()).1,
         last_movement: None,
         incoming,
         _cancel: cancel,
@@ -544,22 +547,19 @@ async fn pending_parent_does_not_block_flight() {
     assert!(feed.agent_is_seated());
     assert_eq!(
         feed.sit_camera_pose(),
-        Some((seat_id, camera, WorldPose { position: DVec3::new(4.0, 5.0, 6.0), rotation: Quat::IDENTITY }))
+        Some((seat_id, Some(camera), WorldPose { position: DVec3::new(4.0, 5.0, 6.0), rotation: Quat::IDENTITY }))
     );
 
     sit_response_sender.send_replace(Some(SitResponseState {
         generation: 2,
         object_id: seat_id,
         requested_object_id: seat_id,
-        camera_override: Some(camera),
+        camera_override: None,
         force_mouselook: false,
     }));
     feed.drain().unwrap();
     assert!(feed.agent_is_seated(), "World parent state remains authoritative after stand is requested");
-    assert_eq!(
-        feed.sit_camera_pose(),
-        Some((seat_id, camera, WorldPose { position: DVec3::new(4.0, 5.0, 6.0), rotation: Quat::IDENTITY }))
-    );
+    assert_eq!(feed.sit_camera_pose(), Some((seat_id, None, WorldPose { position: DVec3::new(4.0, 5.0, 6.0), rotation: Quat::IDENTITY })));
 
     let _ = world.remove_object(UpdateSource::new(region, 3, Ordered(3), 0), seat_local_id).unwrap();
     advance_scene(&world, &mut scene, &sender, &mut feed);
@@ -631,6 +631,7 @@ async fn pending_asset_preserves_scene() {
     let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
     let (_sit_response_sender, sit_response) = watch::channel(None);
+    let (_sit_control_grab_sender, sit_control_grabs) = watch::channel(Default::default());
     let mut feed = SceneFeed::start(
         SceneSources { reader: reads.reader(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
         Uuid::from_u128(2),
@@ -638,6 +639,7 @@ async fn pending_asset_preserves_scene() {
         watch::channel(None).0,
         agent_motion,
         sit_response,
+        sit_control_grabs,
         Handle::current(),
         || {},
     );
@@ -692,6 +694,7 @@ async fn stalled_publication_preserves_intake() {
     let (pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
     let (_sit_response_sender, sit_response) = watch::channel(None);
+    let (_sit_control_grab_sender, sit_control_grabs) = watch::channel(Default::default());
     let mut feed = SceneFeed::start(
         SceneSources { reader: reader.clone(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
         Uuid::from_u128(1),
@@ -699,6 +702,7 @@ async fn stalled_publication_preserves_intake() {
         watch::channel(None).0,
         agent_motion,
         sit_response,
+        sit_control_grabs,
         Handle::current(),
         || {},
     );

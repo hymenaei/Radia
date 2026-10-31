@@ -31,7 +31,7 @@ use winit::{
 
 use self::window::{MAX_RECOVERIES, SceneWindow, SceneWindowError};
 use crate::{
-    agent_movement::MovementObservation,
+    agent_movement::{MovementObservation, ScriptControlGrabs},
     scene_feed::SceneFeed,
     session::{AgentMotionSample, SitResponseState},
 };
@@ -203,14 +203,16 @@ impl Viewport {
         movement: watch::Sender<Option<MovementObservation>>,
         agent_motion: watch::Receiver<Option<AgentMotionSample>>,
         sit_response: watch::Receiver<Option<SitResponseState>>,
+        sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
         runtime: Handle,
     ) {
         let requested = self.shared.requested.lock().unwrap_or_else(PoisonError::into_inner);
         if requested.generation == generation && requested.visible {
             let shared = Arc::clone(&self.shared);
-            let feed = SceneFeed::start(sources, agent_id, camera, movement, agent_motion, sit_response, runtime, move || {
-                shared.wake();
-            });
+            let feed =
+                SceneFeed::start(sources, agent_id, camera, movement, agent_motion, sit_response, sit_control_grabs, runtime, move || {
+                    shared.wake();
+                });
             *self.shared.feed.lock().unwrap_or_else(PoisonError::into_inner) = Some((generation, feed));
             self.shared.wake();
         }

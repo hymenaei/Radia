@@ -26,7 +26,7 @@ use super::{
 };
 use crate::{
     DEFAULT_DRAW_DISTANCE,
-    agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
+    agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP, ScriptControlGrabs, SittingCameraInput},
     camera::{CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input},
     scene_feed::SceneFeed,
 };
@@ -473,15 +473,21 @@ impl SceneWindow {
         (Some(pose), Some(seed))
     }
 
-    fn camera_observation(&mut self, pose: Option<world::WorldPose>, rotation: math::Quat, now: Instant) -> Option<scene::Camera> {
+    fn camera_observation(
+        &mut self,
+        pose: Option<world::WorldPose>,
+        rotation: math::Quat,
+        sit_camera: Option<(uuid::Uuid, Option<crate::session::SitCameraOverride>, world::WorldPose)>,
+        sitting_input: SittingCameraInput,
+        now: Instant,
+    ) -> Option<scene::Camera> {
         let viewport = self.window.inner_size().into();
         match self.camera_mode {
             CameraMode::Follow => pose.and_then(|mut pose| {
                 pose.rotation = rotation;
                 let (draw_distance, lod_factor) =
                     self.camera.as_ref().map_or((DEFAULT_DRAW_DISTANCE, 1.0), |camera| (camera.draw_distance, camera.lod_factor));
-                let sit_camera = self.feed.as_ref().and_then(SceneFeed::sit_camera_pose);
-                self.follow_camera.follow_with_sit_camera(pose, sit_camera, viewport, draw_distance, lod_factor, now)
+                self.follow_camera.follow_with_sit_input(pose, sit_camera, sitting_input, viewport, draw_distance, lod_factor, now)
             }),
             CameraMode::Free => self.camera.as_ref().and_then(|camera| camera.scene_camera(viewport, now)),
         }
@@ -497,11 +503,33 @@ impl SceneWindow {
             self.controls.clear_flying();
         }
         self.sit_response_generation = sit_response_generation;
+        let sit_camera = self.feed.as_ref().and_then(SceneFeed::sit_camera_pose);
+        let sit_camera_enabled = sit_camera.as_ref().is_some_and(|(_, camera, _)| camera.is_some());
+        let grabs = self.feed.as_ref().map_or_else(ScriptControlGrabs::default, SceneFeed::sit_control_grabs);
+        let sitting_actions = seated.then(|| {
+            self.controls.sitting_actions(
+                self.modifiers.shift_key(),
+                self.modifiers.alt_key(),
+                self.modifiers.control_key(),
+                sit_camera_enabled,
+                grabs,
+                now,
+            )
+        });
         let body_rotation = self.body_rotation.update(seed, if seated { 0.0 } else { self.controls.yaw(self.modifiers.shift_key()) }, now);
         let rotation = if seated { pose.map_or(body_rotation, |pose| pose.rotation) } else { body_rotation };
-        let movement: MovementObservation = self.controls.observation(self.modifiers.shift_key(), rotation);
+        let movement: MovementObservation = match sitting_actions {
+            Some(actions) => self.controls.sitting_observation(rotation, actions),
+            None => self.controls.observation(self.modifiers.shift_key(), rotation),
+        };
         self.stop_clear_pending = movement.control_flags & STOP != 0;
-        let observation = self.camera_observation(pose, rotation, now);
+        let observation = self.camera_observation(
+            pose,
+            rotation,
+            sit_camera,
+            sitting_actions.map_or(SittingCameraInput::default(), |actions| actions.camera),
+            now,
+        );
         let agent_pose = pose.map(|mut pose| {
             pose.rotation = rotation;
             pose

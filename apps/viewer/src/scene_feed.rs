@@ -28,7 +28,7 @@ use world::{
 };
 
 use crate::{
-    agent_movement::MovementObservation,
+    agent_movement::{MovementObservation, ScriptControlGrabs},
     asset_coordinator::{AssetHandle, RequestError},
     session::{AgentMotionSample, EnvironmentInbox, SitCameraOverride, SitResponseState},
     world_reader::{ReadError, WorldReader},
@@ -133,6 +133,7 @@ pub(crate) struct SceneFeed {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pose_seed: u64,
     sit_response: watch::Receiver<Option<SitResponseState>>,
+    sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
@@ -146,6 +147,7 @@ impl SceneFeed {
         movement: watch::Sender<Option<MovementObservation>>,
         mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
         sit_response: watch::Receiver<Option<SitResponseState>>,
+        sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
@@ -159,12 +161,24 @@ impl SceneFeed {
         let observations = camera.subscribe();
         let agent_motions = agent_motion.clone();
         let sit_response_updates = sit_response.clone();
+        let sit_control_grab_updates = sit_control_grabs.clone();
         let mut dead_reckoning = DeadReckoning::default();
         dead_reckoning.replace(*agent_motion.borrow_and_update());
         drop(
             runtime.clone().spawn(
-                run(scene, sources, sender, runtime.clone(), cancelled, observations, agent_motions, sit_response_updates, wake)
-                    .in_current_span(),
+                run(
+                    scene,
+                    sources,
+                    sender,
+                    runtime.clone(),
+                    cancelled,
+                    observations,
+                    agent_motions,
+                    sit_response_updates,
+                    sit_control_grab_updates,
+                    wake,
+                )
+                .in_current_span(),
             ),
         );
         Self {
@@ -190,6 +204,7 @@ impl SceneFeed {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             pose_seed: 0,
             sit_response,
+            sit_control_grabs,
             last_movement: None,
             incoming,
             _cancel: cancel,
@@ -322,9 +337,8 @@ impl SceneFeed {
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
-    pub(crate) fn sit_camera_pose(&self) -> Option<(Uuid, SitCameraOverride, WorldPose)> {
+    pub(crate) fn sit_camera_pose(&self) -> Option<(Uuid, Option<SitCameraOverride>, WorldPose)> {
         let response = (*self.sit_response.borrow())?;
-        let camera = response.camera_override?;
         let agent = self.agent()?;
         let Parent::Resolved(seat_entity) = agent.detail().summary.parent else { return None };
         let seat = self.view.object(seat_entity)?;
@@ -338,7 +352,12 @@ impl SceneFeed {
             WorldTransformState::Provisional { pose, .. } => pose,
             WorldTransformState::Unresolved(_) => return None,
         };
-        Some((seat_id, camera, pose))
+        Some((seat_id, response.camera_override, pose))
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn sit_control_grabs(&self) -> ScriptControlGrabs {
+        *self.sit_control_grabs.borrow()
     }
 
     pub(crate) fn sit_response_generation(&self) -> Option<u64> {
@@ -528,6 +547,7 @@ async fn run(
     mut camera: watch::Receiver<Option<Camera>>,
     mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     mut sit_response: watch::Receiver<Option<SitResponseState>>,
+    mut sit_control_grabs: watch::Receiver<ScriptControlGrabs>,
     wake: impl Fn(),
 ) {
     let SceneSources { mut reader, assets, environments, motion_circuits } = sources;
@@ -594,6 +614,7 @@ async fn run(
             let motion_updated = agent_motion.changed().fuse();
             let circuit_transition = motion_circuits.wait_for_transition().fuse();
             let camera_overridden = sit_response.changed().fuse();
+            let controls_grabbed = sit_control_grabs.changed().fuse();
             let available = assets.next().fuse();
             let released = textures.changed().fuse();
             let timer = async {
@@ -612,6 +633,7 @@ async fn run(
                 motion_updated,
                 circuit_transition,
                 camera_overridden,
+                controls_grabbed,
                 available,
                 released,
                 timer,
@@ -644,6 +666,7 @@ async fn run(
                 _ = circuit_transition => wake(),
                 result = moved => { if result.is_err() { break; } }
                 result = camera_overridden => { if result.is_err() { break; } wake(); }
+                result = controls_grabbed => { if result.is_err() { break; } wake(); }
                 result = changed => { if result.is_err() { break; } scene.notify_world_change(); }
                 _ = timer => {}
             }

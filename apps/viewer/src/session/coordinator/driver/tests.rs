@@ -24,7 +24,7 @@ use crate::{
 };
 
 use super::inventory::{apply_inventory_fetch, cache_restore_move_changes, resolve_pending_inventory_moves};
-use super::{MoveExpectation, PendingHandshakeReplies, network_end_after_stream_close};
+use super::{MoveExpectation, PendingHandshakeReplies, decode_script_control_changes, network_end_after_stream_close};
 use crate::session::SessionEnd;
 
 #[test]
@@ -69,6 +69,22 @@ fn disconnect_request_keeps_failure() {
 #[test]
 fn unexpected_primary_disconnect_fails() {
     assert_eq!(network_end_after_stream_close(false, None, true), SessionEnd::Failed("The primary simulator disconnected.".into()));
+}
+
+#[test]
+fn script_control_change_decodes_generated_wire_schema() {
+    let schema = SchemaMessage::schema_by_name("ScriptControlChange").expect("script control protocol schema");
+    let message = Message::Schema(
+        SchemaMessage::new(
+            schema,
+            vec![BlockValues::single(vec![FieldValue::Bool(true), FieldValue::U32(0x100), FieldValue::Bool(false)])],
+        )
+        .expect("valid script control message"),
+    );
+    let bytes = Packet::new(77, message).with_reliable().encode().expect("encode reliable script control message");
+    let decoded = Packet::decode(&bytes).expect("decode script control message").message().clone();
+
+    assert_eq!(decode_script_control_changes(&decoded), Some(vec![(true, 0x100, false)]));
 }
 
 use crate::session::agent_control::{SitRequestTransport, handle_sit_alert, process_agent_control_command, process_sit_response};

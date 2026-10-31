@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use egui::{Align2, Area, Button, Context, Frame, Id, LayerId, Order, Popup, PopupCloseBehavior, PopupKind, Pos2, Ui, Vec2};
+use egui::{Align2, Area, Button, Context, Frame, Id, LayerId, Order, Popup, PopupCloseBehavior, PopupKind, Pos2, Vec2};
 use math::{DVec3, Vec3};
 use render::{PickHit, PickObject, PickObjectKind, PickTarget, Renderer, scene::Camera};
 use uuid::Uuid;
@@ -35,6 +35,35 @@ pub(super) enum SitMenuEvent {
     SessionEnded,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SelfMenuPick {
+    Avatar,
+    Attachment,
+}
+
+pub(crate) fn classify_self_menu_pick(pick: PickObject, agent_id: Uuid, root_id: Option<Uuid>) -> Option<SelfMenuPick> {
+    match pick.kind {
+        PickObjectKind::Avatar if pick.id == agent_id => Some(SelfMenuPick::Avatar),
+        PickObjectKind::Prim if root_id == Some(agent_id) => Some(SelfMenuPick::Attachment),
+        _ => None,
+    }
+}
+
+pub(crate) fn self_sit_menu_item(
+    agent_available: bool,
+    seated: bool,
+    editing_appearance: bool,
+    flying: bool,
+    pending: bool,
+) -> Option<SitMenuItem> {
+    if !agent_available {
+        return None;
+    }
+    let (label, request) = if seated { ("Stand Up", SitRequest::Stand) } else { ("Sit Down", SitRequest::Ground) };
+    let enabled = !pending && (seated || (!editing_appearance && !flying));
+    Some(SitMenuItem { label, request, enabled })
+}
+
 pub(super) fn sit_request_for_left_click(
     renderer: Option<&Renderer>,
     camera: Option<Camera>,
@@ -58,56 +87,8 @@ pub(super) fn sit_request_for_left_click(
     sit_click_request(hit, camera, ray, root_click_action, feed.agent_available(), feed.agent_is_seated())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ToggleAction {
-    SitOnGround,
-    StandUp,
-}
-
-#[derive(Default)]
-pub(crate) struct SitToggle {
-    pending: bool,
-}
-
-impl SitToggle {
-    pub(crate) fn label(&self, seated: bool) -> &'static str {
-        if seated { "Stand Up" } else { "Sit Down" }
-    }
-
-    pub(crate) fn action(&self, seated: bool, available: bool) -> Option<ToggleAction> {
-        if self.pending || !available {
-            return None;
-        }
-        Some(if seated { ToggleAction::StandUp } else { ToggleAction::SitOnGround })
-    }
-
-    pub(crate) fn visible(&self, agent_available: bool) -> bool {
-        agent_available
-    }
-
-    fn is_pending(&self) -> bool {
-        self.pending
-    }
-
-    fn enabled(&self, agent_available: bool, controls_available: bool) -> bool {
-        self.visible(agent_available) && controls_available && !self.pending
-    }
-
-    fn begin(&mut self) -> bool {
-        if self.pending {
-            return false;
-        }
-        self.pending = true;
-        true
-    }
-
-    fn complete(&mut self) {
-        self.pending = false;
-    }
-}
-
 pub(super) struct SitControls {
-    toggle: SitToggle,
+    pending: bool,
     menu: Option<SitMenu>,
     next_menu_id: u64,
     sender: SyncSender<SitCompletion>,
@@ -118,7 +99,7 @@ pub(super) struct SitControls {
 impl SitControls {
     pub(super) fn new() -> Self {
         let (sender, receiver) = mpsc::sync_channel(1);
-        Self { toggle: SitToggle::default(), menu: None, next_menu_id: 0, sender, receiver, notice: None }
+        Self { pending: false, menu: None, next_menu_id: 0, sender, receiver, notice: None }
     }
 
     pub(super) fn menu_open(&self) -> bool {
@@ -170,7 +151,7 @@ impl SitControls {
         match feed {
             None => self.handle_menu_event(SitMenuEvent::SessionEnded),
             Some(feed) if !feed.agent_available() => self.handle_menu_event(SitMenuEvent::SessionEnded),
-            Some(feed) if !feed.knows_pick(menu.object) => self.handle_menu_event(SitMenuEvent::TargetDisappeared),
+            Some(feed) if !feed.knows_pick(menu.pick()) => self.handle_menu_event(SitMenuEvent::TargetDisappeared),
             Some(_) => false,
         }
     }
@@ -208,54 +189,34 @@ impl SitControls {
                     world_knows_object,
                     "viewport object picked"
                 );
-                if let Some(feed) = feed.filter(|_| world_knows_object)
-                    && let Some((_, offset)) = sit_here_target(hit, camera, ray)
-                    && let Some(root_id) = feed.root_object_id(object.id)
-                {
-                    self.open_menu(SitMenu { object, root_id, offset, position, popup_id: Id::NULL });
+                if let Some(feed) = feed.filter(|_| world_knows_object) {
+                    let root_id = feed.root_object_id(object.id);
+                    if classify_self_menu_pick(object, feed.agent_id(), root_id).is_some() {
+                        self.open_menu(SitMenu { target: SitMenuTarget::SelfAgent(object), position, popup_id: Id::NULL });
+                    } else if let Some(root_id) = root_id
+                        && let Some((_, offset)) = sit_here_target(hit, camera, ray)
+                    {
+                        self.open_menu(SitMenu { target: SitMenuTarget::Object { object, root_id, offset }, position, popup_id: Id::NULL });
+                    }
                 }
             }
         }
     }
 
-    pub(super) fn button(&mut self, ui: &mut Ui, seated: bool, agent_available: bool, controls_available: bool) -> Option<SitRequest> {
-        if !self.toggle.visible(agent_available) {
-            return None;
-        }
-        let action = self.toggle.action(seated, controls_available);
-        let response = ui.add_enabled(self.toggle.enabled(agent_available, controls_available), Button::new(self.toggle.label(seated)));
-        if response.clicked() {
-            return match action? {
-                ToggleAction::SitOnGround => Some(SitRequest::Ground),
-                ToggleAction::StandUp => Some(SitRequest::Stand),
-            };
-        }
-        None
-    }
-
-    pub(super) fn controls_ui(
+    pub(super) fn overlays(
         &mut self,
-        controls: &mut Ui,
+        context: &Context,
+        now: Instant,
+        feed: Option<&SceneFeed>,
         seated: bool,
-        agent_available: bool,
-        controls_available: bool,
-    ) -> (bool, Option<SitRequest>) {
-        let mut request_chat = false;
-        let mut sit_request = None;
-        controls.horizontal(|ui| {
-            request_chat = ui.button("Nearby chat (F6)").clicked();
-            sit_request = self.button(ui, seated, agent_available, controls_available);
-        });
-        (request_chat, sit_request)
-    }
-
-    pub(super) fn overlays(&mut self, context: &Context, now: Instant, feed: Option<&SceneFeed>) -> Option<SitRequest> {
+        flying: bool,
+    ) -> Option<SitRequest> {
         self.reconcile_menu(feed);
         let mut request = None;
+        let menu_was_open = self.menu.is_some();
         if let Some(menu) = &self.menu {
             let menu = *menu;
-            let world_knows_object = feed.is_some_and(|feed| feed.knows_pick(menu.object));
-            let sitting_on_target = feed.is_some_and(|feed| feed.agent_is_sitting_on(menu.root_id));
+            let item = menu.item(feed, seated, flying, self.pending);
             let mut open = true;
             let layer_id = LayerId::new(PopupKind::Menu.order(), menu.popup_id);
             Popup::new(menu.popup_id, context.clone(), menu.position, layer_id)
@@ -265,12 +226,11 @@ impl SitControls {
                 .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                 .open_bool(&mut open)
                 .show(|ui| {
-                    ui.set_min_width(96.0);
-                    if ui
-                        .add_enabled(menu.enabled(world_knows_object, self.toggle.is_pending()), Button::new(menu.label(sitting_on_target)))
-                        .clicked()
-                    {
-                        request = Some(menu.request(sitting_on_target));
+                    if let Some(item) = item {
+                        ui.set_min_width(96.0);
+                        if ui.add_enabled(item.enabled, Button::new(item.label)).clicked() {
+                            request = Some(item.request);
+                        }
                     }
                 });
             if request.is_some() {
@@ -286,6 +246,18 @@ impl SitControls {
         }
         if context.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.handle_menu_event(SitMenuEvent::Escape);
+        }
+        if let Some(item) = self_sit_menu_item(feed.is_some_and(SceneFeed::agent_available), seated, false, flying, self.pending) {
+            Area::new(Id::unique("radia-viewport-sit-toolbar"))
+                .order(Order::Foreground)
+                .anchor(Align2::RIGHT_TOP, Vec2::new(-18.0, 18.0))
+                .show(context, |ui| {
+                    Frame::popup(ui.style()).show(ui, |ui| {
+                        if ui.add_enabled(item.enabled && !menu_was_open, Button::new(item.label)).clicked() {
+                            request = Some(item.request);
+                        }
+                    });
+                });
         }
         if self.notice.as_ref().is_some_and(|(_, expires)| now >= *expires) {
             self.notice = None;
@@ -313,9 +285,10 @@ impl SitControls {
     }
 
     fn start(&mut self, request: SitRequest, feed: &SceneFeed, wake: std::sync::Arc<super::SharedWindowState>) -> bool {
-        if !self.toggle.begin() {
+        if self.pending {
             return false;
         }
+        self.pending = true;
         self.handle_menu_event(SitMenuEvent::Chosen);
         let sender = self.sender.clone();
         let agent_control = feed.agent_control().clone();
@@ -349,20 +322,20 @@ impl SitControls {
     pub(super) fn poll(&mut self, now: Instant) {
         match self.receiver.try_recv() {
             Ok(completion) => {
-                self.toggle.complete();
+                self.pending = false;
                 self.notice = completion.notice().map(|message| (message, now + NOTICE_DURATION));
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
-                self.toggle.complete();
+                self.pending = false;
                 self.notice = Some(("Sit request ended unexpectedly.".to_owned(), now + NOTICE_DURATION));
             }
         }
     }
 }
 
-#[derive(Debug)]
-pub(super) enum SitRequest {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SitRequest {
     Object { id: Uuid, offset: Vec3 },
     Ground,
     Stand,
@@ -370,24 +343,54 @@ pub(super) enum SitRequest {
 
 #[derive(Clone, Copy)]
 struct SitMenu {
-    object: PickObject,
-    root_id: Uuid,
-    offset: Vec3,
+    target: SitMenuTarget,
     position: Pos2,
     popup_id: Id,
 }
 
+#[derive(Clone, Copy)]
+enum SitMenuTarget {
+    Object { object: PickObject, root_id: Uuid, offset: Vec3 },
+    SelfAgent(PickObject),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SitMenuItem {
+    pub(crate) label: &'static str,
+    pub(crate) request: SitRequest,
+    pub(crate) enabled: bool,
+}
+
 impl SitMenu {
-    fn label(&self, sitting_on_target: bool) -> &'static str {
-        if sitting_on_target { "Stand Up" } else { "Sit Here" }
+    fn pick(self) -> PickObject {
+        match self.target {
+            SitMenuTarget::Object { object, .. } | SitMenuTarget::SelfAgent(object) => object,
+        }
     }
 
-    fn request(&self, sitting_on_target: bool) -> SitRequest {
-        if sitting_on_target { SitRequest::Stand } else { SitRequest::Object { id: self.object.id, offset: self.offset } }
+    fn item(self, feed: Option<&SceneFeed>, seated: bool, flying: bool, pending: bool) -> Option<SitMenuItem> {
+        match self.target {
+            SitMenuTarget::Object { object, root_id, offset } => {
+                let world_knows_object = feed.is_some_and(|feed| feed.knows_pick(object));
+                let sitting_on_target = feed.is_some_and(|feed| feed.agent_is_sitting_on(root_id));
+                Some(object_sit_menu_item(object, offset, sitting_on_target, world_knows_object, pending))
+            }
+            SitMenuTarget::SelfAgent(_) => self_sit_menu_item(feed.is_some_and(SceneFeed::agent_available), seated, false, flying, pending),
+        }
     }
+}
 
-    fn enabled(&self, world_knows_object: bool, pending: bool) -> bool {
-        world_knows_object && !pending
+pub(crate) fn object_sit_menu_item(
+    object: PickObject,
+    offset: Vec3,
+    sitting_on_target: bool,
+    world_knows_object: bool,
+    pending: bool,
+) -> SitMenuItem {
+    SitMenuItem {
+        label: if sitting_on_target { "Stand Up" } else { "Sit Here" },
+        request: if sitting_on_target { SitRequest::Stand } else { SitRequest::Object { id: object.id, offset } },
+        enabled: world_knows_object && !pending,
     }
 }
 
@@ -514,76 +517,83 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        SitControls, SitMenu, SitMenuEvent, SitRequest, SitToggle, ToggleAction, agent_request_sit_offset, sit_click_request,
-        sit_here_target,
+        SelfMenuPick, SitControls, SitMenu, SitMenuEvent, SitMenuTarget, SitRequest, agent_request_sit_offset, classify_self_menu_pick,
+        object_sit_menu_item, self_sit_menu_item, sit_click_request, sit_here_target,
     };
     use world::{CLICK_ACTION_DISABLED, CLICK_ACTION_SIT, Kind};
 
     #[test]
-    fn toggle_tracks_world_state() {
-        let mut toggle = SitToggle::default();
-        assert_eq!(toggle.label(false), "Sit Down");
-        assert_eq!(toggle.action(false, true), Some(ToggleAction::SitOnGround));
-        assert_eq!(toggle.label(true), "Stand Up");
-        assert_eq!(toggle.action(true, true), Some(ToggleAction::StandUp));
-        assert!(toggle.begin());
-        assert_eq!(toggle.action(false, true), None);
-        assert_eq!(toggle.action(true, true), None);
-        toggle.complete();
-        assert_eq!(toggle.action(false, true), Some(ToggleAction::SitOnGround));
+    fn self_menu_tracks_official_sit_and_stand_conditions() {
+        assert_eq!(self_sit_menu_item(false, false, false, false, false), None);
+
+        let sit_down = self_sit_menu_item(true, false, false, false, false).unwrap();
+        assert_eq!(sit_down.label, "Sit Down");
+        assert_eq!(sit_down.request, SitRequest::Ground);
+        assert!(sit_down.enabled);
+
+        let stand_up = self_sit_menu_item(true, true, true, true, false).unwrap();
+        assert_eq!(stand_up.label, "Stand Up");
+        assert_eq!(stand_up.request, SitRequest::Stand);
+        assert!(stand_up.enabled);
+
+        assert!(!self_sit_menu_item(true, false, false, true, false).unwrap().enabled);
+        assert!(!self_sit_menu_item(true, false, true, false, false).unwrap().enabled);
+        assert!(!self_sit_menu_item(true, false, false, false, true).unwrap().enabled);
     }
 
     #[test]
-    fn toggle_requires_agent_and_controls() {
-        let toggle = SitToggle::default();
-        assert!(!toggle.visible(false));
-        assert!(!toggle.enabled(false, true));
-        assert!(!toggle.enabled(true, false));
-        assert!(toggle.enabled(true, true));
-        assert_eq!(toggle.action(false, false), None);
+    fn self_menu_pick_matches_agent_uuid_and_routes_own_attachments() {
+        let agent_id = Uuid::from_u128(10);
+        let avatar = PickObject {
+            id: agent_id,
+            local_id: NonZeroU32::new(1).unwrap(),
+            kind: PickObjectKind::Avatar,
+            click_action: 0,
+            position: DVec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        };
+        assert_eq!(classify_self_menu_pick(avatar, agent_id, None), Some(SelfMenuPick::Avatar));
+        assert_eq!(classify_self_menu_pick(PickObject { id: Uuid::from_u128(11), ..avatar }, agent_id, Some(agent_id)), None);
+
+        let attachment = PickObject { id: Uuid::from_u128(12), kind: PickObjectKind::Prim, ..avatar };
+        assert_eq!(classify_self_menu_pick(attachment, agent_id, Some(agent_id)), Some(SelfMenuPick::Attachment));
+        assert_eq!(classify_self_menu_pick(attachment, agent_id, Some(Uuid::from_u128(13))), None);
     }
 
     #[test]
     fn sit_menu_stands_on_current_target() {
-        let menu = SitMenu {
-            object: PickObject {
-                id: Uuid::from_u128(9),
-                local_id: NonZeroU32::new(10).unwrap(),
-                kind: PickObjectKind::Prim,
-                click_action: 0,
-                position: DVec3::ZERO,
-                rotation: Quat::IDENTITY,
-                scale: Vec3::ONE,
-            },
-            root_id: Uuid::from_u128(9),
-            offset: Vec3::X,
-            position: egui::Pos2::ZERO,
-            popup_id: Id::NULL,
-        };
-        assert_eq!(menu.label(false), "Sit Here");
-        std::assert_matches!(menu.request(false), SitRequest::Object { id, offset } if id == Uuid::from_u128(9) && offset == Vec3::X);
-        assert_eq!(menu.label(true), "Stand Up");
-        std::assert_matches!(menu.request(true), SitRequest::Stand);
-        assert!(menu.enabled(true, false));
-        assert!(!menu.enabled(false, false));
-        assert!(!menu.enabled(true, true));
+        let object = test_object(9, PickObjectKind::Prim);
+        let sit_here = object_sit_menu_item(object, Vec3::X, false, true, false);
+        assert_eq!(sit_here.label, "Sit Here");
+        std::assert_matches!(sit_here.request, SitRequest::Object { id, offset } if id == object.id && offset == Vec3::X);
+        assert!(sit_here.enabled);
+
+        let stand_up = object_sit_menu_item(object, Vec3::X, true, true, false);
+        assert_eq!(stand_up.label, "Stand Up");
+        std::assert_matches!(stand_up.request, SitRequest::Stand);
+        assert!(stand_up.enabled);
+        assert!(!object_sit_menu_item(object, Vec3::X, false, false, false).enabled);
+        assert!(!object_sit_menu_item(object, Vec3::X, false, true, true).enabled);
     }
 
     fn test_sit_menu() -> SitMenu {
         SitMenu {
-            object: PickObject {
-                id: Uuid::from_u128(9),
-                local_id: NonZeroU32::new(10).unwrap(),
-                kind: PickObjectKind::Prim,
-                click_action: 0,
-                position: DVec3::ZERO,
-                rotation: Quat::IDENTITY,
-                scale: Vec3::ONE,
-            },
-            root_id: Uuid::from_u128(9),
-            offset: Vec3::X,
+            target: SitMenuTarget::Object { object: test_object(9, PickObjectKind::Prim), root_id: Uuid::from_u128(9), offset: Vec3::X },
             position: egui::Pos2::ZERO,
             popup_id: Id::NULL,
+        }
+    }
+
+    fn test_object(id: u128, kind: PickObjectKind) -> PickObject {
+        PickObject {
+            id: Uuid::from_u128(id),
+            local_id: NonZeroU32::new(10).unwrap(),
+            kind,
+            click_action: 0,
+            position: DVec3::ZERO,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
         }
     }
 

@@ -708,8 +708,7 @@ impl SceneWindow {
         let frame_times = self.frame_times.summary();
         self.dpi = self.window.scale_factor();
         let seated = self.feed.as_mut().is_some_and(SceneFeed::agent_is_seated);
-        let agent_available = self.feed.as_ref().is_some_and(SceneFeed::agent_available);
-        let controls_available = self.movement_available;
+        let flying = self.controls.is_flying();
         self.sit_controls.poll(now);
         let input = self.platform.take_egui_input(&self.window);
         let mut request_chat = false;
@@ -717,7 +716,7 @@ impl SceneWindow {
         let mut sit_request = None;
         let output = self.egui.run_ui(input, |root| {
             egui::Window::new("Rendering").default_width(400.0).show(root.ctx(), |ui| {
-                (request_chat, sit_request) = self.sit_controls.controls_ui(ui, seated, agent_available, controls_available);
+                request_chat = ui.button("Nearby chat (F6)").clicked();
                 if let Some(camera) = &mut self.camera {
                     ui.add(Slider::new(&mut camera.draw_distance, 32.0..=1024.0).text("Draw distance").suffix(" m"));
                     ui.add(Slider::new(&mut camera.lod_factor, 0.25..=4.0).text("LOD factor"))
@@ -847,7 +846,7 @@ impl SceneWindow {
                     recreate_renderer = ui.button("Recreate GPU resources").clicked();
                 });
             });
-            let menu_request = self.sit_controls.overlays(root.ctx(), now, self.feed.as_ref());
+            let menu_request = self.sit_controls.overlays(root.ctx(), now, self.feed.as_ref(), seated, flying);
             if sit_request.is_none() {
                 sit_request = menu_request;
             }

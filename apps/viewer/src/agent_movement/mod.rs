@@ -277,6 +277,10 @@ impl HeldControls {
         self.pressed != 0
     }
 
+    pub(crate) fn is_flying(&self) -> bool {
+        self.flying
+    }
+
     pub(crate) fn yaw(&self, shift: bool) -> f32 {
         if shift {
             return 0.0;

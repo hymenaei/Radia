@@ -64,10 +64,6 @@ pub(crate) fn self_sit_menu_item(
     Some(SitMenuItem { label, request, enabled })
 }
 
-pub(crate) fn seated_control_item(agent_available: bool, seated: bool, pending: bool) -> Option<SitMenuItem> {
-    (agent_available && seated).then_some(SitMenuItem { label: "Stand Up", request: SitRequest::Stand, enabled: !pending })
-}
-
 pub(super) fn sit_request_for_left_click(
     renderer: Option<&Renderer>,
     camera: Option<Camera>,
@@ -217,7 +213,6 @@ impl SitControls {
     ) -> Option<SitRequest> {
         self.reconcile_menu(feed);
         let mut request = None;
-        let menu_was_open = self.menu.is_some();
         if let Some(menu) = &self.menu {
             let menu = *menu;
             let item = menu.item(feed, seated, flying, self.pending);
@@ -250,18 +245,6 @@ impl SitControls {
         }
         if context.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.handle_menu_event(SitMenuEvent::Escape);
-        }
-        if let Some(item) = seated_control_item(feed.is_some_and(SceneFeed::agent_available), seated, self.pending) {
-            Area::new(Id::unique("radia-viewport-stand-control"))
-                .order(Order::Foreground)
-                .anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -54.0))
-                .show(context, |ui| {
-                    Frame::popup(ui.style()).show(ui, |ui| {
-                        if ui.add_enabled(item.enabled && !menu_was_open, Button::new(item.label)).clicked() {
-                            request = Some(item.request);
-                        }
-                    });
-                });
         }
         if self.notice.as_ref().is_some_and(|(_, expires)| now >= *expires) {
             self.notice = None;
@@ -522,7 +505,7 @@ mod tests {
 
     use super::{
         SelfMenuPick, SitControls, SitMenu, SitMenuEvent, SitMenuTarget, SitRequest, agent_request_sit_offset, classify_self_menu_pick,
-        object_sit_menu_item, seated_control_item, self_sit_menu_item, sit_click_request, sit_here_target,
+        object_sit_menu_item, self_sit_menu_item, sit_click_request, sit_here_target,
     };
     use world::{CLICK_ACTION_DISABLED, CLICK_ACTION_SIT, Kind};
 
@@ -543,18 +526,6 @@ mod tests {
         assert!(!self_sit_menu_item(true, false, false, true, false).unwrap().enabled);
         assert!(!self_sit_menu_item(true, false, true, false, false).unwrap().enabled);
         assert!(!self_sit_menu_item(true, false, false, false, true).unwrap().enabled);
-    }
-
-    #[test]
-    fn seated_control_only_shows_stand_while_seated() {
-        assert_eq!(seated_control_item(false, true, false), None);
-        assert_eq!(seated_control_item(true, false, false), None);
-
-        let stand_up = seated_control_item(true, true, false).unwrap();
-        assert_eq!(stand_up.label, "Stand Up");
-        assert_eq!(stand_up.request, SitRequest::Stand);
-        assert!(stand_up.enabled);
-        assert!(!seated_control_item(true, true, true).unwrap().enabled);
     }
 
     #[test]

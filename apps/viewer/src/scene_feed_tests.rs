@@ -56,7 +56,7 @@ fn world() -> World {
 }
 
 fn test_agent_control() -> crate::session::AgentControlHandle {
-    let (handle, state, _) = crate::session::AgentControlState::new();
+    let (handle, state, _, _) = crate::session::AgentControlState::new();
     drop(state);
     handle
 }

@@ -319,9 +319,12 @@ mod tests {
                     .iter()
                     .all(|operation| { matches!(operation, Some(super::ObjectOperation::Observe(_) | super::ObjectOperation::Patch(_))) })
             );
-            assert!(resolved.blocks.iter().all(|operation| {
-                matches!(operation, Some(super::ObjectOperation::Observe(observation)) if observation.click_action == Some(CLICK_ACTION_SIT))
-            }));
+            for operation in &resolved.blocks {
+                std::assert_matches!(
+                    operation,
+                    Some(super::ObjectOperation::Observe(observation)) if observation.click_action == Some(CLICK_ACTION_SIT)
+                );
+            }
         }
         reopened.close().await;
     }

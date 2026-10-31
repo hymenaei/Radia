@@ -703,6 +703,7 @@ mod tests {
         let start = Instant::now();
         let left = Key::Character("a".into());
         let mut controls = HeldControls::default();
+        controls.set_input_enabled(true);
         let mut grabs = ScriptControlGrabs::default();
         assert!(grabs.apply(true, YAW_POS, false));
 

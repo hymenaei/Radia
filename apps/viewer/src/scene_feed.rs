@@ -302,14 +302,11 @@ impl SceneFeed {
     }
 
     pub(crate) fn knows_pick(&self, pick: render::PickObject) -> bool {
-        self.view.objects().any(|object| {
-            let summary = object.detail().summary;
-            summary.id == pick.id && summary.address.local_id() == pick.local_id
-        })
+        self.picked_object(pick).is_some()
     }
 
     pub(crate) fn root_object_id(&self, id: Uuid) -> Option<Uuid> {
-        let mut object = self.view.objects().find(|object| object.detail().summary.id == id)?;
+        let mut object = self.view.object_by_id(id)?;
         loop {
             match object.detail().summary.parent {
                 Parent::Resolved(parent) => object = self.view.object(parent)?,
@@ -319,10 +316,7 @@ impl SceneFeed {
     }
 
     pub(crate) fn pick_root_click_action(&self, pick: render::PickObject) -> Option<(Kind, u8)> {
-        let mut object = self.view.objects().find(|object| {
-            let summary = object.detail().summary;
-            summary.id == pick.id && summary.address.local_id() == pick.local_id
-        })?;
+        let mut object = self.picked_object(pick)?;
         loop {
             let summary = object.detail().summary;
             match summary.parent {
@@ -330,6 +324,11 @@ impl SceneFeed {
                 Parent::Unknown | Parent::Root | Parent::Pending { .. } => return Some((summary.kind, summary.click_action)),
             }
         }
+    }
+
+    fn picked_object(&self, pick: render::PickObject) -> Option<&Object> {
+        let object = self.view.object_by_id(pick.id)?;
+        (object.detail().summary.address.local_id() == pick.local_id).then_some(object)
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]

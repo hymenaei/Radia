@@ -12,19 +12,17 @@ use render::scene::Camera;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::agent_movement::ScriptControlGrabs;
-use crate::session::agent_control::{AgentControlHandle, SitResponseState};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::{
-    agent_movement::MovementObservation,
+    agent_movement::{MovementObservation, ScriptControlGrabs},
     asset_coordinator::AssetHandle,
-    session::{AgentMotionSample, experience_environment::EnvironmentInbox},
+    session::{AgentMotionSample, agent_control::SitResponseState, experience_environment::EnvironmentInbox},
     world_reader::WorldReader,
 };
 use crate::{
     inventory::{FavoriteLocation, InventoryFetchHandle, favorite_store::FavoriteStoreError, favorites::FavoritesError},
     remembered_login::{CredentialStoreError, RememberedLogin},
-    session::ChatMessage,
+    session::{ChatMessage, agent_control::AgentControlHandle},
 };
 
 const MAX_PENDING_CHAT_MESSAGES: usize = 64;

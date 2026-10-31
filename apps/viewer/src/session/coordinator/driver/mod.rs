@@ -906,6 +906,7 @@ impl SessionDriver {
             world_reader: self.reads.reader(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             sit_response: self.sit_response.clone(),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             sit_control_grabs: self.control_grabs_sender.subscribe(),
         }));
     }

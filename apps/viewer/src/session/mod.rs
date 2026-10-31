@@ -13,8 +13,10 @@ mod region_lookup;
 mod terrain;
 mod world;
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(crate) use agent_control::SitCameraOverride;
 pub use agent_control::{AgentControlError, AgentControlHandle, SitOutcome};
-pub(crate) use agent_control::{AgentControlEvent, AgentControlState, SitCameraOverride, SitResponseState};
+pub(crate) use agent_control::{AgentControlEvent, AgentControlState, SitResponseState};
 pub(crate) use agent_motion::{AgentMotionPublisher, AgentMotionSample};
 pub(crate) use coordinator::{
     AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd,

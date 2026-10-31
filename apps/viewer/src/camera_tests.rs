@@ -431,6 +431,7 @@ fn ground_sitting_keys_orbit_the_camera() {
     let start = Instant::now();
     let pose = WorldPose { position: DVec3::new(20.0, 30.0, 40.0), rotation: Quat::IDENTITY };
     let mut controls = HeldControls::default();
+    controls.set_input_enabled(true);
     for key in ["a", "w", "e"] {
         controls.keyboard_event(&Key::Character(key.into()), ElementState::Pressed, false, false, true).expect("sitting key");
     }
@@ -465,6 +466,7 @@ fn object_sitting_without_offsets_orbits_the_camera() {
     let pose = WorldPose { position: DVec3::new(20.0, 30.0, 40.0), rotation: Quat::IDENTITY };
     let seat_id = Uuid::from_u128(10);
     let mut controls = HeldControls::default();
+    controls.set_input_enabled(true);
     for key in ["d", "s", "c"] {
         controls.keyboard_event(&Key::Character(key.into()), ElementState::Pressed, false, false, true).expect("sitting key");
     }
@@ -569,6 +571,7 @@ fn ground_orbit_resets_on_forward() {
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn assert_forward_camera_matches_facing(camera: &mut FollowCamera, pose: WorldPose, now: Instant) {
     let mut controls = HeldControls::default();
+    controls.set_input_enabled(true);
     let mut mode = CameraMode::Follow;
     let forward_key = Key::Character("w".into());
     assert_eq!(handle_keyboard_input(&mut controls, &mut mode, &forward_key, ElementState::Pressed, false, false, true), Some(true));
@@ -618,6 +621,7 @@ fn object_sit_camera_forwards_sitting_keys() {
     let seat_id = Uuid::from_u128(11);
     let sit_camera = SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) };
     let mut controls = HeldControls::default();
+    controls.set_input_enabled(true);
     for key in ["a", "w", "e"] {
         controls.keyboard_event(&Key::Character(key.into()), ElementState::Pressed, false, false, true).expect("sitting key");
     }

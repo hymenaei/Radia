@@ -450,6 +450,11 @@ mod tests {
         let mut controls = HeldControls::default();
         let jump = Key::Character("e".into());
         assert_eq!(controls.keyboard_event(&jump, ElementState::Pressed, false, false, false), None);
+        assert_eq!(controls.keyboard_event(&jump, ElementState::Pressed, false, false, true), None);
+        assert_eq!(
+            controls.sitting_actions(false, false, false, false, ScriptControlGrabs::default(), Instant::now()),
+            super::SittingActions::default()
+        );
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags, 0);
 
         controls.set_input_enabled(true);
@@ -516,6 +521,7 @@ mod tests {
     fn script_grabs_forward_controls_and_release_restores_orbit() {
         let start = Instant::now();
         let mut controls = HeldControls::default();
+        controls.set_input_enabled(true);
         controls.keyboard_event(&Key::Character("w".into()), ElementState::Pressed, false, false, true).expect("forward press");
         let mut grabs = ScriptControlGrabs::default();
         assert!(grabs.apply(true, AT_POS, false));
@@ -537,6 +543,7 @@ mod tests {
         let start = Instant::now();
         let key = Key::Character("a".into());
         let mut controls = HeldControls::default();
+        controls.set_input_enabled(true);
         controls.keyboard_event_at(&key, ElementState::Pressed, false, false, true, start).expect("left press");
 
         for (elapsed, expected) in [(Duration::ZERO, -SITTING_NUDGE_RATE), (Duration::from_millis(125), -0.525), (SITTING_NUDGE_TIME, -1.0)]
@@ -551,6 +558,7 @@ mod tests {
     fn sitting_modifier_keys_match_viewer_bindings() {
         let start = Instant::now();
         let mut controls = HeldControls::default();
+        controls.set_input_enabled(true);
         for key in ["a", "w", "e"] {
             controls.keyboard_event_at(&Key::Character(key.into()), ElementState::Pressed, false, false, true, start).expect("sitting key");
         }
@@ -585,6 +593,7 @@ mod tests {
     fn sitting_alt_vertical_respects_camera_and_grabs() {
         let start = Instant::now();
         let mut controls = HeldControls::default();
+        controls.set_input_enabled(true);
         for key in ["e", "c"] {
             controls
                 .keyboard_event_at(&Key::Character(key.into()), ElementState::Pressed, false, false, true, start)
@@ -593,6 +602,7 @@ mod tests {
 
         for (key, expected) in [("e", 1.0), ("c", -1.0)] {
             let mut orbiting = HeldControls::default();
+            orbiting.set_input_enabled(true);
             orbiting
                 .keyboard_event_at(&Key::Character(key.into()), ElementState::Pressed, false, false, true, start)
                 .expect("vertical key");
@@ -617,6 +627,7 @@ mod tests {
     fn always_run_forwards_turns_not_steps() {
         let start = Instant::now();
         let mut controls = HeldControls::default();
+        controls.set_input_enabled(true);
         controls.toggle_run();
         for key in ["a", "w"] {
             controls.keyboard_event_at(&Key::Character(key.into()), ElementState::Pressed, false, false, true, start).expect("sitting key");
@@ -634,6 +645,7 @@ mod tests {
     fn forwarded_sitting_movement_uses_viewer_nudge_then_normal_flags() {
         let start = Instant::now();
         let mut controls = HeldControls::default();
+        controls.set_input_enabled(true);
         controls.keyboard_event_at(&Key::Character("w".into()), ElementState::Pressed, false, false, true, start).expect("forward press");
 
         assert_eq!(controls.sitting_actions(false, false, false, true, ScriptControlGrabs::default(), start).control_flags, NUDGE_AT_POS);
@@ -643,6 +655,7 @@ mod tests {
         );
 
         let mut sliding = HeldControls::default();
+        sliding.set_input_enabled(true);
         sliding.keyboard_event_at(&Key::Character("a".into()), ElementState::Pressed, false, false, true, start).expect("slide press");
         assert_eq!(sliding.sitting_actions(true, false, false, false, ScriptControlGrabs::default(), start).control_flags, NUDGE_LEFT_POS);
     }
@@ -653,6 +666,7 @@ mod tests {
         let start = Instant::now();
         let forward = Key::Character("w".into());
         let mut controls = HeldControls::default();
+        controls.set_input_enabled(true);
         let mut grabs = ScriptControlGrabs::default();
         assert!(grabs.apply(true, AT_POS, false));
 
@@ -711,6 +725,7 @@ mod tests {
     fn releasing_controls_clears_sitting_camera_input() {
         let start = Instant::now();
         let mut controls = HeldControls::default();
+        controls.set_input_enabled(true);
         controls.keyboard_event_at(&Key::Character("w".into()), ElementState::Pressed, false, false, true, start).expect("forward press");
         controls.release_all();
         assert_eq!(

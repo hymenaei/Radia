@@ -63,6 +63,15 @@ pub(crate) enum KeyBinding {
     Stop,
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SittingRunMode {
+    Forward,
+    Backward,
+    SlideLeft,
+    SlideRight,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MovementObservation {
     pub(crate) control_flags: u32,
@@ -152,8 +161,12 @@ impl ScriptControlGrabs {
 pub(crate) struct HeldControls {
     pressed: u16,
     pressed_at: [Option<Instant>; 12],
+    processed_run_press: [Option<Instant>; 12],
+    last_run_tap: Option<(SittingRunMode, Instant)>,
     flying: bool,
     always_run: bool,
+    temporary_running: bool,
+    temporary_run_mode: Option<SittingRunMode>,
     stop_pending: bool,
     stop_sequence: u64,
 }
@@ -203,6 +216,16 @@ impl MovementKey {
     fn mask(self) -> u16 {
         1 << (self as u8)
     }
+
+    fn sitting_run_mode(self) -> Option<SittingRunMode> {
+        match self {
+            Self::Forward | Self::ForwardArrow => Some(SittingRunMode::Forward),
+            Self::Backward | Self::BackwardArrow => Some(SittingRunMode::Backward),
+            Self::TurnLeft | Self::TurnLeftArrow => Some(SittingRunMode::SlideLeft),
+            Self::TurnRight | Self::TurnRightArrow => Some(SittingRunMode::SlideRight),
+            Self::Jump | Self::JumpPage | Self::Down | Self::DownPage => None,
+        }
+    }
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -251,7 +274,14 @@ impl HeldControls {
         let binding = KeyBinding::from_key(key)?;
         if state == ElementState::Released {
             let changed = match binding {
-                KeyBinding::Movement(key) => self.set_pressed_at(key, false, now),
+                KeyBinding::Movement(key) => {
+                    let changed = self.set_pressed_at(key, false, now);
+                    if !self.always_run && key.sitting_run_mode().is_some_and(|mode| self.temporary_run_mode == Some(mode)) {
+                        self.temporary_running = false;
+                        self.temporary_run_mode = None;
+                    }
+                    changed
+                }
                 _ => false,
             };
             return Some((binding, changed));
@@ -291,17 +321,23 @@ impl HeldControls {
 
     pub(crate) fn toggle_run(&mut self) {
         self.always_run = !self.always_run;
+        if !self.always_run {
+            self.temporary_running = false;
+            self.temporary_run_mode = None;
+        }
     }
 
     pub(crate) fn stop(&mut self) {
         self.pressed = 0;
         self.pressed_at = [None; 12];
+        self.reset_sitting_run();
         self.request_stop();
     }
 
     pub(crate) fn release_all(&mut self) {
         self.pressed = 0;
         self.pressed_at = [None; 12];
+        self.reset_sitting_run();
         self.request_stop();
     }
 
@@ -363,11 +399,11 @@ impl HeldControls {
             control_flags |= STOP;
             self.stop_pending = false;
         }
-        MovementObservation { control_flags, body_rotation, always_run: self.always_run, stop_sequence: self.stop_sequence }
+        MovementObservation { control_flags, body_rotation, always_run: self.is_running(), stop_sequence: self.stop_sequence }
     }
 
     pub(crate) fn sitting_actions(
-        &self,
+        &mut self,
         shift: bool,
         alt: bool,
         control: bool,
@@ -421,6 +457,7 @@ impl HeldControls {
         }
         if shift {
             if left {
+                self.note_sitting_run_press(MovementKey::TurnLeft);
                 actions.control_flags |= if self.key_is_nudging(MovementKey::TurnLeft, MovementKey::TurnLeftArrow, now) {
                     NUDGE_LEFT_POS
                 } else {
@@ -428,17 +465,20 @@ impl HeldControls {
                 };
             }
             if right {
+                self.note_sitting_run_press(MovementKey::TurnRight);
                 actions.control_flags |= if self.key_is_nudging(MovementKey::TurnRight, MovementKey::TurnRightArrow, now) {
                     NUDGE_LEFT_NEG
                 } else {
                     LEFT_NEG | FAST_LEFT
                 };
             }
-        } else if sit_camera_enabled || grabs.contains(YAW_POS | YAW_NEG) || self.always_run {
+        } else if sit_camera_enabled || grabs.contains(YAW_POS | YAW_NEG) || self.is_running() {
             if left {
+                self.note_sitting_run_press(MovementKey::TurnLeft);
                 actions.control_flags |= YAW_POS;
             }
             if right {
+                self.note_sitting_run_press(MovementKey::TurnRight);
                 actions.control_flags |= YAW_NEG;
             }
         } else {
@@ -446,16 +486,18 @@ impl HeldControls {
             actions.camera.around -= self.key_rate(MovementKey::TurnLeft, MovementKey::TurnLeftArrow, now);
         }
 
-        if sit_camera_enabled || grabs.contains(AT_POS) {
+        if sit_camera_enabled || grabs.contains(AT_POS) || (self.temporary_running && !self.always_run) {
             if forward {
+                self.note_sitting_run_press(MovementKey::Forward);
                 actions.control_flags |=
                     if self.key_is_nudging(MovementKey::Forward, MovementKey::ForwardArrow, now) { NUDGE_AT_POS } else { AT_POS | FAST_AT };
             }
         } else {
             actions.camera.distance += self.key_rate(MovementKey::Forward, MovementKey::ForwardArrow, now);
         }
-        if sit_camera_enabled || grabs.contains(AT_NEG) {
+        if sit_camera_enabled || grabs.contains(AT_NEG) || (self.temporary_running && !self.always_run) {
             if backward {
+                self.note_sitting_run_press(MovementKey::Backward);
                 actions.control_flags |= if self.key_is_nudging(MovementKey::Backward, MovementKey::BackwardArrow, now) {
                     NUDGE_AT_NEG
                 } else {
@@ -488,7 +530,39 @@ impl HeldControls {
         let mut observation = self.observation(false, body_rotation);
         observation.control_flags &= FLY | STOP;
         observation.control_flags |= actions.control_flags;
+        observation.always_run = self.is_running();
         observation
+    }
+
+    fn is_running(&self) -> bool {
+        self.always_run || self.temporary_running
+    }
+
+    fn note_sitting_run_press(&mut self, key: MovementKey) {
+        let Some(pressed_at) = self.pressed_at[key as usize] else { return };
+        if self.processed_run_press[key as usize] == Some(pressed_at) {
+            return;
+        }
+        self.processed_run_press[key as usize] = Some(pressed_at);
+        if self.is_running() {
+            return;
+        }
+        let Some(mode) = key.sitting_run_mode() else { return };
+        let running = self
+            .last_run_tap
+            .is_some_and(|(last_mode, last_at)| last_mode == mode && pressed_at.saturating_duration_since(last_at) < SITTING_NUDGE_TIME);
+        self.last_run_tap = Some((mode, pressed_at));
+        if running {
+            self.temporary_running = true;
+            self.temporary_run_mode = Some(mode);
+        }
+    }
+
+    fn reset_sitting_run(&mut self) {
+        self.processed_run_press = [None; 12];
+        self.last_run_tap = None;
+        self.temporary_running = false;
+        self.temporary_run_mode = None;
     }
 
     fn key_rate(&self, first: MovementKey, second: MovementKey, now: Instant) -> f32 {
@@ -778,6 +852,42 @@ mod tests {
         let mut sliding = HeldControls::default();
         sliding.keyboard_event_at(&Key::Character("a".into()), ElementState::Pressed, false, false, true, start).expect("slide press");
         assert_eq!(sliding.sitting_actions(true, false, false, false, ScriptControlGrabs::default(), start).control_flags, NUDGE_LEFT_POS);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn sitting_double_tap_runs_until_release() {
+        let start = Instant::now();
+        let forward = Key::Character("w".into());
+        let mut controls = HeldControls::default();
+        let mut grabs = ScriptControlGrabs::default();
+        assert!(grabs.apply(true, AT_POS, false));
+
+        controls.keyboard_event_at(&forward, ElementState::Pressed, false, false, true, start).expect("first forward press");
+        let first = controls.sitting_actions(false, false, false, false, grabs, start);
+        assert_eq!(first.control_flags, NUDGE_AT_POS);
+        controls
+            .keyboard_event_at(&forward, ElementState::Released, false, false, true, start + Duration::from_millis(50))
+            .expect("first forward release");
+
+        controls
+            .keyboard_event_at(&forward, ElementState::Pressed, false, false, true, start + Duration::from_millis(150))
+            .expect("second forward press");
+        let second = controls.sitting_actions(false, false, false, false, grabs, start + Duration::from_millis(150));
+        assert_eq!(second.control_flags, NUDGE_AT_POS);
+        assert!(controls.sitting_observation(Quat::IDENTITY, second).always_run);
+
+        let without_grab =
+            controls.sitting_actions(false, false, false, false, ScriptControlGrabs::default(), start + Duration::from_millis(175));
+        assert_eq!(without_grab.control_flags, NUDGE_AT_POS);
+        assert_eq!(without_grab.camera.distance, 0.0);
+
+        controls
+            .keyboard_event_at(&forward, ElementState::Released, false, false, true, start + Duration::from_millis(200))
+            .expect("second forward release");
+        let stopped =
+            controls.sitting_actions(false, false, false, false, ScriptControlGrabs::default(), start + Duration::from_millis(200));
+        assert!(!controls.sitting_observation(Quat::IDENTITY, stopped).always_run);
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]

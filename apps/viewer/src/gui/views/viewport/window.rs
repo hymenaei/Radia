@@ -107,6 +107,7 @@ pub(super) struct SceneWindow {
     camera_mode: CameraMode,
     controls: HeldControls,
     body_rotation: BodyRotation,
+    sit_response_generation: Option<u64>,
     stop_clear_pending: bool,
     last_camera: Option<scene::Camera>,
     cursor: PhysicalPosition<f64>,
@@ -184,6 +185,7 @@ impl SceneWindow {
             camera_mode: CameraMode::Follow,
             controls: HeldControls::default(),
             body_rotation: BodyRotation::default(),
+            sit_response_generation: None,
             stop_clear_pending: false,
             last_camera: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
@@ -490,9 +492,11 @@ impl SceneWindow {
         let (pose, seed) = self.agent_pose_and_seed_at(now);
         self.ensure_camera(pose);
         let seated = self.feed.as_mut().is_some_and(SceneFeed::agent_is_seated);
-        if seated {
+        let sit_response_generation = self.feed.as_ref().and_then(SceneFeed::sit_response_generation);
+        if seated || sit_response_generation.is_some_and(|generation| Some(generation) != self.sit_response_generation) {
             self.controls.clear_flying();
         }
+        self.sit_response_generation = sit_response_generation;
         let body_rotation = self.body_rotation.update(seed, if seated { 0.0 } else { self.controls.yaw(self.modifiers.shift_key()) }, now);
         let rotation = if seated { pose.map_or(body_rotation, |pose| pose.rotation) } else { body_rotation };
         let movement: MovementObservation = self.controls.observation(self.modifiers.shift_key(), rotation);

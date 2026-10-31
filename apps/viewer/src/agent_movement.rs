@@ -334,7 +334,7 @@ mod tests {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     use winit::{event::ElementState, keyboard::Key};
 
-    use super::{AT_NEG, AT_POS, FAST_AT, FAST_LEFT, FAST_UP, FLY, LEFT_NEG, LEFT_POS, STOP, UP_NEG, UP_POS, YAW_NEG, YAW_POS};
+    use super::{AT_NEG, AT_POS, FAST_AT, FAST_LEFT, FAST_UP, FLY, LEFT_NEG, LEFT_POS, STAND_UP, STOP, UP_NEG, UP_POS, YAW_NEG, YAW_POS};
     use super::{BodyRotation, HeldControls, KeyBinding, MovementKey};
 
     #[test]
@@ -411,6 +411,20 @@ mod tests {
 
         controls.toggle_flying(true);
         assert_eq!(controls.observation(false, Quat::IDENTITY).control_flags & FLY, 0);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn seated_movement_keys_do_not_stand() {
+        let mut controls = HeldControls::default();
+        for (key, expected) in [("w", AT_POS | FAST_AT), ("e", UP_POS | FAST_UP)] {
+            let key = Key::Character(key.into());
+            controls.keyboard_event(&key, ElementState::Pressed, false, false, true).expect("seated movement press");
+            let flags = controls.observation(false, Quat::IDENTITY).control_flags;
+            assert_eq!(flags, expected);
+            assert_eq!(flags & STAND_UP, 0);
+            controls.keyboard_event(&key, ElementState::Released, false, false, true).expect("seated movement release");
+        }
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]

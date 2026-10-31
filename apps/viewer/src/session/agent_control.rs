@@ -53,7 +53,6 @@ impl Error for AgentControlError {}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SitOutcome {
     Accepted { auto_pilot: bool, force_mouselook: bool },
-    UnsupportedAutoPilot,
     Refused,
     TimedOut,
     Cancelled,
@@ -106,9 +105,11 @@ pub(crate) struct SitCameraOverride {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SitResponseState {
+    pub(crate) generation: u64,
     pub(crate) object_id: Uuid,
     pub(crate) requested_object_id: Uuid,
     pub(crate) camera_override: Option<SitCameraOverride>,
+    pub(crate) force_mouselook: bool,
 }
 
 #[derive(Debug)]
@@ -134,6 +135,7 @@ struct PendingSit {
 pub(crate) struct AgentControlState {
     commands: mpsc::Receiver<Command>,
     pending_sit: Option<PendingSit>,
+    next_sit_response_generation: u64,
     sit_response: watch::Sender<Option<SitResponseState>>,
 }
 
@@ -141,7 +143,11 @@ impl AgentControlState {
     pub(crate) fn new() -> (AgentControlHandle, Self, watch::Receiver<Option<SitResponseState>>) {
         let (sender, commands) = mpsc::channel(COMMAND_CAPACITY);
         let (sit_response, sit_updates) = watch::channel(None);
-        (AgentControlHandle { commands: sender }, Self { commands, pending_sit: None, sit_response }, sit_updates)
+        (
+            AgentControlHandle { commands: sender },
+            Self { commands, pending_sit: None, next_sit_response_generation: 0, sit_response },
+            sit_updates,
+        )
     }
 
     pub(crate) async fn next_event(&mut self) -> AgentControlEvent {
@@ -195,7 +201,9 @@ impl AgentControlState {
             return false;
         };
         let requested_object_id = pending.object_id;
-        self.set_sit_response(Some(SitResponseState { object_id, requested_object_id, camera_override }));
+        let generation = self.next_sit_response_generation;
+        self.next_sit_response_generation = generation.wrapping_add(1);
+        self.set_sit_response(Some(SitResponseState { generation, object_id, requested_object_id, camera_override, force_mouselook }));
         if let Some(pending) = self.pending_sit.take()
             && pending.reply.send(Ok(SitOutcome::Accepted { auto_pilot, force_mouselook })).is_err()
         {
@@ -361,6 +369,7 @@ pub(super) fn process_agent_control_command<T: SitTransport>(
                 }
                 return;
             }
+            camera.clear_flying();
             agent_control.cancel_sit(SitOutcome::Cancelled);
             agent_control.clear_sit_response_without_camera();
             if reply.send(Ok(())).is_err() {
@@ -420,33 +429,33 @@ pub(super) fn process_sit_response<T: SitTransport>(
         agent_control.fail_sit(AgentControlError::InvalidSitResponse);
         return;
     }
-    if response.auto_pilot {
-        agent_control.complete_sit(simulator, Ok(SitOutcome::UnsupportedAutoPilot));
+    if world.entity(response.object_id).and_then(|entity| world.object(entity)).is_none() {
+        tracing::debug!(simulator = simulator.get(), object = %response.object_id, "sit response references an unknown object");
+        agent_control.fail_sit(AgentControlError::InvalidSitResponse);
         return;
     }
     let Some((agent_id, session_id)) = active_agent else {
         agent_control.fail_sit(AgentControlError::SimulatorUnavailable);
         return;
     };
-    let sit = AgentSit { agent_id, session_id };
-    match transport.send_sit(sit, Delivery::Reliable) {
-        Ok(()) => {
-            tracing::debug!(simulator = simulator.get(), object = %response.object_id, "sent AgentSit");
-            if agent_control.accept_sit(
-                simulator,
-                response.object_id,
-                response.auto_pilot,
-                response.force_mouselook,
-                response.camera_override,
-            ) {
-                camera.clear_flying();
-                tracing::debug!(simulator = simulator.get(), object = %response.object_id, "sit outcome accepted");
+    if !response.auto_pilot {
+        match transport.send_sit(AgentSit { agent_id, session_id }, Delivery::Reliable) {
+            Ok(()) => tracing::debug!(simulator = simulator.get(), object = %response.object_id, "sent AgentSit"),
+            Err(error) => {
+                tracing::debug!(simulator = simulator.get(), %error, "sit acceptance could not be queued");
+                agent_control.fail_sit(AgentControlError::SendFailed);
+                return;
             }
         }
-        Err(error) => {
-            tracing::debug!(simulator = simulator.get(), %error, "sit acceptance could not be queued");
-            agent_control.fail_sit(AgentControlError::SendFailed);
-        }
+    }
+    if agent_control.accept_sit(simulator, response.object_id, response.auto_pilot, response.force_mouselook, response.camera_override) {
+        camera.clear_flying();
+        tracing::debug!(
+            simulator = simulator.get(),
+            object = %response.object_id,
+            auto_pilot = response.auto_pilot,
+            "sit outcome accepted"
+        );
     }
 }
 
@@ -564,12 +573,24 @@ mod tests {
 
         assert_eq!(
             *response.borrow(),
-            Some(SitResponseState { object_id, requested_object_id: object_id, camera_override: Some(camera_override) })
+            Some(SitResponseState {
+                generation: 0,
+                object_id,
+                requested_object_id: object_id,
+                camera_override: Some(camera_override),
+                force_mouselook: false,
+            })
         );
         state.clear_sit_response_without_camera();
         assert_eq!(
             *response.borrow(),
-            Some(SitResponseState { object_id, requested_object_id: object_id, camera_override: Some(camera_override) })
+            Some(SitResponseState {
+                generation: 0,
+                object_id,
+                requested_object_id: object_id,
+                camera_override: Some(camera_override),
+                force_mouselook: false,
+            })
         );
     }
 

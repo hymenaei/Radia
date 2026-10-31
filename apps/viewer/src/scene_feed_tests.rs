@@ -521,9 +521,11 @@ async fn pending_parent_does_not_block_flight() {
 
     let camera = SitCameraOverride { eye_offset: Vec3::new(2.0, 0.0, 1.0), at_offset: Vec3::new(0.0, 0.0, 1.0) };
     sit_response_sender.send_replace(Some(SitResponseState {
+        generation: 1,
         object_id: seat_id,
         requested_object_id: seat_id,
         camera_override: Some(camera),
+        force_mouselook: false,
     }));
     assert!(!feed.agent_is_seated(), "an accepted response does not mark the avatar seated before World confirms its parent");
     let mut pending_controls = HeldControls::default();
@@ -546,9 +548,11 @@ async fn pending_parent_does_not_block_flight() {
     );
 
     sit_response_sender.send_replace(Some(SitResponseState {
+        generation: 2,
         object_id: seat_id,
         requested_object_id: seat_id,
         camera_override: Some(camera),
+        force_mouselook: false,
     }));
     feed.drain().unwrap();
     assert!(feed.agent_is_seated(), "World parent state remains authoritative after stand is requested");

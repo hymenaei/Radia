@@ -341,6 +341,10 @@ impl SceneFeed {
         Some((seat_id, camera, pose))
     }
 
+    pub(crate) fn sit_response_generation(&self) -> Option<u64> {
+        (*self.sit_response.borrow()).map(|response| response.generation)
+    }
+
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {
         self.camera.send_if_modified(|previous| {
             if *previous == camera {

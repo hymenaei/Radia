@@ -16,6 +16,7 @@ use std::{
 };
 
 use assets::TextureHandle;
+use uuid::Uuid;
 use world::{Entity, Region, RegionSummary, TerrainPatch, TerrainPatchId, WorldRevision};
 
 use crate::scene::region_environment::RegionEnvironment;
@@ -139,6 +140,7 @@ impl Batch {
 pub(in crate::scene) struct Mirror {
     pub(in crate::scene) viewer_environment: Option<ViewerEnvironment>,
     pub(in crate::scene) objects: HashMap<Entity, Object>,
+    pub(in crate::scene) objects_by_id: HashMap<Uuid, Entity>,
     pub(in crate::scene) regions: BTreeMap<Region, RegionData>,
     pub(in crate::scene) environments: BTreeMap<Region, RegionEnvironment>,
     pub(in crate::scene) patches: BTreeMap<(Region, TerrainPatchId), Patch>,
@@ -178,7 +180,9 @@ impl Mirror {
         match change {
             Change::ViewerEnvironment(environment) => self.viewer_environment = environment,
             Change::Object(mut object) => {
-                if let Some(old) = self.objects.get(&object.detail().summary.entity) {
+                let entity = object.detail().summary.entity;
+                let id = object.detail().summary.id;
+                let previous_id = if let Some(old) = self.objects.get(&entity) {
                     object.inherit_animation_timing(old, now);
                     object.update_motion_from(old, now);
                     if old.geometry() == object.geometry() && object.preparation.is_none() {
@@ -188,12 +192,18 @@ impl Mirror {
                             object.materials = old.materials.clone();
                         }
                     }
+                    Some(old.detail().summary.id)
                 } else {
                     object.motion = super::motion::MotionState::new(
                         object.detail().motion_source.and_then(world::UpdateSource::motion_received_at).unwrap_or(now),
                     );
+                    None
+                };
+                if let Some(previous_id) = previous_id.filter(|previous_id| *previous_id != id) {
+                    self.objects_by_id.remove(&previous_id);
                 }
-                self.objects.insert(object.detail().summary.entity, object);
+                self.objects.insert(entity, object);
+                self.objects_by_id.insert(id, entity);
             }
             Change::Mesh(change) => self.apply_mesh(&change),
             Change::Material(change) => {
@@ -204,7 +214,9 @@ impl Mirror {
                 }
             }
             Change::Remove(entity) => {
-                self.objects.remove(&entity);
+                if let Some(object) = self.objects.remove(&entity) {
+                    self.objects_by_id.remove(&object.detail().summary.id);
+                }
             }
             Change::Region(region) => {
                 self.regions.insert(region.summary().region, region);

@@ -75,6 +75,7 @@ fn scene_with_world_with_agent(
         let position = if alpha == 255 { Vec3::new(10.0, y, 0.0) } else { Vec3::new(if id == 1 { 10.0 } else { 14.0 }, y * 0.35, 0.0) };
         object.pose = Some(Pose { position: Some(position), rotation: Some(Quat::IDENTITY) });
         object.scale = Some(scale);
+        object.click_action = Some(if id == 1 { world::CLICK_ACTION_SIT } else { 0 });
         object.shape = FieldUpdate::Set(Shape::Prim(shape));
         object.appearance = FieldUpdate::Set(Appearance::Surface);
         object.surface_appearance =

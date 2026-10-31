@@ -168,7 +168,8 @@ async fn loopback_simulator_receives_action_flags_camera_fields_and_focus_stop()
     let movement = controls.observation(false, Quat::IDENTITY);
     send_loopback(&mut uplink, simulator, agent_id, session_id, None::<Camera>, movement, &sender, destination, &mut sequence);
     let Message::AgentUpdate(_) = receive_packet(&receiver).await else { panic!("AgentUpdate before focus loss") };
-    let movement = controls.release_and_observe(Quat::IDENTITY);
+    controls.release_all();
+    let movement = controls.observation(false, Quat::IDENTITY);
     send_loopback(&mut uplink, simulator, agent_id, session_id, None::<Camera>, movement, &sender, destination, &mut sequence);
     let Message::AgentUpdate(update) = receive_packet(&receiver).await else { panic!("focus-loss AgentUpdate") };
     assert_eq!(update.agent_data.control_flags, 0x0000_6000);
@@ -186,6 +187,7 @@ fn space_stop_reaches_agent_update() {
     let session_id = Uuid::from_u128(2);
     let camera = view(DVec3::ZERO, Vec3::X);
     let mut controls = HeldControls::default();
+    controls.set_input_enabled(true);
     assert_eq!(
         controls.keyboard_event(&Key::Named(NamedKey::Space), ElementState::Pressed, false, false, false),
         Some((KeyBinding::Stop, true))
@@ -249,6 +251,7 @@ async fn visible_region_origin_wakes_live_camera_and_forwards_held_key() {
     assert_eq!(world.world().entity(agent_id), None, "the self avatar has not resolved in World");
 
     let mut controls = HeldControls::default();
+    controls.set_input_enabled(true);
     let (binding, changed) =
         controls.keyboard_event(&Key::Character("w".into()), ElementState::Pressed, false, false, false).expect("forward key binding");
     assert_eq!(binding, KeyBinding::Movement(MovementKey::Forward));
@@ -566,6 +569,30 @@ async fn disconnected_uplink_suspends_keepalive_until_reconnect() {
     assert!(uplink.next_tick().now_or_never().is_some(), "a newly connected primary wakes the uplink");
     uplink.tick_with(destination, Some(DVec3::ZERO), Some(camera), Some(movement), &mut send);
     assert_eq!(sent.get(), 4, "the current state is resent when a destination returns");
+}
+
+#[test]
+fn movement_availability_tracks_session_state() {
+    let simulator = simulator_id();
+    let mut uplink = CameraUplink::new();
+    let mut availability = uplink.movement_availability();
+    let movement =
+        crate::agent_movement::MovementObservation { control_flags: 0, body_rotation: Quat::IDENTITY, always_run: false, stop_sequence: 0 };
+    assert!(!*availability.borrow_and_update());
+
+    uplink.tick_with(
+        Some((simulator, Uuid::nil(), Uuid::nil())),
+        Some(DVec3::ZERO),
+        Some(view(DVec3::ZERO, Vec3::X)),
+        Some(movement),
+        |_, _| Ok(()),
+    );
+    assert!(availability.has_changed().unwrap());
+    assert!(*availability.borrow_and_update());
+
+    uplink.tick_with(None, Some(DVec3::ZERO), None, Some(movement), |_, _| Ok(()));
+    assert!(availability.has_changed().unwrap());
+    assert!(!*availability.borrow_and_update());
 }
 
 #[tokio::test(start_paused = true)]

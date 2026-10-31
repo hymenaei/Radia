@@ -796,6 +796,8 @@ impl SessionDriver {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             movement: self.camera.movement_sender(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
+            movement_availability: self.camera.movement_availability(),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             agent_motion: self.agent_motion.receiver(),
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             motion_circuits: self.region_motion_sender.subscribe(),

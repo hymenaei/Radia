@@ -72,6 +72,8 @@ pub use update::{
 };
 
 const MAX_OBJECT_MEDIA_BYTES: usize = 64 * 1024 * 1024;
+pub const CLICK_ACTION_DISABLED: u8 = 8;
+pub const CLICK_ACTION_SIT: u8 = 1;
 
 pub struct World {
     id: WorldId,

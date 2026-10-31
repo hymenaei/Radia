@@ -30,6 +30,7 @@ impl WorldChangeClasses {
     pub const SHAPE: Self = Self(1 << 4);
     pub const APPEARANCE: Self = Self(1 << 5);
     pub const MEDIA: Self = Self(1 << 6);
+    pub const INTERACTION: Self = Self(1 << 7);
 
     pub const fn is_empty(self) -> bool {
         self.0 == 0

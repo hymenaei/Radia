@@ -160,6 +160,7 @@ pub enum FieldGroup {
     PbrMaterials,
     ObjectMedia,
     SitTarget,
+    ClickAction,
     AvatarAppearance,
     PbrMaterialOverrides,
 }
@@ -243,6 +244,7 @@ pub struct ObjectObservation {
     pub angular_velocity: Option<Vec3>,
     pub is_physical: Option<bool>,
     pub time_dilation: Option<f32>,
+    pub click_action: Option<u8>,
     pub scale: Option<Vec3>,
     pub attachment_point: FieldUpdate<AttachmentPoint>,
     pub shape: FieldUpdate<Shape>,
@@ -265,6 +267,7 @@ impl ObjectObservation {
             angular_velocity: None,
             is_physical: None,
             time_dilation: None,
+            click_action: None,
             scale: None,
             attachment_point: FieldUpdate::Keep,
             shape: FieldUpdate::Keep,

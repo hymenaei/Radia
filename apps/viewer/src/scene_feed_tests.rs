@@ -55,6 +55,12 @@ fn world() -> World {
     })
 }
 
+fn test_agent_control() -> crate::session::AgentControlHandle {
+    let (handle, state, _, _) = crate::session::AgentControlState::new();
+    drop(state);
+    handle
+}
+
 fn advance_scene(world: &World, scene: &mut Reconciler, sender: &mpsc::Sender<Batch>, feed: &mut SceneFeed) {
     scene.notify_world_change();
     let now = Instant::now();
@@ -284,11 +290,13 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
         view,
         budget,
         assets: assets.handle(),
+        agent_control: test_agent_control(),
         agent_id,
         agent: None,
         water_height: None,
         camera: watch::channel(None).0,
         movement: watch::channel(None).0,
+        movement_availability: watch::channel(false).1,
         agent_motion,
         motion_circuits: watch::channel(Vec::new()).1,
         motion_circuit_scratch: Vec::new(),
@@ -362,11 +370,13 @@ async fn terrain_clamp_respects_parenting() {
         view,
         budget,
         assets: assets.handle(),
+        agent_control: test_agent_control(),
         agent_id: agent,
         agent: None,
         water_height: None,
         camera,
         movement: watch::channel(None).0,
+        movement_availability: watch::channel(false).1,
         agent_motion,
         motion_circuits: watch::channel(Vec::new()).1,
         motion_circuit_scratch: Vec::new(),
@@ -496,11 +506,13 @@ async fn pending_parent_does_not_block_flight() {
         view,
         budget,
         assets: assets.handle(),
+        agent_control: test_agent_control(),
         agent_id,
         agent: None,
         water_height: None,
         camera: watch::channel(None).0,
         movement: watch::channel(None).0,
+        movement_availability: watch::channel(false).1,
         agent_motion,
         motion_circuits: watch::channel(Vec::new()).1,
         motion_circuit_scratch: Vec::new(),
@@ -655,13 +667,16 @@ async fn pending_asset_preserves_scene() {
     let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
     let (_sit_response_sender, sit_response) = watch::channel(None);
+    let (_movement_availability_sender, movement_availability) = watch::channel(false);
     let (_sit_control_grab_sender, sit_control_grabs) = watch::channel(Default::default());
     let (_stand_pending_sender, stand_pending) = watch::channel(false);
     let mut feed = SceneFeed::start(
         SceneSources { reader: reads.reader(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
         Uuid::from_u128(2),
+        test_agent_control(),
         watch::channel(None).0,
         watch::channel(None).0,
+        movement_availability,
         agent_motion,
         sit_response,
         stand_pending,
@@ -720,13 +735,16 @@ async fn stalled_publication_preserves_intake() {
     let (pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
     let (_sit_response_sender, sit_response) = watch::channel(None);
+    let (_movement_availability_sender, movement_availability) = watch::channel(false);
     let (_sit_control_grab_sender, sit_control_grabs) = watch::channel(Default::default());
     let (_stand_pending_sender, stand_pending) = watch::channel(false);
     let mut feed = SceneFeed::start(
         SceneSources { reader: reader.clone(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
         Uuid::from_u128(1),
+        test_agent_control(),
         watch::channel(None).0,
         watch::channel(None).0,
+        movement_availability,
         agent_motion,
         sit_response,
         stand_pending,

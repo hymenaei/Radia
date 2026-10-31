@@ -562,6 +562,8 @@ impl LoginScreen {
     fn apply_session_ready(&mut self, ready: SessionReadyUpdate, cx: &mut Context<Self>) {
         let session = ready.session;
         let agent_control = ready.agent_control;
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let viewport_agent_control = agent_control.clone();
         let region_name = ready.region_name;
         let inventory_updates = ready.inventory_updates;
         let inventory_fetch = ready.inventory_fetch;
@@ -603,8 +605,10 @@ impl LoginScreen {
             ready.environments,
             &ready.assets,
             session.agent_id,
+            viewport_agent_control,
             ready.camera,
             ready.movement,
+            ready.movement_availability,
             ready.agent_motion,
             ready.motion_circuits,
             ready.sit_response,

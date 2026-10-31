@@ -168,6 +168,8 @@ pub(crate) struct SessionReadyUpdate {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) movement: watch::Sender<Option<MovementObservation>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) movement_availability: watch::Receiver<bool>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<network::CircuitMotionStatus>)>>,

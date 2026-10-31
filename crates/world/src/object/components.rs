@@ -44,6 +44,7 @@ pub(crate) struct Fences {
     pub(crate) angular_velocity: Option<FieldStamp>,
     pub(crate) is_physical: Option<FieldStamp>,
     pub(crate) time_dilation: Option<FieldStamp>,
+    pub(crate) click_action: Option<FieldStamp>,
     pub(crate) scale: Option<FieldStamp>,
     pub(crate) parent: Option<FieldStamp>,
     pub(crate) attachment_point: Option<FieldStamp>,
@@ -101,6 +102,7 @@ pub(crate) struct ObjectState {
     pub(crate) angular_velocity: Option<Vec3>,
     pub(crate) is_physical: bool,
     pub(crate) time_dilation: f32,
+    pub(crate) click_action: u8,
     pub(crate) motion_source: Option<UpdateSource>,
     pub(crate) attachment_point: Option<AttachmentPoint>,
     pub(crate) frame_generation: u64,
@@ -119,6 +121,7 @@ impl ObjectState {
             angular_velocity: None,
             is_physical: false,
             time_dilation: 1.0,
+            click_action: 0,
             motion_source: None,
             attachment_point: None,
             frame_generation: 0,
@@ -172,6 +175,7 @@ impl ObjectOrdering {
         self.fences.angular_velocity = None;
         self.fences.is_physical = None;
         self.fences.time_dilation = None;
+        self.fences.click_action = None;
         self.fences.scale = None;
         self.fences.parent = None;
         self.fences.attachment_point = None;

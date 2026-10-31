@@ -6,6 +6,7 @@ use std::{
     time::Instant,
 };
 
+use uuid::Uuid;
 use world::{Entity, Region, WorldRevision};
 
 use super::{Batch, Change, MeshChange, Mirror, SceneLifetime, Status};
@@ -208,6 +209,10 @@ impl SceneView {
     pub fn object(&self, entity: Entity) -> Option<&Object> {
         if self.session.is_active() { self.mirror.objects.get(&entity) } else { None }
     }
+    pub fn object_by_id(&self, id: Uuid) -> Option<&Object> {
+        let entity = *self.mirror.objects_by_id.get(&id)?;
+        self.object(entity)
+    }
     pub fn regions(&self) -> impl Iterator<Item = &RegionData> {
         self.mirror.regions.values().filter(|_| self.session.is_active())
     }
@@ -257,9 +262,15 @@ impl SceneView {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU32;
+
     use super::*;
     use math::DVec3;
-    use world::{RegionInfo, RegionSummary, TERRAIN_PATCH_SAMPLES, TerrainPatch};
+    use uuid::Uuid;
+    use world::{
+        Kind, ObjectObservation, OrderEvidence, ParentUpdate, RegionInfo, RegionSummary, TERRAIN_PATCH_SAMPLES, TerrainPatch, UpdateSource,
+        World, WorldLimits,
+    };
 
     use crate::scene::model::SceneLifetime;
     use crate::scene::{Budget, Reconciler};
@@ -329,5 +340,60 @@ mod tests {
         let view = terrain_view(&[(region, DVec3::ZERO)], &[(region, 1, 0, 7.0)]);
 
         assert_eq!(view.terrain_height_at(DVec3::new(20.0, 15.0, 0.0)), Some(7.0));
+    }
+
+    #[test]
+    fn object_id_index_tracks_removal() {
+        let region = Region::new(31);
+        let id = Uuid::from_u128(31);
+        let mut world = World::new(WorldLimits {
+            max_region_registrations: 1,
+            max_entities: 1,
+            max_entities_per_region: 1,
+            max_tombstones_per_region: 1,
+            max_tombstones: 1,
+            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(1),
+            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(1),
+            max_journal_entries: 8,
+            max_journal_changes: 16,
+            max_region_name_bytes: 64,
+            max_recovery_targets: 1,
+        });
+        let _region = world.adopt_region(region).expect("test region is accepted");
+        let _object = world
+            .observe_object(ObjectObservation::new(
+                UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
+                id,
+                NonZeroU32::new(17).expect("test local id is nonzero"),
+                Kind::Object,
+                ParentUpdate::Root,
+            ))
+            .expect("test object is accepted");
+        let entity = world.entity(id).expect("world indexes the observed object");
+        let detail = world.object_detail(entity).expect("object detail is available");
+        let budget = Budget::default();
+        let lease = budget.reserve(size_of::<world::ObjectDetail>() + detail.owned_bytes()).expect("test detail fits budget");
+        let object = Object::new(detail, lease);
+        let mut view = SceneView::new(SceneLifetime::new());
+
+        let observation = test_batch(&view, vec![Change::Object(object)]);
+        view.apply(observation).expect("object observation applies through the view");
+        assert_eq!(view.object_by_id(id).map(|object| object.detail().summary.entity), Some(entity));
+        let removal = test_batch(&view, vec![Change::Remove(entity)]);
+        view.apply(removal).expect("object removal applies through the view");
+        assert_eq!(view.object_by_id(id).map(|object| object.detail().summary.id), None);
+    }
+
+    fn test_batch(view: &SceneView, changes: Vec<Change>) -> Batch {
+        let (_, delivery) = crate::scene::model::Receipt::new();
+        Batch {
+            session: view.session.clone(),
+            sequence: view.sequence + 1,
+            revision: None,
+            status: Status::Ready,
+            replace: false,
+            changes,
+            delivery,
+        }
     }
 }

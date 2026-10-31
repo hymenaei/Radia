@@ -24,6 +24,7 @@ pub(crate) struct CameraUplink {
     observations: watch::Receiver<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
     movements: watch::Receiver<Option<MovementObservation>>,
+    movement_availability: watch::Sender<bool>,
     last_sent: Option<SentState>,
     last_camera: Option<LastCamera>,
     availability: Option<MovementAvailability>,
@@ -69,11 +70,13 @@ impl CameraUplink {
     pub(crate) fn new() -> Self {
         let (camera, observations) = watch::channel(None);
         let (movement, movements) = watch::channel(None);
+        let (movement_availability, _) = watch::channel(false);
         Self {
             camera,
             observations,
             movement,
             movements,
+            movement_availability,
             last_sent: None,
             last_camera: None,
             availability: None,
@@ -92,6 +95,10 @@ impl CameraUplink {
 
     pub(crate) fn movement_sender(&self) -> watch::Sender<Option<MovementObservation>> {
         self.movement.clone()
+    }
+
+    pub(crate) fn movement_availability(&self) -> watch::Receiver<bool> {
+        self.movement_availability.subscribe()
     }
 
     pub(crate) fn request_update(&self) {
@@ -283,6 +290,15 @@ impl CameraUplink {
     }
 
     fn report_availability(&mut self, availability: MovementAvailability) {
+        let available = matches!(availability, MovementAvailability::Available);
+        self.movement_availability.send_if_modified(|current| {
+            if *current == available {
+                false
+            } else {
+                *current = available;
+                true
+            }
+        });
         if self.availability != Some(availability) {
             self.availability = Some(availability);
             match availability {

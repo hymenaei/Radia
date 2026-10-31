@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use winit::window::Window;
+
 const FRAME_WORK_SAMPLES: usize = 120;
 
 pub(super) struct FrameTimes {
@@ -52,6 +54,11 @@ pub(super) fn next_frame_deadline(deadline: Instant, completed: Instant, interva
 
 pub(super) fn refresh_interval(millihertz: Option<u32>, fallback: Duration) -> Duration {
     millihertz.filter(|rate| *rate > 0).map(|rate| Duration::from_nanos(1_000_000_000_000 / u64::from(rate))).unwrap_or(fallback)
+}
+
+pub(super) fn display_refresh_interval(window: &Window, fallback: Duration) -> Duration {
+    let millihertz = window.current_monitor().and_then(|monitor| monitor.refresh_rate_millihertz());
+    refresh_interval(millihertz, fallback)
 }
 
 pub(super) fn redraw_interval(display: Duration, focused: bool, movement_pending: bool) -> Duration {

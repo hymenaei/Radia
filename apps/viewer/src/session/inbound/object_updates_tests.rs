@@ -77,6 +77,40 @@ fn motion_updates_preserve_physics_and_time_dilation_fields() {
 }
 
 #[test]
+fn click_action_survives_full_compressed_and_cached_updates() {
+    for (sequence, fixture) in [vectors::OBJECT_UPDATE, vectors::OBJECT_UPDATE_COMPRESSED_TYPED].into_iter().enumerate() {
+        let sequence = u32::try_from(sequence + 1).expect("two fixture sequences fit u32");
+        let mut update = packet(fixture).message().clone();
+        let reference = match &mut update {
+            Message::ObjectUpdate(update) => {
+                update.objects.truncate(1);
+                let object = update.objects.first_mut().expect("full fixture has an object");
+                object.click_action = world::CLICK_ACTION_SIT;
+                CachedObjectReference { local_id: object.local_id, crc: object.crc, update_flags: object.update_flags }
+            }
+            Message::ObjectUpdateCompressed(update) => {
+                update.objects.truncate(1);
+                let object = update.objects.first_mut().expect("compressed fixture has an object");
+                object.click_action = world::CLICK_ACTION_SIT;
+                CachedObjectReference { local_id: object.local_id, crc: object.crc, update_flags: object.update_flags }
+            }
+            _ => panic!("fixture should be a full or compressed update"),
+        };
+        let order = u64::from(sequence);
+        let batch = decode_object_message(REGION, sequence, OrderEvidence::Ordered(order), &update).expect("object batch");
+        let Some(ObjectOperation::Observe(observation)) = batch.blocks.first().and_then(Option::as_ref) else {
+            panic!("expected a full object observation")
+        };
+        assert_eq!(observation.click_action, Some(world::CLICK_ACTION_SIT));
+
+        let mut invalid_fields = 0;
+        let cached = decode_cached_object(REGION, sequence, OrderEvidence::Ordered(order), 0, reference, &update, &mut invalid_fields);
+        let Some(ObjectOperation::Observe(observation)) = cached else { panic!("expected a cached object observation") };
+        assert_eq!(observation.click_action, Some(world::CLICK_ACTION_SIT));
+    }
+}
+
+#[test]
 fn malformed_terse_block_does_not_discard_later_object() {
     let fixture = packet(vectors::IMPROVED_TERSE_OBJECT_UPDATE);
     let Message::ImprovedTerseObjectUpdate(update) = fixture.message() else { panic!("expected terse fixture") };

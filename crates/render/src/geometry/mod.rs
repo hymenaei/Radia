@@ -38,7 +38,7 @@ use crate::{
     texture::{TextureCompletion, TextureJob, TextureState, Textures},
 };
 
-pub use pick::PickError;
+pub use pick::{PickError, PickHit, PickObject, PickObjectKind, PickTarget};
 
 const MESH_BYTES: usize = 64 * 1024 * 1024;
 const DEPTH_BYTES: usize = 128 * 1024 * 1024;

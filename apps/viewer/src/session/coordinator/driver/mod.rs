@@ -443,15 +443,7 @@ impl SessionDriver {
     }
 
     fn handle_sit_response(&mut self, simulator: SimulatorId, message: &Message) {
-        agent_control::process_sit_response(
-            &self.session_handle,
-            &mut self.agent_control,
-            &mut self.camera,
-            self.session_world.world(),
-            simulator,
-            self.active_session.as_ref().map(|session| (session.agent_id, session.session_id)),
-            message,
-        );
+        agent_control::process_sit_response(&mut self.agent_control, &mut self.camera, self.session_world.world(), simulator, message);
     }
 
     fn handle_agent_sit_animation(&mut self, simulator: SimulatorId, received_at: std::time::Instant, message: &Message) {

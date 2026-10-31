@@ -5,7 +5,7 @@ use network::{Delivery, SessionHandle, SimulatorId};
 use protocol::{
     lludp::{FieldValue, Message},
     messages::{
-        AgentRequestSit, AgentSit,
+        AgentRequestSit,
         agent::agent_request_sit::{AgentData as SitAgentData, TargetObject},
     },
 };
@@ -301,23 +301,17 @@ fn linkset_root(world: &World, object_id: Uuid) -> Option<Uuid> {
     None
 }
 
-pub(super) trait SitTransport {
-    fn send_request(&self, request: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error>;
-
-    fn send_sit(&self, sit: AgentSit, delivery: Delivery) -> Result<(), network::Error>;
+pub(super) trait SitRequestTransport {
+    fn send_request(&self, request: AgentRequestSit) -> Result<(), network::Error>;
 }
 
-impl SitTransport for SessionHandle {
-    fn send_request(&self, request: AgentRequestSit, delivery: Delivery) -> Result<(), network::Error> {
-        self.send(request, delivery)
-    }
-
-    fn send_sit(&self, sit: AgentSit, delivery: Delivery) -> Result<(), network::Error> {
-        self.send(sit, delivery)
+impl SitRequestTransport for SessionHandle {
+    fn send_request(&self, request: AgentRequestSit) -> Result<(), network::Error> {
+        self.send(request, Delivery::Reliable)
     }
 }
 
-pub(super) fn process_agent_control_command<T: SitTransport>(
+pub(super) fn process_agent_control_command<T: SitRequestTransport>(
     transport: &T,
     agent_control: &mut AgentControlState,
     camera: &mut crate::session::CameraUplink,
@@ -343,7 +337,7 @@ pub(super) fn process_agent_control_command<T: SitTransport>(
                 agent_data: SitAgentData { agent_id, session_id },
                 target_object: TargetObject { target_id: object_id, offset },
             };
-            match transport.send_request(request, Delivery::Reliable) {
+            match transport.send_request(request) {
                 Ok(()) => {
                     tracing::debug!(simulator = simulator.get(), target = %object_id, offset = ?offset, "sent AgentRequestSit");
                     agent_control.begin_sit(object_id, simulator, reply);
@@ -398,13 +392,11 @@ pub(super) fn process_agent_control_command<T: SitTransport>(
     }
 }
 
-pub(super) fn process_sit_response<T: SitTransport>(
-    transport: &T,
+pub(super) fn process_sit_response(
     agent_control: &mut AgentControlState,
     camera: &mut crate::session::CameraUplink,
     world: &World,
     simulator: SimulatorId,
-    active_agent: Option<(Uuid, Uuid)>,
     message: &Message,
 ) {
     let Some(response) = decode_sit_response(message) else {
@@ -433,20 +425,6 @@ pub(super) fn process_sit_response<T: SitTransport>(
         tracing::debug!(simulator = simulator.get(), object = %response.object_id, "sit response references an unknown object");
         agent_control.fail_sit(AgentControlError::InvalidSitResponse);
         return;
-    }
-    let Some((agent_id, session_id)) = active_agent else {
-        agent_control.fail_sit(AgentControlError::SimulatorUnavailable);
-        return;
-    };
-    if !response.auto_pilot {
-        match transport.send_sit(AgentSit { agent_id, session_id }, Delivery::Reliable) {
-            Ok(()) => tracing::debug!(simulator = simulator.get(), object = %response.object_id, "sent AgentSit"),
-            Err(error) => {
-                tracing::debug!(simulator = simulator.get(), %error, "sit acceptance could not be queued");
-                agent_control.fail_sit(AgentControlError::SendFailed);
-                return;
-            }
-        }
     }
     if agent_control.accept_sit(simulator, response.object_id, response.auto_pilot, response.force_mouselook, response.camera_override) {
         camera.clear_flying();

@@ -376,9 +376,24 @@ mod tests {
         let object = Object::new(detail, lease);
         let mut view = SceneView::new(SceneLifetime::new());
 
-        view.mirror.apply(Change::Object(object));
+        let observation = test_batch(&view, vec![Change::Object(object)]);
+        view.apply(observation).expect("object observation applies through the view");
         assert_eq!(view.object_by_id(id).map(|object| object.detail().summary.entity), Some(entity));
-        view.mirror.apply(Change::Remove(entity));
+        let removal = test_batch(&view, vec![Change::Remove(entity)]);
+        view.apply(removal).expect("object removal applies through the view");
         assert_eq!(view.object_by_id(id).map(|object| object.detail().summary.id), None);
+    }
+
+    fn test_batch(view: &SceneView, changes: Vec<Change>) -> Batch {
+        let (_, delivery) = crate::scene::model::Receipt::new();
+        Batch {
+            session: view.session.clone(),
+            sequence: view.sequence + 1,
+            revision: None,
+            status: Status::Ready,
+            replace: false,
+            changes,
+            delivery,
+        }
     }
 }

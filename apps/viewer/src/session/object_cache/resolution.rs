@@ -253,12 +253,12 @@ mod tests {
     use storage::sqlite::SqliteBatch;
     use tokio::runtime::Builder;
     use uuid::Uuid;
+    use world::CLICK_ACTION_SIT;
 
     use super::*;
     use crate::session::inbound::decode_object_message;
     use crate::session::object_cache::ObjectCacheEvent;
     use crate::session::object_cache::test_support::*;
-    use world::CLICK_ACTION_SIT;
     #[tokio::test]
     async fn full_and_compressed_payloads_survive_restart_and_resolve_as_hits() {
         let directory = tempfile::tempdir().expect("create isolated cache directory");

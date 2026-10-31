@@ -90,6 +90,8 @@ pub(crate) struct SittingCameraInput {
     pub(crate) around: f32,
     pub(crate) over: f32,
     pub(crate) distance: f32,
+    pub(crate) pan_horizontal: f32,
+    pub(crate) pan_vertical: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -418,6 +420,13 @@ impl HeldControls {
         let backward = self.is_pressed(MovementKey::Backward) || self.is_pressed(MovementKey::BackwardArrow);
         let up = self.is_pressed(MovementKey::Jump) || self.is_pressed(MovementKey::JumpPage);
         let down = self.is_pressed(MovementKey::Down) || self.is_pressed(MovementKey::DownPage);
+        if control && alt && shift {
+            actions.camera.pan_horizontal += self.key_rate(MovementKey::TurnLeft, MovementKey::TurnLeftArrow, now);
+            actions.camera.pan_horizontal -= self.key_rate(MovementKey::TurnRight, MovementKey::TurnRightArrow, now);
+            actions.camera.pan_vertical += self.key_rate(MovementKey::Forward, MovementKey::ForwardArrow, now);
+            actions.camera.pan_vertical -= self.key_rate(MovementKey::Backward, MovementKey::BackwardArrow, now);
+            return actions;
+        }
         if control && alt && !shift {
             actions.camera.over += self.key_rate(MovementKey::Jump, MovementKey::JumpPage, now).max(self.key_rate(
                 MovementKey::Forward,
@@ -777,16 +786,28 @@ mod tests {
         }
 
         let alt = controls.sitting_actions(false, true, false, false, ScriptControlGrabs::default(), start + SITTING_NUDGE_TIME);
-        assert_eq!(alt.camera, super::SittingCameraInput { around: -1.0, over: 1.0, distance: 1.0 });
+        assert_eq!(alt.camera.around, -1.0);
+        assert_eq!(alt.camera.over, 1.0);
+        assert_eq!(alt.camera.distance, 1.0);
         assert_eq!(alt.control_flags, 0);
 
         let control_alt = controls.sitting_actions(false, true, true, false, ScriptControlGrabs::default(), start + SITTING_NUDGE_TIME);
-        assert_eq!(control_alt.camera, super::SittingCameraInput { around: 0.0, over: 1.0, distance: 0.0 });
+        assert_eq!(control_alt.camera.around, 0.0);
+        assert_eq!(control_alt.camera.over, 1.0);
+        assert_eq!(control_alt.camera.distance, 0.0);
         assert_eq!(control_alt.control_flags, 0);
 
         let shift = controls.sitting_actions(true, false, false, false, ScriptControlGrabs::default(), start + SITTING_NUDGE_TIME);
         assert_eq!(shift.control_flags, LEFT_POS | FAST_LEFT);
-        assert_eq!(shift.camera, super::SittingCameraInput { around: 0.0, over: 1.0, distance: 1.0 });
+        assert_eq!(shift.camera.around, 0.0);
+        assert_eq!(shift.camera.over, 1.0);
+        assert_eq!(shift.camera.distance, 1.0);
+
+        let control_alt_shift =
+            controls.sitting_actions(true, true, true, false, ScriptControlGrabs::default(), start + SITTING_NUDGE_TIME);
+        assert_eq!(control_alt_shift.control_flags, 0);
+        assert_eq!(control_alt_shift.camera.pan_horizontal, 1.0);
+        assert_eq!(control_alt_shift.camera.pan_vertical, 1.0);
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
@@ -833,7 +854,9 @@ mod tests {
 
         let actions = controls.sitting_actions(false, false, false, false, ScriptControlGrabs::default(), start + SITTING_NUDGE_TIME);
         assert_eq!(actions.control_flags, YAW_POS);
-        assert_eq!(actions.camera, super::SittingCameraInput { around: 0.0, over: 0.0, distance: 1.0 });
+        assert_eq!(actions.camera.around, 0.0);
+        assert_eq!(actions.camera.over, 0.0);
+        assert_eq!(actions.camera.distance, 1.0);
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]

@@ -167,6 +167,13 @@ impl FollowCamera {
             let distance = (offset.length() * (1.0 - f64::from(input.distance) * dt)).clamp(self.minimum, 240.0);
             offset = offset.normalize() * distance;
         }
+        if input.pan_horizontal != 0.0 || input.pan_vertical != 0.0 {
+            let direction = -offset.normalize();
+            let left = DVec3::Z.cross(direction).normalize_or(DVec3::Y);
+            let up = direction.cross(left);
+            let pan = (left * f64::from(input.pan_horizontal) + up * f64::from(input.pan_vertical)) * (5.0 * dt);
+            self.focus_offset += (rotation.conjugate() * pan.as_vec3()).as_dvec3();
+        }
         self.offset = (rotation.conjugate() * offset.as_vec3()).as_dvec3();
     }
 
@@ -770,7 +777,9 @@ mod tests {
             start + Duration::from_secs(1),
         );
         assert_eq!(actions.control_flags, 0);
-        assert_eq!(actions.camera, SittingCameraInput { around: -1.0, over: 1.0, distance: 1.0 });
+        assert_eq!(actions.camera.around, -1.0);
+        assert_eq!(actions.camera.over, 1.0);
+        assert_eq!(actions.camera.distance, 1.0);
 
         let mut camera = FollowCamera::default();
         let before = camera
@@ -802,7 +811,9 @@ mod tests {
             start + Duration::from_secs(1),
         );
         assert_eq!(actions.control_flags, 0);
-        assert_eq!(actions.camera, SittingCameraInput { around: 1.0, over: -1.0, distance: -1.0 });
+        assert_eq!(actions.camera.around, 1.0);
+        assert_eq!(actions.camera.over, -1.0);
+        assert_eq!(actions.camera.distance, -1.0);
 
         let mut camera = FollowCamera::default();
         camera
@@ -890,7 +901,7 @@ mod tests {
     fn sitting_orbit_rate_matches_viewer_camera_rate() {
         let start = Instant::now();
         let pose = WorldPose { position: DVec3::ZERO, rotation: Quat::IDENTITY };
-        let input = SittingCameraInput { around: 1.0, over: 0.0, distance: 0.0 };
+        let input = SittingCameraInput { around: 1.0, ..SittingCameraInput::default() };
         let mut camera = FollowCamera::default();
         camera.follow_with_sit_input(pose, None, SittingCameraInput::default(), [1280, 720], 128.0, 1.0, start).expect("initial camera");
         let orbit = camera
@@ -903,7 +914,7 @@ mod tests {
     fn sitting_under_orbit_clamps_to_viewer_limit() {
         let start = Instant::now();
         let pose = WorldPose { position: DVec3::ZERO, rotation: Quat::IDENTITY };
-        let input = SittingCameraInput { around: 0.0, over: -1.0, distance: 0.0 };
+        let input = SittingCameraInput { over: -1.0, ..SittingCameraInput::default() };
         let mut camera = FollowCamera::default();
         camera.follow_with_sit_input(pose, None, SittingCameraInput::default(), [1280, 720], 128.0, 1.0, start).expect("initial camera");
         let result = camera

@@ -299,8 +299,8 @@ pub(crate) fn agent_request_sit_offset(hit: DVec3, object: PickObject, camera: C
         camera.position() + ray * distance
     };
     let camera_to_focus = inverse_rotation * (focus - camera.position()).as_vec3();
-    let mut focus_offset = inverse_rotation * (focus - object.position).as_vec3();
-    let focus_values = focus_offset.to_array();
+    let mut focus_offset_local = inverse_rotation * (focus - object.position).as_vec3();
+    let focus_values = focus_offset_local.to_array();
     let camera_values = camera_to_focus.to_array();
     let extent_values = extents.to_array();
     let clip_fraction: [f32; 3] = std::array::from_fn(|axis| {
@@ -317,22 +317,22 @@ pub(crate) fn agent_request_sit_offset(hit: DVec3, object: PickObject, camera: C
     } else {
         2
     };
-    focus_offset -= camera_to_focus * clip_fraction[clip_axis];
-    let focus_offset = object.rotation * focus_offset;
-    let hit_offset = (hit - object.position).as_vec3();
+    focus_offset_local -= camera_to_focus * clip_fraction[clip_axis];
+    let hit_offset_world = (hit - object.position).as_vec3();
+    let hit_offset_local = inverse_rotation * hit_offset_world;
     let camera_from_object = inverse_rotation * (camera.position() - object.position).as_vec3();
     let camera_inside = (0..3).all(|axis| camera_from_object[axis].abs() <= extents[axis] * 0.5);
     if camera_inside {
-        return hit_offset.is_finite().then_some(hit_offset);
+        return hit_offset_local.is_finite().then_some(hit_offset_local);
     }
     let view_distance = camera.position().distance(hit) as f32;
     if !view_distance.is_finite() || view_distance <= f32::EPSILON {
-        return Some(focus_offset);
+        return Some(focus_offset_local);
     }
-    let relative_distance = (hit_offset.dot(camera.direction())).abs();
+    let relative_distance = (hit_offset_world.dot(camera.direction())).abs();
     let depth_fraction = relative_distance / view_distance;
     let bias = ((depth_fraction - OFFSET_BIAS_START) / (OFFSET_BIAS_END - OFFSET_BIAS_START)).clamp(0.0, 1.0);
-    let offset = focus_offset.lerp(hit_offset, bias);
+    let offset = focus_offset_local.lerp(hit_offset_local, bias);
     offset.is_finite().then_some(offset)
 }
 
@@ -372,6 +372,38 @@ mod tests {
         assert!((offset.x + 1.0 / 54.0).abs() < 1e-5);
         assert_eq!(offset.y, 0.0);
         assert_eq!(offset.z, 0.0);
+    }
+
+    #[test]
+    fn rotated_prim_offset_is_local() {
+        let camera = Camera::new(DVec3::new(0.0, -10.0, 0.0), Vec3::Y, 1.0, [128, 128]).unwrap();
+        let object = PickObject {
+            id: Uuid::from_u128(8),
+            kind: PickObjectKind::Prim,
+            position: DVec3::ZERO,
+            rotation: Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            scale: Vec3::splat(2.0),
+        };
+        let offset = agent_request_sit_offset(DVec3::new(0.0, -1.0, 0.0), object, camera, DVec3::Y).unwrap();
+        assert!((offset.x + 1.0 / 54.0).abs() < 1e-5);
+        assert!(offset.y.abs() < 1e-5);
+        assert!(offset.z.abs() < 1e-5);
+    }
+
+    #[test]
+    fn sit_here_preserves_prim_uuid() {
+        let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).unwrap();
+        let id = Uuid::from_u128(0x123456789abcdef00123456789abcdef);
+        let object = PickObject {
+            id,
+            kind: PickObjectKind::Prim,
+            position: DVec3::new(10.0, 0.0, 0.0),
+            rotation: Quat::IDENTITY,
+            scale: Vec3::splat(2.0),
+        };
+        let (target, _) =
+            sit_here_target(PickHit { target: PickTarget::Object(object), position: DVec3::new(9.0, 0.0, 0.0) }, camera, DVec3::X).unwrap();
+        assert_eq!(target, id);
     }
 
     #[test]

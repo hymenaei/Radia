@@ -1,3 +1,5 @@
+mod input;
+
 use std::{
     error::Error,
     fmt,
@@ -14,23 +16,23 @@ use tracing::Instrument;
 use winit::platform::startup_notify::{EventLoopExtStartupNotify, WindowAttributesExtStartupNotify, reset_activation_token_env};
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
-    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
+    event::WindowEvent,
     event_loop::{ActiveEventLoop, ControlFlow},
-    keyboard::{Key, ModifiersState, NamedKey},
-    window::{CursorGrabMode, UserAttentionType, Window, WindowId},
+    keyboard::ModifiersState,
+    window::{UserAttentionType, Window, WindowId},
 };
 
 use super::{
-    FRAME_INTERVAL, InputCapture, SharedWindowState,
+    FRAME_INTERVAL, SharedWindowState,
     recovery::{PresentationRecovery, RecoveryAttempt},
-    sit_controls::{SitControls, SitMenuEvent, sit_request_for_left_click},
+    sit_controls::SitControls,
     timing::{FrameTimes, display_refresh_interval, next_frame_deadline, redraw_interval},
 };
 use crate::{
     DEFAULT_DRAW_DISTANCE,
     agent_movement::sitting::{ScriptControlGrabs, SittingCameraInput},
-    agent_movement::{BodyRotation, HeldControls, KeyBinding, MovementObservation, STOP},
-    camera::{CameraMode, FollowCamera, OrbitCamera, handle_keyboard_input, should_reset_sitting_orbit},
+    agent_movement::{BodyRotation, HeldControls, MovementObservation, STOP},
+    camera::{CameraMode, FollowCamera, OrbitCamera},
     scene_feed::SceneFeed,
 };
 
@@ -109,7 +111,7 @@ pub(super) struct SceneWindow {
     last_camera: Option<scene::Camera>,
     cursor: PhysicalPosition<f64>,
     modifiers: ModifiersState,
-    drag: Option<DragState>,
+    input: input::ViewportInput,
     sit_controls: SitControls,
 }
 
@@ -191,7 +193,7 @@ impl SceneWindow {
             last_camera: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
             modifiers: ModifiersState::empty(),
-            drag: None,
+            input: input::ViewportInput::default(),
             sit_controls: SitControls::new(),
         })
     }
@@ -218,139 +220,6 @@ impl SceneWindow {
 
     pub(super) fn wants_keyboard_input(&self) -> bool {
         self.egui.egui_wants_keyboard_input()
-    }
-
-    pub(super) fn handle_scene_input(&mut self, event: &WindowEvent, capture: InputCapture) -> bool {
-        self.synchronize_control_input();
-        match event {
-            WindowEvent::ModifiersChanged(modifiers) => {
-                let modifiers = modifiers.state();
-                if self.modifiers != modifiers {
-                    self.modifiers = modifiers;
-                    self.dirty = true;
-                }
-            }
-            WindowEvent::Focused(focused) => {
-                tracing::info!(focused, "viewport focus changed");
-                self.focused = *focused;
-                if !focused {
-                    self.sit_controls.handle_menu_event(SitMenuEvent::FocusLost);
-                    self.release_drag(false);
-                    self.modifiers = ModifiersState::empty();
-                }
-                self.synchronize_control_input();
-                self.dirty = true;
-            }
-            WindowEvent::CursorMoved { position, .. } => self.cursor = *position,
-            WindowEvent::MouseInput { button: MouseButton::Left, state, .. } => {
-                self.handle_left_click(*state, capture);
-            }
-            WindowEvent::MouseInput { button: MouseButton::Right, state: ElementState::Pressed, .. } => {
-                self.sit_controls.handle_right_click(
-                    capture,
-                    self.renderer.as_ref(),
-                    self.feed.as_ref(),
-                    self.last_camera,
-                    self.cursor,
-                    self.window.inner_size(),
-                    self.dpi,
-                );
-                self.synchronize_control_input();
-            }
-            WindowEvent::MouseWheel { delta, .. } if !capture.consumed && !capture.pointer => {
-                let clicks = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
-                    MouseScrollDelta::PixelDelta(position) => position.y / (40.0 * self.dpi),
-                };
-                let zoom = 2.0f64.powf(-clicks / 4.0);
-                match self.camera_mode {
-                    CameraMode::Follow => {
-                        let draw_distance = self.camera.as_ref().map_or(DEFAULT_DRAW_DISTANCE, |camera| camera.draw_distance);
-                        self.follow_camera.zoom(zoom, draw_distance);
-                    }
-                    CameraMode::Free => {
-                        if let Some(camera) = &mut self.camera {
-                            camera.zoom(zoom);
-                        }
-                    }
-                }
-                self.dirty = true;
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && event.logical_key == Key::Named(NamedKey::Escape)
-                    && self.sit_controls.menu_open() =>
-            {
-                self.sit_controls.handle_menu_event(SitMenuEvent::Escape);
-                self.synchronize_control_input();
-                self.dirty = true;
-                return true;
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && event.logical_key == Key::Named(NamedKey::Escape)
-                    && !capture.consumed
-                    && !capture.keyboard =>
-            {
-                self.release_drag(true);
-                if self.camera_mode == CameraMode::Free {
-                    self.transition_to_follow();
-                }
-            }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if self.sit_controls.menu_open()
-                    && event.state == ElementState::Pressed
-                    && matches!(KeyBinding::from_key(&event.logical_key), Some(KeyBinding::Movement(_)))
-                {
-                    self.sit_controls.handle_menu_event(SitMenuEvent::MovementKey);
-                    self.synchronize_control_input();
-                    self.dirty = true;
-                    if capture.consumed || capture.keyboard {
-                        return true;
-                    }
-                }
-                let was_free = self.camera_mode == CameraMode::Free;
-                let seated = self.feed.as_mut().is_some_and(SceneFeed::agent_is_seated);
-                let sitting_input_active = self.feed.as_mut().is_some_and(SceneFeed::sitting_input_active);
-                let reset_sitting_orbit = !was_free
-                    && self.camera_mode == CameraMode::Follow
-                    && should_reset_sitting_orbit(
-                        &event.logical_key,
-                        event.state,
-                        event.repeat,
-                        capture.consumed || capture.keyboard,
-                        sitting_input_active,
-                        self.modifiers.alt_key(),
-                        self.modifiers.control_key(),
-                        self.modifiers.shift_key(),
-                    );
-                let Some(changed) = handle_keyboard_input(
-                    &mut self.controls,
-                    &mut self.camera_mode,
-                    &event.logical_key,
-                    event.state,
-                    event.repeat,
-                    capture.consumed || capture.keyboard,
-                    seated,
-                ) else {
-                    return false;
-                };
-                if changed {
-                    self.dirty = true;
-                    if reset_sitting_orbit {
-                        self.reset_sitting_camera();
-                    }
-                }
-                if was_free && self.camera_mode == CameraMode::Follow {
-                    self.transition_to_follow();
-                }
-                if self.camera_mode == CameraMode::Follow {
-                    self.release_drag(true);
-                }
-            }
-            _ => return false,
-        }
-        true
     }
 
     pub(super) fn resize(&mut self, width: u32, height: u32) {
@@ -387,122 +256,6 @@ impl SceneWindow {
 
     pub(super) fn take_retired(&mut self) -> Option<Retirement> {
         self.retired.take()
-    }
-
-    fn release_drag(&mut self, restore: bool) {
-        if let Some(drag) = self.drag.take() {
-            if let Err(error) = self.window.set_cursor_grab(CursorGrabMode::None) {
-                tracing::warn!(%error, "could not release scene cursor capture");
-            }
-            self.window.set_cursor_visible(true);
-            if restore && let Err(error) = self.window.set_cursor_position(drag.origin) {
-                tracing::warn!(%error, "could not restore scene cursor position");
-            }
-        }
-    }
-
-    fn handle_left_click(&mut self, state: ElementState, capture: InputCapture) {
-        if state == ElementState::Released {
-            self.release_drag(true);
-            return;
-        }
-        if self.sit_controls.handle_left_click_while_menu_open(capture.consumed || capture.pointer) {
-            self.synchronize_control_input();
-            self.dirty = true;
-            return;
-        }
-        if capture.consumed || capture.pointer {
-            return;
-        }
-
-        if !self.modifiers.alt_key() {
-            if self.modifiers.is_empty()
-                && let Some(request) = sit_request_for_left_click(
-                    self.renderer.as_ref(),
-                    self.last_camera,
-                    self.feed.as_mut(),
-                    self.cursor,
-                    self.window.inner_size(),
-                )
-                && self.sit_controls.start_if_requested(Some(request), self.feed.as_ref(), Arc::clone(&self.wake))
-            {
-                self.egui.memory_mut(|memory| {
-                    if let Some(id) = memory.focused() {
-                        memory.surrender_focus(id);
-                    }
-                });
-                self.dirty = true;
-                return;
-            }
-            self.start_drag();
-            return;
-        }
-
-        let point = {
-            let (Some(renderer), Some(observation)) = (&self.renderer, self.last_camera) else {
-                return;
-            };
-            let size = self.window.inner_size();
-            match renderer.pick(observation, observation.ray([self.cursor.x, self.cursor.y], [size.width, size.height])) {
-                Ok(hit) => hit.map(|hit| hit.position),
-                Err(error) => {
-                    tracing::debug!(%error, "scene focus pick exceeded its work limit");
-                    return;
-                }
-            }
-        };
-        let Some(point) = point else { return };
-        self.enter_free_camera();
-        if let Some(camera) = &mut self.camera {
-            camera.focus(point, Instant::now());
-            self.start_drag();
-        }
-    }
-
-    pub(super) fn drag_camera(&mut self, (dx, dy): (f64, f64)) {
-        let Some(drag) = &mut self.drag else {
-            return;
-        };
-        drag.travel[0] += dx.abs() / self.dpi;
-        drag.travel[1] += dy.abs() / self.dpi;
-        if drag.travel[0] >= 4.0 || drag.travel[1] >= 4.0 {
-            self.dirty = true;
-            let dy = if drag.travel[1] >= 4.0 { dy } else { 0.0 };
-            let width = f64::from(self.window.inner_size().width);
-            match self.camera_mode {
-                CameraMode::Follow => {
-                    let draw_distance = self.camera.as_ref().map_or(DEFAULT_DRAW_DISTANCE, |camera| camera.draw_distance);
-                    self.follow_camera.drag([dx, dy], width, self.modifiers.control_key(), self.modifiers.shift_key(), draw_distance);
-                }
-                CameraMode::Free => {
-                    if let Some(camera) = &mut self.camera {
-                        camera.drag([dx, dy], width, self.modifiers.control_key(), self.modifiers.shift_key());
-                    }
-                }
-            }
-        }
-    }
-
-    fn start_drag(&mut self) {
-        if self.drag.is_some() {
-            return;
-        }
-        let origin = self.cursor;
-        let size = self.window.inner_size();
-        let center = PhysicalPosition::new(f64::from(size.width) * 0.5, f64::from(size.height) * 0.5);
-        match self.window.set_cursor_grab(CursorGrabMode::Confined) {
-            Ok(()) => {
-                self.sit_controls.handle_menu_event(SitMenuEvent::CameraDragStarted);
-                self.synchronize_control_input();
-                self.window.set_cursor_visible(false);
-                self.drag = Some(DragState { origin, travel: [0.0; 2] });
-                if let Err(error) = self.window.set_cursor_position(center) {
-                    self.release_drag(false);
-                    tracing::warn!(%error, "could not position scene cursor");
-                }
-            }
-            Err(error) => tracing::warn!(%error, "could not capture scene cursor"),
-        }
     }
 
     fn enter_free_camera(&mut self) {
@@ -856,7 +609,7 @@ impl SceneWindow {
         self.dirty |= self.sit_controls.start_if_requested(sit_request, self.feed.as_ref(), Arc::clone(&self.wake));
         self.synchronize_control_input();
         self.platform.handle_platform_output(&self.window, output.platform_output);
-        if self.drag.is_some() {
+        if self.input.is_dragging() {
             self.window.set_cursor_visible(false);
         }
         DebugUiFrame {
@@ -1027,11 +780,6 @@ impl Drop for SceneWindow {
     }
 }
 
-struct DragState {
-    origin: PhysicalPosition<f64>,
-    travel: [f64; 2],
-}
-
 fn debug_ui(window: &Window) -> (Context, egui_winit::State) {
     let ctx = Context::default();
     ctx.global_style_mut(|style| style.animation_time = 0.0);
@@ -1044,7 +792,10 @@ fn debug_ui(window: &Window) -> (Context, egui_winit::State) {
 mod tests {
     use std::error::Error;
 
+    use winit::dpi::PhysicalPosition;
+
     use super::SceneWindowError;
+    use super::input::{CAMERA_DRAG_THRESHOLD, ViewportInput};
 
     #[test]
     fn recovery_error_keeps_user_message() {
@@ -1056,5 +807,18 @@ mod tests {
         let error = SceneWindowError::Renderer(render::Error::UnsupportedSurface);
         let source = Error::source(&error).expect("renderer creation error must retain its source");
         assert!(source.downcast_ref::<render::Error>().is_some());
+    }
+
+    #[test]
+    fn sit_pick_requires_undragged_release() {
+        let origin = PhysicalPosition::new(20.0, 30.0);
+        let mut click = ViewportInput::default();
+        click.begin_sit_click(origin, true);
+        assert_eq!(click.finish_sit_click(true), Some(origin));
+
+        let mut drag = ViewportInput::default();
+        drag.begin_sit_click(origin, true);
+        drag.pointer_motion((CAMERA_DRAG_THRESHOLD, 0.0), 1.0);
+        assert_eq!(drag.finish_sit_click(true), None);
     }
 }

@@ -251,7 +251,7 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
     assert_eq!(
         budget.stats().charged_bytes,
         read_work_bytes_for_request(Request::new(resource)).expect("bounded cache read reservation"),
-        "disk reads reserve for the raw payload and decoded asset",
+        "cache reads reserve the bounded payload before decode admission",
     );
     let input = store.complete_cache_read(read.run(), now).expect("cache hit supplies input");
     let LoadJob::Decode(input) = input else { panic!("cache hit follows decode admission") };
@@ -294,6 +294,24 @@ fn demand_lease_protects_cache_key() {
     assert_eq!(cache.stats().protected_bytes, 0);
 
     store.close();
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn cache_miss_skips_disk_job() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let now = Instant::now();
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::new(resource(15)), Priority::Visible, now).expect("request texture");
+
+    assert_matches!(store.next_job(now), Some(LoadJob::Fetch(_)));
+    assert_eq!(cache.stats().misses, 0);
+    assert_matches!(demand.status(), Status::Fetching);
+
+    drop(demand);
     drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 }
@@ -365,8 +383,8 @@ fn cancelled_read_allows_retry() {
     release.send(()).expect("resume disk read");
     let completion = worker.join().expect("disk read worker completes");
     assert!(store.complete_cache_read(completion, now).is_none());
-    assert_eq!(store.running_fetches, 0);
-    assert_eq!(store.running_decodes, 0);
+    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
     assert_eq!(budget.stats().charged_bytes, 0);
     assert!(store.next_job(now).is_none(), "cancelled demand must not enter decode admission");
 
@@ -376,8 +394,8 @@ fn cancelled_read_allows_retry() {
     let decode = store.start_decode(input).expect("admit retry decode");
     assert!(store.complete(decode.run(), now).is_empty());
     assert_matches!(retry.status(), Status::Ready(Content::Texture(_)));
-    assert_eq!(store.running_fetches, 0);
-    assert_eq!(store.running_decodes, 0);
+    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
     store.close();
     drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
@@ -436,8 +454,7 @@ fn full_write_admission_does_not_hold_network_fetch_admission() {
         .collect::<Vec<_>>();
     let mut fetches = Vec::new();
     for _ in 0..MAX_ASSET_FETCHES {
-        let LoadJob::ReadCache(read) = store.next_job(now).expect("cache read job") else { panic!("cold asset reads cache") };
-        let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss schedules fetch") };
+        let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold asset fetch") else { panic!("cache miss bypasses disk reads") };
         assert!(!fetch.is_cancelled());
         fetches.push(fetch);
     }
@@ -457,8 +474,7 @@ fn decoded_material_and_environment_payloads_survive_disk_round_trips() {
         let mut store = Store::with_cache(Budget::default(), Arc::clone(cache));
         let route = store.register_route().expect("register route");
         let demand = store.request(route, Request::new(resource), Priority::Visible, now).expect("request asset");
-        let LoadJob::ReadCache(read) = store.next_job(now).expect("cold cache read") else { panic!("first work reads disk") };
-        let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss schedules network") };
+        let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold asset fetch") else { panic!("cache miss bypasses disk reads") };
         let input = fetch.complete(Ok(response)).expect("attach encoded asset response");
         let decode = store.start_decode(input).expect("admit network decode");
         let writes = store.complete(decode.run(), now);
@@ -491,7 +507,7 @@ fn decoded_material_and_environment_payloads_survive_disk_round_trips() {
     round_trip(&cache, legacy, legacy_envelope(legacy.id));
     round_trip(&cache, environment, b"{'type':'sky'}".to_vec());
     assert_eq!(cache.stats().hits, 3);
-    assert_eq!(cache.stats().misses, 3);
+    assert_eq!(cache.stats().misses, 0);
     assert!(cache.stats().bytes_written > 0);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 }
@@ -510,8 +526,7 @@ fn cached_full_mesh_response_finishes() {
     let route = store.register_route().expect("register route");
     let demand = store.request(route, request, Priority::Visible, now).expect("request mesh LOD");
 
-    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("cold mesh reads cache") };
-    let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss schedules mesh fetch") };
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold mesh fetch") else { panic!("cache miss bypasses disk reads") };
     let input = fetch.complete(Ok(asset.clone())).expect("full asset response enters decoding");
     let decode = store.start_decode(input).expect("admit mesh decode");
     let writes = store.complete(decode.run(), now);
@@ -557,8 +572,7 @@ fn partial_mesh_lod_is_cached() {
     let route = store.register_route().expect("register route");
     let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
 
-    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("cold mesh reads cache") };
-    let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss schedules mesh fetch") };
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold mesh fetch") else { panic!("cache miss bypasses disk reads") };
     let input = fetch
         .complete_response(Ok(FetchResponse::Partial { bytes, range: request.range(), total_length: Some(request.asset_length()) }))
         .expect("partial mesh block enters decoding");
@@ -591,8 +605,7 @@ fn partial_mesh_metadata_is_validated() {
         let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
         let route = store.register_route().expect("register route");
         let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
-        let LoadJob::ReadCache(read) = store.next_job(now).expect("cache read") else { panic!("cold LOD reads cache") };
-        let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss fetches LOD") };
+        let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold LOD fetch") else { panic!("cache miss bypasses disk reads") };
         let range = if malformed == "range" { 0..request.range().end } else { request.range() };
         let total_length = match malformed {
             "missing total" => None,
@@ -621,8 +634,7 @@ fn malformed_mesh_blocks_are_not_cached() {
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
     let route = store.register_route().expect("register route");
     let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
-    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("cold LOD reads cache") };
-    let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss fetches LOD") };
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold LOD fetch") else { panic!("cache miss bypasses disk reads") };
     let input = fetch
         .complete_response(Ok(FetchResponse::Partial {
             bytes: b"bad".to_vec(),
@@ -863,8 +875,7 @@ fn present_mesh_lod_is_cached() {
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
     let route = store.register_route().expect("register route");
     let header_demand = store.request(route, Request::MeshHeader(id), Priority::Visible, now).expect("request header");
-    let LoadJob::ReadCache(header_read) = store.next_job(now).expect("header cache read") else { panic!("cold header reads cache") };
-    let Some(LoadJob::Fetch(header_fetch)) = store.complete_cache_read(header_read.run(), now) else { panic!("header cache miss fetches") };
+    let LoadJob::Fetch(header_fetch) = store.next_job(now).expect("cold header fetch") else { panic!("cache miss bypasses disk reads") };
     let header_input = header_fetch.complete(Ok(asset.clone())).expect("attach full mesh header response");
     let header_decode = store.start_decode(header_input).expect("admit header decode");
     let header_writes = store.complete(header_decode.run(), now);
@@ -875,15 +886,9 @@ fn present_mesh_lod_is_cached() {
     assert_eq!(header.lod(id, MeshLod::High), Err(Failure::MissingLod(MeshLod::High)));
     let present = header.lod(id, MeshLod::Low).expect("low LOD is present");
     let lod_demand = store.request(route, Request::MeshLod(present), Priority::Visible, now).expect("request present LOD");
-    let LoadJob::ReadCache(lod_read) = store.next_job(now).expect("LOD cache read") else { panic!("cold LOD reads cache") };
-    let Some(LoadJob::Fetch(lod_fetch)) = store.complete_cache_read(lod_read.run(), now) else { panic!("LOD cache miss fetches") };
-    let lod_input = lod_fetch
-        .complete_response(Ok(FetchResponse::Partial {
-            bytes: block.clone(),
-            range: present.range(),
-            total_length: Some(present.asset_length()),
-        }))
-        .expect("attach present block");
+    let LoadJob::Decode(lod_input) = store.next_job(now).expect("header prefix supplies the LOD") else {
+        panic!("complete LOD in the header is decoded directly")
+    };
     let lod_decode = store.start_decode(lod_input).expect("admit LOD decode");
     let lod_writes = store.complete(lod_decode.run(), now);
     for write in lod_writes {
@@ -1005,10 +1010,11 @@ fn unavailable_mesh_cache_fetches() {
     let id = AssetId::new(Uuid::from_u128(131));
     let block = mesh_block_fixture();
     let request = mesh_lod_request(id, &block);
+    cache.put_complete(Request::MeshLod(request), mesh_lod_record_for(request, &block)).expect("seed indexed LOD");
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
     let route = store.register_route().expect("register route");
     let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
-    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache read") else { panic!("first job reads cache") };
+    let LoadJob::ReadCache(read) = store.next_job(now).expect("indexed cache read") else { panic!("indexed asset checks disk") };
     let completion = read.run_lookup(|_, _| crate::cache::AssetLookup::Unavailable(storage::UnavailableReason::Io));
     let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(completion, now) else { panic!("unavailable cache falls back") };
     assert_matches!(demand.status(), Status::Fetching);
@@ -1108,6 +1114,54 @@ fn visible_work_precedes_baselines() {
     store.maintain(later + Duration::from_secs(61));
     assert!(job.is_cancelled(), "running background work still has a bounded deadline");
     assert_matches!(baseline.status(), Status::Failed { failure: Failure::Deadline, .. });
+}
+
+#[test]
+fn mesh_importance_precedes_age() {
+    let now = Instant::now();
+    let mut store = Store::new(Budget::default());
+    let route = store.register_route().unwrap();
+    let far = mesh_resource(801).id;
+    let near = mesh_resource(802).id;
+    let _far = store.request_with_importance(route, Request::MeshHeader(far), Priority::Visible, 64, now).expect("request far mesh header");
+    let _near = store
+        .request_with_importance(route, Request::MeshHeader(near), Priority::Visible, 96, now + Duration::from_secs(1))
+        .expect("request near mesh header");
+
+    assert_eq!(next_fetch(&mut store, now + Duration::from_secs(1)).request(), Request::MeshHeader(near));
+}
+
+#[test]
+fn mesh_fetch_pool_independent_of_textures() {
+    let now = Instant::now();
+    let mut store = Store::new(Budget::default());
+    let route = store.register_route().unwrap();
+    let mut demands = Vec::new();
+    for index in 0..MAX_MESH_ASSET_FETCHES + 8 {
+        let id = mesh_resource(900 + u128::try_from(index).unwrap()).id;
+        demands.push(store.request(route, Request::MeshHeader(id), Priority::Visible, now).unwrap());
+    }
+    for index in 0..MAX_ASSET_FETCHES + 4 {
+        let id = resource(1_000 + u128::try_from(index).unwrap()).id;
+        demands.push(store.request(route, Request::Texture { id, size: TextureSize::new(128) }, Priority::Visible, now).unwrap());
+    }
+
+    let mut mesh_fetches = 0;
+    let mut other_fetches = 0;
+    let mut jobs = Vec::new();
+    while let Some(job) = store.next_job(now) {
+        let LoadJob::Fetch(fetch) = &job else { panic!("network demands schedule fetches") };
+        if fetch.resource().kind == Kind::Mesh {
+            mesh_fetches += 1;
+        } else {
+            other_fetches += 1;
+        }
+        jobs.push(job);
+    }
+
+    assert_eq!(mesh_fetches, MAX_MESH_ASSET_FETCHES);
+    assert_eq!(other_fetches, MAX_ASSET_FETCHES);
+    assert!(store.next_job(now).is_none());
 }
 
 #[test]
@@ -1439,7 +1493,7 @@ fn foreign_decode_preserves_owner() {
 fn fetches_overlap_decodes() {
     let budget = Budget::default();
     let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
-    let demands: Vec<_> = (1..=12)
+    let demands: Vec<_> = (1..=13)
         .map(|id| {
             let mut resource = resource(id);
             if id > 2 {
@@ -1455,34 +1509,44 @@ fn fetches_overlap_decodes() {
         let job = store.start_decode(input).expect("decode admission");
         decoding.push(job);
     }
+    let mut material_decodes = Vec::new();
     let mut fetched = Vec::<DecodeInput>::new();
-    let mut fetched_bytes = 0;
     for _ in 0..MAX_ASSET_FETCHES {
         let bytes = material_envelope(material_json);
-        fetched_bytes += bytes.capacity();
         let input = next_fetch(&mut store, now).complete(Ok(bytes)).expect("valid material response is attached to its fetch");
-        let input = store.start_decode(input).expect_err("decoding remains bounded independently of fetching");
-        fetched.push(input);
+        match store.start_decode(input) {
+            Ok(job) => material_decodes.push(job),
+            Err(input) => fetched.push(input),
+        }
+    }
+    assert_eq!(material_decodes.len(), MAX_ASSET_DECODES, "non-texture work has its own bounded decode slots");
+    for _ in 0..MAX_ASSET_DECODES {
+        let input = next_fetch(&mut store, now)
+            .complete(Ok(material_envelope(material_json)))
+            .expect("another material fetch can overlap active decodes");
+        fetched.push(store.start_decode(input).expect_err("full decode pool leaves fetched data queued"));
     }
     assert!(store.next_job(now).is_none(), "fetched responses retain fetch admission until decoding starts");
-    assert_eq!(budget.stats().charged_bytes, 2 * TEXTURE_WORK_BYTES + fetched_bytes);
-    let job = decoding.pop().unwrap();
+    let waiting = fetched.remove(0);
+    let job = material_decodes.remove(0);
     let result = job.run();
     store.maintain(now);
-    let waiting = store.start_decode(fetched.remove(0)).expect_err("an undelivered completion retains its decode slot");
+    let waiting = store.start_decode(waiting).expect_err("other decoders retain their pool until completion delivery");
     store.complete(result, now);
     let job = store.start_decode(waiting).expect("a delivered completion admits waiting data");
-    assert_eq!(job.resource(), Resource { id: resource(3).id, kind: Kind::PbrMaterial });
+    assert_eq!(job.resource(), Resource { id: resource(5).id, kind: Kind::PbrMaterial });
     store.complete(job.run(), now);
-    let Status::Ready(Content::Material(content)) = demands[2].status() else { panic!("waiting material publishes decoded content") };
+    let Status::Ready(Content::Material(content)) = demands[2].status() else { panic!("first material publishes decoded content") };
     let MaterialDescription::Pbr(material) = &*content else { panic!("waiting response decodes to PBR fields") };
     assert_eq!(material.base_color_factor, [0.2, 0.3, 0.4, 0.5]);
     drop(content);
     assert!(store.next_job(now).is_some(), "starting a decoder releases one fetch slot");
     assert_matches!(demands[0].status(), Status::Decoding);
-    assert_matches!(demands[1].status(), Status::Ready(_));
+    assert_matches!(demands[1].status(), Status::Decoding);
+    assert_matches!(demands[3].status(), Status::Decoding);
     store.close();
     drop(decoding);
+    drop(material_decodes);
     drop(fetched);
     drop(demands);
     assert_eq!(budget.stats().charged_bytes, 0);
@@ -1532,14 +1596,14 @@ fn dropped_jobs_wake_sessions() {
     let demand = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     let input = fetch(&mut store, now, RGBA_J2C.to_vec());
     let job = store.start_decode(input).expect("decode admission");
-    assert_eq!(store.running_decodes, 1);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 1);
     first_wake.borrow_and_update();
     second_wake.borrow_and_update();
     drop(job);
     assert!(first_wake.has_changed().unwrap());
     assert!(second_wake.has_changed().unwrap(), "reconnect and retiring owners must not steal each other's wakeups");
     store.maintain(now);
-    assert_eq!(store.running_decodes, 0);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
     assert_matches!(demand.status(), Status::Failed { failure: Failure::Cancelled, retry_at: None });
     assert!(store.next_job(now).is_none());
     assert_eq!(budget.stats().charged_bytes, 0);
@@ -1551,17 +1615,17 @@ fn reacquisition_waits_for_cancelled_job() {
     let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
     let first = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     let job = next_fetch(&mut store, now);
-    assert_eq!(store.running_fetches, 1);
+    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 1);
     drop(first);
     store.maintain(now);
-    assert_eq!(store.running_fetches, 1);
+    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 1);
     assert!(job.is_cancelled());
     let replacement = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     assert!(store.next_job(now).is_none(), "reacquisition must not duplicate a resource's in-flight work");
     let completion = job.complete(Err(Failure::NotFound)).expect_err("cancellation wins over a late fetch failure");
     assert_eq!(completion.failure(), Failure::Cancelled);
     store.complete(completion.into(), now);
-    assert_eq!(store.running_fetches, 0);
+    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
     let job = store.next_job(now).expect("the replacement starts after cancelled work completes");
     let job = match job {
         LoadJob::Fetch(job) => job.complete(Ok(RGBA_J2C.to_vec())).expect("response attachment"),
@@ -1625,8 +1689,16 @@ proptest::proptest! {
             store.maintain(now);
             let fetching = store.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Fetching, .. })).count();
             let decoding = store.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })).count();
-            proptest::prop_assert_eq!(store.running_fetches, fetching);
-            proptest::prop_assert_eq!(store.running_decodes, decoding);
+            proptest::prop_assert_eq!(store.running_mesh_fetches + store.running_other_fetches, fetching);
+            let decoding_textures = store.entries.values().filter(|entry| {
+                entry.request.resource().kind == Kind::Texture && matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })
+            }).count();
+            let decoding_other = store.entries.values().filter(|entry| {
+                entry.request.resource().kind != Kind::Texture && matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })
+            }).count();
+            proptest::prop_assert_eq!(store.running_texture_decodes, decoding_textures);
+            proptest::prop_assert_eq!(store.running_other_decodes, decoding_other);
+            proptest::prop_assert_eq!(store.running_texture_decodes + store.running_other_decodes, decoding);
             for job in &jobs {
                 if !leases.iter().flatten().any(|(resource, _)| *resource == job.resource()) {
                     proptest::prop_assert!(job.is_cancelled());
@@ -1638,8 +1710,8 @@ proptest::proptest! {
         }
         drop(leases);
         store.close();
-        proptest::prop_assert_eq!(store.running_fetches, 0);
-        proptest::prop_assert_eq!(store.running_decodes, 0);
+        proptest::prop_assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
+        proptest::prop_assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
         drop(jobs);
         proptest::prop_assert_eq!(budget.stats().charged_bytes, 0);
     }
@@ -1676,11 +1748,11 @@ fn retired_material_cannot_publish() {
     let old = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
     let input = fetch(&mut store, now, legacy_envelope(resource.id));
     let job = store.start_decode(input).expect("decode admission");
-    assert_eq!(store.running_decodes, 1);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 1);
     let prepared = job.run();
     store.retire_route(route);
     store.complete(prepared, now);
-    assert_eq!(store.running_decodes, 0);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
     assert_matches!(old.status(), Status::Failed { failure: Failure::RouteClosed, .. });
     assert_eq!(budget.stats().charged_bytes, 0);
     let route = store.register_route().unwrap();
@@ -1752,6 +1824,37 @@ fn mesh_decodes_share_budget() {
         store.complete(completion, now);
         assert_matches!(demand.status(), Status::Ready(_));
     }
+}
+
+#[test]
+fn mesh_decode_bypasses_texture_pool() {
+    let budget = Budget::default();
+    let now = Instant::now();
+    let mut store = Store::new(budget);
+    let route = store.register_route().expect("register route");
+    let mut texture_demands = Vec::new();
+    let mut texture_decodes = Vec::new();
+    for id in 401..401 + MAX_ASSET_DECODES as u128 {
+        texture_demands.push(store.request(route, Request::new(resource(id)), Priority::Visible, now).expect("request texture"));
+        let input = fetch(&mut store, now, RGBA_J2C.to_vec());
+        texture_decodes.push(store.start_decode(input).expect("admit texture decode"));
+    }
+
+    let mesh_id = AssetId::new(Uuid::from_u128(403));
+    let mesh_demand = store.request(route, Request::MeshHeader(mesh_id), Priority::Visible, now).expect("request mesh header");
+    let block = mesh_block_fixture();
+    let (_, asset) = mesh_full_asset_fixture(mesh_id, &block);
+    let mesh_input = fetch(&mut store, now, asset);
+    let mesh_decode = store.start_decode(mesh_input).expect("texture decoders do not occupy mesh decode slots");
+    assert_matches!(mesh_demand.status(), Status::Decoding);
+    assert!(texture_demands.iter().all(|demand| matches!(demand.status(), Status::Decoding)));
+
+    store.close();
+    drop(mesh_decode);
+    drop(texture_decodes);
+    drop(mesh_demand);
+    drop(texture_demands);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
 }
 
 #[test]

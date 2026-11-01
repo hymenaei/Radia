@@ -196,8 +196,7 @@ impl Error for AssetCacheError {
 }
 
 pub(crate) fn read_work_bytes_for_request(request: Request) -> Option<usize> {
-    let resource = request.resource();
-    cache_limit(request).checked_add(resource.kind.max_cache_bytes())
+    Some(cache_limit(request))
 }
 
 pub struct AssetCache {
@@ -272,6 +271,10 @@ impl AssetCache {
             AssetLookup::Unavailable(_) => {}
         }
         result
+    }
+
+    pub(crate) fn may_contain(&self, request: Request) -> bool {
+        self.storage.contains(storage_key(request))
     }
 
     pub fn put_complete(&self, request: Request, bytes: Vec<u8>) -> Result<(), AssetCacheError> {

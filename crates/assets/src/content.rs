@@ -72,10 +72,26 @@ impl MeshHeaderAsset {
     pub fn lod(&self, id: utils::AssetId, lod: mesh::MeshLod) -> Result<mesh::MeshLodRequest, Failure> {
         self.0.header.lod(id, lod).map_err(mesh_failure)
     }
+
+    pub(crate) fn lod_bytes(&self, request: mesh::MeshLodRequest) -> Option<&[u8]> {
+        if request.asset_id() != self.0.id
+            || request.asset_length() != self.0.header.asset_length()
+            || self.0.header.lod(self.0.id, request.lod()).ok() != Some(request)
+        {
+            return None;
+        }
+        let header_size = usize::try_from(self.0.header.header_size()).ok()?;
+        let range = request.range();
+        let start = usize::try_from(range.start).ok()?.checked_sub(header_size)?;
+        let end = usize::try_from(range.end).ok()?.checked_sub(header_size)?;
+        self.0.prefix.as_deref()?.get(start..end)
+    }
 }
 
 struct MeshHeaderInner {
+    id: utils::AssetId,
     header: mesh::MeshHeader,
+    prefix: Option<Vec<u8>>,
     _reservation: Resident,
 }
 
@@ -161,7 +177,7 @@ enum Data {
     Texture(texture::Decoded),
     Material(MaterialDescription),
     Environment(EnvironmentDescription),
-    MeshHeader(mesh::MeshHeader),
+    MeshHeader { id: utils::AssetId, header: mesh::MeshHeader },
     Mesh { lod: mesh::MeshLod, geometry: mesh::LodGeometry },
 }
 
@@ -169,24 +185,26 @@ pub(crate) struct Prepared {
     kind: Kind,
     data: Data,
     source: Option<CacheSource>,
+    mesh_prefix: Option<Vec<u8>>,
 }
 
 impl Prepared {
     pub(crate) fn finish(self, mut reservation: Reservation, persist: bool) -> Result<(Finished, Option<Blob>, Option<Blob>), Failure> {
-        let (source, persisted) = match self.source {
-            Some(CacheSource::Payload(bytes)) if self.kind == Kind::Texture || persist => {
+        let Prepared { kind, data, source: source_bytes, mesh_prefix } = self;
+        let (source, persisted) = match source_bytes {
+            Some(CacheSource::Payload(bytes)) if kind == Kind::Texture || persist => {
                 let blob = reservation.split(bytes.capacity()).and_then(|part| part.finish(bytes)).map_err(|_| Failure::MemoryPressure)?;
-                let source = (self.kind == Kind::Texture).then(|| blob.clone());
+                let source = (kind == Kind::Texture).then(|| blob.clone());
                 let persisted = persist.then_some(blob);
                 (source, persisted)
             }
             Some(source @ (CacheSource::MeshHeader { .. } | CacheSource::MeshLod { .. })) if persist => {
-                let persisted = persist_mesh_source(source, &self.data, &mut reservation);
+                let persisted = persist_mesh_source(source, &data, &mut reservation);
                 (None, persisted)
             }
             _ => (None, None),
         };
-        let content = match self.data {
+        let content = match data {
             Data::Texture(image) => image.finish(reservation).map(Finished::Texture),
             Data::Material(description) => {
                 let reservation = reservation.retain(size_of::<MaterialDescription>()).map_err(|_| Failure::MemoryPressure)?;
@@ -200,9 +218,16 @@ impl Prepared {
                     _reservation: reservation,
                 })))))
             }
-            Data::MeshHeader(header) => {
-                let reservation = reservation.retain(size_of::<MeshHeaderInner>()).map_err(|_| Failure::MemoryPressure)?;
-                Ok(Finished::Other(Content::MeshHeader(MeshHeaderAsset(Arc::new(MeshHeaderInner { header, _reservation: reservation })))))
+            Data::MeshHeader { id, header } => {
+                let retained_bytes =
+                    size_of::<MeshHeaderInner>().checked_add(mesh_prefix.as_ref().map_or(0, Vec::capacity)).ok_or(Failure::TooLarge)?;
+                let reservation = reservation.retain(retained_bytes).map_err(|_| Failure::MemoryPressure)?;
+                Ok(Finished::Other(Content::MeshHeader(MeshHeaderAsset(Arc::new(MeshHeaderInner {
+                    id,
+                    header,
+                    prefix: mesh_prefix,
+                    _reservation: reservation,
+                })))))
             }
             Data::Mesh { lod, geometry } => {
                 let bytes = match &geometry {
@@ -222,7 +247,7 @@ impl Prepared {
 fn persist_mesh_source(source: CacheSource, data: &Data, reservation: &mut Reservation) -> Option<Blob> {
     let (capacity, frame) = match source {
         CacheSource::MeshHeader { bytes, total_length } => {
-            let Data::MeshHeader(header) = data else { return None };
+            let Data::MeshHeader { header, .. } = data else { return None };
             let length = usize::try_from(header.header_size()).ok()?;
             let header_bytes = bytes.get(..length)?;
             let capacity = crate::cache::MESH_HEADER_FRAME_BYTES.checked_add(header_bytes.len())?;
@@ -303,12 +328,16 @@ pub(crate) fn prepare_cancellable(
     if cancelled() {
         return Err(Failure::Cancelled);
     }
-    Ok(Prepared { kind: resource.kind, data, source })
+    let mesh_prefix = match (&data, &source) {
+        (Data::MeshHeader { id, header }, Some(CacheSource::MeshHeader { bytes, .. })) => mesh_lod_prefix(*id, *header, bytes),
+        _ => None,
+    };
+    Ok(Prepared { kind: resource.kind, data, source, mesh_prefix })
 }
 
 pub(crate) fn prepare_cached(size: TextureSize, source: &Blob, cancelled: impl Fn() -> bool) -> Result<Prepared, Failure> {
     let data = Data::Texture(texture::decode(source, size, cancelled)?);
-    Ok(Prepared { kind: Kind::Texture, data, source: None })
+    Ok(Prepared { kind: Kind::Texture, data, source: None, mesh_prefix: None })
 }
 
 pub(crate) fn prepare_disk(
@@ -327,7 +356,7 @@ pub(crate) fn prepare_disk(
             Request::MeshHeader(_) => {
                 let (total_length, header_bytes) = crate::cache::parse_mesh_header_frame(&bytes).ok_or(Failure::MalformedBlock)?;
                 let data = decode_mesh(request, header_bytes, Some(total_length), None, bytes.capacity(), reservation, &cancelled)?;
-                let Data::MeshHeader(header) = &data else { return Err(Failure::MalformedBlock) };
+                let Data::MeshHeader { header, .. } = &data else { return Err(Failure::MalformedBlock) };
                 let header_size = usize::try_from(header.header_size()).map_err(|_| Failure::MalformedBlock)?;
                 if header_size != header_bytes.len() {
                     return Err(Failure::MalformedBlock);
@@ -348,7 +377,23 @@ pub(crate) fn prepare_disk(
         return Err(Failure::Cancelled);
     }
     let source = (resource.kind == Kind::Texture).then_some(CacheSource::Payload(bytes));
-    Ok(Prepared { kind: resource.kind, data, source })
+    Ok(Prepared { kind: resource.kind, data, source, mesh_prefix: None })
+}
+
+fn mesh_lod_prefix(id: utils::AssetId, header: mesh::MeshHeader, bytes: &[u8]) -> Option<Vec<u8>> {
+    let header_size = usize::try_from(header.header_size()).ok()?;
+    let prefix_end = header_size.checked_add(mesh::MESH_HEADER_BYTES)?.min(bytes.len());
+    let prefix = bytes.get(header_size..prefix_end)?;
+    let contains_complete_lod = [mesh::MeshLod::Lowest, mesh::MeshLod::Low, mesh::MeshLod::Medium, mesh::MeshLod::High]
+        .into_iter()
+        .any(|lod| header.lod(id, lod).is_ok_and(|request| usize::try_from(request.range().end).is_ok_and(|end| end <= prefix_end)));
+    if !contains_complete_lod {
+        return None;
+    }
+    let mut prefix_bytes = Vec::new();
+    prefix_bytes.try_reserve_exact(prefix.len()).ok()?;
+    prefix_bytes.extend_from_slice(prefix);
+    Some(prefix_bytes)
 }
 
 fn decode_payload(resource: Resource, size: TextureSize, bytes: &[u8], cancelled: &impl Fn() -> bool) -> Result<Data, Failure> {
@@ -374,7 +419,7 @@ fn decode_mesh(
         return Err(Failure::TooLarge);
     }
     match request {
-        Request::MeshHeader(_) => {
+        Request::MeshHeader(id) => {
             let parse_bytes = input_capacity
                 .checked_add(mesh::MAX_MESH_HEADER_BYTES)
                 .and_then(|bytes| bytes.checked_add(std::mem::size_of::<MeshHeaderInner>()))
@@ -396,7 +441,7 @@ fn decode_mesh(
                 }
             }
             let header_bytes = &bytes[..bytes.len().min(mesh::MAX_MESH_HEADER_BYTES)];
-            mesh::decode_header(header_bytes, total_length).map(Data::MeshHeader).map_err(mesh_failure)
+            mesh::decode_header(header_bytes, total_length).map(|header| Data::MeshHeader { id, header }).map_err(mesh_failure)
         }
         Request::MeshLod(block) => {
             let lod = block.lod();

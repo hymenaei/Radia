@@ -16,7 +16,7 @@ use utils::AssetId;
 use crate::{
     Blob, Budget, Content, TextureEvents, TextureHandle, TextureSize, WeakTexture,
     budget::{Reservation, TEXTURE_WORK_BYTES, WORK_BYTES},
-    cache::{AssetCache, AssetLookup, CacheWrite, read_work_bytes},
+    cache::{AssetCache, AssetLookup, CacheUnit, CacheWrite, cache_unit, read_work_bytes_for_request},
     content::{Finished, Prepared, StoredContent},
     mesh::{MeshLod, MeshLodRequest},
 };
@@ -106,12 +106,8 @@ impl Request {
         }
     }
 
-    fn unit(self) -> AssetUnit {
-        match self {
-            Self::MeshHeader(_) => AssetUnit::MeshHeader,
-            Self::MeshLod(block) => AssetUnit::MeshLod(block.lod()),
-            _ => AssetUnit::Whole,
-        }
+    fn unit(self) -> CacheUnit {
+        cache_unit(self)
     }
 
     fn size(self) -> Option<TextureSize> {
@@ -132,14 +128,7 @@ impl Request {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct LoadKey {
     resource: Resource,
-    unit: AssetUnit,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-enum AssetUnit {
-    Whole,
-    MeshHeader,
-    MeshLod(MeshLod),
+    unit: CacheUnit,
 }
 
 #[derive(Debug)]
@@ -161,6 +150,7 @@ pub enum Failure {
     Denied,
     HttpStatus { status: u16 },
     Network,
+    MemoryPressure,
     TooLarge,
     Malformed,
     Unsupported,
@@ -513,14 +503,14 @@ pub struct CacheReadCompletion {
 
 impl CacheReadJob {
     pub fn run(self) -> CacheReadCompletion {
-        self.run_lookup(|cache, resource| cache.lookup(resource))
+        self.run_lookup(|cache, request| cache.lookup(request))
     }
 
-    fn run_lookup(self, lookup: impl FnOnce(&AssetCache, Resource) -> AssetLookup) -> CacheReadCompletion {
+    fn run_lookup(self, lookup: impl FnOnce(&AssetCache, Request) -> AssetLookup) -> CacheReadCompletion {
         let result = if self.job.is_cancelled() {
             Err(Failure::Cancelled)
         } else {
-            let lookup = lookup(&self.cache, self.job.resource);
+            let lookup = lookup(&self.cache, self.job.request);
             if self.job.is_cancelled() { Err(Failure::Cancelled) } else { Ok(lookup) }
         };
         CacheReadCompletion { job: self.job, result }
@@ -767,7 +757,7 @@ impl Store {
             return Err(AdmissionError::InvalidId);
         }
         let cache_protection =
-            self.cache.as_ref().map(|cache| cache.protect(resource).map_err(|_| AdmissionError::CacheProtection)).transpose()?;
+            self.cache.as_ref().map(|cache| cache.protect(request).map_err(|_| AdmissionError::CacheProtection)).transpose()?;
         let entry = self.entries.entry(key).or_insert_with(|| AssetEntry {
             request,
             views: BTreeMap::new(),
@@ -933,7 +923,8 @@ impl Store {
                 .entries
                 .get(&key)
                 .is_some_and(|entry| !entry.cache_checked && entry.texture().and_then(|texture| texture.source()).is_none());
-        let bytes = if cache_read { read_work_bytes(resource.kind)? } else { resource.kind.max_response_bytes() };
+        let request = self.entries.get(&key)?.request;
+        let bytes = if cache_read { read_work_bytes_for_request(request)? } else { resource.kind.max_response_bytes() };
         let headroom = if self.running_decodes > 0 { 0 } else { TEXTURE_WORK_BYTES.saturating_sub(bytes) };
         let reservation = self.budget.reserve_with_headroom(bytes, headroom)?;
         self.sequence = self.sequence.checked_add(1)?;
@@ -1094,9 +1085,14 @@ impl Store {
         {
             return writes;
         }
-        if origin == DecodeOrigin::Disk && result.is_err() && !job.is_cancelled() {
+        if origin == DecodeOrigin::Disk && result.as_ref().is_err_and(|failure| *failure == Failure::MemoryPressure) {
+            entry.cache_checked = false;
+            entry.broadcast_status(Status::Queued);
+            return writes;
+        }
+        if origin == DecodeOrigin::Disk && result.as_ref().is_err_and(|failure| *failure != Failure::Cancelled) && !job.is_cancelled() {
             if let Some(cache) = &self.cache {
-                cache.discard_corrupt(job.resource);
+                cache.discard_corrupt(job.request);
             }
             return writes;
         }
@@ -1105,7 +1101,7 @@ impl Store {
             Ok((content, source, persisted)) => {
                 entry.used = now;
                 if let (Some(cache), Some(payload)) = (&self.cache, persisted)
-                    && let Some(write) = cache.queue_write(job.resource, payload, &self.budget)
+                    && let Some(write) = cache.queue_write(job.request, payload, &self.budget)
                 {
                     writes.push(write);
                 }

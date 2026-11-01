@@ -400,7 +400,7 @@ fn water_height(view: &SceneView, agent: &Object) -> Option<f64> {
 
 async fn acquire_asset_demand(handle: AssetHandle, request: AssetRequest) -> AssetStatusEvent {
     loop {
-        match handle.request(request.region, request.request, request.priority).await {
+        match handle.request_with_importance(request.region, request.request, request.priority, request.importance).await {
             Ok(demand) => return AssetStatusEvent { ticket: request.ticket, status: demand.status(), demand: Some(demand) },
             Err(RequestError::Busy) => {
                 tokio::time::sleep(Duration::from_millis(250)).await;

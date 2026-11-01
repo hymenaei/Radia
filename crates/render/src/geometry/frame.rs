@@ -311,10 +311,7 @@ impl GeometryRenderer {
             key,
             textures: self.textures.state(),
             meshes: self.memory.mesh_state(),
-            more_meshes: self.cache.replacement_count > 0
-                && self.cache.items.iter().any(|(_, item)| {
-                    item.replacement.as_ref().is_some_and(|replacement| self.meshes.contains_key(&replacement.item.mesh.id()))
-                })
+            more_meshes: self.has_ready_replacement()
                 || (!self.pending_meshes.is_empty()
                     && (uploaded > 0 || self.cache.mesh_state != previous_mesh_state || !self.retired.is_empty() || fallbacks_released)),
             animation_deadline,

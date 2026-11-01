@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Instant,
 };
@@ -23,7 +23,7 @@ pub(super) struct FrameCache {
     pub(super) items: ItemSlab,
     item_indices: HashMap<ItemId, ItemIndex>,
     pub(super) objects: HashMap<Entity, ItemIndex>,
-    pub(super) replacement_count: usize,
+    pub(super) replacements: BTreeSet<ItemIndex>,
     pub(super) mesh_info: HashMap<MeshId, Arc<MeshInfo>>,
     pub(super) candidates: Vec<ItemIndex>,
     pub(super) next_candidates: Vec<ItemIndex>,
@@ -82,7 +82,7 @@ impl FrameCache {
     pub(super) fn clear_items(&mut self) {
         self.items.clear();
         self.item_indices.clear();
-        self.replacement_count = 0;
+        self.replacements.clear();
     }
 }
 
@@ -361,7 +361,7 @@ impl GeometryRenderer {
             self.discard_replacement(index);
             if let Some(cached) = self.cache.items.get_mut(index) {
                 cached.replacement = Some(Box::new(CachedReplacement { item, retry_state: None }));
-                self.cache.replacement_count += 1;
+                self.cache.replacements.insert(index);
             }
             self.update_held_object_pose(index, transform, update);
             update.items_updated += 1;
@@ -394,7 +394,7 @@ impl GeometryRenderer {
     fn discard_replacement(&mut self, index: ItemIndex) {
         let replacement = self.cache.items.get_mut(index).and_then(|item| item.replacement.take());
         if let Some(replacement) = replacement {
-            self.cache.replacement_count -= 1;
+            self.cache.replacements.remove(&index);
             self.draw_list.release_faces(&replacement.item.faces);
         }
     }
@@ -428,62 +428,55 @@ impl GeometryRenderer {
         }
     }
 
+    fn replacements_for(&self, mesh_id: MeshId) -> Vec<ItemIndex> {
+        self.cache
+            .replacements
+            .iter()
+            .copied()
+            .filter(|index| self.replacement(*index).is_some_and(|replacement| replacement.item.mesh.id() == mesh_id))
+            .collect()
+    }
+
+    fn replacement(&self, index: ItemIndex) -> Option<&CachedReplacement> {
+        self.cache.items.get(index)?.replacement.as_deref()
+    }
+
     pub(super) fn set_replacement_retry_state(&mut self, mesh_id: MeshId, state: MeshState) {
-        if self.cache.replacement_count == 0 {
-            return;
-        }
-        for (_, item) in self.cache.items.iter_mut() {
-            if let Some(replacement) = item.replacement.as_mut().filter(|replacement| replacement.item.mesh.id() == mesh_id) {
+        for index in self.replacements_for(mesh_id) {
+            if let Some(replacement) = self.cache.items.get_mut(index).and_then(|item| item.replacement.as_mut()) {
                 replacement.retry_state = Some(state);
             }
         }
     }
 
     pub(super) fn replacement_retry_state(&self, mesh_id: MeshId) -> Option<MeshState> {
-        if self.cache.replacement_count == 0 {
-            return None;
-        }
-        self.cache.items.iter().find_map(|(_, item)| {
-            item.replacement
-                .as_ref()
-                .and_then(|replacement| (replacement.item.mesh.id() == mesh_id).then_some(replacement.retry_state).flatten())
-        })
+        self.replacements_for(mesh_id).into_iter().find_map(|index| self.replacement(index)?.retry_state)
     }
 
     pub(super) fn has_replacement(&self, mesh_id: MeshId) -> bool {
-        if self.cache.replacement_count == 0 {
-            return false;
-        }
-        self.cache.items.iter().any(|(_, item)| item.replacement.as_ref().is_some_and(|replacement| replacement.item.mesh.id() == mesh_id))
+        !self.replacements_for(mesh_id).is_empty()
+    }
+
+    pub(super) fn has_ready_replacement(&self) -> bool {
+        self.cache
+            .replacements
+            .iter()
+            .any(|index| self.replacement(*index).is_some_and(|replacement| self.meshes.contains_key(&replacement.item.mesh.id())))
     }
 
     pub(super) fn promote_ready_replacements(&mut self, update: &mut CacheUpdate) -> bool {
-        if self.cache.replacement_count == 0 {
-            return false;
-        }
         let indices = self
             .cache
-            .items
+            .replacements
             .iter()
-            .filter_map(|(index, item)| {
-                item.replacement.as_ref().is_some_and(|replacement| self.meshes.contains_key(&replacement.item.mesh.id())).then_some(index)
-            })
+            .copied()
+            .filter(|index| self.replacement(*index).is_some_and(|replacement| self.meshes.contains_key(&replacement.item.mesh.id())))
             .collect::<Vec<_>>();
         self.promote_replacements(indices, update)
     }
 
     pub(super) fn drop_blocked_fallbacks(&mut self, mesh_id: MeshId, update: &mut CacheUpdate) -> Vec<MeshId> {
-        if self.cache.replacement_count == 0 {
-            return Vec::new();
-        }
-        let indices = self
-            .cache
-            .items
-            .iter()
-            .filter_map(|(index, item)| {
-                item.replacement.as_ref().is_some_and(|replacement| replacement.item.mesh.id() == mesh_id).then_some(index)
-            })
-            .collect::<Vec<_>>();
+        let indices = self.replacements_for(mesh_id);
         let previous_meshes =
             indices.iter().filter_map(|index| self.cache.items.get(*index).map(|item| item.mesh.id())).collect::<Vec<_>>();
         if self.promote_replacements(indices, update) { previous_meshes } else { Vec::new() }
@@ -494,7 +487,7 @@ impl GeometryRenderer {
         for index in indices {
             let replacement = self.cache.items.get_mut(index).and_then(|item| item.replacement.take()).map(|replacement| *replacement);
             let Some(replacement) = replacement else { continue };
-            self.cache.replacement_count -= 1;
+            self.cache.replacements.remove(&index);
             let Some(item) = self.cache.items.get_mut(index) else { continue };
             let previous = std::mem::replace(item, replacement.item);
             self.draw_list.release_faces(&previous.faces);
@@ -676,7 +669,7 @@ impl GeometryRenderer {
 
     fn remove_item(&mut self, index: ItemIndex) -> Option<CachedItem> {
         let item = self.cache.remove_item(index)?;
-        self.cache.replacement_count -= usize::from(item.replacement.is_some());
+        self.cache.replacements.remove(&index);
         self.draw_list.release_faces(&item.faces);
         if let Some(replacement) = item.replacement.as_ref() {
             self.draw_list.release_faces(&replacement.item.faces);
@@ -750,12 +743,13 @@ impl GeometryRenderer {
             let priority = draw_priority(item, camera);
             missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, self.meshes.contains_key(&mesh.id()));
         }
-        if self.cache.replacement_count > 0 {
+        if !self.cache.replacements.is_empty() {
             let replacements = self
                 .cache
-                .items
+                .replacements
                 .iter()
-                .filter_map(|(_, item)| {
+                .filter_map(|index| {
+                    let item = self.cache.items.get(*index)?;
                     let replacement = &item.replacement.as_ref()?.item;
                     let visible = self.is_item_visible(item, camera, &frustum) || self.is_item_visible(replacement, camera, &frustum);
                     visible.then(|| (replacement.mesh.clone(), replacement.terrain_composition.clone(), draw_priority(replacement, camera)))

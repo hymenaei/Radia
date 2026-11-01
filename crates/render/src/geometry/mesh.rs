@@ -78,6 +78,15 @@ impl GeometryRenderer {
         self.retired.push(self.meshes.remove(&old).expect("selected resident"));
         true
     }
+
+    pub(super) fn retire_mesh_id(&mut self, mesh_id: crate::scene::MeshId) -> bool {
+        if self.retired.len() == 4 {
+            return false;
+        }
+        let Some(mesh) = self.meshes.remove(&mesh_id) else { return false };
+        self.retired.push(mesh);
+        true
+    }
 }
 
 fn floats<const N: usize>(bytes: &mut Vec<u8>, values: [f32; N]) {

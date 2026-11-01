@@ -288,6 +288,7 @@ fn new_item(
         rotation,
         scale,
         invert_normals: false,
+        replacement: None,
         transform,
         pickable: true,
         shading: ShadingMode::Studio,

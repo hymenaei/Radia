@@ -343,6 +343,12 @@ impl GeometryRenderer {
                 face.slot = None;
                 face.blended_index = None;
             }
+            if let Some(replacement) = item.replacement.as_mut() {
+                for face in &mut replacement.item.faces {
+                    face.slot = None;
+                    face.blended_index = None;
+                }
+            }
         }
         self.draw_list.clear();
         self.stats.instances = 0;

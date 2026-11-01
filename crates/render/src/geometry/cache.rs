@@ -10,8 +10,8 @@ use world::{Entity, Region};
 
 use super::instance::{instance_base, is_visible, parameter_part};
 use super::items::{
-    CachedFace, CachedFaceContext, CachedItem, ItemId, ItemIndex, ItemSlab, MeshInfo, cached_faces, draw_priority, mesh_info,
-    same_surface_geometry,
+    CachedFace, CachedFaceContext, CachedItem, CachedReplacement, ItemId, ItemIndex, ItemSlab, MeshInfo, cached_faces, draw_priority,
+    mesh_info, object_draw_scale, same_surface_geometry,
 };
 use super::{GeometryRenderer, MeshState, ShadingMode};
 use crate::scene::{
@@ -23,8 +23,7 @@ pub(super) struct FrameCache {
     pub(super) items: ItemSlab,
     item_indices: HashMap<ItemId, ItemIndex>,
     pub(super) objects: HashMap<Entity, ItemIndex>,
-    pub(super) pending_replacements: HashMap<Entity, Object>,
-    pub(super) held_meshes: HashSet<MeshId>,
+    pub(super) replacement_count: usize,
     pub(super) mesh_info: HashMap<MeshId, Arc<MeshInfo>>,
     pub(super) candidates: Vec<ItemIndex>,
     pub(super) next_candidates: Vec<ItemIndex>,
@@ -83,8 +82,7 @@ impl FrameCache {
     pub(super) fn clear_items(&mut self) {
         self.items.clear();
         self.item_indices.clear();
-        self.pending_replacements.clear();
-        self.held_meshes.clear();
+        self.replacement_count = 0;
     }
 }
 
@@ -113,8 +111,6 @@ impl GeometryRenderer {
         if full {
             self.cache.clear_items();
             self.cache.objects.clear();
-            self.cache.pending_replacements.clear();
-            self.cache.held_meshes.clear();
             self.cache.mesh_info.clear();
             self.cache.candidates.clear();
             self.cache.visible.clear();
@@ -189,7 +185,6 @@ impl GeometryRenderer {
             }
             while let Some(region) = self.cache.retired_regions.iter().next().copied() {
                 self.cache.retired_regions.remove(&region);
-                self.cache.pending_replacements.retain(|_, object| object.detail().summary.address.region() != region);
                 let removed = self
                     .cache
                     .items
@@ -257,7 +252,6 @@ impl GeometryRenderer {
         let old_index = self.cache.objects.get(&entity).copied();
         let old_id = old_index.and_then(|index| self.cache.items.get(index).map(|item| item.id));
         let Some(object) = object else {
-            self.cache.pending_replacements.remove(&entity);
             if let Some(index) = old_index {
                 update.items_updated += 1;
                 self.remove_item(index);
@@ -269,7 +263,6 @@ impl GeometryRenderer {
             return;
         };
         let Some((_, mesh)) = object.mesh() else {
-            self.cache.pending_replacements.remove(&entity);
             if let Some(index) = old_index {
                 update.items_updated += 1;
                 self.remove_item(index);
@@ -281,7 +274,6 @@ impl GeometryRenderer {
             return;
         };
         let Placement::Ready(transform) = object.placement() else {
-            self.cache.pending_replacements.remove(&entity);
             if let Some(index) = old_index {
                 update.items_updated += 1;
                 self.remove_item(index);
@@ -293,22 +285,25 @@ impl GeometryRenderer {
             return;
         };
         if !object.mesh_matches_geometry() {
-            self.cache.pending_replacements.remove(&entity);
             if let Some(index) = old_index {
+                self.discard_replacement(index);
                 self.update_held_object_pose(index, transform, update);
             }
             return;
         }
         let previous_mesh = old_index.and_then(|index| self.cache.items.get(index).map(|cached| cached.mesh.id()));
-        if let Some(index) = old_index
-            && old_id == Some(object_item_id(object))
-            && let Some(cached) = self.cache.items.get_mut(index)
-            && cached.mesh.id() == mesh.id()
-            && cached.source.as_ref().is_some_and(|previous| previous.same_render_appearance(object))
-        {
-            self.cache.pending_replacements.remove(&entity);
+        let unchanged = old_index.is_some_and(|index| {
+            self.cache.items.get(index).is_some_and(|cached| {
+                cached.id == object_item_id(object)
+                    && cached.mesh.id() == mesh.id()
+                    && cached.source.as_ref().is_some_and(|previous| previous.same_render_appearance(object))
+            })
+        });
+        if unchanged && let Some(index) = old_index {
+            self.discard_replacement(index);
+            let Some(cached) = self.cache.items.get_mut(index) else { return };
             let flags = object.mesh_flags().unwrap_or_default();
-            let scale = transform.scale * Vec3::new(if flags.mirror { -1.0 } else { 1.0 }, 1.0, 1.0);
+            let scale = object_draw_scale(object, transform.scale);
             let pose_changed =
                 cached.position != transform.pose.position || cached.rotation != transform.pose.rotation || cached.scale != scale;
             let parameters_dirty =
@@ -349,53 +344,65 @@ impl GeometryRenderer {
             }
             return;
         }
-        let replacement_needed = old_index.is_some_and(|index| {
-            self.cache.items.get(index).is_some_and(|cached| {
-                cached.mesh.id() != mesh.id() || !cached.source.as_ref().is_some_and(|previous| previous.same_render_appearance(object))
-            })
-        });
-        if !self.meshes.contains_key(&mesh.id()) && (replacement_needed || old_index.is_none()) {
-            self.cache.pending_replacements.insert(entity, object.clone());
+        let Some(item) = self.object_item(object) else {
             if let Some(index) = old_index {
-                self.update_held_object_pose(index, transform, update);
+                self.remove_item(index);
+                self.cache.animated_items.remove(&index);
             }
+            self.cache.objects.remove(&entity);
+            update.full_visibility = true;
+            update.layout_changed = true;
+            return;
+        };
+        if let Some(index) = old_index
+            && previous_mesh != Some(item.mesh.id())
+            && !self.meshes.contains_key(&item.mesh.id())
+        {
+            self.discard_replacement(index);
+            if let Some(cached) = self.cache.items.get_mut(index) {
+                cached.replacement = Some(Box::new(CachedReplacement { item, retry_state: None }));
+                self.cache.replacement_count += 1;
+            }
+            self.update_held_object_pose(index, transform, update);
+            update.items_updated += 1;
             update.mesh_dirty = true;
+            update.full_visibility = true;
             return;
         }
-        self.cache.pending_replacements.remove(&entity);
-        let item = self.object_item(object);
-        update.items_updated += usize::from(item.is_some() || old_id.is_some());
+        update.items_updated += 1;
         if let Some(index) = old_index {
             self.remove_item(index);
             self.cache.animated_items.remove(&index);
         }
-        if let Some(item) = item {
-            let id = item.id;
-            update.mesh_dirty |= previous_mesh != Some(item.mesh.id());
-            if let Some(index) = self.cache.insert_item(item) {
-                if self.cache.items.get(index).is_some_and(|item| !item.animated_faces.is_empty()) {
-                    self.cache.animated_items.insert(index);
-                }
-                self.cache.objects.insert(entity, index);
-                if old_id == Some(id) {
-                    update.pose_items.push(index);
-                }
+        let id = item.id;
+        update.mesh_dirty |= previous_mesh != Some(item.mesh.id()) || old_index.is_some();
+        if let Some(index) = self.cache.insert_item(item) {
+            if self.cache.items.get(index).is_some_and(|item| !item.animated_faces.is_empty()) {
+                self.cache.animated_items.insert(index);
             }
-            update.layout_changed = true;
-            if old_id != Some(id) {
-                update.full_visibility = true;
+            self.cache.objects.insert(entity, index);
+            if old_id == Some(id) {
+                update.pose_items.push(index);
             }
-        } else {
-            self.cache.objects.remove(&entity);
+        }
+        update.layout_changed = true;
+        if old_id != Some(id) {
             update.full_visibility = true;
-            update.layout_changed = true;
+        }
+    }
+
+    fn discard_replacement(&mut self, index: ItemIndex) {
+        let replacement = self.cache.items.get_mut(index).and_then(|item| item.replacement.take());
+        if let Some(replacement) = replacement {
+            self.cache.replacement_count -= 1;
+            self.draw_list.release_faces(&replacement.item.faces);
         }
     }
 
     fn update_held_object_pose(&mut self, index: ItemIndex, transform: world::WorldTransform, update: &mut CacheUpdate) {
         let Some(cached) = self.cache.items.get_mut(index) else { return };
         let mirror = cached.source.as_ref().and_then(Object::mesh_flags).is_some_and(|flags| flags.mirror);
-        let scale = transform.scale * Vec3::new(if mirror { -1.0 } else { 1.0 }, 1.0, 1.0);
+        let scale = super::items::draw_scale(transform.scale, mirror);
         let pose_changed =
             cached.position != transform.pose.position || cached.rotation != transform.pose.rotation || cached.scale != scale;
         let scale_changed = cached.scale != scale;
@@ -421,6 +428,91 @@ impl GeometryRenderer {
         }
     }
 
+    pub(super) fn set_replacement_retry_state(&mut self, mesh_id: MeshId, state: MeshState) {
+        if self.cache.replacement_count == 0 {
+            return;
+        }
+        for (_, item) in self.cache.items.iter_mut() {
+            if let Some(replacement) = item.replacement.as_mut().filter(|replacement| replacement.item.mesh.id() == mesh_id) {
+                replacement.retry_state = Some(state);
+            }
+        }
+    }
+
+    pub(super) fn replacement_retry_state(&self, mesh_id: MeshId) -> Option<MeshState> {
+        if self.cache.replacement_count == 0 {
+            return None;
+        }
+        self.cache.items.iter().find_map(|(_, item)| {
+            item.replacement
+                .as_ref()
+                .and_then(|replacement| (replacement.item.mesh.id() == mesh_id).then_some(replacement.retry_state).flatten())
+        })
+    }
+
+    pub(super) fn has_replacement(&self, mesh_id: MeshId) -> bool {
+        if self.cache.replacement_count == 0 {
+            return false;
+        }
+        self.cache.items.iter().any(|(_, item)| item.replacement.as_ref().is_some_and(|replacement| replacement.item.mesh.id() == mesh_id))
+    }
+
+    pub(super) fn promote_ready_replacements(&mut self, update: &mut CacheUpdate) -> bool {
+        if self.cache.replacement_count == 0 {
+            return false;
+        }
+        let indices = self
+            .cache
+            .items
+            .iter()
+            .filter_map(|(index, item)| {
+                item.replacement.as_ref().is_some_and(|replacement| self.meshes.contains_key(&replacement.item.mesh.id())).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        self.promote_replacements(indices, update)
+    }
+
+    pub(super) fn drop_blocked_fallbacks(&mut self, mesh_id: MeshId, update: &mut CacheUpdate) -> Vec<MeshId> {
+        if self.cache.replacement_count == 0 {
+            return Vec::new();
+        }
+        let indices = self
+            .cache
+            .items
+            .iter()
+            .filter_map(|(index, item)| {
+                item.replacement.as_ref().is_some_and(|replacement| replacement.item.mesh.id() == mesh_id).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let previous_meshes =
+            indices.iter().filter_map(|index| self.cache.items.get(*index).map(|item| item.mesh.id())).collect::<Vec<_>>();
+        if self.promote_replacements(indices, update) { previous_meshes } else { Vec::new() }
+    }
+
+    fn promote_replacements(&mut self, indices: Vec<ItemIndex>, update: &mut CacheUpdate) -> bool {
+        let mut changed = false;
+        for index in indices {
+            let replacement = self.cache.items.get_mut(index).and_then(|item| item.replacement.take()).map(|replacement| *replacement);
+            let Some(replacement) = replacement else { continue };
+            self.cache.replacement_count -= 1;
+            let Some(item) = self.cache.items.get_mut(index) else { continue };
+            let previous = std::mem::replace(item, replacement.item);
+            self.draw_list.release_faces(&previous.faces);
+            self.cache.animated_items.remove(&index);
+            if self.cache.items.get(index).is_some_and(|item| !item.animated_faces.is_empty()) {
+                self.cache.animated_items.insert(index);
+            }
+            update.items_updated += 1;
+            update.full_visibility = true;
+            update.layout_changed = true;
+            update.mesh_dirty = true;
+            changed = true;
+        }
+        if changed {
+            self.prune_mesh_info();
+        }
+        changed
+    }
     fn update_surface(&mut self, view: &SceneView, surface: Option<&Surface>, region: Region, kind: SurfaceKind, update: &mut CacheUpdate) {
         let id = surface_item_id(region, kind);
         let old_index = self.cache.index(id);
@@ -462,81 +554,6 @@ impl GeometryRenderer {
         }
     }
 
-    pub(super) fn release_blocked_replacements(&mut self, update: &mut CacheUpdate) -> bool {
-        let entities = self
-            .cache
-            .pending_replacements
-            .iter()
-            .filter_map(|(entity, object)| {
-                let (_, mesh) = object.mesh()?;
-                self.mesh_budget_blocked.contains(&mesh.id()).then_some(*entity)
-            })
-            .collect::<Vec<_>>();
-        let mut changed = false;
-        for entity in entities {
-            if let Some(index) = self.cache.objects.remove(&entity) {
-                if let Some(item) = self.cache.items.get(index) {
-                    self.cache.held_meshes.remove(&item.mesh.id());
-                }
-                self.remove_item(index);
-                self.cache.animated_items.remove(&index);
-                update.items_updated += 1;
-                changed = true;
-            }
-        }
-        if changed {
-            update.full_visibility = true;
-            update.layout_changed = true;
-        }
-        changed
-    }
-
-    pub(super) fn complete_mesh_replacements(&mut self, view: &SceneView, update: &mut CacheUpdate) -> bool {
-        let entities = self
-            .cache
-            .pending_replacements
-            .iter()
-            .filter_map(|(entity, object)| {
-                let (_, mesh) = object.mesh()?;
-                (self.cache.mesh_ready.contains(&mesh.id()) || self.meshes.contains_key(&mesh.id())).then_some(*entity)
-            })
-            .collect::<Vec<_>>();
-        let mut changed = false;
-        for entity in entities {
-            let Some(target) = self.cache.pending_replacements.remove(&entity) else { continue };
-            let Some((target_key, target_mesh)) = target.mesh() else { continue };
-            let Some(object) = view.object(entity).filter(|object| {
-                object.mesh_matches_geometry()
-                    && object.mesh().is_some_and(|(key, mesh)| key == target_key && mesh.id() == target_mesh.id())
-            }) else {
-                continue;
-            };
-            let old_index = self.cache.objects.get(&entity).copied();
-            let old_pose = old_index.and_then(|index| self.cache.items.get(index)).map(|item| (item.position, item.rotation));
-            let Some(mut item) = self.object_item(object) else { continue };
-            if let Some((position, rotation)) = old_pose {
-                item.position = position;
-                item.rotation = rotation;
-                item.transform = instance_base(position, rotation, item.scale, item.invert_normals, self.cache.origin);
-            }
-            if let Some(index) = old_index {
-                self.remove_item(index);
-                self.cache.animated_items.remove(&index);
-            }
-            if let Some(index) = self.cache.insert_item(item) {
-                if self.cache.items.get(index).is_some_and(|item| !item.animated_faces.is_empty()) {
-                    self.cache.animated_items.insert(index);
-                }
-                self.cache.objects.insert(entity, index);
-            }
-            update.items_updated += 1;
-            update.full_visibility = true;
-            update.layout_changed = true;
-            changed = true;
-        }
-        changed
-    }
-
     fn object_item(&mut self, object: &Object) -> Option<CachedItem> {
         if !object.mesh_matches_geometry() {
             return None;
@@ -544,7 +561,7 @@ impl GeometryRenderer {
         let (_, mesh) = object.mesh()?;
         let Placement::Ready(transform) = object.placement() else { return None };
         let flags = object.mesh_flags().unwrap_or_default();
-        let scale = transform.scale * Vec3::new(if flags.mirror { -1.0 } else { 1.0 }, 1.0, 1.0);
+        let scale = object_draw_scale(object, transform.scale);
         let id = object_item_id(object);
         let region = object.detail().summary.address.region();
         let info = self.cached_mesh_info(mesh);
@@ -558,6 +575,7 @@ impl GeometryRenderer {
                 materials,
                 appearance,
                 scale,
+                invert_normals: flags.invert,
                 shading: ShadingMode::Studio,
                 terrain: None,
                 terrain_textures: None,
@@ -575,6 +593,7 @@ impl GeometryRenderer {
             rotation: transform.pose.rotation,
             scale,
             invert_normals: flags.invert,
+            replacement: None,
             transform: instance_base(transform.pose.position, transform.pose.rotation, scale, flags.invert, self.cache.origin),
             pickable: true,
             shading: ShadingMode::Studio,
@@ -608,6 +627,7 @@ impl GeometryRenderer {
                 materials: None,
                 appearance: None,
                 scale,
+                invert_normals: false,
                 shading,
                 terrain: terrain_region,
                 terrain_textures: terrain_textures.as_ref(),
@@ -624,6 +644,7 @@ impl GeometryRenderer {
             rotation,
             scale,
             invert_normals: false,
+            replacement: None,
             transform: instance_base(surface.position, rotation, scale, false, self.cache.origin),
             pickable,
             shading,
@@ -642,17 +663,24 @@ impl GeometryRenderer {
         self.cache.mesh_info.entry(mesh.id()).or_insert_with(|| mesh_info(mesh)).clone()
     }
 
-    fn prune_mesh_info(&mut self) {
+    pub(super) fn prune_mesh_info(&mut self) {
         self.cache.retained_meshes.clear();
         for (_, item) in self.cache.items.iter() {
             self.cache.retained_meshes.insert(item.mesh.id());
+            if let Some(replacement) = item.replacement.as_ref() {
+                self.cache.retained_meshes.insert(replacement.item.mesh.id());
+            }
         }
         self.cache.mesh_info.retain(|id, _| self.cache.retained_meshes.contains(id));
     }
 
     fn remove_item(&mut self, index: ItemIndex) -> Option<CachedItem> {
         let item = self.cache.remove_item(index)?;
+        self.cache.replacement_count -= usize::from(item.replacement.is_some());
         self.draw_list.release_faces(&item.faces);
+        if let Some(replacement) = item.replacement.as_ref() {
+            self.draw_list.release_faces(&replacement.item.faces);
+        }
         Some(item)
     }
 
@@ -660,7 +688,9 @@ impl GeometryRenderer {
         self.cache.next_candidates.clear();
         let frustum = Frustum::from_clip_matrix(projection);
         for (index, item) in self.cache.items.iter() {
-            if self.is_item_visible(item, camera, &frustum) {
+            if self.is_item_visible(item, camera, &frustum)
+                || item.replacement.as_ref().is_some_and(|replacement| self.is_item_visible(&replacement.item, camera, &frustum))
+            {
                 self.cache.next_candidates.push(index);
             }
         }
@@ -678,7 +708,8 @@ impl GeometryRenderer {
         let mut changed = false;
         for item_index in ids {
             let Some(item) = self.cache.items.get(*item_index) else { continue };
-            let visible = self.is_item_visible(item, camera, &frustum);
+            let visible = self.is_item_visible(item, camera, &frustum)
+                || item.replacement.as_ref().is_some_and(|replacement| self.is_item_visible(&replacement.item, camera, &frustum));
             let id = item.id;
             let position = self
                 .cache
@@ -709,43 +740,8 @@ impl GeometryRenderer {
         self.cache.mesh_representatives.clear();
         self.cache.mesh_compositions.clear();
         self.cache.mesh_priorities.clear();
-        self.cache.held_meshes.clear();
         let frustum = Frustum::from_clip_matrix(projection);
         let mut missing = false;
-        let pending = self.cache.pending_replacements.iter().map(|(entity, object)| (*entity, object.clone())).collect::<Vec<_>>();
-        for (entity, object) in pending {
-            if let Some(index) = self.cache.objects.get(&entity)
-                && let Some(item) = self.cache.items.get(*index)
-            {
-                self.cache.held_meshes.insert(item.mesh.id());
-            }
-            let Some((_, mesh)) = object.mesh() else { continue };
-            let Placement::Ready(transform) = object.placement() else { continue };
-            let flags = object.mesh_flags().unwrap_or_default();
-            let scale = transform.scale * Vec3::new(if flags.mirror { -1.0 } else { 1.0 }, 1.0, 1.0);
-            if !is_visible(
-                transform.pose.position,
-                transform.pose.rotation,
-                scale,
-                mesh.mesh().bounds(),
-                ShadingMode::Studio,
-                camera,
-                &frustum,
-            ) {
-                continue;
-            }
-            let bounds = mesh.mesh().bounds();
-            let center = (bounds.min.as_dvec3() + bounds.max.as_dvec3()) * 0.5 * scale.as_dvec3();
-            let offset = transform.pose.position - camera.position() + (transform.pose.rotation * center.as_vec3()).as_dvec3();
-            let radius = ((bounds.max.as_dvec3() - bounds.min.as_dvec3()).abs() * scale.as_dvec3().abs() * 0.5).length();
-            missing |= add_mesh_demand(
-                &mut self.cache,
-                mesh,
-                None,
-                (radius / offset.length().max(1.0), offset.length()),
-                self.meshes.contains_key(&mesh.id()),
-            );
-        }
         let candidates = self.cache.candidates.clone();
         for id in candidates {
             let Some(item) = self.cache.items.get(id) else { continue };
@@ -753,6 +749,21 @@ impl GeometryRenderer {
             let composition = item.terrain_composition.clone();
             let priority = draw_priority(item, camera);
             missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, self.meshes.contains_key(&mesh.id()));
+        }
+        if self.cache.replacement_count > 0 {
+            let replacements = self
+                .cache
+                .items
+                .iter()
+                .filter_map(|(_, item)| {
+                    let replacement = &item.replacement.as_ref()?.item;
+                    let visible = self.is_item_visible(item, camera, &frustum) || self.is_item_visible(replacement, camera, &frustum);
+                    visible.then(|| (replacement.mesh.clone(), replacement.terrain_composition.clone(), draw_priority(replacement, camera)))
+                })
+                .collect::<Vec<_>>();
+            for (mesh, composition, priority) in replacements {
+                missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, self.meshes.contains_key(&mesh.id()));
+            }
         }
         self.cache.mesh_ids.sort_by(|a, b| {
             let resident = self.meshes.contains_key(b).cmp(&self.meshes.contains_key(a));
@@ -764,6 +775,16 @@ impl GeometryRenderer {
             b_priority.0.total_cmp(&a_priority.0).then_with(|| a_priority.1.total_cmp(&b_priority.1))
         });
         missing
+    }
+
+    pub(super) fn forget_mesh_demand(&mut self, mesh_id: MeshId) {
+        self.cache.mesh_ids.retain(|candidate| *candidate != mesh_id);
+        self.cache.mesh_set.remove(&mesh_id);
+        self.cache.mesh_priorities.remove(&mesh_id);
+        self.cache.mesh_ready.remove(&mesh_id);
+        self.cache.mesh_representatives.remove(&mesh_id);
+        self.cache.mesh_compositions.remove(&mesh_id);
+        self.pending_meshes.remove(&mesh_id);
     }
 }
 

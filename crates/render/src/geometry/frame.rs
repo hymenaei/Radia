@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
 use math::DVec3;
 use uuid::Uuid;
@@ -67,6 +70,7 @@ impl GeometryRenderer {
 
         let visibility_started = Instant::now();
         let mut update = self.update_cache(view);
+        self.promote_ready_replacements(&mut update);
         self.apply_agent_pose(agent_pose, origin, &mut update);
         let update_all_motion = update.full_visibility || camera_changed;
         self.update_object_motion(view, started, origin, update_all_motion, agent_pose.map(AgentPose::agent_id), &mut update);
@@ -75,7 +79,7 @@ impl GeometryRenderer {
         update.pose_items.dedup();
         let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, origin);
         self.water.update(&self.queue, view, camera, projection, water_height);
-        let mut candidates_changed = if update.full_visibility || camera_changed {
+        let candidates_changed = if update.full_visibility || camera_changed {
             self.rebuild_candidates(camera, projection)
         } else if !update.pose_items.is_empty() {
             self.update_candidates(camera, projection, &update.pose_items)
@@ -97,6 +101,9 @@ impl GeometryRenderer {
             || self.cache.mesh_state != self.memory.mesh_state()
             || !self.pending_meshes.is_empty();
         let mut uploaded = 0;
+        let mut fallbacks_released = false;
+        let mut blocked_replacements = HashSet::new();
+        let mut fallback_meshes = HashSet::new();
         if mesh_progress {
             self.mesh_budget_blocked.clear();
             self.pending_meshes.clear();
@@ -104,31 +111,40 @@ impl GeometryRenderer {
             for index in 0..self.cache.mesh_ids.len() {
                 let mesh_id = self.cache.mesh_ids[index];
                 let Some(mesh) = self.cache.mesh_representatives.get(&mesh_id).cloned() else { continue };
-                if self.cache.held_meshes.contains(&mesh_id) {
-                    if self.meshes.contains_key(&mesh_id) {
-                        self.cache.mesh_ready.insert(mesh_id);
-                    }
-                    continue;
-                }
                 let composition = self.cache.mesh_compositions.get(&mesh_id).cloned().flatten();
                 if self.upload_mesh(device, &mesh, composition.as_deref(), &mut uploaded) {
                     self.cache.mesh_ready.insert(mesh_id);
                 } else {
                     self.pending_meshes.insert(mesh_id);
+                    if self.mesh_budget_blocked.contains(&mesh_id) && self.has_replacement(mesh_id) {
+                        blocked_replacements.insert(mesh_id);
+                    }
                 }
             }
             self.cache.mesh_ready.retain(|mesh_id| self.meshes.contains_key(mesh_id));
             self.cache.mesh_state = self.memory.mesh_state();
         }
-        let replacements_released = self.release_blocked_replacements(&mut update);
-        let replacements_completed = self.complete_mesh_replacements(view, &mut update);
-        if replacements_released || replacements_completed {
-            candidates_changed |= self.rebuild_candidates(camera, projection);
-            self.rebuild_visible_meshes(camera, projection);
-            self.cache.mesh_ready.retain(|mesh_id| self.meshes.contains_key(mesh_id));
-            self.cache.mesh_ready.extend(self.cache.mesh_ids.iter().filter(|mesh_id| self.meshes.contains_key(mesh_id)).copied());
-            self.pending_meshes.clear();
-            self.pending_meshes.extend(self.cache.mesh_ids.iter().filter(|mesh_id| !self.meshes.contains_key(mesh_id)).copied());
+        for mesh_id in blocked_replacements {
+            let retry_state = self.replacement_retry_state(mesh_id);
+            if !self.retired.is_empty() {
+                self.set_replacement_retry_state(mesh_id, self.memory.mesh_state());
+            } else if retry_state.is_none_or(|retry_state| retry_state != self.memory.mesh_state()) {
+                for old_mesh in self.drop_blocked_fallbacks(mesh_id, &mut update) {
+                    fallback_meshes.insert(old_mesh);
+                    fallbacks_released = true;
+                }
+            }
+        }
+        for mesh_id in fallback_meshes {
+            let still_demanded = self.cache.candidates.iter().any(|index| {
+                self.cache.items.get(*index).is_some_and(|item| {
+                    item.mesh.id() == mesh_id || item.replacement.as_ref().is_some_and(|replacement| replacement.item.mesh.id() == mesh_id)
+                })
+            });
+            if !still_demanded {
+                self.forget_mesh_demand(mesh_id);
+                self.retire_mesh_id(mesh_id);
+            }
         }
         self.stats.items_updated = update.items_updated;
         if self.cache.mesh_state != previous_mesh_state {
@@ -169,6 +185,15 @@ impl GeometryRenderer {
         if origin_rebased {
             for (_, item) in self.cache.items.iter_mut() {
                 item.transform = instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin);
+                if let Some(replacement) = item.replacement.as_mut() {
+                    replacement.item.transform = instance_base(
+                        replacement.item.position,
+                        replacement.item.rotation,
+                        replacement.item.scale,
+                        replacement.item.invert_normals,
+                        origin,
+                    );
+                }
             }
         }
         if layout {
@@ -286,8 +311,12 @@ impl GeometryRenderer {
             key,
             textures: self.textures.state(),
             meshes: self.memory.mesh_state(),
-            more_meshes: !self.pending_meshes.is_empty()
-                && (uploaded > 0 || self.cache.mesh_state != previous_mesh_state || !self.retired.is_empty()),
+            more_meshes: self.cache.replacement_count > 0
+                && self.cache.items.iter().any(|(_, item)| {
+                    item.replacement.as_ref().is_some_and(|replacement| self.meshes.contains_key(&replacement.item.mesh.id()))
+                })
+                || (!self.pending_meshes.is_empty()
+                    && (uploaded > 0 || self.cache.mesh_state != previous_mesh_state || !self.retired.is_empty() || fallbacks_released)),
             animation_deadline,
         });
         times.draw_list += instances_started.elapsed();
@@ -324,12 +353,12 @@ impl GeometryRenderer {
 
     fn set_item_pose(&mut self, index: ItemIndex, pose: WorldPose, origin: DVec3, update: Option<&mut CacheUpdate>) {
         let Some(item) = self.cache.items.get_mut(index) else { return };
-        if item.position == pose.position && item.rotation == pose.rotation {
+        let changed = set_cached_item_pose(item, pose, origin);
+        let replacement_changed =
+            item.replacement.as_mut().is_some_and(|replacement| set_cached_item_pose(&mut replacement.item, pose, origin));
+        if !changed && !replacement_changed {
             return;
         }
-        item.position = pose.position;
-        item.rotation = pose.rotation;
-        item.transform = instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin);
         if let Some(update) = update {
             update.pose_items.push(index);
             update.items_updated += 1;
@@ -496,6 +525,16 @@ impl GeometryRenderer {
             );
         }
     }
+}
+
+fn set_cached_item_pose(item: &mut super::items::CachedItem, pose: WorldPose, origin: DVec3) -> bool {
+    if item.position == pose.position && item.rotation == pose.rotation {
+        return false;
+    }
+    item.position = pose.position;
+    item.rotation = pose.rotation;
+    item.transform = instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin);
+    true
 }
 
 fn is_agent_pose_override(kind: Kind, object_id: Uuid, agent_id: Option<Uuid>) -> bool {
@@ -672,6 +711,7 @@ mod tests {
                     materials: None,
                     appearance: None,
                     scale: Vec3::ONE,
+                    invert_normals: false,
                     shading,
                     terrain: None,
                     terrain_textures: None,
@@ -699,6 +739,7 @@ mod tests {
                 materials: object.materials(),
                 appearance: object.detail().surface_appearance.as_ref(),
                 scale: transform.scale,
+                invert_normals: false,
                 shading: ShadingMode::Studio,
                 terrain: None,
                 terrain_textures: None,

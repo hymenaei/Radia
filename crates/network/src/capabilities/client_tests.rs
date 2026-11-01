@@ -15,13 +15,14 @@ use serde::Serialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net, runtime,
+    sync::Barrier,
     task::{JoinSet, spawn},
     time::timeout,
 };
 use url::Url;
 
 use crate::capabilities::budget::{
-    MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_CAPABILITY_REQUESTS,
+    MAX_CAPABILITY_REQUEST_BODY_BYTES, MAX_CAPABILITY_RESPONSE_BYTES, MAX_CONCURRENT_ASSET_REQUESTS, MAX_CONCURRENT_CAPABILITY_REQUESTS,
     MAX_SEED_CAPABILITY_RESPONSE_BYTES,
 };
 use crate::fixtures::event_queue::decode_request_body;
@@ -315,6 +316,86 @@ async fn capability_clients_share_the_session_http_connection_pool() {
     let (first_peer, second_peer) = timeout(TEST_TIMEOUT, server).await.expect("server should receive both requests").expect("server task");
 
     assert_eq!(first_peer, second_peer, "clients in one capability session should reuse an HTTP connection");
+}
+
+#[tokio::test]
+async fn asset_requests_are_independent() {
+    const ASSET_REQUESTS: usize = MAX_CONCURRENT_CAPABILITY_REQUESTS + 2;
+    const ORDINARY_REQUESTS: usize = MAX_CONCURRENT_CAPABILITY_REQUESTS + 1;
+
+    let mut server = ConcurrentCapabilityTestServer::start(ASSET_REQUESTS + ORDINARY_REQUESTS);
+    let budget = CapabilityBudget::new();
+    let client =
+        Client::new_with_budget(Url::parse("http://127.0.0.1:9/seed").expect("seed URL"), budget.clone()).expect("active Tokio runtime");
+    let asset_url = CapabilityUrl::parse(server.url("/asset").as_str()).expect("asset URL");
+    let ordinary_url = CapabilityUrl::parse(server.url("/ordinary").as_str()).expect("ordinary URL");
+    let asset_barrier = Arc::new(Barrier::new(ASSET_REQUESTS + 1));
+    let mut asset_tasks = JoinSet::new();
+
+    for index in 0..ASSET_REQUESTS {
+        let client = client.clone();
+        let url = asset_url.clone();
+        let barrier = Arc::clone(&asset_barrier);
+        asset_tasks.spawn(async move {
+            barrier.wait().await;
+            let result = if index % 2 == 0 {
+                client
+                    .get_bytes_with_response_limit_and_redirect_policy(&url, MAX_CAPABILITY_RESPONSE_BYTES, RedirectPolicy::ViewerAsset)
+                    .await
+                    .map(|_| ())
+            } else {
+                client
+                    .get_range_with_response_limit_and_redirect_policy(
+                        &url,
+                        0..1,
+                        MAX_CAPABILITY_RESPONSE_BYTES,
+                        RedirectPolicy::ViewerAsset,
+                    )
+                    .await
+                    .map(|_| ())
+            };
+            result.expect("asset request succeeds");
+        });
+    }
+
+    asset_barrier.wait().await;
+    for _ in 0..ASSET_REQUESTS {
+        let request = server.next_request().await;
+        assert_eq!(request.path, "/asset");
+    }
+    assert_eq!(budget.asset_requests.available_permits(), MAX_CONCURRENT_ASSET_REQUESTS - ASSET_REQUESTS);
+
+    let ordinary_barrier = Arc::new(Barrier::new(ORDINARY_REQUESTS + 1));
+    let mut ordinary_tasks = JoinSet::new();
+    for _ in 0..ORDINARY_REQUESTS {
+        let client = client.clone();
+        let url = ordinary_url.clone();
+        let barrier = Arc::clone(&ordinary_barrier);
+        ordinary_tasks.spawn(async move {
+            barrier.wait().await;
+            client.get_bytes_with_response_limit(&url, MAX_CAPABILITY_RESPONSE_BYTES).await.expect("ordinary request succeeds");
+        });
+    }
+
+    ordinary_barrier.wait().await;
+    let mut held_ordinary = Vec::with_capacity(MAX_CONCURRENT_CAPABILITY_REQUESTS);
+    for _ in 0..MAX_CONCURRENT_CAPABILITY_REQUESTS {
+        let request = server.next_request().await;
+        assert_eq!(request.path, "/ordinary");
+        held_ordinary.push(request);
+    }
+    assert_eq!(budget.ordinary_requests.available_permits(), 0);
+
+    server.release_response(held_ordinary.remove(0));
+    let waiting_ordinary = server.next_request().await;
+    assert_eq!(waiting_ordinary.path, "/ordinary");
+
+    let maximum_active = server.finish();
+    assert_eq!(maximum_active, ASSET_REQUESTS + MAX_CONCURRENT_CAPABILITY_REQUESTS);
+    assert_eq!(asset_tasks.join_all().await.len(), ASSET_REQUESTS);
+    assert_eq!(ordinary_tasks.join_all().await.len(), ORDINARY_REQUESTS);
+    assert_eq!(budget.asset_requests.available_permits(), MAX_CONCURRENT_ASSET_REQUESTS);
+    assert_eq!(budget.ordinary_requests.available_permits(), MAX_CONCURRENT_CAPABILITY_REQUESTS);
 }
 
 #[tokio::test]

@@ -42,6 +42,7 @@ pub struct AssetRequest {
     pub region: Region,
     pub request: Request,
     pub priority: Priority,
+    pub importance: u16,
 }
 
 pub enum AssetChange {
@@ -87,10 +88,18 @@ enum AssetUnit {
 struct Entry {
     ticket: AssetTicket,
     request: Request,
-    users: HashMap<AssetUser, (TextureSize, Priority)>,
+    users: HashMap<AssetUser, UserDemand>,
     size: TextureSize,
     priority: Priority,
+    importance: u16,
     status: Option<Status>,
+}
+
+#[derive(Clone, Copy)]
+struct UserDemand {
+    size: TextureSize,
+    priority: Priority,
+    importance: u16,
 }
 
 struct ObjectDemand {
@@ -315,9 +324,13 @@ impl AssetDemand {
     }
     fn refresh(&mut self, key: AssetKey) {
         let Some(entry) = self.entries.get_mut(&key) else { return };
-        let Some(size) = entry.users.values().map(|(size, _)| *size).max() else { return };
-        let priority = entry.users.values().map(|(_, priority)| *priority).max().unwrap_or(Priority::Background);
-        if (entry.size == size || key.unit != AssetUnit::Whole || key.resource.kind != Kind::Texture) && entry.priority == priority {
+        let Some(size) = entry.users.values().map(|demand| demand.size).max() else { return };
+        let priority = entry.users.values().map(|demand| demand.priority).max().unwrap_or(Priority::Background);
+        let importance = entry.users.values().map(|demand| demand.importance).max().unwrap_or_default();
+        if (entry.size == size || key.unit != AssetUnit::Whole || key.resource.kind != Kind::Texture)
+            && entry.priority == priority
+            && entry.importance == importance
+        {
             return;
         }
         if self.tickets.remove(&entry.ticket).is_some() {
@@ -325,6 +338,7 @@ impl AssetDemand {
         }
         entry.size = size;
         entry.priority = priority;
+        entry.importance = importance;
         entry.request = request_with_size(entry.request, size);
         entry.ticket = AssetTicket::new();
         self.tickets.insert(entry.ticket, key);
@@ -333,6 +347,7 @@ impl AssetDemand {
             region: key.region,
             request: entry.request,
             priority,
+            importance,
         }));
     }
 
@@ -377,7 +392,7 @@ impl AssetDemand {
         }
         let mut keys = HashSet::new();
         for id in textures {
-            self.register(user, region, Request::Texture { id: AssetId::new(id), size }, size, priority, &mut keys);
+            self.register(user, region, Request::Texture { id: AssetId::new(id), size }, size, priority, 0, &mut keys);
         }
         let old = self.terrain_targets.remove(&region);
         if let Some(old) = &old {
@@ -468,15 +483,18 @@ impl AssetDemand {
             self.targets.get(&entity).map_or((0, None, None, Vec::new()), |target| {
                 (target.faces, Some(target.size), target.asset, target.keys.iter().copied().collect())
             });
-        let interested = match object.placement() {
-            Placement::Ready(transform) => {
-                camera.importance(transform.pose.position, 3.0 * transform.scale.as_dvec3().abs().max_element()).is_some()
-            }
-            _ => false,
-        };
         let mesh_asset = match object.geometry() {
             crate::scene::Geometry::Mesh(asset) => Some(asset),
             _ => None,
+        };
+        let (interested, importance) = match (mesh_asset, object.placement()) {
+            (Some(_), Placement::Ready(transform)) => {
+                camera.mesh_importance(transform.pose.position, transform.scale).map_or((false, 0), |importance| (true, importance))
+            }
+            (None, Placement::Ready(transform)) => {
+                (camera.importance(transform.pose.position, 3.0 * transform.scale.as_dvec3().abs().max_element()).is_some(), 0)
+            }
+            _ => (false, 0),
         };
         let mut tracked_asset = previous_asset.filter(|asset| Some(*asset) == mesh_asset);
         if previous_asset != mesh_asset
@@ -506,7 +524,7 @@ impl AssetDemand {
             self.remove_user(AssetUser::Object(entity), key);
         }
         let mesh_resolution = if let (Some(asset), Some(tracked_asset)) = (mesh_asset, tracked_asset) {
-            Some(self.resolve_mesh(camera, object, asset, tracked_asset, size, priority, &mut keys))
+            Some(self.resolve_mesh(camera, object, asset, tracked_asset, size, priority, importance, &mut keys))
         } else {
             mesh_asset.map(|_| MeshResolution::Failed)
         };
@@ -570,6 +588,7 @@ impl AssetDemand {
         tracked_asset: AssetId,
         size: TextureSize,
         priority: Priority,
+        importance: u16,
         keys: &mut HashSet<AssetKey>,
     ) -> MeshResolution {
         if asset != tracked_asset {
@@ -592,7 +611,7 @@ impl AssetDemand {
         let mut plan = self.meshes.request_plan(asset, desired, current, priority);
         if plan.needs_header {
             let (resolution, content) =
-                self.observe(object.detail().summary.entity, region, Request::MeshHeader(asset), size, priority, keys);
+                self.observe(object.detail().summary.entity, region, Request::MeshHeader(asset), size, priority, importance, keys);
             if let Some(Content::MeshHeader(header)) = content {
                 self.meshes.set_header(asset, header);
             } else if matches!(resolution, Resolution::Failed(_)) {
@@ -607,7 +626,7 @@ impl AssetDemand {
         }
         let mut failed = false;
         for request in plan.requests {
-            let (resolution, content) = self.observe(object.detail().summary.entity, region, request, size, priority, keys);
+            let (resolution, content) = self.observe(object.detail().summary.entity, region, request, size, priority, importance, keys);
             failed |= matches!(resolution, Resolution::Failed(_));
             if let Some(Content::Mesh(content)) = content {
                 let update = self.meshes.set_lod(asset, content, &self.budget);
@@ -634,9 +653,10 @@ impl AssetDemand {
         request: Request,
         size: TextureSize,
         priority: Priority,
+        importance: u16,
         keys: &mut HashSet<AssetKey>,
     ) -> (Resolution, Option<Content>) {
-        let key = self.register(AssetUser::Object(entity), region, request, size, priority, keys);
+        let key = self.register(AssetUser::Object(entity), region, request, size, priority, importance, keys);
         let entry = self.entries.get(&key).expect("registered asset entry");
         match &entry.status {
             Some(Status::Ready(content)) => (Resolution::Ready, Some(content.clone())),
@@ -655,6 +675,7 @@ impl AssetDemand {
         request: Request,
         size: TextureSize,
         priority: Priority,
+        importance: u16,
         keys: &mut HashSet<AssetKey>,
     ) -> AssetKey {
         let key = asset_key(region, request);
@@ -663,17 +684,18 @@ impl AssetDemand {
             let ticket = AssetTicket::new();
             self.tickets.insert(ticket, key);
             let request = request_with_size(request, size);
-            self.events.push_back(AssetChange::Request(AssetRequest { ticket, region, request, priority }));
-            Entry { ticket, request, users: HashMap::new(), size, priority, status: None }
+            self.events.push_back(AssetChange::Request(AssetRequest { ticket, region, request, priority, importance }));
+            Entry { ticket, request, users: HashMap::new(), size, priority, importance, status: None }
         });
         entry
             .users
             .entry(user)
             .and_modify(|old| {
-                old.0 = old.0.max(size);
-                old.1 = old.1.max(priority);
+                old.size = old.size.max(size);
+                old.priority = old.priority.max(priority);
+                old.importance = old.importance.max(importance);
             })
-            .or_insert((size, priority));
+            .or_insert(UserDemand { size, priority, importance });
         key
     }
 
@@ -695,7 +717,7 @@ impl AssetDemand {
             .copied()
             .unwrap_or_else(FaceAppearance::default);
         let (legacy_state, legacy) = if let Some(id) = authored.material {
-            let (resolution, content) = self.observe(entity, region, Request::LegacyMaterial(id), size, priority, keys);
+            let (resolution, content) = self.observe(entity, region, Request::LegacyMaterial(id), size, priority, 0, keys);
             let material = match content {
                 Some(Content::Material(material)) => match *material {
                     MaterialDescription::Legacy(material) => Some(material),
@@ -708,7 +730,7 @@ impl AssetDemand {
             (None, None)
         };
         let (pbr_state, pbr) = if let Some(id) = source.pbr_materials.as_ref().and_then(|materials| materials.material(slot)) {
-            let (resolution, content) = self.observe(entity, region, Request::PbrMaterial(id), size, priority, keys);
+            let (resolution, content) = self.observe(entity, region, Request::PbrMaterial(id), size, priority, 0, keys);
             let material = match content {
                 Some(Content::Material(material)) => match *material {
                     MaterialDescription::Pbr(material) => Some(material),
@@ -731,7 +753,7 @@ impl AssetDemand {
             } else {
                 TextureSize::new((f64::from(size.edge()) / repeats).ceil() as u32)
             };
-            let (resolution, content) = self.observe(entity, region, Request::Texture { id, size }, size, priority, keys);
+            let (resolution, content) = self.observe(entity, region, Request::Texture { id, size }, size, priority, 0, keys);
             let image = match content {
                 Some(Content::Texture(image)) => Some(image),
                 _ => None,

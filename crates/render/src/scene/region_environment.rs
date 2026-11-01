@@ -279,6 +279,7 @@ impl RegionEnvironmentResolver {
                         region,
                         request: Request::Environment(*asset),
                         priority: Priority::Visible,
+                        importance: 0,
                     })));
                 }
                 CandidateSource::Inline(source) => {

@@ -90,8 +90,17 @@ pub(super) fn publication(object: &Object, asset: Option<AssetId>, resolution: O
 }
 
 pub(super) fn material_slots(object: &Object, asset: bool, mesh: Option<&SharedMesh>, priority: Priority) -> BTreeSet<u8> {
-    if asset || priority == Priority::Visible && mesh.is_some() {
-        return mesh.map_or_else(BTreeSet::new, |mesh| mesh.mesh().faces().iter().map(|face| face.slot).collect());
+    if asset {
+        return match mesh {
+            Some(mesh) => mesh.mesh().faces().iter().map(|face| face.slot).collect(),
+            None if priority == Priority::Visible => fallback_slots(object).into_iter().take(8).collect(),
+            None => BTreeSet::new(),
+        };
+    }
+    if priority == Priority::Visible
+        && let Some(mesh) = mesh
+    {
+        return mesh.mesh().faces().iter().map(|face| face.slot).collect();
     }
     fallback_slots(object)
 }
@@ -235,9 +244,7 @@ impl MeshAssets {
             {
                 requests.push(Request::MeshLod(request));
                 if visible && lod == desired && !has_displayable_fallback(record, current, desired) {
-                    let fallback = desired.fallback_order().into_iter().skip(1).find(|fallback| {
-                        header.lod(asset, *fallback).is_ok() && !matches!(record.lods[fallback.index()], LodContent::Unavailable)
-                    });
+                    let fallback = fallback_lod(record, header, asset, desired);
                     if let Some(fallback) = fallback
                         && state_pending(record, fallback)
                         && let Ok(request) = header.lod(asset, fallback)
@@ -302,6 +309,17 @@ fn selected_lod(record: &MeshRecord, header: &MeshHeaderAsset, asset: AssetId, d
         .fallback_order()
         .into_iter()
         .find(|lod| header.lod(asset, *lod).is_ok() && !matches!(record.lods.get(lod.index()), Some(LodContent::Unavailable)))
+}
+
+fn fallback_lod(record: &MeshRecord, header: &MeshHeaderAsset, asset: AssetId, desired: MeshLod) -> Option<MeshLod> {
+    if desired == MeshLod::Lowest {
+        return None;
+    }
+    let available = |lod: &MeshLod| header.lod(asset, *lod).is_ok() && !matches!(record.lods[lod.index()], LodContent::Unavailable);
+    if available(&MeshLod::Lowest) {
+        return Some(MeshLod::Lowest);
+    }
+    desired.fallback_order().into_iter().skip(1).take_while(|lod| lod.index() < desired.index()).find(|lod| available(lod))
 }
 
 fn resolved_lod(record: &MeshRecord, asset: AssetId, lod: MeshLod) -> Option<MeshResolution> {

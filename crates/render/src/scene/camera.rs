@@ -121,6 +121,37 @@ impl Camera {
         Some((2.0 * radius * self.focal_pixels / depth.max(radius)).ceil().clamp(1.0, f64::from(u32::MAX)) as u32)
     }
 
+    pub(in crate::scene) fn mesh_importance(self, center: DVec3, scale: Vec3) -> Option<u16> {
+        if !center.is_finite() || !scale.is_finite() {
+            return None;
+        }
+        let radius = (scale.abs() * 0.5).length();
+        if !radius.is_finite() || radius <= 0.0 {
+            return None;
+        }
+        let offset = center - self.position;
+        if !offset.is_finite() {
+            return None;
+        }
+        let distance = offset.length();
+        if !distance.is_finite() || distance - f64::from(radius) > self.draw_distance {
+            return None;
+        }
+        let depth = offset.dot(self.direction);
+        if !depth.is_finite()
+            || depth + f64::from(radius) <= 0.0
+            || self.view_planes.into_iter().any(|plane| offset.dot(plane) < -f64::from(radius))
+        {
+            return None;
+        }
+        let score = f64::from(radius) / distance.max(1.0);
+        if !score.is_finite() || score <= 0.0 {
+            return None;
+        }
+        let bucket = (score.log2() * 4.0 + 2048.0).floor().clamp(1.0, f64::from(u16::MAX));
+        u16::try_from(bucket as u32).ok()
+    }
+
     pub fn detail(self, center: DVec3, radius: f64, previous: Option<Detail>) -> Option<Detail> {
         if !center.is_finite() || !radius.is_finite() || radius <= 0.0 {
             return None;
@@ -313,6 +344,18 @@ mod tests {
         let vertical = Camera::new(DVec3::ZERO, Vec3::Z, PI / 2.0, [1000, 1000]).unwrap();
         assert!(vertical.importance(DVec3::Z * 10.0, 1.0).is_some());
         assert_eq!(vertical.importance(DVec3::new(12.0, 0.0, 10.0), 1.0), None);
+    }
+
+    #[test]
+    fn mesh_importance_buckets_stay_stable() {
+        let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 3.0, [1000, 1000]).unwrap();
+        let near = camera.mesh_importance(DVec3::X * 10.0, Vec3::splat(2.0)).unwrap();
+        let far = camera.mesh_importance(DVec3::X * 50.0, Vec3::ONE).unwrap();
+        let moved = Camera::new(DVec3::new(0.01, 0.0, 0.0), Vec3::X, PI / 3.0, [1000, 1000]).unwrap();
+
+        assert!(near > far);
+        assert_eq!(near, moved.mesh_importance(DVec3::X * 10.0, Vec3::splat(2.0)).unwrap());
+        assert_eq!(camera.mesh_importance(-DVec3::X * 10.0, Vec3::ONE), None);
     }
 
     #[test]

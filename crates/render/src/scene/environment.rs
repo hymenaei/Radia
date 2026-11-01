@@ -172,6 +172,7 @@ impl ViewerEnvironments {
                     region,
                     request: Request::Environment(asset),
                     priority: Priority::Visible,
+                    importance: 0,
                 }));
             }
             EnvironmentPush::Clear { experience, transition } => {

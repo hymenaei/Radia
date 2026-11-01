@@ -222,9 +222,14 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
                 ReconcileStep::Build(job) => fixture.scene.complete_mesh(job.run()),
                 ReconcileStep::Publish(batch) => fixture.view.apply(batch).expect("apply scene batch"),
                 ReconcileStep::Continue => {}
-                ReconcileStep::Wait(_) => {
-                    let (ticket, status) = statuses.recv().await.expect("asset status channel stays open");
-                    apply_status(ticket, status, &mut fixture, &mut demands, &mut texture_ready);
+                ReconcileStep::Wait(deadline) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+                        status = statuses.recv() => {
+                            let (ticket, status) = status.expect("asset status channel stays open");
+                            apply_status(ticket, status, &mut fixture, &mut demands, &mut texture_ready);
+                        }
+                    }
                 }
                 ReconcileStep::Idle => {
                     let (ticket, status) = statuses.recv().await.expect("asset status channel stays open");

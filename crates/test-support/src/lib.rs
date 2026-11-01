@@ -1,4 +1,5 @@
 pub mod allocation;
+pub mod http_peer;
 
 pub mod lludp;
 pub mod mesh;

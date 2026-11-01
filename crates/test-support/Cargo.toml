@@ -9,3 +9,4 @@ workspace = true
 
 [dependencies]
 flate2.workspace = true
+url.workspace = true

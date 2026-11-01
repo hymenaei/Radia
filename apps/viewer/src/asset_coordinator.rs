@@ -283,14 +283,14 @@ impl AssetHandle {
     }
 }
 
-pub(crate) struct AssetCoordinator {
+pub struct AssetCoordinator {
     handle: AssetHandle,
     controls: mpsc::Sender<RouteCommand>,
     worker: JoinHandle<()>,
 }
 
 impl AssetCoordinator {
-    pub(crate) fn new(runtime: Handle, cancelled: impl Future<Output = ()> + Send + 'static, cache: Option<Arc<AssetCache>>) -> Self {
+    pub fn new(runtime: Handle, cancelled: impl Future<Output = ()> + Send + 'static, cache: Option<Arc<AssetCache>>) -> Self {
         static MEMORY: OnceLock<Budget> = OnceLock::new();
         let budget = MEMORY.get_or_init(Budget::default).clone();
         Self::build(runtime, cancelled, budget, cache, Box::new(spawn_cache_writes), Box::new(|| {}))
@@ -335,7 +335,7 @@ impl AssetCoordinator {
         Self { handle, controls, worker }
     }
 
-    pub(crate) async fn stop(self) {
+    pub async fn stop(self) {
         let Self { handle, controls, worker } = self;
         handle.active.store(false, Ordering::Release);
         drop((handle, controls));
@@ -344,14 +344,14 @@ impl AssetCoordinator {
         }
     }
 
-    pub(crate) fn handle(&self) -> AssetHandle {
+    pub fn handle(&self) -> AssetHandle {
         self.handle.clone()
     }
 
-    pub(crate) fn register(&self, region: Region, client: Client) {
+    pub fn register(&self, region: Region, client: Client) {
         self.control(RouteCommand::Register(region, client));
     }
-    pub(crate) fn retire(&self, region: Region) {
+    pub fn retire(&self, region: Region) {
         self.control(RouteCommand::Retire(region));
     }
 
@@ -623,100 +623,20 @@ fn spawn_cache_writes(writes: Vec<CacheWrite>, runtime: &Handle, jobs: &mut Futu
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        assert_matches,
-        io::{Read, Write},
-        net::{TcpListener, TcpStream},
-        sync::Arc,
-        thread,
-    };
+    use std::{assert_matches, sync::Arc};
 
     use assets::Priority;
     use llsd::{Value, binary, xml};
     use tempfile::tempdir;
-    use test_support::texture::{RGBA_J2C, RGBA_RAW};
+    use test_support::{
+        http_peer::LoopbackPeer as Peer,
+        texture::{RGBA_J2C, RGBA_RAW},
+    };
     use url::Url;
     use utils::AssetId;
     use uuid::Uuid;
 
     use super::*;
-
-    struct Peer {
-        url: Url,
-        thread: thread::JoinHandle<Vec<Vec<u8>>>,
-    }
-
-    fn read_request(stream: &mut TcpStream) -> Vec<u8> {
-        stream.set_nonblocking(false).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let mut bytes = Vec::new();
-        let mut chunk = [0; 4096];
-        loop {
-            let count = stream.read(&mut chunk).unwrap();
-            assert!(count > 0, "request ended before framing completed");
-            bytes.extend_from_slice(&chunk[..count]);
-            if let Some(header) = bytes.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                let length = String::from_utf8_lossy(&bytes[..header])
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap_or(0);
-                if bytes.len() >= header + 4 + length {
-                    return bytes;
-                }
-            }
-        }
-    }
-
-    impl Peer {
-        fn new(count: usize, mut respond: impl FnMut(usize, &[u8], &Url) -> (u16, Vec<u8>) + Send + 'static) -> Self {
-            Self::new_with_headers(count, move |index, request, base| {
-                let (status, body) = respond(index, request, base);
-                (status, Vec::new(), body)
-            })
-        }
-
-        fn new_with_headers(
-            count: usize,
-            mut respond: impl FnMut(usize, &[u8], &Url) -> (u16, Vec<(String, String)>, Vec<u8>) + Send + 'static,
-        ) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
-            let base = url.clone();
-            let thread = thread::spawn(move || {
-                let mut requests = Vec::new();
-                for index in 0..count {
-                    let deadline = Instant::now() + Duration::from_secs(5);
-                    let mut stream = loop {
-                        match listener.accept() {
-                            Ok((stream, _)) => break stream,
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
-                                thread::sleep(Duration::from_millis(1))
-                            }
-                            Err(error) => panic!("expected capability request: {error}"),
-                        }
-                    };
-                    let request = read_request(&mut stream);
-                    let (status, headers, body) = respond(index, &request, &base);
-                    let mut header = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n", body.len());
-                    for (name, value) in headers {
-                        header.push_str(&format!("{name}: {value}\r\n"));
-                    }
-                    header.push_str("Connection: close\r\n\r\n");
-                    let _ = stream.write_all(header.as_bytes()).and_then(|_| stream.write_all(&body));
-                    requests.push(request);
-                }
-                requests
-            });
-            Self { url, thread }
-        }
-        fn finish(self) -> Vec<Vec<u8>> {
-            self.thread.join().unwrap()
-        }
-    }
 
     fn grants(base: &Url) -> Vec<u8> {
         xml::to_vec(&Value::Map(

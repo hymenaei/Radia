@@ -12,6 +12,14 @@ pub fn asset_with_lod_vertices(lods: &[(usize, usize)]) -> Vec<u8> {
     asset_with_blocks(blocks)
 }
 
+pub fn asset_with_seeded_lod_vertices(lods: &[(usize, usize)], face_count: usize, seed: u64) -> Vec<u8> {
+    let blocks = lods
+        .iter()
+        .map(|(lod, vertex_count)| (*lod, block_with_seeded_vertices(*vertex_count, face_count, seed.wrapping_add(*lod as u64))))
+        .collect();
+    asset_with_blocks(blocks)
+}
+
 pub fn asset_with_empty_lod(geometry_lods: &[usize], empty_lods: &[usize], face_count: usize) -> Vec<u8> {
     let lods: Vec<_> = (0..4)
         .filter_map(|lod| {
@@ -123,6 +131,43 @@ fn block_with_vertices(vertex_count: usize) -> Vec<u8> {
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&payload).expect("mesh fixture compression accepts bounded bytes");
     encoder.finish().expect("mesh fixture compression finishes")
+}
+
+fn block_with_seeded_vertices(vertex_count: usize, face_count: usize, mut seed: u64) -> Vec<u8> {
+    let mut faces = Vec::with_capacity(face_count);
+    for _ in 0..face_count {
+        let mut position = Vec::with_capacity(vertex_count * 6);
+        let mut uv = Vec::with_capacity(vertex_count * 4);
+        for _ in 0..vertex_count {
+            for _ in 0..3 {
+                position.extend_from_slice(&next_seeded_word(&mut seed).to_be_bytes());
+            }
+            for _ in 0..2 {
+                uv.extend_from_slice(&next_seeded_word(&mut seed).to_be_bytes());
+            }
+        }
+        let domain = map(&[("Min", array(&[real(-1.0), real(-1.0), real(-1.0)])), ("Max", array(&[real(1.0), real(1.0), real(1.0)]))]);
+        let uv_domain = map(&[("Min", array(&[real(0.0), real(0.0)])), ("Max", array(&[real(1.0), real(1.0)]))]);
+        faces.push(map(&[
+            ("Position", binary(&position)),
+            ("PositionDomain", domain),
+            ("TexCoord0", binary(&uv)),
+            ("TexCoord0Domain", uv_domain),
+            ("TriangleList", binary(&[0x00, 0x00, 0x01, 0x00, 0x02, 0x00])),
+        ]));
+    }
+    let mut payload = b"<?llsd/binary?>\n".to_vec();
+    payload.extend(array(&faces));
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&payload).expect("mesh fixture compression accepts bounded bytes");
+    encoder.finish().expect("mesh fixture compression finishes")
+}
+
+fn next_seeded_word(seed: &mut u64) -> u16 {
+    *seed ^= *seed << 13;
+    *seed ^= *seed >> 7;
+    *seed ^= *seed << 17;
+    (*seed >> 16) as u16
 }
 
 fn block_with_geometry(face_count: usize, vertex_count: usize, index_count: usize) -> Vec<u8> {

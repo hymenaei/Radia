@@ -8121,6 +8121,7 @@ name = "test-support"
 version = "0.0.1"
 dependencies = [
  "flate2",
+ "url",
 ]
 
 [[package]]
@@ -8976,6 +8977,7 @@ version = "0.0.1"
 dependencies = [
  "assets",
  "chrono",
+ "criterion",
  "dirs 7.0.0",
  "egui",
  "egui-winit",

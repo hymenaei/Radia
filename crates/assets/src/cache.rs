@@ -35,8 +35,8 @@ const MESH_LOD_LOW: NamespaceId = NamespaceId::new(6);
 const MESH_LOD_MEDIUM: NamespaceId = NamespaceId::new(7);
 const MESH_LOD_HIGH: NamespaceId = NamespaceId::new(8);
 pub(crate) const MESH_NAMESPACE_IDS: [NamespaceId; 5] = [MESH_HEADER, MESH_LOD_LOWEST, MESH_LOD_LOW, MESH_LOD_MEDIUM, MESH_LOD_HIGH];
-const MESH_HEADER_FRAME_BYTES: usize = size_of::<u64>();
-const MESH_LOD_FRAME_BYTES: usize = 3 * size_of::<u64>();
+pub(super) const MESH_HEADER_FRAME_BYTES: usize = size_of::<u64>();
+pub(super) const MESH_LOD_FRAME_BYTES: usize = 3 * size_of::<u64>();
 const NAMESPACES: [Namespace; 9] = [
     Namespace::new("textures", "j2c"),
     Namespace::new("materials/pbr", "llsd"),
@@ -76,10 +76,6 @@ pub(crate) fn mesh_header_frame(total_length: u64, header: &[u8]) -> Option<Vec<
     Some(frame)
 }
 
-pub(crate) const fn mesh_header_frame_bytes() -> usize {
-    MESH_HEADER_FRAME_BYTES
-}
-
 pub(crate) fn parse_mesh_header_frame(bytes: &[u8]) -> Option<(u64, &[u8])> {
     let max_length = MESH_HEADER_FRAME_BYTES.checked_add(MAX_MESH_HEADER_BYTES)?;
     if bytes.len() <= MESH_HEADER_FRAME_BYTES || bytes.len() > max_length {
@@ -106,10 +102,6 @@ pub(crate) fn mesh_lod_frame(request: crate::mesh::MeshLodRequest, block: &[u8])
     frame.extend_from_slice(&request.asset_length().to_le_bytes());
     frame.extend_from_slice(block);
     Some(frame)
-}
-
-pub(crate) const fn mesh_lod_frame_bytes() -> usize {
-    MESH_LOD_FRAME_BYTES
 }
 
 pub(crate) fn parse_mesh_lod_frame(request: crate::mesh::MeshLodRequest, bytes: &[u8]) -> Option<&[u8]> {
@@ -396,42 +388,34 @@ impl Drop for CacheWrite {
 }
 
 fn cache_limit(request: Request) -> usize {
-    let unit = cache_unit(request);
-    match unit {
-        CacheUnit::Whole => cache_limit_for_kind(request.resource().kind),
-        CacheUnit::Header | CacheUnit::Lod(_) => cache_limit_for_unit(unit).min(storage::MAX_VALUE_BYTES),
-    }
-}
-
-fn cache_limit_for_kind(kind: Kind) -> usize {
-    kind.max_cache_bytes().min(storage::MAX_VALUE_BYTES)
-}
-
-fn cache_limit_for_unit(unit: CacheUnit) -> usize {
-    match unit {
-        CacheUnit::Whole => storage::MAX_VALUE_BYTES,
-        CacheUnit::Header => MESH_HEADER_FRAME_BYTES.saturating_add(MAX_MESH_HEADER_BYTES),
-        CacheUnit::Lod(_) => MESH_LOD_FRAME_BYTES.saturating_add(MAX_MESH_BLOCK_BYTES),
+    match request {
+        Request::Texture { .. } => Kind::Texture.max_cache_bytes().min(storage::MAX_VALUE_BYTES),
+        Request::PbrMaterial(_) => Kind::PbrMaterial.max_cache_bytes().min(storage::MAX_VALUE_BYTES),
+        Request::LegacyMaterial(_) => Kind::LegacyMaterial.max_cache_bytes().min(storage::MAX_VALUE_BYTES),
+        Request::Environment(_) => Kind::Environment.max_cache_bytes().min(storage::MAX_VALUE_BYTES),
+        Request::MeshHeader(_) => MESH_HEADER_FRAME_BYTES.saturating_add(MAX_MESH_HEADER_BYTES).min(storage::MAX_VALUE_BYTES),
+        Request::MeshLod(_) => MESH_LOD_FRAME_BYTES.saturating_add(MAX_MESH_BLOCK_BYTES).min(storage::MAX_VALUE_BYTES),
     }
 }
 
 fn storage_key(request: Request) -> StorageKey {
-    let unit = cache_unit(request);
-    let namespace = match unit {
-        CacheUnit::Whole => match request.resource().kind {
-            Kind::Texture => TEXTURES,
-            Kind::PbrMaterial => PBR_MATERIALS,
-            Kind::LegacyMaterial => LEGACY_MATERIALS,
-            Kind::Environment => ENVIRONMENTS,
-            Kind::Mesh => MESH_HEADER,
-        },
-        CacheUnit::Header => MESH_HEADER,
-        CacheUnit::Lod(MeshLod::Lowest) => MESH_LOD_LOWEST,
-        CacheUnit::Lod(MeshLod::Low) => MESH_LOD_LOW,
-        CacheUnit::Lod(MeshLod::Medium) => MESH_LOD_MEDIUM,
-        CacheUnit::Lod(MeshLod::High) => MESH_LOD_HIGH,
+    let (namespace, id) = match request {
+        Request::Texture { id, .. } => (TEXTURES, id),
+        Request::PbrMaterial(id) => (PBR_MATERIALS, id),
+        Request::LegacyMaterial(id) => (LEGACY_MATERIALS, id),
+        Request::Environment(id) => (ENVIRONMENTS, id),
+        Request::MeshHeader(id) => (MESH_HEADER, id),
+        Request::MeshLod(block) => {
+            let namespace = match block.lod() {
+                MeshLod::Lowest => MESH_LOD_LOWEST,
+                MeshLod::Low => MESH_LOD_LOW,
+                MeshLod::Medium => MESH_LOD_MEDIUM,
+                MeshLod::High => MESH_LOD_HIGH,
+            };
+            (namespace, block.asset_id())
+        }
     };
-    StorageKey::new(namespace, *request.resource().id.uuid().as_bytes())
+    StorageKey::new(namespace, *id.uuid().as_bytes())
 }
 
 fn map_storage_error(error: StorageError) -> AssetCacheError {

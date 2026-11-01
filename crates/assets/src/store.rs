@@ -26,6 +26,7 @@ pub const MAX_ASSET_DECODES: usize = 2;
 pub const MAX_ASSET_FETCHES: usize = 8;
 const DEMAND_DEADLINE: Duration = Duration::from_secs(60);
 const NEGATIVE_TTL: Duration = Duration::from_secs(30);
+const CACHE_PRESSURE_RETRY: Duration = Duration::from_secs(1);
 const MAX_ATTEMPTS: u8 = 3;
 type ScheduleKey = (Reverse<Priority>, bool, Instant, LoadKey, Route);
 
@@ -351,6 +352,7 @@ struct AssetEntry {
     target: Option<TextureSize>,
     priority: Priority,
     cache_checked: bool,
+    cache_retry_at: Option<Instant>,
 }
 
 impl AssetEntry {
@@ -768,6 +770,7 @@ impl Store {
             target: None,
             priority,
             cache_checked: false,
+            cache_retry_at: None,
         });
         if !entry.request.is_compatible_with(request) {
             return Err(AdmissionError::ConflictingRequest);
@@ -933,6 +936,9 @@ impl Store {
         let life = Arc::new(WorkLife { maintenance: Arc::clone(&self.maintenance_dirty) });
         let (cancelled, receiver) = watch::channel(false);
         let entry = self.entries.get_mut(&key).expect("selected demanded entry");
+        if entry.cache_retry_at.is_some_and(|retry_at| retry_at <= now) {
+            entry.cache_retry_at = None;
+        }
         let source = entry.texture().and_then(|texture| texture.source());
         let job = Job {
             resource,
@@ -1087,6 +1093,7 @@ impl Store {
         }
         if origin == DecodeOrigin::Disk && result.as_ref().is_err_and(|failure| *failure == Failure::MemoryPressure) {
             entry.cache_checked = false;
+            entry.cache_retry_at = Some(now + CACHE_PRESSURE_RETRY);
             entry.broadcast_status(Status::Queued);
             return writes;
         }
@@ -1165,11 +1172,13 @@ impl Store {
                     && (entry.priority == Priority::Visible || matches!(entry.phase, LoadPhase::Running { .. }))
             })
             .flat_map(|entry| {
-                entry
-                    .views
-                    .values()
-                    .filter(|view| view.count() > 0 && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some()))
-                    .flat_map(|view| std::iter::once(view.deadline).chain(view.failed.as_ref().and_then(|failed| failed.retry_at)))
+                entry.cache_retry_at.into_iter().chain(
+                    entry
+                        .views
+                        .values()
+                        .filter(|view| view.count() > 0 && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some()))
+                        .flat_map(|view| std::iter::once(view.deadline).chain(view.failed.as_ref().and_then(|failed| failed.retry_at))),
+                )
             })
             .filter(|deadline| *deadline > now)
             .min()
@@ -1210,6 +1219,7 @@ impl Store {
                     view.count() > 0
                         && view.attempts < MAX_ATTEMPTS
                         && (entry.priority == Priority::Background || now < view.deadline)
+                        && entry.cache_retry_at.is_none_or(|retry_at| retry_at <= now)
                         && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some_and(|retry| retry <= now))
                 })
             {

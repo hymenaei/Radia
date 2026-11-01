@@ -978,11 +978,18 @@ fn mesh_cache_pressure_keeps_entry() {
     assert_matches!(demand.status(), Status::Queued);
     assert_eq!(cache.stats().corrupt_entries, 0);
     assert_matches!(cache.lookup(Request::MeshLod(request)), crate::cache::AssetLookup::Hit(_));
+    let bytes_read = cache.stats().bytes_read;
+    assert!(store.next_job(now).is_none());
+    assert!(store.next_job(now + Duration::from_millis(500)).is_none());
+    assert_eq!(cache.stats().bytes_read, bytes_read, "cache pressure delays another disk read");
     drop(pressure);
-    let LoadJob::ReadCache(read) = store.next_job(now).expect("retry cache read") else { panic!("retry reads retained entry") };
-    let Some(LoadJob::Decode(input)) = store.complete_cache_read(read.run(), now) else { panic!("retained LOD is still a hit") };
+    let retry_at = now + Duration::from_secs(1);
+    let LoadJob::ReadCache(read) = store.next_job(retry_at).expect("retry cache read after pressure delay") else {
+        panic!("retry reads retained entry")
+    };
+    let Some(LoadJob::Decode(input)) = store.complete_cache_read(read.run(), retry_at) else { panic!("retained LOD is still a hit") };
     let decode = store.start_decode(input).expect("admit retry decode");
-    assert!(store.complete(decode.run(), now).is_empty());
+    assert!(store.complete(decode.run(), retry_at).is_empty());
     assert_matches!(demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
     drop(demand);
     store.close();

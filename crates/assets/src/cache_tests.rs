@@ -131,7 +131,7 @@ fn open_uses_asset_policy_for_real_eviction() {
     let cheap_texture = resource(61, Kind::Texture);
     cache.observe_decode(Kind::Mesh, std::time::Duration::from_secs(30));
     let mesh_request = Request::MeshHeader(expensive_mesh.id);
-    let mesh_header = vec![1; ENTRY_BYTES - crate::cache::mesh_header_frame_bytes()];
+    let mesh_header = vec![1; ENTRY_BYTES - crate::cache::MESH_HEADER_FRAME_BYTES];
     let mesh_entry = crate::cache::mesh_header_frame(ENTRY_BYTES as u64, &mesh_header).expect("frame mesh header");
     cache.put_complete(mesh_request, mesh_entry).expect("store expensive mesh first");
     let one_entry_limit = cache.accounted_size();

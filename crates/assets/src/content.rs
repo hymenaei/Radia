@@ -225,7 +225,7 @@ fn persist_mesh_source(source: CacheSource, data: &Data, reservation: &mut Reser
             let Data::MeshHeader(header) = data else { return None };
             let length = usize::try_from(header.header_size()).ok()?;
             let header_bytes = bytes.get(..length)?;
-            let capacity = crate::cache::mesh_header_frame_bytes().checked_add(header_bytes.len())?;
+            let capacity = crate::cache::MESH_HEADER_FRAME_BYTES.checked_add(header_bytes.len())?;
             reserve_cache_payload(reservation, capacity)?;
             (capacity, crate::cache::mesh_header_frame(total_length, header_bytes)?)
         }
@@ -238,7 +238,7 @@ fn persist_mesh_source(source: CacheSource, data: &Data, reservation: &mut Reser
             } else {
                 bytes.as_slice()
             };
-            let capacity = crate::cache::mesh_lod_frame_bytes().checked_add(block.len())?;
+            let capacity = crate::cache::MESH_LOD_FRAME_BYTES.checked_add(block.len())?;
             reserve_cache_payload(reservation, capacity)?;
             (capacity, crate::cache::mesh_lod_frame(request, block)?)
         }

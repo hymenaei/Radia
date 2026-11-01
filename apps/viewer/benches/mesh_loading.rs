@@ -65,8 +65,22 @@ pub fn register(c: &mut Criterion) {
     let mesh_assets = mesh_assets();
     let warm_directory = tempdir().expect("create warm cache directory");
     let warm_cache = Arc::new(AssetCache::open(warm_directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open warm cache"));
-    runtime.block_on(run_measurement(Arc::clone(&warm_cache), Arc::clone(&mesh_assets), true));
-    let warm_sample = runtime.block_on(run_measurement(Arc::clone(&warm_cache), Arc::clone(&mesh_assets), true));
+    let mut warm_sample = Sample::default();
+    let mut previous_counts = None;
+    let mut stable_counts = 0;
+    for _ in 0..8 {
+        warm_sample = runtime.block_on(run_measurement(Arc::clone(&warm_cache), Arc::clone(&mesh_assets), true));
+        let counts = (warm_sample.http_requests, warm_sample.http_bytes);
+        if previous_counts == Some(counts) {
+            stable_counts += 1;
+        } else {
+            stable_counts = 0;
+        }
+        if stable_counts == 1 {
+            break;
+        }
+        previous_counts = Some(counts);
+    }
     report_counts_once(CacheMode::Warm, &warm_sample);
 
     let mut group = c.benchmark_group("mesh_loading");
@@ -179,7 +193,7 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
     let mut texture_ready = HashSet::new();
     let mut sample = Sample::default();
 
-    tokio::time::timeout(Duration::from_secs(120), async {
+    let completed = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             while let Ok((ticket, status)) = statuses.try_recv() {
                 apply_status(ticket, status, &mut fixture, &mut demands, &mut texture_ready);
@@ -192,7 +206,7 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
             }
             match fixture.scene.poll(Instant::now()) {
                 ReconcileStep::Asset(AssetChange::Request(request)) => {
-                    let demand = acquire(&handle, request.region, request.request, request.priority).await;
+                    let demand = acquire(&handle, request.region, request.request, request.priority, request.importance).await;
                     let watcher = watch_demand(request.ticket, demand.clone(), status_sender.clone());
                     demands.insert(request.ticket, TrackedDemand { _demand: demand, watcher, request: request.request });
                 }
@@ -220,8 +234,82 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
             }
         }
     })
-    .await
-    .expect("mesh loading benchmark completes within the hang guard");
+    .await;
+    if completed.is_err() {
+        let published_meshes = fixture
+            .view
+            .objects()
+            .filter(|object| matches!(object.geometry(), render::scene::Geometry::Mesh(_)) && object.mesh().is_some())
+            .count();
+        let ready_demands = demands.values().filter(|demand| matches!(demand._demand.status(), Status::Ready(_))).count();
+        let (queued, fetching, decoding, failed, stale) =
+            demands.values().fold((0, 0, 0, 0, 0), |counts, demand| match demand._demand.status() {
+                Status::Queued => (counts.0 + 1, counts.1, counts.2, counts.3, counts.4),
+                Status::Fetching => (counts.0, counts.1 + 1, counts.2, counts.3, counts.4),
+                Status::Decoding => (counts.0, counts.1, counts.2 + 1, counts.3, counts.4),
+                Status::Failed { .. } => (counts.0, counts.1, counts.2, counts.3 + 1, counts.4),
+                Status::StaleSession => (counts.0, counts.1, counts.2, counts.3, counts.4 + 1),
+                Status::Ready(_) | Status::Refining(_) | Status::RefinementFailed { .. } => counts,
+            });
+        let (headers_ready, headers_total, lods_ready, lods_total, other_ready, other_total) =
+            demands.values().fold((0, 0, 0, 0, 0, 0), |counts, demand| {
+                let ready = usize::from(matches!(demand._demand.status(), Status::Ready(_)));
+                match demand.request {
+                    Request::MeshHeader(_) => (counts.0 + ready, counts.1 + 1, counts.2, counts.3, counts.4, counts.5),
+                    Request::MeshLod(_) => (counts.0, counts.1, counts.2 + ready, counts.3 + 1, counts.4, counts.5),
+                    _ => (counts.0, counts.1, counts.2, counts.3, counts.4 + ready, counts.5 + 1),
+                }
+            });
+        let (headers_queued, headers_fetching, lods_queued, lods_fetching, other_queued, other_fetching) =
+            demands.values().fold((0, 0, 0, 0, 0, 0), |counts, demand| {
+                let queued = usize::from(matches!(demand._demand.status(), Status::Queued));
+                let fetching = usize::from(matches!(demand._demand.status(), Status::Fetching));
+                match demand.request {
+                    Request::MeshHeader(_) => (counts.0 + queued, counts.1 + fetching, counts.2, counts.3, counts.4, counts.5),
+                    Request::MeshLod(_) => (counts.0, counts.1, counts.2 + queued, counts.3 + fetching, counts.4, counts.5),
+                    _ => (counts.0, counts.1, counts.2, counts.3, counts.4 + queued, counts.5 + fetching),
+                }
+            });
+        eprintln!(
+            "mesh_loading timeout: nearest={} all={} textures={}/{} meshes={}/{} headers={}/{} lods={}/{} other={}/{} demands={}/{} queued={} fetching={} decoding={} failed={} stale={} states=headers({},{}) lods({},{}) other({},{}) memory={:?} cache={:?}",
+            sample.nearest_10_ready.is_some(),
+            sample.all_ready.is_some(),
+            texture_ready.len(),
+            fixture.textures.len(),
+            published_meshes,
+            fixture.mesh_objects.len(),
+            headers_ready,
+            headers_total,
+            lods_ready,
+            lods_total,
+            other_ready,
+            other_total,
+            ready_demands,
+            demands.len(),
+            queued,
+            fetching,
+            decoding,
+            failed,
+            stale,
+            headers_queued,
+            headers_fetching,
+            lods_queued,
+            lods_fetching,
+            other_queued,
+            other_fetching,
+            handle.memory_stats(),
+            handle.cache_stats(),
+        );
+        for (_, demand) in demands.drain() {
+            demand.watcher.abort();
+        }
+        drop(handle);
+        cancel.send(()).unwrap();
+        service.stop().await;
+        let (requests, bytes) = peer.finish_stats();
+        eprintln!("mesh_loading timeout network: requests={} bytes={}", requests.len(), bytes);
+        panic!("mesh loading benchmark exceeded the hang guard");
+    }
 
     for (_, demand) in demands.drain() {
         demand.watcher.abort();
@@ -235,9 +323,9 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
     sample
 }
 
-async fn acquire(handle: &AssetHandle, region: Region, request: Request, priority: assets::Priority) -> Demand {
+async fn acquire(handle: &AssetHandle, region: Region, request: Request, priority: assets::Priority, importance: u16) -> Demand {
     loop {
-        match handle.request(region, request, priority).await {
+        match handle.request_with_importance(region, request, priority, importance).await {
             Ok(demand) => return demand,
             Err(RequestError::Busy) => tokio::task::yield_now().await,
             Err(error) => panic!("benchmark asset demand failed: {error:?}"),

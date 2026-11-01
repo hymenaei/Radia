@@ -597,6 +597,17 @@ impl Cache {
         Lookup::Miss
     }
 
+    pub fn contains(&self, key: Key) -> bool {
+        if !self.read_state.namespaces.contains(key.namespace) {
+            return false;
+        }
+        let entries = match self.read_state.entries.read() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        entries.contains_key(&key)
+    }
+
     pub fn put(&self, key: Key, bytes: Vec<u8>) -> Result<(), StorageError> {
         if !self.read_state.namespaces.contains(key.namespace) {
             return Err(StorageError::UnknownNamespace);

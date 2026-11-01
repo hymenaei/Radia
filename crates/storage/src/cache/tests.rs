@@ -334,6 +334,19 @@ fn unexpected_index_trigger_is_discarded() {
 }
 
 #[test]
+fn contains_checks_index() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");
+    assert!(!cache.contains(key(1)));
+
+    cache.put(key(1), vec![1, 2, 3, 4]).expect("store payload");
+    assert!(cache.contains(key(1)));
+    assert!(!cache.contains(Key::new(NamespaceId::new(2), [1; 16])));
+
+    cache.shutdown().expect("close cache");
+}
+
+#[test]
 fn lookup_checks_hash_and_removes_corruption() {
     let directory = tempdir().expect("cache directory");
     let cache = Cache::open(directory.path(), DEFAULT_SIZE_LIMIT, &TEST_NAMESPACES).expect("open cache");

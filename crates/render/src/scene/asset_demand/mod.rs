@@ -258,9 +258,9 @@ impl AssetDemand {
                 }
             }
             (AssetUnit::MeshLod(_), Some(Content::Mesh(mesh))) => {
-                let (changed, deferred) = self.meshes.set_lod(key.resource.id, mesh, &self.budget);
-                self.deferred |= deferred;
-                if changed || deferred {
+                let update = self.meshes.set_lod(key.resource.id, mesh, &self.budget);
+                self.deferred |= update.deferred;
+                if update.changed || update.deferred {
                     self.meshes.users(key.resource.id).into_iter().map(AssetUser::Object).collect()
                 } else {
                     Vec::new()
@@ -510,8 +510,8 @@ impl AssetDemand {
         } else {
             mesh_asset.map(|_| MeshResolution::Failed)
         };
-        let (mesh_publication, published_mesh) = mesh::publication(object, mesh_asset, mesh_resolution);
-        let slots = mesh::material_slots(object, mesh_asset.is_some(), published_mesh.as_ref(), priority);
+        let publication = mesh::publication(object, mesh_asset, mesh_resolution);
+        let slots = mesh::material_slots(object, mesh_asset.is_some(), publication.mesh.as_ref(), priority);
         let count = slots.len();
         if self.faces.saturating_sub(previous_faces).saturating_add(count) > MAX_FACES
             || (previous_faces == 0 && !self.targets.contains_key(&entity) && self.targets.len() == MAX_TARGETS)
@@ -546,7 +546,7 @@ impl AssetDemand {
             self.refresh(*key);
         }
         self.targets.insert(entity, ObjectDemand { keys, faces: count, size, asset: tracked_asset });
-        let mesh_changed = !matches!(&mesh_publication, MeshPublication::Keep);
+        let mesh_changed = !matches!(&publication.publication, MeshPublication::Keep);
         let materials_unchanged = object.materials().is_some_and(|old| old == faces) || object.materials().is_none() && faces.is_empty();
         if !mesh_changed && materials_unchanged {
             return None;
@@ -559,7 +559,7 @@ impl AssetDemand {
             self.deferred |= materials.is_none();
             materials
         };
-        Some(MaterialChange { source: object.clone(), materials, mesh: mesh_publication })
+        Some(MaterialChange { source: object.clone(), materials, mesh: publication.publication })
     }
 
     fn resolve_mesh(
@@ -575,21 +575,33 @@ impl AssetDemand {
         if asset != tracked_asset {
             return MeshResolution::Failed;
         }
-        let Placement::Ready(transform) = object.placement() else { return MeshResolution::Waiting };
-        let Some(desired) = camera.mesh_lod(transform.pose.position, transform.scale) else { return MeshResolution::Waiting };
+        let current = object.mesh().and_then(|(key, _)| match key {
+            crate::scene::DrawnMeshKey::Asset { asset: current, lod } if current == asset => Some(lod),
+            _ => None,
+        });
+        let Placement::Ready(transform) = object.placement() else {
+            self.meshes.set_user_lods(asset, object.detail().summary.entity, [None; 2], current);
+            return MeshResolution::Waiting;
+        };
+        let Some(desired) = camera.mesh_lod(transform.pose.position, transform.scale) else {
+            self.meshes.set_user_lods(asset, object.detail().summary.entity, [None; 2], current);
+            return MeshResolution::Waiting;
+        };
         let region = object.detail().summary.address.region();
         self.deferred |= self.meshes.retry_pending(asset, &self.budget);
-        let mut plan = self.meshes.request_plan(asset, desired, priority);
+        let mut plan = self.meshes.request_plan(asset, desired, current, priority);
         if plan.needs_header {
             let (resolution, content) =
                 self.observe(object.detail().summary.entity, region, Request::MeshHeader(asset), size, priority, keys);
             if let Some(Content::MeshHeader(header)) = content {
                 self.meshes.set_header(asset, header);
             } else if matches!(resolution, Resolution::Failed(_)) {
+                self.meshes.set_user_lods(asset, object.detail().summary.entity, [None; 2], None);
                 return MeshResolution::Failed;
             }
-            plan = self.meshes.request_plan(asset, desired, priority);
+            plan = self.meshes.request_plan(asset, desired, current, priority);
             if plan.needs_header {
+                self.meshes.set_user_lods(asset, object.detail().summary.entity, plan.retained, current);
                 return MeshResolution::Waiting;
             }
         }
@@ -598,14 +610,21 @@ impl AssetDemand {
             let (resolution, content) = self.observe(object.detail().summary.entity, region, request, size, priority, keys);
             failed |= matches!(resolution, Resolution::Failed(_));
             if let Some(Content::Mesh(content)) = content {
-                let (_, deferred) = self.meshes.set_lod(asset, content, &self.budget);
-                self.deferred |= deferred;
+                let update = self.meshes.set_lod(asset, content, &self.budget);
+                self.deferred |= update.deferred;
             }
         }
-        match self.meshes.resolve(asset, desired) {
+        let resolution = match self.meshes.resolve(asset, desired, current) {
             MeshResolution::Waiting if failed => MeshResolution::Failed,
             resolution => resolution,
-        }
+        };
+        let published = match &resolution {
+            MeshResolution::Ready(crate::scene::DrawnMeshKey::Asset { asset: published, lod }, _) if *published == asset => Some(*lod),
+            MeshResolution::Waiting => current,
+            _ => None,
+        };
+        self.meshes.set_user_lods(asset, object.detail().summary.entity, plan.retained, published);
+        resolution
     }
 
     fn observe(

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use assets::{
     MeshAsset, MeshHeaderAsset, Priority, Request,
@@ -18,7 +18,13 @@ pub(super) struct MeshAssets {
 struct MeshRecord {
     header: Option<MeshHeaderAsset>,
     lods: [LodContent; 4],
-    users: HashSet<Entity>,
+    users: HashMap<Entity, MeshUser>,
+}
+
+#[derive(Default)]
+struct MeshUser {
+    requested: [Option<MeshLod>; 2],
+    published: Option<MeshLod>,
 }
 
 #[derive(Default)]
@@ -27,12 +33,14 @@ enum LodContent {
     Pending,
     PendingAsset(MeshAsset),
     Empty,
+    Unavailable,
     Ready(SharedMesh),
 }
 
 pub(super) struct MeshRequestPlan {
     pub(super) needs_header: bool,
     pub(super) requests: Vec<Request>,
+    pub(super) retained: [Option<MeshLod>; 2],
 }
 
 pub(super) enum MeshResolution {
@@ -42,6 +50,11 @@ pub(super) enum MeshResolution {
     Ready(DrawnMeshKey, SharedMesh),
 }
 
+pub(super) struct MeshContentUpdate {
+    pub(super) changed: bool,
+    pub(super) deferred: bool,
+}
+
 #[derive(Clone)]
 pub(in crate::scene) enum MeshPublication {
     Keep,
@@ -49,23 +62,30 @@ pub(in crate::scene) enum MeshPublication {
     Set(DrawnMeshKey, SharedMesh),
 }
 
-pub(super) fn publication(
-    object: &Object,
-    asset: Option<AssetId>,
-    resolution: Option<MeshResolution>,
-) -> (MeshPublication, Option<SharedMesh>) {
+pub(super) struct MeshPublicationResult {
+    pub(super) publication: MeshPublication,
+    pub(super) mesh: Option<SharedMesh>,
+}
+
+pub(super) fn publication(object: &Object, asset: Option<AssetId>, resolution: Option<MeshResolution>) -> MeshPublicationResult {
     match (asset, resolution) {
         (Some(_), Some(MeshResolution::Ready(key, mesh))) => {
             let current = object.mesh().is_some_and(|(current_key, current)| current_key == key && current.id() == mesh.id());
-            if current { (MeshPublication::Keep, Some(mesh)) } else { (MeshPublication::Set(key, mesh.clone()), Some(mesh)) }
+            let publication = if current { MeshPublication::Keep } else { MeshPublication::Set(key, mesh.clone()) };
+            MeshPublicationResult { publication, mesh: Some(mesh) }
         }
-        (Some(_), Some(MeshResolution::Empty | MeshResolution::Failed)) | (Some(_), None) => (MeshPublication::Clear, None),
+        (Some(_), Some(MeshResolution::Empty | MeshResolution::Failed)) | (Some(_), None) => {
+            MeshPublicationResult { publication: MeshPublication::Clear, mesh: None }
+        }
         (Some(_), Some(MeshResolution::Waiting)) => {
             let mesh = object.mesh_matches_geometry().then(|| object.mesh().map(|(_, mesh)| mesh.clone())).flatten();
-            (MeshPublication::Keep, mesh)
+            MeshPublicationResult { publication: MeshPublication::Keep, mesh }
         }
-        (None, _) if object.mesh_matches_geometry() => (MeshPublication::Keep, object.mesh().map(|(_, mesh)| mesh.clone())),
-        _ => (MeshPublication::Keep, None),
+        (None, _) if object.mesh_matches_geometry() => {
+            let mesh = object.mesh().map(|(_, mesh)| mesh.clone());
+            MeshPublicationResult { publication: MeshPublication::Keep, mesh }
+        }
+        _ => MeshPublicationResult { publication: MeshPublication::Keep, mesh: None },
     }
 }
 
@@ -98,13 +118,23 @@ impl MeshAssets {
         if !self.records.contains_key(&asset) && self.records.len() >= MAX_OBJECTS {
             return false;
         }
-        self.records.entry(asset).or_default().users.insert(entity);
+        self.records.entry(asset).or_default().users.entry(entity).or_default();
         true
+    }
+
+    pub(super) fn set_user_lods(&mut self, asset: AssetId, entity: Entity, requested: [Option<MeshLod>; 2], published: Option<MeshLod>) {
+        let Some(record) = self.records.get_mut(&asset) else { return };
+        if let Some(user) = record.users.get_mut(&entity) {
+            user.requested = requested;
+            user.published = published;
+        }
+        retain_lods(record);
     }
 
     pub(super) fn remove_user(&mut self, asset: AssetId, entity: Entity) {
         let empty = self.records.get_mut(&asset).is_some_and(|record| {
             record.users.remove(&entity);
+            retain_lods(record);
             record.users.is_empty()
         });
         if empty {
@@ -117,7 +147,7 @@ impl MeshAssets {
     }
 
     pub(super) fn users(&self, asset: AssetId) -> Vec<Entity> {
-        self.records.get(&asset).map_or_else(Vec::new, |record| record.users.iter().copied().collect())
+        self.records.get(&asset).map_or_else(Vec::new, |record| record.users.keys().copied().collect())
     }
 
     pub(super) fn set_header(&mut self, asset: AssetId, header: MeshHeaderAsset) -> bool {
@@ -129,34 +159,40 @@ impl MeshAssets {
         true
     }
 
-    pub(super) fn set_lod(&mut self, asset: AssetId, content: MeshAsset, budget: &Budget) -> (bool, bool) {
+    pub(super) fn set_lod(&mut self, asset: AssetId, content: MeshAsset, budget: &Budget) -> MeshContentUpdate {
         let lod = content.lod();
-        let Some(record) = self.records.get_mut(&asset) else { return (false, false) };
-        let Some(state) = record.lods.get_mut(lod_index(lod)) else { return (false, false) };
+        let Some(record) = self.records.get_mut(&asset) else { return MeshContentUpdate { changed: false, deferred: false } };
+        let Some(state) = record.lods.get_mut(lod.index()) else { return MeshContentUpdate { changed: false, deferred: false } };
         if !matches!(state, LodContent::Pending | LodContent::PendingAsset(_)) {
-            return (false, false);
+            return MeshContentUpdate { changed: false, deferred: false };
         }
         match content.geometry() {
+            LodGeometry::Empty { face_count: 0 } => {
+                *state = LodContent::Unavailable;
+                MeshContentUpdate { changed: true, deferred: false }
+            }
             LodGeometry::Empty { .. } => {
                 *state = LodContent::Empty;
-                (true, false)
+                MeshContentUpdate { changed: true, deferred: false }
             }
             LodGeometry::Geometry(_) => {
                 let Some(lease) = budget.reserve(asset_mesh_bytes()) else {
                     *state = LodContent::PendingAsset(content);
-                    return (false, true);
+                    return MeshContentUpdate { changed: false, deferred: true };
                 };
-                let Some(mesh) = SharedMesh::from_asset(content, lease) else { return (false, false) };
+                let Some(mesh) = SharedMesh::from_asset(content, lease) else {
+                    return MeshContentUpdate { changed: false, deferred: false };
+                };
                 *state = LodContent::Ready(mesh);
-                (true, false)
+                MeshContentUpdate { changed: true, deferred: false }
             }
         }
     }
 
     pub(super) fn retry_pending(&mut self, asset: AssetId, budget: &Budget) -> bool {
         let mut deferred = false;
-        for index in 0..4 {
-            let content = self.records.get(&asset).and_then(|record| match record.lods.get(index) {
+        for lod in [MeshLod::Lowest, MeshLod::Low, MeshLod::Medium, MeshLod::High] {
+            let content = self.records.get(&asset).and_then(|record| match record.lods.get(lod.index()) {
                 Some(LodContent::PendingAsset(content)) => Some(content.clone()),
                 _ => None,
             });
@@ -167,7 +203,7 @@ impl MeshAssets {
             };
             let Some(mesh) = SharedMesh::from_asset(content, lease) else { continue };
             if let Some(record) = self.records.get_mut(&asset)
-                && let Some(state @ LodContent::PendingAsset(_)) = record.lods.get_mut(index)
+                && let Some(state @ LodContent::PendingAsset(_)) = record.lods.get_mut(lod.index())
             {
                 *state = LodContent::Ready(mesh);
             }
@@ -175,83 +211,107 @@ impl MeshAssets {
         deferred
     }
 
-    pub(super) fn request_plan(&self, asset: AssetId, desired: MeshLod, priority: Priority) -> MeshRequestPlan {
+    pub(super) fn request_plan(&self, asset: AssetId, desired: MeshLod, current: Option<MeshLod>, priority: Priority) -> MeshRequestPlan {
         let Some(record) = self.records.get(&asset) else {
-            return MeshRequestPlan { needs_header: true, requests: Vec::new() };
+            return MeshRequestPlan { needs_header: true, requests: Vec::new(), retained: [None; 2] };
         };
         let Some(header) = record.header.as_ref() else {
-            return MeshRequestPlan { needs_header: true, requests: Vec::new() };
+            return MeshRequestPlan { needs_header: true, requests: Vec::new(), retained: [None; 2] };
         };
         let visible = priority == Priority::Visible;
         let selected = if visible {
-            available_lod(header, asset, desired)
-        } else if header.lod(asset, MeshLod::Lowest).is_ok() {
+            selected_lod(record, header, asset, desired)
+        } else if header.lod(asset, MeshLod::Lowest).is_ok() && !matches!(record.lods[MeshLod::Lowest.index()], LodContent::Unavailable) {
             Some(MeshLod::Lowest)
         } else {
             None
         };
         let mut requests = Vec::with_capacity(2);
-        if let Some(lod) = selected
-            && state_pending(record, lod)
-            && let Ok(request) = header.lod(asset, lod)
-        {
-            requests.push(Request::MeshLod(request));
-            if visible
-                && lod == desired
-                && let Some(fallback) = nearest_available(header, asset, desired)
-                && state_pending(record, fallback)
-                && let Ok(request) = header.lod(asset, fallback)
+        let mut retained = [None; 2];
+        if let Some(lod) = selected {
+            retained[0] = Some(lod);
+            if state_pending(record, lod)
+                && let Ok(request) = header.lod(asset, lod)
             {
                 requests.push(Request::MeshLod(request));
+                if visible && lod == desired && !has_displayable_fallback(record, current, desired) {
+                    let fallback = desired.fallback_order().into_iter().skip(1).find(|fallback| {
+                        header.lod(asset, *fallback).is_ok() && !matches!(record.lods[fallback.index()], LodContent::Unavailable)
+                    });
+                    if let Some(fallback) = fallback
+                        && state_pending(record, fallback)
+                        && let Ok(request) = header.lod(asset, fallback)
+                    {
+                        retained[1] = Some(fallback);
+                        requests.push(Request::MeshLod(request));
+                    }
+                }
             }
         }
-        MeshRequestPlan { needs_header: false, requests }
+        MeshRequestPlan { needs_header: false, requests, retained }
     }
 
-    pub(super) fn resolve(&self, asset: AssetId, desired: MeshLod) -> MeshResolution {
+    pub(super) fn resolve(&self, asset: AssetId, desired: MeshLod, current: Option<MeshLod>) -> MeshResolution {
         let Some(record) = self.records.get(&asset) else { return MeshResolution::Waiting };
-        if matches!(record.lods.get(lod_index(desired)), Some(LodContent::Empty)) {
-            return MeshResolution::Empty;
+        let Some(header) = record.header.as_ref() else { return MeshResolution::Waiting };
+        let Some(selected) = selected_lod(record, header, asset, desired) else { return MeshResolution::Waiting };
+        if let Some(resolution) = resolved_lod(record, asset, selected) {
+            return resolution;
         }
-        let mut lods = [MeshLod::Lowest, MeshLod::Low, MeshLod::Medium, MeshLod::High];
-        lods.sort_by_key(|lod| {
-            let index = lod_index(*lod);
-            (index.abs_diff(lod_index(desired)), usize::from(index > lod_index(desired)))
-        });
-        for lod in lods {
-            if let Some(LodContent::Ready(mesh)) = record.lods.get(lod_index(lod)) {
-                return MeshResolution::Ready(DrawnMeshKey::Asset { asset, lod }, mesh.clone());
+        if let Some(current) = current
+            && current != selected
+            && let Some(LodContent::Ready(mesh)) = record.lods.get(current.index())
+        {
+            return MeshResolution::Ready(DrawnMeshKey::Asset { asset, lod: current }, mesh.clone());
+        }
+        for lod in desired.fallback_order().into_iter().skip(1) {
+            if lod == selected {
+                continue;
+            }
+            if let Some(resolution) = resolved_lod(record, asset, lod) {
+                return resolution;
             }
         }
         MeshResolution::Waiting
     }
 }
 
-fn state_pending(record: &MeshRecord, lod: MeshLod) -> bool {
-    matches!(record.lods.get(lod_index(lod)), Some(LodContent::Pending | LodContent::PendingAsset(_)))
-}
-
-fn available_lod(header: &MeshHeaderAsset, asset: AssetId, desired: MeshLod) -> Option<MeshLod> {
-    if header.lod(asset, desired).is_ok() { Some(desired) } else { nearest_available(header, asset, desired) }
-}
-
-fn nearest_available(header: &MeshHeaderAsset, asset: AssetId, desired: MeshLod) -> Option<MeshLod> {
-    let mut lods = [MeshLod::Lowest, MeshLod::Low, MeshLod::Medium, MeshLod::High]
-        .into_iter()
-        .filter(|lod| *lod != desired && header.lod(asset, *lod).is_ok())
-        .collect::<Vec<_>>();
-    lods.sort_by_key(|lod| {
-        let index = lod_index(*lod);
-        (index.abs_diff(lod_index(desired)), usize::from(index > lod_index(desired)))
-    });
-    lods.into_iter().next()
-}
-
-fn lod_index(lod: MeshLod) -> usize {
-    match lod {
-        MeshLod::Lowest => 0,
-        MeshLod::Low => 1,
-        MeshLod::Medium => 2,
-        MeshLod::High => 3,
+fn retain_lods(record: &mut MeshRecord) {
+    for lod in [MeshLod::Lowest, MeshLod::Low, MeshLod::Medium, MeshLod::High] {
+        let retained = record.users.values().any(|user| user.published == Some(lod) || user.requested.contains(&Some(lod)));
+        if retained {
+            continue;
+        }
+        if let Some(state @ (LodContent::PendingAsset(_) | LodContent::Ready(_))) = record.lods.get_mut(lod.index()) {
+            *state = LodContent::Pending;
+        }
     }
+}
+
+fn has_displayable_fallback(record: &MeshRecord, current: Option<MeshLod>, desired: MeshLod) -> bool {
+    current.is_some_and(|lod| matches!(record.lods.get(lod.index()), Some(LodContent::Ready(_))))
+        || desired
+            .fallback_order()
+            .into_iter()
+            .skip(1)
+            .any(|lod| matches!(record.lods.get(lod.index()), Some(LodContent::Ready(_) | LodContent::Empty)))
+}
+
+fn selected_lod(record: &MeshRecord, header: &MeshHeaderAsset, asset: AssetId, desired: MeshLod) -> Option<MeshLod> {
+    desired
+        .fallback_order()
+        .into_iter()
+        .find(|lod| header.lod(asset, *lod).is_ok() && !matches!(record.lods.get(lod.index()), Some(LodContent::Unavailable)))
+}
+
+fn resolved_lod(record: &MeshRecord, asset: AssetId, lod: MeshLod) -> Option<MeshResolution> {
+    match record.lods.get(lod.index()) {
+        Some(LodContent::Ready(mesh)) => Some(MeshResolution::Ready(DrawnMeshKey::Asset { asset, lod }, mesh.clone())),
+        Some(LodContent::Empty) => Some(MeshResolution::Empty),
+        _ => None,
+    }
+}
+
+fn state_pending(record: &MeshRecord, lod: MeshLod) -> bool {
+    matches!(record.lods.get(lod.index()), Some(LodContent::Pending | LodContent::PendingAsset(_)))
 }

@@ -32,12 +32,21 @@ pub enum MeshLod {
 }
 
 impl MeshLod {
-    const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::Lowest => 0,
             Self::Low => 1,
             Self::Medium => 2,
             Self::High => 3,
+        }
+    }
+
+    pub const fn fallback_order(self) -> [Self; 4] {
+        match self {
+            Self::Lowest => [Self::Lowest, Self::Low, Self::Medium, Self::High],
+            Self::Low => [Self::Low, Self::Lowest, Self::Medium, Self::High],
+            Self::Medium => [Self::Medium, Self::Low, Self::Lowest, Self::High],
+            Self::High => [Self::High, Self::Medium, Self::Low, Self::Lowest],
         }
     }
 

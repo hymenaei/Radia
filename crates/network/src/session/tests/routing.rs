@@ -42,18 +42,18 @@ async fn run_queued_target_does_not_follow_neighbor_replacement() {
     );
 
     let mut buffer = [0; 65_535];
-    let deadline = Instant::now() + Duration::from_millis(50);
+    let observer = clone_udp_socket(&replacement).expect("inspect replacement endpoint");
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match timeout(remaining, replacement.recv_from(&mut buffer)).await {
-            Ok(Ok((size, _))) => {
+        match observer.recv_from(&mut buffer) {
+            Ok((size, _)) => {
                 let packet = Packet::decode(&buffer[..size]).expect("decode replacement traffic");
                 assert!(
                     !matches!(packet.message(), Message::RequestMultipleObjects(_)),
                     "a queued send for the retired simulator ID must not reach its replacement"
                 );
             }
-            Err(_) | Ok(Err(_)) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) => panic!("read replacement traffic: {error}"),
         }
     }
 
@@ -70,7 +70,7 @@ async fn run_neighbor_targets_and_replacements() {
         receive_message_with_peer(&harness.neighbor, |message| matches!(message, Message::RequestMultipleObjects(_))).await;
     assert_eq!(sent_peer, harness.neighbor_peer);
     let mut buffer = [0; 65_535];
-    assert!(timeout(Duration::from_millis(50), harness.primary.recv_from(&mut buffer)).await.is_err());
+    std::assert_matches!(clone_udp_socket(&harness.primary).expect("inspect primary endpoint").recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
 
     let mut disable = test_fixture("disable_simulator.hex");
     set_sequence(&mut disable, 42);
@@ -135,6 +135,7 @@ async fn primary_intro_precedes_early_udp_data() {
     let (disconnect, disconnect_requested) = watch::channel(false);
     let client = spawn(run_session(
         login_session(simulator.local_addr().expect("primary simulator address")),
+        commands.clone(),
         command_receiver,
         event_sender,
         disconnect_requested,
@@ -164,7 +165,7 @@ async fn primary_intro_precedes_early_udp_data() {
 
     disconnect.send_replace(true);
     receive_message(&simulator, |message| matches!(message, Message::LogoutRequest(_))).await;
-    assert!(timeout(Duration::from_millis(200), client).await.expect("disconnect should finish").expect("client task").is_ok());
+    assert!(timeout(WAIT, client).await.expect("disconnect should finish").expect("client task").is_ok());
     drop(commands);
 }
 
@@ -173,13 +174,16 @@ fn preconnect_buffer_is_bounded() {
     let simulator_id = test_simulator_id(51);
     let mut pending = PreconnectEvents::default();
     for _ in 0..MAX_PRECONNECT_EVENTS {
-        assert!(matches!(
-            queue_until_connected(&HashSet::new(), &mut pending, simulator_id, EventEnvelope::new(Event::Failed("pending".into()))),
-            PreconnectOutcome::Buffered
-        ));
+        match queue_until_connected(&HashSet::new(), &mut pending, simulator_id, EventEnvelope::new(Event::Failed("pending".into()))) {
+            PreconnectOutcome::Buffered => {}
+            _ => panic!("event should be buffered before overflow"),
+        }
     }
     let overflow = queue_until_connected(&HashSet::new(), &mut pending, simulator_id, EventEnvelope::new(Event::Failed("overflow".into())));
-    assert!(matches!(overflow, PreconnectOutcome::Full));
+    match overflow {
+        PreconnectOutcome::Full => {}
+        _ => panic!("preconnect event queue should report full"),
+    }
     assert_eq!(pending.take(simulator_id).len(), MAX_PRECONNECT_EVENTS);
 }
 
@@ -269,7 +273,7 @@ async fn replacing_neighbor_releases_queued_state() {
 }
 
 #[tokio::test]
-async fn preconnect_overflow_is_neighbor_scoped() {
+async fn preconnect_overflow_reports_coverage_without_disconnect() {
     let primary = UdpSocket::bind("127.0.0.1:0").await.expect("bind primary simulator");
     let primary_endpoint = primary.local_addr().expect("read primary address");
     let mut connection = connect_runtime(login_session(primary_endpoint), ResponseData::default()).await.expect("connect primary circuit");
@@ -296,21 +300,40 @@ async fn preconnect_overflow_is_neighbor_scoped() {
         assert!(run_state.preconnect_events.push(simulator_id, EventEnvelope::new(Event::Failed("buffered".into()))));
     }
     let (events, mut received) = mpsc::channel(1);
+    let source = CoverageSource::EventQueue { incarnation: 54 };
+    let watermark = connection.coverage_losses.watermark(simulator_id, source);
 
     connection
-        .fail_preconnect_overflow(simulator_id, &events, &mut run_state)
+        .publish_simulator_event(
+            simulator_id,
+            event_with_coverage_watermark(
+                Event::CapabilityEvent {
+                    simulator_id,
+                    source: neighbor_endpoint,
+                    message: "CrossedRegion".into(),
+                    body: llsd::Value::Undefined,
+                },
+                watermark,
+            ),
+            &events,
+            &mut run_state,
+        )
         .await
-        .expect("neighbor overflow should not log out the primary simulator");
+        .expect("a full pre-connect buffer should report coverage loss without ending the session");
 
-    assert!(run_state.neighbor_connections.is_empty(), "overflow must remove the affected neighbor");
-    assert!(run_state.preconnect_events.take(simulator_id).is_empty());
+    assert!(run_state.neighbor_connections.contains_key(&region_handle), "queue pressure must keep the neighbor connected");
+    assert_eq!(run_state.preconnect_events.take(simulator_id).len(), MAX_PRECONNECT_EVENTS);
     assert!(!run_state.connected_simulators.contains(&simulator_id));
-    assert!(neighbor_task.await.expect_err("overflow should cancel the neighbor worker").is_cancelled());
+    assert!(received.try_recv().is_err(), "the pre-connect event remains buffered until connection ordering is established");
     std::assert_matches!(
-        received.recv().await.map(EventEnvelope::into_event),
-        Some(Event::SimulatorFailed { simulator_id: failed_id, region_handle: Some(handle), endpoint, .. })
-            if failed_id == simulator_id && handle == region_handle && endpoint == neighbor_endpoint
+        connection.coverage_losses.snapshot().losses.as_slice(),
+        [CoverageLoss::Source(record)]
+            if record.watermark.simulator_id == simulator_id
+                && record.watermark.source == source
+                && record.reason == CoverageLossReason::EventAdmission
     );
+    neighbor_task.abort();
+    assert!(neighbor_task.await.expect_err("test neighbor worker should be cancelled").is_cancelled());
 }
 
 #[tokio::test]
@@ -347,9 +370,10 @@ async fn neighbor_circuits_are_independent() {
     set_sequence(&mut chat, 43);
     harness.neighbor.send_to(&chat, neighbor_peer).await.expect("send after neighbor disabled");
     let mut buffer = [0; 65_535];
-    match timeout(Duration::from_millis(50), harness.neighbor.recv_from(&mut buffer)).await {
-        Err(_) | Ok(Err(_)) => {}
-        Ok(Ok((size, _))) => {
+    match clone_udp_socket(&harness.neighbor).expect("inspect disabled neighbor endpoint").recv_from(&mut buffer) {
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ConnectionReset) => {}
+        Err(error) => panic!("read disabled neighbor traffic: {error}"),
+        Ok((size, _)) => {
             panic!("disabled circuit sent another packet: {:?}", Packet::decode(&buffer[..size]).expect("decode packet").message())
         }
     }

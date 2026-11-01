@@ -5,7 +5,7 @@ use std::{
 
 use assets::mesh::{Face, Mesh, Vertex};
 use math::{DVec3, Vec2, Vec3};
-use world::{Region, TerrainPatchId, TerrainSettings};
+use world::{Region, TERRAIN_PATCH_SIZE, TERRAIN_REGION_SIZE as WORLD_TERRAIN_REGION_SIZE, TerrainPatchId, TerrainSettings};
 
 #[cfg(test)]
 use uuid::Uuid;
@@ -30,6 +30,57 @@ pub(super) struct Terrain {
     patch: TerrainPatchId,
     origin: DVec3,
     settings: Option<TerrainSettings>,
+}
+
+pub(in crate::scene) fn height_at(mirror: &Mirror, position: DVec3) -> Option<f64> {
+    if !position.is_finite() {
+        return None;
+    }
+    let (region, origin) = mirror.regions.values().find_map(|data| {
+        let origin = data.summary().info.resolved_origin()?;
+        (position.x >= origin.x
+            && position.x < origin.x + WORLD_TERRAIN_REGION_SIZE as f64
+            && position.y >= origin.y
+            && position.y < origin.y + WORLD_TERRAIN_REGION_SIZE as f64)
+            .then_some((data.summary().region, origin))
+    })?;
+    let grid_x = position.x - origin.x;
+    let grid_y = position.y - origin.y;
+    let x0 = grid_x.floor() as i32;
+    let y0 = grid_y.floor() as i32;
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+    let tx = grid_x - f64::from(x0);
+    let ty = grid_y - f64::from(y0);
+    let sample = |x: i32, y: i32| {
+        let (region, patch, clamp_x, clamp_y) =
+            locate(mirror, region, x.div_euclid(TERRAIN_PATCH_SIZE as i32), y.div_euclid(TERRAIN_PATCH_SIZE as i32))?;
+        let patch = mirror.patches.get(&(region, patch))?;
+        let x = clamp_x.unwrap_or(x.rem_euclid(TERRAIN_PATCH_SIZE as i32) as usize);
+        let y = clamp_y.unwrap_or(y.rem_euclid(TERRAIN_PATCH_SIZE as i32) as usize);
+        Some(patch_height(patch, x, y))
+    };
+    let interpolate_row = |y| interpolate_samples(|| sample(x0, y), || sample(x1, y), tx);
+    let height = if ty == 0.0 {
+        interpolate_row(y0)?
+    } else if ty == 1.0 {
+        interpolate_row(y1)?
+    } else {
+        let low = interpolate_row(y0)?;
+        let high = interpolate_row(y1)?;
+        low * (1.0 - ty) + high * ty
+    };
+    Some(origin.z + height)
+}
+
+fn interpolate_samples(first: impl FnOnce() -> Option<f64>, second: impl FnOnce() -> Option<f64>, factor: f64) -> Option<f64> {
+    if factor == 0.0 {
+        first()
+    } else if factor == 1.0 {
+        second()
+    } else {
+        Some(first()? * (1.0 - factor) + second()? * factor)
+    }
 }
 
 impl Terrain {
@@ -152,7 +203,11 @@ fn sample(tiles: &[Option<Tile>; 9], x: i32, y: i32) -> Option<f64> {
     let tile = tiles[((y.div_euclid(16) + 1) * 3 + x.div_euclid(16) + 1) as usize].as_ref()?;
     let x = tile.x.unwrap_or(x.rem_euclid(16) as usize);
     let y = tile.y.unwrap_or(y.rem_euclid(16) as usize);
-    Some(f64::from(tile.patch.source().heights()[y * 16 + x]))
+    Some(patch_height(&tile.patch, x, y))
+}
+
+fn patch_height(patch: &Patch, x: usize, y: usize) -> f64 {
+    f64::from(patch.source().heights()[y * TERRAIN_PATCH_SIZE + x])
 }
 
 fn composition_coordinate(settings: &TerrainSettings, local_x: f32, local_y: f32, height: f32, global_x: f32, global_y: f32) -> f32 {

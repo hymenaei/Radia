@@ -11,7 +11,7 @@ use crate::object::storage::ComponentView;
 use crate::{
     Appearance, AttachmentPoint, AvatarAppearance, CoordinateFrame, Entity, Kind, LinearMotion, LocalAddress, LocalTransform, ObjectMedia,
     Parent, PbrMaterialAssignments, PbrMaterialOverrides, PoseError, PoseState, Shape, SitTarget, SurfaceAppearance, TextureAnimation,
-    Transform, WorldTransformState,
+    Transform, UpdateSource, WorldTransformState,
 };
 use crate::{ObjectOrdering, ObjectRecord, World};
 
@@ -86,6 +86,18 @@ impl<'a> Object<'a> {
 
     pub fn angular_velocity(&self) -> Option<Vec3> {
         self.record.state.angular_velocity
+    }
+
+    pub fn is_physical(&self) -> bool {
+        self.record.state.is_physical
+    }
+
+    pub fn time_dilation(&self) -> f32 {
+        self.record.state.time_dilation
+    }
+
+    pub fn motion_source(&self) -> Option<UpdateSource> {
+        self.record.state.motion_source
     }
 
     pub fn shape(&self) -> Option<Shape> {

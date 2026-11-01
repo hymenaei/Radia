@@ -323,15 +323,38 @@ impl TeleportFinishScenario {
             );
         }
         self.harness.primary.send_to(&ack(31, sent.sequence()), self.harness.primary_peer).await.expect("ack explicit former-primary send");
-        assert!(
-            timeout(
-                Duration::from_millis(50),
-                receive_message(&self.harness.primary, |message| matches!(message, Message::RequestMultipleObjects(_)))
-            )
+        let mut fence = object_request();
+        if let Message::RequestMultipleObjects(request) = &mut fence {
+            request.objects[0].local_id = 78;
+        }
+        let (completed, response) = oneshot::channel();
+        self.harness
+            .commands
+            .send(Command::SendTo { simulator_id: self.harness.primary_id, message: fence, delivery: Delivery::Reliable, completed })
             .await
-            .is_err(),
-            "the queued default send must not also reach the former primary"
-        );
+            .expect("queue former-primary send fence");
+        timeout(WAIT, async {
+            loop {
+                let (bytes, _) = receive_udp(&self.harness.primary).await;
+                let packet = Packet::decode(&bytes).expect("decode former-primary traffic");
+                if packet.is_resent() && packet.sequence() == sent.sequence() {
+                    self.harness
+                        .primary
+                        .send_to(&ack(32, packet.sequence()), self.harness.primary_peer)
+                        .await
+                        .expect("ack repeated explicit send");
+                    continue;
+                }
+                if let Message::RequestMultipleObjects(request) = packet.message() {
+                    assert_eq!(request.objects[0].local_id, 78, "the default send must not reach the former primary before its send fence");
+                    self.harness.primary.send_to(&ack(32, packet.sequence()), self.harness.primary_peer).await.expect("ack send fence");
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("former-primary send fence arrives");
+        response.await.expect("send fence response").expect("send fence completes");
         let wrong_region = self.target_region + 1;
         let mut demoted_movement = movement_complete_packet(50, self.session.agent_id, self.session.session_id, wrong_region);
         demoted_movement[0] |= 0x40;
@@ -481,134 +504,6 @@ impl TeleportFinishScenario {
 
 async fn run_teleport_finish_test() {
     let _ = run_teleport_finish_scenario(1).await;
-}
-
-async fn run_overload_logout_promotion_test() {
-    use crate::event::Event::{Failed, SimulatorDisconnected, SimulatorPromoted};
-
-    let mut harness = connected_neighbor().await;
-    let session = login_session(harness.primary.local_addr().expect("primary simulator address"));
-    let (session, target_region) = prepare_overload_logout_promotion(&mut harness, session).await;
-
-    let mut observed_logout = None;
-    for sequence in 60..60 + (TEST_EVENT_CAPACITY + MAX_PENDING_SIMULATOR_EVENTS) as u32 {
-        let mut chat = test_fixture("chat_from_simulator.hex");
-        chat[0] |= 0x40;
-        set_sequence(&mut chat, sequence);
-        harness.primary.send_to(&chat, harness.primary_peer).await.expect("fill application event backlog");
-        let response = receive_ack(&harness.primary, sequence).await;
-        if matches!(response.message(), Message::LogoutRequest(_)) {
-            observed_logout = Some(response);
-            break;
-        }
-    }
-    let logout = match observed_logout {
-        Some(logout) => logout,
-        None => timeout(WAIT, async {
-            loop {
-                let (bytes, _) = receive(&harness.primary).await;
-                let packet = Packet::decode(&bytes).expect("decode primary output");
-                if matches!(packet.message(), Message::LogoutRequest(_)) {
-                    break packet;
-                }
-            }
-        })
-        .await
-        .expect("backlog should start logout on the current primary"),
-    };
-
-    harness
-        .neighbor
-        .send_to(&movement_complete_packet(44, session.agent_id, session.session_id, target_region), harness.neighbor_peer)
-        .await
-        .expect("send destination movement completion while logout is pending");
-    receive_ack(&harness.neighbor, 44).await;
-    let mut barrier = test_fixture("chat_from_simulator.hex");
-    barrier[0] |= 0x40;
-    set_sequence(&mut barrier, 45);
-    harness.neighbor.send_to(&barrier, harness.neighbor_peer).await.expect("send post-movement barrier");
-    receive_ack(&harness.neighbor, 45).await;
-
-    let mut disable = test_fixture("disable_simulator.hex");
-    set_sequence(&mut disable, 46);
-    harness.neighbor.send_to(&disable, harness.neighbor_peer).await.expect("close destination after movement barrier");
-    timeout(WAIT, async {
-        loop {
-            match next_raw_event(&mut harness.events).await {
-                SimulatorDisconnected { simulator_id, region_handle: Some(region_handle), .. }
-                    if simulator_id == harness.neighbor_id && region_handle == target_region =>
-                {
-                    break;
-                }
-                SimulatorPromoted { .. } => panic!("logout must freeze pending promotion before destination disconnect"),
-                Failed(reason) => panic!("destination disconnect failed: {reason}"),
-                _ => {}
-            }
-        }
-    })
-    .await
-    .expect("destination disconnect should drain accepted movement events");
-
-    harness.primary.send_to(&ack(120, logout.sequence()), harness.primary_peer).await.expect("ack primary logout");
-    let mut logout_reply = test_fixture("logout_reply.hex");
-    logout_reply[0] |= 0x40;
-    set_sequence(&mut logout_reply, 121);
-    harness.primary.send_to(&logout_reply, harness.primary_peer).await.expect("reply to primary logout");
-    let result = timeout(LOGOUT_TIMEOUT + WAIT, harness.client).await.expect("overload teardown completes").expect("runtime task");
-    assert!(result.is_err(), "application overload should remain a visible session failure");
-}
-
-async fn prepare_overload_logout_promotion(harness: &mut NeighborHarness, session: AgentSession) -> (AgentSession, u64) {
-    use protocol::lludp::Message::RegionHandshake;
-
-    use crate::event::Event::{Failed, SimulatorMessage};
-
-    let target_region = 0x1000_0000_0000_1000;
-    let finish = Packet::new(
-        30,
-        teleport_finish_to(
-            session.agent_id,
-            harness.neighbor.local_addr().expect("destination address"),
-            target_region,
-            session.seed_capability.as_str(),
-        ),
-    )
-    .with_reliable()
-    .encode()
-    .expect("encode TeleportFinish");
-    harness.primary.send_to(&finish, harness.primary_peer).await.expect("send TeleportFinish");
-    timeout(WAIT, async {
-        loop {
-            match next_raw_event(&mut harness.events).await {
-                SimulatorMessage { simulator_id, message: Message::TeleportFinish(_), .. } if simulator_id == harness.primary_id => break,
-                Failed(reason) => panic!("session failed before handoff setup: {reason}"),
-                _ => {}
-            }
-        }
-    })
-    .await
-    .expect("manager should process TeleportFinish");
-
-    let mut handshake = test_fixture("region_handshake.hex");
-    handshake[0] |= 0x40;
-    set_sequence(&mut handshake, 41);
-    harness.neighbor.send_to(&handshake, harness.neighbor_peer).await.expect("send destination handshake");
-    let reply = receive_message(&harness.neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))).await;
-    let movement_request = receive_message(&harness.neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))).await;
-    harness.neighbor.send_to(&ack(42, reply.sequence()), harness.neighbor_peer).await.expect("ack destination handshake reply");
-    harness.neighbor.send_to(&ack(43, movement_request.sequence()), harness.neighbor_peer).await.expect("ack destination movement request");
-    timeout(WAIT, async {
-        loop {
-            match next_raw_event(&mut harness.events).await {
-                SimulatorMessage { simulator_id, message: RegionHandshake(_), .. } if simulator_id == harness.neighbor_id => break,
-                Failed(reason) => panic!("session failed during destination handshake: {reason}"),
-                _ => {}
-            }
-        }
-    })
-    .await
-    .expect("manager should process destination handshake");
-    (session, target_region)
 }
 
 async fn run_handoff_send_latency_test() {
@@ -799,7 +694,7 @@ async fn handoff_waits_for_matching_movement() {
     let (event_sender, mut event_receiver) = mpsc::channel(8);
     let (shutdown_signal, shutdown) = watch::channel(false);
     let (neighbor_requests, _neighbor_request_receiver) = mpsc::channel(1);
-    let (_command_sender, commands) = mpsc::channel(1);
+    let (command_sender, commands) = mpsc::channel(1);
     let mut connection = connect_test_neighbor(simulator_id, session.clone(), region_handle).await.expect("connect destination circuit");
     crate::circuit::test_values::set_handoff(
         &mut connection,
@@ -820,26 +715,49 @@ async fn handoff_waits_for_matching_movement() {
         next_neighbor_event(&mut event_receiver).await,
         Event::SimulatorConnected { simulator_id: id, region_handle: Some(handle), .. } if id == simulator_id && handle == region_handle
     );
-    let mut buffer = [0; 65_535];
-    assert!(timeout(Duration::from_millis(50), neighbor.recv_from(&mut buffer)).await.is_err());
-
+    std::assert_matches!(
+        next_neighbor_event(&mut event_receiver).await,
+        Event::SimulatorMotionStatus { simulator_id: id, .. } if id == simulator_id
+    );
     let mut handshake = test_fixture("region_handshake.hex");
     handshake[0] |= 0x40;
     set_sequence(&mut handshake, 41);
     neighbor.send_to(&handshake, peer).await.expect("send destination region handshake");
     std::assert_matches!(
-        receive_message(&neighbor, |message| matches!(message, Message::RegionHandshakeReply(_))).await.message(),
-        Message::RegionHandshakeReply(_)
+        next_neighbor_event(&mut event_receiver).await,
+        Event::SimulatorMessage { simulator_id: id, message: Message::RegionHandshake(_), .. } if id == simulator_id
     );
+    let (completed, response) = oneshot::channel();
+    command_sender
+        .send(SimulatorCommand::ReplyRegionHandshake {
+            message: Message::RegionHandshakeReply(protocol::messages::RegionHandshakeReply {
+                agent_data: protocol::messages::region::region_handshake_reply::AgentData {
+                    agent_id: session.agent_id,
+                    session_id: session.session_id,
+                },
+                region_info: protocol::messages::region::region_handshake_reply::RegionInfo { flags: 0 },
+            }),
+            completed,
+        })
+        .await
+        .expect("queue application handshake reply");
+    response.await.expect("handshake reply completion remains open").expect("handshake reply reaches simulator");
+    let handshake_reply = loop {
+        let (bytes, _) = receive(&neighbor).await;
+        let packet = Packet::decode(&bytes).expect("decode destination circuit traffic");
+        assert!(
+            !matches!(packet.message(), Message::CompleteAgentMovement(_)),
+            "movement completion must follow the destination handshake reply"
+        );
+        if matches!(packet.message(), Message::RegionHandshakeReply(_)) {
+            break packet;
+        }
+    };
+    std::assert_matches!(handshake_reply.message(), Message::RegionHandshakeReply(_));
     std::assert_matches!(
         receive_message(&neighbor, |message| matches!(message, Message::CompleteAgentMovement(_))).await.message(),
         Message::CompleteAgentMovement(_)
     );
-    std::assert_matches!(
-        next_neighbor_event(&mut event_receiver).await,
-        Event::SimulatorMessage { message: Message::RegionHandshake(_), .. }
-    );
-
     let wrong = movement_complete_packet(42, session.agent_id, Uuid::from_u128(99), region_handle);
     neighbor.send_to(&wrong, peer).await.expect("send wrong-session movement completion");
     let matching = movement_complete_packet(43, session.agent_id, session.session_id, region_handle);
@@ -856,7 +774,7 @@ async fn handoff_waits_for_matching_movement() {
     assert_eq!(movement.data.region_handle, region_handle);
 
     shutdown_signal.send_replace(true);
-    assert!(timeout(Duration::from_millis(200), task).await.expect("destination stops").expect("destination task").is_ok());
+    assert!(timeout(WAIT, task).await.expect("destination stops").expect("destination task").is_ok());
 }
 
 #[test]
@@ -868,11 +786,6 @@ fn teleport_finish_promotes_after_matching_movement() {
 #[ignore = "manual loaded loopback handoff latency measurement; run with --release --ignored --nocapture"]
 fn handoff_send_latency() {
     run_large_stack_test(run_handoff_send_latency_test);
-}
-
-#[test]
-fn overload_logout_keeps_a_pending_promotion_on_the_original_primary() {
-    run_large_stack_test(run_overload_logout_promotion_test);
 }
 
 #[test]

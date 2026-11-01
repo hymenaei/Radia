@@ -31,6 +31,14 @@ pub fn asset_with_lod_faces(lods: &[(usize, usize)]) -> Vec<u8> {
     asset_with_faces(lods)
 }
 
+pub fn asset_with_lod_geometry(lods: &[(usize, usize, usize, usize)]) -> Vec<u8> {
+    let blocks = lods
+        .iter()
+        .map(|(lod, face_count, vertex_count, index_count)| (*lod, block_with_geometry(*face_count, *vertex_count, *index_count)))
+        .collect();
+    asset_with_blocks(blocks)
+}
+
 fn asset_with_faces(lods: &[(usize, usize)]) -> Vec<u8> {
     let blocks: BTreeMap<_, _> = lods.iter().map(|(lod, face_count)| (*lod, block(*face_count))).collect();
     asset_with_blocks(blocks)
@@ -112,6 +120,40 @@ fn block_with_vertices(vertex_count: usize) -> Vec<u8> {
     ]);
     let mut payload = b"<?llsd/binary?>\n".to_vec();
     payload.extend(array(&[face]));
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&payload).expect("mesh fixture compression accepts bounded bytes");
+    encoder.finish().expect("mesh fixture compression finishes")
+}
+
+fn block_with_geometry(face_count: usize, vertex_count: usize, index_count: usize) -> Vec<u8> {
+    const TRIANGLE_POSITIONS: [[u8; 6]; 3] = [[0x80, 0, 0, 0, 0, 0], [0x80, 0, 0, 0, 0xff, 0xff], [0x80, 0, 0xff, 0xff, 0, 0]];
+    const TRIANGLE_UVS: [[u8; 4]; 3] = [[0, 0, 0, 0], [0xff, 0xff, 0, 0], [0, 0, 0xff, 0xff]];
+    let mut faces = Vec::with_capacity(face_count);
+    for index in 0..face_count {
+        let min_y = -1.0 + 2.0 * index as f64 / face_count as f64;
+        let max_y = -1.0 + 2.0 * (index + 1) as f64 / face_count as f64;
+        let mut position = Vec::with_capacity(vertex_count * 6);
+        let mut uv = Vec::with_capacity(vertex_count * 4);
+        for vertex in 0..vertex_count {
+            position.extend_from_slice(TRIANGLE_POSITIONS.get(vertex % 3).expect("triangle position fixture"));
+            uv.extend_from_slice(TRIANGLE_UVS.get(vertex % 3).expect("triangle UV fixture"));
+        }
+        let mut triangles = Vec::with_capacity(index_count * 2);
+        for index in 0..index_count {
+            triangles.extend_from_slice(&u16::try_from(index % vertex_count.max(1)).expect("triangle index fixture").to_le_bytes());
+        }
+        let domain = map(&[("Min", array(&[real(-0.01), real(min_y), real(-1.0)])), ("Max", array(&[real(0.01), real(max_y), real(1.0)]))]);
+        let uv_domain = map(&[("Min", array(&[real(0.0), real(0.0)])), ("Max", array(&[real(1.0), real(1.0)]))]);
+        faces.push(map(&[
+            ("Position", binary(&position)),
+            ("PositionDomain", domain),
+            ("TexCoord0", binary(&uv)),
+            ("TexCoord0Domain", uv_domain),
+            ("TriangleList", binary(&triangles)),
+        ]));
+    }
+    let mut payload = b"<?llsd/binary?>\n".to_vec();
+    payload.extend(array(&faces));
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&payload).expect("mesh fixture compression accepts bounded bytes");
     encoder.finish().expect("mesh fixture compression finishes")

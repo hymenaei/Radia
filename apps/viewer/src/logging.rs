@@ -22,9 +22,11 @@ pub(crate) fn init() -> Option<WorkerGuard> {
     let (json, guard, file_error, maintenance_warning) = match create_session_log() {
         Ok((file, warning)) => {
             let (writer, guard) = tracing_appender::non_blocking(file);
-            let file_filter = EnvFilter::try_from_env("FILE_LOG").unwrap_or_else(|_| {
-                EnvFilter::new("info,viewer=debug,network=debug,protocol=debug,world=debug,render=debug,assets=debug,llsd=debug")
-            });
+            let file_filter = EnvFilter::try_from_env("FILE_LOG")
+                .unwrap_or_else(|_| {
+                    EnvFilter::new("info,viewer=debug,network=debug,protocol=debug,world=debug,render=debug,assets=debug,llsd=debug")
+                })
+                .add_directive("jpeg2k=warn".parse().expect("valid jpeg2k tracing directive"));
             let json = fmt::layer()
                 .json()
                 .with_timer(ChronoLocal::new("%Y-%m-%dT%H:%M:%S%.3f%:z".into()))
@@ -37,7 +39,9 @@ pub(crate) fn init() -> Option<WorkerGuard> {
         Err(error) => (None, None, Some(error), None),
     };
 
-    let console_filter = EnvFilter::try_from_env("LOG").unwrap_or_else(|_| EnvFilter::new("warn,viewer=info"));
+    let console_filter = EnvFilter::try_from_env("LOG")
+        .unwrap_or_else(|_| EnvFilter::new("warn,viewer=info"))
+        .add_directive("jpeg2k=warn".parse().expect("valid jpeg2k tracing directive"));
 
     let console = fmt::layer()
         .compact()

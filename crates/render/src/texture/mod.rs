@@ -5,12 +5,13 @@ mod upload;
 pub use compression::CompressionQuality;
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     mem::{replace, take},
     sync::{
         Arc, OnceLock, Weak,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use assets::{
@@ -25,11 +26,13 @@ use wgpu::{
     TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
     TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension, VertexState,
 };
+use world::Region;
 
 const DEFAULT_SOFT_CAP: usize = 1024 * 1024 * 1024;
 const STAGING_BYTES: usize = 48 * 1024 * 1024;
 const UPLOAD_BYTES: usize = 4 * 1024 * 1024;
 const MAX_JOBS: usize = 2;
+const FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const TERRAIN_ALPHA_RAMP_WIDTH: u32 = 256;
 pub(crate) const TERRAIN_ALPHA_RAMP: &[u8; 256] = include_bytes!("../terrain_alpha_ramp.r8");
 
@@ -200,8 +203,11 @@ pub(crate) struct TextureKey {
     pub(crate) sampler: Sampler,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct TerrainTextureKey(pub(crate) [Option<TextureKey>; 4]);
+struct TerrainBinding {
+    key: [Option<TextureKey>; 4],
+    revisions: [u64; 4],
+    binding: BindGroup,
+}
 
 struct GpuTexture {
     texture: Texture,
@@ -228,12 +234,13 @@ struct TextureEntry {
     used: u64,
     owner: WeakTexture,
     revision: u64,
+    state_revision: u64,
     evicted: bool,
     state: TextureUploadState,
     fallback: Option<GpuTexture>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TextureState {
     pub(crate) revision: u64,
     pub(crate) staging: usize,
@@ -246,6 +253,8 @@ pub(crate) struct Textures {
     revision: u64,
     queue: Queue,
     memory: Arc<Accounting>,
+    conversion_failures: u64,
+    last_failure_warning: Option<Instant>,
     entries: HashMap<TextureId, TextureEntry>,
     cap_bytes: Arc<AtomicUsize>,
     soft_cap: usize,
@@ -266,7 +275,8 @@ pub(crate) struct Textures {
     _terrain_alpha_ramp: Texture,
     terrain_alpha_ramp_view: TextureView,
     terrain_alpha_ramp_sampler: wgpu::Sampler,
-    terrain_bindings: HashMap<TerrainTextureKey, BindGroup>,
+    terrain_bindings: HashMap<Region, TerrainBinding>,
+    changed_ids: HashSet<TextureId>,
     mip_layout: BindGroupLayout,
     mip_pipeline: RenderPipeline,
     pub(crate) uploaded: usize,
@@ -444,6 +454,8 @@ impl Textures {
             revision: 0,
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
+            conversion_failures: 0,
+            last_failure_warning: None,
             entries: HashMap::new(),
             cap_bytes: Arc::new(AtomicUsize::new(0)),
             soft_cap: DEFAULT_SOFT_CAP,
@@ -465,6 +477,7 @@ impl Textures {
             terrain_alpha_ramp_view,
             terrain_alpha_ramp_sampler,
             terrain_bindings: HashMap::new(),
+            changed_ids: HashSet::new(),
             mip_layout,
             mip_pipeline,
             uploaded: 0,
@@ -482,6 +495,7 @@ impl Textures {
             used: 0,
             owner: texture.downgrade(),
             revision: info.revision,
+            state_revision: 0,
             evicted: false,
             state: TextureUploadState::Dormant,
             fallback: None,
@@ -529,7 +543,7 @@ impl Textures {
             work,
             compress,
         });
-        self.changed();
+        self.changed(id);
     }
 
     pub(crate) fn next_conversion_job(&mut self) -> Option<TextureJob> {
@@ -551,11 +565,22 @@ impl Textures {
             Conversion::Failed { failure, .. } => {
                 entry.state = if failure == Failure::Cancelled { TextureUploadState::Dormant } else { TextureUploadState::Failed(failure) };
                 if failure != Failure::Cancelled {
-                    tracing::warn!(?failure, "texture preparation failed");
+                    self.conversion_failures = self.conversion_failures.saturating_add(1);
+                    let now = Instant::now();
+                    if self.last_failure_warning.is_none_or(|last| now.saturating_duration_since(last) >= FAILURE_LOG_INTERVAL) {
+                        tracing::warn!(
+                            failures = self.conversion_failures,
+                            sample_texture = ?completion.id,
+                            sample_failure = ?failure,
+                            "texture preparation failures"
+                        );
+                        self.conversion_failures = 0;
+                        self.last_failure_warning = Some(now);
+                    }
                 }
             }
         }
-        self.changed();
+        self.changed(completion.id);
         drop(completion.life);
     }
 
@@ -570,7 +595,7 @@ impl Textures {
             TextureUploadState::Dormant | TextureUploadState::Failed(_) | TextureUploadState::Prepared(_) => {}
         }
         entry.evicted = evicted;
-        self.changed();
+        self.changed(id);
     }
 
     fn event_revision(&self) -> u64 {
@@ -630,21 +655,32 @@ impl Textures {
         Some(key)
     }
 
-    pub(crate) fn terrain_key(&mut self, textures: &[Option<TextureHandle>; 4], epoch: u64) -> TerrainTextureKey {
-        TerrainTextureKey(std::array::from_fn(|index| {
-            let texture = textures[index].as_ref()?;
-            self.request(texture, epoch, Priority::Visible);
-            let key = TextureKey { id: texture.id(), sampler: Sampler::default() };
-            self.texture_view(key).map(|_| key)
-        }))
+    pub(crate) fn is_resident(&self, id: TextureId) -> bool {
+        self.entries.get(&id).is_some_and(|entry| {
+            entry.owner.is_alive() && (matches!(entry.state, TextureUploadState::Ready(_)) || entry.fallback.is_some())
+        })
     }
 
-    pub(crate) fn prepare_terrain_binding(&mut self, device: &Device, key: TerrainTextureKey) {
-        if self.terrain_bindings.contains_key(&key) {
-            return;
+    pub(crate) fn prepare_terrain_binding(
+        &mut self,
+        device: &Device,
+        region: Region,
+        textures: &[Option<TextureHandle>; 4],
+        epoch: u64,
+    ) -> bool {
+        let key = std::array::from_fn(|index| {
+            let texture = textures[index].as_ref()?;
+            self.request(texture, epoch, Priority::Visible);
+            Some(TextureKey { id: texture.id(), sampler: Sampler::default() })
+        });
+        let revisions = std::array::from_fn(|index| {
+            key[index].and_then(|key| self.entries.get(&key.id).map(|entry| entry.state_revision)).unwrap_or(0)
+        });
+        if self.terrain_bindings.get(&region).is_some_and(|binding| binding.key == key && binding.revisions == revisions) {
+            return false;
         }
         let views: [TextureView; 4] = std::array::from_fn(|index| {
-            key.0[index].and_then(|key| self.texture_view(key).cloned()).unwrap_or_else(|| self.terrain_fallback.clone())
+            key[index].and_then(|key| self.texture_view(key).cloned()).unwrap_or_else(|| self.terrain_fallback.clone())
         });
         let mut entries: Vec<_> = views
             .iter()
@@ -659,15 +695,20 @@ impl Textures {
             layout: &self.terrain_layout,
             entries: &entries,
         });
-        self.terrain_bindings.insert(key, binding);
+        self.terrain_bindings.insert(region, TerrainBinding { key, revisions, binding });
+        true
     }
 
-    pub(crate) fn terrain_binding(&self, key: TerrainTextureKey) -> &BindGroup {
-        self.terrain_bindings.get(&key).expect("terrain binding prepared with its draw")
+    pub(crate) fn terrain_binding(&self, region: Region) -> &BindGroup {
+        &self.terrain_bindings.get(&region).expect("terrain binding prepared with its draw").binding
     }
 
-    pub(crate) fn clear_terrain_bindings(&mut self) {
-        self.terrain_bindings.clear();
+    pub(crate) fn retain_terrain_bindings(&mut self, regions: &HashSet<Region>) {
+        self.terrain_bindings.retain(|region, _| regions.contains(region));
+    }
+
+    pub(crate) fn take_changed_ids(&mut self) -> HashSet<TextureId> {
+        std::mem::take(&mut self.changed_ids)
     }
 
     fn texture_view(&self, key: TextureKey) -> Option<&TextureView> {
@@ -707,8 +748,12 @@ impl Textures {
     pub(crate) fn bytes(&self) -> usize {
         self.memory.gpu.load(Ordering::Acquire)
     }
-    fn changed(&mut self) {
+    fn changed(&mut self, id: TextureId) {
         self.revision = self.revision.checked_add(1).expect("texture state space exhausted");
+        if let Some(entry) = self.entries.get_mut(&id) {
+            entry.state_revision = entry.state_revision.checked_add(1).expect("texture entry state space exhausted");
+        }
+        self.changed_ids.insert(id);
     }
     pub(crate) fn state(&self) -> TextureState {
         TextureState {

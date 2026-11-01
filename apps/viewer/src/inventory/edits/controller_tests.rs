@@ -14,7 +14,7 @@ use tokio::{
     runtime::Handle,
     sync::{mpsc, watch},
     task::JoinHandle,
-    time::timeout,
+    time::{self, timeout},
 };
 use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
 use uuid::Uuid;
@@ -36,11 +36,6 @@ struct PeerRequest {
 impl PeerRequest {
     async fn respond(self, status: u16, body: impl AsRef<[u8]>) {
         self.write_response(status, body).await.expect("write AIS peer response");
-    }
-
-    async fn respond_after(self, delay: Duration, status: u16, body: impl AsRef<[u8]>) -> io::Result<()> {
-        tokio::time::sleep(delay).await;
-        self.write_response(status, body).await
     }
 
     async fn write_response(self, status: u16, body: impl AsRef<[u8]>) -> io::Result<()> {
@@ -534,7 +529,7 @@ async fn missing_ais_capability_uses_legacy_category_creation() {
     controller.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn move_confirmation_timeout_invalidates_both_folders_for_refetch() {
     let http = LoopbackPeer::start().await;
     let udp = UdpSocket::bind("127.0.0.1:0").await.expect("bind UDP move peer");
@@ -545,20 +540,20 @@ async fn move_confirmation_timeout_invalidates_both_folders_for_refetch() {
     let (mut controller, model) =
         start_controller(&http, &inventory, EditSession { agent_id: owner.id(), session_id: Uuid::from_u128(24) }, transport);
     let handle = controller.handle();
+
+    time::resume();
     let move_item = tokio::spawn(async move { handle.move_item(item, second).await });
 
-    let Some(InventoryEditEvent::MoveStarted { expectation, confirmed: _confirmed, registered }) =
-        timeout(TEST_TIMEOUT, controller.next_event()).await.expect("move registration timeout")
-    else {
+    let Some(InventoryEditEvent::MoveStarted { expectation, confirmed: _confirmed, registered }) = controller.next_event().await else {
         panic!("expected UDP move registration event");
     };
     registered.send(()).expect("move worker waits for registration");
     let mut bytes = [0; 4096];
     let (size, _) = timeout(TEST_TIMEOUT, udp.recv_from(&mut bytes)).await.expect("outbound move packet timeout").expect("read packet");
     assert!(Packet::decode(&bytes[..size]).expect("decode outbound packet").is_reliable());
-    let Some(InventoryEditEvent::MoveTimedOut { expectation: timed_out, refreshed }) =
-        timeout(TEST_TIMEOUT, controller.next_event()).await.expect("move confirmation timeout event")
-    else {
+    time::pause();
+    time::advance(controller::MOVE_CONFIRMATION_TIMEOUT).await;
+    let Some(InventoryEditEvent::MoveTimedOut { expectation: timed_out, refreshed }) = controller.next_event().await else {
         panic!("expected timeout invalidation event");
     };
     assert_eq!(timed_out, expectation);
@@ -573,7 +568,7 @@ async fn move_confirmation_timeout_invalidates_both_folders_for_refetch() {
     controller.stop().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn ais_timeout_refreshes_a_committed_rename() {
     let mut http = LoopbackPeer::start().await;
     let (mut inventory, owner, _root, folder, _, _, _, item_key, _, _) = inventory_fixture();
@@ -585,28 +580,23 @@ async fn ais_timeout_refreshes_a_committed_rename() {
         Arc::new(NoopMoveTransport),
     );
     let handle = controller.handle();
-    let started = tokio::time::Instant::now();
+
+    time::resume();
     let rename = tokio::spawn(async move { handle.rename_item(item_key, "late response").await });
     http.grant(&[("InventoryAPIv3", "/ais")]).await;
     let request = http.next().await;
     assert_eq!(request.method, "PATCH");
+    time::pause();
     let item = server_inventory.snapshot().item(item_key).expect("server item").clone();
     let mut item = item;
     item.name = Arc::from("server committed rename");
     server_inventory
         .apply_delta(InventoryDelta { updated_items: vec![item], ..InventoryDelta::default() })
         .expect("apply server-side rename");
-    let delayed_response = tokio::spawn(async move {
-        request.respond_after(Duration::from_secs(22), 200, metadata("_updated_items", &[item_key.id().uuid()])).await
-    });
-
-    let Some(InventoryEditEvent::RefreshFolders { folders, refreshed }) =
-        timeout(Duration::from_secs(25), controller.next_event()).await.expect("refresh event timeout")
-    else {
+    let Some(InventoryEditEvent::RefreshFolders { folders, refreshed }) = controller.next_event().await else {
         panic!("expected refresh after uncertain AIS result");
     };
     assert_eq!(folders, vec![folder]);
-    assert!(started.elapsed() >= Duration::from_secs(19));
 
     let invalidated = inventory
         .apply_delta(InventoryDelta { updated_category_versions: vec![(folder, ServerVersion::UNKNOWN)], ..InventoryDelta::default() })
@@ -625,13 +615,12 @@ async fn ais_timeout_refreshes_a_committed_rename() {
     refreshed.send(true).expect("edit worker waits for refresh scheduling");
 
     assert_eq!(rename.await.expect("timed out rename result"), InventoryEditOutcome::TimedOut);
+    if let Err(error) = request.write_response(200, metadata("_updated_items", &[item_key.id().uuid()])).await {
+        std::assert_matches!(error.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted);
+    }
     assert_eq!(
         model.borrow().as_ref().and_then(|snapshot| snapshot.item(item_key)).map(|item| item.name.as_ref()),
         Some("server committed rename")
     );
-    let late_result = timeout(Duration::from_secs(3), delayed_response).await.expect("delayed AIS response task timeout");
-    if let Err(error) = late_result.expect("late response task") {
-        std::assert_matches!(error.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted);
-    }
     controller.stop().await;
 }

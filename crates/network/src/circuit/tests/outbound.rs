@@ -101,6 +101,26 @@ fn paced_send_expires() {
 }
 
 #[test]
+fn handshake_reply_survives_send_age() {
+    let mut queued = queued_for_test(TrafficClass::Control);
+    queued.message = Message::RegionHandshakeReply(protocol::messages::RegionHandshakeReply {
+        agent_data: Default::default(),
+        region_info: Default::default(),
+    });
+    let expired_at = queued.queued_at + MAX_SEND_AGE + MAX_SEND_AGE;
+    let mut outbound = OutboundQueue::new();
+    assert!(outbound.push(queued, None).is_ok());
+
+    assert!(outbound.expire(expired_at).is_empty());
+    let queued = outbound.messages.pop_front().expect("aged handshake reply remains queued");
+    let circuit = Circuit::new();
+    let mut pending = Some(pending_for_test(&circuit, queued, TrafficClass::Control));
+
+    assert!(expire_pending_send(&mut pending, expired_at).is_none());
+    assert!(pending.is_some(), "aged handshake reply remains in flight");
+}
+
+#[test]
 fn deferred_reliable_retry_expires() {
     let mut circuit = Circuit::new();
     let original = circuit.prepare_message(queued_for_test(TrafficClass::Fair).message, Delivery::Reliable).expect("prepare reliable send");

@@ -169,7 +169,7 @@ pub(super) async fn run_client(
                                 return Ok(());
                             }
                         }
-                        Some(Command::SendTo { completed, .. }) => {
+                        Some(Command::SendTo { completed, .. }) | Some(Command::ReplyRegionHandshake { completed, .. }) => {
                             if let Err(error) = completed.send(Err(Error::SimulatorNotReady)) {
                                 drop(error);
                             }
@@ -192,6 +192,8 @@ pub(super) async fn run_client(
             session: options,
             startup_disconnect: Some(disconnect_requested.clone()),
             root_transport: None,
+            #[cfg(test)]
+            application_event_capacity: crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY,
         },
     )
     .await?

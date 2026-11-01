@@ -1,10 +1,16 @@
-use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[cfg(test)]
 use network::Event;
 use network::{AgentSession, PacketOrder, SimulatorId};
 use protocol::lludp::Message;
-use protocol::messages::ParcelProperties;
+use protocol::messages::{AgentMovementComplete, ParcelProperties};
 use uuid::Uuid;
 use world::{
     Applied, LocalAddress, ObjectObservation, OrderEvidence, OrderEvidence::Ordered, ParcelAccessSettings, ParcelBitmap, ParcelFlags,
@@ -15,13 +21,15 @@ use super::{PresentationMailbox, ViewerUpdate};
 use crate::session::{
     RegionLookup, display_message,
     inbound::{
-        AvatarAppearanceMessage, ObjectBatch, ObjectOperation, SitTargetUpdate, decode_avatar_appearance_update, decode_object_message,
-        decode_sit_target_update,
+        AvatarAppearanceMessage, ObjectBatch, ObjectMediaRequest, ObjectOperation, SitTargetUpdate, decode_avatar_appearance_update,
+        decode_object_message, decode_sit_target_update,
     },
+    object_cache::ObjectCacheSession,
     world::{IngestStatus, IngestSummary, RegistrationError, SessionWorld},
 };
 
 const MAX_HANDOFF_OBSERVATIONS: usize = 32;
+const MAX_PENDING_MOVEMENT_COMPLETES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct PendingWorldHandoff {
@@ -34,12 +42,30 @@ pub(super) struct WorldHandoff {
     world_primary: Option<SimulatorId>,
     promoted_target: Option<PendingWorldHandoff>,
     observations: HashMap<SimulatorId, ObjectObservation>,
+    pending_movement_completes: HashMap<SimulatorId, PendingMovementComplete>,
+}
+
+struct PendingMovementComplete {
+    movement: AgentMovementComplete,
+    received_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MovementCompleteOutcome {
+    Applied,
+    Held,
+    Rejected,
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum SimulatorScope {
     Primary,
     Neighbor,
+}
+
+pub(super) struct SimulatorMessageOutcome {
+    pub(super) summary: Option<(SimulatorId, IngestSummary)>,
+    pub(super) touched_agent: bool,
 }
 
 pub(super) enum DecodedWorldUpdate {
@@ -54,9 +80,9 @@ pub(super) enum DecodedWorldUpdate {
 
 pub(super) fn route_recovery_targets(
     world: &SessionWorld,
-    addresses: impl Iterator<Item = LocalAddress>,
-) -> Vec<(Option<SimulatorId>, LocalAddress)> {
-    addresses.map(|address| (world.simulator_for_region(address.region()), address)).collect()
+    targets: impl Iterator<Item = (LocalAddress, protocol::messages::CacheMissType)>,
+) -> Vec<(Option<SimulatorId>, LocalAddress, protocol::messages::CacheMissType)> {
+    targets.map(|(address, cache_miss_type)| (world.simulator_for_region(address.region()), address, cache_miss_type)).collect()
 }
 
 pub(super) fn decode_simulator_world_update(
@@ -64,6 +90,8 @@ pub(super) fn decode_simulator_world_update(
     simulator_id: SimulatorId,
     sequence: u32,
     packet_order: PacketOrder,
+    received_at: Instant,
+    ping_delay: Option<Duration>,
     message: &Message,
 ) -> Option<DecodedWorldUpdate> {
     let region = world.region_for(simulator_id)?;
@@ -144,7 +172,10 @@ pub(super) fn decode_simulator_world_update(
         Ok(None) => {}
         Err(_) => return Some(DecodedWorldUpdate::Malformed { invalid_blocks: 1, invalid_fields: 0 }),
     }
-    decode_object_message(region, sequence, order_evidence(packet_order), message).map(DecodedWorldUpdate::Object)
+    decode_object_message(region, sequence, order_evidence(packet_order), message).map(|mut batch| {
+        batch.stamp_motion(received_at, ping_delay);
+        DecodedWorldUpdate::Object(batch)
+    })
 }
 
 fn record_parcel_rejection(world: &mut SessionWorld, simulator_id: SimulatorId, region: world::Region) {
@@ -183,12 +214,78 @@ impl WorldHandoff {
         }
     }
 
+    pub(super) fn movement_complete(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator_id: SimulatorId,
+        session: Option<(Uuid, Uuid)>,
+        movement: &AgentMovementComplete,
+        received_at: Instant,
+    ) -> MovementCompleteOutcome {
+        let Some((agent_id, session_id)) = session else { return MovementCompleteOutcome::Rejected };
+        if movement.agent_data.agent_id != agent_id || movement.agent_data.session_id != session_id {
+            return MovementCompleteOutcome::Rejected;
+        }
+        let handle = RegionHandle::new(movement.data.region_handle);
+        if self.world_primary == Some(simulator_id) || self.promoted_target.is_some_and(|handoff| handoff.target == simulator_id) {
+            return if self.resolve_movement_region(world, simulator_id, handle) {
+                MovementCompleteOutcome::Applied
+            } else {
+                MovementCompleteOutcome::Rejected
+            };
+        }
+        if !movement_region_matches(world, simulator_id, handle) {
+            return MovementCompleteOutcome::Rejected;
+        }
+        self.pending_movement_completes.insert(simulator_id, PendingMovementComplete { movement: movement.clone(), received_at });
+        while self.pending_movement_completes.len() > MAX_PENDING_MOVEMENT_COMPLETES {
+            if let Some(stale) = self.pending_movement_completes.keys().next().copied() {
+                self.pending_movement_completes.remove(&stale);
+            }
+        }
+        MovementCompleteOutcome::Held
+    }
+
+    pub(super) fn apply_promoted_movement_complete(
+        &mut self,
+        world: &mut SessionWorld,
+        simulator_id: SimulatorId,
+        session: Option<(Uuid, Uuid)>,
+    ) -> Option<(AgentMovementComplete, Instant)> {
+        let pending = self.pending_movement_completes.remove(&simulator_id)?;
+        let (agent_id, session_id) = session?;
+        if pending.movement.agent_data.agent_id != agent_id || pending.movement.agent_data.session_id != session_id {
+            return None;
+        }
+        if self.world_primary != Some(simulator_id) && !self.promoted_target.is_some_and(|handoff| handoff.target == simulator_id) {
+            return None;
+        }
+        self.resolve_movement_region(world, simulator_id, RegionHandle::new(pending.movement.data.region_handle))
+            .then_some((pending.movement, pending.received_at))
+    }
+
+    fn resolve_movement_region(&self, world: &mut SessionWorld, simulator_id: SimulatorId, handle: RegionHandle) -> bool {
+        let region = world.region_for(simulator_id).map(|region| region.get());
+        match world.register_simulator(simulator_id, Some(handle)) {
+            Ok(_) => true,
+            Err(RegistrationError::HandleChanged) => {
+                tracing::error!(simulator = simulator_id.get(), region, "primary simulator handle changed during movement completion");
+                false
+            }
+            Err(RegistrationError::Apply(error)) => {
+                tracing::warn!(simulator = simulator_id.get(), region, %error, "could not resolve primary simulator region from movement completion");
+                false
+            }
+        }
+    }
+
     pub(super) fn simulator_disconnected(&mut self, world: &mut SessionWorld, simulator_id: SimulatorId) {
         let region = world.region_for(simulator_id).map(|region| region.get());
         if let Err(error) = world.retire_simulator(simulator_id) {
             tracing::warn!(simulator = simulator_id.get(), region, %error, "could not retire simulator world region");
         }
         self.observations.remove(&simulator_id);
+        self.pending_movement_completes.remove(&simulator_id);
         if self.promoted_target.is_some_and(|handoff| handoff.target == simulator_id) {
             self.promoted_target = None;
         }
@@ -212,8 +309,9 @@ impl WorldHandoff {
                 self.simulator_connected(world, *simulator_id, *region_handle);
                 None
             }
-            SimulatorMessage { simulator_id, sequence, packet_order, message, .. } => {
-                let update = decode_simulator_world_update(world, *simulator_id, *sequence, *packet_order, message)?;
+            SimulatorMessage { simulator_id, sequence, packet_order, received_at, ping_delay, message, .. } => {
+                let update =
+                    decode_simulator_world_update(world, *simulator_id, *sequence, *packet_order, *received_at, *ping_delay, message)?;
                 self.apply_update(world, *simulator_id, update, agent_id)
             }
             SimulatorDisconnected { simulator_id, .. } | SimulatorFailed { simulator_id, .. } => {
@@ -230,22 +328,53 @@ impl WorldHandoff {
         simulator_id: SimulatorId,
         sequence: u32,
         packet_order: PacketOrder,
+        received_at: Instant,
+        ping_delay: Option<Duration>,
         message: &Message,
         agent_id: Option<Uuid>,
-        on_object_chunk: &mut impl FnMut(Vec<(Option<SimulatorId>, LocalAddress)>, Vec<LocalAddress>),
-    ) -> Option<(SimulatorId, IngestSummary)> {
-        let update = decode_simulator_world_update(world, simulator_id, sequence, packet_order, message)?;
+        object_cache: &mut ObjectCacheSession,
+        on_object_chunk: &mut impl FnMut(Vec<(Option<SimulatorId>, LocalAddress, protocol::messages::CacheMissType)>, Vec<LocalAddress>),
+        media_requests: &mut Vec<ObjectMediaRequest>,
+    ) -> Option<SimulatorMessageOutcome> {
+        let update = decode_simulator_world_update(world, simulator_id, sequence, packet_order, received_at, ping_delay, message)?;
+        let mut recovered_media_requests = Vec::new();
+        let update = match (update, message) {
+            (DecodedWorldUpdate::Object(batch), Message::ObjectUpdateCached(cached)) => {
+                let region = world.region_for(simulator_id)?;
+                let (batch, requests) = object_cache
+                    .resolve_cached(
+                        simulator_id,
+                        region,
+                        sequence,
+                        order_evidence(packet_order),
+                        |address| world.world().entity_at(address).is_some(),
+                        cached,
+                        batch,
+                    )
+                    .await;
+                recovered_media_requests = requests;
+                DecodedWorldUpdate::Object(batch)
+            }
+            (update, _) => update,
+        };
         match update {
             DecodedWorldUpdate::Object(batch) => {
                 let batch = self.filter_batch(world, simulator_id, agent_id, batch)?;
-                let _summary = world
+                let batch_summary = world
                     .apply_object_batch_cooperatively(simulator_id, batch, |_summary, targets, cancellations| {
                         on_object_chunk(targets, cancellations);
                     })
                     .await?;
-                self.complete_observation(world, simulator_id).map(|summary| (simulator_id, summary))
+                let summary = self.complete_observation(world, simulator_id);
+                let touched_agent = agent_id.and_then(|agent_id| world.world().entity(agent_id)).is_some_and(|entity| {
+                    batch_summary.touches_entity(entity) || summary.as_ref().is_some_and(|summary| summary.touches_entity(entity))
+                });
+                media_requests.extend(recovered_media_requests);
+                Some(SimulatorMessageOutcome { summary: summary.map(|summary| (simulator_id, summary)), touched_agent })
             }
-            update => self.apply_update(world, simulator_id, update, agent_id),
+            update => {
+                Some(SimulatorMessageOutcome { summary: self.apply_update(world, simulator_id, update, agent_id), touched_agent: false })
+            }
         }
     }
 
@@ -443,6 +572,7 @@ impl WorldHandoff {
         if !self.begin(source, target) {
             return None;
         }
+        self.pending_movement_completes.retain(|simulator, _| *simulator == target);
         if let Some(previous_target) = previous_target.filter(|previous_target| *previous_target != target) {
             self.observations.remove(&previous_target);
         }
@@ -483,6 +613,13 @@ impl WorldHandoff {
         }
         (completed, applied)
     }
+}
+
+fn movement_region_matches(world: &SessionWorld, simulator_id: SimulatorId, handle: RegionHandle) -> bool {
+    world
+        .region_for(simulator_id)
+        .and_then(|region| world.world().region(region))
+        .is_some_and(|info| info.handle.is_none_or(|known| known == handle))
 }
 
 fn parcel_properties_observation(message: &ParcelProperties) -> Result<ParcelPropertiesObservation, ()> {
@@ -580,7 +717,7 @@ pub(super) fn order_evidence(packet_order: PacketOrder) -> OrderEvidence {
 pub(super) fn handle_simulator_message(
     scope: SimulatorScope,
     source: SocketAddr,
-    message: Message,
+    message: &Message,
     session: Option<&AgentSession>,
     region_lookup: Option<&RegionLookup>,
     region_name: Option<&str>,
@@ -590,7 +727,7 @@ pub(super) fn handle_simulator_message(
 
     if matches!(scope, SimulatorScope::Primary) {
         if let Some(region_lookup) = region_lookup {
-            region_lookup.handle_message(source, &message);
+            region_lookup.handle_message(source, message);
         }
         if matches!(&message, RegionHandshake(_))
             && let Some(name) = region_name
@@ -599,7 +736,7 @@ pub(super) fn handle_simulator_message(
         }
     }
     if let ChatFromSimulator(message) = message
-        && let Some(chat_message) = display_message(message.chat_data, session)
+        && let Some(chat_message) = display_message(message.chat_data.clone(), session)
     {
         mailbox.publish(ViewerUpdate::ChatMessage(chat_message));
     }

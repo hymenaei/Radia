@@ -35,7 +35,7 @@ use crate::{
     },
     coverage::{CoverageLossLedger, CoverageLossReason, CoverageSource},
     error::Error,
-    event::{EventEnvelope, SimulatorId},
+    event::{CircuitMotionStatus, EventEnvelope, SimulatorId},
 };
 use outbound::{
     MovementSend, OutboundQueue, PendingSend, QueuedMessage, active_queue_class, agent_throttle_message, expire_deferred_retries,
@@ -46,10 +46,10 @@ use outbound::{
 pub(crate) use admission::{ConnectionRole, SimulatorMemoryBudget};
 pub(crate) use error::ConnectionError;
 pub(crate) use link::{
-    ACK_INTERVAL, EVENT_BACKLOG_DISCONNECT_REASON, HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_TIMEOUT,
+    ACK_INTERVAL, HandoffCancellation, HandoffGeneration, HandoffTarget, LOGOUT_TIMEOUT, MAX_CONNECTION_PRECONNECT_EVENTS,
     MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS,
-    MAX_QUEUED_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS, NEIGHBOR_PRECONNECT_OVERFLOW_REASON, NeighborEventQueueOutcome, PrimaryState,
-    SimulatorCommand, SimulatorEvent, SimulatorRequest, SimulatorTaskOutcome, connection_message_has_application_event,
+    MAX_QUEUED_SIMULATOR_EVENTS, MAX_SIMULATOR_CONNECTIONS, NeighborEventQueueOutcome, PrimaryState, SimulatorCommand, SimulatorEvent,
+    SimulatorRequest, SimulatorTaskOutcome, connection_message_has_application_event,
 };
 #[cfg(test)]
 pub(crate) use lludp::test_values::NEW_RELIABLE_ACK_CAPACITY;
@@ -101,6 +101,7 @@ pub(super) struct SimulatorConnection {
     use_circuit_sequence: u32,
     handoff: Option<HandoffTarget>,
     handoff_role_generation: Option<u64>,
+    region_handshake_reply_sent: bool,
     movement_requested: bool,
     initial_movement_sent: bool,
     primary_state: PrimaryState,
@@ -124,6 +125,7 @@ struct ConnectionTask {
     pending_events: VecDeque<EventEnvelope>,
     pending_notifications: VecDeque<SimulatorEvent>,
     outbound: OutboundQueue,
+    pending_handshake_reply: Option<QueuedMessage>,
     pending_send: Option<PendingSend>,
     deferred_retries: HashMap<u32, Instant>,
     priority_logout: Option<QueuedMessage>,
@@ -134,6 +136,14 @@ struct ConnectionTask {
     last_send_was_retry: bool,
     event_delivery_turn: bool,
     packet_rejections: receive::PacketRejections,
+    motion_status_sender: watch::Sender<CircuitMotionStatus>,
+    motion_status_receiver: watch::Receiver<CircuitMotionStatus>,
+}
+
+impl Drop for ConnectionTask {
+    fn drop(&mut self) {
+        self.motion_status_sender.send_modify(|status| status.connected = false);
+    }
 }
 
 impl Drop for SimulatorConnection {
@@ -198,6 +208,7 @@ impl SimulatorConnection {
             use_circuit_sequence,
             handoff: None,
             handoff_role_generation: None,
+            region_handshake_reply_sent: false,
             movement_requested: false,
             initial_movement_sent: false,
             primary_state: if is_primary { PrimaryState::Connecting } else { PrimaryState::Neighbor { generation: 0 } },
@@ -227,6 +238,7 @@ impl SimulatorConnection {
             || outbound.has_handoff_movement()
             || pending_send
                 .is_some_and(|pending| pending.queued_message.as_ref().is_some_and(|queued| queued.movement == MovementSend::Handoff))
+            || outbound.is_full(TrafficClass::Deadline, active_queue_class(pending_send))
         {
             return Ok(());
         }

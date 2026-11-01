@@ -25,10 +25,6 @@ impl EventReceiver {
     pub(crate) fn try_recv(&mut self) -> Result<Event, mpsc::error::TryRecvError> {
         self.0.try_recv().map(EventEnvelope::into_event)
     }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
 }
 
 pub(crate) struct EventQueueHarness {

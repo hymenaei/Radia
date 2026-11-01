@@ -1,3 +1,5 @@
+use std::sync::mpsc as std_mpsc;
+
 use super::*;
 
 async fn run_enable_overflow_keeps_primary_responsive() {
@@ -17,14 +19,20 @@ async fn run_enable_overflow_keeps_primary_responsive() {
     let send_announcements = async {
         for index in 0..addresses.len() {
             announce_neighbor(primary, primary_peer, addresses[index], regions[index], first_sequence + index as u32).await;
+            tokio::task::yield_now().await;
         }
     };
     let observe_announcements = async {
         let mut seen = vec![false; addresses.len()];
         let mut rejected_endpoint = None;
-        timeout(WAIT, async {
-            while seen.iter().any(|received| !received) || rejected_endpoint.is_none() {
-                match next_event(events).await {
+        let mut event_channel_closed = false;
+        let observed = timeout(WAIT, async {
+            while (seen.iter().any(|received| !received) || rejected_endpoint.is_none()) && !event_channel_closed {
+                let Some(event) = events.recv().await else {
+                    event_channel_closed = true;
+                    break;
+                };
+                match event.into_event() {
                     Event::SimulatorMessage { simulator_id, sequence, message: Message::EnableSimulator(_), .. }
                         if simulator_id == primary_id && (first_sequence..first_sequence + addresses.len() as u32).contains(&sequence) =>
                     {
@@ -39,12 +47,21 @@ async fn run_enable_overflow_keeps_primary_responsive() {
                 }
             }
         })
-        .await
-        .expect("primary should process all neighbor announcements");
-        (seen, rejected_endpoint)
+        .await;
+        (seen, rejected_endpoint, event_channel_closed, observed.is_err())
     };
 
-    let (_, (seen, rejected_endpoint)) = tokio::join!(send_announcements, observe_announcements);
+    let (_, (seen, rejected_endpoint, event_channel_closed, timed_out)) = tokio::join!(send_announcements, observe_announcements);
+    if event_channel_closed {
+        let client = timeout(WAIT, &mut harness.client).await;
+        panic!("primary closed its event channel; session result: {client:?}");
+    }
+    assert!(
+        !timed_out,
+        "primary should process all neighbor announcements: saw {} of {}, rejected={rejected_endpoint:?}",
+        seen.iter().filter(|received| **received).count(),
+        seen.len()
+    );
     assert!(seen.into_iter().all(|received| received));
     assert_eq!(rejected_endpoint, addresses.last().copied());
 
@@ -54,7 +71,7 @@ async fn run_enable_overflow_keeps_primary_responsive() {
     }
     let rejected = sockets.last().expect("the 33rd neighbor announcement");
     let mut buffer = [0; 65_535];
-    assert!(timeout(Duration::from_millis(50), rejected.recv_from(&mut buffer)).await.is_err());
+    std::assert_matches!(clone_udp_socket(rejected).expect("inspect rejected endpoint").recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
 
     harness.primary.send_to(&start_ping_packet(150, 7, 0), harness.primary_peer).await.expect("ping primary after announcement burst");
     std::assert_matches!(
@@ -83,7 +100,7 @@ async fn neighbor_shutdown_preempts_start() {
         connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
 
     let result = timeout(
-        Duration::from_millis(100),
+        WAIT,
         neighbor_connection.run(event_sender, shutdown, neighbor_requests, commands, mpsc::channel(1).1, SimulatorMemoryBudget::new()),
     )
     .await;
@@ -205,17 +222,12 @@ async fn neighbor_receiver_close_preempts() {
     std::assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { .. });
 
     drop(event_receiver);
-    assert!(
-        timeout(Duration::from_millis(200), task)
-            .await
-            .expect("neighbor should stop after event receiver closes")
-            .expect("neighbor task")
-            .is_ok()
-    );
+    assert!(timeout(WAIT, task).await.expect("neighbor should stop after event receiver closes").expect("neighbor task").is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn neighbor_ping_is_delayed() {
+    tokio::time::resume();
     let neighbor = UdpSocket::bind("127.0.0.1:0").await.expect("bind neighbor simulator");
     let endpoint = neighbor.local_addr().expect("neighbor simulator address");
     let simulator_id = SimulatorId::allocate().expect("allocate neighbor ID");
@@ -225,6 +237,8 @@ async fn neighbor_ping_is_delayed() {
     let (_command_sender, commands) = mpsc::channel(1);
     let neighbor_connection =
         connect_test_neighbor(simulator_id, login_session(endpoint), 0x1000_0000_0000_1000).await.expect("connect neighbor circuit");
+    tokio::time::pause();
+    let (release_clock, clock_task) = hold_clock().await;
     let task = spawn(neighbor_connection.run(
         event_sender,
         shutdown,
@@ -239,12 +253,31 @@ async fn neighbor_ping_is_delayed() {
     neighbor.send_to(&ack(40, 1), peer).await.expect("ack neighbor circuit");
     std::assert_matches!(next_neighbor_event(&mut event_receiver).await, Event::SimulatorConnected { .. });
 
+    advance(PING_INTERVAL - Duration::from_millis(1)).await;
     let mut buffer = [0; 65_535];
-    assert!(
-        timeout(Duration::from_millis(100), neighbor.recv_from(&mut buffer)).await.is_err(),
-        "the neighbor should wait for its ping interval after connecting"
-    );
+    std::assert_matches!(clone_udp_socket(&neighbor).expect("inspect neighbor endpoint").recv_from(&mut buffer), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock);
+    advance(Duration::from_millis(2)).await;
+    release_clock.send(()).expect("release paused clock");
+    clock_task.await.expect("clock guard finishes");
+    let (ping, _) = timeout(WAIT, receive_udp(&neighbor)).await.expect("first neighbor ping follows PING_INTERVAL");
+    std::assert_matches!(Packet::decode(&ping).expect("decode neighbor ping").message(), Message::StartPingCheck(_));
 
     shutdown_signal.send_replace(true);
-    assert!(timeout(Duration::from_millis(200), task).await.expect("neighbor should stop on shutdown").expect("neighbor task").is_ok());
+    assert!(timeout(WAIT, task).await.expect("neighbor should stop on shutdown").expect("neighbor task").is_ok());
+}
+
+async fn hold_clock() -> (std_mpsc::Sender<()>, JoinHandle<()>) {
+    let (release, held) = std_mpsc::channel();
+    let (entered, ready) = oneshot::channel();
+    let task = task::spawn_blocking(move || {
+        if entered.send(()).is_err() {
+            return;
+        }
+        match held.recv_timeout(Duration::from_secs(60)) {
+            Ok(()) | Err(std_mpsc::RecvTimeoutError::Disconnected) => {}
+            Err(std_mpsc::RecvTimeoutError::Timeout) => panic!("test did not release the paused clock"),
+        }
+    });
+    ready.await.expect("blocking clock guard started");
+    (release, task)
 }

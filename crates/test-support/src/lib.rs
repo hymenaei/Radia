@@ -2,6 +2,7 @@ pub mod allocation;
 
 pub mod lludp;
 pub mod mesh;
+pub mod process;
 pub mod texture;
 
 pub fn parse_hex_fixture(source: &str) -> Result<Vec<u8>, String> {

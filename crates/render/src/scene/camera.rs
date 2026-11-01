@@ -158,19 +158,26 @@ impl Camera {
         if !center.is_finite() || !scale.is_finite() {
             return None;
         }
-        let radius = (scale.as_dvec3().abs() * 0.5).length();
+        let radius = (scale * 0.5).length();
         if !radius.is_finite() || radius <= 0.0 {
             return None;
         }
-        let distance = (center - self.position).length();
-        if !distance.is_finite() || distance - radius > self.draw_distance {
+        let distance = (center - self.position).length() as f32;
+        if !distance.is_finite() || f64::from(distance) - f64::from(radius) > self.draw_distance {
             return None;
         }
-        let ramp_distance = self.lod_factor * 2.0;
-        let distance = if distance < ramp_distance { distance * distance / ramp_distance } else { distance } * PI / 3.0;
+        let mut distance = distance;
+        let lod_factor = self.lod_factor as f32;
+        let ramp_distance = lod_factor * 2.0;
+        if distance < ramp_distance {
+            distance *= 1.0 / ramp_distance;
+            distance *= distance;
+            distance *= ramp_distance;
+        }
+        distance *= std::f32::consts::PI / 3.0;
         let distance = round_hundredth(distance);
         let radius = round_hundredth(radius);
-        let lod_factor = self.lod_factor * (PI / 3.0) / self.vertical_fov;
+        let lod_factor = lod_factor * (std::f32::consts::PI / 3.0) / self.vertical_fov as f32;
         let tangent = round_hundredth(lod_factor * radius / distance);
         Some(match tangent {
             value if value <= 0.03 => MeshLod::Lowest,
@@ -181,7 +188,7 @@ impl Camera {
     }
 }
 
-fn round_hundredth(value: f64) -> f64 {
+fn round_hundredth(value: f32) -> f32 {
     (value * 100.0).round() / 100.0
 }
 
@@ -237,6 +244,13 @@ mod tests {
         let zoomed = Camera::new(DVec3::ZERO, Vec3::X, PI / 2.0, [1000, 1000]).unwrap();
         assert_eq!(zoomed.mesh_lod(DVec3::X * 20.0, scale), Some(MeshLod::Lowest));
         assert_eq!(camera.mesh_lod(DVec3::X * 20.0, Vec3::new(-1.0, 1.0, 1.0)), Some(MeshLod::Low));
+    }
+
+    #[test]
+    fn mesh_lod_matches_viewer_mesh_scale_bias_and_close_ramp() {
+        let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 3.0, [1000, 1000]).unwrap();
+        assert_eq!(camera.mesh_lod(DVec3::X * 20.0, Vec3::ONE), Some(MeshLod::Low));
+        assert_eq!(camera.mesh_lod(DVec3::X * 1.5, Vec3::splat(0.1)), Some(MeshLod::Medium));
     }
 
     #[test]

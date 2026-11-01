@@ -7750,7 +7750,9 @@ dependencies = [
  "rusqlite",
  "sha2 0.11.1",
  "tempfile",
+ "test-support",
  "tracing",
+ "utils",
 ]
 
 [[package]]
@@ -8990,8 +8992,10 @@ dependencies = [
  "proptest",
  "protocol",
  "render",
+ "rusqlite",
  "serde",
  "serde_json",
+ "storage",
  "tempfile",
  "test-support",
  "tokio",

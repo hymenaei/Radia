@@ -3,7 +3,7 @@ use std::{
     fmt::{self, Display, Formatter},
     mem::size_of,
     sync::{
-        Arc, Weak,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -15,7 +15,13 @@ use assets::{
 };
 use utils::AssetId;
 
-use crate::scene::budget::Lease;
+use crate::scene::{budget::Lease, mesh_cache::MeshKey};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DrawnMeshKey {
+    Prim(MeshKey),
+    Asset { asset: AssetId, lod: MeshLod },
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Detail {
@@ -80,34 +86,21 @@ impl SharedMesh {
         Self::retain(MeshSource::Owned(mesh), lease)
     }
 
-    pub(in crate::scene) fn from_asset(asset_id: AssetId, asset: MeshAsset, lease: Lease) -> Option<Self> {
+    pub(in crate::scene) fn from_asset(asset: MeshAsset, lease: Lease) -> Option<Self> {
         if !matches!(asset.geometry(), LodGeometry::Geometry(_)) {
             return None;
         }
-        let lod = asset.lod();
-        Some(Self::retain_asset(MeshSource::Asset(asset), Some((asset_id, lod)), lease))
+        Some(Self::retain(MeshSource::Asset(asset), lease))
     }
 
     fn retain(source: MeshSource, lease: Lease) -> Self {
-        Self::retain_asset(source, None, lease)
-    }
-
-    fn retain_asset(source: MeshSource, asset_lod: Option<(AssetId, MeshLod)>, lease: Lease) -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1)).expect("mesh IDs exhausted");
-        Self(Arc::new(Retained { id: MeshId(id), source, asset_lod, _lease: lease }))
+        Self(Arc::new(Retained { id: MeshId(id), source, _lease: lease }))
     }
 
     pub fn id(&self) -> MeshId {
         self.0.id
-    }
-
-    pub(crate) fn asset_lod(&self) -> Option<(AssetId, MeshLod)> {
-        self.0.asset_lod
-    }
-
-    pub(in crate::scene) fn downgrade(&self) -> WeakMesh {
-        WeakMesh(Arc::downgrade(&self.0))
     }
 
     pub fn mesh(&self) -> &Mesh {
@@ -121,18 +114,6 @@ impl SharedMesh {
     }
 }
 
-pub(in crate::scene) struct WeakMesh(Weak<Retained>);
-
-impl WeakMesh {
-    pub(in crate::scene) fn upgrade(&self) -> Option<SharedMesh> {
-        self.0.upgrade().map(SharedMesh)
-    }
-
-    pub(in crate::scene) fn is_alive(&self) -> bool {
-        self.0.strong_count() > 0
-    }
-}
-
 enum MeshSource {
     Owned(Mesh),
     Asset(MeshAsset),
@@ -141,7 +122,6 @@ enum MeshSource {
 struct Retained {
     id: MeshId,
     source: MeshSource,
-    asset_lod: Option<(AssetId, MeshLod)>,
     _lease: Lease,
 }
 
@@ -151,11 +131,4 @@ pub(super) fn retained_bytes(mesh: &Mesh) -> usize {
 
 pub(in crate::scene) fn asset_mesh_bytes() -> usize {
     size_of::<Retained>() + 32
-}
-
-#[derive(Clone)]
-pub(in crate::scene) struct MeshBinding {
-    pub asset: utils::AssetId,
-    pub lod: MeshLod,
-    pub mesh: SharedMesh,
 }

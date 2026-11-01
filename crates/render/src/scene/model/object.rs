@@ -1,32 +1,38 @@
 use std::{sync::Arc, time::Instant};
 
 use math::Vec3;
-use utils::AssetId;
-use world::{Kind, ObjectDetail, PrimShape, SculptFlags, Shape, WorldTransform, WorldTransformState};
+use world::{Kind, MotionUpdateKind, ObjectDetail, PrimShape, SculptFlags, Shape, WorldTransform, WorldTransformState};
 
 use crate::material::FaceMaterial;
-use crate::scene::{MeshKey, PreparedMesh, SharedMesh, asset_demand::Materials, budget::Lease, mesh::MeshBinding, texture_animation};
+use crate::scene::{
+    DrawnMeshKey, MeshKey, PreparedMesh, SharedMesh,
+    asset_demand::Materials,
+    budget::Lease,
+    motion::{MotionSample, MotionState},
+    texture_animation,
+};
 
 #[derive(Clone)]
 pub struct Object {
     data: Arc<ObjectData>,
     pub(super) preparation: Option<(MeshKey, PreparedMesh)>,
-    pub(super) mesh: Option<(MeshKey, SharedMesh)>,
-    pub(super) asset_mesh: Option<MeshBinding>,
+    pub(super) mesh: Option<(DrawnMeshKey, SharedMesh)>,
     pub(super) materials: Option<Materials>,
     animation_clock: Option<AnimationClock>,
+    pub(super) motion: MotionState,
 }
 
 impl Object {
     pub(in crate::scene) fn new(source: ObjectDetail, lease: Lease) -> Self {
         let animation_clock = source.texture_animation.map(|_| AnimationClock { started_at: Instant::now(), frame_offset: 0.0 });
+        let motion = MotionState::new(source.motion_source.and_then(world::UpdateSource::motion_received_at).unwrap_or_else(Instant::now));
         Self {
             data: Arc::new(ObjectData { source, _lease: lease }),
             preparation: None,
             mesh: None,
-            asset_mesh: None,
             materials: None,
             animation_clock,
+            motion,
         }
     }
 
@@ -34,22 +40,15 @@ impl Object {
         &self.data.source
     }
 
-    pub fn mesh(&self) -> Option<(MeshKey, &SharedMesh)> {
+    pub fn mesh(&self) -> Option<(DrawnMeshKey, &SharedMesh)> {
         self.mesh.as_ref().map(|(key, mesh)| (*key, mesh))
     }
 
-    pub fn render_mesh(&self) -> Option<&SharedMesh> {
-        match self.geometry() {
-            Geometry::Prim(_) => self.mesh.as_ref().map(|(_, mesh)| mesh),
-            Geometry::Mesh(asset) => self.asset_mesh.as_ref().filter(|binding| binding.asset == asset).map(|binding| &binding.mesh),
-            Geometry::Unsupported(_) | Geometry::Missing => None,
-        }
-    }
-
-    pub fn mesh_lod(&self) -> Option<(AssetId, assets::mesh::MeshLod)> {
-        self.asset_mesh.as_ref().and_then(|binding| match self.geometry() {
-            Geometry::Mesh(asset) if asset == binding.asset => Some((binding.asset, binding.lod)),
-            _ => None,
+    pub(crate) fn mesh_matches_geometry(&self) -> bool {
+        self.mesh.as_ref().is_some_and(|(key, _)| match (self.geometry(), key) {
+            (Geometry::Prim(shape), DrawnMeshKey::Prim(key)) => shape == key.shape,
+            (Geometry::Mesh(asset), DrawnMeshKey::Asset { asset: mesh_asset, .. }) => asset == *mesh_asset,
+            _ => false,
         })
     }
 
@@ -94,10 +93,14 @@ impl Object {
         let a = self.detail();
         let b = other.detail();
         a.summary.address.region() == b.summary.address.region()
-            && self.geometry() == other.geometry()
+            && a.shape == b.shape
             && a.surface_appearance == b.surface_appearance
             && a.pbr_materials == b.pbr_materials
             && a.pbr_material_overrides == b.pbr_material_overrides
+    }
+
+    pub(crate) fn same_render_appearance(&self, other: &Self) -> bool {
+        self.same_appearance(other) && self.materials() == other.materials()
     }
 
     pub fn mesh_state(&self) -> Option<(MeshKey, &PreparedMesh)> {
@@ -120,6 +123,69 @@ impl Object {
             return Placement::Hidden(HiddenReason::InvalidDimensions);
         }
         Placement::Ready(transform)
+    }
+
+    pub(in crate::scene) fn motion_sample(&self) -> Option<MotionSample> {
+        let detail = self.detail();
+        let transform = match detail.world_transform {
+            Ok(WorldTransformState::Resolved(transform)) => transform,
+            Ok(WorldTransformState::MissingScale(pose)) => WorldTransform { pose, scale: Vec3::ONE },
+            Ok(WorldTransformState::Provisional { .. } | WorldTransformState::Unresolved(_)) | Err(_) => return None,
+        };
+        let is_attachment = detail.attachment_point.is_some();
+        Some(MotionSample {
+            transform,
+            kind: detail.summary.kind,
+            region: detail.summary.address.region(),
+            local_position: if is_attachment { Vec3::ZERO } else { detail.summary.local_transform.position().unwrap_or_default() },
+            local_rotation: if is_attachment {
+                transform.pose.rotation
+            } else {
+                detail.summary.local_transform.rotation().unwrap_or(transform.pose.rotation)
+            },
+            velocity: detail.linear_motion.velocity.unwrap_or_default(),
+            acceleration: detail.linear_motion.acceleration.unwrap_or_default(),
+            angular_velocity: detail.angular_velocity.unwrap_or_default(),
+            is_physical: detail.is_physical,
+            time_dilation: detail.time_dilation,
+            ping_delay: detail.motion_source.and_then(world::UpdateSource::motion_ping_delay),
+            motion_update_kind: detail.motion_source.map_or(MotionUpdateKind::Full, world::UpdateSource::motion_update_kind),
+            is_attachment,
+            source: detail.motion_source,
+        })
+    }
+
+    pub(in crate::scene) fn motion_state(&self) -> MotionState {
+        self.motion
+    }
+
+    pub(crate) fn motion_changed_from(&self, previous: &Self) -> bool {
+        match (previous.motion_sample(), self.motion_sample()) {
+            (Some(previous), Some(next)) => crate::scene::motion::motion_changed(previous, next),
+            (None, None) => false,
+            _ => true,
+        }
+    }
+
+    pub(in crate::scene) fn start_motion_phase_out(&mut self, at: Option<Instant>) {
+        if let Some(sample) = self.motion_sample() {
+            self.motion.start_linear_phase_out(sample, at);
+        }
+    }
+
+    pub(in crate::scene) fn resume_motion_at(&mut self, now: Instant, regions: &[math::motion::RegionBounds]) {
+        if let Some(sample) = self.motion_sample() {
+            self.motion.resume_linear_at(sample, now, regions);
+        }
+    }
+
+    pub(super) fn update_motion_from(&mut self, previous: &Self, at: Instant) {
+        let (Some(previous_sample), Some(next_sample)) = (previous.motion_sample(), self.motion_sample()) else {
+            self.motion = MotionState::new(at);
+            return;
+        };
+        let sampled_at = next_sample.source.and_then(world::UpdateSource::motion_received_at).unwrap_or(at);
+        self.motion = MotionState::updated_at(previous.motion, previous_sample, next_sample, at, sampled_at);
     }
 
     pub fn geometry(&self) -> Geometry {
@@ -172,7 +238,7 @@ pub enum Placement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Geometry {
     Prim(PrimShape),
-    Mesh(AssetId),
+    Mesh(utils::AssetId),
     Unsupported(Shape),
     Missing,
 }

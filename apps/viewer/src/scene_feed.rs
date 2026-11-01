@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     sync::OnceLock,
     time::{Duration, Instant},
@@ -12,38 +12,117 @@ use futures::{
     pin_mut,
     stream::FuturesUnordered,
 };
+use math::motion::{self as kinematics};
+use network::CircuitMotionStatus;
 use render::scene::{
-    ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, Object, ReadFailure, ReadJob, ReadQuery, ReadReply,
-    ReconcileStep, Reconciler, SceneView,
+    ApplyError, AssetChange, AssetRequest, AssetTicket, Batch, Budget, Camera, MotionCircuit, Object, ReadFailure, ReadJob, ReadQuery,
+    ReadReply, ReconcileStep, Reconciler, SceneView,
 };
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 use tracing::Instrument;
 use uuid::Uuid;
-use world::{Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS};
+use world::{Entity, MAX_OBJECT_PAGE_ITEMS, MAX_REGION_PAGE_ITEMS, MAX_TERRAIN_PAGE_PATCHES, MAX_WORLD_CHANGE_PAGE_ITEMS, WorldPose};
 
 use crate::{
     agent_movement::MovementObservation,
     asset_coordinator::{AssetHandle, RequestError},
-    session::EnvironmentInbox,
+    session::{AgentMotionSample, EnvironmentInbox},
     world_reader::{ReadError, WorldReader},
 };
+
+#[path = "scene_feed/motion_circuit.rs"]
+mod motion_circuit;
+
+use motion_circuit::MotionCircuitWake;
+
+const MIN_ACTIVE_MOTION_SQUARED: f32 = 1e-6;
+
+#[derive(Default)]
+struct DeadReckoning {
+    sample: Option<AgentMotionSample>,
+    trajectory: Option<kinematics::LinearTrajectory>,
+}
+
+impl DeadReckoning {
+    fn replace(&mut self, sample: Option<AgentMotionSample>) {
+        match sample {
+            Some(sample) if sample.is_finite() => {
+                let lead = kinematics::half_ping_lead(
+                    f64::from(sample.time_dilation),
+                    sample.ping_delay,
+                    kinematics::FRAME_INTERVAL.as_secs_f64(),
+                );
+                self.trajectory = Some(kinematics::LinearTrajectory::new(
+                    sample.position + sample.velocity.as_dvec3() * lead,
+                    sample.velocity,
+                    sample.acceleration,
+                    f64::from(sample.time_dilation),
+                    sample.received_at,
+                ));
+                self.sample = Some(sample);
+            }
+            Some(_) => {}
+            None => {
+                self.sample = None;
+                self.trajectory = None;
+            }
+        }
+    }
+
+    fn start_phase_out(&mut self, at: Option<Instant>) {
+        let Some(sample) = self.sample else { return };
+        if let Some(trajectory) = &mut self.trajectory {
+            let phase_out_at = at.map_or(sample.received_at, |at| at.max(sample.received_at));
+            trajectory.start_phase_out(phase_out_at);
+        }
+    }
+
+    fn resume_at(&mut self, now: Instant, regions: &[kinematics::RegionBounds]) {
+        let Some(sample) = self.sample else { return };
+        if let Some(trajectory) = &mut self.trajectory {
+            trajectory.resume_at(sample.region.get(), now, regions);
+        }
+    }
+
+    fn pose(&self, now: Instant, regions: &[kinematics::RegionBounds]) -> Option<WorldPose> {
+        let sample = self.sample?;
+        let position = self.trajectory?.position_at(sample.region.get(), now, regions);
+        Some(sample.pose(position))
+    }
+
+    fn active(&self, now: Instant) -> bool {
+        self.sample.is_some_and(|sample| {
+            !self.trajectory.is_some_and(|trajectory| trajectory.is_phase_out_settled(now))
+                && (sample.velocity.length_squared() > MIN_ACTIVE_MOTION_SQUARED
+                    || sample.acceleration.length_squared() > MIN_ACTIVE_MOTION_SQUARED)
+        })
+    }
+}
 
 pub(crate) struct SceneSources {
     pub(crate) reader: WorldReader,
     pub(crate) assets: AssetHandle,
     pub(crate) environments: EnvironmentInbox,
+    pub(crate) motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
 }
 
 pub(crate) struct SceneFeed {
     pub(crate) runtime: Handle,
     pub(crate) view: SceneView,
     pub(crate) budget: Budget,
+    pub(crate) assets: AssetHandle,
     agent_id: Uuid,
     agent: Option<Entity>,
     pub(crate) water_height: Option<f64>,
     camera: watch::Sender<Option<Camera>>,
     movement: watch::Sender<Option<MovementObservation>>,
+    agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+    motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<CircuitMotionStatus>)>>,
+    motion_circuit_scratch: Vec<MotionCircuit>,
+    motion_region_scratch: Vec<kinematics::RegionBounds>,
+    motion_active: HashMap<world::Region, bool>,
+    dead_reckoning: DeadReckoning,
     last_movement: Option<MovementObservation>,
     incoming: mpsc::Receiver<Batch>,
     _cancel: oneshot::Sender<()>,
@@ -55,33 +134,135 @@ impl SceneFeed {
         agent_id: Uuid,
         camera: watch::Sender<Option<Camera>>,
         movement: watch::Sender<Option<MovementObservation>>,
+        mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
         runtime: Handle,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
+        let assets = sources.assets.clone();
+        let motion_circuits = sources.motion_circuits.clone();
         static MEMORY: OnceLock<Budget> = OnceLock::new();
         let budget = MEMORY.get_or_init(Budget::default).clone();
         let (scene, view) = Reconciler::new(budget.clone());
         let (sender, incoming) = mpsc::channel(1);
         let (cancel, cancelled) = oneshot::channel();
         let observations = camera.subscribe();
-        drop(runtime.clone().spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, wake).in_current_span()));
+        let agent_motions = agent_motion.clone();
+        let mut dead_reckoning = DeadReckoning::default();
+        dead_reckoning.replace(*agent_motion.borrow_and_update());
+        drop(
+            runtime
+                .clone()
+                .spawn(run(scene, sources, sender, runtime.clone(), cancelled, observations, agent_motions, wake).in_current_span()),
+        );
         Self {
             runtime,
             view,
             budget,
+            assets,
             agent_id,
             agent: None,
             water_height: None,
             camera,
             movement,
+            agent_motion,
+            motion_circuits,
+            motion_circuit_scratch: Vec::new(),
+            motion_region_scratch: Vec::new(),
+            motion_active: HashMap::new(),
+            dead_reckoning,
             last_movement: None,
             incoming,
             _cancel: cancel,
         }
     }
 
-    pub(crate) fn agent(&self) -> Option<&Object> {
-        self.agent.and_then(|entity| self.view.object(entity))
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn camera_pose(&mut self) -> Option<WorldPose> {
+        self.camera_pose_at(Instant::now())
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn camera_pose_at(&mut self, now: Instant) -> Option<WorldPose> {
+        self.camera_pose_and_seed_at(now).map(|(pose, _)| pose)
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) fn camera_pose_and_seed_at(&mut self, now: Instant) -> Option<(WorldPose, (u64, math::Quat))> {
+        if self.agent_motion.has_changed().is_ok_and(|changed| changed) {
+            self.dead_reckoning.replace(*self.agent_motion.borrow_and_update());
+        }
+        self.refresh_motion_circuits(now);
+        let sample = self.dead_reckoning.sample?;
+        let mut pose = self.dead_reckoning.pose(now, &self.motion_region_scratch)?;
+        if !sample.parented
+            && let Some(ground) = self.view.terrain_height_at(pose.position)
+        {
+            pose.position.z = pose.position.z.max(ground + 0.5 * f64::from(sample.scale.z));
+        }
+        Some((pose, (sample.seed, sample.simulator_rotation)))
+    }
+
+    pub(crate) fn agent_id(&self) -> Uuid {
+        self.agent_id
+    }
+
+    pub(crate) fn agent_motion_active(&self, now: Instant) -> bool {
+        self.dead_reckoning.active(now)
+    }
+
+    pub(crate) fn refresh_motion_circuits(&mut self, now: Instant) {
+        self.motion_region_scratch.clear();
+        self.motion_region_scratch.extend(self.view.regions().filter_map(|region| {
+            region
+                .summary()
+                .info
+                .resolved_origin()
+                .map(|origin| kinematics::RegionBounds { region_id: region.summary().region.get(), origin })
+        }));
+        self.motion_circuit_scratch.clear();
+        {
+            let circuits = self.motion_circuits.borrow_and_update();
+            self.motion_circuit_scratch.extend(circuits.iter().map(|(region, receiver)| {
+                let status = *receiver.borrow();
+                MotionCircuit { region: *region, last_packet_received_at: status.last_packet_received_at, connected: status.connected }
+            }));
+        }
+        let mut regions = self.view.regions().map(|region| region.summary().region).collect::<HashSet<_>>();
+        if let Some(sample) = self.dead_reckoning.sample {
+            regions.insert(sample.region);
+        }
+        regions.extend(self.motion_circuit_scratch.iter().map(|circuit| circuit.region));
+        for region in regions.iter().copied() {
+            let circuit = self.motion_circuit_scratch.iter().find(|circuit| circuit.region == region).copied();
+            let active = circuit.is_some_and(|circuit| kinematics::circuit_active(now, circuit.last_packet_received_at, circuit.connected));
+            let previous = self.motion_active.insert(region, active);
+            if previous == Some(active) {
+                continue;
+            }
+            if active {
+                self.view.resume_motion(region, now, &self.motion_region_scratch);
+                if self.dead_reckoning.sample.is_some_and(|sample| sample.region == region) {
+                    self.dead_reckoning.resume_at(now, &self.motion_region_scratch);
+                }
+            } else {
+                let phase_out_at = match previous {
+                    Some(true) => Some(
+                        circuit
+                            .filter(|circuit| circuit.connected)
+                            .map_or(now, |circuit| circuit.last_packet_received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME)),
+                    ),
+                    Some(false) => continue,
+                    None => circuit
+                        .filter(|circuit| circuit.connected)
+                        .map(|circuit| circuit.last_packet_received_at + Duration::from_secs_f64(kinematics::PHASE_OUT_TIME)),
+                };
+                self.view.start_motion_phase_out(region, phase_out_at);
+                if self.dead_reckoning.sample.is_some_and(|sample| sample.region == region) {
+                    self.dead_reckoning.start_phase_out(phase_out_at);
+                }
+            }
+        }
+        self.motion_active.retain(|region, _| regions.contains(region));
     }
 
     pub(crate) fn set_camera(&self, camera: Option<Camera>) {
@@ -265,9 +446,11 @@ async fn run(
     runtime: Handle,
     cancelled: oneshot::Receiver<()>,
     mut camera: watch::Receiver<Option<Camera>>,
+    mut agent_motion: watch::Receiver<Option<AgentMotionSample>>,
     wake: impl Fn(),
 ) {
-    let SceneSources { mut reader, assets, environments } = sources;
+    let SceneSources { mut reader, assets, environments, motion_circuits } = sources;
+    let mut motion_circuits = MotionCircuitWake::new(motion_circuits);
     let mut environments = environments.take();
     let mut textures = assets.texture_events();
     let mut assets = AssetSubscriptions::new(assets);
@@ -327,6 +510,8 @@ async fn run(
             }
             .fuse();
             let moved = camera.changed().fuse();
+            let motion_updated = agent_motion.changed().fuse();
+            let circuit_transition = motion_circuits.wait_for_transition().fuse();
             let available = assets.next().fuse();
             let released = textures.changed().fuse();
             let timer = async {
@@ -337,7 +522,7 @@ async fn run(
                 }
             }
             .fuse();
-            pin_mut!(reading, building, changed, moved, available, released, timer, pushed);
+            pin_mut!(reading, building, changed, moved, motion_updated, circuit_transition, available, released, timer, pushed);
             let mut asset_event = None;
             futures::select_biased! {
                 _ = cancelled => break,
@@ -361,6 +546,8 @@ async fn run(
                 event = available => asset_event = event,
 
                 result = released => { if result.is_err() { break; } wake(); }
+                result = motion_updated => { if result.is_err() { break; } wake(); }
+                _ = circuit_transition => wake(),
                 result = moved => { if result.is_err() { break; } }
                 result = changed => { if result.is_err() { break; } scene.notify_world_change(); }
                 _ = timer => {}
@@ -376,329 +563,5 @@ async fn run(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::asset_coordinator::AssetCoordinator;
-    use crate::world_reader::ReadRequest;
-    use crate::world_reader::WorldReadHost;
-    use futures::{Future, FutureExt, join};
-    use math::{DVec3, Quat, Vec3};
-    use render::scene::{EnvironmentProperty, EnvironmentPush, Status};
-    use std::{
-        future::{pending, ready},
-        num::NonZeroU32,
-        time::Duration,
-    };
-    use utils::{AssetId, ExperienceId};
-    use uuid::Uuid;
-    use world::{
-        Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate, Pose, Region,
-        RegionInfo, Shape, SurfaceAppearance, UpdateSource, World, WorldLimits,
-    };
-
-    async fn select_read<T>(service: &mut WorldReadHost, intake: impl Future<Output = T>) -> Result<T, ReadRequest> {
-        if let Some(request) = service.take_reserved() {
-            return Err(request);
-        }
-        let result = {
-            let intake = intake.fuse();
-            let request = service.next_request().fuse();
-            pin_mut!(intake, request);
-            futures::select_biased! {
-                input = intake => Ok(input),
-                request = request => Err(request),
-            }
-        };
-        if result.is_ok() {
-            service.record_intake_turn();
-        }
-        result
-    }
-
-    fn world() -> World {
-        World::new(WorldLimits {
-            max_region_registrations: 2,
-            max_entities: 16,
-            max_entities_per_region: 16,
-            max_tombstones_per_region: 16,
-            max_tombstones: 16,
-            max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(16),
-            max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(16),
-            max_journal_entries: 32,
-            max_journal_changes: 128,
-            max_region_name_bytes: 64,
-            max_recovery_targets: 8,
-        })
-    }
-
-    #[tokio::test]
-    async fn water_height_follows_agent_region() {
-        let mut world = world();
-        let agent = Uuid::from_u128(1);
-        for region in [Region::new(1), Region::new(2)] {
-            let _ = world.adopt_region(region).unwrap();
-            let _ = world
-                .patch_region(
-                    region,
-                    RegionInfo { origin: Some(DVec3::new((region.get() - 1) as f64 * 256.0, 0.0, 7.0)), ..RegionInfo::default() },
-                )
-                .unwrap();
-        }
-        let _ = world
-            .observe_object(ObjectObservation::new(
-                UpdateSource::new(Region::new(1), 1, Ordered(1), 0),
-                agent,
-                NonZeroU32::new(1).unwrap(),
-                Kind::Avatar,
-                ParentUpdate::Root,
-            ))
-            .unwrap();
-        let _ = world.observe_water_height(UpdateSource::new(Region::new(2), 1, Ordered(1), 0), 31.0).unwrap();
-        let budget = Budget::default();
-        let (mut scene, view) = Reconciler::new(budget.clone());
-        let (sender, incoming) = mpsc::channel(1);
-        let (cancel, _) = oneshot::channel();
-        let (camera, _) = watch::channel(None);
-        let mut feed = SceneFeed {
-            runtime: Handle::current(),
-            view,
-            budget,
-            agent_id: agent,
-            agent: None,
-            water_height: None,
-            camera,
-            movement: watch::channel(None).0,
-            last_movement: None,
-            incoming,
-            _cancel: cancel,
-        };
-        let mut hydrate = |world: &World| {
-            scene.notify_world_change();
-            let now = Instant::now();
-            for _ in 0..1000 {
-                match scene.poll(now) {
-                    ReconcileStep::Read(job) => {
-                        let reply = match job.query() {
-                            ReadQuery::Barrier => Ok(ReadReply::Barrier(world.read_barrier())),
-                            ReadQuery::Objects(cursor) => world.object_list_page(*cursor, 256).map(ReadReply::Objects),
-                            ReadQuery::Regions(cursor) => world.region_page(*cursor, 64).map(ReadReply::Regions),
-                            ReadQuery::Details(entities) => world.object_detail_batch(entities).map(ReadReply::Details),
-                            ReadQuery::Changes(cursor) => world.change_page(*cursor, 256).map(ReadReply::Changes),
-                            ReadQuery::Terrain(region, cursor) => world.terrain_page(*region, *cursor, 8).map(ReadReply::Terrain),
-                            ReadQuery::Environment(region) => Ok(ReadReply::Environment(world.environment(*region))),
-                        };
-                        scene.complete_read(job, reply.map_err(ReadFailure::World), now);
-                    }
-                    ReconcileStep::Publish(batch) => {
-                        sender.try_send(batch).unwrap();
-                        feed.drain().unwrap();
-                    }
-                    ReconcileStep::Build(job) => scene.complete_mesh(job.run()),
-                    ReconcileStep::Continue => {}
-                    ReconcileStep::Idle => return (feed.water_height, feed.agent().map(|object| object.detail().summary.entity)),
-                    _ => panic!("expected scene reconciliation"),
-                }
-            }
-            panic!("scene did not settle");
-        };
-        let (height, original) = hydrate(&world);
-        assert_eq!(height, None, "another region's water must not supply the water height");
-        let original = original.expect("the observed avatar is available before its water height");
-        let _ = world.observe_water_height(UpdateSource::new(Region::new(1), 2, Ordered(2), 0), 17.0).unwrap();
-        assert_eq!(hydrate(&world), (Some(24.0), Some(original)));
-        let _ = world.retire_region(Region::new(1)).unwrap();
-        assert_eq!(hydrate(&world), (None, None), "retirement must remove both the avatar and previous water height");
-        let _ = world
-            .observe_object(ObjectObservation::new(
-                UpdateSource::new(Region::new(2), 3, Ordered(3), 0),
-                agent,
-                NonZeroU32::new(1).unwrap(),
-                Kind::Avatar,
-                ParentUpdate::Root,
-            ))
-            .unwrap();
-        let (height, replacement) = hydrate(&world);
-        assert_eq!(height, Some(38.0), "the new avatar region supplies its own observed height");
-        assert_ne!(replacement.expect("the replacement avatar is available"), original, "a retired entity must not remain cached");
-    }
-
-    #[tokio::test]
-    async fn pending_asset_preserves_scene() {
-        let mut world = world();
-        let region = Region::new(1);
-        let _ = world.adopt_region(region).unwrap();
-        let _ = world.patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() }).unwrap();
-        let mut object = ObjectObservation::new(
-            UpdateSource::new(region, 1, Ordered(1), 0),
-            Uuid::from_u128(1),
-            NonZeroU32::new(1).unwrap(),
-            Kind::Object,
-            ParentUpdate::Root,
-        );
-        object.pose = Some(Pose { position: Some(Vec3::new(10.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
-        object.scale = Some(Vec3::ONE);
-        object.shape = FieldUpdate::Set(Shape::Prim(Default::default()));
-        object.appearance = FieldUpdate::Set(Appearance::Surface);
-        object.surface_appearance = Some(
-            SurfaceAppearance::new(
-                FaceAppearance { texture: Some(AssetId::new(Uuid::from_u128(100))), color: [255, 0, 0, 255], ..FaceAppearance::default() },
-                Vec::new(),
-            )
-            .unwrap(),
-        );
-        let _ = world.observe_object(object).unwrap();
-        let mut reads = WorldReadHost::new(&world, Handle::current());
-        let assets = AssetCoordinator::new(Handle::current(), pending(), None);
-        let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
-        let mut feed = SceneFeed::start(
-            SceneSources { reader: reads.reader(), environments, assets: assets.handle() },
-            Uuid::from_u128(2),
-            watch::channel(None).0,
-            watch::channel(None).0,
-            Handle::current(),
-            || {},
-        );
-        feed.set_camera(Some(Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1000, 1000]).unwrap()));
-        let receiving = async {
-            loop {
-                let batch = feed.incoming.recv().await.expect("scene remains active");
-                feed.view.apply(batch).unwrap();
-                if let Some(face) = feed.view.objects().next().and_then(|object| object.materials()).and_then(|faces| faces.first())
-                    && let Some(binding) = &face.base_color_texture
-                    && binding.state().resolution == render::material::Resolution::Pending
-                {
-                    assert_eq!(face.base_color_factor(), [1.0, 0.0, 0.0, 1.0]);
-                    assert!(binding.image().is_none());
-                    assert_eq!(face.alpha, render::material::AlphaBehavior::Unknown);
-                    break;
-                }
-            }
-        }
-        .fuse();
-        let serving = async {
-            loop {
-                let Err(request) = select_read(&mut reads, pending::<()>()).await else { unreachable!() };
-                request.serve(&world);
-            }
-        }
-        .fuse();
-        pin_mut!(receiving, serving);
-        futures::select_biased! {
-            _ = receiving => {}
-            _ = serving => unreachable!(),
-        }
-    }
-
-    #[tokio::test]
-    async fn stalled_publication_preserves_intake() {
-        let mut world = world();
-        let region = Region::new(1);
-        let _ = world.adopt_region(region).unwrap();
-        let _ = world
-            .observe_object(ObjectObservation::new(
-                UpdateSource::new(region, 1, Ordered(1), 0),
-                Uuid::from_u128(1),
-                NonZeroU32::new(1).unwrap(),
-                Kind::Object,
-                ParentUpdate::Root,
-            ))
-            .unwrap();
-        let mut service = WorldReadHost::new(&world, Handle::current());
-        let reader = service.reader();
-        let assets = AssetCoordinator::new(Handle::current(), pending(), None);
-        let (pushes, environments) = crate::session::EnvironmentInbox::channel();
-        let mut feed = SceneFeed::start(
-            SceneSources { reader: reader.clone(), environments, assets: assets.handle() },
-            Uuid::from_u128(1),
-            watch::channel(None).0,
-            watch::channel(None).0,
-            Handle::current(),
-            || {},
-        );
-        let batch = {
-            let receiving = async {
-                loop {
-                    let batch = feed.incoming.recv().await.expect("live Scene publication");
-                    if batch.status() == Status::Ready {
-                        break batch;
-                    }
-                    feed.view.apply(batch).unwrap();
-                }
-            }
-            .fuse();
-            let serving = async {
-                loop {
-                    let Err(request) = select_read(&mut service, pending::<()>()).await else { unreachable!() };
-                    request.serve(&world);
-                }
-            }
-            .fuse();
-            pin_mut!(receiving, serving);
-            futures::select_biased! {
-                batch = receiving => batch,
-                _ = serving => unreachable!(),
-            }
-        };
-        assert_eq!(feed.view.status(), Status::Loading);
-        let initial = world.revision();
-        let (barrier, turns) = join!(reader.barrier(), async {
-            let mut turns = 0;
-            while turns < 1024 {
-                match select_read(&mut service, ready(())).await {
-                    Ok(()) => {
-                        turns += 1;
-                        let mut patch = ObjectPatch::new(
-                            UpdateSource::new(region, turns + 1, Ordered(u64::from(turns + 1)), 0),
-                            NonZeroU32::new(1).unwrap(),
-                        );
-                        patch.pose = Some(Pose { position: Some(Vec3::new(turns as f32, 0.0, 0.0)), rotation: None });
-                        let _ = world.patch_object(patch).unwrap();
-                        service.publish(&world);
-                    }
-                    Err(request) => request.serve(&world),
-                }
-            }
-            turns
-        });
-        assert_eq!(turns, 1024);
-        assert!(barrier.unwrap().revision > initial);
-        assert!(world.revision() > initial);
-        let experience = ExperienceId::new(Uuid::from_u128(44)).unwrap();
-        let push = EnvironmentPush::Partial {
-            experience,
-            sky: vec![EnvironmentProperty { name: "gamma".into(), source: b"r1.4".as_slice().into() }],
-            water: Vec::new(),
-            transition: Duration::ZERO,
-        };
-        assert!(pushes.try_send(crate::session::EnvironmentCommand { region, push }).is_ok());
-        feed.view.apply(batch).unwrap();
-        assert_eq!(feed.view.object_count(), 1);
-        {
-            let receiving = async {
-                loop {
-                    let batch = feed.incoming.recv().await.expect("live Scene publication");
-                    feed.view.apply(batch).unwrap();
-                    if let Some(environment) = feed.view.viewer_environment() {
-                        assert_eq!(environment.sky_properties()["gamma"].experience(), experience);
-                        break;
-                    }
-                }
-            }
-            .fuse();
-            let serving = async {
-                loop {
-                    let Err(request) = select_read(&mut service, pending::<()>()).await else { unreachable!() };
-                    request.serve(&world);
-                }
-            }
-            .fuse();
-            {
-                pin_mut!(receiving, serving);
-                futures::select_biased! { _ = receiving => {}, _ = serving => unreachable!() }
-            }
-        }
-        service.finish();
-        assert!(feed.incoming.recv().await.is_none());
-        assert_eq!(feed.view.status(), Status::Closed);
-    }
-}
+#[path = "scene_feed_tests.rs"]
+mod tests;

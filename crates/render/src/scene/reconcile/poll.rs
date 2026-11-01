@@ -109,7 +109,7 @@ impl Reconciler {
                 for change in &changes {
                     self.state.mirror.apply_mesh(change);
                     let entity = match change {
-                        MeshChange::Set(entity, ..) | MeshChange::Clear(entity) => entity,
+                        MeshChange::Set(entity, ..) | MeshChange::Clear(entity, _) => entity,
                     };
                     if let Some(object) = self.state.mirror.objects.get(entity) {
                         self.preparation.assets.invalidate(object);

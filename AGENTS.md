@@ -81,7 +81,7 @@ Do not add comments or doc comments to source, except a concise safety comment o
 - Smallest proof first. Run tests and clippy for the crates you touched. Run the workspace-wide suite only when asked, because CI owns it.
 - Test behavior through public APIs. Skip tests that assert callback wiring or mirror the implementation.
 - Use property-based or stateful tests where operations interact (reordering, reparenting, stale updates, ID reuse). Generators must be domain-valid and failures reproducible.
-- Wait on completion signals, never on sleeps or polling.
+- Wait on completion signals, never on sleeps or polling. Use production timing constants; test-only timing values and short absence windows do not prove behavior. Test deadlines with a controlled clock or slow-runner-safe bounds, and use generous timeouts only as hang guards.
 - Integration tests are plain `tests/<name>.rs` files, auto-discovered by Cargo; no `[[test]]` entries. Only when one grows into several files does it become `tests/<name>/main.rs` with its submodules.
 - Use `std::assert_matches!` instead of `assert!(matches!(..))`, so failures print the actual value.
 - Ask before launching the gui viewer, driving a browser, or any computer use.

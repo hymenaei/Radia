@@ -2,7 +2,7 @@ use std::assert_matches;
 use std::collections::HashSet;
 
 use render::material::AlphaBehavior;
-use render::scene::Geometry;
+use render::scene::{DrawnMeshKey, Geometry};
 use world::{FaceAppearance, SculptFlags, SurfaceAppearance};
 
 use super::support::{
@@ -32,6 +32,13 @@ fn request_header(work: &[render::scene::AssetRequest]) -> render::scene::AssetR
     work.iter().find(|request| matches!(request.request, Request::MeshHeader(_))).copied().expect("the mesh header was requested")
 }
 
+fn asset_lod(object: &render::scene::Object) -> Option<(AssetId, assets::mesh::MeshLod)> {
+    match object.mesh().map(|(key, _)| key) {
+        Some(DrawnMeshKey::Asset { asset, lod }) => Some((asset, lod)),
+        Some(DrawnMeshKey::Prim(_)) | None => None,
+    }
+}
+
 #[test]
 fn mesh_lod_falls_back_then_refines() {
     let asset = AssetId::new(Uuid::from_u128(700));
@@ -52,15 +59,16 @@ fn mesh_lod_falls_back_then_refines() {
     assert_eq!(work.requested.len(), 2, "only the desired and nearest fallback LOD are requested");
 
     scene.complete_asset(medium.ticket, prepared_asset(medium.request, bytes.clone()));
-    settle_materials(&mut scene, &mut view, &world, &mut now);
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&medium.ticket), "decoded LOD content no longer needs its fetch ticket");
     let object = view.objects().next().unwrap();
-    assert_eq!(object.mesh_lod(), Some((asset, assets::mesh::MeshLod::Medium)));
+    assert_eq!(asset_lod(object), Some((asset, assets::mesh::MeshLod::Medium)));
 
     scene.complete_asset(high.ticket, prepared_asset(high.request, bytes));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert!(work.released.contains(&medium.ticket), "a fallback LOD is released once the selected LOD is ready");
+    assert!(work.released.contains(&high.ticket), "decoded selected LOD content no longer needs its fetch ticket");
     let object = view.objects().next().unwrap();
-    assert_eq!(object.mesh_lod(), Some((asset, assets::mesh::MeshLod::High)));
+    assert_eq!(asset_lod(object), Some((asset, assets::mesh::MeshLod::High)));
 }
 
 #[test]
@@ -81,19 +89,20 @@ fn selected_empty_lod_stops_fallback() {
     let medium = request_lod(&work.requested, assets::mesh::MeshLod::Medium);
 
     scene.complete_asset(medium.ticket, prepared_asset(medium.request, bytes.clone()));
-    settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(view.objects().next().unwrap().mesh_lod(), Some((asset, assets::mesh::MeshLod::Medium)));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&medium.ticket));
+    assert_eq!(asset_lod(view.objects().next().unwrap()), Some((asset, assets::mesh::MeshLod::Medium)));
 
     scene.complete_asset(high.ticket, prepared_asset(high.request, bytes));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert!(work.released.contains(&medium.ticket));
+    assert!(work.released.contains(&high.ticket));
     let object = view.objects().next().unwrap();
-    assert!(object.render_mesh().is_none());
-    assert!(object.mesh_lod().is_none());
+    assert!(object.mesh().is_none());
+    assert!(asset_lod(object).is_none());
 }
 
 #[test]
-fn one_face_selected_lod_keeps_the_two_face_fallback_appearance() {
+fn material_slots_follow_the_published_fallback_lod() {
     let asset = AssetId::new(Uuid::from_u128(712));
     let texture = AssetId::new(Uuid::from_u128(713));
     let bytes = test_support::mesh::asset_with_lod_faces(&[(2, 2), (3, 1)]);
@@ -121,16 +130,18 @@ fn one_face_selected_lod_keeps_the_two_face_fallback_appearance() {
 
     scene.complete_asset(medium.ticket, prepared_asset(medium.request, bytes.clone()));
     settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(view.objects().next().unwrap().mesh_lod(), Some((asset, assets::mesh::MeshLod::Medium)));
+    let fallback = view.objects().next().unwrap();
+    assert_eq!(asset_lod(fallback), Some((asset, assets::mesh::MeshLod::Medium)));
+    let face = fallback.materials().unwrap().iter().find(|face| face.slot == 1).expect("fallback face appearance resolves");
+    assert_eq!(face.alpha, AlphaBehavior::Blend);
+    assert_eq!(face.base_color_factor()[3], 0.0);
+    assert_eq!(face.base_color_texture.as_ref().unwrap().state().asset, texture);
 
     scene.complete_asset(high.ticket, prepared_asset(high.request, bytes));
     settle_materials(&mut scene, &mut view, &world, &mut now);
     let object = view.objects().next().unwrap();
-    assert_eq!(object.mesh_lod(), Some((asset, assets::mesh::MeshLod::High)));
-    let face = object.materials().unwrap().iter().find(|face| face.slot == 1).expect("fallback face appearance is retained");
-    assert_eq!(face.alpha, AlphaBehavior::Blend);
-    assert_eq!(face.base_color_factor()[3], 0.0);
-    assert_eq!(face.base_color_texture.as_ref().unwrap().state().asset, texture);
+    assert_eq!(asset_lod(object), Some((asset, assets::mesh::MeshLod::High)));
+    assert!(object.materials().is_some_and(|materials| materials.iter().all(|face| face.slot != 1)));
 }
 
 #[test]
@@ -156,13 +167,13 @@ fn drawing_uses_nearest_ready_shared_lod_independent_of_fallback_request() {
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(!work.released.contains(&high.ticket));
     let high_object = view.objects().find(|object| object.detail().summary.id.as_u128() == 1).unwrap();
-    assert_eq!(high_object.mesh_lod(), Some((asset, assets::mesh::MeshLod::Lowest)));
+    assert_eq!(asset_lod(high_object), Some((asset, assets::mesh::MeshLod::Lowest)));
 
     scene.complete_asset(medium.ticket, prepared_asset(medium.request, bytes));
     settle_materials(&mut scene, &mut view, &world, &mut now);
     let high_object = view.objects().find(|object| object.detail().summary.id.as_u128() == 1).unwrap();
-    assert_eq!(high_object.mesh_lod(), Some((asset, assets::mesh::MeshLod::Medium)));
-    assert!(view.objects().any(|object| object.mesh_lod() == Some((asset, assets::mesh::MeshLod::Lowest))));
+    assert_eq!(asset_lod(high_object), Some((asset, assets::mesh::MeshLod::Medium)));
+    assert!(view.objects().any(|object| asset_lod(object) == Some((asset, assets::mesh::MeshLod::Lowest))));
 }
 
 #[test]
@@ -202,14 +213,17 @@ fn camera_change_refines_distinct_meshes() {
     assert_eq!(highs.len(), assets.len());
     assert_eq!(mediums.len(), assets.len());
     let high_tickets: HashSet<_> = highs.iter().map(|request| request.ticket).collect();
+    let first_medium_tickets: HashSet<_> = mediums.iter().map(|request| request.ticket).collect();
     for high in highs {
         scene.complete_asset(high.ticket, prepared_asset(high.request, bytes.clone()));
     }
 
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    let released_mediums: HashSet<_> = work.released.iter().copied().collect();
-    assert_eq!(released_mediums.len(), assets.len(), "ready high LODs release their pending fallback tickets");
-    let high_meshes: HashSet<_> = view.objects().filter_map(|object| object.mesh_lod()).collect();
+    let released_first_lods: HashSet<_> = work.released.iter().copied().collect();
+    let mut expected_releases = high_tickets;
+    expected_releases.extend(first_medium_tickets);
+    assert_eq!(released_first_lods, expected_releases, "decoded LODs release their fetch tickets");
+    let high_meshes: HashSet<_> = view.objects().filter_map(asset_lod).collect();
     let expected_highs: HashSet<_> = assets.iter().copied().map(|asset| (asset, assets::mesh::MeshLod::High)).collect();
     assert_eq!(high_meshes, expected_highs);
 
@@ -222,19 +236,20 @@ fn camera_change_refines_distinct_meshes() {
         .copied()
         .collect();
     assert_eq!(requested_mediums.len(), assets.len(), "camera movement requests the newly selected LOD for each asset");
-    assert!(requested_mediums.iter().all(|request| !released_mediums.contains(&request.ticket)));
+    assert!(requested_mediums.iter().all(|request| !released_first_lods.contains(&request.ticket)));
     assert_eq!(
-        view.objects().filter_map(|object| object.mesh_lod()).collect::<HashSet<_>>(),
+        view.objects().filter_map(asset_lod).collect::<HashSet<_>>(),
         expected_highs,
         "the prior meshes stay published while medium LODs are pending"
     );
+    let medium_tickets: HashSet<_> = requested_mediums.iter().map(|request| request.ticket).collect();
     for medium in requested_mediums {
         scene.complete_asset(medium.ticket, prepared_asset(medium.request, bytes.clone()));
     }
 
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(work.released.into_iter().collect::<HashSet<_>>(), high_tickets, "refinement releases previous LOD tickets");
-    let medium_meshes: HashSet<_> = view.objects().filter_map(|object| object.mesh_lod()).collect();
+    assert_eq!(work.released.into_iter().collect::<HashSet<_>>(), medium_tickets, "decoded refinement requests are released");
+    let medium_meshes: HashSet<_> = view.objects().filter_map(asset_lod).collect();
     let expected_mediums: HashSet<_> = assets.iter().copied().map(|asset| (asset, assets::mesh::MeshLod::Medium)).collect();
     assert_eq!(medium_meshes, expected_mediums);
 }
@@ -255,12 +270,14 @@ fn same_asset_shares_geometry_and_releases_on_last_user() {
     let header = work.requested[0];
     scene.complete_asset(header.ticket, prepared_asset(header.request, bytes.clone()));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&header.ticket));
     assert_eq!(work.requested.len(), 2, "objects share each selected and fallback LOD request");
     let high = request_lod(&work.requested, assets::mesh::MeshLod::High);
     let medium = request_lod(&work.requested, assets::mesh::MeshLod::Medium);
     scene.complete_asset(medium.ticket, prepared_asset(medium.request, bytes));
-    settle_materials(&mut scene, &mut view, &world, &mut now);
-    let mesh_ids: Vec<_> = view.objects().filter_map(|object| object.render_mesh().map(|mesh| mesh.id())).collect();
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&medium.ticket));
+    let mesh_ids: Vec<_> = view.objects().filter_map(|object| object.mesh().map(|(_, mesh)| mesh.id())).collect();
     let first = mesh_ids.first().copied().unwrap();
     assert!(mesh_ids.iter().all(|id| *id == first), "both objects share one published mesh handle");
 
@@ -272,9 +289,7 @@ fn same_asset_shares_geometry_and_releases_on_last_user() {
     let _ = world.remove_object(source(1, 11), NonZeroU32::new(2).unwrap()).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert!(work.released.contains(&header.ticket));
     assert!(work.released.contains(&high.ticket));
-    assert!(work.released.contains(&medium.ticket));
     assert_eq!(view.object_count(), 0);
 }
 
@@ -299,17 +314,19 @@ fn shape_and_asset_changes_release_stale_fetches() {
     let new_header = request_header(&work.requested);
     assert!(work.released.contains(&old_header.ticket));
     assert_ne!(old_header.ticket, new_header.ticket);
-    assert!(view.objects().next().unwrap().render_mesh().is_none());
+    assert!(view.objects().next().unwrap().mesh().is_none());
 
     scene.complete_asset(old_header.ticket, prepared_asset(old_header.request, bytes.clone()));
     assert!(settle_materials(&mut scene, &mut view, &world, &mut now).requested.is_empty());
     scene.complete_asset(new_header.ticket, prepared_asset(new_header.request, bytes.clone()));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&new_header.ticket));
     let lod = request_lod(&work.requested, assets::mesh::MeshLod::High);
     scene.complete_asset(lod.ticket, prepared_asset(lod.request, bytes));
-    settle_materials(&mut scene, &mut view, &world, &mut now);
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&lod.ticket));
     let object = view.objects().next().unwrap();
-    assert_eq!(object.mesh_lod().map(|(id, _)| id), Some(second_asset));
+    assert_eq!(asset_lod(object).map(|(id, _)| id), Some(second_asset));
 
     let mut patch = world::ObjectPatch::new(source(1, 12), NonZeroU32::new(1).unwrap());
     patch.shape = FieldUpdate::Set(Shape::Sculpt {
@@ -320,15 +337,14 @@ fn shape_and_asset_changes_release_stale_fetches() {
     let _ = world.patch_object(patch).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert!(work.released.contains(&new_header.ticket));
-    assert!(work.released.contains(&lod.ticket));
+    assert!(work.requested.is_empty());
     let object = view.objects().next().unwrap();
     assert_matches!(object.geometry(), Geometry::Unsupported(Shape::Sculpt { .. }));
-    assert!(object.render_mesh().is_none());
+    assert!(object.mesh().is_none());
 }
 
 #[test]
-fn prim_to_mesh_drops_prim_geometry_until_mesh_lod_arrives() {
+fn replaced_prim_mesh_is_not_published_for_a_mesh_asset_shape() {
     let asset = AssetId::new(Uuid::from_u128(709));
     let bytes = test_support::mesh::asset(&[3], 1);
     let mut world = world();
@@ -340,7 +356,8 @@ fn prim_to_mesh_drops_prim_geometry_until_mesh_lod_arrives() {
     settle_materials(&mut scene, &mut view, &world, &mut now);
     let object = view.objects().next().unwrap();
     assert_matches!(object.geometry(), Geometry::Prim(_));
-    let prim_mesh_id = object.render_mesh().unwrap().id();
+    let (DrawnMeshKey::Prim(_), prim_mesh) = object.mesh().unwrap() else { panic!("fixture prim mesh") };
+    let prim_mesh_id = prim_mesh.id();
 
     let mut patch = world::ObjectPatch::new(source(1, 8), NonZeroU32::new(1).unwrap());
     patch.shape = FieldUpdate::Set(Shape::Mesh { asset_id: asset, flags: SculptFlags::default() });
@@ -350,7 +367,7 @@ fn prim_to_mesh_drops_prim_geometry_until_mesh_lod_arrives() {
     let header = request_header(&work.requested);
     let object = view.objects().next().unwrap();
     assert_matches!(object.geometry(), Geometry::Mesh(id) if id == asset);
-    assert!(object.render_mesh().is_none());
+    assert!(object.mesh().is_none(), "the previous primitive slot is dropped when geometry changes");
 
     scene.complete_asset(header.ticket, prepared_asset(header.request, bytes.clone()));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
@@ -358,8 +375,8 @@ fn prim_to_mesh_drops_prim_geometry_until_mesh_lod_arrives() {
     scene.complete_asset(high.ticket, prepared_asset(high.request, bytes));
     settle_materials(&mut scene, &mut view, &world, &mut now);
     let object = view.objects().next().unwrap();
-    assert_eq!(object.mesh_lod(), Some((asset, assets::mesh::MeshLod::High)));
-    assert_ne!(object.render_mesh().unwrap().id(), prim_mesh_id);
+    assert_eq!(asset_lod(object), Some((asset, assets::mesh::MeshLod::High)));
+    assert_ne!(object.mesh().unwrap().1.id(), prim_mesh_id);
 }
 
 #[test]
@@ -377,6 +394,29 @@ fn removing_mesh_during_header_fetch_ignores_late_completion() {
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(work.released.contains(&header.ticket));
+    scene.complete_asset(header.ticket, prepared_asset(header.request, test_support::mesh::asset(&[0, 1, 2, 3], 1)));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.requested.is_empty());
+    assert_eq!(view.object_count(), 0);
+}
+
+#[test]
+fn leaving_region_releases_mesh_fetch_and_ignores_late_completion() {
+    let asset = AssetId::new(Uuid::from_u128(715));
+    let mut world = world();
+    add_mesh(&mut world, 1, asset, 10.0);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(camera(0.0));
+
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let header = request_header(&work.requested);
+    let _ = world.retire_region(world::Region::new(1)).unwrap();
+    scene.notify_world_change();
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&header.ticket));
+    assert_eq!(view.object_count(), 0);
+
     scene.complete_asset(header.ticket, prepared_asset(header.request, test_support::mesh::asset(&[0, 1, 2, 3], 1)));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(work.requested.is_empty());
@@ -412,7 +452,7 @@ fn malformed_headers_and_oversized_face_lists_are_not_drawn() {
     let lod = request_lod(&work.requested, assets::mesh::MeshLod::High);
     scene.complete_asset(lod.ticket, prepared_asset(lod.request, oversized_bytes));
     settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert!(view.objects().all(|object| object.render_mesh().is_none()));
+    assert!(view.objects().all(|object| object.mesh().is_none()));
 }
 
 #[test]
@@ -439,8 +479,8 @@ fn thousands_of_mesh_objects_share_bounded_asset_and_scene_state() {
     scene.complete_asset(medium.ticket, prepared_asset(medium.request, bytes));
     settle_materials(&mut scene, &mut view, &world, &mut now);
 
-    let mesh_ids: HashSet<_> = view.objects().filter_map(|object| object.render_mesh().map(|mesh| mesh.id())).collect();
+    let mesh_ids: HashSet<_> = view.objects().filter_map(|object| object.mesh().map(|(_, mesh)| mesh.id())).collect();
     assert_eq!(mesh_ids.len(), 1, "thousands of objects reuse one decoded LOD");
-    assert!(view.objects().all(|object| object.mesh_lod() == Some((asset, assets::mesh::MeshLod::Medium))));
+    assert!(view.objects().all(|object| asset_lod(object) == Some((asset, assets::mesh::MeshLod::Medium))));
     assert!(budget.charged_bytes() <= render::scene::MEMORY_BYTES);
 }

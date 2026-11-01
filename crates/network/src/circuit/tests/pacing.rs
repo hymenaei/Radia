@@ -584,20 +584,12 @@ async fn worker_wakes_for_rate_recovery_before_retry_deadline() {
 
     queue_worker_request(&first_handle, 875).await.await.expect("drain credit earned during loss backoff").consume();
     let queued_at = Instant::now();
-    let mut pending = queue_worker_request(&second_handle, 500).await;
-    let mut granted = None;
-    for _ in 0..4 {
-        advance(Duration::from_secs(1)).await;
-        for _ in 0..8 {
-            task::yield_now().await;
-        }
-        if let Ok(lease) = pending.try_recv() {
-            granted = Some(lease);
-            break;
-        }
-    }
-
-    let sent_at = granted.expect("recovery timers wake the worker before the five-second retry deadline").consume();
+    let pending = queue_worker_request(&second_handle, 500).await;
+    let sent_at = timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("recovery timers wake the worker before the retry deadline")
+        .expect("waiting request receives pacing credit")
+        .consume();
     assert!(sent_at.saturating_duration_since(queued_at) < Duration::from_secs(5));
 
     drop((first, second));

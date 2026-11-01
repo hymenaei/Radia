@@ -19,6 +19,26 @@ pub(super) fn scene_with_scales(alpha: u8, scales: [Vec3; 2]) -> (Reconciler, Sc
 }
 
 pub(super) fn scene_with_mapping(alpha: u8, scales: [Vec3; 2], mapping: world::TextureMapping) -> (Reconciler, SceneView, Camera) {
+    let (_, scene, view, camera) = scene_with_world(alpha, scales, mapping);
+    (scene, view, camera)
+}
+
+pub(super) fn scene_with_agent() -> (Reconciler, SceneView, Camera) {
+    let (_, scene, view, camera) =
+        scene_with_world_with_agent(255, [Vec3::splat(2.0); 2], world::TextureMapping::Default, Some(Uuid::from_u128(1)));
+    (scene, view, camera)
+}
+
+pub(super) fn scene_with_world(alpha: u8, scales: [Vec3; 2], mapping: world::TextureMapping) -> (World, Reconciler, SceneView, Camera) {
+    scene_with_world_with_agent(alpha, scales, mapping, None)
+}
+
+fn scene_with_world_with_agent(
+    alpha: u8,
+    scales: [Vec3; 2],
+    mapping: world::TextureMapping,
+    agent_id: Option<Uuid>,
+) -> (World, Reconciler, SceneView, Camera) {
     let mut world = World::new(WorldLimits {
         max_region_registrations: 1,
         max_entities: 2,
@@ -43,11 +63,13 @@ pub(super) fn scene_with_mapping(alpha: u8, scales: [Vec3; 2], mapping: world::T
     .zip(scales)
     {
         color[3] = alpha;
+        let object_id = Uuid::from_u128(u128::from(id));
+        let kind = if Some(object_id) == agent_id { Kind::Avatar } else { Kind::Object };
         let mut object = ObjectObservation::new(
             UpdateSource::new(region, id, OrderEvidence::Ordered(u64::from(id)), 0),
-            Uuid::from_u128(u128::from(id)),
+            object_id,
             NonZeroU32::new(id).unwrap(),
-            Kind::Object,
+            kind,
             ParentUpdate::Root,
         );
         let position = if alpha == 255 { Vec3::new(10.0, y, 0.0) } else { Vec3::new(if id == 1 { 10.0 } else { 14.0 }, y * 0.35, 0.0) };
@@ -86,7 +108,7 @@ pub(super) fn scene_with_mapping(alpha: u8, scales: [Vec3; 2], mapping: world::T
             ReconcileStep::Idle => {
                 assert_eq!(view.object_count(), 2);
                 assert!(view.objects().all(|object| object.mesh().is_some() && object.materials().is_some()));
-                return (scene, view, camera);
+                return (world, scene, view, camera);
             }
             _ => panic!("fixture stopped before publishing geometry"),
         }

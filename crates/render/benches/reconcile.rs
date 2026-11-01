@@ -47,7 +47,9 @@ pub(crate) fn bench(c: &mut Criterion) {
                     std::hint::black_box((
                         work.requested.len(),
                         work.released.len(),
-                        view.objects().filter(|object| object.mesh_lod().is_some()).count(),
+                        view.objects()
+                            .filter(|object| matches!(object.mesh().map(|(key, _)| key), Some(render::scene::DrawnMeshKey::Asset { .. })))
+                            .count(),
                     ));
                 },
                 BatchSize::LargeInput,

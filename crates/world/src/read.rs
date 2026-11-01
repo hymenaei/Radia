@@ -13,7 +13,7 @@ use crate::{
 };
 use crate::{
     Entity, Kind, LocalAddress, Parent, PbrMaterialOverrides, PoseError, PoseState, Region, RegionInfo, Shape, TerrainSettings,
-    WorldRevision, WorldTransformState,
+    UpdateSource, WorldRevision, WorldTransformState,
 };
 use crate::{Object, World, WorldChange, WorldId};
 
@@ -96,6 +96,9 @@ pub struct ObjectDetail {
     pub parent_id: Option<Uuid>,
     pub linear_motion: LinearMotion,
     pub angular_velocity: Option<math::Vec3>,
+    pub is_physical: bool,
+    pub time_dilation: f32,
+    pub motion_source: Option<UpdateSource>,
     pub shape: Option<Shape>,
     pub appearance: Option<Appearance>,
     pub surface_appearance: Option<SurfaceAppearance>,
@@ -341,6 +344,9 @@ impl World {
             parent_id,
             linear_motion: object.linear_motion(),
             angular_velocity: object.angular_velocity(),
+            is_physical: object.is_physical(),
+            time_dilation: object.time_dilation(),
+            motion_source: object.motion_source(),
             shape: object.shape(),
             appearance: object.appearance(),
             surface_appearance: object.surface_appearance().cloned(),

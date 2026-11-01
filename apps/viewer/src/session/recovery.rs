@@ -10,7 +10,7 @@ use network::{
     SessionHandle, SimulatorId,
 };
 use protocol::lludp::{Message, Packet};
-use protocol::messages::{CacheMissType::Full, ObjectRequest, RequestAgentData, RequestMultipleObjects};
+use protocol::messages::{CacheMissType, ObjectRequest, RequestAgentData, RequestMultipleObjects};
 use tokio::time::Instant;
 use world::LocalAddress;
 
@@ -34,12 +34,20 @@ pub(super) struct ScheduledRecovery {
     pub(super) simulator_id: SimulatorId,
     token: u64,
     agent_data: RequestAgentData,
+    cache_miss_type: CacheMissType,
     retry: RecoveryRetryState,
 }
 
 impl ScheduledRecovery {
-    fn new(simulator_id: SimulatorId, token: u64, agent_data: RequestAgentData, address: LocalAddress, now: Instant) -> Self {
-        Self { key: address, simulator_id, token, agent_data, retry: RecoveryRetryState::new(now) }
+    fn new(
+        simulator_id: SimulatorId,
+        token: u64,
+        agent_data: RequestAgentData,
+        address: LocalAddress,
+        cache_miss_type: CacheMissType,
+        now: Instant,
+    ) -> Self {
+        Self { key: address, simulator_id, token, agent_data, cache_miss_type, retry: RecoveryRetryState::new(now) }
     }
 
     pub(super) fn is_exhausted(&self) -> bool {
@@ -128,12 +136,25 @@ impl RecoveryScheduler {
         matches!(self.entries.get(&address), Some(RecoveryEntry::Degraded { .. }))
     }
 
+    #[cfg(test)]
     fn schedule(&mut self, simulator_id: SimulatorId, agent_data: RequestAgentData, address: LocalAddress, now: Instant) -> Option<u64> {
+        self.schedule_with_type(simulator_id, agent_data, address, CacheMissType::Full, now)
+    }
+
+    fn schedule_with_type(
+        &mut self,
+        simulator_id: SimulatorId,
+        agent_data: RequestAgentData,
+        address: LocalAddress,
+        cache_miss_type: CacheMissType,
+        now: Instant,
+    ) -> Option<u64> {
         let has_capacity = self.has_capacity();
         match self.entries.get_mut(&address) {
             Some(RecoveryEntry::Degraded { .. }) => return None,
             Some(RecoveryEntry::Pending(current) | RecoveryEntry::InFlight(current)) if current.simulator_id == simulator_id => {
                 current.agent_data = agent_data;
+                current.cache_miss_type = cache_miss_type;
                 return Some(current.token);
             }
             None if !has_capacity => return None,
@@ -141,7 +162,10 @@ impl RecoveryScheduler {
         }
         let token = self.next_token.checked_add(1)?;
         self.next_token = token;
-        self.entries.insert(address, RecoveryEntry::Pending(ScheduledRecovery::new(simulator_id, token, agent_data, address, now)));
+        self.entries.insert(
+            address,
+            RecoveryEntry::Pending(ScheduledRecovery::new(simulator_id, token, agent_data, address, cache_miss_type, now)),
+        );
         Some(token)
     }
 
@@ -283,21 +307,21 @@ impl RecoveryIntake {
 
     pub(super) fn schedule(
         &mut self,
-        targets: Vec<(Option<SimulatorId>, LocalAddress)>,
+        targets: Vec<(Option<SimulatorId>, LocalAddress, CacheMissType)>,
         updated: Vec<LocalAddress>,
         agent_data: Option<RequestAgentData>,
     ) {
         if targets.is_empty() && updated.is_empty() {
             return;
         }
-        let simulator = targets.first().and_then(|(simulator, _)| simulator.map(SimulatorId::get));
-        let region = targets.first().map(|(_, address)| address.region().get());
+        let simulator = targets.first().and_then(|(simulator, _, _)| simulator.map(SimulatorId::get));
+        let region = targets.first().map(|(_, address, _)| address.region().get());
         let now = Instant::now();
         let mut dropped = 0;
         for address in updated {
             self.scheduler.cancel(address);
         }
-        for (simulator_id, address) in targets {
+        for (simulator_id, address, cache_miss_type) in targets {
             if self.scheduler.is_degraded(address) {
                 continue;
             }
@@ -311,7 +335,7 @@ impl RecoveryIntake {
                 dropped += 1;
                 continue;
             };
-            match self.scheduler.schedule(simulator_id, agent_data, address, now) {
+            match self.scheduler.schedule_with_type(simulator_id, agent_data, address, cache_miss_type, now) {
                 Some(_) => {}
                 None => {
                     self.scheduler.mark_degraded(address, Some(simulator_id));
@@ -363,8 +387,8 @@ impl RecoveryIntake {
         let Some(first) = recoveries.first().copied() else { return Ok(()) };
         assert!(self.in_flight.is_none(), "recovery sends are serialized");
         let simulator_id = first.simulator_id;
-        let addresses = recoveries.iter().map(|recovery| recovery.key).collect::<Vec<_>>();
-        let request = recovery_request(first.agent_data, &addresses);
+        let targets = recoveries.iter().map(|recovery| (recovery.key, recovery.cache_miss_type)).collect::<Vec<_>>();
+        let request = recovery_request_with_types(first.agent_data, &targets);
         let packet_size = Packet::new(0, Message::RequestMultipleObjects(request.clone())).encode().map(|packet| packet.len());
         if !packet_size.is_ok_and(|size| size <= MAX_RECOVERY_REQUEST_BYTES) {
             return Err(OversizedRecoveryRequest { recoveries });
@@ -430,8 +454,17 @@ pub(super) fn simulator_lost_error(error: &Error) -> bool {
     matches!(error, SessionClosed | SimulatorConnectionClosed | SimulatorUnavailable)
 }
 
+#[cfg(test)]
 pub(super) fn recovery_request(agent_data: RequestAgentData, addresses: &[LocalAddress]) -> RequestMultipleObjects {
-    let objects = addresses.iter().map(|address| ObjectRequest { cache_miss_type: Full, local_id: address.local_id().get() }).collect();
+    let targets = addresses.iter().copied().map(|address| (address, CacheMissType::Full)).collect::<Vec<_>>();
+    recovery_request_with_types(agent_data, &targets)
+}
+
+fn recovery_request_with_types(agent_data: RequestAgentData, targets: &[(LocalAddress, CacheMissType)]) -> RequestMultipleObjects {
+    let objects = targets
+        .iter()
+        .map(|(address, cache_miss_type)| ObjectRequest { cache_miss_type: *cache_miss_type, local_id: address.local_id().get() })
+        .collect();
     RequestMultipleObjects { agent_data, objects }
 }
 
@@ -564,7 +597,7 @@ mod tests {
             let mut intake = RecoveryIntake::new();
             assert!(intake.scheduler.schedule(simulator, agent_data(), target, Instant::now()).is_some());
 
-            intake.schedule(vec![(route, target)], vec![], None);
+            intake.schedule(vec![(route, target, Full)], vec![], None);
 
             assert!(intake.scheduler.next_deadline().is_none());
             assert!(intake.scheduler.is_degraded(target));
@@ -697,7 +730,11 @@ mod tests {
         let first = simulator_id();
         let second = simulator_id();
         let mut intake = RecoveryIntake::new();
-        intake.schedule(vec![(Some(first), address(first.get(), 8)), (Some(second), address(second.get(), 9))], vec![], Some(agent_data()));
+        intake.schedule(
+            vec![(Some(first), address(first.get(), 8), Full), (Some(second), address(second.get(), 9), Full)],
+            vec![],
+            Some(agent_data()),
+        );
 
         let RecoveryCompletion::Deadline { due, aged_out } = intake.next_completion().await else { panic!("first batch is due") };
         assert!(aged_out.is_empty());

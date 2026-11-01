@@ -42,6 +42,8 @@ pub(crate) struct Fences {
     pub(crate) frame: Option<FieldStamp>,
     pub(crate) linear_motion: Option<FieldStamp>,
     pub(crate) angular_velocity: Option<FieldStamp>,
+    pub(crate) is_physical: Option<FieldStamp>,
+    pub(crate) time_dilation: Option<FieldStamp>,
     pub(crate) scale: Option<FieldStamp>,
     pub(crate) parent: Option<FieldStamp>,
     pub(crate) attachment_point: Option<FieldStamp>,
@@ -97,6 +99,9 @@ pub(crate) struct ObjectState {
     pub(crate) parent: Parent,
     pub(crate) linear_motion: LinearMotion,
     pub(crate) angular_velocity: Option<Vec3>,
+    pub(crate) is_physical: bool,
+    pub(crate) time_dilation: f32,
+    pub(crate) motion_source: Option<UpdateSource>,
     pub(crate) attachment_point: Option<AttachmentPoint>,
     pub(crate) frame_generation: u64,
     pub(crate) position_frame_generation: Option<u64>,
@@ -112,6 +117,9 @@ impl ObjectState {
             parent: Parent::Unknown,
             linear_motion: LinearMotion::default(),
             angular_velocity: None,
+            is_physical: false,
+            time_dilation: 1.0,
+            motion_source: None,
             attachment_point: None,
             frame_generation: 0,
             position_frame_generation: None,
@@ -132,6 +140,9 @@ impl ObjectState {
         self.parent = Parent::Unknown;
         self.linear_motion = LinearMotion::default();
         self.angular_velocity = None;
+        self.is_physical = false;
+        self.time_dilation = 1.0;
+        self.motion_source = None;
         self.attachment_point = None;
         self.position_frame_generation = None;
         self.rotation_frame_generation = None;
@@ -159,6 +170,8 @@ impl ObjectOrdering {
         self.fences.frame = None;
         self.fences.linear_motion = None;
         self.fences.angular_velocity = None;
+        self.fences.is_physical = None;
+        self.fences.time_dilation = None;
         self.fences.scale = None;
         self.fences.parent = None;
         self.fences.attachment_point = None;

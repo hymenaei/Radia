@@ -9,7 +9,7 @@ mod persistence;
 mod presentation;
 
 #[cfg(test)]
-pub(crate) use self::driver::resolve_pending_inventory_moves;
+pub(crate) use self::driver::inventory::resolve_pending_inventory_moves;
 pub(crate) use self::driver::{CredentialPersistence, drain_session};
 #[cfg(test)]
 use self::input::select_drain_input;
@@ -17,7 +17,7 @@ use self::input::select_drain_input;
 pub(crate) use self::inventory_intake::apply_udp as apply_inventory_udp;
 pub(crate) use self::persistence::{WriteLock, save_favorite_store, write_lock};
 pub(crate) use self::presentation::{
-    AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionReadyUpdate, ViewerUpdate,
+    AuthenticationUpdate, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd, SessionReadyUpdate, ViewerUpdate,
 };
 
 #[cfg(test)]
@@ -29,7 +29,7 @@ mod tests {
     };
 
     use math::Vec3;
-    use network::{Event, Event::SimulatorMessage, PacketOrder, PacketOrder::Ordered, SimulatorId};
+    use network::{Event, Event::SimulatorMessage, Grid, PacketOrder, PacketOrder::Ordered, SimulatorId};
     use protocol::{
         Audible, ChatSourceType, ChatType,
         lludp::Message,
@@ -47,6 +47,7 @@ mod tests {
 
     use crate::session::coordinator::events::WorldHandoff;
     use crate::session::coordinator::input::Input;
+    use crate::session::object_cache::ObjectCacheSession;
     use crate::session::world::{IngestSummary, SessionWorld, viewer_world_limits};
     use crate::test_helpers::simulator_id;
     use crate::world_reader::WorldReadHost;
@@ -211,7 +212,15 @@ mod tests {
         packet_order: PacketOrder,
         message: Message,
     ) -> Event {
-        SimulatorMessage { simulator_id, source: "127.0.0.1:13000".parse().expect("simulator address"), sequence, packet_order, message }
+        SimulatorMessage {
+            simulator_id,
+            source: "127.0.0.1:13000".parse().expect("simulator address"),
+            sequence,
+            packet_order,
+            received_at: std::time::Instant::now(),
+            ping_delay: None,
+            message,
+        }
     }
 
     pub(super) fn chat_message(from_name: &str) -> Message {
@@ -239,9 +248,24 @@ mod tests {
     }
 
     async fn apply_world_cooperatively(world: &mut SessionWorld, handoff: &mut WorldHandoff, event: &Event) {
-        if let Event::SimulatorMessage { simulator_id, sequence, packet_order, message, .. } = event {
-            let _ =
-                handoff.apply_message_cooperatively(world, *simulator_id, *sequence, *packet_order, message, None, &mut |_, _| {}).await;
+        if let Event::SimulatorMessage { simulator_id, sequence, packet_order, received_at, ping_delay, message, .. } = event {
+            let mut object_cache = ObjectCacheSession::new(Grid::Agni);
+            let mut media_requests = Vec::new();
+            let _ = handoff
+                .apply_message_cooperatively(
+                    world,
+                    *simulator_id,
+                    *sequence,
+                    *packet_order,
+                    *received_at,
+                    *ping_delay,
+                    message,
+                    None,
+                    &mut object_cache,
+                    &mut |_, _| {},
+                    &mut media_requests,
+                )
+                .await;
         } else {
             let _ = handoff.apply_event(world, event, None);
         }

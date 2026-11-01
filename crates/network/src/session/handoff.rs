@@ -424,6 +424,10 @@ impl SessionState {
 
 impl SessionDispatcher<'_> {
     pub(super) fn handle_handoff_command_retry(&mut self) -> RuntimeAction {
+        self.flush_pending_handshake_replies();
+        for connection in self.run_state.neighbor_connections.values_mut() {
+            connection.flush_handoff_command();
+        }
         RuntimeAction::Continue
     }
 

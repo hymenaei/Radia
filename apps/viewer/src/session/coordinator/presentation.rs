@@ -14,7 +14,9 @@ use uuid::Uuid;
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 use crate::{
-    agent_movement::MovementObservation, asset_coordinator::AssetHandle, session::experience_environment::EnvironmentInbox,
+    agent_movement::MovementObservation,
+    asset_coordinator::AssetHandle,
+    session::{AgentMotionSample, experience_environment::EnvironmentInbox},
     world_reader::WorldReader,
 };
 use crate::{
@@ -57,7 +59,12 @@ impl PresentationMailbox {
                 ViewerUpdate::Failed(error) => {
                     state.chat_messages.clear();
                     state.chat_bytes = 0;
-                    state.failure = Some(error);
+                    state.end_session(SessionEnd::Failed(error));
+                }
+                ViewerUpdate::Ended => {
+                    state.chat_messages.clear();
+                    state.chat_bytes = 0;
+                    state.end_session(SessionEnd::Requested);
                 }
                 ViewerUpdate::Favorites(update) => state.favorites = Some(update),
                 ViewerUpdate::FavoriteStoreSaved { generation, result } => {
@@ -110,7 +117,7 @@ pub(crate) struct PresentationSnapshot {
     pub(crate) session_ready: Option<SessionReadyUpdate>,
     pub(crate) region_name: Option<String>,
     pub(crate) chat_messages: VecDeque<ChatMessage>,
-    pub(crate) failure: Option<String>,
+    pub(crate) session_end: Option<SessionEnd>,
     pub(crate) favorites: Option<FavoritesUpdate>,
     pub(crate) favorite_store_saved: Option<(u64, Result<(), FavoriteStoreError>)>,
 }
@@ -118,9 +125,16 @@ pub(crate) struct PresentationSnapshot {
 impl PresentationSnapshot {
     fn from_pending(generation: u64, pending: PendingPresentation) -> Self {
         let PendingPresentation {
-            authentication, session_ready, region_name, chat_messages, failure, favorites, favorite_store_saved, ..
+            authentication,
+            session_ready,
+            region_name,
+            chat_messages,
+            session_end,
+            favorites,
+            favorite_store_saved,
+            ..
         } = pending;
-        Self { generation, authentication, session_ready, region_name, chat_messages, failure, favorites, favorite_store_saved }
+        Self { generation, authentication, session_ready, region_name, chat_messages, session_end, favorites, favorite_store_saved }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -128,7 +142,7 @@ impl PresentationSnapshot {
             && self.session_ready.is_none()
             && self.region_name.is_none()
             && self.chat_messages.is_empty()
-            && self.failure.is_none()
+            && self.session_end.is_none()
             && self.favorites.is_none()
             && self.favorite_store_saved.is_none()
     }
@@ -139,6 +153,12 @@ pub(crate) enum AuthenticationUpdate {
     CredentialsUpdated { remembered_login: Option<RememberedLogin>, warning: Option<CredentialStoreError> },
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum SessionEnd {
+    Requested,
+    Failed(String),
+}
+
 pub(crate) struct SessionReadyUpdate {
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) environments: EnvironmentInbox,
@@ -146,6 +166,10 @@ pub(crate) struct SessionReadyUpdate {
     pub(crate) camera: watch::Sender<Option<Camera>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) movement: watch::Sender<Option<MovementObservation>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) agent_motion: watch::Receiver<Option<AgentMotionSample>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    pub(crate) motion_circuits: watch::Receiver<Vec<(world::Region, watch::Receiver<network::CircuitMotionStatus>)>>,
     #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(crate) assets: AssetHandle,
     pub(crate) session: AgentSession,
@@ -171,12 +195,19 @@ struct PendingPresentation {
     region_name: Option<String>,
     chat_messages: VecDeque<ChatMessage>,
     chat_bytes: usize,
-    failure: Option<String>,
+    session_end: Option<SessionEnd>,
     favorites: Option<FavoritesUpdate>,
     favorite_store_saved: Option<(u64, Result<(), FavoriteStoreError>)>,
 }
 
 impl PendingPresentation {
+    fn end_session(&mut self, end: SessionEnd) {
+        match (&self.session_end, &end) {
+            (Some(SessionEnd::Failed(_)), _) | (Some(SessionEnd::Requested), SessionEnd::Requested) => {}
+            _ => self.session_end = Some(end),
+        }
+    }
+
     fn push_chat(&mut self, message: ChatMessage) {
         let message_bytes = message.from_name.len().saturating_add(message.message.len());
         if message_bytes > MAX_PENDING_CHAT_BYTES {
@@ -203,6 +234,7 @@ pub(crate) enum ViewerUpdate {
     RegionName(String),
     ChatMessage(ChatMessage),
     Failed(String),
+    Ended,
     Favorites(FavoritesUpdate),
     FavoriteStoreSaved { generation: u64, result: Result<(), FavoriteStoreError> },
 }
@@ -249,10 +281,11 @@ mod tests {
             mailbox.publish(ViewerUpdate::ChatMessage(ChatMessage { from_name: "Agent".into(), message: "Hello".into() }));
         }
         mailbox.publish(ViewerUpdate::Failed("connection closed".into()));
+        mailbox.publish(ViewerUpdate::Ended);
 
         let snapshot = futures::executor::block_on(receiver.next()).expect("failure wake");
         assert!(snapshot.chat_messages.is_empty());
-        assert_eq!(snapshot.failure.as_deref(), Some("connection closed"));
+        assert_eq!(snapshot.session_end, Some(SessionEnd::Failed("connection closed".into())));
     }
 
     #[test]
@@ -264,8 +297,16 @@ mod tests {
         let address = "127.0.0.1:13000".parse().unwrap();
         for (order, name) in [(10, "Initial"), (20, "Renamed"), (15, "Stale")] {
             let message = region_handshake(name);
-            decode_simulator_world_update(&mut world, simulator, order, Ordered(u64::from(order)), &message);
-            handle_simulator_message(SimulatorScope::Primary, address, message, None, None, world.region_name(simulator), &mailbox);
+            decode_simulator_world_update(
+                &mut world,
+                simulator,
+                order,
+                Ordered(u64::from(order)),
+                std::time::Instant::now(),
+                None,
+                &message,
+            );
+            handle_simulator_message(SimulatorScope::Primary, address, &message, None, None, world.region_name(simulator), &mailbox);
         }
         let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");
         assert_eq!(snapshot.region_name.as_deref(), Some("Renamed"));
@@ -281,23 +322,23 @@ mod tests {
             handle_simulator_message(
                 SimulatorScope::Neighbor,
                 source,
-                region_handshake(&format!("Neighbor {index}")),
+                &region_handshake(&format!("Neighbor {index}")),
                 None,
                 None,
                 Some("Neighbor"),
                 &mailbox,
             );
-            handle_simulator_message(SimulatorScope::Neighbor, source, chat_message("Neighbor"), None, None, None, &mailbox);
+            handle_simulator_message(SimulatorScope::Neighbor, source, &chat_message("Neighbor"), None, None, None, &mailbox);
             handle_simulator_message(
                 SimulatorScope::Primary,
                 source,
-                region_handshake("Unaccepted"),
+                &region_handshake("Unaccepted"),
                 None,
                 None,
                 Some(&format!("Primary {index}")),
                 &mailbox,
             );
-            handle_simulator_message(SimulatorScope::Primary, source, chat_message("Primary"), None, None, None, &mailbox);
+            handle_simulator_message(SimulatorScope::Primary, source, &chat_message("Primary"), None, None, None, &mailbox);
         }
 
         let snapshot = futures::executor::block_on(receiver.next()).expect("presentation wake");

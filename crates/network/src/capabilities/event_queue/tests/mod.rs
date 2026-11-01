@@ -4,12 +4,7 @@ mod client;
 mod retained_size;
 mod retry;
 
-use std::{
-    io::Write,
-    net::SocketAddr,
-    sync,
-    time::{Duration, Instant},
-};
+use std::{io::Write, net::SocketAddr, sync, time::Duration};
 
 use llsd::Value;
 use protocol::{

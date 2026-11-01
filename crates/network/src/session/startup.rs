@@ -133,7 +133,8 @@ impl SessionRuntime {
         login_data: ResponseData,
         options: SessionRuntimeOptions,
     ) -> Result<Option<Self>, SessionError> {
-        let SessionRuntimeOptions { coverage_losses, session: options, mut startup_disconnect, root_transport } = options;
+        let application_event_capacity = options.application_event_capacity();
+        let SessionRuntimeOptions { coverage_losses, session: options, mut startup_disconnect, root_transport, .. } = options;
         async {
             if startup_disconnect.as_ref().is_some_and(|disconnect| *disconnect.borrow()) {
                 return Ok(None);
@@ -150,7 +151,7 @@ impl SessionRuntime {
             let (root_logout, root_logout_receiver) = mpsc::channel(1);
             let (primary_state_sender, primary_state_receiver) = watch::channel(PrimaryState::Connecting);
             let (neighbor_cancellation, _) = watch::channel(false);
-            let packet_memory = SimulatorMemoryBudget::new();
+            let packet_memory = SimulatorMemoryBudget::with_application_capacity(application_event_capacity);
             let mut root_connection_workers = JoinSet::<ConnectionTaskResult>::new();
             let (root_connection_abort, ready_receiver) = RootConnectionStart {
                 simulator_id,

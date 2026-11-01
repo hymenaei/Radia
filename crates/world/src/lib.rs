@@ -66,9 +66,9 @@ pub use region::terrain::{
     TerrainPageCursor, TerrainPatch, TerrainPatchError, TerrainPatchId, TerrainSettings, TerrainSettingsError,
 };
 pub use update::{
-    Applied, ApplyError, ApplyOutcome, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, ObjectObservation,
-    ObjectPatch, OrderEvidence, Recovery, RegionApplied, RegionOutcome, Rejections, UpdateAuthority, UpdateSource, WorldLimits,
-    WorldRevision,
+    Applied, ApplyError, ApplyOutcome, DeferredReason, FieldGroup, FieldRejection, FieldRejectionReason, FieldUpdate, MotionUpdateKind,
+    ObjectObservation, ObjectPatch, OrderEvidence, Recovery, RegionApplied, RegionOutcome, Rejections, UpdateAuthority, UpdateSource,
+    WorldLimits, WorldRevision,
 };
 
 const MAX_OBJECT_MEDIA_BYTES: usize = 64 * 1024 * 1024;

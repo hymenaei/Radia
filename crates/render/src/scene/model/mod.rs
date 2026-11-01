@@ -12,13 +12,18 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use assets::TextureHandle;
 use world::{Entity, Region, RegionSummary, TerrainPatch, TerrainPatchId, WorldRevision};
 
 use crate::scene::region_environment::RegionEnvironment;
-use crate::scene::{MeshKey, PreparedMesh, Surface, SurfaceKind, ViewerEnvironment, asset_demand::MaterialChange, budget::Lease};
+use crate::scene::{
+    DrawnMeshKey, MeshKey, PreparedMesh, Surface, SurfaceKind, ViewerEnvironment,
+    asset_demand::{MaterialChange, MeshPublication},
+    budget::Lease,
+};
 
 #[derive(Clone, Debug)]
 pub(in crate::scene) struct SceneLifetime(Arc<AtomicBool>);
@@ -97,7 +102,7 @@ pub enum Status {
 
 pub(in crate::scene) enum MeshChange {
     Set(Entity, MeshKey, PreparedMesh),
-    Clear(Entity),
+    Clear(Entity, MeshKey),
 }
 
 pub(in crate::scene) enum Change {
@@ -153,14 +158,20 @@ impl Mirror {
                     && object.geometry() == Geometry::Prim(key.shape)
                 {
                     if let PreparedMesh::Ready(mesh) = state {
-                        object.mesh = Some((*key, mesh.clone()));
+                        object.mesh = Some((DrawnMeshKey::Prim(*key), mesh.clone()));
+                    } else if !matches!(state, PreparedMesh::Pending) {
+                        object.mesh = None;
                     }
                     object.preparation = Some((*key, state.clone()));
                 }
             }
-            MeshChange::Clear(entity) => {
-                if let Some(object) = self.objects.get_mut(entity) {
-                    object.preparation = None;
+            MeshChange::Clear(entity, key) => {
+                if let Some(object) = self.objects.get_mut(entity)
+                    && object.geometry() == Geometry::Prim(key.shape)
+                {
+                    if object.preparation.as_ref().is_some_and(|(current, _)| current.shape == key.shape) {
+                        object.preparation = None;
+                    }
                     object.mesh = None;
                 }
             }
@@ -168,19 +179,29 @@ impl Mirror {
     }
 
     pub(in crate::scene) fn apply(&mut self, change: Change) {
+        self.apply_at(change, Instant::now());
+    }
+
+    pub(in crate::scene) fn apply_at(&mut self, change: Change, now: Instant) {
         match change {
             Change::ViewerEnvironment(environment) => self.viewer_environment = environment,
             Change::Object(mut object) => {
                 if let Some(old) = self.objects.get(&object.detail().summary.entity) {
-                    object.inherit_animation_timing(old, std::time::Instant::now());
+                    object.inherit_animation_timing(old, now);
+                    object.update_motion_from(old, now);
+                    if old.geometry() == object.geometry() {
+                        object.mesh = old.mesh.clone();
+                    }
                     if old.geometry() == object.geometry() && object.preparation.is_none() {
                         object.preparation = old.preparation.clone();
-                        object.mesh = old.mesh.clone();
-                        object.asset_mesh = old.asset_mesh.clone();
                         if object.same_appearance(old) {
                             object.materials = old.materials.clone();
                         }
                     }
+                } else {
+                    object.motion = super::motion::MotionState::new(
+                        object.detail().motion_source.and_then(world::UpdateSource::motion_received_at).unwrap_or(now),
+                    );
                 }
                 self.objects.insert(object.detail().summary.entity, object);
             }
@@ -190,7 +211,16 @@ impl Mirror {
                     && object.same_appearance(&change.source)
                 {
                     object.materials = change.materials;
-                    object.asset_mesh = change.mesh;
+                    match &change.mesh {
+                        MeshPublication::Keep => {}
+                        MeshPublication::Clear => object.mesh = None,
+                        MeshPublication::Set(key, mesh) => {
+                            if matches!((object.geometry(), key), (Geometry::Mesh(asset), DrawnMeshKey::Asset { asset: mesh_asset, .. }) if asset == *mesh_asset)
+                            {
+                                object.mesh = Some((*key, mesh.clone()));
+                            }
+                        }
+                    }
                 }
             }
             Change::Remove(entity) => {

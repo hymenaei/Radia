@@ -2,6 +2,7 @@ use std::{
     fmt,
     net::SocketAddr,
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 
 use llsd::Value;
@@ -37,6 +38,13 @@ impl SimulatorId {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CircuitMotionStatus {
+    pub last_packet_received_at: Instant,
+    pub measured_ping_delay: Option<Duration>,
+    pub connected: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PacketOrder {
     Ordered(u64),
     Ambiguous,
@@ -56,16 +64,33 @@ pub(crate) enum EventSendOutcome {
 }
 
 pub(crate) struct EventRetention {
-    _charge: EventRetentionCharge,
+    _charge: Option<EventRetentionCharge>,
+    _application_credit: Option<OwnedSemaphorePermit>,
 }
 
 impl EventRetention {
     pub(crate) fn from_permits(permits: Vec<OwnedSemaphorePermit>) -> Self {
-        Self { _charge: EventRetentionCharge::Permits { _permits: permits } }
+        Self { _charge: Some(EventRetentionCharge::Permits { _permits: permits }), _application_credit: None }
     }
 
     pub(crate) fn from_packet_reservation(reservation: PacketMemoryReservation) -> Self {
-        Self { _charge: EventRetentionCharge::Packet { _reservation: reservation } }
+        Self { _charge: Some(EventRetentionCharge::Packet { _reservation: reservation }), _application_credit: None }
+    }
+
+    fn with_application_credit(permit: OwnedSemaphorePermit) -> Self {
+        Self { _charge: None, _application_credit: Some(permit) }
+    }
+
+    fn attach_application_credit(&mut self, permit: OwnedSemaphorePermit) {
+        self._application_credit = Some(permit);
+    }
+
+    fn release_application_credit(&mut self) {
+        self._application_credit = None;
+    }
+
+    fn has_application_credit(&self) -> bool {
+        self._application_credit.is_some()
     }
 }
 
@@ -109,6 +134,24 @@ impl EventEnvelope {
         self.coverage_watermark
     }
 
+    pub(crate) fn has_application_credit(&self) -> bool {
+        self.retained_bytes.as_ref().is_some_and(EventRetention::has_application_credit)
+    }
+
+    pub(crate) fn attach_application_credit(&mut self, permit: OwnedSemaphorePermit) {
+        if let Some(retention) = &mut self.retained_bytes {
+            retention.attach_application_credit(permit);
+        } else {
+            self.retained_bytes = Some(EventRetention::with_application_credit(permit));
+        }
+    }
+
+    pub(crate) fn release_application_credit(&mut self) {
+        if let Some(retention) = &mut self.retained_bytes {
+            retention.release_application_credit();
+        }
+    }
+
     pub(crate) fn into_parts(self) -> (Event, Option<EventRetention>, Option<CoverageWatermark>) {
         let Self { event, retained_bytes, coverage_watermark } = self;
         (event, retained_bytes, coverage_watermark)
@@ -128,23 +171,97 @@ impl From<Event> for EventEnvelope {
 }
 
 pub enum Event {
-    MfaRequired { challenge: MfaChallenge },
-    LoginAccepted { mfa_hash: Option<String> },
-    SessionReady { simulator_id: SimulatorId, session: Box<AgentSession>, capabilities: Client, login_data: ResponseData },
-    CapabilityEvent { simulator_id: SimulatorId, source: SocketAddr, message: String, body: Value },
-    CapabilityEventBatch { simulator_id: SimulatorId, source: SocketAddr, order: EventQueueBatchOrder, events: Vec<CapabilityEvent> },
-    CapabilityError { simulator_id: SimulatorId, source: SocketAddr, capability: String, reason: String },
-    EventQueueCoverageLost { simulator_id: SimulatorId, source: SocketAddr, reason: String },
-    CoverageLost { loss: crate::coverage::CoverageLoss },
-    SimulatorConnected { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr },
-    SimulatorDisconnected { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr },
-    SimulatorFailed { simulator_id: SimulatorId, region_handle: Option<u64>, endpoint: SocketAddr, reason: String },
-    SimulatorConnectFailed { simulator_id: SimulatorId, region_handle: u64, endpoint: SocketAddr },
-    SimulatorCapabilities { simulator_id: SimulatorId, source: SocketAddr, capabilities: Client },
-    SimulatorPromoted { previous_simulator_id: SimulatorId, simulator_id: SimulatorId, session: Box<AgentSession>, capabilities: Client },
-    SimulatorMessage { simulator_id: SimulatorId, source: SocketAddr, sequence: u32, packet_order: PacketOrder, message: Message },
+    MfaRequired {
+        challenge: MfaChallenge,
+    },
+    LoginAccepted {
+        mfa_hash: Option<String>,
+    },
+    SessionReady {
+        simulator_id: SimulatorId,
+        session: Box<AgentSession>,
+        capabilities: Client,
+        login_data: ResponseData,
+    },
+    CapabilityEvent {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        message: String,
+        body: Value,
+    },
+    CapabilityEventBatch {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        order: EventQueueBatchOrder,
+        events: Vec<CapabilityEvent>,
+    },
+    CapabilityError {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        capability: String,
+        reason: String,
+    },
+    EventQueueCoverageLost {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        reason: String,
+    },
+    CoverageLost {
+        loss: crate::coverage::CoverageLoss,
+    },
+    SimulatorConnected {
+        simulator_id: SimulatorId,
+        region_handle: Option<u64>,
+        endpoint: SocketAddr,
+    },
+    SimulatorMotionStatus {
+        simulator_id: SimulatorId,
+        motion_status: watch::Receiver<CircuitMotionStatus>,
+    },
+    SimulatorDisconnected {
+        simulator_id: SimulatorId,
+        region_handle: Option<u64>,
+        endpoint: SocketAddr,
+    },
+    SimulatorFailed {
+        simulator_id: SimulatorId,
+        region_handle: Option<u64>,
+        endpoint: SocketAddr,
+        reason: String,
+    },
+    SimulatorConnectFailed {
+        simulator_id: SimulatorId,
+        region_handle: u64,
+        endpoint: SocketAddr,
+    },
+    SimulatorCapabilities {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        capabilities: Client,
+    },
+    SimulatorPromoted {
+        previous_simulator_id: SimulatorId,
+        simulator_id: SimulatorId,
+        session: Box<AgentSession>,
+        capabilities: Client,
+    },
+    SimulatorMessage {
+        simulator_id: SimulatorId,
+        source: SocketAddr,
+        sequence: u32,
+        packet_order: PacketOrder,
+        received_at: Instant,
+        ping_delay: Option<Duration>,
+        message: Message,
+    },
     SendFailed(String),
     Failed(String),
+}
+
+impl Event {
+    pub(crate) fn is_application(&self) -> bool {
+        matches!(self, Self::CapabilityEvent { .. } | Self::CapabilityEventBatch { .. } | Self::SimulatorMessage { .. })
+    }
 }
 
 impl fmt::Debug for Event {
@@ -193,6 +310,11 @@ impl fmt::Debug for Event {
                 .field("simulator_id", &"[SESSION LOCAL]")
                 .field("region_handle", &"[REDACTED]")
                 .field("endpoint", &"[REDACTED]")
+                .finish(),
+            Self::SimulatorMotionStatus { .. } => formatter
+                .debug_struct("SimulatorMotionStatus")
+                .field("simulator_id", &"[SESSION LOCAL]")
+                .field("motion_status", &"[OMITTED]")
                 .finish(),
             Self::SimulatorDisconnected { .. } => formatter
                 .debug_struct("SimulatorDisconnected")

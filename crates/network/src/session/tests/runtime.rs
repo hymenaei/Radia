@@ -22,11 +22,11 @@ use uuid::Uuid;
 use crate::fixtures::test_simulator_id;
 
 use super::{
-    EVENT_BACKLOG_DISCONNECT_REASON, FinishOrder, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffAnnouncement, HandoffDecision, HandoffOrder,
-    HandoffTarget, NEIGHBOR_COMMAND_CAPACITY, PromotionSetup, RunState, SimulatorCommand, SimulatorConnectionState, SimulatorMemoryBudget,
+    FinishOrder, HANDOFF_COMMAND_RETRY_INTERVAL, HandoffAnnouncement, HandoffDecision, HandoffOrder, HandoffTarget,
+    NEIGHBOR_COMMAND_CAPACITY, PromotionSetup, RunState, SimulatorCommand, SimulatorConnectionState, SimulatorMemoryBudget,
     SimulatorTaskOutcome, arbitrate_handoff, connect_runtime, decode_crossed_region, decode_event_teleport_finish, decode_teleport_finish,
-    handoff_cancellation, neighbor_completion_event, neighbor_event_queue_failure, neighbor_event_queue_task_failure,
-    remove_failed_neighbor, retry_pending_handoff_commands, same_handoff_destination, teleport_failure_matches,
+    handoff_cancellation, neighbor_event_queue_failure, neighbor_event_queue_task_failure, remove_failed_neighbor,
+    retry_pending_handoff_commands, same_handoff_destination, teleport_failure_matches,
 };
 use crate::session::handoff::{HandoffEvidence, HandoffState, PendingPromotion, matches_handoff_cancellation, matches_pending_promotion};
 use crate::{
@@ -441,33 +441,6 @@ fn teleport_cancel_and_crossing_seed_are_redacted() {
     let fields = crate::session::teleport::event_fields(&finish).expect("teleport finish event");
     let info = crate::session::teleport::event_block(fields, "Info").expect("teleport finish info");
     assert_eq!(info.get("SeedCapability"), Some(&Value::String("[redacted]".into())));
-}
-
-#[test]
-fn neighbor_overload_reports_failure() {
-    let simulator_id = SimulatorId::allocate().expect("allocate simulator ID");
-    let region_handle = 0x1000_0000_0000_1000;
-    let endpoint = "127.0.0.1:9000".parse().expect("parse endpoint");
-
-    std::assert_matches!(
-        neighbor_completion_event(
-            simulator_id,
-            Some(region_handle),
-            endpoint,
-            &SimulatorTaskOutcome::Finished(Err(crate::circuit::ConnectionError::ShutdownReason(
-                EVENT_BACKLOG_DISCONNECT_REASON,
-            ))),
-        ),
-        Event::SimulatorFailed {
-            simulator_id: failed_id,
-            region_handle: Some(failed_region),
-            endpoint: failed_endpoint,
-            reason,
-        } if failed_id == simulator_id
-            && failed_region == region_handle
-            && failed_endpoint == endpoint
-            && reason == EVENT_BACKLOG_DISCONNECT_REASON
-    );
 }
 
 #[tokio::test]

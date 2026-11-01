@@ -4,6 +4,7 @@ use std::{
     fmt::{self, Display, Formatter},
     mem::size_of,
     num::NonZeroU32,
+    time::{Duration, Instant},
 };
 
 use math::Vec3;
@@ -30,6 +31,13 @@ pub enum UpdateAuthority {
     Untracked,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MotionUpdateKind {
+    #[default]
+    Full,
+    Terse,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UpdateSource {
     pub(super) region: Region,
@@ -37,11 +45,25 @@ pub struct UpdateSource {
     pub(super) order: OrderEvidence,
     pub(super) block_ordinal: u32,
     pub(super) authority: UpdateAuthority,
+    motion_update_kind: MotionUpdateKind,
+    explicit_angular_velocity: bool,
+    motion_received_at: Option<Instant>,
+    motion_ping_delay: Option<Duration>,
 }
 
 impl UpdateSource {
     pub const fn new(region: Region, sequence: u32, order: OrderEvidence, block_ordinal: u32) -> Self {
-        Self { region, sequence, order, block_ordinal, authority: UpdateAuthority::Tracked }
+        Self {
+            region,
+            sequence,
+            order,
+            block_ordinal,
+            authority: UpdateAuthority::Tracked,
+            motion_update_kind: MotionUpdateKind::Full,
+            explicit_angular_velocity: false,
+            motion_received_at: None,
+            motion_ping_delay: None,
+        }
     }
 
     pub const fn with_authority(mut self, authority: UpdateAuthority) -> Self {
@@ -49,8 +71,40 @@ impl UpdateSource {
         self
     }
 
+    pub const fn with_motion_update_kind(mut self, kind: MotionUpdateKind) -> Self {
+        self.motion_update_kind = kind;
+        self
+    }
+
+    pub(crate) const fn with_explicit_angular_velocity(mut self, explicit: bool) -> Self {
+        self.explicit_angular_velocity = explicit;
+        self
+    }
+
+    pub const fn with_motion_timing(mut self, received_at: Instant, ping_delay: Option<Duration>) -> Self {
+        self.motion_received_at = Some(received_at);
+        self.motion_ping_delay = ping_delay;
+        self
+    }
+
     pub const fn authority(self) -> UpdateAuthority {
         self.authority
+    }
+
+    pub const fn motion_update_kind(self) -> MotionUpdateKind {
+        self.motion_update_kind
+    }
+
+    pub const fn has_explicit_angular_velocity(self) -> bool {
+        self.explicit_angular_velocity
+    }
+
+    pub const fn motion_received_at(self) -> Option<Instant> {
+        self.motion_received_at
+    }
+
+    pub const fn motion_ping_delay(self) -> Option<Duration> {
+        self.motion_ping_delay
     }
 
     pub const fn region(self) -> Region {
@@ -94,6 +148,8 @@ pub enum FieldGroup {
     Pose,
     LinearMotion,
     AngularVelocity,
+    Physical,
+    TimeDilation,
     Scale,
     Parent,
     AttachmentPoint,
@@ -185,6 +241,8 @@ pub struct ObjectObservation {
     pub pose: Option<Pose>,
     pub linear_motion: Option<LinearMotion>,
     pub angular_velocity: Option<Vec3>,
+    pub is_physical: Option<bool>,
+    pub time_dilation: Option<f32>,
     pub scale: Option<Vec3>,
     pub attachment_point: FieldUpdate<AttachmentPoint>,
     pub shape: FieldUpdate<Shape>,
@@ -205,6 +263,8 @@ impl ObjectObservation {
             pose: None,
             linear_motion: None,
             angular_velocity: None,
+            is_physical: None,
+            time_dilation: None,
             scale: None,
             attachment_point: FieldUpdate::Keep,
             shape: FieldUpdate::Keep,
@@ -223,6 +283,8 @@ pub struct ObjectPatch {
     pub pose: Option<Pose>,
     pub linear_motion: LinearMotion,
     pub angular_velocity: Option<Vec3>,
+    pub is_physical: Option<bool>,
+    pub time_dilation: Option<f32>,
     pub scale: Option<Vec3>,
     pub parent: Option<ParentUpdate>,
     pub attachment_point: FieldUpdate<AttachmentPoint>,
@@ -244,6 +306,8 @@ impl ObjectPatch {
             pose: None,
             linear_motion: LinearMotion { velocity: None, acceleration: None },
             angular_velocity: None,
+            is_physical: None,
+            time_dilation: None,
             scale: None,
             parent: None,
             attachment_point: FieldUpdate::Keep,

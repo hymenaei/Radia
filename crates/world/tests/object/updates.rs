@@ -1,8 +1,8 @@
 use super::support::{
     Ambiguous, AmbiguousOrder, AngularVelocity, Avatar, Deferred, Degraded, FieldGroup, FieldRejection, FieldRejectionReason, IgnoredStale,
-    Introduced, InvalidRotation, KindMismatch, LinearMotion, Object, ObjectObservation, ObjectPatch, Pose, Quat, Region, Removed, Root,
-    Scale, Unchanged, Unknown, UnknownObject, UntrustedSource, UpdateSource, Updated, Vec3, address, local_id, object, ordered, source,
-    untracked, uuid, with_region,
+    Introduced, InvalidRotation, KindMismatch, LinearMotion, MotionUpdateKind, Object, ObjectObservation, ObjectPatch, Pose, Quat, Region,
+    Removed, Root, Scale, Unchanged, Unknown, UnknownObject, UntrustedSource, UpdateSource, Updated, Vec3, address, local_id, object,
+    ordered, source, untracked, uuid, with_region,
 };
 
 #[test]
@@ -23,6 +23,7 @@ fn all_invalid_patch_is_a_noop() {
         pose: Some(Pose { position: Some(Vec3::splat(f32::NAN)), rotation: None }),
         linear_motion: LinearMotion { velocity: Some(Vec3::splat(f32::INFINITY)), acceleration: None },
         angular_velocity: Some(Vec3::splat(f32::NAN)),
+        time_dilation: Some(f32::NAN),
         scale: Some(Vec3::splat(f32::NAN)),
         ..ObjectPatch::new(source(region, 2), local_id(1))
     };
@@ -37,10 +38,11 @@ fn all_invalid_patch_is_a_noop() {
             FieldRejection { group: FieldGroup::Pose, reason: FieldRejectionReason::InvalidValue { field: "position" } },
             FieldRejection { group: FieldGroup::LinearMotion, reason: FieldRejectionReason::InvalidValue { field: "velocity" } },
             FieldRejection { group: AngularVelocity, reason: FieldRejectionReason::InvalidValue { field: "angular_velocity" } },
+            FieldRejection { group: FieldGroup::TimeDilation, reason: FieldRejectionReason::InvalidValue { field: "time_dilation" } },
             FieldRejection { group: Scale, reason: FieldRejectionReason::InvalidValue { field: "scale" } },
         ]
     );
-    assert_eq!(applied.rejections.len(), 4);
+    assert_eq!(applied.rejections.len(), 5);
     assert!(!applied.rejections.is_empty());
     let current = world.object(entity).unwrap();
     assert_eq!(current.id(), id);
@@ -48,6 +50,7 @@ fn all_invalid_patch_is_a_noop() {
     assert_eq!(current.rotation(), Some(Quat::IDENTITY));
     assert_eq!(current.linear_motion(), LinearMotion { velocity: Some(Vec3::X), acceleration: Some(Vec3::Y) });
     assert_eq!(current.angular_velocity(), Some(Vec3::Z));
+    assert_eq!(current.time_dilation(), 1.0);
     assert_eq!(current.scale(), Some(Vec3::ONE));
 }
 
@@ -133,6 +136,97 @@ fn partial_patch_merge_and_ordering() {
 }
 
 #[test]
+fn motion_metadata_is_stored_and_authoritative_updates_advance_the_sample() {
+    let region = Region::new(72);
+    let mut world = with_region(region);
+    let first_source = source(region, 1);
+    let mut initial = object(first_source, 720, 1, Object, Root);
+    initial.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+    initial.linear_motion = Some(LinearMotion { velocity: Some(Vec3::X), acceleration: Some(Vec3::ZERO) });
+    initial.angular_velocity = Some(Vec3::Z);
+    initial.is_physical = Some(true);
+    initial.time_dilation = Some(0.5);
+    let introduced = world.observe_object(initial).unwrap();
+    let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
+    let current = world.object(entity).unwrap();
+    assert!(current.is_physical());
+    assert_eq!(current.time_dilation(), 0.5);
+    let motion_source = current.motion_source().unwrap();
+    assert_eq!((motion_source.region(), motion_source.sequence()), (first_source.region(), first_source.sequence()));
+    assert!(motion_source.has_explicit_angular_velocity());
+
+    let next_source = source(region, 2);
+    let mut update = ObjectPatch::new(next_source, local_id(1));
+    update.linear_motion = LinearMotion { velocity: Some(Vec3::X), acceleration: Some(Vec3::ZERO) };
+    update.angular_velocity = Some(Vec3::Z);
+    update.is_physical = Some(true);
+    update.time_dilation = Some(0.5);
+    let applied = world.patch_object(update).unwrap();
+
+    assert_eq!(applied.outcome, Updated(entity));
+    let motion_source = world.object(entity).unwrap().motion_source().unwrap();
+    assert_eq!((motion_source.region(), motion_source.sequence()), (next_source.region(), next_source.sequence()));
+    assert!(motion_source.has_explicit_angular_velocity());
+}
+
+#[test]
+fn motion_bounds_depend_on_update_kind() {
+    let region = Region::new(73);
+    let mut world = with_region(region);
+    let mut initial = object(source(region, 1), 730, 1, Object, Root);
+    initial.pose = Some(Pose { position: Some(Vec3::ZERO), rotation: Some(Quat::IDENTITY) });
+    initial.linear_motion = Some(LinearMotion { velocity: Some(Vec3::ZERO), acceleration: Some(Vec3::ZERO) });
+    initial.angular_velocity = Some(Vec3::ZERO);
+    let introduced = world.observe_object(initial).unwrap();
+    let Introduced(entity) = introduced.outcome else { panic!("expected object introduction") };
+
+    let full_limit = ObjectPatch {
+        linear_motion: LinearMotion { velocity: Some(Vec3::splat(4096.0)), acceleration: Some(Vec3::splat(-4096.0)) },
+        angular_velocity: Some(Vec3::splat(4096.0)),
+        ..ObjectPatch::new(source(region, 2), local_id(1))
+    };
+    assert_eq!(world.patch_object(full_limit).unwrap().outcome, Updated(entity));
+
+    let full_out_of_range = ObjectPatch {
+        linear_motion: LinearMotion { velocity: Some(Vec3::splat(f32::MAX)), acceleration: Some(Vec3::splat(-f32::MAX)) },
+        angular_velocity: Some(Vec3::splat(f32::MAX)),
+        ..ObjectPatch::new(source(region, 3), local_id(1))
+    };
+    let rejected = world.patch_object(full_out_of_range).unwrap();
+    assert_eq!(
+        rejected.rejections.iter().copied().collect::<Vec<_>>(),
+        [
+            FieldRejection { group: FieldGroup::LinearMotion, reason: FieldRejectionReason::InvalidValue { field: "velocity" } },
+            FieldRejection { group: AngularVelocity, reason: FieldRejectionReason::InvalidValue { field: "angular_velocity" } },
+        ]
+    );
+    assert_eq!(
+        world.object(entity).unwrap().linear_motion(),
+        LinearMotion { velocity: Some(Vec3::splat(4096.0)), acceleration: Some(Vec3::splat(-4096.0)) }
+    );
+    assert_eq!(world.object(entity).unwrap().angular_velocity(), Some(Vec3::splat(4096.0)));
+
+    let terse_out_of_range = ObjectPatch {
+        linear_motion: LinearMotion { velocity: Some(Vec3::splat(128.1)), acceleration: Some(Vec3::splat(-64.1)) },
+        angular_velocity: Some(Vec3::splat(64.1)),
+        ..ObjectPatch::new(source(region, 4).with_motion_update_kind(MotionUpdateKind::Terse), local_id(1))
+    };
+    let rejected = world.patch_object(terse_out_of_range).unwrap();
+    assert_eq!(
+        rejected.rejections.iter().copied().collect::<Vec<_>>(),
+        [
+            FieldRejection { group: FieldGroup::LinearMotion, reason: FieldRejectionReason::InvalidValue { field: "velocity" } },
+            FieldRejection { group: AngularVelocity, reason: FieldRejectionReason::InvalidValue { field: "angular_velocity" } },
+        ]
+    );
+    assert_eq!(
+        world.object(entity).unwrap().linear_motion(),
+        LinearMotion { velocity: Some(Vec3::splat(4096.0)), acceleration: Some(Vec3::splat(-4096.0)) }
+    );
+    assert_eq!(world.object(entity).unwrap().angular_velocity(), Some(Vec3::splat(4096.0)));
+}
+
+#[test]
 fn invalid_rotation_does_not_advance_pose() {
     let region = Region::new(27);
     let mut world = with_region(region);
@@ -176,9 +270,9 @@ fn quaternion_sign_and_freshness() {
     let sign_only =
         ObjectPatch { pose: Some(Pose { position: None, rotation: Some(negative) }), ..ObjectPatch::new(source(region, 2), local_id(1)) };
     let applied = world.patch_object(sign_only).unwrap();
-    assert_eq!(applied.outcome, Unchanged);
-    assert_eq!(applied.revision, None);
-    assert_eq!(world.revision(), revision);
+    assert_eq!(applied.outcome, Updated(entity));
+    assert_eq!(applied.revision.unwrap().get(), revision.get() + 1);
+    assert_eq!(world.revision().get(), revision.get() + 1);
     assert_eq!(world.object(entity).unwrap().rotation(), Some(rotation));
 
     let between_updates = ObjectPatch {
@@ -194,7 +288,7 @@ fn quaternion_sign_and_freshness() {
     };
     let applied = world.patch_object(with_position).unwrap();
     assert_eq!(applied.outcome, Updated(entity));
-    assert_eq!(applied.revision.unwrap().get(), revision.get() + 1);
+    assert_eq!(applied.revision.unwrap().get(), revision.get() + 2);
     assert_eq!(world.object(entity).unwrap().rotation(), Some(rotation));
 
     let near_rotation = Quat::from_rotation_y(0.25001);
@@ -265,9 +359,9 @@ fn rounded_quaternion_sign_preserves_pose() {
     };
     let applied = world.patch_object(sign_only).unwrap();
 
-    assert_eq!(applied.outcome, Unchanged);
-    assert_eq!(applied.revision, None);
-    assert_eq!(world.revision(), revision);
+    assert_eq!(applied.outcome, Updated(entity));
+    assert_eq!(applied.revision.unwrap().get(), revision.get() + 1);
+    assert_eq!(world.revision().get(), revision.get() + 1);
     assert_eq!(world.object(entity).unwrap().rotation(), Some(rotation));
 
     let older = ObjectPatch {
@@ -472,9 +566,9 @@ fn stale_observation_fills_only_unset_groups() {
     same_values_observation.scale = Some(Vec3::splat(2.0));
     let revision_before_same_values = world.revision();
     let same_values = world.observe_object(same_values_observation).unwrap();
-    assert_eq!(same_values.outcome, Unchanged);
-    assert_eq!(same_values.revision, None);
-    assert_eq!(world.revision(), revision_before_same_values);
+    assert_eq!(same_values.outcome, Updated(entity));
+    assert_eq!(same_values.revision.unwrap().get(), revision_before_same_values.get() + 1);
+    assert_eq!(world.revision().get(), revision_before_same_values.get() + 1);
     assert_eq!(world.remove_object(source(region, 125), local_id(10)).unwrap().outcome, Unchanged);
     assert_eq!(world.entity(uuid(70)), Some(entity));
 }

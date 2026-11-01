@@ -1,8 +1,10 @@
+mod agent_motion;
 mod coordinator;
 mod environment;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod experience_environment;
 mod inbound;
+mod object_cache;
 mod object_media;
 mod outbound;
 mod recovery;
@@ -10,9 +12,10 @@ mod region_lookup;
 mod terrain;
 mod world;
 
+pub(crate) use agent_motion::{AgentMotionPublisher, AgentMotionSample};
 pub(crate) use coordinator::{
-    AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionReadyUpdate,
-    ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
+    AuthenticationUpdate, CredentialPersistence, FavoritesUpdate, PresentationMailbox, PresentationSnapshot, SessionEnd,
+    SessionReadyUpdate, ViewerUpdate, WriteLock, drain_session, save_favorite_store, write_lock,
 };
 #[cfg(test)]
 pub(crate) use coordinator::{apply_inventory_udp, resolve_pending_inventory_moves};

@@ -22,7 +22,7 @@ use std::{
     net::SocketAddr,
     sync::Arc,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use llsd::{Map, Value};
@@ -56,6 +56,7 @@ use crate::fixtures::{
     circuit::{SendGate, SimulatorMemoryBudgetTestExt, new_send_gate, set_send_gate},
     event_with_coverage_watermark, event_with_retained_bytes, event_with_retention,
     session::{receive_client_message, receive_udp, server_ack, set_sequence, test_fixture},
+    simulator::clone_udp_socket,
     test_simulator_id,
 };
 use crate::session::simulators::publish_primary_terminal_event;
@@ -63,11 +64,12 @@ use crate::{
     AgentSession, Error, Grid, StartLocation,
     capabilities::{CapabilityBudget, Client, EventQueueExit},
     circuit::{
-        EVENT_BACKLOG_DISCONNECT_REASON, HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS,
-        MAX_PENDING_SIMULATOR_EVENTS, MAX_PRECONNECT_EVENTS, MAX_QUEUED_SIMULATOR_EVENTS, NeighborEventQueueOutcome, SimulatorEvent,
-        UdpTransport,
+        HandoffTarget, LOGOUT_TIMEOUT, MAX_NEIGHBOR_CONNECTION_TASKS, MAX_NEIGHBOR_SIMULATORS, MAX_PRECONNECT_EVENTS,
+        NeighborEventQueueOutcome, SimulatorCommand, SimulatorEvent, UdpTransport,
         admission::{MAX_NEIGHBOR_CONNECTION_EVENT_BYTES, MAX_QUEUED_NEIGHBOR_EVENT_BYTES, MAX_QUEUED_SIMULATOR_EVENT_BYTES},
-        lludp::{Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, RESENT_FLAG, ReceiveError},
+        lludp::{
+            Circuit, CircuitError, Delivery, KEEPALIVE_TIMEOUT, MAX_PENDING_PACKETS, MAX_RETRIES, PING_INTERVAL, RESENT_FLAG, ReceiveError,
+        },
         pacing::{OutboundBudget, OutboundBudgetHandle},
         queue_neighbor_event,
     },
@@ -79,7 +81,7 @@ use crate::{
     session::{COMMAND_CAPACITY, Command, DEFAULT_UPSTREAM_BYTES_PER_SECOND, NETWORK_THREAD_STACK_SIZE},
 };
 
-use super::logout::{LogoutAttemptError, LogoutOutcome, LogoutUnavailable, PendingLogout, send_logout_with_deadline};
+use super::logout::{LogoutAttemptError, LogoutOutcome, PendingLogout, send_logout_with_deadline};
 use super::*;
 use super::{
     HandoffState, NEIGHBOR_COMMAND_CAPACITY, PreconnectEvents, PreconnectOutcome, SimulatorCapabilitySession, SimulatorConnection,
@@ -98,6 +100,35 @@ const WAIT: Duration = Duration::from_secs(2);
 const SESSION_EVENT_CAPACITY: usize = 2;
 const TEST_EVENT_CAPACITY: usize = CLIENT_EVENT_CAPACITY + PRIMARY_TERMINAL_EVENT_CAPACITY;
 
+pub(super) fn relay_handshake_events(
+    events: mpsc::Sender<EventEnvelope>,
+    commands: mpsc::Sender<Command>,
+    capacity: usize,
+) -> (mpsc::Sender<EventEnvelope>, JoinHandle<()>, watch::Receiver<Option<u32>>) {
+    let commands = commands.downgrade();
+    let (runtime_events, mut incoming) = mpsc::channel::<EventEnvelope>(capacity);
+    let (observed, observation) = watch::channel(None);
+    let relay = spawn(async move {
+        while let Some(event) = incoming.recv().await {
+            if let Event::SimulatorMessage { sequence, .. } = &event.event {
+                observed.send_replace(Some(*sequence));
+            }
+            if let Event::SimulatorMessage { simulator_id, message: Message::RegionHandshake(_), .. } = &event.event {
+                let (completed, response) = oneshot::channel();
+                if let Some(commands) = commands.upgrade()
+                    && commands.send(Command::ReplyRegionHandshake { simulator_id: *simulator_id, flags: 0, completed }).await.is_ok()
+                {
+                    drop(response);
+                }
+            }
+            if events.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
+    (runtime_events, relay, observation)
+}
+
 struct NeighborHarness {
     primary: UdpSocket,
     neighbor: UdpSocket,
@@ -110,6 +141,7 @@ struct NeighborHarness {
     events: mpsc::Receiver<EventEnvelope>,
     disconnect: watch::Sender<bool>,
     packet_memory: SimulatorMemoryBudget,
+    coverage: CoverageLossLedger,
     client: JoinHandle<Result<(), crate::session::SessionError>>,
     pause_sends: watch::Sender<bool>,
     send_entered: Arc<Notify>,
@@ -119,26 +151,40 @@ impl NeighborHarness {
     async fn shutdown(self) {
         self.disconnect.send_replace(true);
         receive_message(&self.primary, |message| matches!(message, Message::LogoutRequest(_))).await;
-        assert!(timeout(Duration::from_millis(200), self.client).await.expect("disconnect should finish").expect("client task").is_ok());
+        assert!(timeout(WAIT, self.client).await.expect("disconnect should finish").expect("client task").is_ok());
     }
 }
 
 pub(crate) async fn run_session(
     session: AgentSession,
+    command_sender: mpsc::Sender<Command>,
     commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<EventEnvelope>,
     disconnect_requested: watch::Receiver<bool>,
 ) -> Result<(), crate::session::SessionError> {
+    run_session_with_options(session, command_sender, commands, events, disconnect_requested, test_options()).await
+}
+
+pub(crate) async fn run_session_with_options(
+    session: AgentSession,
+    command_sender: mpsc::Sender<Command>,
+    commands: mpsc::Receiver<Command>,
+    events: mpsc::Sender<EventEnvelope>,
+    disconnect_requested: watch::Receiver<bool>,
+    options: SessionRuntimeOptions,
+) -> Result<(), crate::session::SessionError> {
     let failure_events = events.clone();
     let mut failure_shutdown = disconnect_requested.clone();
-    let terminal_event_permit = events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
+    let (session_events, relay, _) = relay_handshake_events(events, command_sender, SESSION_EVENT_CAPACITY);
+    let terminal_event_permit = session_events.clone().try_reserve_owned().expect("test event channel reserves terminal event slot");
     let result = async {
-        let connection = SessionRuntime::connect(session, ResponseData::default(), test_options())
+        let connection = SessionRuntime::connect(session, ResponseData::default(), options)
             .await?
             .ok_or(crate::session::SessionError::PrimaryConnectionStoppedDuringStartup)?;
-        connection.run(commands, events, disconnect_requested, terminal_event_permit).await
+        connection.run(commands, session_events, disconnect_requested, terminal_event_permit).await
     }
     .await;
+    drop(relay);
     if let Err(error) = &result {
         send_failure_event(&failure_events, error.to_string(), &mut failure_shutdown).await;
     }
@@ -151,6 +197,7 @@ pub(super) fn test_options() -> SessionRuntimeOptions {
         session: SessionOptions::default(),
         startup_disconnect: None,
         root_transport: None,
+        application_event_capacity: crate::circuit::admission::SESSION_APPLICATION_EVENT_CREDIT_CAPACITY,
     }
 }
 
@@ -296,6 +343,8 @@ fn retained_packet_event(budget: &SimulatorMemoryBudget, simulator_id: Simulator
             source,
             sequence,
             packet_order: Ordered(u64::from(sequence)),
+            received_at: std::time::Instant::now(),
+            ping_delay: None,
             message: packet.into_message(),
         },
         reservation.into_retention(),
@@ -378,8 +427,11 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
     .await
     .expect("connect primary simulator");
     let packet_memory = connection.packet_memory.clone();
-    let terminal = event_sender.clone().reserve_owned().await.expect("reserve terminal event");
-    let client = spawn(connection.run(command_receiver, event_sender, disconnect_requested, terminal));
+    let coverage = connection.coverage_losses.clone();
+    let (session_events, relay, _) = relay_handshake_events(event_sender.clone(), commands.clone(), TEST_EVENT_CAPACITY);
+    let terminal = session_events.clone().reserve_owned().await.expect("reserve terminal event");
+    let client = spawn(connection.run(command_receiver, session_events, disconnect_requested, terminal));
+    drop(relay);
 
     let (_, primary_peer) = receive(&primary).await;
     primary.send_to(&ack(20, 1), primary_peer).await.expect("ack primary circuit");
@@ -444,6 +496,7 @@ async fn connected_neighbor_with_options(seed: Url) -> NeighborHarness {
         events,
         disconnect,
         packet_memory,
+        coverage,
         client,
         pause_sends,
         send_entered,

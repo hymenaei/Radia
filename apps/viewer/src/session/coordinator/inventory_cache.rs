@@ -30,6 +30,7 @@ pub(super) struct InventoryCacheSession {
     pending_overflow: bool,
     disabled: bool,
     restore: Option<PendingRestore>,
+    restore_invalidated: bool,
 }
 
 struct PendingRestore {
@@ -70,32 +71,49 @@ impl InventoryCacheSession {
             pending_overflow: false,
             disabled: false,
             restore: None,
+            restore_invalidated: false,
         }
     }
 
     pub(super) fn start(&mut self, runtime: &Handle, grid: Grid, agent_id: Uuid, library_owner: Option<Uuid>, inventory: &Inventory) {
+        let grid_identity = grid.id();
+        self.start_with_open(runtime, inventory, move || InventoryCache::open(grid_identity, agent_id, library_owner));
+    }
+
+    fn start_with_open(
+        &mut self,
+        runtime: &Handle,
+        inventory: &Inventory,
+        open: impl FnOnce() -> Result<(InventoryCache, InventoryCacheOpenStatus), ::inventory::InventoryCacheError> + Send + 'static,
+    ) {
         if self.open_started || self.disabled {
             return;
         }
         self.open_started = true;
-        let grid_identity = grid.id();
+        let invalidate_cache = self.restore_invalidated;
         let inventory = inventory.clone();
         let skeleton = inventory.snapshot();
         let sender = self.event_sender.clone();
         drop(runtime.spawn(async move {
-            let opened = tokio::task::spawn_blocking(move || InventoryCache::open(grid_identity, agent_id, library_owner)).await;
+            let opened = tokio::task::spawn_blocking(open).await;
             let event = match opened {
-                Ok(Ok((cache, status))) => match cache.load(&inventory).await {
-                    Ok(load) => {
-                        let prepared = tokio::task::spawn_blocking(move || load.prepare_restore(&skeleton)).await;
-                        match prepared {
-                            Ok(Ok(restore)) => InventoryCacheEvent::Ready { cache, restore, status },
-                            Ok(Err(error)) => InventoryCacheEvent::OpenFailed(error.to_string()),
+                Ok(Ok((cache, status))) => {
+                    if invalidate_cache && let Err(error) = cache.discard().await {
+                        InventoryCacheEvent::OpenFailed(error.to_string())
+                    } else {
+                        match cache.load(&inventory).await {
+                            Ok(load) => {
+                                let prepared = tokio::task::spawn_blocking(move || load.prepare_restore(&skeleton)).await;
+                                match prepared {
+                                    Ok(Ok(restore)) => InventoryCacheEvent::Ready { cache, restore, status },
+                                    Ok(Err(error)) => InventoryCacheEvent::OpenFailed(error.to_string()),
+                                    Err(error) => InventoryCacheEvent::OpenFailed(error.to_string()),
+                                }
+                            }
                             Err(error) => InventoryCacheEvent::OpenFailed(error.to_string()),
                         }
                     }
-                    Err(error) => InventoryCacheEvent::OpenFailed(error.to_string()),
-                },
+                }
                 Ok(Err(error)) => InventoryCacheEvent::OpenFailed(error.to_string()),
                 Err(error) => InventoryCacheEvent::OpenFailed(error.to_string()),
             };
@@ -110,6 +128,11 @@ impl InventoryCacheSession {
             return Some(InventoryCacheEvent::RestoreBatch);
         }
         self.event_receiver.recv().await
+    }
+
+    pub(super) fn invalidate_restore(&mut self) {
+        self.restore_invalidated = true;
+        self.restore = None;
     }
 
     pub(super) fn record_change(&mut self, runtime: &Handle, changes: ChangeSet, before: InventorySnapshot, after: InventorySnapshot) {
@@ -231,7 +254,9 @@ impl InventoryCacheSession {
                 Err(error) => self.warn_once(&error),
             }
         }
-        self.restore = Some(PendingRestore { restore, excluded });
+        if !self.restore_invalidated {
+            self.restore = Some(PendingRestore { restore, excluded });
+        }
     }
 
     fn clear_pending_writes(&mut self) {
@@ -297,4 +322,136 @@ fn estimate_write(changes: &ChangeSet) -> (usize, usize) {
         bytes = bytes.saturating_add(row_bytes);
     }
     (rows, bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashSet, sync::Arc};
+
+    use ::inventory::{
+        AssetType, Category, CategoryKey, FolderType, Inventory, InventoryChild, InventoryLimits, InventoryOwner, InventoryType, Item,
+        ItemKey, PermissionMask, Permissions, SaleInfo, SaleType, ServerVersion,
+    };
+    use tempfile::tempdir;
+    use tokio::runtime::Handle;
+    use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
+    use uuid::Uuid;
+
+    use super::{InventoryCache, InventoryCacheEvent, InventoryCacheSession};
+
+    fn uuid(value: u128) -> Uuid {
+        Uuid::from_u128(value)
+    }
+
+    fn category(owner: InventoryOwner, id: u128, parent: Option<u128>, version: i32) -> Category {
+        Category {
+            key: CategoryKey::new(owner, FolderId::new(uuid(id))),
+            parent: parent.map(|parent| CategoryKey::new(owner, FolderId::new(uuid(parent)))),
+            preferred_folder_type: FolderType::None,
+            name: Arc::from(format!("folder-{id}")),
+            server_version: ServerVersion::from_raw(version),
+            server_descendent_count: None,
+        }
+    }
+
+    fn item(owner: InventoryOwner, id: u128, parent: CategoryKey) -> Item {
+        Item {
+            key: ItemKey::new(owner, ItemId::new(uuid(id))),
+            parent,
+            asset_id: AssetId::new(uuid(id + 100)),
+            asset_type: AssetType::Notecard,
+            inventory_type: InventoryType::Notecard,
+            flags: 0,
+            name: Arc::from("cached item"),
+            description: Arc::from("cached description"),
+            created_at: 0,
+            permissions: Permissions {
+                creator: AvatarId::new(Uuid::nil()),
+                owner: AvatarId::new(Uuid::nil()),
+                group: GroupId::new(Uuid::nil()),
+                last_owner: AvatarId::new(Uuid::nil()),
+                base: PermissionMask::new(0),
+                owner_mask: PermissionMask::new(0),
+                group_mask: PermissionMask::new(0),
+                everyone: PermissionMask::new(0),
+                next_owner: PermissionMask::new(0),
+            },
+            sale: SaleInfo { sale_type: SaleType::NotForSale, price: 0 },
+        }
+    }
+
+    fn cache_skeleton(owner: InventoryOwner) -> (Inventory, CategoryKey, CategoryKey) {
+        let root = category(owner, 1, None, 7);
+        let child = category(owner, 2, Some(1), 4);
+        let root_key = root.key;
+        let child_key = child.key;
+        let mut inventory = Inventory::new(root, None, InventoryLimits::default()).expect("valid inventory root");
+        inventory.upsert_category(child).expect("valid child folder");
+        (inventory, root_key, child_key)
+    }
+
+    #[tokio::test]
+    async fn early_delta_invalidation_survives_the_next_login() {
+        let directory = tempdir().expect("create inventory cache directory");
+        let agent = uuid(10);
+        let owner = InventoryOwner::new(agent);
+        let (mut seeded, root, child) = cache_skeleton(owner);
+        let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", agent, None).expect("open inventory cache");
+        let bootstrap = seeded.snapshot();
+        cache.submit_bootstrap(&bootstrap).expect("write login skeleton").wait().await.expect("skeleton write completes");
+
+        let before_root = seeded.snapshot();
+        let root_changes = seeded
+            .apply_folder_fetch(root, ServerVersion::from_raw(7), Some(1), vec![InventoryChild::Category(category(owner, 2, Some(1), 4))])
+            .expect("complete root folder");
+        let after_root = seeded.snapshot();
+        cache
+            .submit_changeset(&root_changes, &before_root, &after_root)
+            .expect("write root folder completion")
+            .wait()
+            .await
+            .expect("root completion write succeeds");
+
+        let before_child = seeded.snapshot();
+        let stale_item = item(owner, 3, child);
+        let stale_item_key = stale_item.key;
+        let child_changes = seeded
+            .apply_folder_fetch(child, ServerVersion::from_raw(4), Some(1), vec![InventoryChild::Item(stale_item)])
+            .expect("complete child folder");
+        let after_child = seeded.snapshot();
+        cache
+            .submit_changeset(&child_changes, &before_child, &after_child)
+            .expect("write cached child contents")
+            .wait()
+            .await
+            .expect("child completion write succeeds");
+        assert!(after_child.is_complete(child));
+        cache.close().await.expect("close seeded cache");
+
+        let (mut next_login, next_root, next_child) = cache_skeleton(owner);
+        let mut cache_session = InventoryCacheSession::new();
+        cache_session.invalidate_restore();
+        let cache_root = directory.path().to_path_buf();
+        cache_session
+            .start_with_open(&Handle::current(), &next_login, move || InventoryCache::open_at_root(cache_root, "agni", agent, None));
+        let event = cache_session.next_event().await.expect("cache open event arrives");
+        assert!(matches!(event, InventoryCacheEvent::Ready { .. }));
+        cache_session.handle_event(&Handle::current(), event, &mut next_login);
+        cache_session.close().await;
+
+        let (cache, _) = InventoryCache::open_at_root(directory.path(), "agni", agent, None).expect("reopen inventory cache");
+        let load = cache.load(&next_login).await.expect("load invalidated cache");
+        let mut restore = load.prepare_restore(&next_login.snapshot()).expect("prepare next login restore");
+        loop {
+            let progress = restore.apply_next(&mut next_login, &HashSet::new()).expect("apply cached folder batch");
+            if progress.finished {
+                break;
+            }
+        }
+        let snapshot = next_login.snapshot();
+        assert_eq!(snapshot.roots().personal(), next_root);
+        assert_eq!(snapshot.item(stale_item_key).map(|item| item.parent), Some(next_child));
+        assert!(!snapshot.is_complete(next_child));
+        cache.close().await.expect("close reopened cache");
+    }
 }

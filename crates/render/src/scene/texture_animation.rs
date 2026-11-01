@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use math::UvTransform;
 use world::TextureAnimation;
 
@@ -41,8 +43,22 @@ fn full_length(animation: TextureAnimation) -> f32 {
     }
 }
 
+fn frame_counter(animation: TextureAnimation, elapsed_seconds: f64, smooth_frame_offset: f64) -> Option<f32> {
+    if !elapsed_seconds.is_finite() || elapsed_seconds < 0.0 || !smooth_frame_offset.is_finite() {
+        return None;
+    }
+    let elapsed = elapsed_seconds as f32;
+    let frame_offset = if is_smooth(animation) { smooth_frame_offset as f32 } else { 0.0 };
+    let frame = elapsed * animation.rate() + frame_offset;
+    frame.is_finite().then_some(frame)
+}
+
+fn stepped_frame(frame: f32, full_length: f32) -> f32 {
+    (frame + 0.01).floor().min(full_length - 1.0)
+}
+
 pub(crate) fn transform_at(animation: TextureAnimation, elapsed_seconds: f64, smooth_frame_offset: f64, base: UvTransform) -> UvTransform {
-    if !is_enabled(animation) || !elapsed_seconds.is_finite() || elapsed_seconds < 0.0 || !smooth_frame_offset.is_finite() {
+    if !is_enabled(animation) {
         return base;
     }
 
@@ -52,19 +68,14 @@ pub(crate) fn transform_at(animation: TextureAnimation, elapsed_seconds: f64, sm
         return base;
     }
 
-    let elapsed = elapsed_seconds as f32;
-    let frame_offset = if is_smooth(animation) { smooth_frame_offset as f32 } else { 0.0 };
-    let mut frame = elapsed * animation.rate() + frame_offset;
-    if !frame.is_finite() {
-        return base;
-    }
+    let Some(mut frame) = frame_counter(animation, elapsed_seconds, smooth_frame_offset) else { return base };
     if animation.mode() & LOOP != 0 {
         frame %= full_length;
     } else {
         frame = frame.min(full_length - 1.0);
     }
     if !is_smooth(animation) {
-        frame = (frame + 0.01).floor().min(full_length - 1.0);
+        frame = stepped_frame(frame, full_length);
     }
     if animation.mode() & PING_PONG != 0 && frame >= num_frames {
         frame = if is_smooth(animation) { num_frames - (frame - num_frames) } else { (num_frames - 1.99) - (frame - num_frames) };
@@ -102,38 +113,67 @@ pub(crate) fn transform_at(animation: TextureAnimation, elapsed_seconds: f64, sm
 }
 
 pub(crate) fn smooth_frame_counter(animation: TextureAnimation, elapsed_seconds: f64, smooth_frame_offset: f64) -> Option<f64> {
-    if !is_smooth(animation) || !elapsed_seconds.is_finite() || elapsed_seconds < 0.0 || !smooth_frame_offset.is_finite() {
+    if !is_smooth(animation) {
         return None;
     }
-    let frame = elapsed_seconds as f32 * animation.rate() + smooth_frame_offset as f32;
-    frame.is_finite().then_some(f64::from(frame))
+    frame_counter(animation, elapsed_seconds, smooth_frame_offset).map(f64::from)
 }
 
 pub(crate) fn is_changing_at(animation: TextureAnimation, elapsed_seconds: f64, smooth_frame_offset: f64) -> bool {
-    if !is_enabled(animation) || animation.rate() == 0.0 || !elapsed_seconds.is_finite() || elapsed_seconds < 0.0 {
+    if !is_enabled(animation) || animation.rate() == 0.0 {
         return false;
     }
     let full_length = full_length(animation);
     if !full_length.is_finite() || full_length <= 0.0 {
         return false;
     }
+    let Some(frame) = frame_counter(animation, elapsed_seconds, smooth_frame_offset) else { return false };
     if animation.mode() & LOOP != 0 {
         return is_smooth(animation) || full_length > 1.0;
     }
-    if animation.rate() < 0.0 {
-        return true;
+    animation.rate() < 0.0 || frame < full_length - 1.0
+}
+
+pub(crate) fn next_update_after(animation: TextureAnimation, elapsed_seconds: f64, smooth_frame_offset: f64) -> Option<Duration> {
+    if !is_changing_at(animation, elapsed_seconds, smooth_frame_offset) {
+        return None;
     }
-    let offset = if is_smooth(animation) { smooth_frame_offset as f32 } else { 0.0 };
-    let frame = elapsed_seconds as f32 * animation.rate() + offset;
-    frame.is_finite() && frame < full_length - 1.0
+    if is_smooth(animation) {
+        return Some(Duration::ZERO);
+    }
+    let full_length = full_length(animation);
+    let mut frame = frame_counter(animation, elapsed_seconds, smooth_frame_offset)?;
+    if animation.mode() & LOOP != 0 {
+        frame %= full_length;
+    } else {
+        frame = frame.min(full_length - 1.0);
+    }
+    let rate = animation.rate();
+    let current = stepped_frame(frame, full_length);
+    let mut boundary = if rate > 0.0 { current + 1.0 - 0.01 } else { current - 0.01 };
+    if animation.mode() & LOOP != 0 {
+        if rate > 0.0 && (boundary >= full_length || stepped_frame(boundary, full_length) == current) {
+            boundary = full_length;
+        } else if rate < 0.0 && boundary <= -full_length {
+            boundary = -full_length;
+        }
+    } else if rate > 0.0 {
+        boundary = boundary.min(full_length - 1.0);
+    }
+    let epsilon = f32::EPSILON * boundary.abs().max(1.0) * 2.0;
+    boundary -= rate.signum() * epsilon;
+    let seconds = f64::from((boundary - frame) / rate) - 0.000_001;
+    Duration::try_from_secs_f64(seconds.max(0.0)).ok()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use math::UvTransform;
     use world::TextureAnimation;
 
-    use super::{is_changing_at, transform_at};
+    use super::{is_changing_at, next_update_after, transform_at};
 
     fn animation(mode: u8, size: [u8; 2], start: f32, length: f32, rate: f32) -> TextureAnimation {
         let mut bytes = vec![mode, 0xff, size[0], size[1]];
@@ -193,5 +233,36 @@ mod tests {
         assert!(is_changing_at(animation(0x03, [2, 2], 0.0, 0.0, 1.0), 400.0, 0.0));
         assert!(!is_changing_at(animation(0x01, [2, 2], 0.0, 0.0, 1.0), 4.0, 0.0));
         assert!(!is_changing_at(animation(0x01, [2, 2], 0.0, 0.0, 0.0), 0.0, 0.0));
+    }
+
+    #[test]
+    fn stepped_deadline_tracks_frame_boundary() {
+        let first = next_update_after(animation(0x03, [2, 2], 0.0, 0.0, 0.5), 1.0, 0.0).expect("loop keeps changing");
+        assert!(first < Duration::from_millis(980));
+        assert!(first > Duration::from_millis(979));
+        let between = next_update_after(animation(0x03, [2, 2], 0.0, 0.0, 0.5), 1.5, 0.0).expect("loop keeps changing");
+        assert!(between < Duration::from_millis(480));
+        assert!(between > Duration::from_millis(479));
+        assert_eq!(next_update_after(animation(0x03, [2, 2], 0.0, 0.0, 0.0), 1.0, 0.0), None);
+        assert_eq!(next_update_after(animation(0x01, [2, 2], 0.0, 0.0, 1.0), 4.0, 0.0), None);
+    }
+
+    #[test]
+    fn negative_rate_tracks_reverse_boundary() {
+        let delay = next_update_after(animation(0x03, [2, 2], 0.0, 0.0, -0.5), 1.0, 0.0).expect("loop keeps changing");
+        assert!(delay < Duration::from_millis(1020));
+        assert!(delay > Duration::from_millis(1019));
+    }
+
+    #[test]
+    fn overflowing_loop_stops_redraws() {
+        let animation = animation(0x03, [2, 2], 0.0, 0.0, f32::MAX);
+        assert!(!is_changing_at(animation, 2.0, 0.0));
+        assert_eq!(next_update_after(animation, 2.0, 0.0), None);
+    }
+
+    #[test]
+    fn smooth_animation_requests_continuous_updates() {
+        assert_eq!(next_update_after(animation(0x13, [0, 0], 0.0, 1.0, 0.5), 1.0, 0.0), Some(Duration::ZERO));
     }
 }

@@ -18,10 +18,12 @@ rusqlite.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
+utils.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
+test-support.workspace = true
 tempfile.workspace = true
 
 [[bench]]

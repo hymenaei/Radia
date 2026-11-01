@@ -1,6 +1,6 @@
 mod eviction;
-mod journal;
-mod recovery;
+mod index;
+mod protection;
 mod writer;
 
 use std::{
@@ -24,10 +24,13 @@ use sha2::{Digest, Sha256};
 use std::sync::mpsc::SyncSender;
 
 use self::{
-    journal::{FormatError, Record},
-    recovery::{discard_index_files, recover},
+    index::{Index, Record},
+    protection::{EVICTION_HISTORY_LEN, EvictionHistory, ProtectionRegistry, ProtectionShared, lock_protection},
     writer::{Command, WorkerState, WriteQueue, writer_loop},
 };
+
+pub use self::eviction::{EvictionCandidate, EvictionPolicy, EvictionReason, EvictionScore, LruPolicy};
+pub use self::protection::Protection;
 
 #[cfg(test)]
 use self::writer::WritePoint;
@@ -39,21 +42,26 @@ pub const MAX_QUEUED_WRITE_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_QUEUED_WRITES: usize = 1024;
 const DIRECTORY_OVERHEAD: u64 = 4096;
 const FILE_OVERHEAD: u64 = 512;
-const INDEX_OVERHEAD: u64 = 3;
+const INDEX_FILE_OVERHEAD: u64 = 2;
 const MAX_NAMESPACE_BYTES: usize = 127;
 const MAX_NAMESPACE_SEGMENTS: usize = 8;
 const MAX_NAMESPACE_SEGMENT_BYTES: usize = 32;
 const MAX_EXTENSION_BYTES: usize = 16;
-const MAX_NAMESPACE_TABLE_BYTES: u64 = 256 * (2 + MAX_NAMESPACE_BYTES as u64 + MAX_EXTENSION_BYTES as u64);
-const MIN_SIZE_LIMIT_INTERNAL: u64 =
-    DIRECTORY_OVERHEAD * 3 + FILE_OVERHEAD * 4 + journal::SNAPSHOT_BASE_HEADER_BYTES + MAX_NAMESPACE_TABLE_BYTES;
+const MAX_NAMESPACE_TABLE_BYTES: u64 = 256 * (MAX_NAMESPACE_BYTES as u64 + MAX_EXTENSION_BYTES as u64 + 32);
+const MIN_SIZE_LIMIT_INTERNAL: u64 = DIRECTORY_OVERHEAD * 3
+    + FILE_OVERHEAD * 4
+    + index::INDEX_BASE_BYTES
+    + index::INDEX_AUXILIARY_RESERVATION_BYTES
+    + MAX_NAMESPACE_TABLE_BYTES;
 const LOOKUP_MAX_ATTEMPTS: usize = 3;
 const SNAPSHOT_FILE: &str = "snapshot";
 const JOURNAL_FILE: &str = "journal";
 const LOCK_FILE: &str = "lock";
+const INDEX_FILE: &str = "index.sqlite";
 const ENTRY_VALID: u8 = 0;
 const ENTRY_REPLACING: u8 = 1;
 const ENTRY_INVALID: u8 = 2;
+const ENTRY_EVICTING: u8 = 3;
 
 pub const MIN_SIZE_LIMIT: u64 = MIN_SIZE_LIMIT_INTERNAL;
 
@@ -89,7 +97,7 @@ impl Key {
         Self { namespace, name }
     }
 
-    pub(super) const fn namespace(self) -> NamespaceId {
+    pub const fn namespace(self) -> NamespaceId {
         self.namespace
     }
 
@@ -162,6 +170,10 @@ impl NamespaceTable {
 
     pub(super) fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub(super) fn definitions(&self) -> impl Iterator<Item = Namespace> + '_ {
+        self.entries.iter().map(|entry| entry.definition)
     }
 
     fn contains(&self, id: NamespaceId) -> bool {
@@ -243,7 +255,7 @@ fn directory_id(directories: &mut HashMap<String, DirectoryId>, path: &str) -> R
     Ok(id)
 }
 
-fn valid_namespace(namespace: &str) -> bool {
+pub(super) fn valid_namespace(namespace: &str) -> bool {
     !namespace.is_empty()
         && namespace.len() <= MAX_NAMESPACE_BYTES
         && namespace.is_ascii()
@@ -255,7 +267,7 @@ fn valid_namespace(namespace: &str) -> bool {
         })
 }
 
-fn valid_extension(extension: &str) -> bool {
+pub(super) fn valid_extension(extension: &str) -> bool {
     !extension.is_empty()
         && extension.len() <= MAX_EXTENSION_BYTES
         && extension.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
@@ -301,6 +313,7 @@ pub enum UnavailableReason {
     ReadLimit,
     WriteQueueFull,
     WriterStopped,
+    Busy,
     Io,
     Allocation,
 }
@@ -368,6 +381,7 @@ struct Entry {
     pub hash: [u8; 32],
     pub last_use: AtomicU64,
     pub use_count: AtomicU64,
+    persisted_use_count: AtomicU64,
     state: AtomicU8,
 }
 
@@ -379,6 +393,7 @@ impl Entry {
             hash: record.hash,
             last_use: AtomicU64::new(record.last_use),
             use_count: AtomicU64::new(record.use_count),
+            persisted_use_count: AtomicU64::new(record.use_count),
             state: AtomicU8::new(ENTRY_VALID),
         }
     }
@@ -394,6 +409,28 @@ impl Entry {
     }
 }
 
+struct PendingTouch {
+    entry: Arc<Entry>,
+    last_use: u64,
+    use_count_delta: u64,
+}
+
+impl PendingTouch {
+    fn resulting_use_count(&self) -> u64 {
+        self.entry.persisted_use_count.load(Ordering::Relaxed).saturating_add(self.use_count_delta)
+    }
+
+    fn record(&self) -> Record {
+        Record {
+            key: self.entry.key,
+            size: self.entry.size,
+            hash: self.entry.hash,
+            last_use: self.last_use,
+            use_count: self.resulting_use_count(),
+        }
+    }
+}
+
 enum EntryReadFailure {
     Corrupt,
     Unavailable(UnavailableReason),
@@ -403,8 +440,12 @@ struct ReadState {
     root: PathBuf,
     namespaces: Arc<NamespaceTable>,
     entries: Arc<RwLock<HashMap<Key, Arc<Entry>>>>,
-    touches: Arc<Mutex<HashMap<Key, Arc<Entry>>>>,
+    touches: Arc<Mutex<HashMap<Key, PendingTouch>>>,
     invalid: Arc<Mutex<HashMap<Key, Arc<Entry>>>>,
+    namespace_entry_counts: Vec<AtomicUsize>,
+    protection: Arc<ProtectionShared>,
+    evictions: EvictionHistory,
+    policy: Arc<dyn EvictionPolicy>,
     active_reads: AtomicUsize,
     usage_clock: AtomicU64,
     size_limit: AtomicU64,
@@ -453,7 +494,16 @@ impl fmt::Debug for Cache {
 
 impl Cache {
     pub fn open(directory: impl AsRef<Path>, size_limit: u64, namespaces: &[Namespace]) -> Result<Self, StorageError> {
-        Self::open_internal(directory.as_ref(), size_limit, namespaces, Arc::new(writer::FaultHooks::default()))
+        Self::open_with_policy(directory, size_limit, namespaces, LruPolicy)
+    }
+
+    pub fn open_with_policy(
+        directory: impl AsRef<Path>,
+        size_limit: u64,
+        namespaces: &[Namespace],
+        policy: impl EvictionPolicy + 'static,
+    ) -> Result<Self, StorageError> {
+        Self::open_internal(directory.as_ref(), size_limit, namespaces, Arc::new(policy), Arc::new(writer::FaultHooks::default()))
     }
 
     pub fn lookup(&self, key: Key) -> Lookup {
@@ -489,6 +539,7 @@ impl Cache {
                     }
                     continue;
                 }
+                ENTRY_EVICTING => return Lookup::Miss,
                 ENTRY_VALID | ENTRY_REPLACING => {}
                 _ => return Lookup::Unavailable(UnavailableReason::Io),
             }
@@ -520,13 +571,27 @@ impl Cache {
             let stamp = saturating_increment(&self.read_state.usage_clock);
             entry.last_use.fetch_max(stamp, Ordering::Relaxed);
             let use_count = saturating_increment(&entry.use_count);
-            let mut touches = match self.read_state.touches.lock() {
-                Ok(touches) => touches,
+            let entries = match self.read_state.entries.read() {
+                Ok(entries) => entries,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if touches.try_reserve(1).is_ok() {
-                touches.insert(key, Arc::clone(&entry));
+            if entries.get(&key).is_some_and(|current| Arc::ptr_eq(current, &entry)) {
+                let mut touches = match self.read_state.touches.lock() {
+                    Ok(touches) => touches,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if let Some(pending) = touches.get_mut(&key) {
+                    if Arc::ptr_eq(&pending.entry, &entry) {
+                        pending.last_use = pending.last_use.max(stamp);
+                        pending.use_count_delta = pending.use_count_delta.saturating_add(1);
+                    } else {
+                        *pending = PendingTouch { entry: Arc::clone(&entry), last_use: stamp, use_count_delta: 1 };
+                    }
+                } else if touches.try_reserve(1).is_ok() {
+                    touches.insert(key, PendingTouch { entry: Arc::clone(&entry), last_use: stamp, use_count_delta: 1 });
+                }
             }
+            drop(entries);
             return Lookup::Hit(CacheValue { bytes, last_use: stamp, use_count });
         }
         Lookup::Miss
@@ -542,6 +607,8 @@ impl Cache {
         let weight = bytes.len();
         let (reply, receiver) = mpsc::sync_channel(0);
         self.queue.try_send(Command::Put { key, bytes, reply }, weight)?;
+        #[cfg(test)]
+        self.read_state.hooks.check(WritePoint::PutQueued)?;
         receive(receiver)
     }
 
@@ -552,6 +619,15 @@ impl Cache {
         let (reply, receiver) = mpsc::sync_channel(0);
         self.queue.try_send(Command::Remove { key, reply }, 0)?;
         receive(receiver)
+    }
+
+    pub fn protect(&self, key: Key) -> Result<Protection, StorageError> {
+        if !self.read_state.namespaces.contains(key.namespace) {
+            return Err(StorageError::UnknownNamespace);
+        }
+        let mut state = lock_protection(&self.read_state.protection.state);
+        state.acquire(key, &self.read_state.protection.bytes)?;
+        Ok(Protection { shared: Arc::clone(&self.read_state.protection), key })
     }
 
     pub fn discard(&self, key: Key) {
@@ -581,6 +657,8 @@ impl Cache {
         }
         let (reply, receiver) = mpsc::sync_channel(0);
         self.queue.try_send(Command::SetLimit { limit, reply }, 0)?;
+        #[cfg(test)]
+        self.read_state.hooks.check(WritePoint::SetLimitQueued)?;
         receive(receiver)
     }
 
@@ -604,6 +682,18 @@ impl Cache {
             Err(poisoned) => poisoned.into_inner(),
         };
         entries.values().filter(|entry| entry.state.load(Ordering::Acquire) != ENTRY_INVALID).count()
+    }
+
+    pub fn namespace_entry_count(&self, namespace: NamespaceId) -> usize {
+        self.read_state.namespace_entry_counts.get(usize::from(namespace.0)).map_or(0, |count| count.load(Ordering::Relaxed))
+    }
+
+    pub fn protected_bytes(&self) -> u64 {
+        self.read_state.protection.bytes.load(Ordering::Relaxed)
+    }
+
+    pub fn recent_evictions(&self) -> [Option<EvictionReason>; EVICTION_HISTORY_LEN] {
+        self.read_state.evictions.snapshot()
     }
 
     pub fn shutdown(mut self) -> Result<(), StorageError> {
@@ -630,12 +720,16 @@ impl Cache {
         directory: &Path,
         size_limit: u64,
         namespace_config: &[Namespace],
+        policy: Arc<dyn EvictionPolicy>,
         hooks: Arc<writer::FaultHooks>,
     ) -> Result<Self, StorageError> {
         let root = directory.to_path_buf();
         let namespaces = Arc::new(NamespaceTable::new(namespace_config)?);
-        let minimum_size_limit =
-            DIRECTORY_OVERHEAD * 3 + FILE_OVERHEAD * 4 + journal::snapshot_header_size(&namespaces).ok_or(StorageError::TooLarge)?;
+        let minimum_size_limit = DIRECTORY_OVERHEAD * 3
+            + FILE_OVERHEAD * 4
+            + index::INDEX_BASE_BYTES
+            + index::INDEX_AUXILIARY_RESERVATION_BYTES
+            + index::namespace_bytes(&namespaces)?;
         if size_limit < minimum_size_limit {
             return Err(StorageError::LimitTooSmall);
         }
@@ -646,13 +740,24 @@ impl Cache {
             Err(std::fs::TryLockError::WouldBlock) => return Err(StorageError::InUse),
             Err(std::fs::TryLockError::Error(error)) => return Err(StorageError::Io(error)),
         }
-        let (records, sequence, mut snapshot_bytes, mut journal_bytes, reset, namespace_table_changed) = recover(&root, &namespaces)?;
-        if reset {
-            discard_index_files(&root)?;
-        } else if namespace_table_changed {
-            (snapshot_bytes, journal_bytes) = writer::rewrite_namespace_table(&root, &records, sequence, &namespaces, hooks.as_ref())?;
+        discard_old_index_files(&root);
+        let (index, records) = Index::open(root.join(INDEX_FILE), &namespaces)?;
+        let mut entries = HashMap::new();
+        entries.try_reserve(records.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        let mut namespace_entry_counts = Vec::new();
+        namespace_entry_counts.try_reserve_exact(namespaces.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        namespace_entry_counts.extend((0..namespaces.len()).map(|_| AtomicUsize::new(0)));
+        let mut protection_state = ProtectionRegistry::default();
+        protection_state.sizes.try_reserve(records.len()).map_err(|_| StorageError::Unavailable(UnavailableReason::Allocation))?;
+        for record in records {
+            let namespace = usize::from(record.key.namespace().0);
+            let Some(count) = namespace_entry_counts.get(namespace) else {
+                return Err(StorageError::InvalidNamespaces);
+            };
+            count.fetch_add(1, Ordering::Relaxed);
+            protection_state.sizes.insert(record.key, record.size);
+            entries.insert(record.key, Arc::new(Entry::from_record(record)));
         }
-        let entries = records;
         let max_tick = entries.values().map(|entry| entry.last_use.load(Ordering::Relaxed)).max().unwrap_or(0);
         let entries = Arc::new(RwLock::new(entries));
         let touches = Arc::new(Mutex::new(HashMap::new()));
@@ -664,6 +769,10 @@ impl Cache {
             entries,
             touches,
             invalid,
+            namespace_entry_counts,
+            protection: Arc::new(ProtectionShared { state: Mutex::new(protection_state), bytes: AtomicU64::new(0) }),
+            evictions: EvictionHistory::default(),
+            policy,
             active_reads: AtomicUsize::new(0),
             usage_clock: AtomicU64::new(max_tick),
             size_limit: AtomicU64::new(size_limit),
@@ -672,7 +781,7 @@ impl Cache {
             #[cfg(test)]
             hooks: Arc::clone(&hooks),
         });
-        let worker_state = WorkerState::new(root, lock_file, Arc::clone(&read_state), sequence, snapshot_bytes, journal_bytes, hooks)?;
+        let worker_state = WorkerState::new(root, lock_file, Arc::clone(&read_state), index, hooks)?;
         let startup_queue = Arc::clone(&queue);
         let worker =
             thread::Builder::new().name("storage-cache-writer".to_owned()).spawn(move || writer_loop(worker_state, startup_queue))?;
@@ -736,6 +845,11 @@ impl Cache {
     fn pause_at(&self, point: WritePoint) -> (Receiver<()>, SyncSender<()>) {
         self.read_state.hooks.pause_at(point)
     }
+
+    #[cfg(test)]
+    fn pause_many_at(&self, point: WritePoint, count: usize) -> (Receiver<()>, Vec<SyncSender<()>>) {
+        self.read_state.hooks.pause_many_at(point, count)
+    }
 }
 
 impl Drop for Cache {
@@ -782,12 +896,14 @@ fn receive<T>(receiver: Receiver<Result<T, StorageError>>) -> Result<T, StorageE
     receiver.recv().map_err(|_| StorageError::Unavailable(UnavailableReason::WriterStopped))?
 }
 
-fn format_error(error: FormatError) -> StorageError {
-    match error {
-        FormatError::TooLarge => StorageError::TooLarge,
-        FormatError::Allocation => StorageError::Unavailable(UnavailableReason::Allocation),
-        FormatError::Invalid | FormatError::UnsupportedVersion | FormatError::TruncatedHeader => {
-            StorageError::Io(io::Error::new(io::ErrorKind::InvalidData, "cache index encoding failed"))
+fn discard_old_index_files(root: &Path) {
+    for name in [SNAPSHOT_FILE, JOURNAL_FILE] {
+        match fs::remove_file(root.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(path = %root.join(name).display(), error = %error, "cache could not remove an obsolete index file")
+            }
         }
     }
 }
@@ -832,6 +948,9 @@ pub fn discard_legacy_layout(directory: impl AsRef<Path>) -> Result<(), StorageE
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod eviction_tests;
 
 #[cfg(test)]
 mod tests;

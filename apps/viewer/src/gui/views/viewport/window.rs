@@ -11,9 +11,9 @@ use futures::executor::block_on;
 use render::scene;
 use render::{CompressionQuality, FrameInput, Overlay, Renderer, Retirement, TextureCompletion};
 use tracing::Instrument;
+use utils::ItemId;
 #[cfg(target_os = "linux")]
 use winit::platform::startup_notify::{EventLoopExtStartupNotify, WindowAttributesExtStartupNotify, reset_activation_token_env};
-use utils::ItemId;
 use winit::{
     dpi::{LogicalSize, PhysicalPosition},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},

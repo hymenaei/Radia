@@ -251,8 +251,7 @@ impl GeometryRenderer {
     pub(crate) fn needs_frame(&self, now: Instant) -> bool {
         self.prepared.as_ref().is_some_and(|prepared| {
             prepared.needs_frame(self.textures.state(), self.textures.geometry_state(), self.memory.mesh_state(), now)
-        })
-            || self.motion_redraw
+        }) || self.motion_redraw
             || self.textures.uploading()
     }
 

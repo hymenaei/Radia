@@ -182,22 +182,12 @@ impl SceneFeed {
         dead_reckoning.replace(*agent_motion.borrow_and_update());
         let run_wake = Arc::clone(&wake);
         drop(
-            runtime
-                .clone()
-                .spawn(
-                    run(
-                        scene,
-                        sources,
-                        sender,
-                        selected_environment,
-                        runtime.clone(),
-                        cancelled,
-                        observations,
-                        agent_motions,
-                        move || run_wake(),
-                    )
-                    .in_current_span(),
-                ),
+            runtime.clone().spawn(
+                run(scene, sources, sender, selected_environment, runtime.clone(), cancelled, observations, agent_motions, move || {
+                    run_wake()
+                })
+                .in_current_span(),
+            ),
         );
         Self {
             runtime,

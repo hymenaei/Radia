@@ -95,19 +95,15 @@ impl GeometryRenderer {
         let motion_was_active = self.motion_redraw;
         self.motion_redraw = false;
         if same {
-            let texture_progress = self
-                .prepared
-                .as_ref()
-                .is_some_and(|prepared| prepared.textures != self.textures.state())
-                || self.textures.uploading();
+            let texture_progress =
+                self.prepared.as_ref().is_some_and(|prepared| prepared.textures != self.textures.state()) || self.textures.uploading();
             if texture_progress {
                 let upload_started = Instant::now();
                 self.textures.upload(device, encoder, self.epoch);
                 times.textures = upload_started.elapsed();
             }
             if self.prepared.as_ref().is_some_and(|prepared| {
-                !motion_was_active
-                    && prepared.reusable(&key, self.textures.geometry_state(), self.memory.mesh_state(), started)
+                !motion_was_active && prepared.reusable(&key, self.textures.geometry_state(), self.memory.mesh_state(), started)
             }) {
                 let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, self.cache.origin);
                 let pairs = environment_pairs(device, view, &mut self.textures, frame_input.environment);
@@ -749,12 +745,7 @@ fn request_environment_textures(view: &SceneView, environment: &Evaluated, textu
     }
 }
 
-fn environment_pairs(
-    device: &Device,
-    view: &SceneView,
-    textures: &mut Textures,
-    environment: Option<&Evaluated>,
-) -> EnvironmentPairs {
+fn environment_pairs(device: &Device, view: &SceneView, textures: &mut Textures, environment: Option<&Evaluated>) -> EnvironmentPairs {
     let Some(environment) = environment else { return EnvironmentPairs::default() };
     EnvironmentPairs {
         sun: blend_keys(device, environment.sky.sun.texture, view, textures),
@@ -809,12 +800,7 @@ mod tests {
             animation_deadline: None,
         };
         let now = Instant::now();
-        assert!(prepared.reusable(
-            &prepare_key(&view),
-            crate::texture::GeometryTextureState::default(),
-            MeshState::default(),
-            now
-        ));
+        assert!(prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
         let mut moved = prepare_key(&view);
         moved.camera = Camera::new(DVec3::X, Vec3::X, 1.0, [720, 720]).expect("moved camera");
         assert!(!prepared.reusable(&moved, crate::texture::GeometryTextureState::default(), MeshState::default(), now));
@@ -850,20 +836,10 @@ mod tests {
             ("soft cap change", TextureState { cap: 64 * 1024 * 1024, ..state }),
         ] {
             assert!(
-                prepared.needs_frame(
-                    changed,
-                    crate::texture::GeometryTextureState::default(),
-                    MeshState::default(),
-                    now
-                ),
+                prepared.needs_frame(changed, crate::texture::GeometryTextureState::default(), MeshState::default(), now),
                 "{reason} must allow texture progress to schedule a frame"
             );
-            assert!(prepared.reusable(
-                &prepare_key(&view),
-                crate::texture::GeometryTextureState::default(),
-                MeshState::default(),
-                now
-            ));
+            assert!(prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
         }
         assert!(!prepared.reusable(
             &prepare_key(&view),
@@ -877,19 +853,9 @@ mod tests {
             MeshState { bytes: 0, revision: 1 },
             now
         ));
-        assert!(prepared.needs_frame(
-            state,
-            crate::texture::GeometryTextureState(1),
-            MeshState::default(),
-            now
-        ));
+        assert!(prepared.needs_frame(state, crate::texture::GeometryTextureState(1), MeshState::default(), now));
         prepared.more_meshes = true;
-        assert!(!prepared.reusable(
-            &prepare_key(&view),
-            crate::texture::GeometryTextureState::default(),
-            MeshState::default(),
-            now
-        ));
+        assert!(!prepared.reusable(&prepare_key(&view), crate::texture::GeometryTextureState::default(), MeshState::default(), now));
     }
 
     #[test]

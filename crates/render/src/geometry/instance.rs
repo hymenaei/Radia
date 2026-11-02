@@ -135,5 +135,4 @@ mod tests {
         assert!(!is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Studio, close, &frustum));
         assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Studio, far, &frustum));
     }
-
 }

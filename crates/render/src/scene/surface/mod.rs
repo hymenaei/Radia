@@ -51,7 +51,9 @@ pub(in crate::scene) struct SurfaceJob {
 impl SurfaceJob {
     pub(in crate::scene) fn run(self) -> SurfaceCompletion {
         let result = match &self.input {
-            Input::Terrain(tiles) => tiles.mesh(&self.cancelled).map(|(mesh, composition)| BuiltSurface { mesh, composition: Some(composition) }),
+            Input::Terrain(tiles) => {
+                tiles.mesh(&self.cancelled).map(|(mesh, composition)| BuiltSurface { mesh, composition: Some(composition) })
+            }
             Input::RegionWater(height) => region_water::mesh(*height).map(|mesh| BuiltSurface { mesh, composition: None }),
         };
         SurfaceCompletion { key: self.key, position: self.position, result, work: self.work, cancelled: self.cancelled }

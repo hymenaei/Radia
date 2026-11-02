@@ -60,7 +60,13 @@ pub(crate) struct SurfacePipelines {
 }
 
 impl SurfacePipelines {
-    pub(crate) fn new(device: &Device, format: TextureFormat, textures: &BindGroupLayout, terrain_textures: &BindGroupLayout, texture_store: &Textures) -> Self {
+    pub(crate) fn new(
+        device: &Device,
+        format: TextureFormat,
+        textures: &BindGroupLayout,
+        terrain_textures: &BindGroupLayout,
+        texture_store: &Textures,
+    ) -> Self {
         let surface_shader_source = concat!(
             include_str!("../shaders/atmosphere.wgsl"),
             include_str!("../shaders/water.wgsl"),

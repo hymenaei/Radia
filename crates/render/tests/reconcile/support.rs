@@ -98,7 +98,12 @@ pub(super) fn settle(scene: &mut Reconciler, view: &mut SceneView, world: &World
 
 pub(super) fn settle_work(scene: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> (usize, usize) {
     let work = settle_materials(scene, view, world, now);
-    assert!(work.requested.is_empty(), "geometry fixture unexpectedly requested assets");
+    assert!(
+        work.requested.iter().all(|request| {
+            request.priority == Priority::Background && matches!(&request.request, Request::Texture { size, .. } if size.edge() == 128)
+        }),
+        "geometry fixture unexpectedly requested non-baseline assets"
+    );
     (work.reads, work.builds)
 }
 
@@ -107,7 +112,6 @@ pub(super) struct AssetWork {
     pub(super) reads: usize,
     pub(super) builds: usize,
     pub(super) requested: Vec<AssetRequest>,
-    pub(super) environment_requested: Vec<AssetRequest>,
     pub(super) released: Vec<AssetTicket>,
     pub(super) importance_updates: Vec<(AssetTicket, u16)>,
 }
@@ -116,15 +120,7 @@ pub(super) fn settle_materials(scene: &mut Reconciler, view: &mut SceneView, wor
     let mut work = AssetWork::default();
     for _ in 0..20_000 {
         match scene.poll(*now) {
-            ReconcileStep::Asset(AssetChange::Request(request)) => {
-                if request.priority == Priority::Background
-                    && matches!(&request.request, Request::Texture { size, .. } if size.edge() == 128)
-                {
-                    work.environment_requested.push(request);
-                } else {
-                    work.requested.push(request);
-                }
-            }
+            ReconcileStep::Asset(AssetChange::Request(request)) => work.requested.push(request),
             ReconcileStep::Asset(AssetChange::Release(ticket)) => work.released.push(ticket),
             ReconcileStep::Asset(AssetChange::UpdateImportance { ticket, importance }) => {
                 work.importance_updates.push((ticket, importance))

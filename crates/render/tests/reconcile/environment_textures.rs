@@ -28,15 +28,15 @@ fn environment_keyframes_demand_unique_texture_ids_with_per_environment_and_glob
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(ids.iter().filter(|region| view.environment(**region).is_some()).count(), ids.len());
     let unique: std::collections::BTreeSet<_> = work
-        .environment_requested
+        .requested
         .iter()
         .filter_map(|request| match request.request {
             Request::Texture { id, .. } => Some(id),
             _ => None,
         })
         .collect();
-    assert!(work.environment_requested.len() <= 64, "environment demand stays within the global cap");
-    assert_eq!(unique.len(), work.environment_requested.len(), "keyframes and regions share each requested asset ID once");
+    assert!(work.requested.len() <= 64, "environment demand stays within the global cap");
+    assert_eq!(unique.len(), work.requested.len(), "keyframes and regions share each requested asset ID once");
     for region in ids {
         let start = u128::from(region.get()) * 10_000;
         let frame_ids: std::collections::BTreeSet<_> = (1..=20).map(|index| AssetId::new(Uuid::from_u128(start + index))).collect();
@@ -57,14 +57,14 @@ fn replacement_and_region_retirement_retain_environment_texture_tickets_until_cl
     scene.notify_world_change();
     let initial = settle_materials(&mut scene, &mut view, &world, &mut now);
     let first_request = initial
-        .environment_requested
+        .requested
         .iter()
         .find(|request| matches!(request.request, Request::Texture { id, .. } if id == first_id))
         .copied()
         .expect("custom environment texture demand");
     scene.complete_asset(first_request.ticket, prepared_asset(first_request.request, GRAY_4096_J2C.to_vec()));
     let ready = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert!(ready.environment_requested.is_empty());
+    assert!(ready.requested.is_empty());
     assert_eq!(view.environment_texture(first_id).map(|texture| texture.asset()), Some(first_id));
 
     let second_id = AssetId::new(Uuid::from_u128(202));
@@ -75,7 +75,7 @@ fn replacement_and_region_retirement_retain_environment_texture_tickets_until_cl
     assert!(!replacement.released.contains(&first_request.ticket));
     assert_eq!(view.environment_texture(first_id).map(|texture| texture.asset()), Some(first_id));
     let second_request = replacement
-        .environment_requested
+        .requested
         .iter()
         .find(|request| matches!(request.request, Request::Texture { id, .. } if id == second_id))
         .copied()
@@ -115,7 +115,7 @@ fn close_releases_environment_texture_tickets() {
     let _ = world.observe_environment(target, source(1, 1), assignment).unwrap();
     scene.notify_world_change();
     let pending = settle_materials(&mut scene, &mut view, &world, &mut now);
-    let tickets: std::collections::HashSet<_> = pending.environment_requested.iter().map(|request| request.ticket).collect();
+    let tickets: std::collections::HashSet<_> = pending.requested.iter().map(|request| request.ticket).collect();
     assert!(!tickets.is_empty());
     scene.close();
     let mut released = std::collections::HashSet::new();
@@ -150,7 +150,7 @@ fn experience_settings_and_overrides_share_texture_demands() {
         .expect("experience environment request");
     scene.complete_asset(request.ticket, prepared_asset(request.request, sky_with_sun(setting_texture).into_bytes()));
     let setting = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(requested_id(&setting.environment_requested, setting_texture), 1);
+    assert_eq!(requested_id(&setting.requested, setting_texture), 1);
 
     scene
         .push_environment(
@@ -170,8 +170,8 @@ fn experience_settings_and_overrides_share_texture_demands() {
         )
         .unwrap();
     let sky_override = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(requested_id(&sky_override.environment_requested, setting_texture), 0);
-    assert_eq!(requested_id(&sky_override.environment_requested, sky_override_texture), 1);
+    assert_eq!(requested_id(&sky_override.requested, setting_texture), 0);
+    assert_eq!(requested_id(&sky_override.requested, sky_override_texture), 1);
 
     scene
         .push_environment(
@@ -188,7 +188,7 @@ fn experience_settings_and_overrides_share_texture_demands() {
         )
         .unwrap();
     let water_override = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(requested_id(&water_override.environment_requested, water_override_texture), 1);
+    assert_eq!(requested_id(&water_override.requested, water_override_texture), 1);
 }
 
 fn requested_id(requests: &[super::support::AssetRequest], id: AssetId) -> usize {

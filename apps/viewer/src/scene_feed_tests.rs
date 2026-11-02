@@ -255,6 +255,7 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
         agent_id,
         agent: None,
         water_height: None,
+        environment: ActiveEnvironment::default(),
         camera: watch::channel(None).0,
         movement: watch::channel(None).0,
         agent_motion,
@@ -268,6 +269,13 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
             dead_reckoning
         },
         last_movement: None,
+        environment_selection: watch::channel(EnvironmentSelection {
+            choice: EnvironmentChoice::default(),
+            agent_region: None,
+            active_textures: BTreeSet::new(),
+        })
+        .0,
+        environment_items: watch::channel(EnvironmentItems::Loading).1,
         incoming,
         _cancel: cancel,
     };
@@ -324,6 +332,7 @@ async fn terrain_clamp_respects_parenting() {
         agent_id: agent,
         agent: None,
         water_height: None,
+        environment: ActiveEnvironment::default(),
         camera,
         movement: watch::channel(None).0,
         agent_motion,
@@ -333,6 +342,13 @@ async fn terrain_clamp_respects_parenting() {
         motion_active: HashMap::new(),
         dead_reckoning: DeadReckoning::default(),
         last_movement: None,
+        environment_selection: watch::channel(EnvironmentSelection {
+            choice: EnvironmentChoice::default(),
+            agent_region: None,
+            active_textures: BTreeSet::new(),
+        })
+        .0,
+        environment_items: watch::channel(EnvironmentItems::Loading).1,
         incoming,
         _cancel: cancel,
     };

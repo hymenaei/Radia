@@ -669,7 +669,6 @@ impl SceneWindow {
                 {
                     ui.colored_label(egui::Color32::LIGHT_RED, local_environment_failure(failure));
                 }
-                ui.label(format!("CPU frame: {:.2} ms", self.frame_work.as_secs_f64() * 1000.0));
                 ui.label(format!(
                     "Draw submissions: {}, indexed commands: {}, instances: {}",
                     stats.draw_calls, stats.draw_commands, stats.instances
@@ -1002,6 +1001,7 @@ fn local_environment_failure(failure: assets::Failure) -> String {
         assets::Failure::Denied => "Access to the environment asset was denied.".into(),
         assets::Failure::HttpStatus { status } => format!("The environment request failed with HTTP status {status}."),
         assets::Failure::Network => "The environment server could not be reached.".into(),
+        assets::Failure::MemoryPressure => "The viewer has insufficient memory to load the environment.".into(),
         assets::Failure::TooLarge => "The environment asset is too large.".into(),
         assets::Failure::Malformed => "The environment settings could not be decoded.".into(),
         assets::Failure::Unsupported => "The environment settings type is unsupported.".into(),
@@ -1013,6 +1013,7 @@ fn local_environment_failure(failure: assets::Failure) -> String {
         assets::Failure::MissingLod(_) | assets::Failure::MalformedBlock | assets::Failure::UnsupportedVersion(_) => {
             "The environment asset is malformed or unsupported.".into()
         }
+        assets::Failure::FullAssetRequired => "The environment asset could not be loaded.".into(),
     }
 }
 

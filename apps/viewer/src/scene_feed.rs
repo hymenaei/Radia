@@ -244,6 +244,10 @@ impl SceneFeed {
         self.agent_id
     }
 
+    pub(crate) fn agent(&self) -> Option<&Object> {
+        self.agent.and_then(|entity| self.view.object(entity))
+    }
+
     pub(crate) fn agent_motion_active(&self, now: Instant) -> bool {
         self.dead_reckoning.active(now)
     }
@@ -574,7 +578,7 @@ async fn update_environment_items(
         if latest.as_ref().is_some_and(|latest| latest.revision() == revision) {
             match result {
                 Ok(items) => {
-                    output.send_replace(EnvironmentItems::Ready(items));
+                    output.send_replace(EnvironmentItems::Ready(Arc::new(items)));
                 }
                 Err(error) => {
                     tracing::warn!(%error, "environment inventory query failed");
@@ -629,46 +633,6 @@ async fn execute_world_read(reader: &WorldReader, job: &ReadJob) -> Result<ReadR
         ReadError::Shutdown | ReadError::StaleSession => ReadFailure::Closed,
         ReadError::World(error) => ReadFailure::World(error),
     })
-}
-
-async fn update_environment_items(
-    mut snapshots: watch::Receiver<Option<InventorySnapshot>>,
-    output: watch::Sender<EnvironmentItems>,
-    runtime: Handle,
-    wake: Arc<dyn Fn() + Send + Sync>,
-) {
-    let mut snapshot = snapshots.borrow_and_update().clone();
-    loop {
-        let Some(current) = snapshot else {
-            output.send_replace(EnvironmentItems::Loading);
-            tokio::select! {
-                _ = output.closed() => return,
-                changed = snapshots.changed() => if changed.is_err() { return },
-            }
-            snapshot = snapshots.borrow_and_update().clone();
-            continue;
-        };
-        let revision = current.revision();
-        let result = runtime.spawn_blocking(move || environments::environment_items(current)).await;
-        let latest = snapshots.borrow().clone();
-        if latest.as_ref().is_some_and(|latest| latest.revision() == revision) {
-            match result {
-                Ok(menu) => {
-                    output.send_replace(EnvironmentItems::Ready(menu));
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "environment inventory query failed");
-                    output.send_replace(EnvironmentItems::Failed);
-                }
-            }
-            wake();
-            tokio::select! {
-                _ = output.closed() => return,
-                changed = snapshots.changed() => if changed.is_err() { return },
-            }
-        }
-        snapshot = snapshots.borrow_and_update().clone();
-    }
 }
 
 #[tracing::instrument(name = "scene.feed", level = "debug", skip_all)]
@@ -1020,6 +984,7 @@ mod tests {
         let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
         let (_inventory_updates_sender, inventory_updates) = watch::channel(None);
+        let (_agent_motion_sender, agent_motion) = watch::channel(None);
         let mut feed = SceneFeed::start(
             SceneSources {
                 reader: reads.reader(),
@@ -1031,7 +996,7 @@ mod tests {
             Uuid::from_u128(2),
             watch::channel(None).0,
             watch::channel(None).0,
-            watch::channel(None).1,
+            agent_motion,
             Handle::current(),
             || {},
         );
@@ -1085,6 +1050,7 @@ mod tests {
         let assets = AssetCoordinator::new(Handle::current(), pending(), None);
         let (pushes, environments) = crate::session::EnvironmentInbox::channel();
         let (_inventory_updates_sender, inventory_updates) = watch::channel(None);
+        let (_agent_motion_sender, agent_motion) = watch::channel(None);
         let mut feed = SceneFeed::start(
             SceneSources {
                 reader: reader.clone(),
@@ -1096,7 +1062,7 @@ mod tests {
             Uuid::from_u128(1),
             watch::channel(None).0,
             watch::channel(None).0,
-            watch::channel(None).1,
+            agent_motion,
             Handle::current(),
             || {},
         );

@@ -1654,7 +1654,8 @@ mod tests {
         );
         let region = Region::new(1);
         service.register(region, client);
-        let mut demand = service.handle().request(region, assets::Request::Environment(asset), Priority::Visible).await.unwrap();
+        let mut demand =
+            service.handle().request_with_importance(region, assets::Request::Environment(asset), Priority::Visible, 0).await.unwrap();
         let sky = loop {
             match demand.status() {
                 Status::Ready(Content::Environment(environment)) => break environment,

@@ -54,7 +54,7 @@ impl CapabilityTransport {
                     .map_err(|error| classify_network_error(error, resource.kind))
             })
             .await?;
-        let limit = resource.kind.max_response_bytes();
+        let limit = if resource.kind == Kind::Mesh { job.response_limit() } else { resource.kind.max_response_bytes() };
         match resource.kind {
             Kind::Texture | Kind::PbrMaterial | Kind::Environment | Kind::Mesh => {
                 let grant = grants.get("ViewerAsset").ok_or(Failure::MissingCapability)?;
@@ -67,7 +67,7 @@ impl CapabilityTransport {
                 };
                 let url = grant.with_trailing_slash().with_query_pair(field, &resource.id.uuid().to_string());
                 if resource.kind == Kind::Mesh {
-                    return self.fetch_mesh(&url, request, limit).await;
+                    return self.fetch_mesh(&url, request, limit, job.force_full_mesh()).await;
                 }
                 self.client
                     .get_bytes_with_response_limit_and_redirect_policy(&url, limit, RedirectPolicy::ViewerAsset)
@@ -87,15 +87,18 @@ impl CapabilityTransport {
         }
     }
 
-    async fn fetch_mesh(&self, url: &CapabilityUrl, request: Request, limit: usize) -> Result<FetchResponse, Failure> {
+    async fn fetch_mesh(&self, url: &CapabilityUrl, request: Request, limit: usize, force_full: bool) -> Result<FetchResponse, Failure> {
         match request {
-            Request::MeshHeader(_) => self.fetch_mesh_header(url, limit).await,
-            Request::MeshLod(block) => self.fetch_mesh_lod(url, block, limit).await,
+            Request::MeshHeader(_) => self.fetch_mesh_header(url, limit, force_full).await,
+            Request::MeshLod(block) => self.fetch_mesh_lod(url, block, limit, force_full).await,
             _ => Err(Failure::MalformedBlock),
         }
     }
 
-    async fn fetch_mesh_header(&self, url: &CapabilityUrl, limit: usize) -> Result<FetchResponse, Failure> {
+    async fn fetch_mesh_header(&self, url: &CapabilityUrl, limit: usize, force_full: bool) -> Result<FetchResponse, Failure> {
+        if force_full {
+            return self.fetch_mesh_full(url, limit, false).await;
+        }
         let max_header = u64::try_from(assets::mesh::MAX_MESH_HEADER_BYTES).map_err(|_| Failure::TooLarge)?;
         let mut range_end = u64::try_from(assets::mesh::MESH_HEADER_BYTES).map_err(|_| Failure::TooLarge)?;
         loop {
@@ -103,14 +106,14 @@ impl CapabilityTransport {
                 .client
                 .get_range_with_response_limit_and_redirect_policy(url, 0..range_end, limit, RedirectPolicy::ViewerAsset)
                 .await
-                .map_err(|error| classify_network_error(error, Kind::Mesh))?;
+                .map_err(classify_mesh_range_error)?;
             let (bytes, content_range) = match response {
                 RangeResponse::Full(bytes) => return Ok(FetchResponse::Full(bytes)),
                 RangeResponse::Partial { bytes, content_range: Some(content_range) } => (bytes, content_range),
-                RangeResponse::Partial { .. } => return self.fetch_mesh_full(url, limit).await,
+                RangeResponse::Partial { .. } => return self.fetch_mesh_full(url, limit, true).await,
             };
             let Some(total) = content_range.total else {
-                return self.fetch_mesh_full(url, limit).await;
+                return self.fetch_mesh_full(url, limit, true).await;
             };
             let expected_end = total.min(range_end);
             if content_range.start != 0
@@ -136,12 +139,12 @@ impl CapabilityTransport {
         }
     }
 
-    async fn fetch_mesh_full(&self, url: &CapabilityUrl, limit: usize) -> Result<FetchResponse, Failure> {
+    async fn fetch_mesh_full(&self, url: &CapabilityUrl, limit: usize, range_fallback: bool) -> Result<FetchResponse, Failure> {
         self.client
             .get_bytes_with_response_limit_and_redirect_policy(url, limit, RedirectPolicy::ViewerAsset)
             .await
             .map(FetchResponse::Full)
-            .map_err(|error| classify_network_error(error, Kind::Mesh))
+            .map_err(|error| if range_fallback { classify_mesh_range_error(error) } else { classify_network_error(error, Kind::Mesh) })
     }
 
     async fn fetch_mesh_lod(
@@ -149,13 +152,17 @@ impl CapabilityTransport {
         url: &CapabilityUrl,
         block: assets::mesh::MeshLodRequest,
         limit: usize,
+        force_full: bool,
     ) -> Result<FetchResponse, Failure> {
+        if force_full {
+            return self.fetch_mesh_full(url, limit, false).await;
+        }
         let requested = block.range();
         let response = self
             .client
             .get_range_with_response_limit_and_redirect_policy(url, requested.clone(), limit, RedirectPolicy::ViewerAsset)
             .await
-            .map_err(|error| classify_network_error(error, Kind::Mesh))?;
+            .map_err(classify_mesh_range_error)?;
         match response {
             RangeResponse::Full(bytes) => Ok(FetchResponse::Full(bytes)),
             RangeResponse::Partial { bytes, content_range: Some(content_range) } => {
@@ -398,6 +405,17 @@ fn classify_network_error(error: Error, kind: Kind) -> Failure {
     }
 }
 
+fn classify_mesh_range_error(error: Error) -> Failure {
+    match &error {
+        Error::CapabilityHttp(error)
+            if error.kind == HttpErrorKind::ResourceExhausted && error.status.is_some_and(|status| status.as_u16() == 200) =>
+        {
+            Failure::FullAssetRequired
+        }
+        _ => classify_network_error(error, Kind::Mesh),
+    }
+}
+
 fn warn_unexpected_http_status(kind: Kind, status: u16) {
     let bit = match kind {
         Kind::Texture => 1,
@@ -626,9 +644,10 @@ fn spawn_cache_writes(writes: Vec<CacheWrite>, runtime: &Handle, jobs: &mut Futu
 
 #[cfg(test)]
 mod tests {
-    use std::{assert_matches, sync::Arc};
+    use std::{assert_matches, sync::Arc, time::Instant};
 
-    use assets::Priority;
+    use assets::{Budget, LoadJob, Priority, Store};
+    use futures::future::join_all;
     use llsd::{Value, binary, xml};
     use tempfile::tempdir;
     use test_support::{
@@ -825,6 +844,129 @@ mod tests {
         drop(fetch);
         drop(demand);
         assert_eq!(peer.finish().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn oversized_mesh_header_full_response_retries_with_full_reservation() {
+        let asset = test_support::mesh::asset_with_seeded_lod_vertices(&[(0, 30_000)], 1, 0x89ab_cdef);
+        assert!(asset.len() > assets::mesh::MAX_MESH_HEADER_BYTES);
+        let range_asset = asset.clone();
+        let retry_asset = asset.clone();
+        let peer = Peer::new_with_headers(3, move |index, request, base| match index {
+            0 => (200, Vec::new(), grants(base)),
+            1 => {
+                let request = String::from_utf8_lossy(request).to_ascii_lowercase();
+                assert!(request.contains("range: bytes=0-4095"));
+                (200, Vec::new(), range_asset.clone())
+            }
+            2 => {
+                let request = String::from_utf8_lossy(request).to_ascii_lowercase();
+                assert!(!request.contains("range:"));
+                (200, Vec::new(), retry_asset.clone())
+            }
+            _ => unreachable!(),
+        });
+        let (cancel, cancelled) = oneshot::channel();
+        let service = AssetCoordinator::with_budget(
+            Handle::current(),
+            async move {
+                let _ = cancelled.await;
+            },
+            Budget::default(),
+            None,
+        );
+        let region = Region::new(1);
+        let id = resource(Kind::Mesh).id;
+        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let handle = service.handle();
+        let mut demand = handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 1).await.unwrap();
+        loop {
+            match demand.status() {
+                assets::Status::Ready(assets::Content::MeshHeader(header)) => {
+                    assert_eq!(header.asset_length(), u64::try_from(asset.len()).unwrap());
+                    break;
+                }
+                assets::Status::Failed { failure, .. } => panic!("unexpected mesh header failure: {failure:?}"),
+                _ => {
+                    demand.changed().await;
+                }
+            }
+        }
+        cancel.send(()).unwrap();
+        service.stop().await;
+        assert_eq!(peer.finish().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn concurrent_oversized_mesh_responses_use_each_reserved_limit() {
+        let body = vec![0; assets::mesh::MAX_MESH_HEADER_BYTES + 1];
+        let peer = Peer::new_parallel(std::time::Duration::ZERO, move |request, base| {
+            if String::from_utf8_lossy(request).starts_with("POST /seed") {
+                (200, Vec::new(), grants(base))
+            } else {
+                let request = String::from_utf8_lossy(request).to_ascii_lowercase();
+                assert!(request.contains("range: bytes=0-4095"));
+                (200, Vec::new(), body.clone())
+            }
+        });
+        let transport = CapabilityTransport::new(Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let budget = Budget::default();
+        let mut store = Store::new(budget.clone());
+        let route = store.register_route().unwrap();
+        let now = Instant::now();
+        let demands = (0..assets::MAX_ASSET_ROUTES.saturating_sub(1))
+            .map(|index| {
+                let id = AssetId::new(Uuid::from_u128(100 + u128::try_from(index).unwrap()));
+                store.request(route, Request::MeshHeader(id), Priority::Visible, now).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut jobs = Vec::new();
+        while let Some(job) = store.next_job(now) {
+            let LoadJob::Fetch(fetch) = job else { panic!("uncached mesh headers use network fetches") };
+            assert_eq!(fetch.response_limit(), assets::mesh::MAX_MESH_HEADER_BYTES);
+            jobs.push(fetch);
+        }
+        assert_eq!(jobs.len(), 32);
+        let reserved_bytes = jobs.iter().map(assets::FetchJob::response_limit).sum::<usize>();
+        assert_eq!(budget.stats().charged_bytes, reserved_bytes);
+        assert!(reserved_bytes <= assets::ASSET_WORK_BYTES);
+        for response in join_all(jobs.iter().map(|job| transport.fetch(job))).await {
+            assert_matches!(response, Err(Failure::FullAssetRequired));
+        }
+        assert_eq!(budget.stats().charged_bytes, reserved_bytes);
+        drop((jobs, demands));
+        store.close();
+        drop(store);
+        let (requests, response_bytes) = peer.finish_stats();
+        assert_eq!(requests.len(), 33);
+        assert!(response_bytes <= u64::try_from(33 * (assets::mesh::MAX_MESH_HEADER_BYTES + 1)).unwrap());
+    }
+
+    #[tokio::test]
+    async fn oversized_partial_mesh_response_fails_at_the_range_limit() {
+        let id = resource(Kind::Mesh).id;
+        let block = mesh_fixture_lod_request(id);
+        let asset_length = block.asset_length();
+        let range = block.range();
+        let peer = Peer::new_with_headers(2, move |index, request, base| match index {
+            0 => (200, Vec::new(), grants(base)),
+            1 => {
+                let request = String::from_utf8_lossy(request).to_ascii_lowercase();
+                assert!(request.contains(&format!("range: bytes={}-{}", range.start, range.end - 1)));
+                (206, vec![("Content-Range".into(), format!("bytes {}-{}/{asset_length}", range.start, range.end - 1))], vec![0; 2])
+            }
+            _ => unreachable!(),
+        });
+        let transport = CapabilityTransport::new(Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let mut store = Store::new(Budget::default());
+        let route = store.register_route().unwrap();
+        let demand = store.request(route, Request::MeshLod(block), Priority::Visible, Instant::now()).unwrap();
+        let LoadJob::Fetch(fetch) = store.next_job(Instant::now()).unwrap() else { panic!("mesh LOD starts with a fetch") };
+        assert_eq!(fetch.response_limit(), 1);
+        assert_matches!(transport.fetch(&fetch).await, Err(Failure::TooLarge));
+        assert_eq!(peer.finish().len(), 2);
+        drop(demand);
+        store.close();
     }
 
     #[tokio::test]

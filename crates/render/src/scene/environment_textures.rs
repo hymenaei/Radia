@@ -102,6 +102,7 @@ impl EnvironmentTextures {
                 region,
                 request: Request::Texture { id, size: TextureSize::new(TEXTURE_SIZE) },
                 priority: Priority::Background,
+                importance: 0,
             }));
         }
     }
@@ -256,7 +257,7 @@ mod tests {
                     | Request::MeshHeader(_)
                     | Request::MeshLod(_) => None,
                 },
-                AssetChange::Release(_) => None,
+                AssetChange::Release(_) | AssetChange::UpdateImportance { .. } => None,
             })
             .collect()
     }

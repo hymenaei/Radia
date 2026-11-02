@@ -291,7 +291,7 @@ fn new_item(
         replacement: None,
         transform,
         pickable: true,
-        shading: ShadingMode::Studio,
+        shading: ShadingMode::Surface,
         terrain_textures: None,
         terrain_composition: None,
         surface_kind: None,

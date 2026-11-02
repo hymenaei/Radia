@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assets::TextureId;
+use assets::{TextureHandle, TextureId};
 use math::{Vec4, motion::RegionBounds};
 use uuid::Uuid;
 use wgpu::{

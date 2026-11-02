@@ -44,7 +44,11 @@ impl SceneChanges {
                 Change::Retire(region) => changes.retired.push(*region),
                 Change::Surface(surface) => changes.surfaces.push((surface.region, surface.kind)),
                 Change::RemoveSurface(region, kind) => changes.surfaces.push((*region, *kind)),
-                Change::ViewerEnvironment(_) | Change::Environment(..) | Change::Water(..) | Change::Patch(..) => {}
+                Change::ViewerEnvironment(_)
+                | Change::Environment(..)
+                | Change::EnvironmentTexture(..)
+                | Change::Water(..)
+                | Change::Patch(..) => {}
             }
         }
         changes

@@ -19,7 +19,7 @@ use crate::{
         items::{CachedFace, ItemIndex},
     },
     material::FaceParams,
-    pipeline::{COLOR, TexturePair, blend_keys},
+    pipeline::{TexturePair, blend_keys},
     scene::{AgentPose, Camera, Object, Placement, SceneView, motion, texture_animation},
     texture::Textures,
 };
@@ -708,11 +708,7 @@ fn current_params(source: Option<&Object>, shading: ShadingMode, face: &CachedFa
             params.color = [0.18, 0.23, 0.13, 1.0];
             params.params[0] = 1.0;
         }
-        ShadingMode::RegionWater => {
-            params.color = COLOR.to_array();
-            params.params[0] = 1.0;
-        }
-        ShadingMode::Studio => {}
+        ShadingMode::RegionWater | ShadingMode::Surface => {}
     }
     params
 }
@@ -934,7 +930,7 @@ mod tests {
                 appearance: object.detail().surface_appearance.as_ref(),
                 scale: transform.scale,
                 invert_normals: false,
-                shading: ShadingMode::Studio,
+                shading: ShadingMode::Surface,
                 terrain: None,
                 terrain_textures: None,
             },

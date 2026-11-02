@@ -58,7 +58,7 @@ pub(super) fn is_visible(
     let radius = ((bounds.max.as_dvec3() - bounds.min.as_dvec3()) * 0.5 * scale.as_dvec3()).length();
     if !offset.is_finite()
         || !radius.is_finite()
-        || (shading == ShadingMode::Studio && offset.length() - radius > camera.draw_distance())
+        || (shading == ShadingMode::Surface && offset.length() - radius > camera.draw_distance())
         || offset.abs().max_element() + radius > f64::from(f32::MAX) / 16.0
     {
         return false;
@@ -132,7 +132,7 @@ mod tests {
             assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), shading, close, &frustum));
             assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), shading, far, &frustum));
         }
-        assert!(!is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Studio, close, &frustum));
-        assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Studio, far, &frustum));
+        assert!(!is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Surface, close, &frustum));
+        assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Surface, far, &frustum));
     }
 }

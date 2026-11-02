@@ -9,7 +9,7 @@ use super::instance::parameter_part;
 use super::{ShadingMode, TRANSFORM_BYTES};
 use crate::{
     material::{FaceMaterial, FaceParams},
-    pipeline::{COLOR, Pipeline},
+    pipeline::Pipeline,
     scene::{Camera, Object, SharedMesh, SurfaceKind},
 };
 
@@ -178,11 +178,7 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
             ShadingMode::Terrain => {
                 params.color = [0.18, 0.23, 0.13, 1.0];
             }
-            ShadingMode::RegionWater => {
-                params.color = COLOR.to_array();
-                params.params[0] = 1.0;
-            }
-            ShadingMode::Studio => {}
+            ShadingMode::RegionWater | ShadingMode::Surface => {}
         }
         if params.blend && params.color[3] <= 0.0 {
             continue;
@@ -191,7 +187,7 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
         let pipeline = match shading {
             ShadingMode::Terrain => Pipeline::Terrain,
             ShadingMode::RegionWater => Pipeline::RegionWater,
-            ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, scale, invert_normals),
+            ShadingMode::Surface => surface_pipeline(params.blend, params.double_sided, scale, invert_normals),
         };
         let key = DrawKey { mesh: mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture: params.texture, terrain };
         let Some(group) = draw_list.intern_face(key, texture.as_ref(), terrain_textures) else { continue };
@@ -288,7 +284,7 @@ mod tests {
                     appearance: object.detail().surface_appearance.as_ref(),
                     scale,
                     invert_normals: invert,
-                    shading: ShadingMode::Studio,
+                    shading: ShadingMode::Surface,
                     terrain: None,
                     terrain_textures: None,
                 },

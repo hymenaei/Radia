@@ -66,7 +66,7 @@ impl PickQuery {
         faces: impl Iterator<Item = (&'a Range<u32>, bool)>,
     ) -> Result<(), PickError> {
         let mesh = shared.mesh();
-        let max_distance = if shading == ShadingMode::Studio { self.camera.draw_distance() as f32 } else { f32::INFINITY };
+        let max_distance = if shading == ShadingMode::Surface { self.camera.draw_distance() as f32 } else { f32::INFINITY };
         let limit = self.closest.min(max_distance);
         let inverse = rotation.conjugate();
         let origin = inverse * (self.camera.position() - position).as_vec3() / scale;
@@ -129,7 +129,7 @@ mod tests {
         let (triangle, indices) = first_triangle(&mesh);
         let (front_camera, center, front_ray) = camera_for_triangle(triangle);
         assert_hit_near(
-            &[(mesh.clone(), DVec3::ZERO, ShadingMode::Studio, vec![(indices.clone(), false)])],
+            &[(mesh.clone(), DVec3::ZERO, ShadingMode::Surface, vec![(indices.clone(), false)])],
             front_camera,
             front_ray,
             center,
@@ -138,10 +138,10 @@ mod tests {
         let back_camera = Camera::new(center + front_ray * 5.0, -front_ray.as_vec3(), 1.0, [128, 128]).unwrap();
         let back_ray = back_camera.direction().as_dvec3();
         assert_eq!(
-            pick_items(&[(mesh.clone(), DVec3::ZERO, ShadingMode::Studio, vec![(indices.clone(), false)])], back_camera, back_ray),
+            pick_items(&[(mesh.clone(), DVec3::ZERO, ShadingMode::Surface, vec![(indices.clone(), false)])], back_camera, back_ray),
             Ok(None)
         );
-        assert_hit_near(&[(mesh, DVec3::ZERO, ShadingMode::Studio, vec![(indices, true)])], back_camera, back_ray, center);
+        assert_hit_near(&[(mesh, DVec3::ZERO, ShadingMode::Surface, vec![(indices, true)])], back_camera, back_ray, center);
     }
 
     #[test]
@@ -151,8 +151,8 @@ mod tests {
         let (camera, center, ray) = camera_for_triangle(triangle);
         let position_at = |distance| camera.position() + ray * distance - center;
         let items = [
-            (mesh.clone(), position_at(1.0), ShadingMode::Studio, vec![(indices.clone(), false)]),
-            (mesh, position_at(2.0), ShadingMode::Studio, vec![(indices, false)]),
+            (mesh.clone(), position_at(1.0), ShadingMode::Surface, vec![(indices.clone(), false)]),
+            (mesh, position_at(2.0), ShadingMode::Surface, vec![(indices, false)]),
         ];
         assert_hit_near(&items, camera, ray, camera.position() + ray);
     }
@@ -164,8 +164,8 @@ mod tests {
         let (camera, center, ray) = camera_for_triangle(triangle);
         let position_at = |distance| camera.position() + ray * distance - center;
         let items = [
-            (mesh.clone(), position_at(0.01), ShadingMode::Studio, vec![(indices.clone(), false)]),
-            (mesh, position_at(0.1), ShadingMode::Studio, vec![(indices, false)]),
+            (mesh.clone(), position_at(0.01), ShadingMode::Surface, vec![(indices.clone(), false)]),
+            (mesh, position_at(0.1), ShadingMode::Surface, vec![(indices, false)]),
         ];
         assert_hit_near(&items, camera, ray, camera.position() + ray * 0.1);
     }
@@ -177,7 +177,7 @@ mod tests {
         let (camera, center, ray) = camera_for_triangle(triangle);
         let camera = camera.with_quality(32.0, 1.0).unwrap();
         let position = camera.position() + ray * 40.0 - center;
-        let object = [(mesh.clone(), position, ShadingMode::Studio, vec![(indices.clone(), true)])];
+        let object = [(mesh.clone(), position, ShadingMode::Surface, vec![(indices.clone(), true)])];
         let terrain = [(mesh, position, ShadingMode::Terrain, vec![(indices, true)])];
         assert_eq!(pick_items(&object, camera, ray), Ok(None));
         assert_hit_near(&terrain, camera, ray, camera.position() + ray * 40.0);
@@ -190,12 +190,12 @@ mod tests {
         let (camera, _, ray) = camera_for_triangle(triangle);
         let repeated = (0..=MAX_PICK_TRIANGLES).map(|_| (&indices, false));
         let mut query = PickQuery::new(camera, ray);
-        query.visit_item(&mesh, DVec3::new(0.0, 100.0, 0.0), Quat::IDENTITY, Vec3::ONE, false, ShadingMode::Studio, repeated).unwrap();
+        query.visit_item(&mesh, DVec3::new(0.0, 100.0, 0.0), Quat::IDENTITY, Vec3::ONE, false, ShadingMode::Surface, repeated).unwrap();
         assert_eq!(query.result(), None);
         let repeated = (0..=MAX_PICK_TRIANGLES).map(|_| (&indices, false));
         let mut query = PickQuery::new(camera, ray);
         assert_eq!(
-            query.visit_item(&mesh, DVec3::ZERO, Quat::IDENTITY, Vec3::ONE, false, ShadingMode::Studio, repeated),
+            query.visit_item(&mesh, DVec3::ZERO, Quat::IDENTITY, Vec3::ONE, false, ShadingMode::Surface, repeated),
             Err(PickError::TriangleLimitExceeded)
         );
     }

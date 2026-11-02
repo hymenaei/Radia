@@ -107,11 +107,11 @@ fn render_frame(
     };
     let mut encoder = device.create_command_encoder(&Default::default());
     let admission = geometry.admit().expect("frame is admitted");
-    geometry.prepare(device, &mut encoder, view, camera, SIZE, frame);
+    geometry.prepare_with_environment(device, &mut encoder, view, None, camera, SIZE, frame);
     while let Some(job) = geometry.next_texture_job() {
         geometry.complete_texture(job.run(CompressionQuality::Fast));
     }
-    geometry.prepare(device, &mut encoder, view, camera, SIZE, frame);
+    geometry.prepare_with_environment(device, &mut encoder, view, None, camera, SIZE, frame);
     let output = device.create_texture(&TextureDescriptor {
         label: Some("Water distance comparison"),
         size: Extent3d { width: SIZE[0], height: SIZE[1], depth_or_array_layers: 1 },

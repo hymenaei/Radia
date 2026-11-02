@@ -4,7 +4,7 @@ pub(super) use std::{
     time::{Duration, Instant},
 };
 
-pub(super) use assets::{Priority, Request, mesh::Mesh};
+pub(super) use assets::{FetchResponse, Priority, Request, mesh::Mesh};
 pub(super) use math::{DVec3, Quat, Vec3};
 pub(super) use proptest::prelude::{ProptestConfig, prop, prop_assert_eq, proptest};
 pub(super) use render::scene::{
@@ -108,6 +108,7 @@ pub(super) struct AssetWork {
     pub(super) builds: usize,
     pub(super) requested: Vec<AssetRequest>,
     pub(super) released: Vec<AssetTicket>,
+    pub(super) importance_updates: Vec<(AssetTicket, u16)>,
 }
 
 pub(super) fn settle_materials(scene: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> AssetWork {
@@ -116,6 +117,9 @@ pub(super) fn settle_materials(scene: &mut Reconciler, view: &mut SceneView, wor
         match scene.poll(*now) {
             ReconcileStep::Asset(AssetChange::Request(request)) => work.requested.push(request),
             ReconcileStep::Asset(AssetChange::Release(ticket)) => work.released.push(ticket),
+            ReconcileStep::Asset(AssetChange::UpdateImportance { ticket, importance }) => {
+                work.importance_updates.push((ticket, importance))
+            }
             ReconcileStep::Read(job) => {
                 work.reads += 1;
                 let result = reply(world, &job);
@@ -164,7 +168,17 @@ pub(super) fn prepared_asset(resource: Request, bytes: Vec<u8>) -> assets::Statu
     let route = store.register_route().unwrap();
     let demand = store.request(route, resource, Priority::Visible, now).unwrap();
     let assets::LoadJob::Fetch(job) = store.next_job(now).unwrap() else { panic!("fresh asset request unexpectedly used cached source") };
-    let completion = match job.complete(Ok(bytes)) {
+    let response = match resource {
+        Request::MeshLod(block) => {
+            let range = block.range();
+            let start = usize::try_from(range.start).unwrap();
+            let end = usize::try_from(range.end).unwrap();
+            let partial = bytes.get(start..end).expect("mesh fixture contains the requested LOD block").to_vec();
+            job.complete_response(Ok(FetchResponse::Partial { bytes: partial, range, total_length: Some(block.asset_length()) }))
+        }
+        _ => job.complete(Ok(bytes)),
+    };
+    let completion = match response {
         Ok(input) => store.start_decode(input).expect("decode admission").run(),
         Err(failure) => failure.into(),
     };

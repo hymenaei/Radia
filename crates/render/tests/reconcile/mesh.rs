@@ -68,16 +68,19 @@ fn mesh_importance_survives_small_motion() {
     let small_move = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(small_move.requested.is_empty());
     assert!(small_move.released.is_empty());
+    assert!(small_move.importance_updates.is_empty());
 
     scene.set_camera(Camera::new(DVec3::X * 3.0, Vec3::X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap());
     let larger_move = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(larger_move.requested.is_empty(), "an importance change retains its original request");
+    assert!(larger_move.released.is_empty(), "an importance change keeps the in-flight ticket alive");
     let refreshed = larger_move
-        .requested
+        .importance_updates
         .iter()
-        .find(|request| matches!(request.request, Request::MeshHeader(id) if id == near_asset))
-        .expect("a changed importance bucket refreshes the near mesh request");
-    assert!(refreshed.importance > near_request.importance);
-    assert!(larger_move.released.contains(&near_request.ticket));
+        .find(|(ticket, _)| *ticket == near_request.ticket)
+        .map(|(_, importance)| importance)
+        .expect("a changed importance bucket updates the near mesh request in place");
+    assert!(*refreshed > near_request.importance);
 }
 
 #[test]
@@ -125,6 +128,103 @@ fn unpublished_mesh_slots_bound_and_release() {
         assert_eq!(released.contains(&ticket), id != textures[0], "unexpected release state for {id:?}");
     }
     assert!(view.objects().next().is_some_and(|object| object.mesh().is_some()));
+}
+
+#[test]
+fn face_budget_retries_overflow_meshes_and_prims_after_shared_mesh_publication() {
+    const ADMITTED_MESHES: u32 = 4096;
+    let shared_asset = AssetId::new(Uuid::from_u128(50_000));
+    let rejected_asset = AssetId::new(Uuid::from_u128(50_001));
+    let rejected_texture = AssetId::new(Uuid::from_u128(50_002));
+    let mut world = super::support::world_with_capacity(8192);
+    let overrides = (1..8).map(|slot| (slot, FaceAppearance { color: [slot, 30, 60, 255], ..FaceAppearance::default() })).collect();
+    let eight_faces = SurfaceAppearance::new(FaceAppearance::default(), overrides).unwrap();
+    for id in 1..=ADMITTED_MESHES {
+        add_mesh(&mut world, id, shared_asset, 10.0);
+        let mut patch = world::ObjectPatch::new(source(1, u64::from(id) * 4 + 2), NonZeroU32::new(id).unwrap());
+        patch.surface_appearance = Some(eight_faces.clone());
+        let _ = world.patch_object(patch).unwrap();
+    }
+    let prim_id = ADMITTED_MESHES + 1;
+    add(&mut world, u128::from(prim_id), prim_id, ParentUpdate::Root, 10.0, u64::from(prim_id) * 4);
+    let mut prim_appearance = world::ObjectPatch::new(source(1, u64::from(prim_id) * 4 + 1), NonZeroU32::new(prim_id).unwrap());
+    prim_appearance.surface_appearance =
+        Some(SurfaceAppearance::new(FaceAppearance { texture: Some(rejected_texture), ..FaceAppearance::default() }, Vec::new()).unwrap());
+    let _ = world.patch_object(prim_appearance).unwrap();
+    let mesh_id = prim_id + 1;
+    add_mesh(&mut world, mesh_id, rejected_asset, 10.0);
+    let mut mesh_appearance = world::ObjectPatch::new(source(1, u64::from(mesh_id) * 4 + 2), NonZeroU32::new(mesh_id).unwrap());
+    mesh_appearance.surface_appearance = Some(eight_faces);
+    let _ = world.patch_object(mesh_appearance).unwrap();
+
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(high_camera());
+    let initial = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let world_revision = world.revision();
+    assert_eq!(view.object_count(), usize::try_from(mesh_id).unwrap());
+    assert!(initial.requested.iter().any(|request| matches!(request.request, Request::MeshHeader(id) if id == shared_asset)));
+    let rejected_header = initial
+        .requested
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshHeader(id) if id == rejected_asset))
+        .expect("the rejected mesh starts provisional header demand before the face check");
+    assert!(initial.released.contains(&rejected_header.ticket));
+    assert!(!initial.requested.iter().any(|request| matches!(request.request, Request::Texture { id, .. } if id == rejected_texture)));
+
+    let shared_bytes = test_support::mesh::asset_with_lod_faces(&[(2, 1)]);
+    let header = request_header(&initial.requested);
+    scene.complete_asset(header.ticket, prepared_asset(header.request, shared_bytes.clone()));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let medium = request_lod(&work.requested, assets::mesh::MeshLod::Medium);
+    scene.complete_asset(medium.ticket, prepared_asset(medium.request, shared_bytes.clone()));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let requeued_texture = work
+        .requested
+        .iter()
+        .find(|request| matches!(request.request, Request::Texture { id, .. } if id == rejected_texture))
+        .unwrap_or_else(|| {
+            panic!(
+                "the rejected prim receives its material demand after mesh slots shrink; requests: {:?}",
+                work.requested.iter().map(|request| request.request).collect::<Vec<_>>()
+            )
+        });
+    let requeued_header = work
+        .requested
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshHeader(id) if id == rejected_asset))
+        .expect("the rejected mesh receives its header demand after mesh slots shrink");
+    assert!(!work.released.contains(&requeued_texture.ticket));
+    assert!(!work.released.contains(&requeued_header.ticket));
+
+    scene.complete_asset(requeued_texture.ticket, prepared_asset(requeued_texture.request, test_support::texture::GRAY_4096_J2C.to_vec()));
+    scene.complete_asset(requeued_header.ticket, prepared_asset(requeued_header.request, shared_bytes.clone()));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let rejected_lod = request_lod(&work.requested, assets::mesh::MeshLod::Medium);
+    assert_eq!(rejected_lod.request.resource().id, rejected_asset);
+    scene.complete_asset(rejected_lod.ticket, prepared_asset(rejected_lod.request, shared_bytes));
+    let _ = settle_materials(&mut scene, &mut view, &world, &mut now);
+
+    assert_eq!(world.revision(), world_revision);
+    let prim = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(u128::from(prim_id))).expect("rejected prim");
+    assert!(prim.materials().is_some());
+    assert!(prim.materials().unwrap().iter().any(|material| material.base_color_texture.is_some()));
+    let mesh = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(u128::from(mesh_id))).expect("rejected mesh");
+    assert!(mesh.materials().is_some());
+    assert_eq!(asset_lod(mesh), Some((rejected_asset, assets::mesh::MeshLod::Medium)));
+    assert_eq!(view.object_count(), usize::try_from(mesh_id).unwrap());
+
+    for id in 1..=ADMITTED_MESHES {
+        let order = 20_000 + u64::from(id);
+        let _ = world.remove_object(source(1, order), NonZeroU32::new(id).unwrap()).unwrap();
+    }
+    scene.notify_world_change();
+    let _ = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let reacquired_id = mesh_id + 1;
+    add_mesh(&mut world, reacquired_id, shared_asset, 10.0);
+    scene.notify_world_change();
+    let reacquired = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(reacquired.requested.iter().any(|request| matches!(request.request, Request::MeshHeader(id) if id == shared_asset)));
 }
 
 #[test]
@@ -700,4 +800,14 @@ fn thousands_of_mesh_objects_share_bounded_asset_and_scene_state() {
     assert_eq!(mesh_ids.len(), 1, "thousands of objects reuse one decoded LOD");
     assert!(view.objects().all(|object| asset_lod(object) == Some((asset, assets::mesh::MeshLod::Lowest))));
     assert!(budget.charged_bytes() <= render::scene::MEMORY_BYTES);
+
+    scene.set_camera(Camera::new(DVec3::new(0.01, 0.0, 0.0), Vec3::X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap());
+    assert!(settle_materials(&mut scene, &mut view, &world, &mut now).requested.is_empty());
+    for id in 1..=2000 {
+        let _ = world.remove_object(source(1, u64::from(id) * 4 + 2), NonZeroU32::new(id).unwrap()).unwrap();
+    }
+    scene.notify_world_change();
+    let teardown = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(teardown.released.contains(&request_lod(&work.requested, assets::mesh::MeshLod::High).ticket));
+    assert_eq!(view.object_count(), 0);
 }

@@ -18,6 +18,7 @@ pub(super) struct MeshAssets {
 struct MeshRecord {
     header: Option<MeshHeaderAsset>,
     lods: [LodContent; 4],
+    lod_users: [usize; 4],
     users: HashMap<Entity, MeshUser>,
 }
 
@@ -133,17 +134,26 @@ impl MeshAssets {
 
     pub(super) fn set_user_lods(&mut self, asset: AssetId, entity: Entity, requested: [Option<MeshLod>; 2], published: Option<MeshLod>) {
         let Some(record) = self.records.get_mut(&asset) else { return };
-        if let Some(user) = record.users.get_mut(&entity) {
+        let changed = if let Some(user) = record.users.get_mut(&entity) {
+            let previous = retained_lods(user);
             user.requested = requested;
             user.published = published;
+            Some((previous, retained_lods(user)))
+        } else {
+            None
+        };
+        if let Some((previous, next)) = changed {
+            update_lod_users(record, previous, next);
         }
-        retain_lods(record);
+        release_unretained_lods(record);
     }
 
     pub(super) fn remove_user(&mut self, asset: AssetId, entity: Entity) {
         let empty = self.records.get_mut(&asset).is_some_and(|record| {
-            record.users.remove(&entity);
-            retain_lods(record);
+            if let Some(user) = record.users.remove(&entity) {
+                update_lod_users(record, retained_lods(&user), [false; 4]);
+            }
+            release_unretained_lods(record);
             record.users.is_empty()
         });
         if empty {
@@ -283,13 +293,42 @@ impl MeshAssets {
     }
 }
 
-fn retain_lods(record: &mut MeshRecord) {
-    for lod in [MeshLod::Lowest, MeshLod::Low, MeshLod::Medium, MeshLod::High] {
-        let retained = record.users.values().any(|user| user.published == Some(lod) || user.requested.contains(&Some(lod)));
-        if retained {
+fn retained_lods(user: &MeshUser) -> [bool; 4] {
+    let mut retained = [false; 4];
+    for lod in user.requested.into_iter().flatten().chain(user.published) {
+        if let Some(value) = retained.get_mut(lod.index()) {
+            *value = true;
+        }
+    }
+    retained
+}
+
+fn update_lod_users(record: &mut MeshRecord, previous: [bool; 4], next: [bool; 4]) {
+    for index in 0..record.lod_users.len() {
+        match (previous.get(index), next.get(index)) {
+            (Some(true), Some(false)) => {
+                if let Some(count) = record.lod_users.get_mut(index)
+                    && let Some(next) = count.checked_sub(1)
+                {
+                    *count = next;
+                }
+            }
+            (Some(false), Some(true)) => {
+                if let Some(count) = record.lod_users.get_mut(index) {
+                    *count = count.saturating_add(1);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn release_unretained_lods(record: &mut MeshRecord) {
+    for (index, count) in record.lod_users.iter().enumerate() {
+        if *count > 0 {
             continue;
         }
-        if let Some(state @ (LodContent::PendingAsset(_) | LodContent::Ready(_))) = record.lods.get_mut(lod.index()) {
+        if let Some(state @ (LodContent::PendingAsset(_) | LodContent::Ready(_))) = record.lods.get_mut(index) {
             *state = LodContent::Pending;
         }
     }

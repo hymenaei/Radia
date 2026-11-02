@@ -45,9 +45,11 @@ pub struct AssetRequest {
     pub importance: u16,
 }
 
+#[derive(Debug)]
 pub enum AssetChange {
     Request(AssetRequest),
     Release(AssetTicket),
+    UpdateImportance { ticket: AssetTicket, importance: u16 },
 }
 
 #[derive(Clone)]
@@ -109,6 +111,12 @@ struct ObjectDemand {
     asset: Option<AssetId>,
 }
 
+struct RejectedObject {
+    id: Uuid,
+    entity: Entity,
+    faces: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(in crate::scene) enum AssetUser {
     Object(Entity),
@@ -135,6 +143,9 @@ pub(in crate::scene) struct AssetDemand {
     meshes: MeshAssets,
     tickets: HashMap<AssetTicket, AssetKey>,
     targets: HashMap<Entity, ObjectDemand>,
+    rejected: VecDeque<RejectedObject>,
+    rejected_entities: HashSet<Entity>,
+    rejected_scan_remaining: usize,
     terrain_targets: HashMap<Region, TerrainDemand>,
     dirty_terrain: BTreeSet<Region>,
     terrain_changes: BTreeSet<Region>,
@@ -158,6 +169,9 @@ impl AssetDemand {
             meshes: MeshAssets::default(),
             tickets: HashMap::new(),
             targets: HashMap::new(),
+            rejected: VecDeque::new(),
+            rejected_entities: HashSet::new(),
+            rejected_scan_remaining: 0,
             terrain_targets: HashMap::new(),
             dirty_terrain: BTreeSet::new(),
             terrain_changes: BTreeSet::new(),
@@ -210,7 +224,12 @@ impl AssetDemand {
 
     pub(in crate::scene) fn has_work(&self) -> bool {
         self.camera.is_some()
-            && (self.scan || self.rescan || !self.dirty.is_empty() || !self.dirty_terrain.is_empty() || self.terrain_rescan)
+            && (self.scan
+                || self.rescan
+                || !self.dirty.is_empty()
+                || !self.dirty_terrain.is_empty()
+                || self.terrain_rescan
+                || self.rejected_scan_remaining > 0)
     }
 
     pub(in crate::scene) fn retry_admission(&mut self) -> bool {
@@ -287,6 +306,7 @@ impl AssetDemand {
         if let Some(target) = self.targets.remove(&entity) {
             self.rescan = true;
             self.faces -= target.faces;
+            self.mark_rejected_for_retry();
             if let Some(asset) = target.asset {
                 self.meshes.remove_user(asset, entity);
             }
@@ -322,15 +342,41 @@ impl AssetDemand {
             entry.users.remove(&user);
         }
     }
+
+    fn queue_rejected(&mut self, id: Uuid, entity: Entity, faces: usize) {
+        if self.rejected_entities.contains(&entity) || self.rejected.len() >= MAX_OBJECTS {
+            return;
+        }
+        let rejected = RejectedObject { id, entity, faces };
+        self.rejected_entities.insert(entity);
+        self.rejected.push_back(rejected);
+        if self.can_admit_rejected(self.rejected.back().expect("rejected object was inserted")) {
+            self.rejected_scan_remaining = self.rejected.len();
+        }
+    }
+
+    fn can_admit_rejected(&self, rejected: &RejectedObject) -> bool {
+        self.targets.len() < MAX_TARGETS && self.faces.saturating_add(rejected.faces) <= MAX_FACES
+    }
+
+    fn mark_rejected_for_retry(&mut self) {
+        self.rejected_scan_remaining = self.rejected.len();
+    }
+
     fn refresh(&mut self, key: AssetKey) {
         let Some(entry) = self.entries.get_mut(&key) else { return };
         let Some(size) = entry.users.values().map(|demand| demand.size).max() else { return };
         let priority = entry.users.values().map(|demand| demand.priority).max().unwrap_or(Priority::Background);
         let importance = entry.users.values().map(|demand| demand.importance).max().unwrap_or_default();
-        if (entry.size == size || key.unit != AssetUnit::Whole || key.resource.kind != Kind::Texture)
-            && entry.priority == priority
-            && entry.importance == importance
-        {
+        let size_changed = key.unit == AssetUnit::Whole && key.resource.kind == Kind::Texture && entry.size != size;
+        let priority_changed = entry.priority != priority;
+        let importance_changed = entry.importance != importance;
+        if !size_changed && !priority_changed && !importance_changed {
+            return;
+        }
+        if !size_changed && !priority_changed && importance_changed {
+            entry.importance = importance;
+            self.events.push_back(AssetChange::UpdateImportance { ticket: entry.ticket, importance });
             return;
         }
         if self.tickets.remove(&entry.ticket).is_some() {
@@ -418,6 +464,9 @@ impl AssetDemand {
         self.meshes.clear();
         self.tickets.clear();
         self.targets.clear();
+        self.rejected.clear();
+        self.rejected_entities.clear();
+        self.rejected_scan_remaining = 0;
         self.terrain_targets.clear();
         self.dirty_terrain.clear();
         self.terrain_changes.clear();
@@ -451,6 +500,16 @@ impl AssetDemand {
                 self.scan = false;
                 self.dirty.clear();
                 return Vec::new();
+            }
+        }
+        for _ in 0..self.rejected_scan_remaining.min(128) {
+            let Some(rejected) = self.rejected.pop_front() else { break };
+            self.rejected_scan_remaining = self.rejected_scan_remaining.saturating_sub(1);
+            if self.can_admit_rejected(&rejected) {
+                self.rejected_entities.remove(&rejected.entity);
+                self.dirty.insert(rejected.id, rejected.entity);
+            } else {
+                self.rejected.push_back(rejected);
             }
         }
         let mut changes = Vec::new();
@@ -543,6 +602,7 @@ impl AssetDemand {
                 self.meshes.remove_user(asset, entity);
             }
             self.remove(entity);
+            self.queue_rejected(object.detail().summary.id, entity, count);
             return (object.materials().is_some() || object.mesh().is_some()).then(|| MaterialChange {
                 source: object.clone(),
                 materials: None,
@@ -555,6 +615,9 @@ impl AssetDemand {
         }
         let old = self.targets.remove(&entity);
         self.faces = self.faces.saturating_sub(previous_faces).saturating_add(count);
+        if count < previous_faces {
+            self.mark_rejected_for_retry();
+        }
         if let Some(old) = old {
             for key in old.keys.difference(&keys) {
                 self.release(AssetUser::Object(entity), *key);

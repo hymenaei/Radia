@@ -1,6 +1,6 @@
 use std::{f64::consts::PI, num::NonZeroU32, time::Instant};
 
-use assets::{Budget as AssetBudget, Content, LoadJob, Priority, Request, Status as AssetStatus, Store, TextureSize};
+use assets::{Budget as AssetBudget, Content, FetchResponse, LoadJob, Priority, Request, Status as AssetStatus, Store, TextureSize};
 use math::{DVec3, Quat, Vec3};
 use render::scene::{
     AssetChange, AssetRequest, AssetTicket, Budget, Camera, Detail, DrawnMeshKey, MeshJob, ReadFailure, ReadJob, ReadQuery, ReadReply,
@@ -311,7 +311,7 @@ pub fn first_full_view_batch(world: &World, expected_objects: usize) {
                 reconciler.complete_mesh(job.run());
             }
             ReconcileStep::Asset(AssetChange::Request(_)) => asset_requests += 1,
-            ReconcileStep::Asset(AssetChange::Release(_)) => {}
+            ReconcileStep::Asset(AssetChange::Release(_) | AssetChange::UpdateImportance { .. }) => {}
             ReconcileStep::Continue => {}
             ReconcileStep::Wait(until) => now = until,
             ReconcileStep::Idle if view.object_count() == expected_objects => {
@@ -609,6 +609,7 @@ fn mesh_asset_work(reconciler: &mut Reconciler, view: &mut SceneView, world: &Wo
         match reconciler.poll(*now) {
             ReconcileStep::Asset(AssetChange::Request(request)) => work.requested.push(request),
             ReconcileStep::Asset(AssetChange::Release(ticket)) => work.released.push(ticket),
+            ReconcileStep::Asset(AssetChange::UpdateImportance { .. }) => {}
             ReconcileStep::Read(job) => {
                 let reply = reply(world, &job);
                 reconciler.complete_read(job, reply, *now);
@@ -632,7 +633,17 @@ fn prepared_asset(request: Request, bytes: &[u8]) -> assets::Status {
     let LoadJob::Fetch(fetch) = store.next_job(now).expect("mesh benchmark asset fetch") else {
         panic!("mesh benchmark asset must be absent from the new store");
     };
-    let input = fetch.complete(Ok(bytes.to_vec())).expect("mesh benchmark asset bytes");
+    let response = match request {
+        Request::MeshLod(block) => {
+            let range = block.range();
+            let start = usize::try_from(range.start).expect("mesh benchmark LOD offset fits memory");
+            let end = usize::try_from(range.end).expect("mesh benchmark LOD end fits memory");
+            let bytes = bytes.get(start..end).expect("mesh benchmark asset contains the requested LOD").to_vec();
+            fetch.complete_response(Ok(FetchResponse::Partial { bytes, range, total_length: Some(block.asset_length()) }))
+        }
+        _ => fetch.complete(Ok(bytes.to_vec())),
+    };
+    let input = response.expect("mesh benchmark asset bytes");
     let completion = store.start_decode(input).expect("mesh benchmark decode admission").run();
     store.complete(completion, now);
     demand.status()

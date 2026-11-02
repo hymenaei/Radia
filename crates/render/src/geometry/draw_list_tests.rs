@@ -212,7 +212,7 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
                     item.position.x += f64::from(*delta_x);
                     item.position.y += f64::from(*delta_y);
                     item.rotation = Quat::from_rotation_y(f32::from(*delta_x) * 0.025);
-                    item.transform = instance_base(item.position, item.rotation, item.scale, origin);
+                    item.transform = instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin);
                     true
                 } else {
                     false
@@ -230,7 +230,7 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
                 if next_origin != origin {
                     origin = next_origin;
                     for (_, item) in items.items.iter_mut() {
-                        item.transform = instance_base(item.position, item.rotation, item.scale, origin);
+                        item.transform = instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin);
                     }
                     layout = true;
                 }
@@ -240,7 +240,7 @@ fn verify_operations(operations: &[(u8, u8, u8, i8, i8)]) {
                 camera_changed = true;
                 origin = super::super::instance::scene_origin(camera(camera_x).position());
                 for (_, item) in items.items.iter_mut() {
-                    item.transform = instance_base(item.position, item.rotation, item.scale, origin);
+                    item.transform = instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin);
                 }
                 layout = true;
             }
@@ -276,7 +276,7 @@ fn new_item(
     let bounds = mesh.mesh().bounds();
     let center = bounds.min * 0.5 + bounds.max * 0.5;
     let info = Arc::new(MeshInfo { bounds, centers: vec![center] });
-    let transform = instance_base(position, rotation, scale, origin);
+    let transform = instance_base(position, rotation, scale, false, origin);
     let face = new_face(id, style, mesh, center, scale, textures, list);
     CachedItem {
         id,
@@ -287,6 +287,8 @@ fn new_item(
         position,
         rotation,
         scale,
+        invert_normals: false,
+        replacement: None,
         transform,
         pickable: true,
         shading: ShadingMode::Studio,

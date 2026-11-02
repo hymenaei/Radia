@@ -4,7 +4,8 @@ use std::{
 };
 
 use assets::{
-    Budget, Demand, Failure, Kind, LoadJob, MAX_ASSET_DECODES, MAX_ASSET_FETCHES, Priority, Request, Resource, Route, Store, TextureSize,
+    Budget, Demand, Failure, Kind, LoadJob, MAX_NON_MESH_FETCHES, MAX_TEXTURE_DECODES, Priority, Request, Resource, Route, Store,
+    TextureSize,
 };
 use criterion::{BatchSize, BenchmarkId, Criterion};
 use test_support::texture::GRAY_4096_J2C;
@@ -17,10 +18,10 @@ fn fixture(count: usize) -> Fixture {
     let now = Instant::now();
     let mut store = Store::new(Budget::default());
     let routes = (0..4).map(|_| store.register_route().expect("benchmark route")).collect::<Vec<_>>();
-    let mut demands = Vec::with_capacity(count + MAX_ASSET_DECODES * 2);
-    let mut decodes = Vec::with_capacity(MAX_ASSET_DECODES);
+    let mut demands = Vec::with_capacity(count + MAX_TEXTURE_DECODES * 2);
+    let mut decodes = Vec::with_capacity(MAX_TEXTURE_DECODES);
 
-    for (index, route) in routes.iter().enumerate().take(MAX_ASSET_DECODES) {
+    for (index, route) in routes.iter().enumerate().take(MAX_TEXTURE_DECODES) {
         let id = AssetId::new(Uuid::from_u128(u128::MAX - index as u128));
         let low =
             store.request(*route, Request::Texture { id, size: TextureSize::new(8) }, Priority::Visible, now).expect("benchmark demand");
@@ -54,11 +55,11 @@ fn fixture(count: usize) -> Fixture {
                 _ => Kind::Environment,
             },
         };
-        let priority = if index < MAX_ASSET_FETCHES / 2 || index % 7 == 0 { Priority::Visible } else { Priority::Background };
+        let priority = if index < MAX_NON_MESH_FETCHES / 2 || index % 7 == 0 { Priority::Visible } else { Priority::Background };
         demands.push(store.request(routes[index % routes.len()], Request::new(resource), priority, now).expect("benchmark demand"));
     }
 
-    for _ in 0..MAX_ASSET_FETCHES / 2 {
+    for _ in 0..MAX_NON_MESH_FETCHES / 2 {
         let job = store.next_job(now).expect("benchmark retry seed");
         store.complete(job.fail(Failure::Transient { retry_after: Duration::from_secs(20) }), now);
     }
@@ -68,8 +69,8 @@ fn fixture(count: usize) -> Fixture {
 
 fn saturated_fixture(count: usize) -> (Fixture, Vec<LoadJob>) {
     let mut fixture = fixture(count);
-    let mut jobs = Vec::with_capacity(MAX_ASSET_FETCHES);
-    while jobs.len() < MAX_ASSET_FETCHES {
+    let mut jobs = Vec::with_capacity(MAX_NON_MESH_FETCHES);
+    while jobs.len() < MAX_NON_MESH_FETCHES {
         let Some(job) = fixture.0.next_job(fixture.3) else { break };
         jobs.push(job);
     }
@@ -83,7 +84,7 @@ pub(crate) fn bench(c: &mut Criterion) {
             b.iter_batched_ref(
                 || fixture(count),
                 |(store, demands, _, now, decodes)| {
-                    let mut jobs = Vec::with_capacity(MAX_ASSET_FETCHES);
+                    let mut jobs = Vec::with_capacity(MAX_NON_MESH_FETCHES);
                     while let Some(job) = store.next_job(*now) {
                         jobs.push(job);
                     }

@@ -1,16 +1,17 @@
 use std::{f64::consts::PI, num::NonZeroU32, time::Instant};
 
-use assets::{Budget as AssetBudget, Content, LoadJob, Priority, Request, Status as AssetStatus, Store, TextureSize};
+use assets::{Budget as AssetBudget, Content, FetchResponse, LoadJob, Priority, Request, Status as AssetStatus, Store, TextureSize};
 use math::{DVec3, Quat, Vec3};
 use render::scene::{
-    AssetChange, Budget, Camera, Detail, MeshJob, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView, Status,
+    AssetChange, AssetRequest, AssetTicket, Budget, Camera, Detail, DrawnMeshKey, MeshJob, ReadFailure, ReadJob, ReadQuery, ReadReply,
+    ReconcileStep, Reconciler, SceneView, Status,
 };
 use utils::AssetId;
 use uuid::Uuid;
 use world::{
     Appearance, FaceAppearance, FieldUpdate, Kind, ObjectObservation, ObjectPatch, OrderEvidence::Ordered, ParentUpdate, Pose, PrimShape,
-    Region, RegionInfo, Shape, SurfaceAppearance, TerrainPatch, TerrainSettings, TextureAnimation, UpdateSource, World, WorldLimits,
-    WorldReadError,
+    Region, RegionInfo, SculptFlags, Shape, SurfaceAppearance, TerrainPatch, TerrainSettings, TextureAnimation, UpdateSource, World,
+    WorldLimits, WorldReadError,
 };
 
 const INITIAL_ORDER: u64 = 100_000;
@@ -26,6 +27,11 @@ pub struct BenchmarkTextures {
     pub store: Store,
     pub route: assets::Route,
     pub textures: std::collections::HashMap<AssetId, assets::TextureHandle>,
+}
+
+pub struct AssetWork {
+    pub requested: Vec<AssetRequest>,
+    pub released: Vec<AssetTicket>,
 }
 
 pub fn scene_world(count: usize, region_count: usize) -> (World, Vec<Row>) {
@@ -305,7 +311,7 @@ pub fn first_full_view_batch(world: &World, expected_objects: usize) {
                 reconciler.complete_mesh(job.run());
             }
             ReconcileStep::Asset(AssetChange::Request(_)) => asset_requests += 1,
-            ReconcileStep::Asset(AssetChange::Release(_)) => {}
+            ReconcileStep::Asset(AssetChange::Release(_) | AssetChange::UpdateImportance { .. }) => {}
             ReconcileStep::Continue => {}
             ReconcileStep::Wait(until) => now = until,
             ReconcileStep::Idle if view.object_count() == expected_objects => {
@@ -508,6 +514,144 @@ pub fn publish_texture_update(
 
 fn view_texture(view: &SceneView, row: &Row) -> Option<AssetId> {
     view.object(row.entity)?.detail().surface_appearance.as_ref()?.default_face().texture
+}
+
+pub fn ready_distinct_mesh_scene(count: usize) -> (Reconciler, SceneView, World, Instant) {
+    let world = distinct_mesh_world(count);
+    let (mut reconciler, mut view) = Reconciler::new(Budget::default());
+    reconciler.set_camera(mesh_camera(false));
+    let mut now = Instant::now();
+    let bytes = test_support::mesh::asset(&[2, 3], 1);
+
+    let work = mesh_asset_work(&mut reconciler, &mut view, &world, &mut now);
+    let headers: Vec<_> = work.requested.into_iter().filter(|request| matches!(request.request, Request::MeshHeader(_))).collect();
+    assert_eq!(headers.len(), count, "each distinct mesh object requests its own header");
+    for header in headers {
+        reconciler.complete_asset(header.ticket, prepared_asset(header.request, &bytes));
+    }
+
+    let work = mesh_asset_work(&mut reconciler, &mut view, &world, &mut now);
+    let highs: Vec<_> = work
+        .requested
+        .iter()
+        .copied()
+        .filter(|request| matches!(request.request, Request::MeshLod(block) if block.lod() == assets::mesh::MeshLod::High))
+        .collect();
+    let mediums = work
+        .requested
+        .iter()
+        .filter(|request| matches!(request.request, Request::MeshLod(block) if block.lod() == assets::mesh::MeshLod::Medium))
+        .count();
+    assert_eq!(highs.len(), count, "each distinct mesh object requests its selected LOD");
+    assert_eq!(mediums, count, "each distinct mesh object requests its fallback LOD");
+    for high in highs {
+        reconciler.complete_asset(high.ticket, prepared_asset(high.request, &bytes));
+    }
+    let work = mesh_asset_work(&mut reconciler, &mut view, &world, &mut now);
+    assert_eq!(work.released.len(), 2 * count, "decoded LODs release their fetch requests");
+    assert!(
+        view.objects()
+            .all(|object| matches!(object.mesh().map(|(key, _)| key), Some(DrawnMeshKey::Asset { lod: assets::mesh::MeshLod::High, .. })))
+    );
+    (reconciler, view, world, now)
+}
+
+pub fn request_distinct_mesh_refinement(reconciler: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> AssetWork {
+    reconciler.set_camera(mesh_camera(true));
+    mesh_asset_work(reconciler, view, world, now)
+}
+
+fn distinct_mesh_world(count: usize) -> World {
+    let mut world = World::new(WorldLimits {
+        max_region_registrations: 1,
+        max_entities: count,
+        max_entities_per_region: count,
+        max_tombstones_per_region: 1,
+        max_tombstones: 1,
+        max_tombstone_bytes_per_region: WorldLimits::tombstone_bytes_for_count(1),
+        max_tombstone_bytes: WorldLimits::tombstone_bytes_for_count(1),
+        max_journal_entries: 4096,
+        max_journal_changes: count * 4,
+        max_region_name_bytes: 64,
+        max_recovery_targets: 4,
+    });
+    let region = Region::new(1);
+    let _adopted = world.adopt_region(region).expect("mesh benchmark region adoption");
+    let _metadata = world
+        .patch_region(region, RegionInfo { origin: Some(DVec3::ZERO), ..RegionInfo::default() })
+        .expect("mesh benchmark region metadata");
+    for index in 0..count {
+        let order = INITIAL_ORDER + index as u64;
+        let local_id = NonZeroU32::new(u32::try_from(index + 1).expect("mesh benchmark local ID fits u32"))
+            .expect("mesh benchmark local ID is nonzero");
+        let mut object = ObjectObservation::new(
+            UpdateSource::new(region, order as u32, Ordered(order), 0),
+            Uuid::from_u128(index as u128 + 1),
+            local_id,
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        object.pose = Some(Pose { position: Some(Vec3::new(2.0, 0.0, 0.0)), rotation: Some(Quat::IDENTITY) });
+        object.scale = Some(Vec3::ONE);
+        object.shape = FieldUpdate::Set(Shape::Mesh {
+            asset_id: AssetId::new(Uuid::from_u128(50_000_000 + index as u128)),
+            flags: SculptFlags::default(),
+        });
+        object.appearance = FieldUpdate::Set(Appearance::Surface);
+        let _applied = world.observe_object(object).expect("mesh benchmark object introduction");
+    }
+    world
+}
+
+fn mesh_asset_work(reconciler: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> AssetWork {
+    let mut work = AssetWork { requested: Vec::new(), released: Vec::new() };
+    for _ in 0..100_000 {
+        match reconciler.poll(*now) {
+            ReconcileStep::Asset(AssetChange::Request(request)) => work.requested.push(request),
+            ReconcileStep::Asset(AssetChange::Release(ticket)) => work.released.push(ticket),
+            ReconcileStep::Asset(AssetChange::UpdateImportance { .. }) => {}
+            ReconcileStep::Read(job) => {
+                let reply = reply(world, &job);
+                reconciler.complete_read(job, reply, *now);
+            }
+            ReconcileStep::Build(job) => reconciler.complete_mesh(job.run()),
+            ReconcileStep::Publish(batch) => view.apply(batch).expect("mesh benchmark scene publication"),
+            ReconcileStep::Continue => {}
+            ReconcileStep::Wait(until) => *now = until,
+            ReconcileStep::Idle => return work,
+            ReconcileStep::Closed => panic!("mesh benchmark scene closed"),
+        }
+    }
+    panic!("mesh benchmark scene did not converge");
+}
+
+fn prepared_asset(request: Request, bytes: &[u8]) -> assets::Status {
+    let now = Instant::now();
+    let mut store = Store::new(AssetBudget::default());
+    let route = store.register_route().expect("mesh benchmark asset route");
+    let demand = store.request(route, request, Priority::Visible, now).expect("mesh benchmark asset demand");
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("mesh benchmark asset fetch") else {
+        panic!("mesh benchmark asset must be absent from the new store");
+    };
+    let response = match request {
+        Request::MeshLod(block) => {
+            let range = block.range();
+            let start = usize::try_from(range.start).expect("mesh benchmark LOD offset fits memory");
+            let end = usize::try_from(range.end).expect("mesh benchmark LOD end fits memory");
+            let bytes = bytes.get(start..end).expect("mesh benchmark asset contains the requested LOD").to_vec();
+            fetch.complete_response(Ok(FetchResponse::Partial { bytes, range, total_length: Some(block.asset_length()) }))
+        }
+        _ => fetch.complete(Ok(bytes.to_vec())),
+    };
+    let input = response.expect("mesh benchmark asset bytes");
+    let completion = store.start_decode(input).expect("mesh benchmark decode admission").run();
+    store.complete(completion, now);
+    demand.status()
+}
+
+fn mesh_camera(medium: bool) -> Camera {
+    let position = if medium { DVec3::new(-8.0, 0.0, 0.0) } else { DVec3::ZERO };
+    Camera::new(position, Vec3::X, PI / 3.0, [1000, 1000]).expect("mesh benchmark camera")
 }
 
 fn camera(detail: Detail) -> Camera {

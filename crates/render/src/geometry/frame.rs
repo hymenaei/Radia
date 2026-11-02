@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use math::DVec3;
 use uuid::Uuid;
@@ -67,6 +70,7 @@ impl GeometryRenderer {
 
         let visibility_started = Instant::now();
         let mut update = self.update_cache(view);
+        self.promote_ready_replacements(&mut update);
         self.apply_agent_pose(agent_pose, origin, &mut update);
         let update_all_motion = update.full_visibility || camera_changed;
         self.update_object_motion(view, started, origin, update_all_motion, agent_pose.map(AgentPose::agent_id), &mut update);
@@ -75,12 +79,12 @@ impl GeometryRenderer {
         update.pose_items.dedup();
         let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, origin);
         self.water.update(&self.queue, view, camera, projection, water_height);
-        let candidates_changed = if update.full_visibility || camera_changed {
+        let (candidates_changed, replacement_visibility_changed) = if update.full_visibility || camera_changed {
             self.rebuild_candidates(camera, projection)
         } else if !update.pose_items.is_empty() {
             self.update_candidates(camera, projection, &update.pose_items)
         } else {
-            false
+            (false, false)
         };
         times.visibility = visibility_started.elapsed();
 
@@ -90,12 +94,21 @@ impl GeometryRenderer {
             self.draw_list.invalidate_batches();
         }
         let meshes_started = Instant::now();
-        let candidate_mesh_missing = if candidates_changed || update.mesh_dirty { self.rebuild_visible_meshes(camera) } else { false };
+        let candidate_mesh_missing = if candidates_changed || replacement_visibility_changed || update.mesh_dirty {
+            self.rebuild_visible_meshes(camera)
+        } else {
+            false
+        };
         let mesh_progress = candidate_mesh_missing
+            || replacement_visibility_changed
             || update.mesh_dirty
             || self.cache.mesh_state != self.memory.mesh_state()
             || !self.pending_meshes.is_empty();
         let mut uploaded = 0;
+        let mut fallbacks_released = false;
+        let mut blocked_replacements = HashSet::new();
+        let mut fallback_meshes = HashSet::new();
+        let replacement_groups = if mesh_progress { self.replacement_groups() } else { HashMap::new() };
         if mesh_progress {
             self.mesh_budget_blocked.clear();
             self.pending_meshes.clear();
@@ -103,19 +116,56 @@ impl GeometryRenderer {
             for index in 0..self.cache.mesh_ids.len() {
                 let mesh_id = self.cache.mesh_ids[index];
                 let Some(mesh) = self.cache.mesh_representatives.get(&mesh_id).cloned() else { continue };
-                if self.meshes.contains_key(&mesh_id) {
-                    self.cache.mesh_ready.insert(mesh_id);
-                    continue;
-                }
                 let composition = self.cache.mesh_compositions.get(&mesh_id).cloned().flatten();
                 if self.upload_mesh(device, &mesh, composition.as_deref(), &mut uploaded) {
                     self.cache.mesh_ready.insert(mesh_id);
                 } else {
                     self.pending_meshes.insert(mesh_id);
+                    if self.mesh_budget_blocked.contains(&mesh_id) && replacement_groups.contains_key(&mesh_id) {
+                        blocked_replacements.insert(mesh_id);
+                    }
                 }
             }
+            self.cache.mesh_ready.retain(|mesh_id| self.meshes.contains_key(mesh_id));
             self.cache.mesh_state = self.memory.mesh_state();
         }
+        for mesh_id in blocked_replacements {
+            let Some(indices) = replacement_groups.get(&mesh_id) else { continue };
+            let retry_state = self.replacement_retry_state(indices);
+            if !self.retired.is_empty() {
+                self.set_replacement_retry_state(indices, self.memory.mesh_state());
+            } else if retry_state.is_none_or(|retry_state| retry_state != self.memory.mesh_state()) {
+                for old_mesh in self.drop_blocked_fallbacks(indices, &mut update) {
+                    fallback_meshes.insert(old_mesh);
+                    fallbacks_released = true;
+                }
+            }
+        }
+        if !fallback_meshes.is_empty() {
+            let mut still_demanded = HashSet::new();
+            for index in &self.cache.candidates {
+                if let Some(item) = self.cache.items.get(*index) {
+                    still_demanded.insert(item.mesh.id());
+                    if let Some(replacement) = item.replacement.as_ref() {
+                        still_demanded.insert(replacement.item.mesh.id());
+                    }
+                }
+            }
+            for index in &self.cache.replacement_visible {
+                if let Some(mesh_id) =
+                    self.cache.items.get(*index).and_then(|item| item.replacement.as_ref()).map(|replacement| replacement.item.mesh.id())
+                {
+                    still_demanded.insert(mesh_id);
+                }
+            }
+            for mesh_id in fallback_meshes {
+                if !still_demanded.contains(&mesh_id) {
+                    self.forget_mesh_demand(mesh_id);
+                    self.retire_mesh_id(mesh_id);
+                }
+            }
+        }
+        self.stats.items_updated = update.items_updated;
         if self.cache.mesh_state != previous_mesh_state {
             self.draw_list.invalidate_batches();
             batches_invalidated = true;
@@ -153,7 +203,16 @@ impl GeometryRenderer {
         let draw_list_started = Instant::now();
         if origin_rebased {
             for (_, item) in self.cache.items.iter_mut() {
-                item.transform = instance_base(item.position, item.rotation, item.scale, origin);
+                item.transform = instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin);
+                if let Some(replacement) = item.replacement.as_mut() {
+                    replacement.item.transform = instance_base(
+                        replacement.item.position,
+                        replacement.item.rotation,
+                        replacement.item.scale,
+                        replacement.item.invert_normals,
+                        origin,
+                    );
+                }
             }
         }
         if layout {
@@ -271,7 +330,9 @@ impl GeometryRenderer {
             key,
             textures: self.textures.state(),
             meshes: self.memory.mesh_state(),
-            more_meshes: !self.pending_meshes.is_empty() && (uploaded > 0 || self.cache.mesh_state != previous_mesh_state),
+            more_meshes: self.has_ready_replacement()
+                || (!self.pending_meshes.is_empty()
+                    && (uploaded > 0 || self.cache.mesh_state != previous_mesh_state || !self.retired.is_empty() || fallbacks_released)),
             animation_deadline,
         });
         times.draw_list += instances_started.elapsed();
@@ -308,12 +369,12 @@ impl GeometryRenderer {
 
     fn set_item_pose(&mut self, index: ItemIndex, pose: WorldPose, origin: DVec3, update: Option<&mut CacheUpdate>) {
         let Some(item) = self.cache.items.get_mut(index) else { return };
-        if item.position == pose.position && item.rotation == pose.rotation {
+        let changed = set_cached_item_pose(item, pose, origin);
+        let replacement_changed =
+            item.replacement.as_mut().is_some_and(|replacement| set_cached_item_pose(&mut replacement.item, pose, origin));
+        if !changed && !replacement_changed {
             return;
         }
-        item.position = pose.position;
-        item.rotation = pose.rotation;
-        item.transform = instance_base(item.position, item.rotation, item.scale, origin);
         if let Some(update) = update {
             update.pose_items.push(index);
             update.items_updated += 1;
@@ -480,6 +541,16 @@ impl GeometryRenderer {
             );
         }
     }
+}
+
+fn set_cached_item_pose(item: &mut super::items::CachedItem, pose: WorldPose, origin: DVec3) -> bool {
+    if item.position == pose.position && item.rotation == pose.rotation {
+        return false;
+    }
+    item.position = pose.position;
+    item.rotation = pose.rotation;
+    item.transform = instance_base(item.position, item.rotation, item.scale, item.invert_normals, origin);
+    true
 }
 
 fn is_agent_pose_override(kind: Kind, object_id: Uuid, agent_id: Option<Uuid>) -> bool {
@@ -656,6 +727,7 @@ mod tests {
                     materials: None,
                     appearance: None,
                     scale: Vec3::ONE,
+                    invert_normals: false,
                     shading,
                     terrain: None,
                     terrain_textures: None,
@@ -683,6 +755,7 @@ mod tests {
                 materials: object.materials(),
                 appearance: object.detail().surface_appearance.as_ref(),
                 scale: transform.scale,
+                invert_normals: false,
                 shading: ShadingMode::Studio,
                 terrain: None,
                 terrain_textures: None,
@@ -691,10 +764,10 @@ mod tests {
         );
         let original = draw_list.face_key(faces[0].group).expect("fixture draw group").pipeline;
         let flipped = Vec3::new(-transform.scale.x, transform.scale.y, transform.scale.z);
-        assert!(draw_list.refresh_winding(&mut faces, transform.scale, flipped));
+        assert!(draw_list.refresh_winding(&mut faces, transform.scale, false, flipped, false));
         let key = draw_list.face_key(faces[0].group).expect("flipped draw group");
         assert_ne!(key.pipeline, original);
-        assert_eq!(key.pipeline, surface_pipeline(faces[0].base_params.blend, faces[0].base_params.double_sided, flipped));
-        assert!(!draw_list.refresh_winding(&mut faces, flipped, flipped));
+        assert_eq!(key.pipeline, surface_pipeline(faces[0].base_params.blend, faces[0].base_params.double_sided, flipped, false));
+        assert!(!draw_list.refresh_winding(&mut faces, flipped, false, flipped, false));
     }
 }

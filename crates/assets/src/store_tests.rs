@@ -150,6 +150,14 @@ fn mesh_lod_request(id: AssetId, block: &[u8]) -> MeshLodRequest {
     crate::mesh::decode_header(&header_bytes, asset_length).unwrap().lod(id, MeshLod::Low).unwrap()
 }
 
+fn large_mesh_lod_request(id: AssetId, size: usize) -> MeshLodRequest {
+    let entry = mesh_llsd_map(&[("offset", mesh_llsd_integer(0)), ("size", mesh_llsd_integer(i32::try_from(size).unwrap()))]);
+    let mut header = b"<?llsd/binary?>\n".to_vec();
+    header.extend(mesh_llsd_map(&[("version", mesh_llsd_integer(1)), ("low_lod", entry)]));
+    let asset_length = u64::try_from(header.len().checked_add(size).unwrap()).unwrap();
+    crate::mesh::decode_header(&header, asset_length).unwrap().lod(id, MeshLod::Low).unwrap()
+}
+
 fn mesh_full_asset_fixture(id: AssetId, block: &[u8]) -> (MeshLodRequest, Vec<u8>) {
     let entry = mesh_llsd_map(&[("offset", mesh_llsd_integer(0)), ("size", mesh_llsd_integer(i32::try_from(block.len()).unwrap()))]);
     let mut header = b"<?llsd/binary?>\n".to_vec();
@@ -158,6 +166,27 @@ fn mesh_full_asset_fixture(id: AssetId, block: &[u8]) -> (MeshLodRequest, Vec<u8
     let request = crate::mesh::decode_header(&header, asset_length).unwrap().lod(id, MeshLod::Low).unwrap();
     header.extend_from_slice(block);
     (request, header)
+}
+
+fn mesh_lod_record(offset: u64, length: u64, asset_length: u64, block: &[u8]) -> Vec<u8> {
+    let mut record = Vec::new();
+    record.extend_from_slice(&offset.to_le_bytes());
+    record.extend_from_slice(&length.to_le_bytes());
+    record.extend_from_slice(&asset_length.to_le_bytes());
+    record.extend_from_slice(block);
+    record
+}
+
+fn mesh_lod_record_for(request: MeshLodRequest, block: &[u8]) -> Vec<u8> {
+    let range = request.range();
+    mesh_lod_record(range.start, range.end - range.start, request.asset_length(), block)
+}
+
+fn mesh_header_record(total_length: u64, header: &[u8]) -> Vec<u8> {
+    let mut record = Vec::new();
+    record.extend_from_slice(&total_length.to_le_bytes());
+    record.extend_from_slice(header);
+    record
 }
 
 fn large_mesh_block_fixture(vertex_count: usize, face_count: usize) -> Vec<u8> {
@@ -220,7 +249,7 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(11);
-    cache.put_complete(resource, RGBA_J2C.to_vec()).expect("seed validated texture bytes");
+    cache.put_complete(Request::new(resource), RGBA_J2C.to_vec()).expect("seed validated texture bytes");
     let budget = Budget::default();
     let mut store = Store::with_cache(budget.clone(), Arc::clone(&cache));
     let now = Instant::now();
@@ -229,15 +258,15 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
     let LoadJob::ReadCache(read) = store.next_job(now).expect("cache read job") else { panic!("first job reads cache") };
     assert_eq!(
         budget.stats().charged_bytes,
-        read_work_bytes(Kind::Texture).expect("bounded cache read reservation"),
-        "disk reads reserve for the raw payload and decoded asset",
+        read_work_bytes_for_request(Request::new(resource)).expect("bounded cache read reservation"),
+        "cache reads reserve the bounded payload before decode admission",
     );
     let input = store.complete_cache_read(read.run(), now).expect("cache hit supplies input");
     let LoadJob::Decode(input) = input else { panic!("cache hit follows decode admission") };
     assert_eq!(
         store
             .entries
-            .get(&LoadKey { resource, unit: AssetUnit::Whole })
+            .get(&LoadKey { resource, unit: CacheUnit::Whole })
             .and_then(|entry| entry.views.get(&route))
             .map(|view| view.attempts),
         Some(0)
@@ -255,6 +284,102 @@ fn disk_hit_uses_decode_admission_and_does_not_count_as_a_fetch_attempt() {
 }
 
 #[test]
+fn cached_mesh_reads_stay_within_storage_limit() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let now = Instant::now();
+    let block = mesh_block_fixture();
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let mut demands = Vec::new();
+    for value in 200..200 + storage::MAX_IN_FLIGHT_READS + 4 {
+        let id = AssetId::new(Uuid::from_u128(u128::try_from(value).expect("fixture asset ID")));
+        let request = mesh_lod_request(id, &block);
+        cache.put_complete(Request::MeshLod(request), mesh_lod_record_for(request, &block)).expect("seed cached mesh block");
+        demands.push(store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request cached mesh"));
+    }
+
+    let mut completed = 0;
+    while completed < demands.len() {
+        let mut reads = Vec::new();
+        while let Some(job) = store.next_job(now) {
+            match job {
+                LoadJob::ReadCache(read) => reads.push(read),
+                LoadJob::Fetch(_) => panic!("cached mesh requests stay on disk"),
+                LoadJob::Decode(_) => panic!("mesh data is not resident before the first read"),
+            }
+        }
+        assert!(!reads.is_empty(), "a released read permit admits the next cached mesh");
+        if completed == 0 {
+            assert_eq!(reads.len(), storage::MAX_IN_FLIGHT_READS);
+        }
+        let mut inputs = Vec::new();
+        for read in reads {
+            let Some(LoadJob::Decode(input)) = store.complete_cache_read(read.run(), now) else {
+                panic!("disk hit supplies mesh decode input")
+            };
+            inputs.push(input);
+        }
+        if completed == 0 {
+            let mut remaining_reads = Vec::new();
+            while let Some(job) = store.next_job(now) {
+                let LoadJob::ReadCache(read) = job else { panic!("cached mesh hits do not fall through to HTTP") };
+                remaining_reads.push(read);
+            }
+            assert_eq!(remaining_reads.len(), demands.len() - inputs.len(), "mesh decode inputs do not hold storage read permits");
+            for read in remaining_reads {
+                let Some(LoadJob::Decode(input)) = store.complete_cache_read(read.run(), now) else {
+                    panic!("disk hit supplies mesh decode input")
+                };
+                inputs.push(input);
+            }
+        }
+        for input in inputs {
+            let decode = store.start_decode(input).expect("admit disk mesh decode");
+            assert!(store.complete(decode.run(), now).is_empty());
+            completed += 1;
+        }
+    }
+
+    assert_eq!(cache.stats().hits, u64::try_from(demands.len()).expect("fixture count"));
+    assert!(demands.iter().all(|demand| matches!(demand.status(), Status::Ready(Content::Mesh(_)))));
+    drop(demands);
+    store.close();
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn cache_read_limit_requeues_lookup() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let now = Instant::now();
+    let block = mesh_block_fixture();
+    let request = mesh_lod_request(AssetId::new(Uuid::from_u128(212)), &block);
+    cache.put_complete(Request::MeshLod(request), mesh_lod_record_for(request, &block)).expect("seed cached mesh block");
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request cached mesh");
+    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("warm LOD reads cache") };
+    let completion = read.run_lookup(|_, _| AssetLookup::Unavailable(storage::UnavailableReason::ReadLimit));
+    assert!(store.complete_cache_read(completion, now).is_none());
+    assert_matches!(demand.status(), Status::Queued);
+
+    let LoadJob::ReadCache(read) = store.next_job(now).expect("deferred lookup is retried") else {
+        panic!("ReadLimit is not a cache miss")
+    };
+    let Some(LoadJob::Decode(input)) = store.complete_cache_read(read.run(), now) else { panic!("disk hit supplies mesh decode input") };
+    let decode = store.start_decode(input).expect("admit cached mesh decode");
+    assert!(store.complete(decode.run(), now).is_empty());
+    assert_matches!(demand.status(), Status::Ready(Content::Mesh(_)));
+    assert_eq!(cache.stats().hits, 1);
+    drop(demand);
+    store.close();
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
 fn demand_lease_protects_cache_key() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
@@ -264,7 +389,7 @@ fn demand_lease_protects_cache_key() {
     let demand = store.request(route, Request::new(resource), Priority::Visible, Instant::now()).expect("request texture");
     assert_eq!(cache.stats().protected_bytes, 0);
 
-    cache.put_complete(resource, vec![7; 1024]).expect("write demanded key");
+    cache.put_complete(Request::new(resource), vec![7; 1024]).expect("write demanded key");
     assert_eq!(cache.stats().protected_bytes, 1024);
     let second_demand = demand.clone();
     drop(demand);
@@ -278,11 +403,29 @@ fn demand_lease_protects_cache_key() {
 }
 
 #[test]
+fn cache_miss_skips_disk_job() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let now = Instant::now();
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::new(resource(15)), Priority::Visible, now).expect("request texture");
+
+    assert_matches!(store.next_job(now), Some(LoadJob::Fetch(_)));
+    assert_eq!(cache.stats().misses, 0);
+    assert_matches!(demand.status(), Status::Fetching);
+
+    drop(demand);
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
 fn retired_route_discards_a_completed_disk_read() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(12);
-    cache.put_complete(resource, RGBA_J2C.to_vec()).expect("seed validated texture bytes");
+    cache.put_complete(Request::new(resource), RGBA_J2C.to_vec()).expect("seed validated texture bytes");
     let budget = Budget::default();
     let mut store = Store::with_cache(budget.clone(), Arc::clone(&cache));
     let now = Instant::now();
@@ -292,10 +435,10 @@ fn retired_route_discards_a_completed_disk_read() {
     let (started, started_receive) = mpsc::sync_channel(0);
     let (release, release_receive) = mpsc::sync_channel(0);
     let worker = thread::spawn(move || {
-        read.run_lookup(|cache, resource| {
+        read.run_lookup(|cache, request| {
             started.send(()).expect("signal active disk read");
             release_receive.recv().expect("release disk read");
-            cache.lookup(resource)
+            cache.lookup(request)
         })
     });
     started_receive.recv_timeout(Duration::from_secs(3)).expect("disk read job started");
@@ -321,7 +464,7 @@ fn cancelled_read_allows_retry() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(14);
-    cache.put_complete(resource, RGBA_J2C.to_vec()).expect("seed validated texture bytes");
+    cache.put_complete(Request::new(resource), RGBA_J2C.to_vec()).expect("seed validated texture bytes");
     let budget = Budget::default();
     let mut store = Store::with_cache(budget.clone(), Arc::clone(&cache));
     let now = Instant::now();
@@ -331,21 +474,21 @@ fn cancelled_read_allows_retry() {
     let (started, started_receive) = mpsc::sync_channel(0);
     let (release, release_receive) = mpsc::sync_channel(0);
     let worker = thread::spawn(move || {
-        read.run_lookup(|cache, resource| {
+        read.run_lookup(|cache, request| {
             started.send(()).expect("signal active disk read");
             release_receive.recv().expect("release disk read");
-            cache.lookup(resource)
+            cache.lookup(request)
         })
     });
     started_receive.recv_timeout(Duration::from_secs(3)).expect("disk read job started");
-    assert_eq!(budget.stats().charged_bytes, read_work_bytes(Kind::Texture).expect("read reservation"));
+    assert_eq!(budget.stats().charged_bytes, read_work_bytes_for_request(Request::new(resource)).expect("read reservation"));
     drop(demand);
     store.maintain(now);
     release.send(()).expect("resume disk read");
     let completion = worker.join().expect("disk read worker completes");
     assert!(store.complete_cache_read(completion, now).is_none());
-    assert_eq!(store.running_fetches, 0);
-    assert_eq!(store.running_decodes, 0);
+    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
     assert_eq!(budget.stats().charged_bytes, 0);
     assert!(store.next_job(now).is_none(), "cancelled demand must not enter decode admission");
 
@@ -355,8 +498,8 @@ fn cancelled_read_allows_retry() {
     let decode = store.start_decode(input).expect("admit retry decode");
     assert!(store.complete(decode.run(), now).is_empty());
     assert_matches!(retry.status(), Status::Ready(Content::Texture(_)));
-    assert_eq!(store.running_fetches, 0);
-    assert_eq!(store.running_decodes, 0);
+    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
     store.close();
     drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
@@ -367,7 +510,7 @@ fn malformed_disk_payload_is_discarded_without_failing_demand_attempts() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let resource = resource(13);
-    cache.put_complete(resource, b"bad".to_vec()).expect("seed semantically malformed payload");
+    cache.put_complete(Request::new(resource), b"bad".to_vec()).expect("seed semantically malformed payload");
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
     let now = Instant::now();
     let route = store.register_route().expect("register route");
@@ -387,7 +530,9 @@ fn malformed_disk_payload_is_discarded_without_failing_demand_attempts() {
     for write in writes {
         write.run();
     }
-    let crate::cache::AssetLookup::Hit(asset) = cache.lookup(resource) else { panic!("valid network bytes replace corrupt cache data") };
+    let crate::cache::AssetLookup::Hit(asset) = cache.lookup(Request::new(resource)) else {
+        panic!("valid network bytes replace corrupt cache data")
+    };
     assert_eq!(asset.bytes, RGBA_J2C);
     drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
@@ -399,20 +544,21 @@ fn full_write_admission_does_not_hold_network_fetch_admission() {
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let write_budget = Budget::default();
     let writes = (0..2u128)
-        .map(|id| cache.queue_write(resource(20 + id), charged_blob(&write_budget, b"payload"), &write_budget).expect("write slot"))
+        .map(|id| {
+            cache.queue_write(Request::new(resource(20 + id)), charged_blob(&write_budget, b"payload"), &write_budget).expect("write slot")
+        })
         .collect::<Vec<_>>();
-    assert!(cache.queue_write(resource(22), charged_blob(&write_budget, b"dropped"), &write_budget).is_none());
+    assert!(cache.queue_write(Request::new(resource(22)), charged_blob(&write_budget, b"dropped"), &write_budget).is_none());
     assert_eq!(cache.stats().dropped_writes, 1);
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
     let now = Instant::now();
     let route = store.register_route().expect("register route");
-    let demands = (30..30 + MAX_ASSET_FETCHES)
+    let demands = (30..30 + MAX_NON_MESH_FETCHES)
         .map(|id| store.request(route, Request::new(resource(id as u128)), Priority::Visible, now).expect("request texture"))
         .collect::<Vec<_>>();
     let mut fetches = Vec::new();
-    for _ in 0..MAX_ASSET_FETCHES {
-        let LoadJob::ReadCache(read) = store.next_job(now).expect("cache read job") else { panic!("cold asset reads cache") };
-        let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss schedules fetch") };
+    for _ in 0..MAX_NON_MESH_FETCHES {
+        let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold asset fetch") else { panic!("cache miss bypasses disk reads") };
         assert!(!fetch.is_cancelled());
         fetches.push(fetch);
     }
@@ -432,8 +578,7 @@ fn decoded_material_and_environment_payloads_survive_disk_round_trips() {
         let mut store = Store::with_cache(Budget::default(), Arc::clone(cache));
         let route = store.register_route().expect("register route");
         let demand = store.request(route, Request::new(resource), Priority::Visible, now).expect("request asset");
-        let LoadJob::ReadCache(read) = store.next_job(now).expect("cold cache read") else { panic!("first work reads disk") };
-        let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss schedules network") };
+        let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold asset fetch") else { panic!("cache miss bypasses disk reads") };
         let input = fetch.complete(Ok(response)).expect("attach encoded asset response");
         let decode = store.start_decode(input).expect("admit network decode");
         let writes = store.complete(decode.run(), now);
@@ -466,7 +611,7 @@ fn decoded_material_and_environment_payloads_survive_disk_round_trips() {
     round_trip(&cache, legacy, legacy_envelope(legacy.id));
     round_trip(&cache, environment, b"{'type':'sky'}".to_vec());
     assert_eq!(cache.stats().hits, 3);
-    assert_eq!(cache.stats().misses, 3);
+    assert_eq!(cache.stats().misses, 0);
     assert!(cache.stats().bytes_written > 0);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 }
@@ -479,15 +624,21 @@ fn cached_full_mesh_response_finishes() {
     let now = Instant::now();
     let id = AssetId::new(Uuid::from_u128(104));
     let block = mesh_block_fixture();
-    let (request, asset) = mesh_full_asset_fixture(id, &block);
-    let resource = Resource { id, kind: Kind::Mesh };
+    let (lod_request, asset) = mesh_full_asset_fixture(id, &block);
+    let request = Request::MeshLod(lod_request);
     let mut store = Store::with_cache(budget, Arc::clone(&cache));
     let route = store.register_route().expect("register route");
-    let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
+    let demand = store.request(route, request, Priority::Visible, now).expect("request mesh LOD");
 
-    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("cold mesh reads cache") };
-    let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss schedules mesh fetch") };
-    let input = fetch.complete(Ok(asset.clone())).expect("full asset response enters decoding");
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold mesh fetch") else { panic!("cache miss bypasses disk reads") };
+    assert!(fetch.response_limit() < asset.len());
+    store.complete(LoadJob::Fetch(fetch).fail(Failure::FullAssetRequired), now);
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("full mesh retry follows an oversized range response") else {
+        panic!("full mesh retry stays on the network")
+    };
+    assert!(fetch.force_full_mesh());
+    assert_eq!(fetch.response_limit(), Kind::Mesh.max_response_bytes());
+    let input = fetch.complete(Ok(asset.clone())).expect("full asset response enters decoding after retry");
     let decode = store.start_decode(input).expect("admit mesh decode");
     let writes = store.complete(decode.run(), now);
 
@@ -496,32 +647,43 @@ fn cached_full_mesh_response_finishes() {
     for write in writes {
         write.run();
     }
-    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(resource) else { panic!("full mesh asset was cached") };
-    assert_eq!(cached.bytes, asset);
+    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(request) else { panic!("full mesh LOD was cached") };
+    assert_eq!(crate::cache::parse_mesh_lod_frame(lod_request, &cached.bytes), Some(block.as_slice()));
+    assert!(cached.bytes.len() < asset.len());
     drop(demand);
     drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 
-    let cache = crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("reopen cache");
-    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(resource) else { panic!("SQLite index retained the full mesh asset") };
-    assert_eq!(cached.bytes, asset);
-    cache.shutdown().expect("close reopened cache");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("reopen cache"));
+    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(request) else { panic!("SQLite index retained the mesh LOD") };
+    assert_eq!(crate::cache::parse_mesh_lod_frame(lod_request, &cached.bytes), Some(block.as_slice()));
+    assert_eq!(cache.stats().entries_by_kind.meshes, 1, "a full response stores only its requested LOD");
+    let mut next_store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let next_route = next_store.register_route().expect("register next route");
+    let next_demand = next_store.request(next_route, request, Priority::Visible, now).expect("request persisted LOD");
+    let LoadJob::ReadCache(read) = next_store.next_job(now).expect("read persisted LOD") else { panic!("second session reads cache") };
+    let Some(LoadJob::Decode(input)) = next_store.complete_cache_read(read.run(), now) else { panic!("second session hits cache") };
+    let decode = next_store.start_decode(input).expect("admit cached LOD decode");
+    assert!(next_store.complete(decode.run(), now).is_empty());
+    assert_matches!(next_demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+    drop(next_demand);
+    next_store.close();
+    drop(next_store);
+    Arc::try_unwrap(cache).expect("reopened cache handle released").shutdown().expect("close reopened cache");
 }
 
 #[test]
-fn partial_mesh_is_not_cached() {
+fn partial_mesh_lod_is_cached() {
     let directory = tempdir().expect("cache directory");
     let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
     let now = Instant::now();
     let id = AssetId::new(Uuid::from_u128(105));
-    let resource = Resource { id, kind: Kind::Mesh };
     let (request, _, bytes) = mesh_lod_requests(id);
     let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
     let route = store.register_route().expect("register route");
     let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
 
-    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("cold mesh reads cache") };
-    let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("cache miss schedules mesh fetch") };
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold mesh fetch") else { panic!("cache miss bypasses disk reads") };
     let input = fetch
         .complete_response(Ok(FetchResponse::Partial { bytes, range: request.range(), total_length: Some(request.asset_length()) }))
         .expect("partial mesh block enters decoding");
@@ -529,14 +691,468 @@ fn partial_mesh_is_not_cached() {
     let writes = store.complete(decode.run(), now);
 
     assert_matches!(demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
-    assert!(writes.is_empty(), "a partial LOD block is not a complete raw mesh asset");
+    assert_eq!(writes.len(), 1, "a successfully decoded partial LOD is persisted as its own block");
+    for write in writes {
+        write.run();
+    }
     drop(demand);
     drop(store);
     Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 
     let cache = crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("reopen cache");
-    assert_eq!(cache.lookup(resource), crate::cache::AssetLookup::Miss);
+    assert_matches!(cache.lookup(Request::MeshLod(request)), crate::cache::AssetLookup::Hit(_));
     cache.shutdown().expect("close reopened cache");
+}
+
+#[test]
+fn partial_mesh_metadata_is_validated() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let now = Instant::now();
+
+    for (index, malformed) in ["range", "missing total", "wrong total"].into_iter().enumerate() {
+        let id = AssetId::new(Uuid::from_u128(110 + u128::try_from(index).expect("case index")));
+        let (request, _, bytes) = mesh_lod_requests(id);
+        let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+        let route = store.register_route().expect("register route");
+        let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
+        let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold LOD fetch") else { panic!("cache miss bypasses disk reads") };
+        let range = if malformed == "range" { 0..request.range().end } else { request.range() };
+        let total_length = match malformed {
+            "missing total" => None,
+            "wrong total" => Some(request.asset_length().saturating_sub(1)),
+            _ => Some(request.asset_length()),
+        };
+        let input = fetch.complete_response(Ok(FetchResponse::Partial { bytes, range, total_length })).expect("attach range response");
+        let decode = store.start_decode(input).expect("admit LOD decode");
+        let completion = decode.run();
+        assert_eq!(completion.failure(), Some(Failure::MalformedBlock));
+        assert!(store.complete(completion, now).is_empty());
+        assert_matches!(demand.status(), Status::Failed { failure: Failure::MalformedBlock, .. });
+        assert_eq!(cache.lookup(Request::MeshLod(request)), crate::cache::AssetLookup::Miss);
+        drop(demand);
+        store.close();
+    }
+}
+
+#[test]
+fn malformed_mesh_blocks_are_not_cached() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let now = Instant::now();
+    let id = AssetId::new(Uuid::from_u128(114));
+    let request = mesh_lod_request(id, b"bad");
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("cold LOD fetch") else { panic!("cache miss bypasses disk reads") };
+    let input = fetch
+        .complete_response(Ok(FetchResponse::Partial {
+            bytes: b"bad".to_vec(),
+            range: request.range(),
+            total_length: Some(request.asset_length()),
+        }))
+        .expect("attach malformed block");
+    let decode = store.start_decode(input).expect("admit LOD decode");
+    let completion = decode.run();
+    assert_eq!(completion.failure(), Some(Failure::MalformedBlock));
+    assert!(store.complete(completion, now).is_empty());
+    assert_matches!(demand.status(), Status::Failed { failure: Failure::MalformedBlock, .. });
+    assert_eq!(cache.lookup(Request::MeshLod(request)), crate::cache::AssetLookup::Miss);
+    drop(demand);
+    store.close();
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn corrupt_mesh_lods_are_refetched() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let now = Instant::now();
+    let block = mesh_block_fixture();
+
+    for (index, corruption) in ["hash", "framing", "offset", "length", "body length", "asset length"].into_iter().enumerate() {
+        let id = AssetId::new(Uuid::from_u128(120 + u128::try_from(index).expect("corruption index")));
+        let request = mesh_lod_request(id, &block);
+        let range = request.range();
+        let valid_record = mesh_lod_record_for(request, &block);
+        let bytes = match corruption {
+            "framing" => b"bad framing".to_vec(),
+            "offset" => mesh_lod_record(range.start.saturating_add(1), range.end - range.start, request.asset_length(), &block),
+            "length" => mesh_lod_record(range.start, range.end - range.start + 1, request.asset_length(), &block),
+            "body length" => mesh_lod_record(
+                range.start,
+                range.end - range.start,
+                request.asset_length(),
+                block.get(..block.len().saturating_sub(1)).unwrap_or_default(),
+            ),
+            "asset length" => mesh_lod_record(range.start, range.end - range.start, request.asset_length().saturating_add(1), &block),
+            _ => valid_record,
+        };
+        cache.put_complete(Request::MeshLod(request), bytes).expect("seed corrupt LOD");
+        if corruption == "hash" {
+            let uuid = id.uuid().to_string();
+            let shard = uuid.get(..2).expect("UUID shard");
+            let path = directory.path().join(format!("assets/meshes/lod/low/{shard}/{uuid}.llmesh"));
+            let mut stored = std::fs::read(&path).expect("read cached LOD");
+            if let Some(first) = stored.first_mut() {
+                *first ^= 0xff;
+            }
+            std::fs::write(path, stored).expect("damage cached LOD hash");
+        }
+
+        let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+        let route = store.register_route().expect("register route");
+        let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
+        let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("warm LOD reads cache") };
+        let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("corrupt LOD refetches") };
+        let input = fetch
+            .complete_response(Ok(FetchResponse::Partial {
+                bytes: block.clone(),
+                range: request.range(),
+                total_length: Some(request.asset_length()),
+            }))
+            .expect("attach valid block");
+        let decode = store.start_decode(input).expect("admit LOD decode");
+        let writes = store.complete(decode.run(), now);
+        assert_eq!(writes.len(), 1, "{corruption} corruption is replaced by a validated network block");
+        for write in writes {
+            write.run();
+        }
+        assert_matches!(demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+        let crate::cache::AssetLookup::Hit(cached) = cache.lookup(Request::MeshLod(request)) else {
+            panic!("{corruption} entry was replaced")
+        };
+        assert_eq!(crate::cache::parse_mesh_lod_frame(request, &cached.bytes), Some(block.as_slice()));
+        assert_eq!(cache.stats().corrupt_entries, u64::try_from(index + 1).expect("corruption count"));
+        drop(demand);
+        store.close();
+    }
+
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn malformed_cached_mesh_lod_is_refetched() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let now = Instant::now();
+    let id = AssetId::new(Uuid::from_u128(133));
+    let block = mesh_block_fixture();
+    let request = mesh_lod_request(id, &block);
+    let mut malformed = block.clone();
+    if let Some(first) = malformed.first_mut() {
+        *first ^= 0xff;
+    }
+    cache.put_complete(Request::MeshLod(request), mesh_lod_record_for(request, &malformed)).expect("seed semantically malformed block");
+
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
+    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache read") else { panic!("warm LOD reads cache") };
+    let Some(LoadJob::Decode(input)) = store.complete_cache_read(read.run(), now) else { panic!("framed entry is a cache hit") };
+    let decode = store.start_decode(input).expect("admit disk decode");
+    let completion = decode.run();
+    assert_eq!(completion.failure(), Some(Failure::MalformedBlock));
+    assert!(store.complete(completion, now).is_empty());
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("malformed cache block falls back") else {
+        panic!("malformed cache data schedules network fetch")
+    };
+    let input = fetch
+        .complete_response(Ok(FetchResponse::Partial {
+            bytes: block.clone(),
+            range: request.range(),
+            total_length: Some(request.asset_length()),
+        }))
+        .expect("attach valid network block");
+    let decode = store.start_decode(input).expect("admit network decode");
+    let writes = store.complete(decode.run(), now);
+    assert_eq!(writes.len(), 1);
+    for write in writes {
+        write.run();
+    }
+    assert_matches!(demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+    assert_eq!(cache.stats().corrupt_entries, 1);
+    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(Request::MeshLod(request)) else {
+        panic!("valid block replaced malformed block")
+    };
+    assert_eq!(crate::cache::parse_mesh_lod_frame(request, &cached.bytes), Some(block.as_slice()));
+    drop(demand);
+    store.close();
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn corrupt_mesh_header_is_refetched() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let now = Instant::now();
+    let id = AssetId::new(Uuid::from_u128(126));
+    let block = mesh_block_fixture();
+    let (lod_request, asset) = mesh_full_asset_fixture(id, &block);
+    let request = Request::MeshHeader(id);
+    cache.put_complete(request, b"invalid header frame".to_vec()).expect("seed malformed header");
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, request, Priority::Visible, now).expect("request mesh header");
+    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("warm header reads cache") };
+    let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(read.run(), now) else { panic!("corrupt header refetches") };
+    let input = fetch.complete(Ok(asset.clone())).expect("attach full mesh");
+    let decode = store.start_decode(input).expect("admit header decode");
+    let writes = store.complete(decode.run(), now);
+    assert_eq!(writes.len(), 1);
+    for write in writes {
+        write.run();
+    }
+    assert_matches!(demand.status(), Status::Ready(Content::MeshHeader(header)) if header.asset_length() == asset.len() as u64);
+    let crate::cache::AssetLookup::Hit(cached) = cache.lookup(request) else { panic!("valid header replaced malformed framing") };
+    let (length, header_bytes) = crate::cache::parse_mesh_header_frame(&cached.bytes).expect("valid framed header");
+    assert_eq!(length, asset.len() as u64);
+    assert_eq!(header_bytes.len(), usize::try_from(lod_request.range().start).expect("header size"));
+    assert_eq!(cache.stats().entries_by_kind.meshes, 1);
+    drop(demand);
+    store.close();
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn cached_header_total_rejects_lod_with_mismatched_asset_length() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let now = Instant::now();
+    let id = AssetId::new(Uuid::from_u128(132));
+    let block = mesh_block_fixture();
+    let (request, asset) = mesh_full_asset_fixture(id, &block);
+    let header_length = usize::try_from(request.range().start).expect("header length");
+    let header_bytes = asset.get(..header_length).expect("header prefix");
+    let header_request = Request::MeshHeader(id);
+    cache.put_complete(header_request, mesh_header_record(request.asset_length(), header_bytes)).expect("seed header frame");
+    let wrong_total = request.asset_length().saturating_add(1);
+    cache
+        .put_complete(
+            Request::MeshLod(request),
+            mesh_lod_record(request.range().start, request.range().end - request.range().start, wrong_total, &block),
+        )
+        .expect("seed LOD with mismatched total");
+
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let header_demand = store.request(route, header_request, Priority::Visible, now).expect("request cached header");
+    let LoadJob::ReadCache(header_read) = store.next_job(now).expect("read header") else { panic!("header uses cache") };
+    let Some(LoadJob::Decode(header_input)) = store.complete_cache_read(header_read.run(), now) else { panic!("header entry hits") };
+    let header_decode = store.start_decode(header_input).expect("admit cached header");
+    assert!(store.complete(header_decode.run(), now).is_empty());
+    let Status::Ready(Content::MeshHeader(header)) = header_demand.status() else { panic!("header decoded") };
+    let block_request = header.lod(id, MeshLod::Low).expect("header contains low LOD");
+    assert_eq!(block_request.asset_length(), request.asset_length());
+    let lod_demand =
+        store.request(route, Request::MeshLod(block_request), Priority::Visible, now).expect("request block described by header");
+    let LoadJob::ReadCache(lod_read) = store.next_job(now).expect("read LOD") else { panic!("LOD uses cache") };
+    let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(lod_read.run(), now) else { panic!("mismatched LOD refetches") };
+    let input = fetch
+        .complete_response(Ok(FetchResponse::Partial {
+            bytes: block,
+            range: block_request.range(),
+            total_length: Some(block_request.asset_length()),
+        }))
+        .expect("attach correct network block");
+    let decode = store.start_decode(input).expect("admit network LOD");
+    let writes = store.complete(decode.run(), now);
+    assert_eq!(writes.len(), 1);
+    for write in writes {
+        write.run();
+    }
+    assert_matches!(lod_demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+    assert_eq!(cache.stats().corrupt_entries, 1);
+    assert_eq!(cache.stats().entries_by_kind.meshes, 2, "the header remains while only the mismatched LOD is replaced");
+    drop(lod_demand);
+    drop(header_demand);
+    store.close();
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn present_mesh_lod_is_cached() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let now = Instant::now();
+    let id = AssetId::new(Uuid::from_u128(127));
+    let block = mesh_block_fixture();
+    let (_lod_request, asset) = mesh_full_asset_fixture(id, &block);
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let header_demand = store.request(route, Request::MeshHeader(id), Priority::Visible, now).expect("request header");
+    let LoadJob::Fetch(header_fetch) = store.next_job(now).expect("cold header fetch") else { panic!("cache miss bypasses disk reads") };
+    let header_input = header_fetch.complete(Ok(asset.clone())).expect("attach full mesh header response");
+    let header_decode = store.start_decode(header_input).expect("admit header decode");
+    let header_writes = store.complete(header_decode.run(), now);
+    for write in header_writes {
+        write.run();
+    }
+    let Status::Ready(Content::MeshHeader(header)) = header_demand.status() else { panic!("mesh header decoded") };
+    assert_eq!(header.lod(id, MeshLod::High), Err(Failure::MissingLod(MeshLod::High)));
+    let present = header.lod(id, MeshLod::Low).expect("low LOD is present");
+    let lod_demand = store.request(route, Request::MeshLod(present), Priority::Visible, now).expect("request present LOD");
+    let LoadJob::Decode(lod_input) = store.next_job(now).expect("header prefix supplies the LOD") else {
+        panic!("complete LOD in the header is decoded directly")
+    };
+    let lod_decode = store.start_decode(lod_input).expect("admit LOD decode");
+    let lod_writes = store.complete(lod_decode.run(), now);
+    for write in lod_writes {
+        write.run();
+    }
+    drop(lod_demand);
+    drop(header_demand);
+    store.close();
+    drop(store);
+
+    let mut next_store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let next_route = next_store.register_route().expect("register next route");
+    let next_demand = next_store.request(next_route, Request::MeshLod(present), Priority::Visible, now).expect("request cached LOD");
+    let LoadJob::ReadCache(read) = next_store.next_job(now).expect("read present LOD") else { panic!("present LOD reads cache") };
+    let Some(LoadJob::Decode(input)) = next_store.complete_cache_read(read.run(), now) else { panic!("present LOD cache hit") };
+    let decode = next_store.start_decode(input).expect("admit cached LOD decode");
+    assert!(next_store.complete(decode.run(), now).is_empty());
+    assert_matches!(next_demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+    assert_eq!(cache.stats().entries_by_kind.meshes, 2, "only the header and present LOD have entries");
+    assert!(asset.len() > block.len());
+    drop(next_demand);
+    next_store.close();
+    drop(next_store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn same_mesh_block_shares_fetch() {
+    let now = Instant::now();
+    let mut store = Store::new(Budget::default());
+    let route = store.register_route().expect("register route");
+    let id = AssetId::new(Uuid::from_u128(128));
+    let block = mesh_lod_request(id, &mesh_block_fixture());
+    let first = store.request(route, Request::MeshLod(block), Priority::Visible, now).expect("request mesh LOD");
+    let second = store.request(route, Request::MeshLod(block), Priority::Visible, now).expect("request same LOD");
+    let fetch = next_fetch(&mut store, now);
+    assert_eq!(fetch.request(), Request::MeshLod(block));
+    assert!(store.next_job(now).is_none(), "the same block has only one running fetch");
+    drop(first);
+    drop(second);
+    store.close();
+}
+
+#[test]
+fn mesh_blocks_are_protected_independently() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let id = AssetId::new(Uuid::from_u128(129));
+    let (low, high, block) = mesh_lod_requests(id);
+    let low_record = mesh_lod_record_for(low, &block);
+    let high_record = mesh_lod_record_for(high, &block);
+    cache.put_complete(Request::MeshLod(low), low_record).expect("seed low LOD");
+    let one_entry_limit = cache.accounted_size();
+    cache.put_complete(Request::MeshLod(high), high_record).expect("seed high LOD");
+    let uuid = id.uuid().to_string();
+    let shard = uuid.get(..2).expect("UUID shard");
+    assert!(directory.path().join(format!("assets/meshes/lod/low/{shard}/{uuid}.llmesh")).exists());
+    assert!(directory.path().join(format!("assets/meshes/lod/high/{shard}/{uuid}.llmesh")).exists());
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::MeshLod(high), Priority::Visible, Instant::now()).expect("protect high LOD");
+    cache.set_size_limit(one_entry_limit).expect("evict one unprotected block");
+    assert_eq!(cache.lookup(Request::MeshLod(low)), crate::cache::AssetLookup::Miss);
+    assert_matches!(cache.lookup(Request::MeshLod(high)), crate::cache::AssetLookup::Hit(_));
+    assert_eq!(cache.stats().entries_by_kind.meshes, 1);
+    drop(demand);
+    store.close();
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn mesh_cache_pressure_keeps_entry() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let id = AssetId::new(Uuid::from_u128(130));
+    let block_bytes = mesh_block_fixture();
+    let request = mesh_lod_request(id, &block_bytes);
+    cache.put_complete(Request::MeshLod(request), mesh_lod_record_for(request, &block_bytes)).expect("seed validated LOD");
+    let budget = Budget::default();
+    let now = Instant::now();
+    let mut store = Store::with_cache(budget.clone(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::MeshLod(request), Priority::Background, now).expect("request cached LOD");
+    let LoadJob::ReadCache(read) = store.next_job(now).expect("cache lookup") else { panic!("warm LOD reads cache") };
+    let Some(LoadJob::Decode(input)) = store.complete_cache_read(read.run(), now) else { panic!("LOD is a cache hit") };
+    let pressure = budget.reserve(ASSET_WORK_BYTES.saturating_sub(budget.stats().charged_bytes)).expect("fill decode budget");
+    let decode = store.start_decode(input).expect("admit cached LOD");
+    let completion = decode.run();
+    assert_eq!(completion.failure(), Some(Failure::MemoryPressure));
+    assert!(store.complete(completion, now).is_empty());
+    assert_matches!(demand.status(), Status::Queued);
+    assert_eq!(store.next_deadline(now), Some(now + Duration::from_secs(1)));
+    assert_eq!(cache.stats().corrupt_entries, 0);
+    assert_matches!(cache.lookup(Request::MeshLod(request)), crate::cache::AssetLookup::Hit(_));
+    let bytes_read = cache.stats().bytes_read;
+    assert!(store.next_job(now).is_none());
+    assert!(store.next_job(now + Duration::from_millis(500)).is_none());
+    assert_eq!(cache.stats().bytes_read, bytes_read, "cache pressure delays another disk read");
+    drop(pressure);
+    let retry_at = now + Duration::from_secs(1);
+    let LoadJob::ReadCache(read) = store.next_job(retry_at).expect("retry cache read after pressure delay") else {
+        panic!("retry reads retained entry")
+    };
+    let Some(LoadJob::Decode(input)) = store.complete_cache_read(read.run(), retry_at) else { panic!("retained LOD is still a hit") };
+    let decode = store.start_decode(input).expect("admit retry decode");
+    assert!(store.complete(decode.run(), retry_at).is_empty());
+    assert_matches!(demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+    drop(demand);
+    store.close();
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
+}
+
+#[test]
+fn unavailable_mesh_cache_fetches() {
+    let directory = tempdir().expect("cache directory");
+    let cache = Arc::new(crate::cache::AssetCache::open(directory.path(), storage::DEFAULT_SIZE_LIMIT).expect("open cache"));
+    let now = Instant::now();
+    let id = AssetId::new(Uuid::from_u128(131));
+    let block = mesh_block_fixture();
+    let request = mesh_lod_request(id, &block);
+    cache.put_complete(Request::MeshLod(request), mesh_lod_record_for(request, &block)).expect("seed indexed LOD");
+    let mut store = Store::with_cache(Budget::default(), Arc::clone(&cache));
+    let route = store.register_route().expect("register route");
+    let demand = store.request(route, Request::MeshLod(request), Priority::Visible, now).expect("request mesh LOD");
+    let LoadJob::ReadCache(read) = store.next_job(now).expect("indexed cache read") else { panic!("indexed asset checks disk") };
+    let completion = read.run_lookup(|_, _| crate::cache::AssetLookup::Unavailable(storage::UnavailableReason::Io));
+    let Some(LoadJob::Fetch(fetch)) = store.complete_cache_read(completion, now) else { panic!("unavailable cache falls back") };
+    assert_matches!(demand.status(), Status::Fetching);
+    let failed = LoadJob::Fetch(fetch).fail(Failure::Transient { retry_after: Duration::ZERO });
+    store.complete(failed, now);
+    let retry_at = match demand.status() {
+        Status::Failed { failure: Failure::Transient { .. }, retry_at: Some(retry_at) } => retry_at,
+        status => panic!("network failure should retain the first-attempt retry delay: {status:?}"),
+    };
+    assert_eq!(retry_at, now + Duration::from_secs(1));
+    let LoadJob::Fetch(fetch) = store.next_job(retry_at).expect("network retry follows cache failure") else {
+        panic!("cache error is not retried in place of the network")
+    };
+    let input = fetch
+        .complete_response(Ok(FetchResponse::Partial { bytes: block, range: request.range(), total_length: Some(request.asset_length()) }))
+        .expect("attach block after cache error");
+    let decode = store.start_decode(input).expect("admit LOD decode");
+    let writes = store.complete(decode.run(), now);
+    for write in writes {
+        write.run();
+    }
+    assert_matches!(demand.status(), Status::Ready(Content::Mesh(mesh)) if mesh.lod() == MeshLod::Low);
+    drop(demand);
+    store.close();
+    drop(store);
+    Arc::try_unwrap(cache).expect("cache handle released").shutdown().expect("close cache");
 }
 
 fn legacy_fields(mode: i32, cutoff: i32) -> llsd::Map {
@@ -610,6 +1226,115 @@ fn visible_work_precedes_baselines() {
     store.maintain(later + Duration::from_secs(61));
     assert!(job.is_cancelled(), "running background work still has a bounded deadline");
     assert_matches!(baseline.status(), Status::Failed { failure: Failure::Deadline, .. });
+}
+
+#[test]
+fn mesh_importance_precedes_age() {
+    let now = Instant::now();
+    let mut store = Store::new(Budget::default());
+    let route = store.register_route().unwrap();
+    let far = mesh_resource(801).id;
+    let near = mesh_resource(802).id;
+    let _far = store.request_with_importance(route, Request::MeshHeader(far), Priority::Visible, 64, now).expect("request far mesh header");
+    let _near = store
+        .request_with_importance(route, Request::MeshHeader(near), Priority::Visible, 96, now + Duration::from_secs(1))
+        .expect("request near mesh header");
+
+    assert_eq!(next_fetch(&mut store, now + Duration::from_secs(1)).request(), Request::MeshHeader(near));
+}
+
+#[test]
+fn importance_update_keeps_fetch_and_reorders_queue() {
+    let now = Instant::now();
+    let mut store = Store::new(Budget::default());
+    let route = store.register_route().unwrap();
+    let running = store
+        .request_with_importance(route, Request::MeshHeader(mesh_resource(803).id), Priority::Visible, 20, now)
+        .expect("request running mesh");
+    let lower = store
+        .request_with_importance(route, Request::MeshHeader(mesh_resource(804).id), Priority::Visible, 10, now)
+        .expect("request lower mesh");
+    let middle = store
+        .request_with_importance(route, Request::MeshHeader(mesh_resource(805).id), Priority::Visible, 15, now)
+        .expect("request middle mesh");
+    let running_fetch = next_fetch(&mut store, now);
+    assert_eq!(running_fetch.request(), Request::MeshHeader(mesh_resource(803).id));
+
+    lower.update_importance(25);
+    store.maintain(now);
+    assert!(!running_fetch.is_cancelled(), "importance changes do not cancel the running fetch");
+    assert_eq!(next_fetch(&mut store, now).request(), Request::MeshHeader(mesh_resource(804).id));
+    assert_eq!(next_fetch(&mut store, now).request(), Request::MeshHeader(mesh_resource(805).id));
+    drop((running, lower, middle, running_fetch));
+}
+
+#[test]
+fn mesh_fetch_pool_independent_of_textures() {
+    let now = Instant::now();
+    let mut store = Store::new(Budget::default());
+    let route = store.register_route().unwrap();
+    let mut demands = Vec::new();
+    for index in 0..MAX_MESH_FETCHES + 8 {
+        let id = mesh_resource(900 + u128::try_from(index).unwrap()).id;
+        demands.push(store.request(route, Request::MeshHeader(id), Priority::Visible, now).unwrap());
+    }
+    for index in 0..MAX_NON_MESH_FETCHES + 4 {
+        let id = resource(1_000 + u128::try_from(index).unwrap()).id;
+        demands.push(store.request(route, Request::Texture { id, size: TextureSize::new(128) }, Priority::Visible, now).unwrap());
+    }
+
+    let mut mesh_fetches = 0;
+    let mut other_fetches = 0;
+    let mut jobs = Vec::new();
+    while let Some(job) = store.next_job(now) {
+        let LoadJob::Fetch(fetch) = &job else { panic!("network demands schedule fetches") };
+        if fetch.resource().kind == Kind::Mesh {
+            mesh_fetches += 1;
+        } else {
+            other_fetches += 1;
+        }
+        jobs.push(job);
+    }
+
+    assert_eq!(mesh_fetches, MAX_MESH_FETCHES);
+    assert_eq!(other_fetches, MAX_NON_MESH_FETCHES);
+    assert!(store.next_job(now).is_none());
+}
+
+#[test]
+fn reservation_block_skips_to_small_work() {
+    let budget = Budget::default();
+    let now = Instant::now();
+    let mut store = Store::new(budget.clone());
+    let route = store.register_route().expect("register route");
+    let decoder_demand = store
+        .request(route, Request::PbrMaterial(AssetId::new(Uuid::from_u128(1200))), Priority::Visible, now)
+        .expect("request active decoder");
+    let input = next_fetch(&mut store, now).complete(Ok(Vec::new())).expect("attach decoder response");
+    let decoder_job = store.start_decode(input).expect("occupy non-texture decode slot");
+    let blocker_bytes = ASSET_WORK_BYTES.saturating_sub(budget.stats().charged_bytes).saturating_sub(4 * 1024 * 1024);
+    let blocker = budget.reserve(blocker_bytes).expect("leave only a small reservation window");
+
+    let block = large_mesh_lod_request(AssetId::new(Uuid::from_u128(1201)), 8 * 1024 * 1024);
+    let large = store.request_with_importance(route, Request::MeshLod(block), Priority::Visible, 100, now).expect("request large mesh LOD");
+    let material_id = AssetId::new(Uuid::from_u128(1202));
+    let small =
+        store.request_with_importance(route, Request::PbrMaterial(material_id), Priority::Visible, 1, now).expect("request small material");
+
+    let LoadJob::Fetch(fetch) = store.next_job(now).expect("small admissible work follows blocked mesh") else {
+        panic!("material starts as a network fetch")
+    };
+    assert_eq!(fetch.request(), Request::PbrMaterial(material_id));
+    assert_matches!(large.status(), Status::Queued);
+
+    store.complete(LoadJob::Fetch(fetch).fail(Failure::Cancelled), now);
+    drop(blocker);
+    store.complete(decoder_job.run(), now);
+    drop((decoder_demand, small, large));
+    store.maintain(now);
+    store.close();
+    drop(store);
+    assert_eq!(budget.stats().charged_bytes, 0);
 }
 
 #[test]
@@ -941,7 +1666,7 @@ fn foreign_decode_preserves_owner() {
 fn fetches_overlap_decodes() {
     let budget = Budget::default();
     let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
-    let demands: Vec<_> = (1..=12)
+    let demands: Vec<_> = (1..=13)
         .map(|id| {
             let mut resource = resource(id);
             if id > 2 {
@@ -952,39 +1677,49 @@ fn fetches_overlap_decodes() {
         .collect();
     let material_json = r#"{"asset":{"version":"2.0"},"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0.2,0.3,0.4,0.5]}}]}"#;
     let mut decoding = Vec::new();
-    for _ in 0..MAX_ASSET_DECODES {
+    for _ in 0..MAX_TEXTURE_DECODES {
         let input = fetch(&mut store, now, RGBA_J2C.to_vec());
         let job = store.start_decode(input).expect("decode admission");
         decoding.push(job);
     }
+    let mut material_decodes = Vec::new();
     let mut fetched = Vec::<DecodeInput>::new();
-    let mut fetched_bytes = 0;
-    for _ in 0..MAX_ASSET_FETCHES {
+    for _ in 0..MAX_NON_MESH_FETCHES {
         let bytes = material_envelope(material_json);
-        fetched_bytes += bytes.capacity();
         let input = next_fetch(&mut store, now).complete(Ok(bytes)).expect("valid material response is attached to its fetch");
-        let input = store.start_decode(input).expect_err("decoding remains bounded independently of fetching");
-        fetched.push(input);
+        match store.start_decode(input) {
+            Ok(job) => material_decodes.push(job),
+            Err(input) => fetched.push(input),
+        }
+    }
+    assert_eq!(material_decodes.len(), MAX_NON_TEXTURE_DECODES, "non-texture work has its own bounded decode slots");
+    for _ in 0..MAX_TEXTURE_DECODES {
+        let input = next_fetch(&mut store, now)
+            .complete(Ok(material_envelope(material_json)))
+            .expect("another material fetch can overlap active decodes");
+        fetched.push(store.start_decode(input).expect_err("full decode pool leaves fetched data queued"));
     }
     assert!(store.next_job(now).is_none(), "fetched responses retain fetch admission until decoding starts");
-    assert_eq!(budget.stats().charged_bytes, 2 * TEXTURE_WORK_BYTES + fetched_bytes);
-    let job = decoding.pop().unwrap();
+    let waiting = fetched.remove(0);
+    let job = material_decodes.remove(0);
     let result = job.run();
     store.maintain(now);
-    let waiting = store.start_decode(fetched.remove(0)).expect_err("an undelivered completion retains its decode slot");
+    let waiting = store.start_decode(waiting).expect_err("other decoders retain their pool until completion delivery");
     store.complete(result, now);
     let job = store.start_decode(waiting).expect("a delivered completion admits waiting data");
-    assert_eq!(job.resource(), Resource { id: resource(3).id, kind: Kind::PbrMaterial });
+    assert_eq!(job.resource(), Resource { id: resource(5).id, kind: Kind::PbrMaterial });
     store.complete(job.run(), now);
-    let Status::Ready(Content::Material(content)) = demands[2].status() else { panic!("waiting material publishes decoded content") };
+    let Status::Ready(Content::Material(content)) = demands[2].status() else { panic!("first material publishes decoded content") };
     let MaterialDescription::Pbr(material) = &*content else { panic!("waiting response decodes to PBR fields") };
     assert_eq!(material.base_color_factor, [0.2, 0.3, 0.4, 0.5]);
     drop(content);
     assert!(store.next_job(now).is_some(), "starting a decoder releases one fetch slot");
     assert_matches!(demands[0].status(), Status::Decoding);
-    assert_matches!(demands[1].status(), Status::Ready(_));
+    assert_matches!(demands[1].status(), Status::Decoding);
+    assert_matches!(demands[3].status(), Status::Decoding);
     store.close();
     drop(decoding);
+    drop(material_decodes);
     drop(fetched);
     drop(demands);
     assert_eq!(budget.stats().charged_bytes, 0);
@@ -1034,14 +1769,14 @@ fn dropped_jobs_wake_sessions() {
     let demand = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     let input = fetch(&mut store, now, RGBA_J2C.to_vec());
     let job = store.start_decode(input).expect("decode admission");
-    assert_eq!(store.running_decodes, 1);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 1);
     first_wake.borrow_and_update();
     second_wake.borrow_and_update();
     drop(job);
     assert!(first_wake.has_changed().unwrap());
     assert!(second_wake.has_changed().unwrap(), "reconnect and retiring owners must not steal each other's wakeups");
     store.maintain(now);
-    assert_eq!(store.running_decodes, 0);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
     assert_matches!(demand.status(), Status::Failed { failure: Failure::Cancelled, retry_at: None });
     assert!(store.next_job(now).is_none());
     assert_eq!(budget.stats().charged_bytes, 0);
@@ -1053,17 +1788,17 @@ fn reacquisition_waits_for_cancelled_job() {
     let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());
     let first = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     let job = next_fetch(&mut store, now);
-    assert_eq!(store.running_fetches, 1);
+    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 1);
     drop(first);
     store.maintain(now);
-    assert_eq!(store.running_fetches, 1);
+    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 1);
     assert!(job.is_cancelled());
     let replacement = store.request(route, Request::new(resource(1)), Priority::Visible, now).unwrap();
     assert!(store.next_job(now).is_none(), "reacquisition must not duplicate a resource's in-flight work");
     let completion = job.complete(Err(Failure::NotFound)).expect_err("cancellation wins over a late fetch failure");
     assert_eq!(completion.failure(), Failure::Cancelled);
     store.complete(completion.into(), now);
-    assert_eq!(store.running_fetches, 0);
+    assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
     let job = store.next_job(now).expect("the replacement starts after cancelled work completes");
     let job = match job {
         LoadJob::Fetch(job) => job.complete(Ok(RGBA_J2C.to_vec())).expect("response attachment"),
@@ -1104,7 +1839,7 @@ proptest::proptest! {
                         proptest::prop_assert!(!jobs.iter().any(|active| active.resource() == input.resource()));
                         proptest::prop_assert!(leases.iter().flatten().any(|(resource, _)| *resource == input.resource()));
                         jobs.push(input);
-                        proptest::prop_assert!(jobs.len() <= MAX_ASSET_FETCHES);
+                        proptest::prop_assert!(jobs.len() <= MAX_NON_MESH_FETCHES);
                     }
                 }
                 3 => {
@@ -1127,8 +1862,16 @@ proptest::proptest! {
             store.maintain(now);
             let fetching = store.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Fetching, .. })).count();
             let decoding = store.entries.values().filter(|entry| matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })).count();
-            proptest::prop_assert_eq!(store.running_fetches, fetching);
-            proptest::prop_assert_eq!(store.running_decodes, decoding);
+            proptest::prop_assert_eq!(store.running_mesh_fetches + store.running_other_fetches, fetching);
+            let decoding_textures = store.entries.values().filter(|entry| {
+                entry.request.resource().kind == Kind::Texture && matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })
+            }).count();
+            let decoding_other = store.entries.values().filter(|entry| {
+                entry.request.resource().kind != Kind::Texture && matches!(entry.phase, LoadPhase::Running { stage: Stage::Decoding, .. })
+            }).count();
+            proptest::prop_assert_eq!(store.running_texture_decodes, decoding_textures);
+            proptest::prop_assert_eq!(store.running_other_decodes, decoding_other);
+            proptest::prop_assert_eq!(store.running_texture_decodes + store.running_other_decodes, decoding);
             for job in &jobs {
                 if !leases.iter().flatten().any(|(resource, _)| *resource == job.resource()) {
                     proptest::prop_assert!(job.is_cancelled());
@@ -1140,8 +1883,8 @@ proptest::proptest! {
         }
         drop(leases);
         store.close();
-        proptest::prop_assert_eq!(store.running_fetches, 0);
-        proptest::prop_assert_eq!(store.running_decodes, 0);
+        proptest::prop_assert_eq!(store.running_mesh_fetches + store.running_other_fetches, 0);
+        proptest::prop_assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
         drop(jobs);
         proptest::prop_assert_eq!(budget.stats().charged_bytes, 0);
     }
@@ -1178,11 +1921,11 @@ fn retired_material_cannot_publish() {
     let old = store.request(route, Request::new(resource), Priority::Visible, now).unwrap();
     let input = fetch(&mut store, now, legacy_envelope(resource.id));
     let job = store.start_decode(input).expect("decode admission");
-    assert_eq!(store.running_decodes, 1);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 1);
     let prepared = job.run();
     store.retire_route(route);
     store.complete(prepared, now);
-    assert_eq!(store.running_decodes, 0);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
     assert_matches!(old.status(), Status::Failed { failure: Failure::RouteClosed, .. });
     assert_eq!(budget.stats().charged_bytes, 0);
     let route = store.register_route().unwrap();
@@ -1254,6 +1997,37 @@ fn mesh_decodes_share_budget() {
         store.complete(completion, now);
         assert_matches!(demand.status(), Status::Ready(_));
     }
+}
+
+#[test]
+fn mesh_decode_bypasses_texture_pool() {
+    let budget = Budget::default();
+    let now = Instant::now();
+    let mut store = Store::new(budget);
+    let route = store.register_route().expect("register route");
+    let mut texture_demands = Vec::new();
+    let mut texture_decodes = Vec::new();
+    for id in 401..401 + MAX_TEXTURE_DECODES as u128 {
+        texture_demands.push(store.request(route, Request::new(resource(id)), Priority::Visible, now).expect("request texture"));
+        let input = fetch(&mut store, now, RGBA_J2C.to_vec());
+        texture_decodes.push(store.start_decode(input).expect("admit texture decode"));
+    }
+
+    let mesh_id = AssetId::new(Uuid::from_u128(403));
+    let mesh_demand = store.request(route, Request::MeshHeader(mesh_id), Priority::Visible, now).expect("request mesh header");
+    let block = mesh_block_fixture();
+    let (_, asset) = mesh_full_asset_fixture(mesh_id, &block);
+    let mesh_input = fetch(&mut store, now, asset);
+    let mesh_decode = store.start_decode(mesh_input).expect("texture decoders do not occupy mesh decode slots");
+    assert_matches!(mesh_demand.status(), Status::Decoding);
+    assert!(texture_demands.iter().all(|demand| matches!(demand.status(), Status::Decoding)));
+
+    store.close();
+    drop(mesh_decode);
+    drop(texture_decodes);
+    drop(mesh_demand);
+    drop(texture_demands);
+    assert_eq!(store.running_texture_decodes + store.running_other_decodes, 0);
 }
 
 #[test]

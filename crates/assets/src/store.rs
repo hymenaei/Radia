@@ -5,7 +5,7 @@ use std::{
     ops::Range,
     sync::{
         Arc, Weak,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -16,18 +16,30 @@ use utils::AssetId;
 use crate::{
     Blob, Budget, Content, TextureEvents, TextureHandle, TextureSize, WeakTexture,
     budget::{Reservation, TEXTURE_WORK_BYTES, WORK_BYTES},
-    cache::{AssetCache, AssetLookup, CacheWrite, read_work_bytes},
+    cache::{AssetCache, AssetLookup, CacheUnit, CacheWrite, cache_unit, read_work_bytes_for_request},
     content::{Finished, Prepared, StoredContent},
     mesh::{MeshLod, MeshLodRequest},
 };
 
 pub const MAX_ASSET_ROUTES: usize = 33;
-pub const MAX_ASSET_DECODES: usize = 2;
-pub const MAX_ASSET_FETCHES: usize = 8;
+pub const MAX_TEXTURE_DECODES: usize = 2;
+const MAX_NON_TEXTURE_DECODES: usize = 2;
+pub const MAX_NON_MESH_FETCHES: usize = 8;
+const MAX_MESH_FETCHES: usize = 32;
 const DEMAND_DEADLINE: Duration = Duration::from_secs(60);
 const NEGATIVE_TTL: Duration = Duration::from_secs(30);
+const CACHE_PRESSURE_RETRY: Duration = Duration::from_secs(1);
 const MAX_ATTEMPTS: u8 = 3;
-type ScheduleKey = (Reverse<Priority>, bool, Instant, LoadKey, Route);
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ScheduleKey {
+    priority: Reverse<Priority>,
+    importance: Reverse<u16>,
+    ready: bool,
+    used: Instant,
+    key: LoadKey,
+    route: Route,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Kind {
@@ -106,12 +118,8 @@ impl Request {
         }
     }
 
-    fn unit(self) -> AssetUnit {
-        match self {
-            Self::MeshHeader(_) => AssetUnit::MeshHeader,
-            Self::MeshLod(block) => AssetUnit::MeshLod(block.lod()),
-            _ => AssetUnit::Whole,
-        }
+    fn unit(self) -> CacheUnit {
+        cache_unit(self)
     }
 
     fn size(self) -> Option<TextureSize> {
@@ -132,14 +140,7 @@ impl Request {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct LoadKey {
     resource: Resource,
-    unit: AssetUnit,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-enum AssetUnit {
-    Whole,
-    MeshHeader,
-    MeshLod(MeshLod),
+    unit: CacheUnit,
 }
 
 #[derive(Debug)]
@@ -161,6 +162,7 @@ pub enum Failure {
     Denied,
     HttpStatus { status: u16 },
     Network,
+    MemoryPressure,
     TooLarge,
     Malformed,
     Unsupported,
@@ -172,6 +174,7 @@ pub enum Failure {
     Cancelled,
     Deadline,
     Transient { retry_after: Duration },
+    FullAssetRequired,
 }
 
 #[derive(Clone, Debug)]
@@ -257,6 +260,7 @@ struct Lease {
     maintenance: Arc<AtomicBool>,
     size: Option<TextureSize>,
     priority: Priority,
+    importance: AtomicU16,
     _cache_protection: Option<storage::Protection>,
     _texture: Option<TextureHandle>,
 }
@@ -285,6 +289,12 @@ impl Demand {
             return self.status();
         }
         self.status.borrow_and_update().upgrade()
+    }
+
+    pub fn update_importance(&self, importance: u16) {
+        self._lease.importance.store(importance, Ordering::Release);
+        self._lease.maintenance.store(true, Ordering::Release);
+        self._lease.counter.wake.send_replace(());
     }
 }
 
@@ -348,6 +358,7 @@ enum LoadPhase {
 enum Stage {
     ReadingCache,
     Fetching,
+    Cached,
     Decoding,
 }
 
@@ -360,7 +371,10 @@ struct AssetEntry {
     texture: Option<WeakTexture>,
     target: Option<TextureSize>,
     priority: Priority,
+    importance: u16,
     cache_checked: bool,
+    cache_retry_at: Option<Instant>,
+    force_full_mesh: bool,
 }
 
 impl AssetEntry {
@@ -404,6 +418,7 @@ struct Job {
     reservation: Reservation,
     cancelled: watch::Receiver<bool>,
     size: TextureSize,
+    force_full_mesh: bool,
 }
 
 impl fmt::Debug for Job {
@@ -470,6 +485,12 @@ impl FetchJob {
     pub fn route(&self) -> Route {
         self.job.route
     }
+    pub fn response_limit(&self) -> usize {
+        self.job.reservation.bytes()
+    }
+    pub fn force_full_mesh(&self) -> bool {
+        self.job.force_full_mesh
+    }
     pub fn is_cancelled(&self) -> bool {
         self.job.is_cancelled()
     }
@@ -487,14 +508,14 @@ impl FetchJob {
             Ok(_) => return Err(FetchFailure::new(job, Failure::Cancelled)),
             Err(failure) => return Err(FetchFailure::new(job, failure)),
         };
-        let capacity = match &response {
-            FetchResponse::Full(bytes) | FetchResponse::Partial { bytes, .. } => bytes.capacity(),
+        let (length, capacity) = match &response {
+            FetchResponse::Full(bytes) | FetchResponse::Partial { bytes, .. } => (bytes.len(), bytes.capacity()),
         };
-        if capacity > job.resource.kind.max_response_bytes() {
+        if length > job.reservation.bytes() || capacity > job.resource.kind.max_response_bytes() {
             return Err(FetchFailure::new(job, Failure::TooLarge));
         }
         if !job.reservation.resize(capacity) {
-            return Err(FetchFailure::new(job, Failure::TooLarge));
+            return Err(FetchFailure::new(job, Failure::Transient { retry_after: Duration::from_secs(1) }));
         }
         Ok(DecodeInput { job, source: DecodeSource::Response(response) })
     }
@@ -513,14 +534,14 @@ pub struct CacheReadCompletion {
 
 impl CacheReadJob {
     pub fn run(self) -> CacheReadCompletion {
-        self.run_lookup(|cache, resource| cache.lookup(resource))
+        self.run_lookup(|cache, request| cache.lookup(request))
     }
 
-    fn run_lookup(self, lookup: impl FnOnce(&AssetCache, Resource) -> AssetLookup) -> CacheReadCompletion {
+    fn run_lookup(self, lookup: impl FnOnce(&AssetCache, Request) -> AssetLookup) -> CacheReadCompletion {
         let result = if self.job.is_cancelled() {
             Err(Failure::Cancelled)
         } else {
-            let lookup = lookup(&self.cache, self.job.resource);
+            let lookup = lookup(&self.cache, self.job.request);
             if self.job.is_cancelled() { Err(Failure::Cancelled) } else { Ok(lookup) }
         };
         CacheReadCompletion { job: self.job, result }
@@ -667,14 +688,20 @@ pub struct Store {
     routes: BTreeSet<Route>,
     entries: BTreeMap<LoadKey, AssetEntry>,
     candidates: Vec<ScheduleKey>,
-    candidate_heap: BinaryHeap<ScheduleKey>,
+    mesh_candidate_heap: BinaryHeap<ScheduleKey>,
+    other_candidate_heap: BinaryHeap<ScheduleKey>,
     candidates_dirty: bool,
     budget: Budget,
     closed: bool,
     maintenance_dirty: Arc<AtomicBool>,
     maintained_at: Option<Instant>,
-    running_fetches: usize,
-    running_decodes: usize,
+    running_mesh_fetches: usize,
+    running_other_fetches: usize,
+    running_cache_reads: usize,
+    running_non_mesh_cache_reads: usize,
+    pending_non_mesh_cache_decodes: usize,
+    running_texture_decodes: usize,
+    running_other_decodes: usize,
     textures: TextureEvents,
     cache: Option<Arc<AssetCache>>,
 }
@@ -698,15 +725,21 @@ impl Store {
             sequence: 0,
             routes: BTreeSet::new(),
             entries: BTreeMap::new(),
-            candidates: Vec::with_capacity(MAX_ASSET_FETCHES),
-            candidate_heap: BinaryHeap::with_capacity(MAX_ASSET_FETCHES),
+            candidates: Vec::with_capacity(MAX_NON_MESH_FETCHES + MAX_MESH_FETCHES),
+            mesh_candidate_heap: BinaryHeap::with_capacity(MAX_MESH_FETCHES),
+            other_candidate_heap: BinaryHeap::with_capacity(MAX_NON_MESH_FETCHES),
             candidates_dirty: true,
             budget,
             closed: false,
             maintenance_dirty: Arc::new(AtomicBool::new(true)),
             maintained_at: None,
-            running_fetches: 0,
-            running_decodes: 0,
+            running_mesh_fetches: 0,
+            running_other_fetches: 0,
+            running_cache_reads: 0,
+            running_non_mesh_cache_reads: 0,
+            pending_non_mesh_cache_decodes: 0,
+            running_texture_decodes: 0,
+            running_other_decodes: 0,
             textures: TextureEvents::default(),
             cache: None,
         }
@@ -755,6 +788,17 @@ impl Store {
     }
 
     pub fn request(&mut self, route: Route, request: Request, priority: Priority, now: Instant) -> Result<Demand, AdmissionError> {
+        self.request_with_importance(route, request, priority, 0, now)
+    }
+
+    pub fn request_with_importance(
+        &mut self,
+        route: Route,
+        request: Request,
+        priority: Priority,
+        importance: u16,
+        now: Instant,
+    ) -> Result<Demand, AdmissionError> {
         let resource = request.resource();
         let key = LoadKey { resource, unit: request.unit() };
         if self.closed {
@@ -767,7 +811,7 @@ impl Store {
             return Err(AdmissionError::InvalidId);
         }
         let cache_protection =
-            self.cache.as_ref().map(|cache| cache.protect(resource).map_err(|_| AdmissionError::CacheProtection)).transpose()?;
+            self.cache.as_ref().map(|cache| cache.protect(request).map_err(|_| AdmissionError::CacheProtection)).transpose()?;
         let entry = self.entries.entry(key).or_insert_with(|| AssetEntry {
             request,
             views: BTreeMap::new(),
@@ -777,7 +821,10 @@ impl Store {
             texture: None,
             target: None,
             priority,
+            importance,
             cache_checked: false,
+            cache_retry_at: None,
+            force_full_mesh: false,
         });
         if !entry.request.is_compatible_with(request) {
             return Err(AdmissionError::ConflictingRequest);
@@ -818,7 +865,7 @@ impl Store {
         let status = match &entry.phase {
             LoadPhase::Idle => ready.as_ref().map_or(Status::Queued, |content| Status::Ready(content.clone())),
             LoadPhase::Running { stage: Stage::Decoding, .. } => Status::Decoding,
-            LoadPhase::Running { stage: Stage::ReadingCache | Stage::Fetching, .. } => Status::Fetching,
+            LoadPhase::Running { stage: Stage::ReadingCache | Stage::Fetching | Stage::Cached, .. } => Status::Fetching,
             LoadPhase::Queued => view.queued_status(),
         };
         view.publish_status(status.retaining(ready.as_ref()));
@@ -828,6 +875,7 @@ impl Store {
             maintenance: Arc::clone(&self.maintenance_dirty),
             size: request.size(),
             priority,
+            importance: AtomicU16::new(importance),
             _cache_protection: cache_protection,
             _texture: texture,
         });
@@ -846,11 +894,13 @@ impl Store {
             let ready = entry.ready();
             let mut desired = None;
             let mut priority = Priority::Background;
+            let mut importance = 0;
             for view in entry.views.values_mut() {
                 view.leases.retain(|weak| {
                     let Some(lease) = weak.upgrade() else { return false };
                     desired = desired.max(lease.size);
                     priority = priority.max(lease.priority);
+                    importance = importance.max(lease.importance.load(Ordering::Acquire));
                     true
                 });
             }
@@ -862,6 +912,7 @@ impl Store {
                 }
             }
             entry.priority = priority;
+            entry.importance = importance;
             if entry.target != desired {
                 entry.target = desired;
                 if ready.is_some() {
@@ -891,8 +942,22 @@ impl Store {
                     let stage = *stage;
                     entry.phase = LoadPhase::Queued;
                     match stage {
-                        Stage::ReadingCache | Stage::Fetching => self.running_fetches -= 1,
-                        Stage::Decoding => self.running_decodes -= 1,
+                        Stage::ReadingCache => {
+                            finish_cache_read(&mut self.running_cache_reads);
+                            if entry.request.resource().kind != Kind::Mesh {
+                                finish_cache_read(&mut self.running_non_mesh_cache_reads);
+                            }
+                        }
+                        Stage::Cached if entry.request.resource().kind != Kind::Mesh => {
+                            finish_cache_read(&mut self.pending_non_mesh_cache_decodes);
+                        }
+                        Stage::Cached => {}
+                        Stage::Fetching => {
+                            finish_fetch(entry.request.resource().kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
+                        }
+                        Stage::Decoding => {
+                            finish_decode(entry.request.resource().kind, &mut self.running_texture_decodes, &mut self.running_other_decodes)
+                        }
                     }
                 }
             }
@@ -909,7 +974,8 @@ impl Store {
         self.entries
             .retain(|_, entry| entry.has_active_demand() || entry.texture().is_some() || matches!(entry.phase, LoadPhase::Running { .. }));
         self.candidates.clear();
-        self.candidate_heap.clear();
+        self.mesh_candidate_heap.clear();
+        self.other_candidate_heap.clear();
         self.candidates_dirty = true;
         self.maintained_at = Some(now);
     }
@@ -918,30 +984,73 @@ impl Store {
         if self.closed {
             return None;
         }
-        if self.running_fetches >= MAX_ASSET_FETCHES && self.maintained_at == Some(now) && !self.maintenance_dirty.load(Ordering::Acquire) {
-            return None;
-        }
         self.maintain(now);
-        if self.running_fetches >= MAX_ASSET_FETCHES {
-            return None;
-        }
         self.build_candidates(now);
-        let (_, _, _, key, route) = self.candidates.last().copied()?;
-        let resource = key.resource;
-        let cache_read = self.cache.is_some()
-            && self
+        let mut selected = None;
+        for index in (0..self.candidates.len()).rev() {
+            let candidate = self.candidates[index];
+            let key = candidate.key;
+            let resource = key.resource;
+            let Some(request) = self.entries.get(&key).map(|entry| entry.request) else { continue };
+            let cache_unchecked = self
                 .entries
                 .get(&key)
                 .is_some_and(|entry| !entry.cache_checked && entry.texture().and_then(|texture| texture.source()).is_none());
-        let bytes = if cache_read { read_work_bytes(resource.kind)? } else { resource.kind.max_response_bytes() };
-        let headroom = if self.running_decodes > 0 { 0 } else { TEXTURE_WORK_BYTES.saturating_sub(bytes) };
-        let reservation = self.budget.reserve_with_headroom(bytes, headroom)?;
-        self.sequence = self.sequence.checked_add(1)?;
-        self.candidates.pop();
-        let generation = self.sequence;
+            if cache_unchecked
+                && self.cache.as_ref().is_some_and(|cache| !cache.may_contain(request))
+                && let Some(entry) = self.entries.get_mut(&key)
+            {
+                entry.cache_checked = true;
+            }
+            let cache_read = self.cache.is_some()
+                && self
+                    .entries
+                    .get(&key)
+                    .is_some_and(|entry| !entry.cache_checked && entry.texture().and_then(|texture| texture.source()).is_none());
+            if cache_read {
+                if self.running_cache_reads >= storage::MAX_IN_FLIGHT_READS
+                    || resource.kind != Kind::Mesh
+                        && self.running_non_mesh_cache_reads + self.pending_non_mesh_cache_decodes
+                            >= MAX_TEXTURE_DECODES + MAX_NON_TEXTURE_DECODES
+                {
+                    continue;
+                }
+            } else if (resource.kind == Kind::Mesh && self.running_mesh_fetches >= MAX_MESH_FETCHES)
+                || (resource.kind != Kind::Mesh && self.running_other_fetches >= MAX_NON_MESH_FETCHES)
+            {
+                continue;
+            }
+            let prefix_lod = (!cache_read).then(|| self.mesh_lod_prefix(request)).flatten();
+            let force_full_mesh = self.entries.get(&key).is_some_and(|entry| entry.force_full_mesh);
+            let fetch_bytes = if force_full_mesh && resource.kind == Kind::Mesh {
+                Some(resource.kind.max_response_bytes())
+            } else {
+                fetch_work_bytes(request)
+            };
+            let Some(bytes) = (if cache_read { read_work_bytes_for_request(request) } else { fetch_bytes })
+                .map(|bytes| bytes.max(prefix_lod.as_ref().map_or(0, |(_, bytes)| bytes.capacity())))
+            else {
+                continue;
+            };
+            let headroom =
+                if self.running_texture_decodes + self.running_other_decodes > 0 { 0 } else { TEXTURE_WORK_BYTES.saturating_sub(bytes) };
+            let Some(reservation) = self.budget.reserve_with_headroom(bytes, headroom) else { continue };
+            let generation = self.sequence.checked_add(1)?;
+            self.sequence = generation;
+            selected = Some((index, candidate, prefix_lod, reservation, generation));
+            break;
+        }
+        let (index, candidate, prefix_lod, reservation, generation) = selected?;
+        self.candidates.remove(index);
+        let key = candidate.key;
+        let route = candidate.route;
+        let resource = key.resource;
         let life = Arc::new(WorkLife { maintenance: Arc::clone(&self.maintenance_dirty) });
         let (cancelled, receiver) = watch::channel(false);
         let entry = self.entries.get_mut(&key).expect("selected demanded entry");
+        if entry.cache_retry_at.is_some_and(|retry_at| retry_at <= now) {
+            entry.cache_retry_at = None;
+        }
         let source = entry.texture().and_then(|texture| texture.source());
         let job = Job {
             resource,
@@ -953,6 +1062,7 @@ impl Store {
             _life: life,
             cancelled: receiver,
             size: entry.target.unwrap_or_default(),
+            force_full_mesh: entry.force_full_mesh,
         };
         if let Some(source) = source {
             if entry.priority == Priority::Background {
@@ -960,9 +1070,20 @@ impl Store {
             }
             entry.views.get_mut(&route).expect("selected route").attempts += 1;
             entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
-            self.running_fetches += 1;
+            start_fetch(resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
             entry.broadcast_status(Status::Fetching);
             return Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Cached(source), job }));
+        }
+        if let Some((block, bytes)) = prefix_lod {
+            if entry.priority == Priority::Background {
+                entry.views.get_mut(&route).expect("selected route").deadline = now + DEMAND_DEADLINE;
+            }
+            entry.views.get_mut(&route).expect("selected route").attempts += 1;
+            entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
+            start_fetch(resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
+            entry.broadcast_status(Status::Fetching);
+            let response = FetchResponse::Partial { bytes, range: block.range(), total_length: Some(block.asset_length()) };
+            return Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Response(response), job }));
         }
         if let Some(cache) = &self.cache
             && !entry.cache_checked
@@ -971,7 +1092,10 @@ impl Store {
                 entry.views.get_mut(&route).expect("selected route").deadline = now + DEMAND_DEADLINE;
             }
             entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::ReadingCache };
-            self.running_fetches += 1;
+            self.running_cache_reads += 1;
+            if resource.kind != Kind::Mesh {
+                self.running_non_mesh_cache_reads += 1;
+            }
             entry.broadcast_status(Status::Fetching);
             return Some(LoadJob::ReadCache(CacheReadJob { job, cache: Arc::clone(cache) }));
         }
@@ -980,9 +1104,21 @@ impl Store {
         }
         entry.views.get_mut(&route).expect("selected route").attempts += 1;
         entry.phase = LoadPhase::Running { generation, route, life: Arc::downgrade(&job._life), cancelled, stage: Stage::Fetching };
-        self.running_fetches += 1;
+        start_fetch(resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
         entry.broadcast_status(Status::Fetching);
         Some(LoadJob::Fetch(FetchJob { job }))
+    }
+
+    fn mesh_lod_prefix(&self, request: Request) -> Option<(MeshLodRequest, Vec<u8>)> {
+        let Request::MeshLod(block) = request else { return None };
+        let resource = Resource { id: block.asset_id(), kind: Kind::Mesh };
+        let key = LoadKey { resource, unit: CacheUnit::Header };
+        let Content::MeshHeader(header) = self.entries.get(&key)?.ready()? else { return None };
+        let source = header.lod_bytes(block)?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(source.len()).ok()?;
+        bytes.extend_from_slice(source);
+        Some((block, bytes))
     }
 
     #[allow(clippy::result_large_err)]
@@ -990,11 +1126,16 @@ impl Store {
         if self.closed || input.is_cancelled() || input.job.route.store != self.id {
             return Err(input);
         }
-        if self.running_decodes >= MAX_ASSET_DECODES {
+        let decode_slots_full = if input.job.resource.kind == Kind::Texture {
+            self.running_texture_decodes >= MAX_TEXTURE_DECODES
+        } else {
+            self.running_other_decodes >= MAX_NON_TEXTURE_DECODES
+        };
+        if decode_slots_full {
             return Err(input);
         }
         if !self.entries.get(&input.job.key).is_some_and(
-            |entry| matches!(entry.phase, LoadPhase::Running { generation, stage: Stage::Fetching, .. } if generation == input.job.generation),
+            |entry| matches!(entry.phase, LoadPhase::Running { generation, stage: Stage::Fetching | Stage::Cached, .. } if generation == input.job.generation),
         ) {
             return Err(input);
         }
@@ -1005,9 +1146,16 @@ impl Store {
         }
         let entry = self.entries.get_mut(&input.job.key).expect("validated running job");
         let LoadPhase::Running { stage, .. } = &mut entry.phase else { unreachable!("validated running phase") };
+        let cached = *stage == Stage::Cached;
         *stage = Stage::Decoding;
-        self.running_fetches -= 1;
-        self.running_decodes += 1;
+        if cached && input.job.resource.kind != Kind::Mesh {
+            finish_cache_read(&mut self.pending_non_mesh_cache_decodes);
+        } else {
+            if !cached {
+                finish_fetch(input.job.resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
+            }
+        }
+        start_decode(input.job.resource.kind, &mut self.running_texture_decodes, &mut self.running_other_decodes);
         self.maintenance_dirty.store(true, Ordering::Release);
         entry.broadcast_status(Status::Decoding);
         Ok(DecodeJob(input))
@@ -1023,33 +1171,55 @@ impl Store {
             return None;
         }
         self.maintenance_dirty.store(true, Ordering::Release);
+        finish_cache_read(&mut self.running_cache_reads);
+        if job.resource.kind != Kind::Mesh {
+            finish_cache_read(&mut self.running_non_mesh_cache_reads);
+        }
         if !self.routes.contains(&job.route)
             || job.is_cancelled()
             || !entry.has_active_demand()
             || entry.views.get(&job.route).is_none_or(|view| now >= view.deadline)
         {
-            self.running_fetches -= 1;
             entry.phase = LoadPhase::Queued;
             return None;
         }
-        if !matches!(&result, Err(Failure::Cancelled)) {
+        if !matches!(&result, Err(Failure::Cancelled))
+            && !matches!(&result, Ok(AssetLookup::Unavailable(storage::UnavailableReason::ReadLimit)))
+        {
             entry.cache_checked = true;
         }
         match result {
             Ok(AssetLookup::Hit(asset)) => {
                 let decode_bytes = job.resource.kind.work_bytes().unwrap_or(asset.bytes.capacity());
                 job.reservation.shrink_to_at_most(decode_bytes.max(asset.bytes.capacity()));
+                if job.resource.kind != Kind::Mesh {
+                    self.pending_non_mesh_cache_decodes += 1;
+                }
                 if let LoadPhase::Running { stage, .. } = &mut entry.phase {
-                    *stage = Stage::Fetching;
+                    *stage = Stage::Cached;
                 }
                 Some(LoadJob::Decode(DecodeInput { source: DecodeSource::Disk(asset.bytes), job }))
             }
-            _ => Self::cache_read_fallback(entry, job, now),
+            Ok(AssetLookup::Unavailable(storage::UnavailableReason::ReadLimit)) => {
+                entry.phase = LoadPhase::Queued;
+                entry.broadcast_status(Status::Queued);
+                None
+            }
+            _ => {
+                let fetch = Self::cache_read_fallback(entry, job, now)?;
+                start_fetch(fetch.resource().kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
+                Some(LoadJob::Fetch(fetch))
+            }
         }
     }
 
-    fn cache_read_fallback(entry: &mut AssetEntry, mut job: Job, now: Instant) -> Option<LoadJob> {
-        job.reservation.shrink_to_at_most(job.resource.kind.max_response_bytes());
+    fn cache_read_fallback(entry: &mut AssetEntry, mut job: Job, now: Instant) -> Option<FetchJob> {
+        let bytes = if entry.force_full_mesh && job.resource.kind == Kind::Mesh {
+            job.resource.kind.max_response_bytes()
+        } else {
+            fetch_work_bytes(job.request)?
+        };
+        job.reservation.shrink_to_at_most(bytes);
         if entry.priority == Priority::Background
             && let Some(view) = entry.views.get_mut(&job.route)
         {
@@ -1061,7 +1231,7 @@ impl Store {
         if let LoadPhase::Running { stage, .. } = &mut entry.phase {
             *stage = Stage::Fetching;
         }
-        Some(LoadJob::Fetch(FetchJob { job }))
+        Some(FetchJob { job })
     }
 
     pub fn complete(&mut self, completion: LoadCompletion, now: Instant) -> Vec<CacheWrite> {
@@ -1082,8 +1252,20 @@ impl Store {
             cache.observe_decode(job.resource.kind, duration);
         }
         match stage {
-            Stage::ReadingCache | Stage::Fetching => self.running_fetches -= 1,
-            Stage::Decoding => self.running_decodes -= 1,
+            Stage::ReadingCache => {
+                finish_cache_read(&mut self.running_cache_reads);
+                if job.resource.kind != Kind::Mesh {
+                    finish_cache_read(&mut self.running_non_mesh_cache_reads);
+                }
+            }
+            Stage::Fetching => {
+                finish_fetch(job.resource.kind, &mut self.running_mesh_fetches, &mut self.running_other_fetches);
+            }
+            Stage::Cached if job.resource.kind != Kind::Mesh => {
+                finish_cache_read(&mut self.pending_non_mesh_cache_decodes);
+            }
+            Stage::Cached => {}
+            Stage::Decoding => finish_decode(job.resource.kind, &mut self.running_texture_decodes, &mut self.running_other_decodes),
         }
         entry.phase = LoadPhase::Queued;
         self.maintenance_dirty.store(true, Ordering::Release);
@@ -1094,9 +1276,27 @@ impl Store {
         {
             return writes;
         }
-        if origin == DecodeOrigin::Disk && result.is_err() && !job.is_cancelled() {
+        if origin == DecodeOrigin::Disk && result.as_ref().is_err_and(|failure| *failure == Failure::MemoryPressure) {
+            entry.cache_checked = false;
+            entry.cache_retry_at = Some(now + CACHE_PRESSURE_RETRY);
+            entry.broadcast_status(Status::Queued);
+            return writes;
+        }
+        if result.as_ref().is_err_and(|failure| *failure == Failure::FullAssetRequired)
+            && job.resource.kind == Kind::Mesh
+            && !entry.force_full_mesh
+        {
+            entry.force_full_mesh = true;
+            if let Some(view) = entry.views.get_mut(&job.route) {
+                view.attempts = view.attempts.saturating_sub(1);
+                view.failed = None;
+            }
+            entry.broadcast_status(Status::Queued);
+            return writes;
+        }
+        if origin == DecodeOrigin::Disk && result.as_ref().is_err_and(|failure| *failure != Failure::Cancelled) && !job.is_cancelled() {
             if let Some(cache) = &self.cache {
-                cache.discard_corrupt(job.resource);
+                cache.discard_corrupt(job.request);
             }
             return writes;
         }
@@ -1105,7 +1305,7 @@ impl Store {
             Ok((content, source, persisted)) => {
                 entry.used = now;
                 if let (Some(cache), Some(payload)) = (&self.cache, persisted)
-                    && let Some(write) = cache.queue_write(job.resource, payload, &self.budget)
+                    && let Some(write) = cache.queue_write(job.request, payload, &self.budget)
                 {
                     writes.push(write);
                 }
@@ -1163,17 +1363,17 @@ impl Store {
     pub fn next_deadline(&self, now: Instant) -> Option<Instant> {
         self.entries
             .values()
-            .filter(|entry| {
-                entry.has_active_demand()
-                    && !matches!(entry.phase, LoadPhase::Idle)
-                    && (entry.priority == Priority::Visible || matches!(entry.phase, LoadPhase::Running { .. }))
-            })
+            .filter(|entry| entry.has_active_demand() && !matches!(entry.phase, LoadPhase::Idle))
             .flat_map(|entry| {
-                entry
-                    .views
-                    .values()
-                    .filter(|view| view.count() > 0 && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some()))
-                    .flat_map(|view| std::iter::once(view.deadline).chain(view.failed.as_ref().and_then(|failed| failed.retry_at)))
+                let demand_deadlines =
+                    (entry.priority == Priority::Visible || matches!(entry.phase, LoadPhase::Running { .. })).then(|| {
+                        entry
+                            .views
+                            .values()
+                            .filter(|view| view.count() > 0 && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some()))
+                            .flat_map(|view| std::iter::once(view.deadline).chain(view.failed.as_ref().and_then(|failed| failed.retry_at)))
+                    });
+                entry.cache_retry_at.into_iter().chain(demand_deadlines.into_iter().flatten())
             })
             .filter(|deadline| *deadline > now)
             .min()
@@ -1184,8 +1384,13 @@ impl Store {
             return;
         }
         self.closed = true;
-        self.running_fetches = 0;
-        self.running_decodes = 0;
+        self.running_mesh_fetches = 0;
+        self.running_other_fetches = 0;
+        self.running_cache_reads = 0;
+        self.running_non_mesh_cache_reads = 0;
+        self.pending_non_mesh_cache_decodes = 0;
+        self.running_texture_decodes = 0;
+        self.running_other_decodes = 0;
         self.maintenance_dirty.store(true, Ordering::Release);
         for entry in self.entries.values() {
             if let LoadPhase::Running { cancelled, .. } = &entry.phase {
@@ -1195,7 +1400,8 @@ impl Store {
         }
         self.entries.clear();
         self.candidates.clear();
-        self.candidate_heap.clear();
+        self.mesh_candidate_heap.clear();
+        self.other_candidate_heap.clear();
         self.candidates_dirty = true;
         self.routes.clear();
     }
@@ -1205,24 +1411,42 @@ impl Store {
             return;
         }
         self.candidates.clear();
-        self.candidate_heap.clear();
-        let candidate_limit = MAX_ASSET_FETCHES.saturating_sub(self.running_fetches);
-        let candidates = &mut self.candidate_heap;
+        self.mesh_candidate_heap.clear();
+        self.other_candidate_heap.clear();
+        let mesh_limit = MAX_MESH_FETCHES;
+        let other_limit = MAX_NON_MESH_FETCHES;
         for (key, entry) in &self.entries {
             if matches!(entry.phase, LoadPhase::Queued)
                 && let Some((route, _)) = entry.views.iter().find(|(_, view)| {
                     view.count() > 0
                         && view.attempts < MAX_ATTEMPTS
                         && (entry.priority == Priority::Background || now < view.deadline)
+                        && entry.cache_retry_at.is_none_or(|retry_at| retry_at <= now)
                         && view.failed.as_ref().is_none_or(|failed| failed.retry_at.is_some_and(|retry| retry <= now))
                 })
             {
-                retain_candidate(candidates, candidate_limit, (Reverse(entry.priority), entry.ready().is_some(), entry.used, *key, *route));
+                let candidate = ScheduleKey {
+                    priority: Reverse(entry.priority),
+                    importance: Reverse(entry.importance),
+                    ready: entry.ready().is_some(),
+                    used: entry.used,
+                    key: *key,
+                    route: *route,
+                };
+                if key.resource.kind == Kind::Mesh {
+                    retain_candidate(&mut self.mesh_candidate_heap, mesh_limit, candidate);
+                } else {
+                    retain_candidate(&mut self.other_candidate_heap, other_limit, candidate);
+                }
             }
         }
-        while let Some(candidate) = self.candidate_heap.pop() {
+        while let Some(candidate) = self.mesh_candidate_heap.pop() {
             self.candidates.push(candidate);
         }
+        while let Some(candidate) = self.other_candidate_heap.pop() {
+            self.candidates.push(candidate);
+        }
+        self.candidates.sort_unstable_by(|left, right| right.cmp(left));
         self.candidates_dirty = false;
     }
 }
@@ -1233,6 +1457,50 @@ fn content_satisfies(content: &Content, desired: Option<TextureSize>) -> bool {
             desired.is_none_or(|size| image.info().is_some_and(|info| info.discard == size.discard_level(info.source_size)))
         }
         Content::Material(_) | Content::Environment(_) | Content::MeshHeader(_) | Content::Mesh(_) => true,
+    }
+}
+
+fn start_fetch(kind: Kind, mesh: &mut usize, other: &mut usize) {
+    if kind == Kind::Mesh {
+        *mesh += 1;
+    } else {
+        *other += 1;
+    }
+}
+
+fn finish_cache_read(reads: &mut usize) {
+    *reads -= 1;
+}
+
+fn finish_fetch(kind: Kind, mesh: &mut usize, other: &mut usize) {
+    if kind == Kind::Mesh {
+        *mesh -= 1;
+    } else {
+        *other -= 1;
+    }
+}
+
+fn start_decode(kind: Kind, texture: &mut usize, other: &mut usize) {
+    if kind == Kind::Texture {
+        *texture += 1;
+    } else {
+        *other += 1;
+    }
+}
+
+fn finish_decode(kind: Kind, texture: &mut usize, other: &mut usize) {
+    if kind == Kind::Texture {
+        *texture -= 1;
+    } else {
+        *other -= 1;
+    }
+}
+
+fn fetch_work_bytes(request: Request) -> Option<usize> {
+    match request {
+        Request::MeshHeader(_) => Some(crate::mesh::MAX_MESH_HEADER_BYTES),
+        Request::MeshLod(block) => usize::try_from(block.range().end.checked_sub(block.range().start)?).ok(),
+        _ => Some(request.resource().kind.max_response_bytes()),
     }
 }
 

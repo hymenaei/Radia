@@ -171,8 +171,8 @@ impl MeshPlanner {
                     } else {
                         self.deferred_switch = true;
                     }
-                } else if self.detach_target(*entity).is_some() {
-                    changes.push(MeshChange::Clear(*entity));
+                } else if let Some(target) = self.detach_target(*entity) {
+                    changes.push(MeshChange::Clear(*entity, target.key));
                 }
             }
             if current == desired
@@ -309,7 +309,7 @@ mod tests {
     };
 
     use crate::scene::{
-        Camera, MeshBuildError, PreparedMesh,
+        Camera, DrawnMeshKey, MeshBuildError, PreparedMesh,
         budget::Budget,
         mesh::retained_bytes,
         mesh_cache::{ENTRY_BYTES, MeshKey},
@@ -457,7 +457,7 @@ mod tests {
         });
         assert_matches!(published_ready.map(status), Some(MeshStatus::Ready));
         apply_changes(&mut mirror, &changes);
-        assert_eq!(mirror.objects[&target].mesh().map(|(key, _)| key), Some(low));
+        assert_eq!(mirror.objects[&target].mesh().map(|(key, _)| key), Some(DrawnMeshKey::Prim(low)));
     }
 
     #[test]
@@ -482,7 +482,7 @@ mod tests {
 
         assert_eq!(planner.targets[&target].key, high);
         assert!(planner.retry_admission(), "a rejected detail switch is retried");
-        assert_eq!(mirror.objects[&target].mesh().map(|(key, _)| key), Some(high));
+        assert_eq!(mirror.objects[&target].mesh().map(|(key, _)| key), Some(DrawnMeshKey::Prim(high)));
         assert_matches!(mesh_state(&mirror.objects[&target]), Some((key, MeshStatus::Ready)) if key == high);
     }
 }

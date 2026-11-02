@@ -4,8 +4,11 @@ use std::{
     time::Instant,
 };
 
+use assets::{Budget as AssetBudget, Failure, FetchResponse, LoadJob, Priority, Request, Store};
 use futures::executor::block_on;
 use math::{DVec3, Vec3};
+use utils::AssetId;
+use uuid::Uuid;
 use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use wgpu::{
     AddressMode, Backends, BindGroupDescriptor, BindGroupEntry, BindingResource, BufferDescriptor, BufferUsages, Color, DeviceDescriptor,
@@ -21,9 +24,12 @@ use crate::geometry::{
 };
 use crate::material::FaceParams;
 use crate::pipeline::{INSTANCE_BYTES, Pipeline, VERTEX_BYTES};
-use crate::scene::{AgentPose, Camera, Placement, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView};
+use crate::scene::{
+    AgentPose, AssetChange, AssetRequest, Camera, DrawnMeshKey, Placement, ReadQuery, ReadReply, ReconcileStep, Reconciler, SceneView,
+};
 use world::{
-    Appearance, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, Region, SurfaceAppearance, UpdateSource, WorldPose,
+    Appearance, FieldUpdate, Kind, ObjectObservation, OrderEvidence, ParentUpdate, Pose, Region, SculptFlags, Shape, SurfaceAppearance,
+    UpdateSource, WorldPose,
 };
 
 fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_pages: bool) {
@@ -76,7 +82,7 @@ fn check_pages(device: &wgpu::Device, queue: &wgpu::Queue, alpha: u8, separate_p
             let Placement::Ready(transform) = object.placement() else { panic!("fixture object must be placed") };
             let params = FaceParams::new(Some(&object.materials().unwrap()[0]));
             let packed = packed_instance(
-                &instance_base(transform.pose.position, transform.pose.rotation, transform.scale, camera.position()),
+                &instance_base(transform.pose.position, transform.pose.rotation, transform.scale, false, camera.position()),
                 &params,
                 transform.scale,
             );
@@ -219,9 +225,12 @@ fn mesh_page_bytes(shared: &crate::scene::SharedMesh) -> usize {
     bytes * (1024 * 1024 / bytes).max(1)
 }
 
-fn settle_scene(world: &world::World, scene: &mut Reconciler, view: &mut SceneView, mut now: Instant) {
+fn settle_scene(world: &world::World, scene: &mut Reconciler, view: &mut SceneView, mut now: Instant) -> Vec<AssetRequest> {
+    let mut requests = Vec::new();
     loop {
         match scene.poll(now) {
+            ReconcileStep::Asset(AssetChange::Request(request)) => requests.push(request),
+            ReconcileStep::Asset(AssetChange::Release(_)) => {}
             ReconcileStep::Read(job) => {
                 let result = match job.query() {
                     ReadQuery::Barrier => Ok(ReadReply::Barrier(world.read_barrier())),
@@ -240,7 +249,7 @@ fn settle_scene(world: &world::World, scene: &mut Reconciler, view: &mut SceneVi
             }
             ReconcileStep::Continue => {}
             ReconcileStep::Wait(until) => now = until,
-            ReconcileStep::Idle => return,
+            ReconcileStep::Idle => return requests,
             _ => panic!("fixture stopped before publishing geometry"),
         }
     }
@@ -259,6 +268,193 @@ fn move_object(world: &mut world::World, id: u32, order: u64, position: Vec3, co
     observation.surface_appearance =
         Some(SurfaceAppearance::new(world::FaceAppearance { color, ..Default::default() }, Vec::new()).expect("fixture appearance"));
     assert_matches!(world.observe_object(observation).unwrap().outcome, world::ApplyOutcome::Updated(_));
+}
+
+fn mesh_scene(
+    objects: &[(u32, AssetId, Vec3)],
+    textures: Option<(AssetId, AssetId)>,
+) -> (world::World, Reconciler, SceneView, Camera, Vec<AssetRequest>) {
+    let count = objects.len();
+    let mut world = world::World::new(world::WorldLimits {
+        max_region_registrations: 1,
+        max_entities: count,
+        max_entities_per_region: count,
+        max_tombstones_per_region: 1,
+        max_tombstones: 1,
+        max_tombstone_bytes_per_region: world::WorldLimits::tombstone_bytes_for_count(1),
+        max_tombstone_bytes: world::WorldLimits::tombstone_bytes_for_count(1),
+        max_journal_entries: 16,
+        max_journal_changes: 64,
+        max_region_name_bytes: 64,
+        max_recovery_targets: count,
+    });
+    let region = Region::new(1);
+    let _adopted = world.adopt_region(region).unwrap();
+    let _metadata = world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).unwrap();
+    for (id, asset, position) in objects {
+        let mut observation = ObjectObservation::new(
+            UpdateSource::new(region, *id, OrderEvidence::Ordered(u64::from(*id)), 0),
+            Uuid::from_u128(100_000 + u128::from(*id)),
+            std::num::NonZeroU32::new(*id).unwrap(),
+            Kind::Object,
+            ParentUpdate::Root,
+        );
+        observation.pose = Some(Pose { position: Some(*position), rotation: Some(math::Quat::IDENTITY) });
+        observation.scale = Some(Vec3::ONE);
+        observation.shape = FieldUpdate::Set(Shape::Mesh { asset_id: *asset, flags: SculptFlags::default() });
+        if *id == 1
+            && let Some((red, green)) = textures
+        {
+            observation.appearance = FieldUpdate::Set(Appearance::Surface);
+            observation.surface_appearance = Some(
+                SurfaceAppearance::new(
+                    world::FaceAppearance { texture: Some(red), color: [255, 0, 0, 255], ..Default::default() },
+                    vec![(1, world::FaceAppearance { texture: Some(green), color: [0, 255, 0, 128], ..Default::default() })],
+                )
+                .unwrap(),
+            );
+        }
+        let _applied = world.observe_object(observation).unwrap();
+    }
+    let camera = Camera::new(DVec3::ZERO, Vec3::X, std::f64::consts::FRAC_PI_3, [128, 128]).unwrap();
+    let (mut scene, mut view) = Reconciler::new(crate::scene::Budget::default());
+    scene.set_camera(camera);
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    (world, scene, view, camera, requests)
+}
+
+fn avatar_mesh_scene() -> (world::World, Reconciler, SceneView, Camera) {
+    let mut world = world::World::new(world::WorldLimits {
+        max_region_registrations: 1,
+        max_entities: 1,
+        max_entities_per_region: 1,
+        max_tombstones_per_region: 1,
+        max_tombstones: 1,
+        max_tombstone_bytes_per_region: world::WorldLimits::tombstone_bytes_for_count(1),
+        max_tombstone_bytes: world::WorldLimits::tombstone_bytes_for_count(1),
+        max_journal_entries: 16,
+        max_journal_changes: 64,
+        max_region_name_bytes: 64,
+        max_recovery_targets: 1,
+    });
+    let region = Region::new(1);
+    let _ = world.adopt_region(region).expect("avatar region");
+    let _ =
+        world.patch_region(region, world::RegionInfo { origin: Some(DVec3::ZERO), ..Default::default() }).expect("avatar region origin");
+    let mut observation = ObjectObservation::new(
+        UpdateSource::new(region, 1, OrderEvidence::Ordered(1), 0),
+        Uuid::from_u128(1),
+        std::num::NonZeroU32::new(1).expect("avatar local id"),
+        Kind::Avatar,
+        ParentUpdate::Root,
+    );
+    observation.scale = Some(Vec3::ONE);
+    observation.shape = FieldUpdate::Set(Shape::Prim(world::PrimShape::default()));
+    observation.appearance = FieldUpdate::Set(Appearance::Surface);
+    observation.surface_appearance = Some(SurfaceAppearance::new(world::FaceAppearance::default(), Vec::new()).expect("avatar appearance"));
+    let _ = world.observe_object(observation).expect("avatar introduction");
+    let (mut scene, mut view) = Reconciler::new(crate::scene::Budget::default());
+    let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [128, 128]).expect("avatar camera");
+    scene.set_camera(camera);
+    settle_scene(&world, &mut scene, &mut view, Instant::now());
+    (world, scene, view, camera)
+}
+
+fn prepared_asset(request: Request, bytes: Vec<u8>) -> assets::Status {
+    let now = Instant::now();
+    let mut store = Store::new(AssetBudget::default());
+    let route = store.register_route().unwrap();
+    let demand = store.request(route, request, Priority::Visible, now).unwrap();
+    let LoadJob::Fetch(job) = store.next_job(now).unwrap() else { panic!("fixture request unexpectedly used a cached source") };
+    let input = match request {
+        Request::MeshLod(block) => {
+            let range = block.range();
+            let start = usize::try_from(range.start).unwrap();
+            let end = usize::try_from(range.end).unwrap();
+            let bytes = bytes.get(start..end).expect("mesh fixture contains the requested LOD block").to_vec();
+            job.complete_response(Ok(FetchResponse::Partial { bytes, range, total_length: Some(block.asset_length()) })).unwrap()
+        }
+        Request::MeshHeader(_) if bytes.len() > job.response_limit() => {
+            let failure = job.complete_response(Err(Failure::FullAssetRequired)).expect_err("header fallback requires a full retry");
+            store.complete(failure.into(), now);
+            let LoadJob::Fetch(retry) = store.next_job(now).expect("full mesh retry is admitted") else {
+                panic!("full mesh retry unexpectedly used a cached source");
+            };
+            assert!(retry.force_full_mesh());
+            retry.complete(Ok(bytes)).unwrap()
+        }
+        _ => job.complete(Ok(bytes)).unwrap(),
+    };
+    let completion = store.start_decode(input).unwrap().run();
+    store.complete(completion, now);
+    demand.status()
+}
+
+fn vulkan_device() -> (wgpu::Device, wgpu::Queue) {
+    block_on(async {
+        let instance =
+            wgpu::Instance::new(InstanceDescriptor { backends: Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() });
+        let adapter = instance.request_adapter(&Default::default()).await.unwrap();
+        adapter.request_device(&DeviceDescriptor::default()).await.unwrap()
+    })
+}
+
+fn prepare_frame(device: &wgpu::Device, queue: &wgpu::Queue, geometry: &mut GeometryRenderer, view: &SceneView, camera: Camera) {
+    let frame = geometry.admit().unwrap();
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(device, &mut encoder, view, None, camera, [128, 128], None);
+    queue.submit([encoder.finish()]);
+    geometry.submitted(frame);
+    device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+}
+
+fn prepare_agent_frame(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    geometry: &mut GeometryRenderer,
+    view: &SceneView,
+    camera: Camera,
+    agent_pose: Option<AgentPose>,
+) {
+    let frame = geometry.admit().expect("geometry frame lease");
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(device, &mut encoder, view, agent_pose, camera, [128, 128], None);
+    queue.submit([encoder.finish()]);
+    geometry.submitted(frame);
+    device.poll(PollType::Wait { submission_index: None, timeout: None }).expect("submitted frame completes");
+}
+
+fn fill_mesh_pages(device: &wgpu::Device, geometry: &mut GeometryRenderer) -> Vec<crate::geometry::storage::Allocation> {
+    let mut pages: Vec<(Arc<crate::geometry::storage::Buffers>, u32, u32)> = Vec::new();
+    for mesh in geometry.meshes.values() {
+        let buffers = mesh.allocation.buffers().clone();
+        if let Some((_, vertices, indices)) = pages.iter_mut().find(|(page, _, _)| Arc::ptr_eq(page, &buffers)) {
+            *vertices = (*vertices).max(mesh.allocation.vertices().end);
+            *indices = (*indices).max(mesh.allocation.indices().end);
+        } else {
+            pages.push((buffers, mesh.allocation.vertices().end, mesh.allocation.indices().end));
+        }
+    }
+    let mut tails: Vec<_> = pages
+        .iter()
+        .map(|(buffers, vertices, indices)| {
+            let vertex_capacity = u32::try_from(buffers.vertices.size() / VERTEX_BYTES as u64).expect("fixture page vertices");
+            let index_capacity = u32::try_from(buffers.indices.size() / size_of::<u32>() as u64).expect("fixture page indices");
+            (buffers.clone(), vertex_capacity - *vertices, index_capacity - *indices)
+        })
+        .collect();
+    tails.sort_unstable_by_key(|(_, vertices, indices)| std::cmp::Reverse(vertices.saturating_add(*indices)));
+    let mut allocations = Vec::new();
+    for (buffers, vertices, indices) in tails {
+        if vertices == 0 || indices == 0 {
+            continue;
+        }
+        if let Some(allocation) = geometry.storage.allocate(device, vertices as usize, indices as usize, false, &geometry.memory) {
+            assert!(Arc::ptr_eq(allocation.buffers(), &buffers), "the page tail reservation matches its page");
+            allocations.push(allocation);
+        }
+    }
+    allocations
 }
 
 fn render_pixels(
@@ -370,7 +566,7 @@ fn check_planar_projection(device: &wgpu::Device, queue: &wgpu::Queue) {
         params.color = [1.0; 4];
         params.params[0] = 1.0;
         instances.extend_from_slice(&packed_instance(
-            &instance_base(transform.pose.position, transform.pose.rotation, transform.scale, camera.position()),
+            &instance_base(transform.pose.position, transform.pose.rotation, transform.scale, false, camera.position()),
             &params,
             transform.scale,
         ));
@@ -580,6 +776,225 @@ fn gpu_appearance_replacement_rechecks_visibility() {
 }
 
 #[test]
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_same_mesh_appearance_rebuilds_after_eviction -- --ignored"]
+fn gpu_same_mesh_appearance_rebuilds_after_eviction() {
+    let (device, queue) = vulkan_device();
+    let (mut world, mut scene, mut view, camera) = scene_with_world(255, [Vec3::splat(2.0); 2], Default::default());
+    let entity =
+        view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("fixture object").detail().summary.entity;
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    let index = geometry.cache.objects[&entity];
+    let mesh_id = geometry.cache.items.get(index).expect("cached object").mesh.id();
+    drop(geometry.meshes.remove(&mesh_id).expect("resident fixture mesh"));
+
+    let color = [24, 96, 224, 255];
+    move_object(&mut world, 1, 100, Vec3::new(10.0, -2.0, 0.0), color);
+    scene.notify_world_change();
+    settle_scene(&world, &mut scene, &mut view, Instant::now());
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+
+    let item = geometry.cache.items.get(index).expect("rebuilt object");
+    let object = view.object(entity).expect("updated scene object");
+    let expected = FaceParams::new(Some(&object.materials().expect("updated material")[0]));
+    assert_eq!(item.mesh.id(), mesh_id);
+    assert!(item.replacement.is_none(), "same-mesh appearance updates rebuild immediately");
+    assert!(geometry.meshes.contains_key(&mesh_id), "the evicted mesh is uploaded again");
+    assert_eq!(item.faces.first().map(|face| face.base_params.color), Some(expected.color));
+    assert_eq!(geometry.stats.pending_meshes, 0);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_removed_pending_replacement_reconciles_snapshot -- --ignored"]
+fn gpu_removed_pending_replacement_reconciles_snapshot() {
+    let (device, queue) = vulkan_device();
+    let (mut world, mut scene, mut view, camera) = scene_with_world(255, [Vec3::splat(2.0); 2], Default::default());
+    let entity =
+        view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).expect("replacement target").detail().summary.entity;
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    let original_mesh = geometry.cache.items.get(geometry.cache.objects[&entity]).expect("original item").mesh.id();
+    move_object(&mut world, 2, 10, Vec3::new(1000.0, 0.0, 0.0), [0, 255, 0, 255]);
+    scene.notify_world_change();
+    settle_scene(&world, &mut scene, &mut view, Instant::now());
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    let stale_version = geometry.cache.version.clone().expect("prepared view version");
+    let fillers = fill_mesh_pages(&device, &mut geometry);
+    assert!(!fillers.is_empty(), "fixture mesh pages have spare capacity to reserve");
+    let blocker_bytes = crate::geometry::MESH_BYTES - geometry.memory.mesh_state().bytes;
+    let blocker = geometry.memory.reserve(blocker_bytes, crate::geometry::Resource::Mesh).expect("fill mesh budget");
+
+    let mut patch = world::ObjectPatch::new(
+        UpdateSource::new(Region::new(1), 20, OrderEvidence::Ordered(20), 0),
+        std::num::NonZeroU32::new(1).expect("target local id"),
+    );
+    patch.shape =
+        FieldUpdate::Set(Shape::Prim(world::PrimShape { path_scale_x: 40, path_scale_y: 40, profile_hollow: 16, ..Default::default() }));
+    let _ = world.patch_object(patch).expect("replacement shape applies");
+    scene.notify_world_change();
+    settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let replacement_mesh =
+        view.object(entity).and_then(|object| object.mesh().map(|(_, mesh)| mesh.id())).expect("new mesh geometry published");
+    assert_ne!(replacement_mesh, original_mesh);
+    assert!(!geometry.meshes.contains_key(&replacement_mesh));
+    assert_eq!(geometry.cache.items.get(geometry.cache.objects[&entity]).map(|item| item.mesh.id()), Some(original_mesh));
+    let view_changes = view.changes_since(&stale_version).expect("same session changes").collect::<Vec<_>>();
+    assert!(view_changes.iter().all(|change| !change.full), "the mesh update remains incremental");
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    let held = geometry.cache.items.get(geometry.cache.objects[&entity]).expect("held item");
+    assert_eq!(held.mesh.id(), original_mesh);
+    assert_eq!(held.replacement.as_ref().map(|replacement| replacement.item.mesh.id()), Some(replacement_mesh));
+    assert_eq!(geometry.stats.instances, 1, "the old item remains drawn while allocation is blocked");
+
+    let _ = world
+        .remove_object(
+            UpdateSource::new(Region::new(1), 30, OrderEvidence::Ordered(30), 0),
+            std::num::NonZeroU32::new(1).expect("target local id"),
+        )
+        .expect("target removal applies");
+    scene.notify_world_change();
+    settle_scene(&world, &mut scene, &mut view, Instant::now());
+    for order in 31..=95 {
+        move_object(&mut world, 2, order, Vec3::new(1000.0, 0.0, 0.0), [order as u8, 96, 224, 255]);
+        scene.notify_world_change();
+        settle_scene(&world, &mut scene, &mut view, Instant::now());
+    }
+    let changes = view.changes_since(&stale_version).expect("same session changes").collect::<Vec<_>>();
+    assert!(changes.iter().any(|change| change.reconcile_all), "evicted removal history requests snapshot reconciliation");
+    assert!(changes.iter().flat_map(|change| &change.objects).all(|changed| *changed != entity), "the removal event aged out of history");
+    assert_eq!(view.object_count(), 1, "the surviving scene snapshot contains the unrelated object");
+
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    assert!(!geometry.cache.objects.contains_key(&entity));
+    assert!(geometry.cache.objects.is_empty(), "the only remaining object is outside the view");
+    assert!(geometry.cache.items.iter().all(|(_, item)| item.entity != Some(entity)));
+    assert!(geometry.cache.items.iter().all(|(_, item)| item.replacement.is_none()));
+    assert!(!geometry.cache.mesh_info.contains_key(&replacement_mesh));
+    assert_eq!(geometry.stats.instances, 0);
+    assert_visible_draw_coverage(&geometry);
+
+    drop(blocker);
+    drop(fillers);
+    let memory = geometry.memory.clone();
+    drop(geometry);
+    device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    assert_eq!(memory.mesh_state().bytes, 0);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(gpu_replacement_visibility_tracks_its_own_bounds)'"]
+fn gpu_replacement_visibility_tracks_its_own_bounds() {
+    let first_asset = AssetId::new(Uuid::from_u128(801));
+    let second_asset = AssetId::new(Uuid::from_u128(802));
+    let first_bytes = test_support::mesh::asset_with_lod_faces(&[(3, 1)]);
+    let second_bytes = test_support::mesh::asset_with_lod_bounds(3, [-0.01, 14.0, -1.0], [0.01, 16.0, 1.0]);
+    let (mut world, mut scene, mut view, first_camera, requests) = mesh_scene(&[(1, first_asset, Vec3::new(2.0, 0.0, 0.0))], None);
+    let first_header = requests
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshHeader(asset) if asset == first_asset))
+        .copied()
+        .expect("held mesh header request");
+    scene.complete_asset(first_header.ticket, prepared_asset(first_header.request, first_bytes.clone()));
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let first_high = requests
+        .iter()
+        .find(|request| {
+            request.request.resource().id == first_asset
+                && matches!(request.request, Request::MeshLod(lod) if lod.lod() == assets::mesh::MeshLod::High)
+        })
+        .copied()
+        .expect("held high LOD request");
+    scene.complete_asset(first_high.ticket, prepared_asset(first_high.request, first_bytes));
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    prepare_frame(&device, &queue, &mut geometry, &view, first_camera);
+    let entity = view
+        .objects()
+        .find(|object| object.detail().summary.id == Uuid::from_u128(100_001))
+        .expect("held mesh object")
+        .detail()
+        .summary
+        .entity;
+    let item_index = geometry.cache.objects[&entity];
+    let held_mesh = geometry.cache.items.get(item_index).expect("held mesh item").mesh.id();
+    assert!(geometry.meshes.contains_key(&held_mesh));
+    assert!(geometry.cache.candidates.contains(&item_index));
+    let initial_visible_union = geometry.cache.candidates.len() + geometry.cache.replacement_visible.len();
+    assert_eq!(initial_visible_union, 1, "the held item is the only visible candidate");
+
+    let fillers = fill_mesh_pages(&device, &mut geometry);
+    assert!(!fillers.is_empty(), "fixture mesh page has capacity to reserve");
+    let blocker_bytes = crate::geometry::MESH_BYTES - geometry.memory.mesh_state().bytes;
+    let blocker = geometry.memory.reserve(blocker_bytes, crate::geometry::Resource::Mesh).expect("fill mesh budget");
+    let mut patch = world::ObjectPatch::new(
+        UpdateSource::new(Region::new(1), 2, OrderEvidence::Ordered(2), 0),
+        std::num::NonZeroU32::new(1).expect("target local ID"),
+    );
+    patch.shape = FieldUpdate::Set(Shape::Mesh { asset_id: second_asset, flags: SculptFlags::default() });
+    let _ = world.patch_object(patch).expect("replacement mesh applies");
+    scene.notify_world_change();
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let second_header = requests
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshHeader(asset) if asset == second_asset))
+        .copied()
+        .expect("replacement mesh header request");
+    scene.complete_asset(second_header.ticket, prepared_asset(second_header.request, second_bytes.clone()));
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let second_high = requests
+        .iter()
+        .find(|request| {
+            request.request.resource().id == second_asset
+                && matches!(request.request, Request::MeshLod(lod) if lod.lod() == assets::mesh::MeshLod::High)
+        })
+        .copied()
+        .expect("replacement high LOD request");
+    scene.complete_asset(second_high.ticket, prepared_asset(second_high.request, second_bytes));
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let expected_replacement_id =
+        view.object(entity).and_then(|object| object.mesh().map(|(_, mesh)| mesh.id())).expect("replacement mesh published");
+
+    let second_camera = Camera::new(DVec3::ZERO, Vec3::new(2.0, 15.0, 0.0), 1.0, [128, 128]).expect("replacement camera");
+    scene.set_camera(second_camera);
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    prepare_frame(&device, &queue, &mut geometry, &view, second_camera);
+    let held = geometry.cache.items.get(item_index).expect("held item with replacement");
+    let replacement_id = held.replacement.as_ref().expect("pending replacement").item.mesh.id();
+    assert_eq!(replacement_id, expected_replacement_id);
+    assert!(geometry.cache.candidates.is_empty(), "the held bounds are outside the new frustum");
+    assert!(geometry.cache.replacement_visible.contains(&item_index), "the replacement bounds enter the new frustum");
+    assert_eq!(
+        geometry.cache.candidates.len() + geometry.cache.replacement_visible.len(),
+        initial_visible_union,
+        "moving visibility from held bounds to replacement bounds keeps the union size"
+    );
+    assert_eq!(geometry.stats.instances, 0, "an off-screen held mesh contributes no instances");
+    assert_eq!(geometry.stats.pending_meshes, 1, "replacement demand survives the unchanged visible union");
+
+    drop(blocker);
+    prepare_frame(&device, &queue, &mut geometry, &view, second_camera);
+    assert!(geometry.meshes.contains_key(&replacement_id), "the visible replacement uploads after budget is released");
+    prepare_frame(&device, &queue, &mut geometry, &view, second_camera);
+    let current = geometry.cache.items.get(item_index).expect("promoted replacement item");
+    assert_eq!(current.mesh.id(), replacement_id);
+    assert!(current.replacement.is_none());
+    assert!(geometry.cache.visible.contains(&item_index));
+    assert_eq!(geometry.stats.instances, 1);
+    assert_visible_draw_coverage(&geometry);
+
+    let memory = geometry.memory.clone();
+    drop(geometry);
+    drop(fillers);
+    device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    assert_eq!(memory.mesh_state().bytes, 0);
+}
+
+#[test]
 #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored ignored-only gpu_mesh_pages"]
 fn gpu_mesh_pages() {
     let (device, queue) = block_on(async {
@@ -722,4 +1137,418 @@ fn gpu_agent_pose_override_patches_draw_and_pick() {
     assert_eq!(geometry.draw_list.instance_transform(slot), Some(item.transform.as_slice()));
     assert!(geometry.pick(camera, old_ray).unwrap().is_some(), "picking returns to the simulator pose");
     assert_eq!(geometry.pick(camera, moved_ray).unwrap(), None, "the restored avatar is absent from the predicted ray");
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_avatar_mesh_ready_late_uses_agent_pose -- --ignored"]
+fn gpu_avatar_mesh_ready_late_uses_agent_pose() {
+    let (device, queue) = vulkan_device();
+    let (mut world, mut scene, mut view, camera) = avatar_mesh_scene();
+    let agent_id = Uuid::from_u128(1);
+    let agent = view.objects().next().expect("avatar");
+    let entity = agent.detail().summary.entity;
+    let predicted_pose = WorldPose { position: DVec3::new(10.0, 0.0, 0.0), rotation: math::Quat::IDENTITY };
+    let agent_pose = Some(AgentPose::new(agent_id, predicted_pose));
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    prepare_agent_frame(&device, &queue, &mut geometry, &view, camera, agent_pose);
+    assert!(!geometry.cache.objects.contains_key(&entity), "the unresolved avatar has no render item");
+
+    let mut observation = ObjectObservation::new(
+        UpdateSource::new(Region::new(1), 10, OrderEvidence::Ordered(10), 0),
+        agent_id,
+        std::num::NonZeroU32::new(1).expect("avatar local id"),
+        Kind::Avatar,
+        ParentUpdate::Root,
+    );
+    observation.pose = Some(Pose { position: Some(Vec3::new(10.0, -2.0, 0.0)), rotation: Some(math::Quat::IDENTITY) });
+    let applied = world.observe_object(observation).expect("avatar pose update");
+    assert_matches!(applied.outcome, world::ApplyOutcome::Updated(_));
+    scene.notify_world_change();
+    settle_scene(&world, &mut scene, &mut view, Instant::now());
+
+    prepare_agent_frame(&device, &queue, &mut geometry, &view, camera, agent_pose);
+    assert_eq!(geometry.stats.instances, 1);
+    let index = geometry.cache.objects[&entity];
+    let item = geometry.cache.items.get(index).expect("late avatar render item");
+    assert!(item.replacement.is_none());
+    assert_eq!(item.position, predicted_pose.position);
+    let slot = item.faces.iter().find_map(|face| face.slot).expect("visible avatar face slot");
+    assert_eq!(geometry.draw_list.instance_transform(slot), Some(item.transform.as_slice()));
+    assert_visible_draw_coverage(&geometry);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_mesh_faces_and_alpha -- --ignored"]
+fn gpu_mesh_faces_and_alpha() {
+    let mesh_asset = AssetId::new(Uuid::from_u128(801));
+    let other_asset = AssetId::new(Uuid::from_u128(804));
+    let red = AssetId::new(Uuid::from_u128(802));
+    let green = AssetId::new(Uuid::from_u128(803));
+    let (mut world, mut scene, mut view, _, requests) =
+        mesh_scene(&[(1, mesh_asset, Vec3::new(5.0, 0.0, 0.0)), (2, other_asset, Vec3::new(3.0, 0.5, 0.0))], Some((red, green)));
+    let camera = Camera::new(DVec3::ZERO, Vec3::X, 25_f64.to_radians(), [128, 128]).expect("fixture camera");
+    scene.set_camera(camera);
+    let header = requests
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshHeader(asset) if asset == mesh_asset))
+        .copied()
+        .expect("mesh header request");
+    let other_header = requests
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshHeader(asset) if asset == other_asset))
+        .copied()
+        .expect("other mesh header request");
+    for request in requests.iter().filter(|request| request.request.resource().kind == assets::Kind::Texture) {
+        let texture = if request.request.resource().id == red { test_support::texture::RGB_J2C } else { test_support::texture::GRAY_J2C };
+        let status = prepared_asset(request.request, texture.to_vec());
+        assert_matches!(status, assets::Status::Ready(_));
+        scene.complete_asset(request.ticket, status);
+    }
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let bytes = test_support::mesh::asset_with_lod_faces(&[(2, 2), (3, 1)]);
+    scene.complete_asset(header.ticket, prepared_asset(header.request, bytes.clone()));
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let other_header = requests
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshHeader(asset) if asset == other_asset))
+        .copied()
+        .unwrap_or(other_header);
+    let high = requests
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshLod(lod) if lod.lod() == assets::mesh::MeshLod::High))
+        .copied()
+        .expect("selected high LOD request");
+    let medium = requests
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshLod(lod) if lod.lod() == assets::mesh::MeshLod::Medium))
+        .copied()
+        .expect("fallback medium LOD request");
+    scene.complete_asset(medium.ticket, prepared_asset(medium.request, bytes.clone()));
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    for request in requests.into_iter().filter(|request| request.request.resource().kind == assets::Kind::Texture) {
+        let texture = if request.request.resource().id == red { test_support::texture::RGB_J2C } else { test_support::texture::GRAY_J2C };
+        let status = prepared_asset(request.request, texture.to_vec());
+        assert_matches!(status, assets::Status::Ready(_));
+        scene.complete_asset(request.ticket, status);
+    }
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let object = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(100_001)).expect("mesh object");
+    assert_eq!(object.mesh().map(|(key, _)| key), Some(DrawnMeshKey::Asset { asset: mesh_asset, lod: assets::mesh::MeshLod::Medium }));
+    let faces = object.materials().expect("fallback materials");
+    let red_face = faces.iter().find(|face| face.slot == 0).expect("first fallback face material");
+    let green_face = faces.iter().find(|face| face.slot == 1).expect("second fallback face material");
+    assert_eq!(red_face.base_color_texture.as_ref().expect("red texture").state().asset, red);
+    assert_eq!(green_face.base_color_texture.as_ref().expect("green texture").state().asset, green);
+    assert_eq!(red_face.alpha, crate::material::AlphaBehavior::Opaque);
+    assert_eq!(green_face.alpha, crate::material::AlphaBehavior::Blend);
+
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    let depth = geometry.depth(&device, [128, 128]).expect("depth target");
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    assert_eq!(geometry.stats.instances, 1, "only the target fallback is ready");
+
+    scene.complete_asset(high.ticket, prepared_asset(high.request, bytes));
+    let other_bytes = test_support::mesh::asset_with_lod_geometry(&[(3, 3, 65_535, 65_535)]);
+    scene.complete_asset(other_header.ticket, prepared_asset(other_header.request, other_bytes.clone()));
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let other_high = requests
+        .iter()
+        .find(|request| {
+            request.request.resource().id == other_asset
+                && matches!(request.request, Request::MeshLod(lod) if lod.lod() == assets::mesh::MeshLod::High)
+        })
+        .copied()
+        .expect("other selected high LOD request");
+    scene.complete_asset(other_high.ticket, prepared_asset(other_high.request, other_bytes));
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let target = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(100_001)).expect("replacement target");
+    assert_eq!(target.mesh().map(|(key, _)| key), Some(DrawnMeshKey::Asset { asset: mesh_asset, lod: assets::mesh::MeshLod::High }));
+    assert_eq!(target.materials().expect("selected high material").len(), 1, "new mesh materials use only the published face slots");
+
+    let frame = geometry.admit().unwrap();
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, None, camera, [128, 128], None);
+    assert_eq!(
+        geometry.stats.pending_meshes, 1,
+        "the larger new mesh uses this frame's upload budget: instances={}, uploaded={}",
+        geometry.stats.instances, geometry.stats.uploaded_bytes
+    );
+    assert_eq!(geometry.stats.instances, 2, "the old multi-face item stays drawn while the replacement waits");
+    queue.submit([encoder.finish()]);
+    let pixels = render_pixels(&device, &queue, [128, 128], &depth, |pass| geometry.draw(pass));
+    geometry.submitted(frame);
+    let red_pixels = pixels.iter().filter(|pixel| pixel[0] > pixel[1].saturating_add(24)).count();
+    let green_pixels = pixels.iter().filter(|pixel| pixel[1] > pixel[0].saturating_add(24)).count();
+    let max_red = pixels.iter().filter(|pixel| pixel[0] > pixel[1].saturating_add(24)).map(|pixel| pixel[0]).max().unwrap_or_default();
+    let max_green = pixels.iter().filter(|pixel| pixel[1] > pixel[0].saturating_add(24)).map(|pixel| pixel[1]).max().unwrap_or_default();
+    assert!(red_pixels > 50, "fallback opaque face renders with red material: {red_pixels} pixels");
+    assert!(green_pixels > 50, "fallback blended face renders with green material: {green_pixels} pixels");
+    assert!(max_green < max_red, "fallback face alpha blends against the black clear color: green={max_green}, red={max_red}");
+
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    assert_eq!(geometry.stats.pending_meshes, 0, "the replacement becomes resident on the next frame");
+    assert_eq!(geometry.stats.instances, 2);
+
+    let _removed = world
+        .remove_object(
+            UpdateSource::new(Region::new(1), 10, OrderEvidence::Ordered(10), 0),
+            std::num::NonZeroU32::new(2).expect("fixture local ID"),
+        )
+        .expect("competing object removal applies");
+    scene.notify_world_change();
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    assert_eq!(geometry.stats.instances, 1, "only the mesh target remains visible");
+
+    let mut patch = world::ObjectPatch::new(
+        UpdateSource::new(Region::new(1), 11, OrderEvidence::Ordered(11), 0),
+        std::num::NonZeroU32::new(1).expect("fixture local ID"),
+    );
+    patch.shape = FieldUpdate::Set(Shape::Mesh { asset_id: mesh_asset, flags: SculptFlags { invert: true, mirror: true } });
+    let _applied = world.patch_object(patch).expect("mesh flags update applies");
+    scene.notify_world_change();
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let object = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(100_001)).expect("flagged mesh target");
+    assert_eq!(
+        object
+            .materials()
+            .and_then(|materials| materials.iter().find(|face| face.slot == 0))
+            .and_then(|face| face.base_color_texture.as_ref())
+            .map(|texture| texture.state().asset),
+        Some(red),
+        "mesh flags preserve the object's existing face material"
+    );
+    let frame = geometry.admit().expect("geometry frame lease");
+    let mut encoder = device.create_command_encoder(&Default::default());
+    geometry.prepare(&device, &mut encoder, &view, None, camera, [128, 128], None);
+    assert!(geometry.stats.layouts > 0, "mirror and invert flag changes rebuild the draw layout");
+    assert_eq!(geometry.stats.instances, 1);
+    queue.submit([encoder.finish()]);
+    let hit = (0..128).step_by(8).any(|y| {
+        (0..128).step_by(8).any(|x| geometry.pick(camera, camera.ray([f64::from(x), f64::from(y)], [128, 128])).unwrap().is_some())
+    });
+    geometry.submitted(frame);
+    assert!(hit, "a mirrored and inverted mesh remains pickable after winding and normal updates");
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_large_mesh_first_upload_exceeds_upload_target -- --ignored"]
+fn gpu_large_mesh_first_upload_exceeds_upload_target() {
+    let asset = AssetId::new(Uuid::from_u128(810));
+    let (world, mut scene, mut view, camera, requests) = mesh_scene(&[(1, asset, Vec3::new(2.0, 0.0, 0.0))], None);
+    let bytes = test_support::mesh::asset_with_lod_geometry(&[(3, 3, 65_535, 65_535)]);
+    let header = requests
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshHeader(id) if id == asset))
+        .copied()
+        .expect("mesh header request");
+    scene.complete_asset(header.ticket, prepared_asset(header.request, bytes.clone()));
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let high = requests
+        .iter()
+        .find(|request| matches!(request.request, Request::MeshLod(lod) if lod.lod() == assets::mesh::MeshLod::High))
+        .copied()
+        .expect("selected high LOD request");
+    scene.complete_asset(high.ticket, prepared_asset(high.request, bytes));
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    assert!(geometry.stats.uploaded_bytes > 4 * 1024 * 1024);
+    assert_eq!(geometry.stats.pending_meshes, 0);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_lod_keeps_fallback_during_unrelated_retirement -- --ignored"]
+fn gpu_lod_keeps_fallback_during_unrelated_retirement() {
+    let target = AssetId::new(Uuid::from_u128(830));
+    let unrelated = AssetId::new(Uuid::from_u128(831));
+    let target_bytes = test_support::mesh::asset_with_lod_geometry(&[(2, 8, 65_535, 65_535), (3, 8, 65_535, 131_079)]);
+    let unrelated_bytes = test_support::mesh::asset_with_lod_geometry(&[(2, 8, 65_535, 196_605)]);
+    let (mut world, mut scene, mut view, camera, requests) =
+        mesh_scene(&[(1, target, Vec3::new(2.0, 0.0, 0.0)), (2, unrelated, Vec3::new(4.0, 0.0, 0.0))], None);
+    for request in requests {
+        let Request::MeshHeader(asset) = request.request else { continue };
+        let bytes = if asset == target { target_bytes.clone() } else { unrelated_bytes.clone() };
+        scene.complete_asset(request.ticket, prepared_asset(request.request, bytes));
+    }
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let mut high = None;
+    for request in requests {
+        let Request::MeshLod(lod) = request.request else { continue };
+        let bytes = if request.request.resource().id == target { target_bytes.clone() } else { unrelated_bytes.clone() };
+        if request.request.resource().id == target && lod.lod() == assets::mesh::MeshLod::High {
+            high = Some(request);
+        } else if lod.lod() == assets::mesh::MeshLod::Medium {
+            scene.complete_asset(request.ticket, prepared_asset(request.request, bytes));
+        }
+    }
+    let high = high.expect("selected high LOD request remains pending");
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    geometry.memory = Arc::new(crate::geometry::Accounting::default());
+    for _ in 0..8 {
+        prepare_frame(&device, &queue, &mut geometry, &view, camera);
+        if geometry.stats.pending_meshes == 0 {
+            break;
+        }
+    }
+    let target_entity = view
+        .objects()
+        .find(|object| object.detail().summary.id == Uuid::from_u128(100_001))
+        .expect("replacement target")
+        .detail()
+        .summary
+        .entity;
+    let unrelated_entity = view
+        .objects()
+        .find(|object| object.detail().summary.id == Uuid::from_u128(100_002))
+        .expect("unrelated mesh object")
+        .detail()
+        .summary
+        .entity;
+    let fallback_id = geometry.cache.items.get(geometry.cache.objects[&target_entity]).expect("fallback item").mesh.id();
+    let unrelated_id = geometry.cache.items.get(geometry.cache.objects[&unrelated_entity]).expect("unrelated item").mesh.id();
+    assert!(geometry.meshes.contains_key(&unrelated_id));
+
+    let _ = world
+        .remove_object(
+            UpdateSource::new(Region::new(1), 30, OrderEvidence::Ordered(30), 0),
+            std::num::NonZeroU32::new(2).expect("unrelated local id"),
+        )
+        .expect("unrelated object removal applies");
+    scene.notify_world_change();
+    settle_scene(&world, &mut scene, &mut view, Instant::now());
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    assert!(!geometry.cache.objects.contains_key(&unrelated_entity));
+    assert!(geometry.meshes.contains_key(&unrelated_id), "unrelated GPU allocation remains available for eviction");
+    let blocker_bytes = crate::geometry::MESH_BYTES - geometry.memory.mesh_state().bytes;
+    let blocker = geometry.memory.reserve(blocker_bytes, crate::geometry::Resource::Mesh).expect("fill mesh budget");
+
+    scene.complete_asset(high.ticket, prepared_asset(high.request, target_bytes));
+    settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let replacement_id = view.object(target_entity).and_then(|object| object.mesh().map(|(_, mesh)| mesh.id())).expect("high LOD geometry");
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    let held = geometry.cache.items.get(geometry.cache.objects[&target_entity]).expect("fallback item");
+    assert_eq!(held.mesh.id(), fallback_id);
+    assert_eq!(held.replacement.as_ref().map(|replacement| replacement.item.mesh.id()), Some(replacement_id));
+    assert!(geometry.meshes.contains_key(&fallback_id), "the visible fallback stays resident");
+    assert!(!geometry.meshes.contains_key(&unrelated_id), "the unrelated allocation was retired to make room");
+    assert_eq!(geometry.stats.mesh_budget_blocked, 1);
+    assert_eq!(geometry.stats.instances, 1);
+
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    let current = geometry.cache.items.get(geometry.cache.objects[&target_entity]).expect("replacement item");
+    assert_eq!(current.mesh.id(), replacement_id);
+    assert!(current.replacement.is_none());
+    assert_eq!(geometry.stats.mesh_budget_blocked, 0);
+    assert_eq!(geometry.stats.instances, 1);
+    assert!(geometry.stats.mesh_bytes <= crate::geometry::MESH_BYTES);
+
+    let memory = geometry.memory.clone();
+    drop(blocker);
+    drop(geometry);
+    device.poll(PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    assert_eq!(memory.mesh_state().bytes, 0);
+}
+
+#[test]
+#[ignore = "requires a Vulkan adapter; run with cargo test -p render gpu_lod_releases_fallback_when_replacement_exceeds_remaining_mesh_budget -- --ignored"]
+fn gpu_lod_releases_fallback_when_replacement_exceeds_remaining_mesh_budget() {
+    let target = AssetId::new(Uuid::from_u128(820));
+    let other_a = AssetId::new(Uuid::from_u128(821));
+    let other_b = AssetId::new(Uuid::from_u128(822));
+    let target_bytes = test_support::mesh::asset_with_lod_geometry(&[(2, 8, 65_535, 65_535), (3, 8, 65_535, 131_079)]);
+    let other_a_bytes = test_support::mesh::asset_with_lod_geometry(&[(2, 8, 65_535, 196_605)]);
+    let other_b_bytes = test_support::mesh::asset_with_lod_geometry(&[(2, 4, 65_535, 65_535)]);
+    let (world, mut scene, mut view, camera, requests) = mesh_scene(
+        &[(1, target, Vec3::new(2.0, 0.0, 0.0)), (2, other_a, Vec3::new(4.0, 0.0, 0.0)), (3, other_b, Vec3::new(6.0, 0.0, 0.0))],
+        None,
+    );
+    for request in requests {
+        let Request::MeshHeader(asset) = request.request else { continue };
+        let bytes = if asset == target {
+            target_bytes.clone()
+        } else if asset == other_a {
+            other_a_bytes.clone()
+        } else {
+            other_b_bytes.clone()
+        };
+        scene.complete_asset(request.ticket, prepared_asset(request.request, bytes));
+    }
+    let requests = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    let mut high = None;
+    for request in requests {
+        let Request::MeshLod(lod) = request.request else { continue };
+        let asset = request.request.resource().id;
+        if asset == target && lod.lod() == assets::mesh::MeshLod::High {
+            high = Some(request);
+            continue;
+        }
+        if lod.lod() == assets::mesh::MeshLod::Medium {
+            let bytes = if asset == target {
+                target_bytes.clone()
+            } else if asset == other_a {
+                other_a_bytes.clone()
+            } else {
+                other_b_bytes.clone()
+            };
+            scene.complete_asset(request.ticket, prepared_asset(request.request, bytes));
+        }
+    }
+    let high = high.expect("selected high LOD request remains pending");
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    assert_eq!(
+        view.objects()
+            .find(|object| object.detail().summary.id == Uuid::from_u128(100_001))
+            .and_then(|object| object.mesh().map(|(key, _)| key)),
+        Some(DrawnMeshKey::Asset { asset: target, lod: assets::mesh::MeshLod::Medium })
+    );
+
+    let (device, queue) = vulkan_device();
+    let mut geometry = GeometryRenderer::new(&device, &queue, TextureFormat::Rgba8UnormSrgb);
+    for _ in 0..8 {
+        prepare_frame(&device, &queue, &mut geometry, &view, camera);
+        if geometry.stats.pending_meshes == 0 {
+            break;
+        }
+    }
+    assert_eq!(geometry.stats.pending_meshes, 0);
+    assert!(geometry.stats.mesh_bytes > 48 * 1024 * 1024);
+    assert!(geometry.stats.mesh_bytes < 49 * 1024 * 1024);
+    assert_eq!(geometry.stats.instances, 3);
+    let target_entity = view
+        .objects()
+        .find(|object| object.detail().summary.id == Uuid::from_u128(100_001))
+        .expect("replacement target")
+        .detail()
+        .summary
+        .entity;
+    let fallback_id = geometry.cache.items.get(geometry.cache.objects[&target_entity]).expect("fallback item").mesh.id();
+
+    scene.complete_asset(high.ticket, prepared_asset(high.request, target_bytes));
+    let _ = settle_scene(&world, &mut scene, &mut view, Instant::now());
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    assert_eq!(geometry.stats.mesh_budget_blocked, 1);
+    assert_eq!(geometry.stats.pending_meshes, 1);
+    assert_eq!(geometry.stats.instances, 2);
+    assert!(!geometry.meshes.contains_key(&fallback_id), "the held fallback is retired when it is the allocation victim");
+
+    prepare_frame(&device, &queue, &mut geometry, &view, camera);
+    assert_eq!(geometry.stats.mesh_budget_blocked, 0);
+    assert_eq!(
+        geometry.stats.pending_meshes,
+        0,
+        "the replacement uploads after the fallback hold is released: bytes={}, meshes={}",
+        geometry.stats.mesh_bytes,
+        geometry.meshes.len()
+    );
+    assert_eq!(geometry.stats.instances, 3);
+    assert!(geometry.stats.mesh_bytes <= 64 * 1024 * 1024);
 }

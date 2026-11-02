@@ -36,7 +36,7 @@ fn warm_disk_decode(cache: &Arc<AssetCache>) {
 pub fn bench(c: &mut Criterion) {
     let directory = tempdir().expect("benchmark cache directory");
     let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).expect("open benchmark cache"));
-    cache.put_complete(resource(), RGBA_J2C.to_vec()).expect("seed benchmark cache");
+    cache.put_complete(Request::new(resource()), RGBA_J2C.to_vec()).expect("seed benchmark cache");
     let mut group = c.benchmark_group("asset_cache_texture");
     group.bench_function("cold_fetch_decode", |b| b.iter(cold_fetch_decode));
     group.bench_function("warm_disk_read_decode", |b| b.iter(|| warm_disk_decode(&cache)));

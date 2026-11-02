@@ -36,7 +36,7 @@ impl SceneChanges {
             match change {
                 Change::Object(object) => changes.objects.push(object.detail().summary.entity),
                 Change::Remove(entity) => changes.objects.push(*entity),
-                Change::Mesh(MeshChange::Set(entity, ..) | MeshChange::Clear(entity)) => changes.objects.push(*entity),
+                Change::Mesh(MeshChange::Set(entity, ..) | MeshChange::Clear(entity, _)) => changes.objects.push(*entity),
                 Change::Material(change) => changes.objects.push(change.source.detail().summary.entity),
                 Change::Region(region) => changes.regions.push(region.summary().region),
                 Change::Retire(region) => changes.retired.push(*region),

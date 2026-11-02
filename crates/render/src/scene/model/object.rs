@@ -1,11 +1,11 @@
 use std::{sync::Arc, time::Instant};
 
 use math::Vec3;
-use world::{Kind, MotionUpdateKind, ObjectDetail, PrimShape, Shape, WorldTransform, WorldTransformState};
+use world::{Kind, MotionUpdateKind, ObjectDetail, PrimShape, SculptFlags, Shape, WorldTransform, WorldTransformState};
 
 use crate::material::FaceMaterial;
 use crate::scene::{
-    MeshKey, PreparedMesh, SharedMesh,
+    DrawnMeshKey, MeshKey, PreparedMesh, SharedMesh,
     asset_demand::Materials,
     budget::Lease,
     motion::{MotionSample, MotionState},
@@ -16,7 +16,7 @@ use crate::scene::{
 pub struct Object {
     data: Arc<ObjectData>,
     pub(super) preparation: Option<(MeshKey, PreparedMesh)>,
-    pub(super) mesh: Option<(MeshKey, SharedMesh)>,
+    pub(super) mesh: Option<(DrawnMeshKey, SharedMesh)>,
     pub(super) materials: Option<Materials>,
     animation_clock: Option<AnimationClock>,
     pub(super) motion: MotionState,
@@ -40,8 +40,23 @@ impl Object {
         &self.data.source
     }
 
-    pub fn mesh(&self) -> Option<(MeshKey, &SharedMesh)> {
+    pub fn mesh(&self) -> Option<(DrawnMeshKey, &SharedMesh)> {
         self.mesh.as_ref().map(|(key, mesh)| (*key, mesh))
+    }
+
+    pub(crate) fn mesh_matches_geometry(&self) -> bool {
+        self.mesh.as_ref().is_some_and(|(key, _)| match (self.geometry(), key) {
+            (Geometry::Prim(shape), DrawnMeshKey::Prim(key)) => shape == key.shape,
+            (Geometry::Mesh(asset), DrawnMeshKey::Asset { asset: mesh_asset, .. }) => asset == *mesh_asset,
+            _ => false,
+        })
+    }
+
+    pub fn mesh_flags(&self) -> Option<SculptFlags> {
+        match self.detail().shape {
+            Some(Shape::Mesh { flags, .. }) => Some(flags),
+            _ => None,
+        }
     }
 
     pub fn materials(&self) -> Option<&[FaceMaterial]> {
@@ -78,7 +93,7 @@ impl Object {
         let a = self.detail();
         let b = other.detail();
         a.summary.address.region() == b.summary.address.region()
-            && self.geometry() == other.geometry()
+            && a.shape == b.shape
             && a.surface_appearance == b.surface_appearance
             && a.pbr_materials == b.pbr_materials
             && a.pbr_material_overrides == b.pbr_material_overrides
@@ -179,6 +194,7 @@ impl Object {
         }
         match self.detail().shape {
             Some(Shape::Prim(shape)) => Geometry::Prim(shape),
+            Some(Shape::Mesh { asset_id, .. }) => Geometry::Mesh(asset_id),
             Some(shape) => Geometry::Unsupported(shape),
             None => Geometry::Missing,
         }
@@ -222,6 +238,7 @@ pub enum Placement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Geometry {
     Prim(PrimShape),
+    Mesh(utils::AssetId),
     Unsupported(Shape),
     Missing,
 }

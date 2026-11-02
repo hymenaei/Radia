@@ -36,7 +36,7 @@ impl GeometryRenderer {
                 continue;
             }
             let faces = item.faces.iter().filter(|face| face.slot.is_some()).map(|face| (&face.indices, face.params.double_sided));
-            query.visit_item(&item.mesh, item.position, item.rotation, item.scale, item.shading, faces)?;
+            query.visit_item(&item.mesh, item.position, item.rotation, item.scale, item.invert_normals, item.shading, faces)?;
         }
         Ok(query.result())
     }
@@ -61,6 +61,7 @@ impl PickQuery {
         position: DVec3,
         rotation: Quat,
         scale: Vec3,
+        invert_normals: bool,
         shading: ShadingMode,
         faces: impl Iterator<Item = (&'a Range<u32>, bool)>,
     ) -> Result<(), PickError> {
@@ -86,7 +87,11 @@ impl PickQuery {
                 let Some(first) = triangle_indices.first().and_then(|index| mesh.vertices().get(*index as usize)) else { continue };
                 let Some(second) = triangle_indices.get(1).and_then(|index| mesh.vertices().get(*index as usize)) else { continue };
                 let Some(third) = triangle_indices.get(2).and_then(|index| mesh.vertices().get(*index as usize)) else { continue };
-                let triangle = [first.position, second.position, third.position];
+                let triangle = if invert_normals {
+                    [first.position, third.position, second.position]
+                } else {
+                    [first.position, second.position, third.position]
+                };
                 let Some(distance) = ray_triangle_intersection(origin, direction, triangle, double_sided) else { continue };
                 if distance < 0.05 || distance >= self.closest || distance >= max_distance {
                     continue;
@@ -185,12 +190,12 @@ mod tests {
         let (camera, _, ray) = camera_for_triangle(triangle);
         let repeated = (0..=MAX_PICK_TRIANGLES).map(|_| (&indices, false));
         let mut query = PickQuery::new(camera, ray);
-        query.visit_item(&mesh, DVec3::new(0.0, 100.0, 0.0), Quat::IDENTITY, Vec3::ONE, ShadingMode::Studio, repeated).unwrap();
+        query.visit_item(&mesh, DVec3::new(0.0, 100.0, 0.0), Quat::IDENTITY, Vec3::ONE, false, ShadingMode::Studio, repeated).unwrap();
         assert_eq!(query.result(), None);
         let repeated = (0..=MAX_PICK_TRIANGLES).map(|_| (&indices, false));
         let mut query = PickQuery::new(camera, ray);
         assert_eq!(
-            query.visit_item(&mesh, DVec3::ZERO, Quat::IDENTITY, Vec3::ONE, ShadingMode::Studio, repeated),
+            query.visit_item(&mesh, DVec3::ZERO, Quat::IDENTITY, Vec3::ONE, false, ShadingMode::Studio, repeated),
             Err(PickError::TriangleLimitExceeded)
         );
     }
@@ -203,6 +208,7 @@ mod tests {
                 *position,
                 Quat::IDENTITY,
                 Vec3::ONE,
+                false,
                 *shading,
                 faces.iter().map(|(range, double_sided)| (range, *double_sided)),
             )?;

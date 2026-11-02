@@ -118,7 +118,7 @@ pub(crate) struct Decoded {
 
 impl Decoded {
     pub(crate) fn finish(self, reservation: Reservation) -> Result<Image, Failure> {
-        let pixels = reservation.finish(self.pixels).map_err(|_| Failure::TooLarge)?;
+        let pixels = reservation.finish(self.pixels).map_err(|_| Failure::MemoryPressure)?;
         Ok(Image { source_size: self.source_size, discard: self.discard, size: self.size, format: self.format, pixels })
     }
 }

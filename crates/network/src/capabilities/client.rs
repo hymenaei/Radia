@@ -5,7 +5,7 @@ use reqwest::Url;
 use serde::Serialize;
 use tokio::{
     runtime::Handle,
-    sync::{OwnedSemaphorePermit, mpsc, oneshot, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
     task::AbortHandle,
     time,
 };
@@ -323,7 +323,7 @@ impl Client {
         let url = url.clone();
         self.on_runtime(async move {
             let (response, permit) = client
-                .run_with_permit(deadline, |http, permit| async move {
+                .run_with_get_permit(deadline, redirect_policy, |http, permit| async move {
                     let response = get_capability_range_bytes(&http, &url.url, range, max_response_bytes, redirect_policy)
                         .await
                         .map_err(Error::CapabilityHttp)?;
@@ -353,7 +353,7 @@ impl Client {
         let url = url.clone();
         self.on_runtime(async move {
             let (response, permit) = client
-                .run_with_permit(deadline, |http, permit| async move {
+                .run_with_get_permit(deadline, redirect_policy, |http, permit| async move {
                     let response = get_capability_bytes(&http, &url.url, accept.as_deref(), max_response_bytes, redirect_policy)
                         .await
                         .map_err(Error::CapabilityHttp)?;
@@ -371,7 +371,32 @@ impl Client {
         F: FnOnce(http::Client, OwnedSemaphorePermit) -> Fut,
         Fut: Future<Output = Result<T, Error>>,
     {
-        let permit = self.acquire_request_permit(deadline).await?;
+        self.run_with_budget_permit(deadline, Arc::clone(&self.budget.ordinary_requests), operation).await
+    }
+
+    async fn run_with_get_permit<T, F, Fut>(
+        &self,
+        deadline: RequestDeadline,
+        redirect_policy: RedirectPolicy,
+        operation: F,
+    ) -> Result<T, Error>
+    where
+        F: FnOnce(http::Client, OwnedSemaphorePermit) -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
+        let budget = match redirect_policy {
+            RedirectPolicy::None => Arc::clone(&self.budget.ordinary_requests),
+            RedirectPolicy::ViewerAsset => Arc::clone(&self.budget.asset_requests),
+        };
+        self.run_with_budget_permit(deadline, budget, operation).await
+    }
+
+    async fn run_with_budget_permit<T, F, Fut>(&self, deadline: RequestDeadline, budget: Arc<Semaphore>, operation: F) -> Result<T, Error>
+    where
+        F: FnOnce(http::Client, OwnedSemaphorePermit) -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
+        let permit = self.acquire_request_permit_from(budget, deadline).await?;
         self.run_with_admitted_permit(deadline, permit, operation).await
     }
 
@@ -389,7 +414,10 @@ impl Client {
     }
 
     async fn acquire_request_permit(&self, deadline: RequestDeadline) -> Result<OwnedSemaphorePermit, Error> {
-        let budget = Arc::clone(&self.budget.ordinary_requests);
+        self.acquire_request_permit_from(Arc::clone(&self.budget.ordinary_requests), deadline).await
+    }
+
+    async fn acquire_request_permit_from(&self, budget: Arc<Semaphore>, deadline: RequestDeadline) -> Result<OwnedSemaphorePermit, Error> {
         let mut session_closed = self.session_closed.subscribe();
         if *session_closed.borrow() {
             return Err(Error::CapabilitySessionClosed);

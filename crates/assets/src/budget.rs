@@ -88,6 +88,10 @@ impl Drop for Reservation {
 }
 
 impl Reservation {
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
     pub(crate) fn shrink_to_at_most(&mut self, max_bytes: usize) {
         let bytes = self.bytes.min(max_bytes);
         let released = self.bytes - bytes;

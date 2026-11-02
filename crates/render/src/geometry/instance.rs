@@ -14,9 +14,9 @@ pub(super) fn scene_origin(position: DVec3) -> DVec3 {
     DVec3::new(snap(position.x), snap(position.y), snap(position.z))
 }
 
-pub(super) fn instance_base(position: DVec3, rotation: Quat, scale: Vec3, origin: DVec3) -> [u8; TRANSFORM_BYTES] {
+pub(super) fn instance_base(position: DVec3, rotation: Quat, scale: Vec3, invert_normals: bool, origin: DVec3) -> [u8; TRANSFORM_BYTES] {
     let mut bytes = [0; TRANSFORM_BYTES];
-    let normal = normal_matrix(rotation, scale);
+    let normal = normal_matrix(rotation, scale) * if invert_normals { -1.0 } else { 1.0 };
     let values = model(position, rotation, scale, origin)
         .to_cols_array()
         .into_iter()

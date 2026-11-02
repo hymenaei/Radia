@@ -333,11 +333,19 @@ struct AssetSubscriptions {
     handle: AssetHandle,
     pending: FuturesUnordered<BoxFuture<'static, Option<AssetStatusEvent>>>,
     cancel: HashMap<AssetTicket, AbortHandle>,
+    demands: HashMap<AssetTicket, assets::Demand>,
+    pending_importance: HashMap<AssetTicket, u16>,
 }
 
 impl AssetSubscriptions {
     fn new(handle: AssetHandle) -> Self {
-        Self { handle, pending: FuturesUnordered::new(), cancel: HashMap::new() }
+        Self {
+            handle,
+            pending: FuturesUnordered::new(),
+            cancel: HashMap::new(),
+            demands: HashMap::new(),
+            pending_importance: HashMap::new(),
+        }
     }
 
     fn push(&mut self, ticket: AssetTicket, future: impl Future<Output = AssetStatusEvent> + Send + 'static) {
@@ -355,6 +363,15 @@ impl AssetSubscriptions {
             AssetChange::Release(ticket) => {
                 if let Some(cancel) = self.cancel.remove(&ticket) {
                     cancel.abort();
+                }
+                self.demands.remove(&ticket);
+                self.pending_importance.remove(&ticket);
+            }
+            AssetChange::UpdateImportance { ticket, importance } => {
+                if let Some(demand) = self.demands.get(&ticket) {
+                    demand.update_importance(importance);
+                } else {
+                    self.pending_importance.insert(ticket, importance);
                 }
             }
         }
@@ -378,15 +395,23 @@ impl AssetSubscriptions {
         }
         if terminal {
             self.cancel.remove(&ticket);
+            self.demands.remove(&ticket);
+            self.pending_importance.remove(&ticket);
             return;
         }
         if let Some(mut demand) = demand {
+            if let Some(importance) = self.pending_importance.remove(&ticket) {
+                demand.update_importance(importance);
+            }
+            self.demands.insert(ticket, demand.clone());
             self.push(ticket, async move {
                 let status = demand.changed().await;
                 AssetStatusEvent { ticket, status, demand: Some(demand) }
             });
         } else {
             self.cancel.remove(&ticket);
+            self.demands.remove(&ticket);
+            self.pending_importance.remove(&ticket);
         }
     }
 }
@@ -400,7 +425,7 @@ fn water_height(view: &SceneView, agent: &Object) -> Option<f64> {
 
 async fn acquire_asset_demand(handle: AssetHandle, request: AssetRequest) -> AssetStatusEvent {
     loop {
-        match handle.request(request.region, request.request, request.priority).await {
+        match handle.request_with_importance(request.region, request.request, request.priority, request.importance).await {
             Ok(demand) => return AssetStatusEvent { ticket: request.ticket, status: demand.status(), demand: Some(demand) },
             Err(RequestError::Busy) => {
                 tokio::time::sleep(Duration::from_millis(250)).await;

@@ -24,7 +24,7 @@ pub use camera::{Camera, CameraError};
 pub use environment::{
     EnvironmentProperty, EnvironmentPush, EnvironmentPushError, ExperienceProperty, ExperienceSetting, ViewerEnvironment,
 };
-pub use mesh::{Detail, MeshBuildError, MeshId, SharedMesh};
+pub use mesh::{Detail, DrawnMeshKey, MeshBuildError, MeshId, SharedMesh};
 pub use mesh_cache::SculptMeshKey;
 pub use mesh_cache::{MeshKey, PreparedMesh};
 pub use model::{

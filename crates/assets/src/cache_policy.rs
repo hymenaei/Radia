@@ -5,7 +5,7 @@ use std::sync::{
 
 use storage::{EvictionCandidate, EvictionPolicy, EvictionReason, EvictionScore, NamespaceId};
 
-use crate::Kind;
+use crate::{Kind, cache::MESH_NAMESPACE_IDS};
 
 const RECENCY_SCALE: u128 = 1_000_000;
 const RECENCY_BUCKET: u64 = 64;
@@ -46,7 +46,7 @@ impl DecodeCosts {
             2
         } else if namespace == NamespaceId::new(3) {
             3
-        } else if namespace == NamespaceId::new(4) {
+        } else if MESH_NAMESPACE_IDS.contains(&namespace) {
             4
         } else {
             return 0;

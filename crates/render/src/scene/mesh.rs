@@ -8,10 +8,20 @@ use std::{
     },
 };
 
-use assets::mesh::Mesh;
 use assets::mesh::MeshError;
+use assets::{
+    MeshAsset,
+    mesh::{LodGeometry, Mesh, MeshLod},
+};
+use utils::AssetId;
 
-use crate::scene::budget::Lease;
+use crate::scene::{budget::Lease, mesh_cache::MeshKey};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DrawnMeshKey {
+    Prim(MeshKey),
+    Asset { asset: AssetId, lod: MeshLod },
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Detail {
@@ -73,9 +83,20 @@ pub struct SharedMesh(Arc<Retained>);
 
 impl SharedMesh {
     pub(in crate::scene) fn new(mesh: Mesh, lease: Lease) -> Self {
+        Self::retain(MeshSource::Owned(mesh), lease)
+    }
+
+    pub(in crate::scene) fn from_asset(asset: MeshAsset, lease: Lease) -> Option<Self> {
+        if !matches!(asset.geometry(), LodGeometry::Geometry(_)) {
+            return None;
+        }
+        Some(Self::retain(MeshSource::Asset(asset), lease))
+    }
+
+    fn retain(source: MeshSource, lease: Lease) -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1)).expect("mesh IDs exhausted");
-        Self(Arc::new(Retained { id: MeshId(id), mesh, _lease: lease }))
+        Self(Arc::new(Retained { id: MeshId(id), source, _lease: lease }))
     }
 
     pub fn id(&self) -> MeshId {
@@ -83,16 +104,31 @@ impl SharedMesh {
     }
 
     pub fn mesh(&self) -> &Mesh {
-        &self.0.mesh
+        match &self.0.source {
+            MeshSource::Owned(mesh) => mesh,
+            MeshSource::Asset(asset) => match asset.geometry() {
+                LodGeometry::Geometry(mesh) => mesh,
+                LodGeometry::Empty { .. } => unreachable!(),
+            },
+        }
     }
+}
+
+enum MeshSource {
+    Owned(Mesh),
+    Asset(MeshAsset),
 }
 
 struct Retained {
     id: MeshId,
-    mesh: Mesh,
+    source: MeshSource,
     _lease: Lease,
 }
 
 pub(super) fn retained_bytes(mesh: &Mesh) -> usize {
     mesh.owned_bytes() + size_of::<Retained>() - size_of::<Mesh>() + 32
+}
+
+pub(in crate::scene) fn asset_mesh_bytes() -> usize {
+    size_of::<Retained>() + 32
 }

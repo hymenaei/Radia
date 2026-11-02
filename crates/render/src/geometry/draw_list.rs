@@ -599,15 +599,22 @@ impl DrawList {
         self.groups.clear();
     }
 
-    pub(super) fn refresh_winding(&mut self, faces: &mut [CachedFace], old_scale: Vec3, scale: Vec3) -> bool {
-        if math::flips_winding(old_scale) == math::flips_winding(scale) {
+    pub(super) fn refresh_winding(
+        &mut self,
+        faces: &mut [CachedFace],
+        old_scale: Vec3,
+        old_invert_normals: bool,
+        scale: Vec3,
+        invert_normals: bool,
+    ) -> bool {
+        if (math::flips_winding(old_scale) ^ old_invert_normals) == (math::flips_winding(scale) ^ invert_normals) {
             return false;
         }
         let mut changed = false;
         for face in faces {
             let Some(mut key) = self.groups.key(face.group) else { continue };
             let previous_pipeline = key.pipeline;
-            key.pipeline = surface_pipeline(face.base_params.blend, face.base_params.double_sided, scale);
+            key.pipeline = surface_pipeline(face.base_params.blend, face.base_params.double_sided, scale, invert_normals);
             if key.pipeline == previous_pipeline {
                 continue;
             }

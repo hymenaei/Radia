@@ -48,6 +48,8 @@ pub(super) struct CachedItem {
     pub(super) position: math::DVec3,
     pub(super) rotation: Quat,
     pub(super) scale: Vec3,
+    pub(super) invert_normals: bool,
+    pub(super) replacement: Option<Box<CachedReplacement>>,
     pub(super) transform: [u8; TRANSFORM_BYTES],
     pub(super) pickable: bool,
     pub(super) shading: ShadingMode,
@@ -59,6 +61,11 @@ pub(super) struct CachedItem {
     pub(super) animated_faces: Vec<usize>,
     pub(super) animation_deadline: Option<Instant>,
     pub(super) parameters_dirty: bool,
+}
+
+pub(super) struct CachedReplacement {
+    pub(super) item: CachedItem,
+    pub(super) retry_state: Option<super::MeshState>,
 }
 
 #[derive(Default)]
@@ -122,6 +129,7 @@ pub(super) struct CachedFaceContext<'a> {
     pub(super) materials: Option<&'a [FaceMaterial]>,
     pub(super) appearance: Option<&'a SurfaceAppearance>,
     pub(super) scale: Vec3,
+    pub(super) invert_normals: bool,
     pub(super) shading: ShadingMode,
     pub(super) terrain: Option<Region>,
     pub(super) terrain_textures: Option<&'a [Option<TextureHandle>; 4]>,
@@ -150,7 +158,7 @@ pub(super) fn mesh_info(mesh: &SharedMesh) -> Arc<MeshInfo> {
 }
 
 pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawList) -> Vec<CachedFace> {
-    let CachedFaceContext { id, mesh, info, materials, appearance, scale, shading, terrain, terrain_textures } = context;
+    let CachedFaceContext { id, mesh, info, materials, appearance, scale, invert_normals, shading, terrain, terrain_textures } = context;
     let mut material_slots = [None; 256];
     if let Some(materials) = materials {
         for (index, material) in materials.iter().enumerate() {
@@ -184,7 +192,7 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
         let pipeline = match shading {
             ShadingMode::Terrain => Pipeline::Terrain,
             ShadingMode::Water => Pipeline::Water,
-            ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, scale),
+            ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, scale, invert_normals),
         };
         let key = DrawKey { mesh: mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture: params.texture, terrain };
         let Some(group) = draw_list.intern_face(key, texture.as_ref(), terrain_textures) else { continue };
@@ -215,9 +223,18 @@ pub(super) fn same_surface_geometry(left: &CachedItem, right: &CachedItem) -> bo
         && left.position == right.position
         && left.rotation == right.rotation
         && left.scale == right.scale
+        && left.invert_normals == right.invert_normals
         && left.pickable == right.pickable
         && left.shading == right.shading
         && left.terrain_composition == right.terrain_composition
+}
+
+pub(super) fn draw_scale(scale: Vec3, mirror: bool) -> Vec3 {
+    if mirror { scale * Vec3::splat(-1.0) } else { scale }
+}
+
+pub(super) fn object_draw_scale(object: &Object, scale: Vec3) -> Vec3 {
+    draw_scale(scale, object.mesh_flags().unwrap_or_default().mirror)
 }
 
 pub(super) fn draw_priority(item: &CachedItem, camera: Camera) -> (f64, f64) {
@@ -228,13 +245,70 @@ pub(super) fn draw_priority(item: &CachedItem, camera: Camera) -> (f64, f64) {
     (radius / distance.max(1.0), distance)
 }
 
-pub(super) fn surface_pipeline(blend: bool, double_sided: bool, scale: Vec3) -> Pipeline {
-    match (blend, double_sided, math::flips_winding(scale)) {
+pub(super) fn surface_pipeline(blend: bool, double_sided: bool, scale: Vec3, invert_normals: bool) -> Pipeline {
+    match (blend, double_sided, math::flips_winding(scale) ^ invert_normals) {
         (true, true, _) => Pipeline::BlendDoubleSided,
         (true, false, true) => Pipeline::BlendFlipped,
         (true, false, false) => Pipeline::Blend,
         (false, true, _) => Pipeline::DoubleSided,
         (false, false, true) => Pipeline::FlippedWinding,
         (false, false, false) => Pipeline::Surface,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use math::{DVec3, Quat};
+
+    use super::*;
+    use crate::{
+        geometry::{draw_list::DrawList, instance::instance_base},
+        pipeline::Pipeline,
+    };
+
+    #[test]
+    fn first_face_pipeline_tracks_mirror_and_invert() {
+        let (_scene, view, _) = crate::geometry::fixtures::scene(255);
+        let object = view.objects().next().expect("mesh fixture object");
+        let (_, mesh) = object.mesh().expect("mesh fixture geometry");
+        let info = mesh_info(mesh);
+        for (mirror, invert, expected_pipeline, expected_normal) in [
+            (false, false, Pipeline::Surface, 1.0),
+            (true, false, Pipeline::FlippedWinding, -1.0),
+            (false, true, Pipeline::FlippedWinding, -1.0),
+            (true, true, Pipeline::Surface, 1.0),
+        ] {
+            let scale = draw_scale(Vec3::ONE, mirror);
+            let mut draw_list = DrawList::default();
+            let faces = cached_faces(
+                CachedFaceContext {
+                    id: (2, object.detail().summary.id.as_u128(), 0),
+                    mesh,
+                    info: &info,
+                    materials: object.materials(),
+                    appearance: object.detail().surface_appearance.as_ref(),
+                    scale,
+                    invert_normals: invert,
+                    shading: ShadingMode::Studio,
+                    terrain: None,
+                    terrain_textures: None,
+                },
+                &mut draw_list,
+            );
+            let face = faces.first().expect("fixture face");
+            assert_eq!(draw_list.face_key(face.group).map(|key| key.pipeline), Some(expected_pipeline));
+            let transform = instance_base(DVec3::ZERO, Quat::IDENTITY, scale, invert, DVec3::ZERO);
+            let normals = transform
+                .get(64..)
+                .expect("instance contains a normal matrix")
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| f32::from_le_bytes(*bytes))
+                .collect::<Vec<_>>();
+            assert_eq!(normals.first(), Some(&expected_normal));
+            assert_eq!(normals.get(5), Some(&expected_normal));
+            assert_eq!(normals.get(10), Some(&expected_normal));
+        }
     }
 }

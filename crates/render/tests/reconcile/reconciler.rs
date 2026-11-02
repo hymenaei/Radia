@@ -3,10 +3,10 @@ use std::{assert_matches, collections::HashSet};
 use world::{FaceAppearance, SurfaceAppearance, TerrainPatch, TerrainSettings, TextureMapping};
 
 use super::support::{
-    AssetId, BTreeMap, BTreeSet, Budget, DVec3, Detail, FieldUpdate, Instant, Kind, NonZeroU32, ObjectObservation, ObjectPatch,
-    ParentUpdate, Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, RecoveryReason, Region,
-    RegionInfo, Request, Shape, Status, Uuid, Vec3, add, add_shaped, camera, ids, move_root, positions, prepared_asset, reply, settle,
-    settle_materials, source, world, world_with_capacity,
+    AssetId, BTreeMap, BTreeSet, Budget, DVec3, Detail, DrawnMeshKey, FieldUpdate, Instant, Kind, NonZeroU32, ObjectObservation,
+    ObjectPatch, ParentUpdate, Placement, Pose, PreparedMesh, Quat, ReadFailure, ReadQuery, ReconcileStep, Reconciler, RecoveryReason,
+    Region, RegionInfo, Request, Shape, Status, Uuid, Vec3, add, add_shaped, camera, ids, move_root, positions, prepared_asset, reply,
+    settle, settle_materials, source, world, world_with_capacity,
 };
 
 #[test]
@@ -67,7 +67,7 @@ fn mesh_reuse_and_replacement() {
     scene.set_camera(camera(-300.0));
     settle(&mut scene, &mut view, &world, &mut now);
     let meshes: Vec<_> = view.objects().map(|object| object.mesh().map(|(key, mesh)| (key, mesh.clone())).unwrap()).collect();
-    assert_eq!(meshes[0].0.detail, Detail::Lowest);
+    assert!(matches!(meshes[0].0, DrawnMeshKey::Prim(key) if key.detail == Detail::Lowest));
     assert_eq!(meshes[0].1.id(), meshes[1].1.id());
 
     scene.set_camera(camera(99.0));
@@ -75,7 +75,9 @@ fn mesh_reuse_and_replacement() {
         match scene.poll(now) {
             ReconcileStep::Publish(batch) => {
                 view.apply(batch).unwrap();
-                assert!(view.objects().all(|object| object.mesh().unwrap().0.detail == Detail::Lowest));
+                assert!(view.objects().all(
+                    |object| matches!(object.mesh().map(|(key, _)| key), Some(DrawnMeshKey::Prim(key)) if key.detail == Detail::Lowest)
+                ));
             }
             ReconcileStep::Build(job) => break job,
             ReconcileStep::Continue => {}
@@ -85,8 +87,7 @@ fn mesh_reuse_and_replacement() {
     scene.complete_mesh(job.run());
     settle(&mut scene, &mut view, &world, &mut now);
     assert!(view.objects().all(|object| {
-        let (key, mesh) = object.mesh().unwrap();
-        key.detail == Detail::High && mesh.id() != meshes[0].1.id()
+        matches!(object.mesh(), Some((DrawnMeshKey::Prim(key), mesh)) if key.detail == Detail::High && mesh.id() != meshes[0].1.id())
     }));
     let mut patch = ObjectPatch::new(source(1, 3), NonZeroU32::new(1).unwrap());
     patch.shape = FieldUpdate::Set(Shape::Prim(world::PrimShape { profile_curve: 15, ..Default::default() }));
@@ -319,7 +320,7 @@ fn quality_updates() {
     scene.set_camera(camera(0.0));
     settle(&mut scene, &mut view, &world, &mut now);
     let revision = view.revision();
-    assert_eq!(view.objects().next().unwrap().mesh().unwrap().0.detail, Detail::Low);
+    assert!(matches!(view.objects().next().unwrap().mesh().unwrap().0, DrawnMeshKey::Prim(key) if key.detail == Detail::Low));
 
     scene.set_camera(camera(0.0).with_quality(32.0, 1.0).unwrap());
     settle(&mut scene, &mut view, &world, &mut now);
@@ -327,10 +328,10 @@ fn quality_updates() {
 
     scene.set_camera(camera(0.0).with_quality(512.0, 4.0).unwrap());
     settle(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(view.objects().next().unwrap().mesh().unwrap().0.detail, Detail::Medium);
+    assert!(matches!(view.objects().next().unwrap().mesh().unwrap().0, DrawnMeshKey::Prim(key) if key.detail == Detail::Medium));
     scene.set_camera(camera(0.0).with_quality(512.0, 0.25).unwrap());
     settle(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(view.objects().next().unwrap().mesh().unwrap().0.detail, Detail::Lowest);
+    assert!(matches!(view.objects().next().unwrap().mesh().unwrap().0, DrawnMeshKey::Prim(key) if key.detail == Detail::Lowest));
     assert_eq!(view.revision(), revision);
 }
 

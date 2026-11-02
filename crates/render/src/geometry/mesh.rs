@@ -31,15 +31,14 @@ impl GeometryRenderer {
         else {
             return false;
         };
-        if *uploaded >= MAX_MESH_UPLOADS || bytes > UPLOAD_BYTES.saturating_sub(self.stats.uploaded_bytes) {
+        if *uploaded >= MAX_MESH_UPLOADS || (*uploaded > 0 && bytes > UPLOAD_BYTES.saturating_sub(self.stats.uploaded_bytes)) {
             return false;
         }
         let Some(allocation) =
             self.storage.allocate(device, mesh.vertices().len(), mesh.indices().len(), composition.is_some(), &self.memory)
         else {
-            if !self.retire_mesh() {
-                self.mesh_budget_blocked.insert(key);
-            }
+            self.retire_mesh();
+            self.mesh_budget_blocked.insert(key);
             return false;
         };
         let mut packed = Vec::with_capacity(bytes);
@@ -77,6 +76,15 @@ impl GeometryRenderer {
             return false;
         };
         self.retired.push(self.meshes.remove(&old).expect("selected resident"));
+        true
+    }
+
+    pub(super) fn retire_mesh_id(&mut self, mesh_id: crate::scene::MeshId) -> bool {
+        if self.retired.len() == 4 {
+            return false;
+        }
+        let Some(mesh) = self.meshes.remove(&mesh_id) else { return false };
+        self.retired.push(mesh);
         true
     }
 }

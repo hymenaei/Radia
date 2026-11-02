@@ -26,7 +26,6 @@ use tokio::{
     task::{JoinError, JoinHandle},
 };
 use tracing::Instrument;
-use utils::AssetId;
 use world::Region;
 
 const COMMANDS: usize = 64;
@@ -55,7 +54,7 @@ impl CapabilityTransport {
                     .map_err(|error| classify_network_error(error, resource.kind))
             })
             .await?;
-        let limit = resource.kind.max_response_bytes();
+        let limit = if resource.kind == Kind::Mesh { job.response_limit() } else { resource.kind.max_response_bytes() };
         match resource.kind {
             Kind::Texture | Kind::PbrMaterial | Kind::Environment | Kind::Mesh => {
                 let grant = grants.get("ViewerAsset").ok_or(Failure::MissingCapability)?;
@@ -68,7 +67,7 @@ impl CapabilityTransport {
                 };
                 let url = grant.with_trailing_slash().with_query_pair(field, &resource.id.uuid().to_string());
                 if resource.kind == Kind::Mesh {
-                    return self.fetch_mesh(&url, request, limit).await;
+                    return self.fetch_mesh(&url, request, limit, job.force_full_mesh()).await;
                 }
                 self.client
                     .get_bytes_with_response_limit_and_redirect_policy(&url, limit, RedirectPolicy::ViewerAsset)
@@ -88,15 +87,18 @@ impl CapabilityTransport {
         }
     }
 
-    async fn fetch_mesh(&self, url: &CapabilityUrl, request: Request, limit: usize) -> Result<FetchResponse, Failure> {
+    async fn fetch_mesh(&self, url: &CapabilityUrl, request: Request, limit: usize, force_full: bool) -> Result<FetchResponse, Failure> {
         match request {
-            Request::MeshHeader(_) => self.fetch_mesh_header(url, limit).await,
-            Request::MeshLod(block) => self.fetch_mesh_lod(url, block, limit).await,
+            Request::MeshHeader(_) => self.fetch_mesh_header(url, limit, force_full).await,
+            Request::MeshLod(block) => self.fetch_mesh_lod(url, block, limit, force_full).await,
             _ => Err(Failure::MalformedBlock),
         }
     }
 
-    async fn fetch_mesh_header(&self, url: &CapabilityUrl, limit: usize) -> Result<FetchResponse, Failure> {
+    async fn fetch_mesh_header(&self, url: &CapabilityUrl, limit: usize, force_full: bool) -> Result<FetchResponse, Failure> {
+        if force_full {
+            return self.fetch_mesh_full(url, limit, false).await;
+        }
         let max_header = u64::try_from(assets::mesh::MAX_MESH_HEADER_BYTES).map_err(|_| Failure::TooLarge)?;
         let mut range_end = u64::try_from(assets::mesh::MESH_HEADER_BYTES).map_err(|_| Failure::TooLarge)?;
         loop {
@@ -104,14 +106,14 @@ impl CapabilityTransport {
                 .client
                 .get_range_with_response_limit_and_redirect_policy(url, 0..range_end, limit, RedirectPolicy::ViewerAsset)
                 .await
-                .map_err(|error| classify_network_error(error, Kind::Mesh))?;
+                .map_err(classify_mesh_range_error)?;
             let (bytes, content_range) = match response {
                 RangeResponse::Full(bytes) => return Ok(FetchResponse::Full(bytes)),
                 RangeResponse::Partial { bytes, content_range: Some(content_range) } => (bytes, content_range),
-                RangeResponse::Partial { .. } => return self.fetch_mesh_full(url, limit).await,
+                RangeResponse::Partial { .. } => return self.fetch_mesh_full(url, limit, true).await,
             };
             let Some(total) = content_range.total else {
-                return self.fetch_mesh_full(url, limit).await;
+                return self.fetch_mesh_full(url, limit, true).await;
             };
             let expected_end = total.min(range_end);
             if content_range.start != 0
@@ -137,12 +139,12 @@ impl CapabilityTransport {
         }
     }
 
-    async fn fetch_mesh_full(&self, url: &CapabilityUrl, limit: usize) -> Result<FetchResponse, Failure> {
+    async fn fetch_mesh_full(&self, url: &CapabilityUrl, limit: usize, range_fallback: bool) -> Result<FetchResponse, Failure> {
         self.client
             .get_bytes_with_response_limit_and_redirect_policy(url, limit, RedirectPolicy::ViewerAsset)
             .await
             .map(FetchResponse::Full)
-            .map_err(|error| classify_network_error(error, Kind::Mesh))
+            .map_err(|error| if range_fallback { classify_mesh_range_error(error) } else { classify_network_error(error, Kind::Mesh) })
     }
 
     async fn fetch_mesh_lod(
@@ -150,13 +152,17 @@ impl CapabilityTransport {
         url: &CapabilityUrl,
         block: assets::mesh::MeshLodRequest,
         limit: usize,
+        force_full: bool,
     ) -> Result<FetchResponse, Failure> {
+        if force_full {
+            return self.fetch_mesh_full(url, limit, false).await;
+        }
         let requested = block.range();
         let response = self
             .client
             .get_range_with_response_limit_and_redirect_policy(url, requested.clone(), limit, RedirectPolicy::ViewerAsset)
             .await
-            .map_err(|error| classify_network_error(error, Kind::Mesh))?;
+            .map_err(classify_mesh_range_error)?;
         match response {
             RangeResponse::Full(bytes) => Ok(FetchResponse::Full(bytes)),
             RangeResponse::Partial { bytes, content_range: Some(content_range) } => {
@@ -166,7 +172,10 @@ impl CapabilityTransport {
                 Ok(FetchResponse::Partial { bytes, range: requested, total_length: Some(block.asset_length()) })
             }
             RangeResponse::Partial { bytes, content_range: None } => {
-                if u64::try_from(bytes.len()).ok() != Some(requested.end - requested.start) {
+                let Some(expected_length) = requested.end.checked_sub(requested.start) else {
+                    return Err(Failure::MalformedBlock);
+                };
+                if u64::try_from(bytes.len()).ok() != Some(expected_length) {
                     return Err(Failure::MalformedBlock);
                 }
                 Ok(FetchResponse::Partial { bytes, range: requested, total_length: Some(block.asset_length()) })
@@ -176,10 +185,13 @@ impl CapabilityTransport {
 }
 
 fn content_range_matches(content_range: ContentRange, requested: &std::ops::Range<u64>, total: u64, body_len: usize) -> bool {
+    let Some(expected_length) = requested.end.checked_sub(requested.start) else {
+        return false;
+    };
     content_range.start == requested.start
         && content_range.end.checked_add(1) == Some(requested.end)
         && content_range.total.is_none_or(|length| length == total)
-        && u64::try_from(body_len).ok() == Some(requested.end - requested.start)
+        && u64::try_from(body_len).ok() == Some(expected_length)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -193,6 +205,7 @@ struct DemandRequest {
     region: Region,
     resource: assets::Request,
     priority: Priority,
+    importance: u16,
     reply: oneshot::Sender<Result<Option<Demand>, RequestError>>,
 }
 
@@ -217,36 +230,35 @@ impl AssetHandle {
         self.textures.subscribe()
     }
 
-    pub async fn request(&self, region: Region, resource: assets::Request, priority: Priority) -> Result<Demand, RequestError> {
+    pub async fn request_with_importance(
+        &self,
+        region: Region,
+        resource: assets::Request,
+        priority: Priority,
+        importance: u16,
+    ) -> Result<Demand, RequestError> {
         let mut routes = self.routes.clone();
         routes.borrow_and_update();
         loop {
-            if let Some(demand) = self.request_once(region, resource, priority).await? {
+            if let Some(demand) = self.request_once(region, resource, priority, importance).await? {
                 return Ok(demand);
             }
             routes.changed().await.map_err(|_| RequestError::Closed)?;
         }
     }
 
-    pub async fn request_mesh_header(&self, region: Region, id: AssetId, priority: Priority) -> Result<Demand, RequestError> {
-        self.request(region, Request::MeshHeader(id), priority).await
-    }
-
-    pub async fn request_mesh_lod(
+    async fn request_once(
         &self,
         region: Region,
-        block: assets::mesh::MeshLodRequest,
+        resource: assets::Request,
         priority: Priority,
-    ) -> Result<Demand, RequestError> {
-        self.request(region, Request::MeshLod(block), priority).await
-    }
-
-    async fn request_once(&self, region: Region, resource: assets::Request, priority: Priority) -> Result<Option<Demand>, RequestError> {
+        importance: u16,
+    ) -> Result<Option<Demand>, RequestError> {
         if !self.active.load(Ordering::Acquire) {
             return Err(RequestError::Closed);
         }
         let (reply, response) = oneshot::channel();
-        self.requests.try_send(DemandRequest { region, resource, priority, reply }).map_err(|error| match error {
+        self.requests.try_send(DemandRequest { region, resource, priority, importance, reply }).map_err(|error| match error {
             TrySendError::Closed(_) => RequestError::Closed,
             TrySendError::Full(_) if self.active.load(Ordering::Acquire) => RequestError::Busy,
             TrySendError::Full(_) => RequestError::Closed,
@@ -277,14 +289,14 @@ impl AssetHandle {
     }
 }
 
-pub(crate) struct AssetCoordinator {
+pub struct AssetCoordinator {
     handle: AssetHandle,
     controls: mpsc::Sender<RouteCommand>,
     worker: JoinHandle<()>,
 }
 
 impl AssetCoordinator {
-    pub(crate) fn new(runtime: Handle, cancelled: impl Future<Output = ()> + Send + 'static, cache: Option<Arc<AssetCache>>) -> Self {
+    pub fn new(runtime: Handle, cancelled: impl Future<Output = ()> + Send + 'static, cache: Option<Arc<AssetCache>>) -> Self {
         static MEMORY: OnceLock<Budget> = OnceLock::new();
         let budget = MEMORY.get_or_init(Budget::default).clone();
         Self::build(runtime, cancelled, budget, cache, Box::new(spawn_cache_writes), Box::new(|| {}))
@@ -329,7 +341,7 @@ impl AssetCoordinator {
         Self { handle, controls, worker }
     }
 
-    pub(crate) async fn stop(self) {
+    pub async fn stop(self) {
         let Self { handle, controls, worker } = self;
         handle.active.store(false, Ordering::Release);
         drop((handle, controls));
@@ -338,14 +350,14 @@ impl AssetCoordinator {
         }
     }
 
-    pub(crate) fn handle(&self) -> AssetHandle {
+    pub fn handle(&self) -> AssetHandle {
         self.handle.clone()
     }
 
-    pub(crate) fn register(&self, region: Region, client: Client) {
+    pub fn register(&self, region: Region, client: Client) {
         self.control(RouteCommand::Register(region, client));
     }
-    pub(crate) fn retire(&self, region: Region) {
+    pub fn retire(&self, region: Region) {
         self.control(RouteCommand::Retire(region));
     }
 
@@ -390,6 +402,17 @@ fn classify_network_error(error: Error, kind: Kind) -> Failure {
             _ => Failure::Network,
         },
         _ => Failure::Network,
+    }
+}
+
+fn classify_mesh_range_error(error: Error) -> Failure {
+    match &error {
+        Error::CapabilityHttp(error)
+            if error.kind == HttpErrorKind::ResourceExhausted && error.status.is_some_and(|status| status.as_u16() == 200) =>
+        {
+            Failure::FullAssetRequired
+        }
+        _ => classify_network_error(error, Kind::Mesh),
     }
 }
 
@@ -530,13 +553,17 @@ async fn run(
                     transports.remove(&route);
                 }
             }
-            Input::Request(Some(DemandRequest { region, resource, priority, reply })) => {
+            Input::Request(Some(DemandRequest { region, resource, priority, importance, reply })) => {
                 if reply.is_canceled() {
                     continue;
                 }
                 let result = regions
                     .get(&region)
-                    .map(|route| store.request(*route, resource, priority, Instant::now()).map_err(RequestError::Admission))
+                    .map(|route| {
+                        store
+                            .request_with_importance(*route, resource, priority, importance, Instant::now())
+                            .map_err(RequestError::Admission)
+                    })
                     .transpose();
                 if reply.send(result).is_err() {
                     tracing::trace!(region = region.get(), "asset request receiver closed");
@@ -617,100 +644,21 @@ fn spawn_cache_writes(writes: Vec<CacheWrite>, runtime: &Handle, jobs: &mut Futu
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        assert_matches,
-        io::{Read, Write},
-        net::{TcpListener, TcpStream},
-        sync::Arc,
-        thread,
-    };
+    use std::{assert_matches, sync::Arc, time::Instant};
 
-    use assets::Priority;
+    use assets::{Budget, LoadJob, Priority, Store};
+    use futures::future::join_all;
     use llsd::{Value, binary, xml};
     use tempfile::tempdir;
-    use test_support::texture::{RGBA_J2C, RGBA_RAW};
+    use test_support::{
+        http_peer::LoopbackPeer as Peer,
+        texture::{RGBA_J2C, RGBA_RAW},
+    };
     use url::Url;
     use utils::AssetId;
     use uuid::Uuid;
 
     use super::*;
-
-    struct Peer {
-        url: Url,
-        thread: thread::JoinHandle<Vec<Vec<u8>>>,
-    }
-
-    fn read_request(stream: &mut TcpStream) -> Vec<u8> {
-        stream.set_nonblocking(false).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let mut bytes = Vec::new();
-        let mut chunk = [0; 4096];
-        loop {
-            let count = stream.read(&mut chunk).unwrap();
-            assert!(count > 0, "request ended before framing completed");
-            bytes.extend_from_slice(&chunk[..count]);
-            if let Some(header) = bytes.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                let length = String::from_utf8_lossy(&bytes[..header])
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap_or(0);
-                if bytes.len() >= header + 4 + length {
-                    return bytes;
-                }
-            }
-        }
-    }
-
-    impl Peer {
-        fn new(count: usize, mut respond: impl FnMut(usize, &[u8], &Url) -> (u16, Vec<u8>) + Send + 'static) -> Self {
-            Self::new_with_headers(count, move |index, request, base| {
-                let (status, body) = respond(index, request, base);
-                (status, Vec::new(), body)
-            })
-        }
-
-        fn new_with_headers(
-            count: usize,
-            mut respond: impl FnMut(usize, &[u8], &Url) -> (u16, Vec<(String, String)>, Vec<u8>) + Send + 'static,
-        ) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
-            let base = url.clone();
-            let thread = thread::spawn(move || {
-                let mut requests = Vec::new();
-                for index in 0..count {
-                    let deadline = Instant::now() + Duration::from_secs(5);
-                    let mut stream = loop {
-                        match listener.accept() {
-                            Ok((stream, _)) => break stream,
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
-                                thread::sleep(Duration::from_millis(1))
-                            }
-                            Err(error) => panic!("expected capability request: {error}"),
-                        }
-                    };
-                    let request = read_request(&mut stream);
-                    let (status, headers, body) = respond(index, &request, &base);
-                    let mut header = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\n", body.len());
-                    for (name, value) in headers {
-                        header.push_str(&format!("{name}: {value}\r\n"));
-                    }
-                    header.push_str("Connection: close\r\n\r\n");
-                    let _ = stream.write_all(header.as_bytes()).and_then(|_| stream.write_all(&body));
-                    requests.push(request);
-                }
-                requests
-            });
-            Self { url, thread }
-        }
-        fn finish(self) -> Vec<Vec<u8>> {
-            self.thread.join().unwrap()
-        }
-    }
 
     fn grants(base: &Url) -> Vec<u8> {
         xml::to_vec(&Value::Map(
@@ -767,6 +715,10 @@ mod tests {
         mesh_fixture_map(&[("offset", mesh_fixture_integer(offset)), ("size", mesh_fixture_integer(size))])
     }
 
+    fn mesh_fixture_empty_lod() -> Vec<u8> {
+        vec![0x78, 0x01, 0x01, 0x06, 0x00, 0xf9, 0xff, 0x5b, 0x00, 0x00, 0x00, 0x00, 0x5d, 0x02, 0x85, 0x00, 0xb9]
+    }
+
     fn mesh_fixture_lod_request(id: AssetId) -> assets::mesh::MeshLodRequest {
         let mut bytes = b"<?llsd/binary?>\n".to_vec();
         bytes.extend(mesh_fixture_map(&[
@@ -780,6 +732,45 @@ mod tests {
         ]));
         let total = u64::try_from(bytes.len() + 1).unwrap();
         assets::mesh::decode_header(&bytes, total).unwrap().lod(id, assets::mesh::MeshLod::Low).unwrap()
+    }
+
+    fn mesh_fixture_asset() -> (Vec<u8>, Vec<u8>, usize) {
+        let block = mesh_fixture_empty_lod();
+        let row = mesh_fixture_array(&vec![mesh_fixture_string(&[b'x'; 64]); 24]);
+        let padding = mesh_fixture_array(&vec![row; 4]);
+        let mut header = b"<?llsd/binary?>\n".to_vec();
+        header.extend(mesh_fixture_map(&[
+            ("version", mesh_fixture_integer(1)),
+            ("lowest_lod", mesh_fixture_block_entry(-1, 0)),
+            ("low_lod", mesh_fixture_block_entry(0, i32::try_from(block.len()).unwrap())),
+            ("medium_lod", mesh_fixture_block_entry(-1, 0)),
+            ("high_lod", mesh_fixture_block_entry(-1, 0)),
+            ("physics_mesh", mesh_fixture_block_entry(-1, 0)),
+            ("skin", mesh_fixture_block_entry(-1, 0)),
+            ("padding", padding),
+        ]));
+        let header_size = header.len();
+        let mut asset = header;
+        asset.extend_from_slice(&block);
+        (asset, block, header_size)
+    }
+
+    fn compact_mesh_fixture_asset() -> (Vec<u8>, Vec<u8>, usize) {
+        let block = mesh_fixture_empty_lod();
+        let mut header = b"<?llsd/binary?>\n".to_vec();
+        header.extend(mesh_fixture_map(&[
+            ("version", mesh_fixture_integer(1)),
+            ("lowest_lod", mesh_fixture_block_entry(0, i32::try_from(block.len()).unwrap())),
+            ("low_lod", mesh_fixture_block_entry(-1, 0)),
+            ("medium_lod", mesh_fixture_block_entry(-1, 0)),
+            ("high_lod", mesh_fixture_block_entry(-1, 0)),
+            ("physics_mesh", mesh_fixture_block_entry(-1, 0)),
+            ("skin", mesh_fixture_block_entry(-1, 0)),
+        ]));
+        let header_size = header.len();
+        let mut asset = header;
+        asset.extend_from_slice(&block);
+        (asset, block, header_size)
     }
 
     #[tokio::test]
@@ -856,50 +847,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_mesh_demands_fetch_and_decode_header_then_lod() {
-        let compressed_empty_lod = [0x78, 0x01, 0x01, 0x06, 0x00, 0xf9, 0xff, 0x5b, 0x00, 0x00, 0x00, 0x00, 0x5d, 0x02, 0x85, 0x00, 0xb9];
-        let row = mesh_fixture_array(&vec![mesh_fixture_string(&[b'x'; 64]); 24]);
-        let padding = mesh_fixture_array(&vec![row; 4]);
-        let mut header = b"<?llsd/binary?>\n".to_vec();
-        header.extend(mesh_fixture_map(&[
-            ("version", mesh_fixture_integer(1)),
-            ("lowest_lod", mesh_fixture_block_entry(-1, 0)),
-            ("low_lod", mesh_fixture_block_entry(0, i32::try_from(compressed_empty_lod.len()).unwrap())),
-            ("medium_lod", mesh_fixture_block_entry(-1, 0)),
-            ("high_lod", mesh_fixture_block_entry(-1, 0)),
-            ("physics_mesh", mesh_fixture_block_entry(-1, 0)),
-            ("skin", mesh_fixture_block_entry(-1, 0)),
-            ("padding", padding),
-        ]));
-        let header_size = header.len();
-        assert!(header_size > assets::mesh::MESH_HEADER_BYTES);
-        let mut asset = header;
-        asset.extend_from_slice(&compressed_empty_lod);
-        let asset_length = asset.len();
-        let initial_header_response = asset[..assets::mesh::MESH_HEADER_BYTES].to_vec();
-        let header_response = asset.clone();
-        let lod_response = compressed_empty_lod.to_vec();
-        let peer = Peer::new_with_headers(4, move |index, request, base| match index {
+    async fn oversized_mesh_header_full_response_retries_with_full_reservation() {
+        let asset = test_support::mesh::asset_with_seeded_lod_vertices(&[(0, 30_000)], 1, 0x89ab_cdef);
+        assert!(asset.len() > assets::mesh::MAX_MESH_HEADER_BYTES);
+        let range_asset = asset.clone();
+        let retry_asset = asset.clone();
+        let peer = Peer::new_with_headers(3, move |index, request, base| match index {
             0 => (200, Vec::new(), grants(base)),
             1 => {
                 let request = String::from_utf8_lossy(request).to_ascii_lowercase();
-                assert!(request.starts_with("get /content/?mesh_id=00000000-0000-0000-0000-000000000001 http/1.1"));
                 assert!(request.contains("range: bytes=0-4095"));
-                (206, vec![("Content-Range".into(), format!("bytes 0-4095/{asset_length}"))], initial_header_response.clone())
+                (200, Vec::new(), range_asset.clone())
             }
             2 => {
                 let request = String::from_utf8_lossy(request).to_ascii_lowercase();
-                assert!(request.contains(&format!("range: bytes=0-{}", asset_length - 1)));
-                (206, vec![("Content-Range".into(), format!("bytes 0-{}/{}", asset_length - 1, asset_length))], header_response.clone())
-            }
-            3 => {
-                let request = String::from_utf8_lossy(request).to_ascii_lowercase();
-                assert!(request.contains(&format!("range: bytes={header_size}-{}", asset_length - 1)));
-                (
-                    206,
-                    vec![("Content-Range".into(), format!("bytes {header_size}-{}/{}", asset_length - 1, asset_length))],
-                    lod_response.clone(),
-                )
+                assert!(!request.contains("range:"));
+                (200, Vec::new(), retry_asset.clone())
             }
             _ => unreachable!(),
         });
@@ -916,7 +879,132 @@ mod tests {
         let id = resource(Kind::Mesh).id;
         service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
         let handle = service.handle();
-        let mut header_demand = handle.request_mesh_header(region, id, Priority::Visible).await.unwrap();
+        let mut demand = handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 1).await.unwrap();
+        loop {
+            match demand.status() {
+                assets::Status::Ready(assets::Content::MeshHeader(header)) => {
+                    assert_eq!(header.asset_length(), u64::try_from(asset.len()).unwrap());
+                    break;
+                }
+                assets::Status::Failed { failure, .. } => panic!("unexpected mesh header failure: {failure:?}"),
+                _ => {
+                    demand.changed().await;
+                }
+            }
+        }
+        cancel.send(()).unwrap();
+        service.stop().await;
+        assert_eq!(peer.finish().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn concurrent_oversized_mesh_responses_use_each_reserved_limit() {
+        let body = vec![0; assets::mesh::MAX_MESH_HEADER_BYTES + 1];
+        let peer = Peer::new_parallel(std::time::Duration::ZERO, move |request, base| {
+            if String::from_utf8_lossy(request).starts_with("POST /seed") {
+                (200, Vec::new(), grants(base))
+            } else {
+                let request = String::from_utf8_lossy(request).to_ascii_lowercase();
+                assert!(request.contains("range: bytes=0-4095"));
+                (200, Vec::new(), body.clone())
+            }
+        });
+        let transport = CapabilityTransport::new(Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let budget = Budget::default();
+        let mut store = Store::new(budget.clone());
+        let route = store.register_route().unwrap();
+        let now = Instant::now();
+        let demands = (0..assets::MAX_ASSET_ROUTES.saturating_sub(1))
+            .map(|index| {
+                let id = AssetId::new(Uuid::from_u128(100 + u128::try_from(index).unwrap()));
+                store.request(route, Request::MeshHeader(id), Priority::Visible, now).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut jobs = Vec::new();
+        while let Some(job) = store.next_job(now) {
+            let LoadJob::Fetch(fetch) = job else { panic!("uncached mesh headers use network fetches") };
+            assert_eq!(fetch.response_limit(), assets::mesh::MAX_MESH_HEADER_BYTES);
+            jobs.push(fetch);
+        }
+        assert_eq!(jobs.len(), 32);
+        let reserved_bytes = jobs.iter().map(assets::FetchJob::response_limit).sum::<usize>();
+        assert_eq!(budget.stats().charged_bytes, reserved_bytes);
+        assert!(reserved_bytes <= assets::ASSET_WORK_BYTES);
+        for response in join_all(jobs.iter().map(|job| transport.fetch(job))).await {
+            assert_matches!(response, Err(Failure::FullAssetRequired));
+        }
+        assert_eq!(budget.stats().charged_bytes, reserved_bytes);
+        drop((jobs, demands));
+        store.close();
+        drop(store);
+        let (requests, response_bytes) = peer.finish_stats();
+        assert_eq!(requests.len(), 33);
+        assert!(response_bytes <= u64::try_from(33 * (assets::mesh::MAX_MESH_HEADER_BYTES + 1)).unwrap());
+    }
+
+    #[tokio::test]
+    async fn oversized_partial_mesh_response_fails_at_the_range_limit() {
+        let id = resource(Kind::Mesh).id;
+        let block = mesh_fixture_lod_request(id);
+        let asset_length = block.asset_length();
+        let range = block.range();
+        let peer = Peer::new_with_headers(2, move |index, request, base| match index {
+            0 => (200, Vec::new(), grants(base)),
+            1 => {
+                let request = String::from_utf8_lossy(request).to_ascii_lowercase();
+                assert!(request.contains(&format!("range: bytes={}-{}", range.start, range.end - 1)));
+                (206, vec![("Content-Range".into(), format!("bytes {}-{}/{asset_length}", range.start, range.end - 1))], vec![0; 2])
+            }
+            _ => unreachable!(),
+        });
+        let transport = CapabilityTransport::new(Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let mut store = Store::new(Budget::default());
+        let route = store.register_route().unwrap();
+        let demand = store.request(route, Request::MeshLod(block), Priority::Visible, Instant::now()).unwrap();
+        let LoadJob::Fetch(fetch) = store.next_job(Instant::now()).unwrap() else { panic!("mesh LOD starts with a fetch") };
+        assert_eq!(fetch.response_limit(), 1);
+        assert_matches!(transport.fetch(&fetch).await, Err(Failure::TooLarge));
+        assert_eq!(peer.finish().len(), 2);
+        drop(demand);
+        store.close();
+    }
+
+    #[tokio::test]
+    async fn public_mesh_demands_fetch_and_decode_header_then_lod() {
+        let (asset, _compressed_empty_lod, header_size) = mesh_fixture_asset();
+        assert!(header_size > assets::mesh::MESH_HEADER_BYTES);
+        let asset_length = asset.len();
+        let initial_header_response = asset[..assets::mesh::MESH_HEADER_BYTES].to_vec();
+        let header_response = asset.clone();
+        let peer = Peer::new_with_headers(3, move |index, request, base| match index {
+            0 => (200, Vec::new(), grants(base)),
+            1 => {
+                let request = String::from_utf8_lossy(request).to_ascii_lowercase();
+                assert!(request.starts_with("get /content/?mesh_id=00000000-0000-0000-0000-000000000001 http/1.1"));
+                assert!(request.contains("range: bytes=0-4095"));
+                (206, vec![("Content-Range".into(), format!("bytes 0-4095/{asset_length}"))], initial_header_response.clone())
+            }
+            2 => {
+                let request = String::from_utf8_lossy(request).to_ascii_lowercase();
+                assert!(request.contains(&format!("range: bytes=0-{}", asset_length - 1)));
+                (206, vec![("Content-Range".into(), format!("bytes 0-{}/{}", asset_length - 1, asset_length))], header_response.clone())
+            }
+            _ => unreachable!(),
+        });
+        let (cancel, cancelled) = oneshot::channel();
+        let service = AssetCoordinator::with_budget(
+            Handle::current(),
+            async move {
+                let _ = cancelled.await;
+            },
+            Budget::default(),
+            None,
+        );
+        let region = Region::new(1);
+        let id = resource(Kind::Mesh).id;
+        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let handle = service.handle();
+        let mut header_demand = handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
         let mesh_header = loop {
             match header_demand.status() {
                 assets::Status::Ready(assets::Content::MeshHeader(header)) => break header,
@@ -927,7 +1015,7 @@ mod tests {
             }
         };
         let block = mesh_header.lod(id, assets::mesh::MeshLod::Low).unwrap();
-        let mut lod_demand = handle.request_mesh_lod(region, block, Priority::Visible).await.unwrap();
+        let mut lod_demand = handle.request_with_importance(region, Request::MeshLod(block), Priority::Visible, 0).await.unwrap();
         let lod = loop {
             match lod_demand.status() {
                 assets::Status::Ready(assets::Content::Mesh(lod)) => break lod,
@@ -941,12 +1029,261 @@ mod tests {
         assert_matches!(lod.geometry(), assets::mesh::LodGeometry::Empty { face_count: 0 });
         cancel.send(()).unwrap();
         service.stop().await;
-        assert_eq!(peer.finish().len(), 4);
+        assert_eq!(peer.finish().len(), 3);
         drop(lod);
         drop(lod_demand);
         drop(mesh_header);
         drop(header_demand);
         drop(handle);
+    }
+
+    #[tokio::test]
+    async fn prefix_lod_persists_without_fetch() {
+        let directory = tempdir().unwrap();
+        let (asset, _lod_bytes, header_size) = compact_mesh_fixture_asset();
+        let asset_length = u64::try_from(asset.len()).unwrap();
+        let last_byte = asset_length.checked_sub(1).unwrap();
+        let initial_asset = asset.clone();
+        let peer = Peer::new_with_headers(2, move |index, request, base| match index {
+            0 => (200, Vec::new(), grants(base)),
+            1 => {
+                let request = String::from_utf8_lossy(request).to_ascii_lowercase();
+                assert!(request.contains("range: bytes=0-4095"));
+                (206, vec![("Content-Range".into(), format!("bytes 0-{last_byte}/{asset_length}"))], initial_asset.clone())
+            }
+            _ => unreachable!(),
+        });
+        let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
+        let region = Region::new(1);
+        let id = resource(Kind::Mesh).id;
+        let service = AssetCoordinator::new(Handle::current(), pending(), Some(Arc::clone(&cache)));
+        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let handle = service.handle();
+        let mut header_demand = handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
+        let header = loop {
+            match header_demand.status() {
+                assets::Status::Ready(assets::Content::MeshHeader(header)) => break header,
+                assets::Status::Failed { failure, .. } => panic!("unexpected mesh header failure: {failure:?}"),
+                _ => {
+                    header_demand.changed().await;
+                }
+            }
+        };
+        assert_eq!(usize::try_from(header.header_size()).unwrap(), header_size);
+        let block = header.lod(id, assets::mesh::MeshLod::Lowest).unwrap();
+        let mut lod_demand = handle.request_with_importance(region, Request::MeshLod(block), Priority::Visible, 0).await.unwrap();
+        let lod = loop {
+            match lod_demand.status() {
+                assets::Status::Ready(assets::Content::Mesh(lod)) => break lod,
+                assets::Status::Failed { failure, .. } => panic!("unexpected prefix LOD failure: {failure:?}"),
+                _ => {
+                    lod_demand.changed().await;
+                }
+            }
+        };
+        assert_eq!(lod.lod(), assets::mesh::MeshLod::Lowest);
+        service.stop().await;
+        assert_eq!(peer.finish().len(), 2, "the header response supplies the complete LOD block");
+        drop(lod);
+        drop(lod_demand);
+        drop(header);
+        drop(header_demand);
+        drop(handle);
+        Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("first cache handles released")).shutdown().unwrap();
+
+        let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
+        let warm_peer = Peer::new(0, |_, _, _| panic!("persisted mesh assets must not make HTTP requests"));
+        let warm_service = AssetCoordinator::new(Handle::current(), pending(), Some(Arc::clone(&cache)));
+        warm_service.register(region, Client::new(warm_peer.url.join("seed").unwrap()).unwrap());
+        let warm_handle = warm_service.handle();
+        let mut warm_header_demand =
+            warm_handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
+        let warm_header = loop {
+            match warm_header_demand.status() {
+                assets::Status::Ready(assets::Content::MeshHeader(header)) => break header,
+                assets::Status::Failed { failure, .. } => panic!("unexpected cached header failure: {failure:?}"),
+                _ => {
+                    warm_header_demand.changed().await;
+                }
+            }
+        };
+        let warm_block = warm_header.lod(id, assets::mesh::MeshLod::Lowest).unwrap();
+        let mut warm_lod_demand =
+            warm_handle.request_with_importance(region, Request::MeshLod(warm_block), Priority::Visible, 0).await.unwrap();
+        let warm_lod = loop {
+            match warm_lod_demand.status() {
+                assets::Status::Ready(assets::Content::Mesh(lod)) => break lod,
+                assets::Status::Failed { failure, .. } => panic!("unexpected cached LOD failure: {failure:?}"),
+                _ => {
+                    warm_lod_demand.changed().await;
+                }
+            }
+        };
+        assert_eq!(warm_lod.lod(), assets::mesh::MeshLod::Lowest);
+        warm_service.stop().await;
+        assert!(warm_peer.finish().is_empty());
+        drop(warm_lod);
+        drop(warm_lod_demand);
+        drop(warm_header);
+        drop(warm_header_demand);
+        drop(warm_handle);
+        Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("warm cache handles released")).shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn mesh_lod_rejects_inconsistent_content_range() {
+        let id = resource(Kind::Mesh).id;
+        let block = mesh_fixture_lod_request(id);
+        let range = block.range();
+        let peer = Peer::new_with_headers(2, move |index, request, base| match index {
+            0 => (200, Vec::new(), grants(base)),
+            1 => {
+                let headers = String::from_utf8_lossy(request).to_ascii_lowercase();
+                assert!(headers.contains(&format!("range: bytes={}-{}", range.start, range.end - 1)));
+                (
+                    206,
+                    vec![(
+                        "Content-Range".into(),
+                        format!("bytes {}-{}/{}", range.start, range.end - 1, block.asset_length().saturating_add(1)),
+                    )],
+                    b"x".to_vec(),
+                )
+            }
+            _ => unreachable!(),
+        });
+        let service = AssetCoordinator::with_budget(Handle::current(), pending(), Budget::default(), None);
+        let region = Region::new(1);
+        service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
+        let handle = service.handle();
+        let mut demand = handle.request_with_importance(region, Request::MeshLod(block), Priority::Visible, 0).await.unwrap();
+        loop {
+            match demand.status() {
+                assets::Status::Failed { failure: Failure::MalformedBlock, .. } => break,
+                assets::Status::Failed { failure, .. } => panic!("unexpected range failure: {failure:?}"),
+                _ => {
+                    demand.changed().await;
+                }
+            }
+        }
+        service.stop().await;
+        assert_eq!(peer.finish().len(), 2);
+        drop(demand);
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn mesh_blocks_are_served_by_a_new_second_session_cache() {
+        let directory = tempdir().unwrap();
+        let (asset, _block, header_size) = mesh_fixture_asset();
+        assert!(header_size > assets::mesh::MESH_HEADER_BYTES);
+        let asset_length = asset.len();
+        let initial_header = asset.get(..assets::mesh::MESH_HEADER_BYTES).unwrap().to_vec();
+        let full_header = asset.clone();
+        let first_peer = Peer::new_with_headers(3, move |index, request, base| match index {
+            0 => (200, Vec::new(), grants(base)),
+            1 => {
+                assert!(String::from_utf8_lossy(request).to_ascii_lowercase().contains("range: bytes=0-4095"));
+                (206, vec![("Content-Range".into(), format!("bytes 0-4095/{asset_length}"))], initial_header.clone())
+            }
+            2 => (206, vec![("Content-Range".into(), format!("bytes 0-{}/{}", asset_length - 1, asset_length))], full_header.clone()),
+            _ => unreachable!(),
+        });
+        let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
+        let region = Region::new(1);
+        let id = resource(Kind::Mesh).id;
+        let (cancel_first, cancelled_first) = oneshot::channel();
+        let first_service = AssetCoordinator::with_budget(
+            Handle::current(),
+            async move {
+                let _ = cancelled_first.await;
+            },
+            Budget::default(),
+            Some(Arc::clone(&cache)),
+        );
+        first_service.register(region, Client::new(first_peer.url.join("seed").unwrap()).unwrap());
+        let first_handle = first_service.handle();
+        let mut first_header_demand =
+            first_handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
+        let first_header = loop {
+            match first_header_demand.status() {
+                assets::Status::Ready(assets::Content::MeshHeader(header)) => break header,
+                assets::Status::Failed { failure, .. } => panic!("unexpected first-session header failure: {failure:?}"),
+                _ => {
+                    first_header_demand.changed().await;
+                }
+            }
+        };
+        let first_request = first_header.lod(id, assets::mesh::MeshLod::Low).unwrap();
+        let mut first_lod_demand =
+            first_handle.request_with_importance(region, Request::MeshLod(first_request), Priority::Visible, 0).await.unwrap();
+        let first_lod = loop {
+            match first_lod_demand.status() {
+                assets::Status::Ready(assets::Content::Mesh(lod)) => break lod,
+                assets::Status::Failed { failure, .. } => panic!("unexpected first-session LOD failure: {failure:?}"),
+                _ => {
+                    first_lod_demand.changed().await;
+                }
+            }
+        };
+        assert_eq!(first_lod.lod(), assets::mesh::MeshLod::Low);
+        cancel_first.send(()).unwrap();
+        first_service.stop().await;
+        assert_eq!(first_peer.finish().len(), 3);
+        drop(first_lod);
+        drop(first_lod_demand);
+        drop(first_header);
+        drop(first_header_demand);
+        drop(first_handle);
+        Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("first cache handles released")).shutdown().unwrap();
+
+        let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
+        let second_peer = Peer::new(0, |_, _, _| panic!("warm mesh blocks must not make HTTP requests"));
+        let (cancel_second, cancelled_second) = oneshot::channel();
+        let second_service = AssetCoordinator::with_budget(
+            Handle::current(),
+            async move {
+                let _ = cancelled_second.await;
+            },
+            Budget::default(),
+            Some(Arc::clone(&cache)),
+        );
+        second_service.register(region, Client::new(second_peer.url.join("seed").unwrap()).unwrap());
+        let second_handle = second_service.handle();
+        let mut second_header_demand =
+            second_handle.request_with_importance(region, Request::MeshHeader(id), Priority::Visible, 0).await.unwrap();
+        let second_header = loop {
+            match second_header_demand.status() {
+                assets::Status::Ready(assets::Content::MeshHeader(header)) => break header,
+                assets::Status::Failed { failure, .. } => panic!("unexpected second-session header failure: {failure:?}"),
+                _ => {
+                    second_header_demand.changed().await;
+                }
+            }
+        };
+        let second_request = second_header.lod(id, assets::mesh::MeshLod::Low).unwrap();
+        let mut second_lod_demand =
+            second_handle.request_with_importance(region, Request::MeshLod(second_request), Priority::Visible, 0).await.unwrap();
+        let second_lod = loop {
+            match second_lod_demand.status() {
+                assets::Status::Ready(assets::Content::Mesh(lod)) => break lod,
+                assets::Status::Failed { failure, .. } => panic!("unexpected second-session LOD failure: {failure:?}"),
+                _ => {
+                    second_lod_demand.changed().await;
+                }
+            }
+        };
+        assert_eq!(second_lod.lod(), assets::mesh::MeshLod::Low);
+        cancel_second.send(()).unwrap();
+        second_service.stop().await;
+        assert!(second_peer.finish().is_empty());
+        assert_eq!(cache.stats().hits, 2);
+        assert_eq!(cache.stats().entries_by_kind.meshes, 2);
+        drop(second_lod);
+        drop(second_lod_demand);
+        drop(second_header);
+        drop(second_header_demand);
+        drop(second_handle);
+        Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("second cache handles released")).shutdown().unwrap();
     }
 
     #[tokio::test]
@@ -1029,7 +1366,8 @@ mod tests {
         let region = Region::new(1);
         service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
         let handle = service.handle();
-        let mut demand = handle.request(region, assets::Request::new(resource(Kind::Environment)), Priority::Visible).await.unwrap();
+        let mut demand =
+            handle.request_with_importance(region, assets::Request::new(resource(Kind::Environment)), Priority::Visible, 0).await.unwrap();
         loop {
             match demand.status() {
                 assets::Status::Ready(assets::Content::Environment(_)) => break,
@@ -1063,8 +1401,10 @@ mod tests {
         let region = Region::new(1);
         first_service.register(region, Client::new(first_peer.url.join("seed").unwrap()).unwrap());
         let first_handle = first_service.handle();
-        let mut first_demand =
-            first_handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+        let mut first_demand = first_handle
+            .request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0)
+            .await
+            .unwrap();
         let first_texture = loop {
             match first_demand.status() {
                 assets::Status::Ready(assets::Content::Texture(texture)) => break texture,
@@ -1095,8 +1435,10 @@ mod tests {
         );
         second_service.register(region, Client::new(second_peer.url.join("seed").unwrap()).unwrap());
         let second_handle = second_service.handle();
-        let mut second_demand =
-            second_handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+        let mut second_demand = second_handle
+            .request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0)
+            .await
+            .unwrap();
         let second_texture = loop {
             match second_demand.status() {
                 assets::Status::Ready(assets::Content::Texture(texture)) => break texture,
@@ -1121,7 +1463,7 @@ mod tests {
     async fn a_semantically_corrupt_texture_is_refetched_and_replaced() {
         let directory = tempdir().unwrap();
         let cache = Arc::new(AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap());
-        cache.put_complete(resource(Kind::Texture), b"bad".to_vec()).unwrap();
+        cache.put_complete(assets::Request::new(resource(Kind::Texture)), b"bad".to_vec()).unwrap();
         let peer = Peer::new(2, |index, _, base| if index == 0 { (200, grants(base)) } else { (200, RGBA_J2C.to_vec()) });
         let (cancel, cancelled) = oneshot::channel();
         let service = AssetCoordinator::with_budget(
@@ -1135,7 +1477,8 @@ mod tests {
         let region = Region::new(1);
         service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
         let handle = service.handle();
-        let mut demand = handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+        let mut demand =
+            handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
         let texture = loop {
             match demand.status() {
                 assets::Status::Ready(assets::Content::Texture(texture)) => break texture,
@@ -1150,7 +1493,7 @@ mod tests {
         service.stop().await;
         assert_eq!(peer.finish().len(), 2);
         assert_eq!(handle.cache_stats().unwrap().corrupt_entries, 1);
-        let assets::cache::AssetLookup::Hit(asset) = cache.lookup(resource(Kind::Texture)) else {
+        let assets::cache::AssetLookup::Hit(asset) = cache.lookup(assets::Request::new(resource(Kind::Texture))) else {
             panic!("validated network content replaced the corrupt entry")
         };
         assert_eq!(asset.bytes, RGBA_J2C);
@@ -1178,7 +1521,8 @@ mod tests {
             let region = Region::new(1);
             service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
             let handle = service.handle();
-            let mut demand = handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+            let mut demand =
+                handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
             let failure = loop {
                 match demand.status() {
                     assets::Status::Failed { failure, .. } => break failure,
@@ -1197,7 +1541,7 @@ mod tests {
             assert_eq!(peer.finish().len(), 2);
             assert_eq!(cache.stats().bytes_written, 0);
             assert_eq!(cache.stats().dropped_writes, 0);
-            assert_eq!(cache.lookup(resource(Kind::Texture)), assets::cache::AssetLookup::Miss);
+            assert_eq!(cache.lookup(assets::Request::new(resource(Kind::Texture))), assets::cache::AssetLookup::Miss);
             drop(demand);
             drop(handle);
             Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handle released")).shutdown().unwrap();
@@ -1260,9 +1604,8 @@ mod tests {
         let region = Region::new(1);
         let handle = service.handle();
         let request = assets::Request::new(resource(Kind::PbrMaterial));
-        let mut requesting = Box::pin(handle.request(region, request, Priority::Visible));
+        let mut requesting = Box::pin(handle.request_with_importance(region, request, Priority::Visible, 0));
         assert!(futures::poll!(&mut requesting).is_pending());
-        assert!(handle.request_once(region, request, Priority::Visible).await.unwrap().is_none());
         assert!(futures::poll!(&mut requesting).is_pending(), "a request must wait for its region's route");
         service.register(region, client);
         let mut demand = requesting.await.unwrap();
@@ -1292,9 +1635,8 @@ mod tests {
         let handle = service.handle();
         let region = Region::new(1);
         let request = assets::Request::new(resource(Kind::Texture));
-        let mut requesting = Box::pin(handle.request(region, request, Priority::Visible));
+        let mut requesting = Box::pin(handle.request_with_importance(region, request, Priority::Visible, 0));
         assert!(futures::poll!(&mut requesting).is_pending());
-        assert!(handle.request_once(region, request, Priority::Visible).await.unwrap().is_none());
         assert!(futures::poll!(&mut requesting).is_pending());
         service.stop().await;
         assert!(matches!(requesting.await, Err(RequestError::Closed)));
@@ -1328,8 +1670,10 @@ mod tests {
         let region = Region::new(1);
         service.register(region, client);
         let handle = service.handle();
-        let first = handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
-        let mut second = handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+        let first =
+            handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
+        let mut second =
+            handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
         received.await.unwrap();
         drop(first);
         assert_eq!(budget.stats().charged_bytes, Kind::Texture.max_response_bytes(), "the remaining face still owns the active fetch");
@@ -1349,7 +1693,7 @@ mod tests {
         assert!(matches!(second.status(), assets::Status::StaleSession));
         assert_eq!(budget.stats().resident_bytes, blob.image().unwrap().pixels().len() + RGBA_J2C.len());
         assert!(matches!(
-            handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await,
+            handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await,
             Err(RequestError::Closed)
         ));
         drop(second);
@@ -1384,7 +1728,11 @@ mod tests {
         );
         let region = Region::new(1);
         service.register(region, client);
-        let demand = service.handle().request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+        let demand = service
+            .handle()
+            .request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0)
+            .await
+            .unwrap();
         received.await.unwrap();
         assert_eq!(budget.stats().charged_bytes, Kind::Texture.max_response_bytes());
         drop(demand);
@@ -1431,7 +1779,8 @@ mod tests {
         let region = Region::new(1);
         service.register(region, Client::new(peer.url.join("seed").unwrap()).unwrap());
         let handle = service.handle();
-        let mut demand = handle.request(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible).await.unwrap();
+        let mut demand =
+            handle.request_with_importance(region, assets::Request::new(resource(Kind::Texture)), Priority::Visible, 0).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 match demand.status() {
@@ -1472,7 +1821,7 @@ mod tests {
         Arc::try_unwrap(cache).unwrap_or_else(|_| panic!("cache handles released")).shutdown().unwrap();
 
         let reopened = AssetCache::open(directory.path(), 1024 * 1024 * 1024).unwrap();
-        assert_matches!(reopened.lookup(resource(Kind::Texture)), assets::cache::AssetLookup::Hit(_));
+        assert_matches!(reopened.lookup(assets::Request::new(resource(Kind::Texture))), assets::cache::AssetLookup::Hit(_));
         reopened.shutdown().unwrap();
     }
 }

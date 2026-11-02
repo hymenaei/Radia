@@ -97,10 +97,46 @@ pub(crate) fn bench(c: &mut Criterion) {
     bench_camera_walk(&mut group, &device, &queue);
     bench_pose(&mut group, &device, &queue);
     bench_reprepare(&mut group, &device, &queue, 50, "stationary_one_reprepare_50_meshes");
+    bench_mesh_objects(&mut group, &device, &queue);
     bench_live_mix(&mut group, &device, &queue);
     bench_animated(&mut group, &device, &queue);
     bench_reprepare(&mut group, &device, &queue, OBJECTS, "one_reprepare_3000_unique_meshes");
     group.finish();
+}
+
+fn bench_mesh_objects(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) {
+    let (_reconciler, view, _world, _now) = support::ready_distinct_mesh_scene(128);
+    let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 3.0, SIZE).expect("mesh preparation camera");
+    let mut prepare = GeometryPrepare::new(device, queue, TextureFormat::Rgba8UnormSrgb);
+    for _ in 0..16 {
+        prepare_sample(&mut prepare, device, queue, &view, camera);
+        if prepare.stats().pending_meshes == 0 {
+            break;
+        }
+    }
+    assert_eq!(prepare.stats().pending_meshes, 0, "mesh benchmark residents settle before timing");
+    let mut generation = 0usize;
+    let mut latest = prepare.stats();
+    group.bench_function("camera_change_128_distinct_mesh_assets", |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                generation = generation.wrapping_add(1);
+                let camera = Camera::new(DVec3::new((generation % 2) as f64 * 0.01, 0.0, 0.0), Vec3::X, PI / 3.0, SIZE)
+                    .expect("mesh preparation camera");
+                elapsed += prepare_sample(&mut prepare, device, queue, &view, camera);
+                latest = prepare.stats();
+                assert_eq!(latest.pending_meshes, 0, "camera changes use resident mesh allocations");
+                assert_eq!(latest.omitted_faces, 0);
+            }
+            elapsed
+        });
+    });
+    report("camera_change_128_distinct_mesh_assets", latest);
 }
 
 fn bench_unchanged(

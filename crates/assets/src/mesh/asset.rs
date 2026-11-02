@@ -32,12 +32,21 @@ pub enum MeshLod {
 }
 
 impl MeshLod {
-    const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::Lowest => 0,
             Self::Low => 1,
             Self::Medium => 2,
             Self::High => 3,
+        }
+    }
+
+    pub const fn fallback_order(self) -> [Self; 4] {
+        match self {
+            Self::Lowest => [Self::Lowest, Self::Low, Self::Medium, Self::High],
+            Self::Low => [Self::Low, Self::Lowest, Self::Medium, Self::High],
+            Self::Medium => [Self::Medium, Self::Low, Self::Lowest, Self::High],
+            Self::High => [Self::High, Self::Medium, Self::Low, Self::Lowest],
         }
     }
 
@@ -111,6 +120,7 @@ pub enum AssetError {
     MissingLod(MeshLod),
     MalformedBlock,
     UnsupportedVersion(u32),
+    InsufficientBudget,
     TooLarge,
     Cancelled,
 }
@@ -222,9 +232,9 @@ fn decode_lod_inner(
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let mut faces = Vec::new();
-    vertices.try_reserve_exact(total_vertices).map_err(|_| AssetError::TooLarge)?;
-    indices.try_reserve_exact(total_indices).map_err(|_| AssetError::TooLarge)?;
-    faces.try_reserve_exact(submeshes.len()).map_err(|_| AssetError::TooLarge)?;
+    vertices.try_reserve_exact(total_vertices).map_err(|_| AssetError::InsufficientBudget)?;
+    indices.try_reserve_exact(total_indices).map_err(|_| AssetError::InsufficientBudget)?;
+    faces.try_reserve_exact(submeshes.len()).map_err(|_| AssetError::InsufficientBudget)?;
     for (slot, submesh) in submeshes.into_iter().enumerate() {
         if cancelled() {
             return Err(AssetError::Cancelled);
@@ -295,7 +305,7 @@ fn resize_reservation(reservation: &mut Option<&mut Reservation>, bytes: usize) 
     if let Some(reservation) = reservation.as_deref_mut()
         && !reservation.resize(bytes)
     {
-        return Err(AssetError::TooLarge);
+        return Err(AssetError::InsufficientBudget);
     }
     Ok(())
 }
@@ -333,7 +343,7 @@ fn prepare_submeshes<'a>(value: &'a Value, cancelled: &impl Fn() -> bool) -> Res
         return Err(AssetError::TooLarge);
     }
     let mut prepared = Vec::new();
-    prepared.try_reserve_exact(submeshes.len()).map_err(|_| AssetError::TooLarge)?;
+    prepared.try_reserve_exact(submeshes.len()).map_err(|_| AssetError::InsufficientBudget)?;
     let mut total_vertices = 0_usize;
     let mut total_indices = 0_usize;
     for submesh in submeshes {
@@ -484,7 +494,7 @@ fn decompress_bounded(
         }
         let required = input_capacity.checked_add(end).ok_or(AssetError::TooLarge)?;
         resize_reservation(reservation, required)?;
-        decoded.try_reserve_exact(produced).map_err(|_| AssetError::TooLarge)?;
+        decoded.try_reserve_exact(produced).map_err(|_| AssetError::InsufficientBudget)?;
         let allocated = input_capacity.checked_add(decoded.capacity()).ok_or(AssetError::TooLarge)?;
         resize_reservation(reservation, allocated)?;
         decoded.extend_from_slice(&chunk[..produced]);
@@ -1014,7 +1024,7 @@ mod tests {
     }
 
     #[test]
-    fn geometry_reservation_failure_is_too_large() {
+    fn geometry_reservation_failure_is_budget_pressure() {
         let encoded = block(&[dense_submesh(20_000, 60_000, 1)]);
         let mut no_reservation = None;
         let decoded = decompress_bounded(&encoded, encoded.capacity(), &mut no_reservation, &|| false).unwrap();
@@ -1046,7 +1056,7 @@ mod tests {
         let mut reservation = budget.reserve(encoded.capacity()).unwrap();
         assert_matches!(
             decode_lod_cancellable_reserved(&encoded, encoded.capacity(), &mut reservation, || false),
-            Err(AssetError::TooLarge)
+            Err(AssetError::InsufficientBudget)
         );
     }
 

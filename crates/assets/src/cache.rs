@@ -1,6 +1,7 @@
 use std::{
     error::Error,
     fmt,
+    mem::size_of,
     path::Path,
     sync::{
         Arc,
@@ -15,9 +16,10 @@ use storage::{
 };
 
 use crate::{
-    Blob, Budget, Kind, Resource,
+    Blob, Budget, Kind, Request,
     budget::Reservation,
     cache_policy::{AssetEvictionPolicy, DecodeCosts},
+    mesh::{MAX_MESH_ASSET_BYTES, MAX_MESH_BLOCK_BYTES, MAX_MESH_HEADER_BYTES, MeshLod},
 };
 
 pub use storage::EvictionReason as CacheEvictionReason;
@@ -27,14 +29,102 @@ const TEXTURES: NamespaceId = NamespaceId::new(0);
 const PBR_MATERIALS: NamespaceId = NamespaceId::new(1);
 const LEGACY_MATERIALS: NamespaceId = NamespaceId::new(2);
 const ENVIRONMENTS: NamespaceId = NamespaceId::new(3);
-const MESHES: NamespaceId = NamespaceId::new(4);
-const NAMESPACES: [Namespace; 5] = [
+const MESH_HEADER: NamespaceId = NamespaceId::new(4);
+const MESH_LOD_LOWEST: NamespaceId = NamespaceId::new(5);
+const MESH_LOD_LOW: NamespaceId = NamespaceId::new(6);
+const MESH_LOD_MEDIUM: NamespaceId = NamespaceId::new(7);
+const MESH_LOD_HIGH: NamespaceId = NamespaceId::new(8);
+pub(crate) const MESH_NAMESPACE_IDS: [NamespaceId; 5] = [MESH_HEADER, MESH_LOD_LOWEST, MESH_LOD_LOW, MESH_LOD_MEDIUM, MESH_LOD_HIGH];
+pub(super) const MESH_HEADER_FRAME_BYTES: usize = size_of::<u64>();
+pub(super) const MESH_LOD_FRAME_BYTES: usize = 3 * size_of::<u64>();
+const NAMESPACES: [Namespace; 9] = [
     Namespace::new("textures", "j2c"),
     Namespace::new("materials/pbr", "llsd"),
     Namespace::new("materials/legacy", "llsd"),
     Namespace::new("environments", "llsd"),
-    Namespace::new("meshes", "llmesh"),
+    Namespace::new("meshes/header", "llmesh"),
+    Namespace::new("meshes/lod/lowest", "llmesh"),
+    Namespace::new("meshes/lod/low", "llmesh"),
+    Namespace::new("meshes/lod/medium", "llmesh"),
+    Namespace::new("meshes/lod/high", "llmesh"),
 ];
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum CacheUnit {
+    Whole,
+    Header,
+    Lod(MeshLod),
+}
+
+pub(crate) fn cache_unit(request: Request) -> CacheUnit {
+    match request {
+        Request::MeshHeader(_) => CacheUnit::Header,
+        Request::MeshLod(block) => CacheUnit::Lod(block.lod()),
+        _ => CacheUnit::Whole,
+    }
+}
+
+pub(crate) fn mesh_header_frame(total_length: u64, header: &[u8]) -> Option<Vec<u8>> {
+    if total_length == 0 || total_length > MAX_MESH_ASSET_BYTES as u64 || header.is_empty() || header.len() > MAX_MESH_HEADER_BYTES {
+        return None;
+    }
+    let capacity = MESH_HEADER_FRAME_BYTES.checked_add(header.len())?;
+    let mut frame = Vec::new();
+    frame.try_reserve_exact(capacity).ok()?;
+    frame.extend_from_slice(&total_length.to_le_bytes());
+    frame.extend_from_slice(header);
+    Some(frame)
+}
+
+pub(crate) fn parse_mesh_header_frame(bytes: &[u8]) -> Option<(u64, &[u8])> {
+    let max_length = MESH_HEADER_FRAME_BYTES.checked_add(MAX_MESH_HEADER_BYTES)?;
+    if bytes.len() <= MESH_HEADER_FRAME_BYTES || bytes.len() > max_length {
+        return None;
+    }
+    let total_length = read_u64(bytes, 0)?;
+    if total_length == 0 || total_length > MAX_MESH_ASSET_BYTES as u64 {
+        return None;
+    }
+    Some((total_length, bytes.get(MESH_HEADER_FRAME_BYTES..)?))
+}
+
+pub(crate) fn mesh_lod_frame(request: crate::mesh::MeshLodRequest, block: &[u8]) -> Option<Vec<u8>> {
+    let range = request.range();
+    let block_length = range.end.checked_sub(range.start)?;
+    if u64::try_from(block.len()).ok()? != block_length || block_length > MAX_MESH_BLOCK_BYTES as u64 {
+        return None;
+    }
+    let capacity = MESH_LOD_FRAME_BYTES.checked_add(block.len())?;
+    let mut frame = Vec::new();
+    frame.try_reserve_exact(capacity).ok()?;
+    frame.extend_from_slice(&range.start.to_le_bytes());
+    frame.extend_from_slice(&block_length.to_le_bytes());
+    frame.extend_from_slice(&request.asset_length().to_le_bytes());
+    frame.extend_from_slice(block);
+    Some(frame)
+}
+
+pub(crate) fn parse_mesh_lod_frame(request: crate::mesh::MeshLodRequest, bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() < MESH_LOD_FRAME_BYTES.checked_add(1)? || bytes.len() > MESH_LOD_FRAME_BYTES.checked_add(MAX_MESH_BLOCK_BYTES)? {
+        return None;
+    }
+    let range = request.range();
+    let block_length = range.end.checked_sub(range.start)?;
+    if read_u64(bytes, 0)? != range.start
+        || read_u64(bytes, size_of::<u64>())? != block_length
+        || read_u64(bytes, 2 * size_of::<u64>())? != request.asset_length()
+    {
+        return None;
+    }
+    let block = bytes.get(MESH_LOD_FRAME_BYTES..)?;
+    (u64::try_from(block.len()).ok()? == block_length).then_some(block)
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+    let end = offset.checked_add(size_of::<u64>())?;
+    let value = bytes.get(offset..end)?.try_into().ok()?;
+    Some(u64::from_le_bytes(value))
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssetLookup {
@@ -105,8 +195,8 @@ impl Error for AssetCacheError {
     }
 }
 
-pub(crate) fn read_work_bytes(kind: Kind) -> Option<usize> {
-    cache_limit(kind).checked_add(kind.max_cache_bytes())
+pub(crate) fn read_work_bytes_for_request(request: Request) -> Option<usize> {
+    Some(cache_limit(request))
 }
 
 pub struct AssetCache {
@@ -117,7 +207,7 @@ pub struct AssetCache {
 
 pub struct CacheWrite {
     cache: Arc<AssetCache>,
-    resource: Resource,
+    request: Request,
     payload: Blob,
     _reservation: Reservation,
     finished: bool,
@@ -145,13 +235,23 @@ impl AssetCache {
         Self::open(directory, storage::DEFAULT_SIZE_LIMIT)
     }
 
-    pub fn lookup(&self, resource: Resource) -> AssetLookup {
-        let key = storage_key(resource);
+    pub fn lookup(&self, request: Request) -> AssetLookup {
+        let key = storage_key(request);
         let mut bytes_read = 0u64;
-        let result = match self.storage.lookup_bounded(key, cache_limit(resource.kind)) {
+        let result = match self.storage.lookup_bounded(key, cache_limit(request)) {
             StorageLookup::Hit(value) => {
                 bytes_read = u64::try_from(value.bytes.len()).unwrap_or(u64::MAX);
-                AssetLookup::Hit(value)
+                let valid = match request {
+                    Request::MeshHeader(_) => parse_mesh_header_frame(&value.bytes).is_some(),
+                    Request::MeshLod(block) => parse_mesh_lod_frame(block, &value.bytes).is_some(),
+                    _ => true,
+                };
+                if valid {
+                    AssetLookup::Hit(value)
+                } else {
+                    self.storage.discard(key);
+                    AssetLookup::Corrupt
+                }
             }
             StorageLookup::Miss => AssetLookup::Miss,
             StorageLookup::Corrupt => AssetLookup::Corrupt,
@@ -173,19 +273,23 @@ impl AssetCache {
         result
     }
 
-    pub fn put_complete(&self, resource: Resource, bytes: Vec<u8>) -> Result<(), AssetCacheError> {
-        if bytes.len() > cache_limit(resource.kind) {
+    pub(crate) fn may_contain(&self, request: Request) -> bool {
+        self.storage.contains(storage_key(request))
+    }
+
+    pub fn put_complete(&self, request: Request, bytes: Vec<u8>) -> Result<(), AssetCacheError> {
+        if bytes.len() > cache_limit(request) {
             return Err(AssetCacheError::TooLarge);
         }
-        let key = storage_key(resource);
+        let key = storage_key(request);
         let written = u64::try_from(bytes.len()).map_err(|_| AssetCacheError::TooLarge)?;
         self.storage.put(key, bytes).map_err(map_storage_error)?;
         self.counters.bytes_written.fetch_add(written, Ordering::Relaxed);
         Ok(())
     }
 
-    pub(crate) fn protect(&self, resource: Resource) -> Result<Protection, AssetCacheError> {
-        self.storage.protect(storage_key(resource)).map_err(AssetCacheError::Storage)
+    pub(crate) fn protect(&self, request: Request) -> Result<Protection, AssetCacheError> {
+        self.storage.protect(storage_key(request)).map_err(AssetCacheError::Storage)
     }
 
     pub(crate) fn observe_decode(&self, kind: Kind, duration: Duration) {
@@ -193,18 +297,18 @@ impl AssetCache {
         self.decode_costs.observe(kind, micros);
     }
 
-    pub(crate) fn discard(&self, resource: Resource) {
-        self.storage.discard(storage_key(resource));
+    pub(crate) fn discard(&self, request: Request) {
+        self.storage.discard(storage_key(request));
     }
 
-    pub(crate) fn discard_corrupt(&self, resource: Resource) {
+    pub(crate) fn discard_corrupt(&self, request: Request) {
         self.counters.corrupt_entries.fetch_add(1, Ordering::Relaxed);
-        self.discard(resource);
+        self.discard(request);
     }
 
-    pub(crate) fn queue_write(self: &Arc<Self>, resource: Resource, payload: Blob, budget: &Budget) -> Option<CacheWrite> {
+    pub(crate) fn queue_write(self: &Arc<Self>, request: Request, payload: Blob, budget: &Budget) -> Option<CacheWrite> {
         let payload_bytes = payload.len();
-        if payload_bytes > cache_limit(resource.kind) {
+        if payload_bytes > cache_limit(request) {
             self.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
             return None;
         }
@@ -222,7 +326,7 @@ impl AssetCache {
             self.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
             return None;
         };
-        Some(CacheWrite { cache: Arc::clone(self), resource, payload, _reservation: reservation, finished: false })
+        Some(CacheWrite { cache: Arc::clone(self), request, payload, _reservation: reservation, finished: false })
     }
 
     pub fn stats(&self) -> AssetCacheStats {
@@ -240,7 +344,7 @@ impl AssetCache {
                 pbr_materials: self.storage.namespace_entry_count(PBR_MATERIALS),
                 legacy_materials: self.storage.namespace_entry_count(LEGACY_MATERIALS),
                 environments: self.storage.namespace_entry_count(ENVIRONMENTS),
-                meshes: self.storage.namespace_entry_count(MESHES),
+                meshes: MESH_NAMESPACE_IDS.iter().map(|namespace| self.storage.namespace_entry_count(*namespace)).sum(),
             },
             protected_bytes: self.storage.protected_bytes(),
             recent_evictions: self.storage.recent_evictions(),
@@ -270,7 +374,7 @@ impl AssetCache {
 
 impl CacheWrite {
     pub fn run(mut self) {
-        if self.cache.put_complete(self.resource, self.payload.to_vec()).is_err() {
+        if self.cache.put_complete(self.request, self.payload.to_vec()).is_err() {
             self.cache.counters.dropped_writes.fetch_add(1, Ordering::Relaxed);
         }
         self.finished = true;
@@ -286,19 +390,35 @@ impl Drop for CacheWrite {
     }
 }
 
-fn cache_limit(kind: Kind) -> usize {
-    kind.max_cache_bytes().min(storage::MAX_VALUE_BYTES)
+fn cache_limit(request: Request) -> usize {
+    match request {
+        Request::Texture { .. } => Kind::Texture.max_cache_bytes().min(storage::MAX_VALUE_BYTES),
+        Request::PbrMaterial(_) => Kind::PbrMaterial.max_cache_bytes().min(storage::MAX_VALUE_BYTES),
+        Request::LegacyMaterial(_) => Kind::LegacyMaterial.max_cache_bytes().min(storage::MAX_VALUE_BYTES),
+        Request::Environment(_) => Kind::Environment.max_cache_bytes().min(storage::MAX_VALUE_BYTES),
+        Request::MeshHeader(_) => MESH_HEADER_FRAME_BYTES.saturating_add(MAX_MESH_HEADER_BYTES).min(storage::MAX_VALUE_BYTES),
+        Request::MeshLod(_) => MESH_LOD_FRAME_BYTES.saturating_add(MAX_MESH_BLOCK_BYTES).min(storage::MAX_VALUE_BYTES),
+    }
 }
 
-fn storage_key(resource: Resource) -> StorageKey {
-    let namespace = match resource.kind {
-        Kind::Texture => TEXTURES,
-        Kind::PbrMaterial => PBR_MATERIALS,
-        Kind::LegacyMaterial => LEGACY_MATERIALS,
-        Kind::Environment => ENVIRONMENTS,
-        Kind::Mesh => MESHES,
+fn storage_key(request: Request) -> StorageKey {
+    let (namespace, id) = match request {
+        Request::Texture { id, .. } => (TEXTURES, id),
+        Request::PbrMaterial(id) => (PBR_MATERIALS, id),
+        Request::LegacyMaterial(id) => (LEGACY_MATERIALS, id),
+        Request::Environment(id) => (ENVIRONMENTS, id),
+        Request::MeshHeader(id) => (MESH_HEADER, id),
+        Request::MeshLod(block) => {
+            let namespace = match block.lod() {
+                MeshLod::Lowest => MESH_LOD_LOWEST,
+                MeshLod::Low => MESH_LOD_LOW,
+                MeshLod::Medium => MESH_LOD_MEDIUM,
+                MeshLod::High => MESH_LOD_HIGH,
+            };
+            (namespace, block.asset_id())
+        }
     };
-    StorageKey::new(namespace, *resource.id.uuid().as_bytes())
+    StorageKey::new(namespace, *id.uuid().as_bytes())
 }
 
 fn map_storage_error(error: StorageError) -> AssetCacheError {

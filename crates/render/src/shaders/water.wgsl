@@ -53,15 +53,15 @@ fn calculate_fresnel(view: vec3<f32>, wave1: vec3<f32>, wave2: vec3<f32>, wave3:
     return max(vec2<f32>(0.0), vec2<f32>(df3.x + df3.y + df3.z, dot(view, wavef) * water.fresnel.y + water.fresnel.x));
 }
 
-fn water_fog_view(position: vec3<f32>, water: WaterFog) -> vec4<f32> {
-    let view = safe_normalize(position);
-    let es = -view.z;
+fn water_fog_view(position_eye: vec3<f32>, plane_normal_eye: vec3<f32>, water: WaterFog) -> vec4<f32> {
+    let view = safe_normalize(position_eye);
+    let es = -dot(view, plane_normal_eye);
     let e0 = max(-water.parameters.z, 0.0);
     var intersection = vec3<f32>(0.0);
     if water.parameters.z > 0.0 && abs(es) > 0.000001 {
         intersection = view * (water.parameters.z / es);
     }
-    let length_in_water = max(length(position - intersection), 0.1);
+    let length_in_water = max(length(position_eye - intersection), 0.1);
     let density = water.parameters.x;
     let modifier = water.parameters.y;
     let t1 = -density * pow(0.98, modifier * e0);
@@ -76,19 +76,25 @@ fn water_fog_view(position: vec3<f32>, water: WaterFog) -> vec4<f32> {
     return vec4<f32>(srgb_to_linear(water.color.rgb) * fog_factor, transmission);
 }
 
-fn apply_water_fog(position: vec3<f32>, color: vec4<f32>, water: WaterFog, clip_to_surface: bool) -> vec4<f32> {
-    if clip_to_surface && position.z + water.parameters.z > 0.0 {
+fn apply_water_fog(
+    position_eye: vec3<f32>,
+    plane_normal_eye: vec3<f32>,
+    color: vec4<f32>,
+    water: WaterFog,
+    clip_to_surface: bool,
+) -> vec4<f32> {
+    if clip_to_surface && dot(position_eye, plane_normal_eye) + water.parameters.z > 0.0 {
         return color;
     }
-    let fog = water_fog_view(position, water);
+    let fog = water_fog_view(position_eye, plane_normal_eye, water);
     return vec4<f32>(color.rgb * fog.a + fog.rgb, color.a);
 }
 
-fn apply_water_haze(position: vec3<f32>, color: vec4<f32>, water: WaterFog) -> vec4<f32> {
-    if position.z + water.parameters.z > 0.0 {
+fn apply_water_haze(position_eye: vec3<f32>, plane_normal_eye: vec3<f32>, color: vec4<f32>, water: WaterFog) -> vec4<f32> {
+    if dot(position_eye, plane_normal_eye) + water.parameters.z > 0.0 {
         return color;
     }
-    let fog = water_fog_view(position, water);
+    let fog = water_fog_view(position_eye, plane_normal_eye, water);
     return vec4<f32>(fog.rgb + color.rgb * pow(fog.a, 1.7), color.a);
 }
 
@@ -148,7 +154,7 @@ fn shade_water(
 ) -> vec4<f32> {
     if water.fog.parameters.w > 0.5 {
         let underwater_surface = vec4<f32>(srgb_to_linear(water.fog.color.rgb), 0.0);
-        let fogged = max(apply_water_fog(position, underwater_surface, water.fog, false), vec4<f32>(0.0));
+        let fogged = max(apply_water_fog(position_eye, normal_eye, underwater_surface, water.fog, false), vec4<f32>(0.0));
         return fogged;
     }
     let wave1 = wave1_sample;
@@ -168,7 +174,7 @@ fn shade_water(
     let reflected_direction = safe_normalize(transpose(view_rotation) * reflected_eye);
     let distance = length(position);
     let fog_sample = view_eye * 2048.0;
-    let fb = apply_water_fog(fog_sample, vec4<f32>(1.0), water.fog, true);
+    let fb = apply_water_fog(fog_sample, normal_eye, vec4<f32>(1.0), water.fog, true);
     let wavef_eye = transform_water_normal(normal_eye, tangent_eye, bitangent_eye, safe_normalize(wavef));
     let punctual_normal = safe_normalize(wavef_eye + normal_eye * (max(distance, 32.0) / 32.0 * (1.0 - view_dot_up)));
     let punctual = pbr_punctual(

@@ -150,6 +150,7 @@ fn render_frame(
         Some(camera.position()),
         Some(WATER_HEIGHT),
         projection(camera, SIZE).inverse(),
+        crate::pipeline::camera_view(camera),
         0,
         0,
     );

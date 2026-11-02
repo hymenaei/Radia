@@ -16,9 +16,9 @@ use wgpu::{
 use super::{atmosphere::sky_hdr_scale, water::water_fog_values};
 
 const HDR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
-const EXPOSURE_FLOATS: usize = 32;
+const EXPOSURE_FLOATS: usize = 48;
 const EXPOSURE_BYTES: usize = EXPOSURE_FLOATS * 4;
-const TONE_FLOATS: usize = 28;
+const TONE_FLOATS: usize = 44;
 const TONE_BYTES: usize = TONE_FLOATS * 4;
 const EXPOSURE_SETTLE_TIME: Duration = Duration::from_secs(4);
 
@@ -224,6 +224,7 @@ impl PostProcess {
         camera_position: Option<DVec3>,
         water_height: Option<f64>,
         inverse_view_projection: Mat4,
+        view: Mat4,
         scene_version: u64,
         texture_revision: u64,
     ) {
@@ -253,11 +254,13 @@ impl PostProcess {
             sky_hdr_scale(environment),
         ]);
         exposure[8..16].copy_from_slice(&fog);
-        exposure[16..].copy_from_slice(&inverse_view_projection.to_cols_array());
+        exposure[16..32].copy_from_slice(&inverse_view_projection.to_cols_array());
+        exposure[32..].copy_from_slice(&view.to_cols_array());
         let mut tone = [0.0; TONE_FLOATS];
         tone[..4].copy_from_slice(&[1.0, tonemap_mix, sky_hdr_scale(environment), 0.0]);
         tone[4..12].copy_from_slice(&fog);
-        tone[12..].copy_from_slice(&inverse_view_projection.to_cols_array());
+        tone[12..28].copy_from_slice(&inverse_view_projection.to_cols_array());
+        tone[28..].copy_from_slice(&view.to_cols_array());
         let mut exposure_bytes = [0; EXPOSURE_BYTES];
         let mut tone_bytes = [0; TONE_BYTES];
         write_values(queue, &self.exposure_uniform, &exposure, &mut exposure_bytes);

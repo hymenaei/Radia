@@ -2,6 +2,7 @@ struct ToneSettings {
     values: vec4<f32>,
     fog: WaterFog,
     inverse_view_projection: mat4x4<f32>,
+    view: mat4x4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> settings: ToneSettings;
@@ -53,7 +54,9 @@ fn pbr_neutral_tonemap(input: vec3<f32>) -> vec3<f32> {
         let projected = settings.inverse_view_projection * clip;
         let position = projected.xyz / projected.w;
         if abs(position.z + settings.fog.parameters.z) >= 0.01 {
-            color = apply_water_haze(position, vec4<f32>(color, 1.0), settings.fog).rgb;
+            let position_eye = (settings.view * vec4<f32>(position, 1.0)).xyz;
+            let plane_normal_eye = (settings.view * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xyz;
+            color = apply_water_haze(position_eye, plane_normal_eye, vec4<f32>(color, 1.0), settings.fog).rgb;
         }
     }
     let exposure = textureLoad(exposure_image, vec2<i32>(0), 0).r;

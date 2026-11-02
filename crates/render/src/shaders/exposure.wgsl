@@ -3,6 +3,7 @@ struct ExposureSettings {
     timing: vec4<f32>,
     fog: WaterFog,
     inverse_view_projection: mat4x4<f32>,
+    view: mat4x4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> settings: ExposureSettings;
@@ -39,7 +40,9 @@ fn scene_color(coordinate: vec2<i32>, size: vec2<u32>) -> vec3<f32> {
     if abs(position.z + settings.fog.parameters.z) < 0.01 {
         return color;
     }
-    return apply_water_haze(position, vec4<f32>(color, 1.0), settings.fog).rgb;
+    let position_eye = (settings.view * vec4<f32>(position, 1.0)).xyz;
+    let plane_normal_eye = (settings.view * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xyz;
+    return apply_water_haze(position_eye, plane_normal_eye, vec4<f32>(color, 1.0), settings.fog).rgb;
 }
 
 @fragment fn fragment() -> @location(0) vec4<f32> {

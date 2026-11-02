@@ -20,7 +20,7 @@ use wgpu::{
 use crate::environment::Evaluated;
 use crate::geometry::{GeometryRenderer, PickError, Stats};
 use crate::gpu_timing::GpuTimings;
-use crate::pipeline::{PostProcess, projection};
+use crate::pipeline::{PostProcess, camera_view, projection};
 use crate::scene::{AgentPose, Camera, SceneView};
 use crate::texture::{TextureCompletion, TextureJob};
 
@@ -338,6 +338,7 @@ impl Renderer {
             }
         }
         let inverse_view_projection = scene.map_or(math::Mat4::IDENTITY, |(_, camera)| projection(camera, self.size).inverse());
+        let view_matrix = scene.map_or(math::Mat4::IDENTITY, |(_, camera)| camera_view(camera));
         let camera_position = scene.map(|(_, camera)| camera.position());
         let scene_version = scene.map_or(0, |(view, _)| view.sequence());
         self.postprocess.render(
@@ -349,6 +350,7 @@ impl Renderer {
             camera_position,
             frame_input.water_height,
             inverse_view_projection,
+            view_matrix,
             scene_version,
             self.geometry.texture_revision(),
         );
@@ -444,9 +446,28 @@ mod tests {
     fn shaders_validate() {
         for (name, source) in [
             ("atmosphere", include_str!("shaders/atmosphere.wgsl")),
-            ("surface", concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/surface.wgsl"))),
-            ("terrain", concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/surface.wgsl"), "\n", include_str!("shaders/terrain.wgsl"))),
-            ("void water", concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/void_water.wgsl"))),
+            (
+                "surface",
+                concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/surface.wgsl")),
+            ),
+            (
+                "terrain",
+                concat!(
+                    include_str!("shaders/atmosphere.wgsl"),
+                    include_str!("shaders/water.wgsl"),
+                    include_str!("shaders/surface.wgsl"),
+                    "\n",
+                    include_str!("shaders/terrain.wgsl")
+                ),
+            ),
+            (
+                "void water",
+                concat!(
+                    include_str!("shaders/atmosphere.wgsl"),
+                    include_str!("shaders/water.wgsl"),
+                    include_str!("shaders/void_water.wgsl")
+                ),
+            ),
             ("sky", concat!(include_str!("shaders/atmosphere.wgsl"), include_str!("shaders/water.wgsl"), include_str!("shaders/sky.wgsl"))),
             ("stars", include_str!("shaders/stars.wgsl")),
             ("mipmap", include_str!("shaders/mipmap.wgsl")),

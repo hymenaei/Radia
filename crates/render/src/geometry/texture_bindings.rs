@@ -49,6 +49,9 @@ impl GeometryRenderer {
             }
             for demand in draw_list.terrain_demands() {
                 for handle in demand.textures.iter().flatten() {
+                    if visible.insert(handle.id()) {
+                        visible_requests.push(handle.clone());
+                    }
                     if requested.insert(handle.id()) {
                         textures.request(handle, epoch, Priority::Visible);
                     }

@@ -47,6 +47,10 @@ pub fn asset_with_lod_geometry(lods: &[(usize, usize, usize, usize)]) -> Vec<u8>
     asset_with_blocks(blocks)
 }
 
+pub fn asset_with_lod_bounds(lod: usize, min: [f64; 3], max: [f64; 3]) -> Vec<u8> {
+    asset_with_blocks([(lod, block_with_bounds(min, max))].into_iter().collect())
+}
+
 fn asset_with_faces(lods: &[(usize, usize)]) -> Vec<u8> {
     let blocks: BTreeMap<_, _> = lods.iter().map(|(lod, face_count)| (*lod, block(*face_count))).collect();
     asset_with_blocks(blocks)
@@ -199,6 +203,26 @@ fn block_with_geometry(face_count: usize, vertex_count: usize, index_count: usiz
     }
     let mut payload = b"<?llsd/binary?>\n".to_vec();
     payload.extend(array(&faces));
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&payload).expect("mesh fixture compression accepts bounded bytes");
+    encoder.finish().expect("mesh fixture compression finishes")
+}
+
+fn block_with_bounds(min: [f64; 3], max: [f64; 3]) -> Vec<u8> {
+    let position = [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0xff, 0xff, 0x80, 0x00, 0xff, 0xff, 0x00, 0x00];
+    let uv = [0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff];
+    let triangles = [0x00, 0x00, 0x01, 0x00, 0x02, 0x00];
+    let domain = map(&[("Min", array(&min.map(real))), ("Max", array(&max.map(real)))]);
+    let uv_domain = map(&[("Min", array(&[real(0.0), real(0.0)])), ("Max", array(&[real(1.0), real(1.0)]))]);
+    let face = map(&[
+        ("Position", binary(&position)),
+        ("PositionDomain", domain),
+        ("TexCoord0", binary(&uv)),
+        ("TexCoord0Domain", uv_domain),
+        ("TriangleList", binary(&triangles)),
+    ]);
+    let mut payload = b"<?llsd/binary?>\n".to_vec();
+    payload.extend(array(&[face]));
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&payload).expect("mesh fixture compression accepts bounded bytes");
     encoder.finish().expect("mesh fixture compression finishes")

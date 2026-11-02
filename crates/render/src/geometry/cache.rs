@@ -27,6 +27,8 @@ pub(super) struct FrameCache {
     pub(super) mesh_info: HashMap<MeshId, Arc<MeshInfo>>,
     pub(super) candidates: Vec<ItemIndex>,
     pub(super) next_candidates: Vec<ItemIndex>,
+    pub(super) replacement_visible: HashSet<ItemIndex>,
+    pub(super) next_replacement_visible: HashSet<ItemIndex>,
     pub(super) visible: Vec<ItemIndex>,
     pub(super) next_visible: Vec<ItemIndex>,
     pub(super) mesh_ids: Vec<MeshId>,
@@ -76,6 +78,9 @@ impl FrameCache {
     pub(super) fn remove_item(&mut self, index: ItemIndex) -> Option<CachedItem> {
         let item = self.items.remove(index)?;
         self.item_indices.remove(&item.id);
+        self.replacements.remove(&index);
+        self.replacement_visible.remove(&index);
+        self.next_replacement_visible.remove(&index);
         Some(item)
     }
 
@@ -83,6 +88,8 @@ impl FrameCache {
         self.items.clear();
         self.item_indices.clear();
         self.replacements.clear();
+        self.replacement_visible.clear();
+        self.next_replacement_visible.clear();
     }
 }
 
@@ -115,6 +122,8 @@ impl GeometryRenderer {
             self.cache.candidates.clear();
             self.cache.visible.clear();
             self.cache.next_candidates.clear();
+            self.cache.replacement_visible.clear();
+            self.cache.next_replacement_visible.clear();
             self.cache.next_visible.clear();
             self.cache.changed_objects.clear();
             self.cache.changed_surfaces.clear();
@@ -428,33 +437,30 @@ impl GeometryRenderer {
         }
     }
 
-    fn replacements_for(&self, mesh_id: MeshId) -> Vec<ItemIndex> {
-        self.cache
-            .replacements
-            .iter()
-            .copied()
-            .filter(|index| self.replacement(*index).is_some_and(|replacement| replacement.item.mesh.id() == mesh_id))
-            .collect()
-    }
-
     fn replacement(&self, index: ItemIndex) -> Option<&CachedReplacement> {
         self.cache.items.get(index)?.replacement.as_deref()
     }
 
-    pub(super) fn set_replacement_retry_state(&mut self, mesh_id: MeshId, state: MeshState) {
-        for index in self.replacements_for(mesh_id) {
-            if let Some(replacement) = self.cache.items.get_mut(index).and_then(|item| item.replacement.as_mut()) {
+    pub(super) fn replacement_groups(&self) -> HashMap<MeshId, Vec<ItemIndex>> {
+        let mut groups = HashMap::<MeshId, Vec<ItemIndex>>::new();
+        for index in &self.cache.replacements {
+            if let Some(replacement) = self.replacement(*index) {
+                groups.entry(replacement.item.mesh.id()).or_default().push(*index);
+            }
+        }
+        groups
+    }
+
+    pub(super) fn set_replacement_retry_state(&mut self, indices: &[ItemIndex], state: MeshState) {
+        for index in indices {
+            if let Some(replacement) = self.cache.items.get_mut(*index).and_then(|item| item.replacement.as_mut()) {
                 replacement.retry_state = Some(state);
             }
         }
     }
 
-    pub(super) fn replacement_retry_state(&self, mesh_id: MeshId) -> Option<MeshState> {
-        self.replacements_for(mesh_id).into_iter().find_map(|index| self.replacement(index)?.retry_state)
-    }
-
-    pub(super) fn has_replacement(&self, mesh_id: MeshId) -> bool {
-        !self.replacements_for(mesh_id).is_empty()
+    pub(super) fn replacement_retry_state(&self, indices: &[ItemIndex]) -> Option<MeshState> {
+        indices.iter().find_map(|index| self.replacement(*index)?.retry_state)
     }
 
     pub(super) fn has_ready_replacement(&self) -> bool {
@@ -475,11 +481,10 @@ impl GeometryRenderer {
         self.promote_replacements(indices, update)
     }
 
-    pub(super) fn drop_blocked_fallbacks(&mut self, mesh_id: MeshId, update: &mut CacheUpdate) -> Vec<MeshId> {
-        let indices = self.replacements_for(mesh_id);
+    pub(super) fn drop_blocked_fallbacks(&mut self, indices: &[ItemIndex], update: &mut CacheUpdate) -> Vec<MeshId> {
         let previous_meshes =
             indices.iter().filter_map(|index| self.cache.items.get(*index).map(|item| item.mesh.id())).collect::<Vec<_>>();
-        if self.promote_replacements(indices, update) { previous_meshes } else { Vec::new() }
+        if self.promote_replacements(indices.to_vec(), update) { previous_meshes } else { Vec::new() }
     }
 
     fn promote_replacements(&mut self, indices: Vec<ItemIndex>, update: &mut CacheUpdate) -> bool {
@@ -488,6 +493,8 @@ impl GeometryRenderer {
             let replacement = self.cache.items.get_mut(index).and_then(|item| item.replacement.take()).map(|replacement| *replacement);
             let Some(replacement) = replacement else { continue };
             self.cache.replacements.remove(&index);
+            self.cache.replacement_visible.remove(&index);
+            self.cache.next_replacement_visible.remove(&index);
             let Some(item) = self.cache.items.get_mut(index) else { continue };
             let previous = std::mem::replace(item, replacement.item);
             self.draw_list.release_faces(&previous.faces);
@@ -677,33 +684,51 @@ impl GeometryRenderer {
         Some(item)
     }
 
-    pub(super) fn rebuild_candidates(&mut self, camera: Camera, projection: math::Mat4) -> bool {
+    pub(super) fn rebuild_candidates(&mut self, camera: Camera, projection: math::Mat4) -> (bool, bool) {
         self.cache.next_candidates.clear();
+        self.cache.next_replacement_visible.clear();
         let frustum = Frustum::from_clip_matrix(projection);
         for (index, item) in self.cache.items.iter() {
-            if self.is_item_visible(item, camera, &frustum)
-                || item.replacement.as_ref().is_some_and(|replacement| self.is_item_visible(&replacement.item, camera, &frustum))
-            {
+            if self.is_item_visible(item, camera, &frustum) {
                 self.cache.next_candidates.push(index);
+            }
+            if item.replacement.as_ref().is_some_and(|replacement| self.is_item_visible(&replacement.item, camera, &frustum)) {
+                self.cache.next_replacement_visible.insert(index);
             }
         }
         self.cache.next_candidates.sort_unstable_by_key(|index| self.cache.items.get(*index).map(|item| item.id));
-        let changed = self.cache.candidates != self.cache.next_candidates;
-        if changed {
+        let candidates_changed = self.cache.candidates != self.cache.next_candidates;
+        if candidates_changed {
             std::mem::swap(&mut self.cache.candidates, &mut self.cache.next_candidates);
         }
+        let replacements_changed = self.cache.replacement_visible != self.cache.next_replacement_visible;
+        if replacements_changed {
+            std::mem::swap(&mut self.cache.replacement_visible, &mut self.cache.next_replacement_visible);
+        }
         self.cache.next_candidates.clear();
-        changed
+        self.cache.next_replacement_visible.clear();
+        (candidates_changed, replacements_changed)
     }
 
-    pub(super) fn update_candidates(&mut self, camera: Camera, projection: math::Mat4, ids: &[ItemIndex]) -> bool {
+    pub(super) fn update_candidates(&mut self, camera: Camera, projection: math::Mat4, ids: &[ItemIndex]) -> (bool, bool) {
         let frustum = Frustum::from_clip_matrix(projection);
-        let mut changed = false;
+        let mut candidates_changed = false;
+        let mut replacements_changed = false;
         for item_index in ids {
             let Some(item) = self.cache.items.get(*item_index) else { continue };
-            let visible = self.is_item_visible(item, camera, &frustum)
-                || item.replacement.as_ref().is_some_and(|replacement| self.is_item_visible(&replacement.item, camera, &frustum));
+            let visible = self.is_item_visible(item, camera, &frustum);
+            let replacement_visible =
+                item.replacement.as_ref().is_some_and(|replacement| self.is_item_visible(&replacement.item, camera, &frustum));
             let id = item.id;
+            let was_replacement_visible = self.cache.replacement_visible.contains(item_index);
+            if replacement_visible != was_replacement_visible {
+                if replacement_visible {
+                    self.cache.replacement_visible.insert(*item_index);
+                } else {
+                    self.cache.replacement_visible.remove(item_index);
+                }
+                replacements_changed = true;
+            }
             let position = self
                 .cache
                 .candidates
@@ -711,29 +736,28 @@ impl GeometryRenderer {
             match position {
                 Ok(index) if !visible => {
                     self.cache.candidates.remove(index);
-                    changed = true;
+                    candidates_changed = true;
                 }
                 Err(position) if visible => {
                     self.cache.candidates.insert(position, *item_index);
-                    changed = true;
+                    candidates_changed = true;
                 }
                 _ => {}
             }
         }
-        changed
+        (candidates_changed, replacements_changed)
     }
 
     fn is_item_visible(&self, item: &CachedItem, camera: Camera, frustum: &Frustum) -> bool {
         is_visible(item.position, item.rotation, item.scale, item.info.bounds, item.shading, camera, frustum)
     }
 
-    pub(super) fn rebuild_visible_meshes(&mut self, camera: Camera, projection: math::Mat4) -> bool {
+    pub(super) fn rebuild_visible_meshes(&mut self, camera: Camera) -> bool {
         self.cache.mesh_ids.clear();
         self.cache.mesh_set.clear();
         self.cache.mesh_representatives.clear();
         self.cache.mesh_compositions.clear();
         self.cache.mesh_priorities.clear();
-        let frustum = Frustum::from_clip_matrix(projection);
         let mut missing = false;
         let candidates = self.cache.candidates.clone();
         for id in candidates {
@@ -741,18 +765,29 @@ impl GeometryRenderer {
             let mesh = item.mesh.clone();
             let composition = item.terrain_composition.clone();
             let priority = draw_priority(item, camera);
+            let replacement = item.replacement.as_ref().map(|replacement| {
+                let replacement = &replacement.item;
+                (
+                    replacement.mesh.clone(),
+                    replacement.terrain_composition.clone(),
+                    draw_priority(replacement, camera),
+                    self.meshes.contains_key(&replacement.mesh.id()),
+                )
+            });
             missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, self.meshes.contains_key(&mesh.id()));
+            if let Some((mesh, composition, priority, resident)) = replacement {
+                missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, resident);
+            }
         }
-        if !self.cache.replacements.is_empty() {
+        if !self.cache.replacement_visible.is_empty() {
             let replacements = self
                 .cache
-                .replacements
+                .replacement_visible
                 .iter()
                 .filter_map(|index| {
                     let item = self.cache.items.get(*index)?;
                     let replacement = &item.replacement.as_ref()?.item;
-                    let visible = self.is_item_visible(item, camera, &frustum) || self.is_item_visible(replacement, camera, &frustum);
-                    visible.then(|| (replacement.mesh.clone(), replacement.terrain_composition.clone(), draw_priority(replacement, camera)))
+                    Some((replacement.mesh.clone(), replacement.terrain_composition.clone(), draw_priority(replacement, camera)))
                 })
                 .collect::<Vec<_>>();
             for (mesh, composition, priority) in replacements {

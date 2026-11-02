@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -79,12 +79,12 @@ impl GeometryRenderer {
         update.pose_items.dedup();
         let projection = self.pipelines.update_camera_uniform(&self.queue, camera, size, origin);
         self.water.update(&self.queue, view, camera, projection, water_height);
-        let candidates_changed = if update.full_visibility || camera_changed {
+        let (candidates_changed, replacement_visibility_changed) = if update.full_visibility || camera_changed {
             self.rebuild_candidates(camera, projection)
         } else if !update.pose_items.is_empty() {
             self.update_candidates(camera, projection, &update.pose_items)
         } else {
-            false
+            (false, false)
         };
         times.visibility = visibility_started.elapsed();
 
@@ -94,9 +94,13 @@ impl GeometryRenderer {
             self.draw_list.invalidate_batches();
         }
         let meshes_started = Instant::now();
-        let candidate_mesh_missing =
-            if candidates_changed || update.mesh_dirty { self.rebuild_visible_meshes(camera, projection) } else { false };
+        let candidate_mesh_missing = if candidates_changed || replacement_visibility_changed || update.mesh_dirty {
+            self.rebuild_visible_meshes(camera)
+        } else {
+            false
+        };
         let mesh_progress = candidate_mesh_missing
+            || replacement_visibility_changed
             || update.mesh_dirty
             || self.cache.mesh_state != self.memory.mesh_state()
             || !self.pending_meshes.is_empty();
@@ -104,6 +108,7 @@ impl GeometryRenderer {
         let mut fallbacks_released = false;
         let mut blocked_replacements = HashSet::new();
         let mut fallback_meshes = HashSet::new();
+        let replacement_groups = if mesh_progress { self.replacement_groups() } else { HashMap::new() };
         if mesh_progress {
             self.mesh_budget_blocked.clear();
             self.pending_meshes.clear();
@@ -116,7 +121,7 @@ impl GeometryRenderer {
                     self.cache.mesh_ready.insert(mesh_id);
                 } else {
                     self.pending_meshes.insert(mesh_id);
-                    if self.mesh_budget_blocked.contains(&mesh_id) && self.has_replacement(mesh_id) {
+                    if self.mesh_budget_blocked.contains(&mesh_id) && replacement_groups.contains_key(&mesh_id) {
                         blocked_replacements.insert(mesh_id);
                     }
                 }
@@ -125,25 +130,39 @@ impl GeometryRenderer {
             self.cache.mesh_state = self.memory.mesh_state();
         }
         for mesh_id in blocked_replacements {
-            let retry_state = self.replacement_retry_state(mesh_id);
+            let Some(indices) = replacement_groups.get(&mesh_id) else { continue };
+            let retry_state = self.replacement_retry_state(indices);
             if !self.retired.is_empty() {
-                self.set_replacement_retry_state(mesh_id, self.memory.mesh_state());
+                self.set_replacement_retry_state(indices, self.memory.mesh_state());
             } else if retry_state.is_none_or(|retry_state| retry_state != self.memory.mesh_state()) {
-                for old_mesh in self.drop_blocked_fallbacks(mesh_id, &mut update) {
+                for old_mesh in self.drop_blocked_fallbacks(indices, &mut update) {
                     fallback_meshes.insert(old_mesh);
                     fallbacks_released = true;
                 }
             }
         }
-        for mesh_id in fallback_meshes {
-            let still_demanded = self.cache.candidates.iter().any(|index| {
-                self.cache.items.get(*index).is_some_and(|item| {
-                    item.mesh.id() == mesh_id || item.replacement.as_ref().is_some_and(|replacement| replacement.item.mesh.id() == mesh_id)
-                })
-            });
-            if !still_demanded {
-                self.forget_mesh_demand(mesh_id);
-                self.retire_mesh_id(mesh_id);
+        if !fallback_meshes.is_empty() {
+            let mut still_demanded = HashSet::new();
+            for index in &self.cache.candidates {
+                if let Some(item) = self.cache.items.get(*index) {
+                    still_demanded.insert(item.mesh.id());
+                    if let Some(replacement) = item.replacement.as_ref() {
+                        still_demanded.insert(replacement.item.mesh.id());
+                    }
+                }
+            }
+            for index in &self.cache.replacement_visible {
+                if let Some(mesh_id) =
+                    self.cache.items.get(*index).and_then(|item| item.replacement.as_ref()).map(|replacement| replacement.item.mesh.id())
+                {
+                    still_demanded.insert(mesh_id);
+                }
+            }
+            for mesh_id in fallback_meshes {
+                if !still_demanded.contains(&mesh_id) {
+                    self.forget_mesh_demand(mesh_id);
+                    self.retire_mesh_id(mesh_id);
+                }
             }
         }
         self.stats.items_updated = update.items_updated;

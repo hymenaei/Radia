@@ -591,14 +591,23 @@ async fn update_environment_items(
         };
         let revision = current.revision();
         let previous_menu = previous.clone();
-        let result = runtime.spawn_blocking(move || environments::environment_items(current, previous_menu)).await;
+        if output.is_closed() {
+            return;
+        }
+        let worker_output = output.clone();
+        let result =
+            runtime.spawn_blocking(move || environments::environment_items(current, previous_menu, || worker_output.is_closed())).await;
+        if output.is_closed() {
+            return;
+        }
         let latest = snapshots.borrow().clone();
         if latest.as_ref().is_some_and(|latest| latest.revision() == revision) {
             match result {
-                Ok(items) => {
+                Ok(Some(items)) => {
                     previous = Some(Arc::clone(&items));
                     output.send_replace(EnvironmentItems::Ready(items));
                 }
+                Ok(None) => return,
                 Err(error) => {
                     tracing::warn!(%error, "environment inventory query failed");
                     output.send_replace(EnvironmentItems::Failed);

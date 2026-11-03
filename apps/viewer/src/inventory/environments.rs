@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use ::inventory::{AssetType, CategoryKey, InventoryOwner, InventorySnapshot, InventoryType, Item, ItemKey};
 
@@ -15,6 +15,9 @@ pub(crate) struct EnvironmentMenuItem {
     name: Arc<str>,
     kind: EnvironmentSettingKind,
     library: bool,
+    parent: CategoryKey,
+    folder: Option<Arc<str>>,
+    duplicate: bool,
 }
 
 impl EnvironmentMenu {
@@ -29,7 +32,14 @@ impl EnvironmentMenu {
 
 impl EnvironmentMenuItem {
     pub(crate) fn label(&self) -> String {
-        environment_setting_label(&self.name, self.kind, self.library)
+        let label = environment_setting_label(&self.name, self.kind, self.library);
+        if self.duplicate {
+            let folder =
+                self.folder.as_deref().map(|name| visible_name(name).collect::<String>()).unwrap_or_else(|| "Unknown folder".into());
+            format!("{label} / {folder} [{}]", self.key.id().uuid())
+        } else {
+            label
+        }
     }
 }
 
@@ -57,45 +67,86 @@ impl EnvironmentSettingKind {
     }
 }
 
-pub(crate) fn environment_items(snapshot: InventorySnapshot, previous: Option<Arc<EnvironmentMenu>>) -> Arc<EnvironmentMenu> {
+pub(crate) fn environment_items(
+    snapshot: InventorySnapshot,
+    previous: Option<Arc<EnvironmentMenu>>,
+    cancelled: impl Fn() -> bool,
+) -> Option<Arc<EnvironmentMenu>> {
     let library_owner = snapshot.roots().library().map(CategoryKey::owner);
-    if let Some(previous) = previous.as_ref().filter(|menu| menu.matches(&snapshot, library_owner)) {
-        return Arc::clone(previous);
+    if let Some(previous) = previous.as_ref()
+        && previous.matches(&snapshot, library_owner, &cancelled)?
+    {
+        return Some(Arc::clone(previous));
     }
-    let mut items = snapshot
-        .items()
-        .filter_map(|item| {
-            let kind = environment_setting_kind(item)?;
-            Some(EnvironmentMenuItem {
+    let mut sorted = BTreeMap::new();
+    for item in snapshot.items() {
+        if cancelled() {
+            return None;
+        }
+        let Some(kind) = environment_setting_kind(item) else { continue };
+        let library = library_owner == Some(item.key.owner());
+        let key = (displayed_name(&item.name), kind.label(), library, item.key);
+        sorted.insert(
+            key,
+            EnvironmentMenuItem {
                 key: item.key,
                 asset_id: item.asset_id,
                 name: Arc::clone(&item.name),
                 kind,
-                library: library_owner == Some(item.key.owner()),
-            })
-        })
-        .collect::<Vec<_>>();
-    items.sort_unstable_by(|left, right| {
-        visible_name(&left.name)
-            .cmp(visible_name(&right.name))
-            .then_with(|| (left.kind.label(), left.library, left.key).cmp(&(right.kind.label(), right.library, right.key)))
-    });
-    Arc::new(EnvironmentMenu { items: Arc::from(items) })
+                library,
+                parent: item.parent,
+                folder: snapshot.category(item.parent).map(|folder| Arc::clone(&folder.name)),
+                duplicate: false,
+            },
+        );
+    }
+    let mut items: Vec<EnvironmentMenuItem> = Vec::with_capacity(sorted.len());
+    for (_, mut row) in sorted {
+        if cancelled() {
+            return None;
+        }
+        if let Some(previous) = items.last_mut()
+            && previous.kind == row.kind
+            && previous.library == row.library
+            && displayed_name(&previous.name) == displayed_name(&row.name)
+        {
+            previous.duplicate = true;
+            row.duplicate = true;
+        }
+        items.push(row);
+    }
+    Some(Arc::new(EnvironmentMenu { items: Arc::from(items) }))
 }
 
 impl EnvironmentMenu {
-    fn matches(&self, snapshot: &InventorySnapshot, library_owner: Option<InventoryOwner>) -> bool {
-        if snapshot.items().filter(|item| environment_setting_kind(item).is_some()).count() != self.items.len() {
-            return false;
+    fn matches(&self, snapshot: &InventorySnapshot, library_owner: Option<InventoryOwner>, cancelled: &impl Fn() -> bool) -> Option<bool> {
+        let mut count = 0;
+        for item in snapshot.items() {
+            if cancelled() {
+                return None;
+            }
+            count += usize::from(environment_setting_kind(item).is_some());
         }
-        self.items.iter().all(|row| {
-            snapshot.item(row.key).is_some_and(|item| {
+        if count != self.items.len() {
+            return Some(false);
+        }
+        for row in self.items.iter() {
+            if cancelled() {
+                return None;
+            }
+            let matches = snapshot.item(row.key).is_some_and(|item| {
                 item.asset_id == row.asset_id
                     && item.name.as_ref() == row.name.as_ref()
                     && environment_setting_kind(item) == Some(row.kind)
                     && (library_owner == Some(item.key.owner())) == row.library
-            })
-        })
+                    && item.parent == row.parent
+                    && snapshot.category(item.parent).map(|folder| folder.name.as_ref()) == row.folder.as_deref()
+            });
+            if !matches {
+                return Some(false);
+            }
+        }
+        Some(true)
     }
 }
 
@@ -115,11 +166,13 @@ fn visible_name(name: &str) -> impl Iterator<Item = char> + '_ {
     name.chars().filter(|character| !character.is_control()).take(MAX_ENVIRONMENT_LABEL_CHARS)
 }
 
+fn displayed_name(name: &str) -> String {
+    let name = visible_name(name).collect::<String>();
+    if name.is_empty() { "Unnamed setting".into() } else { name }
+}
+
 fn environment_setting_label(name: &str, kind: EnvironmentSettingKind, library: bool) -> String {
-    let mut name = name.chars().filter(|character| !character.is_control()).take(MAX_ENVIRONMENT_LABEL_CHARS).collect::<String>();
-    if name.is_empty() {
-        name.push_str("Unnamed setting");
-    }
+    let name = displayed_name(name);
     if library { format!("{name} ({}, Library)", kind.label()) } else { format!("{name} ({})", kind.label()) }
 }
 
@@ -134,7 +187,12 @@ mod tests {
     use utils::{AssetId, AvatarId, FolderId, GroupId, ItemId};
     use uuid::Uuid;
 
-    use super::environment_items;
+    fn environment_items(
+        snapshot: ::inventory::InventorySnapshot,
+        previous: Option<Arc<super::EnvironmentMenu>>,
+    ) -> Arc<super::EnvironmentMenu> {
+        super::environment_items(snapshot, previous, || false).unwrap()
+    }
 
     #[test]
     fn menu_filters_supported_settings() {
@@ -173,6 +231,50 @@ mod tests {
         }
         let menu = environment_items(inventory.snapshot(), None);
         assert_eq!(menu.items().iter().map(|row| row.label()).collect::<Vec<_>>(), ["a0 (Sky)", "az (Sky)"]);
+    }
+
+    #[test]
+    fn duplicate_names_keep_distinct_choices() {
+        let (mut inventory, personal) = model();
+        inventory.upsert_category(category(personal, 9, Some(1), "Other folder")).unwrap();
+        for (id, parent) in [(3, 1), (4, 9), (5, 9)] {
+            inventory.upsert_item(item(personal, id, parent, "Sky", AssetType::Settings, InventoryType::Settings)).unwrap();
+        }
+        let menu = environment_items(inventory.snapshot(), None);
+        let labels = menu.items().iter().map(|row| row.label()).collect::<std::collections::HashSet<_>>();
+        assert_eq!(labels.len(), 3);
+        for row in menu.items() {
+            assert_eq!(menu.label(row.key), Some(row.label()));
+            assert!(row.label().contains(&row.key.id().uuid().to_string()));
+        }
+        inventory.upsert_category(category(personal, 9, Some(1), "Renamed folder")).unwrap();
+        let updated = environment_items(inventory.snapshot(), Some(Arc::clone(&menu)));
+        assert!(!Arc::ptr_eq(&updated, &menu));
+        assert!(updated.items().iter().any(|row| row.label().contains("Renamed folder")));
+    }
+
+    #[test]
+    fn cancelled_rebuild_stops_scanning() {
+        let (mut inventory, personal) = model();
+        for id in 10..110 {
+            inventory.upsert_item(item(personal, id, 1, "Sky", AssetType::Settings, InventoryType::Settings)).unwrap();
+        }
+        for stop_at in [10, 150] {
+            let (sender, receiver) = tokio::sync::watch::channel(());
+            let receiver = std::cell::RefCell::new(Some(receiver));
+            let calls = std::cell::Cell::new(0);
+            let cancelled = super::environment_items(inventory.snapshot(), None, || {
+                calls.set(calls.get() + 1);
+                if calls.get() == stop_at {
+                    receiver.borrow_mut().take();
+                }
+                sender.is_closed()
+            });
+            assert!(cancelled.is_none());
+            assert_eq!(calls.get(), stop_at);
+        }
+        let next = environment_items(inventory.snapshot(), None);
+        assert_eq!(next.items().len(), 100);
     }
 
     #[test]

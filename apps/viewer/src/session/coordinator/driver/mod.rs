@@ -648,7 +648,7 @@ impl SessionDriver {
         if matches!(packet_order, PacketOrder::Ordered(_))
             && Some(simulator_id) == self.primary_simulator
             && let (Some(agent), Some(region)) = (self.active_session.as_ref(), region)
-            && let Err(error) = self.environment_pushes.publish(&message, agent.agent_id, region, simulator_id)
+            && let Err(error) = self.environment_pushes.publish(&message, agent.agent_id, region, simulator_id, received_at)
         {
             tracing::warn!(simulator = simulator_id.get(), region = region.get(), %error, "experience environment push could not be admitted");
         }

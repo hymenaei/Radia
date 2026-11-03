@@ -192,11 +192,15 @@ impl Reconciler {
     }
 
     pub fn push_environment(&mut self, region: Region, push: EnvironmentPush) -> Result<(), EnvironmentPushError> {
+        self.push_environment_at(region, push, Instant::now())
+    }
+
+    pub fn push_environment_at(&mut self, region: Region, push: EnvironmentPush, now: Instant) -> Result<(), EnvironmentPushError> {
         if !self.session.is_active() {
             return Err(EnvironmentPushError::Invalid);
         }
         let version = self.viewer.version();
-        self.viewer.push(region, push)?;
+        self.viewer.push_at(region, push, now)?;
         if version != self.viewer.version() {
             self.sync_environment_textures();
         }

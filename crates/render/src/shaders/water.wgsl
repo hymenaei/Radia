@@ -11,6 +11,7 @@ struct WaterSurface {
     animation: vec4<f32>,
     uv_origin0: vec4<f32>,
     uv_origin1: vec4<f32>,
+    camera_relative: vec4<f32>,
 }
 
 struct WaterCoordinates {
@@ -25,19 +26,38 @@ struct PunctualTerms {
     specular: vec3<f32>,
 }
 
-fn water_coordinates(position: vec3<f32>, water: WaterSurface) -> WaterCoordinates {
-    let horizontal_distance = length(position.xy);
-    let relative_position = position.xy * (min(horizontal_distance, 2560.0) / max(horizontal_distance, 0.000001));
-    let sweep_x = relative_position.x + water.animation.y;
-    let sweep_y = relative_position.y + water.animation.z;
-    var point = relative_position;
+fn water_sweep_point(position: vec2<f32>, water: WaterSurface) -> vec2<f32> {
+    let sweep_x = position.x + water.animation.y;
+    let sweep_y = position.y + water.animation.z;
+    var point = position;
     point.x += (cos(sweep_x * 0.08) + sin(sweep_y * 0.02)) * 6.0;
+    return point;
+}
+
+fn water_coordinates_from_point(point: vec2<f32>, water: WaterSurface) -> WaterCoordinates {
     let time = water.animation.x;
     var coordinates: WaterCoordinates;
     coordinates.big = point * 0.04 + water.wave_directions.xy * time * 0.055 + water.uv_origin0.xy;
     coordinates.first = point * vec2<f32>(0.45, 0.9) + water.wave_directions.zw * time * 0.13 + water.uv_origin0.zw;
     coordinates.second = point * vec2<f32>(0.1, 0.2) + water.wave_directions.xy * time * 0.1 + water.uv_origin1.xy;
     return coordinates;
+}
+
+fn water_coordinates_at(position: vec3<f32>, water: WaterSurface) -> WaterCoordinates {
+    let world_mod = position.xy + water.uv_origin1.zw;
+    let cell = floor(world_mod / 256.0);
+    let local = (world_mod - cell * 256.0) / 256.0;
+    let origin = cell * 256.0 - water.uv_origin1.zw;
+    let x_phase0 = origin.x + water.animation.y;
+    let x_phase1 = origin.x + 256.0 + water.animation.y;
+    let y_phase0 = origin.y + water.animation.z;
+    let y_phase1 = origin.y + 256.0 + water.animation.z;
+    let shift = 6.0 * (
+        mix(cos(x_phase0 * 0.08), cos(x_phase1 * 0.08), local.x)
+        + mix(sin(y_phase0 * 0.02), sin(y_phase1 * 0.02), local.y)
+    );
+    let point = position.xy + vec2<f32>(shift, 0.0);
+    return water_coordinates_from_point(point, water);
 }
 
 fn blend_normal(first: vec3<f32>, second: vec3<f32>, factor: f32) -> vec3<f32> {
@@ -88,6 +108,19 @@ fn apply_water_fog(
     }
     let fog = water_fog_view(position_eye, plane_normal_eye, water);
     return vec4<f32>(color.rgb * fog.a + fog.rgb, color.a);
+}
+
+fn apply_water_background(direction_eye: vec3<f32>, plane_normal_eye: vec3<f32>, color: vec3<f32>, water: WaterFog) -> vec3<f32> {
+    let density = water.parameters.x;
+    if water.parameters.z > 0.0 || density <= 0.0 {
+        return color;
+    }
+    let es = -dot(safe_normalize(direction_eye), plane_normal_eye);
+    let e0 = max(-water.parameters.z, 0.0);
+    let modifier = water.parameters.y;
+    let amount = density * pow(0.98, modifier * e0) / max(density + modifier * es, 0.000001);
+    let factor = pow(clamp(amount, 0.0, 1.0), 1.0 / 1.7);
+    return srgb_to_linear(water.color.rgb) * factor;
 }
 
 fn apply_water_haze(position_eye: vec3<f32>, plane_normal_eye: vec3<f32>, color: vec4<f32>, water: WaterFog) -> vec4<f32> {
@@ -173,7 +206,7 @@ fn shade_water(
     let view_rotation = mat3x3<f32>(world_to_eye[0].xyz, world_to_eye[1].xyz, world_to_eye[2].xyz);
     let reflected_direction = safe_normalize(transpose(view_rotation) * reflected_eye);
     let distance = length(position);
-    let fog_sample = view_eye * 2048.0;
+    let fog_sample = position_eye + view_eye * 2048.0;
     let fb = apply_water_fog(fog_sample, normal_eye, vec4<f32>(1.0), water.fog, true);
     let wavef_eye = transform_water_normal(normal_eye, tangent_eye, bitangent_eye, safe_normalize(wavef));
     let punctual_normal = safe_normalize(wavef_eye + normal_eye * (max(distance, 32.0) / 32.0 * (1.0 - view_dot_up)));
@@ -190,9 +223,7 @@ fn shade_water(
         * atmosphere_terms.sunlight * atmosphere_terms.attenuation;
     let radiance = water_radiance_from_sky_without_probes(reflected_direction, atmosphere) * fresnel.y;
     let base_color = mix(fb.rgb, radiance, min(1.0, fresnel.x));
-    let atmospheric_color = base_color * atmosphere_terms.attenuation.x
-        + srgb_to_linear(atmosphere_terms.additive * 2.0) * atmosphere.distance.z;
-    let color = atmospheric_color + punctual_color;
+    let color = base_color + punctual_color;
     let output = min(vec4<f32>(1.0), max(vec4<f32>(color, 0.0), vec4<f32>(0.0)));
     return output;
 }

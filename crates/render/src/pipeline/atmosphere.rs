@@ -18,7 +18,13 @@ pub(crate) fn atmosphere_values(environment: Option<&Evaluated>) -> [f32; ATMOSP
     let haze = &environment.sky.haze;
     let sun_up = environment.sky.sun_direction[2] >= 0.0;
     let moon_up = environment.sky.moon_direction[2] >= 0.0;
-    let light_direction = if sun_up { environment.sky.sun_direction } else { environment.sky.moon_direction };
+    let light_direction = if sun_up {
+        environment.sky.sun_direction
+    } else if moon_up {
+        environment.sky.moon_direction
+    } else {
+        [0.0, 0.0, -1.0]
+    };
     let mut light_norm = light_direction;
     light_norm[2] = light_norm[2].max(-0.1);
     let glow_factor = if sun_up {
@@ -32,7 +38,7 @@ pub(crate) fn atmosphere_values(environment: Option<&Evaluated>) -> [f32; ATMOSP
     let light_color_length = (light_color[0] * light_color[0] + light_color[1] * light_color[1] + light_color[2] * light_color[2]).sqrt();
     let horizontal_light_squared = light_direction[0] * light_direction[0] + light_direction[1] * light_direction[1];
     let water_specular_scale = if light_color_length > 0.0 { (1.5 + 6.0 * horizontal_light_squared) / light_color_length } else { 0.0 };
-    let water_specular = light_color.map(|component| component * water_specular_scale);
+    let water_specular = if sun_up || moon_up { light_color.map(|component| component * water_specular_scale) } else { [0.0; 3] };
     let sky_hdr_scale = sky_hdr_scale(Some(environment));
     let tonemap_mix = if environment.sky.reflection_probe_ambiance.is_some_and(|ambiance| ambiance > 0.0) { 1.0 } else { 0.0 };
     let source = [
@@ -44,7 +50,7 @@ pub(crate) fn atmosphere_values(environment: Option<&Evaluated>) -> [f32; ATMOSP
         [haze.ambient[0], haze.ambient[1], haze.ambient[2], tonemap_mix],
         [environment.sky.glow[0], environment.sky.glow[1], environment.sky.glow[2], environment.sky.clouds.shadow],
         [haze.distance_multiplier, 0.0, sky_hdr_scale, glow_factor],
-        [light_norm[0], light_norm[1], light_norm[2], 1.0 / light_norm[2].max(0.3)],
+        [light_norm[0], light_norm[1], light_norm[2], 1.0 / light_norm[2].max(1e-6)],
         [water_specular[0], water_specular[1], water_specular[2], 0.0],
     ];
     for (target, value) in values.iter_mut().zip(source.into_iter().flatten()) {
@@ -126,6 +132,25 @@ mod tests {
     }
 
     #[test]
+    fn sunlight_attenuation_near_horizon() {
+        let sources = Sources {
+            base: None,
+            schedule: Schedule::default(),
+            experience_day: None,
+            experience_sky: None,
+            experience_water: None,
+            sky_override: None,
+            water_override: None,
+            local: None,
+        };
+        let mut environment = evaluate(&sources, 0.0, 0.0);
+        environment.sky.sun_direction = [1.0, 0.0, 0.1];
+        assert_eq!(atmosphere_values(Some(&environment))[35], 10.0);
+        environment.sky.sun_direction[2] = 0.0;
+        assert_eq!(atmosphere_values(Some(&environment))[35], 1_000_000.0);
+    }
+
+    #[test]
     fn legacy_ambient_uses_cloud_adjustment_and_linear_luminance() {
         assert!((legacy_ambient_irradiance([0.25; 3], 0.0) - 0.03434571).abs() < 1e-6);
         assert!((legacy_ambient_irradiance([0.25; 3], 0.5) - 0.08944999).abs() < 1e-6);
@@ -133,7 +158,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_surface_light_uses_the_moon_when_both_bodies_are_below_horizon() {
+    fn legacy_surface_light_points_down_and_disables_specular_when_both_bodies_are_below_horizon() {
         let sources = Sources {
             base: None,
             schedule: Schedule::default(),
@@ -152,7 +177,8 @@ mod tests {
         let values = atmosphere_values(Some(&environment));
 
         assert_eq!(&values[12..16], &[0.2, 0.3, 0.4, 0.0]);
-        assert_eq!(&values[16..20], &[0.6, 0.0, -0.8, 0.0]);
+        assert_eq!(&values[16..20], &[0.0, 0.0, -1.0, 0.0]);
+        assert_eq!(&values[36..40], &[0.0; 4]);
     }
 
     #[test]

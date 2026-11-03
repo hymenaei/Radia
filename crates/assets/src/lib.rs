@@ -14,7 +14,8 @@ pub use budget::{ASSET_WORK_BYTES, Budget, MemoryStats};
 pub use content::{Content, Environment, Material, MeshAsset, MeshHeaderAsset};
 pub use envelope::legacy_request;
 pub use environment::{
-    Atmosphere, CelestialBody, Clouds, DayCycle, DensityLayer, EnvironmentDescription, EnvironmentSettings, Haze, Keyframe, Sky, Water,
+    Atmosphere, CelestialBody, Clouds, DayCycle, DensityLayer, EnvironmentDescription, EnvironmentSettings, Haze, HazeProvenance, Keyframe,
+    Sky, Water,
 };
 pub use material::{
     Filter, LegacyAlphaMode, LegacyMaterial, MaterialDescription, MaterialTexture, MinFilter, PbrAlphaMode, PbrMaterial, Sampler,

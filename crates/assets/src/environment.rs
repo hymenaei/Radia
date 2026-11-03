@@ -111,6 +111,18 @@ pub struct Haze {
     pub distance_multiplier: Option<f32>,
     pub density: Option<f32>,
     pub horizon: Option<f32>,
+    pub provenance: HazeProvenance,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HazeProvenance {
+    pub ambient: bool,
+    pub blue_density: bool,
+    pub blue_horizon: bool,
+    pub density_multiplier: bool,
+    pub distance_multiplier: bool,
+    pub density: bool,
+    pub horizon: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -323,6 +335,15 @@ fn haze(fields: &Map) -> Result<Haze, Failure> {
         distance_multiplier: scalar_value(selected("distance_multiplier"))?,
         density: scalar_value(selected("haze_density"))?,
         horizon: scalar_value(selected("haze_horizon"))?,
+        provenance: HazeProvenance {
+            ambient: legacy.is_some_and(|fields| fields.contains_key("ambient")),
+            blue_density: legacy.is_some_and(|fields| fields.contains_key("blue_density")),
+            blue_horizon: legacy.is_some_and(|fields| fields.contains_key("blue_horizon")),
+            density_multiplier: legacy.is_some_and(|fields| fields.contains_key("density_multiplier")),
+            distance_multiplier: legacy.is_some_and(|fields| fields.contains_key("distance_multiplier")),
+            density: legacy.is_some_and(|fields| fields.contains_key("haze_density")),
+            horizon: legacy.is_some_and(|fields| fields.contains_key("haze_horizon")),
+        },
     })
 }
 
@@ -513,6 +534,9 @@ mod tests {
         assert_eq!(sky.clouds.scroll_rate, Some([0.2, 0.01]));
         assert_eq!(sky.haze.ambient, Some([0.25, 0.25, 0.25]));
         assert_eq!(sky.haze.density, Some(0.7));
+        assert!(sky.haze.provenance.ambient);
+        assert!(sky.haze.provenance.density);
+        assert!(!sky.haze.provenance.blue_density);
         assert_eq!(sky.atmosphere.rayleigh.as_ref().unwrap()[0].exponential_scale, Some(-0.000125));
         assert_eq!(sky.reflection_probe_ambiance, Some(0.0), "authored zero must remain distinct from automatic ambiance");
         assert_eq!(sky.gamma, None, "missing parameters remain absent until evaluation applies defaults");
@@ -539,6 +563,8 @@ mod tests {
         .unwrap();
         assert_eq!(sky.haze.density, Some(2.0));
         assert_eq!(sky.haze.horizon, Some(0.75));
+        assert!(sky.haze.provenance.density);
+        assert!(!sky.haze.provenance.horizon);
 
         let EnvironmentSettings::Sky(sky) =
             decode(br#"{'type':'sky','legacy_haze':{'haze_density':r2},'haze_density':r1,'haze_horizon':r0.75}"#).unwrap().settings

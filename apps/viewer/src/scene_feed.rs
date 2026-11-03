@@ -467,6 +467,7 @@ struct AssetSubscriptions {
     cancel: HashMap<AssetTicket, AbortHandle>,
     demands: HashMap<AssetTicket, assets::Demand>,
     pending_importance: HashMap<AssetTicket, u16>,
+    pending_priority: HashMap<AssetTicket, assets::Priority>,
 }
 
 impl AssetSubscriptions {
@@ -477,6 +478,7 @@ impl AssetSubscriptions {
             cancel: HashMap::new(),
             demands: HashMap::new(),
             pending_importance: HashMap::new(),
+            pending_priority: HashMap::new(),
         }
     }
 
@@ -498,12 +500,20 @@ impl AssetSubscriptions {
                 }
                 self.demands.remove(&ticket);
                 self.pending_importance.remove(&ticket);
+                self.pending_priority.remove(&ticket);
             }
             AssetChange::UpdateImportance { ticket, importance } => {
                 if let Some(demand) = self.demands.get(&ticket) {
                     demand.update_importance(importance);
                 } else {
                     self.pending_importance.insert(ticket, importance);
+                }
+            }
+            AssetChange::UpdatePriority { ticket, priority } => {
+                if let Some(demand) = self.demands.get(&ticket) {
+                    demand.update_priority(priority);
+                } else {
+                    self.pending_priority.insert(ticket, priority);
                 }
             }
         }
@@ -529,11 +539,15 @@ impl AssetSubscriptions {
             self.cancel.remove(&ticket);
             self.demands.remove(&ticket);
             self.pending_importance.remove(&ticket);
+            self.pending_priority.remove(&ticket);
             return;
         }
         if let Some(mut demand) = demand {
             if let Some(importance) = self.pending_importance.remove(&ticket) {
                 demand.update_importance(importance);
+            }
+            if let Some(priority) = self.pending_priority.remove(&ticket) {
+                demand.update_priority(priority);
             }
             self.demands.insert(ticket, demand.clone());
             self.push(ticket, async move {
@@ -544,6 +558,7 @@ impl AssetSubscriptions {
             self.cancel.remove(&ticket);
             self.demands.remove(&ticket);
             self.pending_importance.remove(&ticket);
+            self.pending_priority.remove(&ticket);
         }
     }
 }
@@ -562,8 +577,10 @@ async fn update_environment_items(
     wake: Arc<dyn Fn() + Send + Sync>,
 ) {
     let mut snapshot = snapshots.borrow_and_update().clone();
+    let mut previous: Option<Arc<environments::EnvironmentMenu>> = None;
     loop {
         let Some(current) = snapshot else {
+            previous = None;
             output.send_replace(EnvironmentItems::Loading);
             tokio::select! {
                 _ = output.closed() => return,
@@ -573,12 +590,14 @@ async fn update_environment_items(
             continue;
         };
         let revision = current.revision();
-        let result = runtime.spawn_blocking(move || environments::environment_items(current)).await;
+        let previous_menu = previous.clone();
+        let result = runtime.spawn_blocking(move || environments::environment_items(current, previous_menu)).await;
         let latest = snapshots.borrow().clone();
         if latest.as_ref().is_some_and(|latest| latest.revision() == revision) {
             match result {
                 Ok(items) => {
-                    output.send_replace(EnvironmentItems::Ready(Arc::new(items)));
+                    previous = Some(Arc::clone(&items));
+                    output.send_replace(EnvironmentItems::Ready(items));
                 }
                 Err(error) => {
                     tracing::warn!(%error, "environment inventory query failed");
@@ -657,6 +676,9 @@ async fn run(
     let mut reads = FuturesUnordered::new();
     let mut meshes = FuturesUnordered::new();
     loop {
+        if reader.revision().is_err() || cancelled.as_mut().now_or_never().is_some() {
+            break;
+        }
         if let Some(camera) = *camera.borrow_and_update() {
             scene.set_camera(camera);
         }
@@ -724,10 +746,10 @@ async fn run(
             pin_mut!(reading, building, changed, moved, motion_updated, circuit_transition, available, released, selected, timer, pushed);
             let mut asset_event = None;
             let mut environment_changed = false;
-            futures::select_biased! {
+            futures::select! {
                 _ = cancelled => break,
                 command = pushed => match command {
-                    Some(command) => if let Err(error) = scene.push_environment(command.region, command.push) { tracing::warn!(region = command.region.get(), ?error, "experience environment push rejected"); },
+                    Some(command) => if let Err(error) = scene.push_environment_at(command.region, command.push, command.received_at) { tracing::warn!(region = command.region.get(), ?error, "experience environment push rejected"); },
                     None => break,
                 },
                 result = selected => {
@@ -1121,7 +1143,7 @@ mod tests {
             water: Vec::new(),
             transition: Duration::ZERO,
         };
-        assert!(pushes.try_send(crate::session::EnvironmentCommand { region, push }).is_ok());
+        assert!(pushes.try_send(crate::session::EnvironmentCommand { region, received_at: std::time::Instant::now(), push }).is_ok());
         feed.view.apply(batch).unwrap();
         assert_eq!(feed.view.object_count(), 1);
         {

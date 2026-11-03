@@ -50,6 +50,7 @@ pub enum AssetChange {
     Request(AssetRequest),
     Release(AssetTicket),
     UpdateImportance { ticket: AssetTicket, importance: u16 },
+    UpdatePriority { ticket: AssetTicket, priority: Priority },
 }
 
 #[derive(Clone)]

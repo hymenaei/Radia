@@ -4,6 +4,8 @@ mod sky;
 mod surface;
 mod void_water;
 mod water;
+#[cfg(test)]
+mod water_tests;
 
 pub(crate) use postprocess::PostProcess;
 pub(crate) use sky::{Sky, TexturePair, blend_keys};

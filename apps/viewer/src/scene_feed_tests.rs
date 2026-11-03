@@ -582,13 +582,14 @@ async fn stalled_publication_preserves_intake() {
     assert!(barrier.unwrap().revision > initial);
     assert!(world.revision() > initial);
     let experience = ExperienceId::new(Uuid::from_u128(44)).unwrap();
+    let received_at = std::time::Instant::now() - Duration::from_secs(2);
     let push = EnvironmentPush::Partial {
         experience,
         sky: vec![EnvironmentProperty { name: "gamma".into(), source: b"r1.4".as_slice().into() }],
         water: Vec::new(),
-        transition: Duration::ZERO,
+        transition: Duration::from_secs(10),
     };
-    assert!(pushes.try_send(crate::session::EnvironmentCommand { region, push }).is_ok());
+    assert!(pushes.try_send(crate::session::EnvironmentCommand { region, received_at, push }).is_ok());
     feed.view.apply(batch).unwrap();
     assert_eq!(feed.view.object_count(), 1);
     {
@@ -615,6 +616,10 @@ async fn stalled_publication_preserves_intake() {
             futures::select_biased! { _ = receiving => {}, _ = serving => unreachable!() }
         }
     }
+    let mut active = render::environment::ActiveEnvironment::default();
+    assert!(active.update(&feed.view, Some((region, 0.0)), std::time::UNIX_EPOCH, received_at + Duration::from_secs(2),));
+    assert!((active.evaluated().unwrap().sky.gamma - 1.08).abs() < 0.00001);
+
     service.finish();
     assert!(feed.incoming.recv().await.is_none());
     assert_eq!(feed.view.status(), Status::Closed);

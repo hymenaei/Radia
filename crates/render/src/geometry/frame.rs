@@ -114,6 +114,7 @@ impl GeometryRenderer {
                     prepared.geometry_textures = self.textures.geometry_state();
                     prepared.meshes = self.memory.mesh_state();
                 }
+                self.cache.version = Some(view.version());
                 self.stats.uploaded_bytes = 0;
                 self.memory_stats();
                 self.record_prepare(started, times, 0);
@@ -417,6 +418,7 @@ impl GeometryRenderer {
             &self.textures,
             &self.queue,
             camera.position(),
+            camera.position() - self.cache.origin,
             frame_input.environment,
             normal,
             frame_input.water_height,

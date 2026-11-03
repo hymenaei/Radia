@@ -1,10 +1,13 @@
+mod property_transition;
 mod runtime;
 mod stars;
 mod transition;
 
 use std::f32::consts::PI;
 
-use assets::{CelestialBody, DayCycle, EnvironmentDescription, EnvironmentSettings, Haze, Keyframe, Sky, TextureRef, Water};
+use assets::{
+    CelestialBody, DayCycle, EnvironmentDescription, EnvironmentSettings, Haze, HazeProvenance, Keyframe, Sky, TextureRef, Water,
+};
 use math::{Quat, Vec3};
 use utils::AssetId;
 use uuid::Uuid;
@@ -110,6 +113,7 @@ pub struct HazeState {
     pub distance_multiplier: f32,
     pub density: f32,
     pub horizon: f32,
+    pub provenance: HazeProvenance,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -244,7 +248,6 @@ fn selected_sky_track(day: &DayCycle, requested: u8) -> Option<(u8, &[Keyframe<S
         .enumerate()
         .rev()
         .find(|(_, track)| !track.is_empty())
-        .or_else(|| day.skies().iter().enumerate().find(|(_, track)| !track.is_empty()))
         .map(|(index, track)| (index as u8 + 1, track.as_slice()))
 }
 
@@ -364,7 +367,7 @@ fn overlay(state: &mut SkyState, sky: &Sky) {
     if let Some(value) = sky.max_y {
         state.max_y = value;
     }
-    overlay_texture(&mut state.bloom, sky.bloom);
+    overlay_texture_with_clear(&mut state.bloom, sky.bloom, DEFAULT_BLOOM_TEXTURE);
     overlay_texture(&mut state.rainbow, sky.rainbow);
     overlay_texture(&mut state.halo, sky.halo);
     if let Some(value) = sky.atmosphere.moisture {
@@ -393,24 +396,31 @@ fn overlay_body(state: &mut CelestialBodyState, body: &CelestialBody) {
 fn overlay_haze(state: &mut HazeState, haze: &Haze) {
     if let Some(value) = haze.ambient {
         state.ambient = value;
+        state.provenance.ambient = haze.provenance.ambient;
     }
     if let Some(value) = haze.blue_density {
         state.blue_density = value;
+        state.provenance.blue_density = haze.provenance.blue_density;
     }
     if let Some(value) = haze.blue_horizon {
         state.blue_horizon = value;
+        state.provenance.blue_horizon = haze.provenance.blue_horizon;
     }
     if let Some(value) = haze.density_multiplier {
         state.density_multiplier = value;
+        state.provenance.density_multiplier = haze.provenance.density_multiplier;
     }
     if let Some(value) = haze.distance_multiplier {
         state.distance_multiplier = value;
+        state.provenance.distance_multiplier = haze.provenance.distance_multiplier;
     }
     if let Some(value) = haze.density {
         state.density = value;
+        state.provenance.density = haze.provenance.density;
     }
     if let Some(value) = haze.horizon {
         state.horizon = value;
+        state.provenance.horizon = haze.provenance.horizon;
     }
 }
 
@@ -433,7 +443,7 @@ fn overlay_water(state: &mut WaterState, water: &Water) {
     if let Some(value) = water.fresnel_scale {
         state.fresnel_scale = value;
     }
-    overlay_texture(&mut state.normal_map, water.normal_map);
+    overlay_texture_with_clear(&mut state.normal_map, water.normal_map, DEFAULT_WATER_NORMAL_MAP);
     if let Some(value) = water.normal_scale {
         state.normal_scale = value;
     }
@@ -451,9 +461,13 @@ fn overlay_water(state: &mut WaterState, water: &Water) {
 }
 
 fn overlay_texture(state: &mut TextureBlend, value: TextureRef) {
+    overlay_texture_with_clear(state, value, None);
+}
+
+fn overlay_texture_with_clear(state: &mut TextureBlend, value: TextureRef, clear_default: Option<AssetId>) {
     match value {
         TextureRef::Absent => {}
-        TextureRef::Clear => *state = TextureBlend { current: None, next: None, factor: 0.0 },
+        TextureRef::Clear => *state = TextureBlend { current: clear_default, next: None, factor: 0.0 },
         TextureRef::Asset(id) => *state = TextureBlend { current: Some(id), next: None, factor: 0.0 },
     }
 }
@@ -511,6 +525,15 @@ fn default_haze() -> HazeState {
         distance_multiplier: 0.8,
         density: 0.7,
         horizon: 0.19,
+        provenance: HazeProvenance {
+            ambient: true,
+            blue_density: true,
+            blue_horizon: true,
+            density_multiplier: true,
+            distance_multiplier: true,
+            density: true,
+            horizon: true,
+        },
     }
 }
 
@@ -570,7 +593,7 @@ fn blend_sky(start: &SkyState, end: &SkyState, factor: f32) -> SkyState {
         ],
         scale: lerp(start.clouds.scale, end.clouds.scale, factor),
         scroll_rate: blend_array(start.clouds.scroll_rate, end.clouds.scroll_rate, factor),
-        shadow: lerp(start.clouds.shadow, end.clouds.shadow, factor),
+        shadow: start.clouds.shadow,
         variance: lerp(start.clouds.variance, end.clouds.variance, factor),
         texture: blend_texture(start.clouds.texture, end.clouds.texture, factor),
     };
@@ -580,9 +603,10 @@ fn blend_sky(start: &SkyState, end: &SkyState, factor: f32) -> SkyState {
         clouds.shadow = lerp(start.clouds.shadow, 0.0, factor);
         clouds.texture = TextureBlend { current: cloud_start, next: cloud_start, factor };
     } else if cloud_start.is_none() && cloud_end.is_some() {
-        clouds.shadow = lerp(0.0, end.clouds.shadow, factor);
+        clouds.shadow = lerp(0.0, start.clouds.shadow, factor);
         clouds.texture = TextureBlend { current: cloud_end, next: cloud_end, factor };
     }
+    clouds.shadow = lerp(clouds.shadow, end.clouds.shadow, factor);
     let sun = blend_body(&start.sun, &end.sun, factor);
     let moon = blend_body(&start.moon, &end.moon, factor);
     SkyState {
@@ -623,15 +647,94 @@ fn blend_rotation(start: [f32; 4], end: [f32; 4], factor: f32) -> [f32; 4] {
 }
 
 fn blend_haze(start: &HazeState, end: &HazeState, factor: f32) -> HazeState {
+    let end_has_legacy = end.provenance != HazeProvenance::default();
+    let start_has_legacy = start.provenance != HazeProvenance::default();
+    let (start_ambient, start_legacy_ambient) = if end_has_legacy && (!start_has_legacy || !start.provenance.ambient) {
+        (end.ambient, true)
+    } else {
+        (start.ambient, start.provenance.ambient && end_has_legacy)
+    };
+    let (ambient, legacy_ambient) =
+        blend_haze_color(start_ambient, end.ambient, start_legacy_ambient, end.provenance.ambient, [0.25; 3], factor);
+    let (blue_density, legacy_blue_density) = blend_haze_color(
+        start.blue_density,
+        end.blue_density,
+        start.provenance.blue_density,
+        end.provenance.blue_density,
+        [0.2447, 0.4487, 0.7599],
+        factor,
+    );
+    let (blue_horizon, legacy_blue_horizon) = blend_haze_color(
+        start.blue_horizon,
+        end.blue_horizon,
+        start.provenance.blue_horizon,
+        end.provenance.blue_horizon,
+        [0.4954, 0.4954, 0.6399],
+        factor,
+    );
+    let (density_multiplier, legacy_density_multiplier) = blend_haze_scalar(
+        start.density_multiplier,
+        end.density_multiplier,
+        start.provenance.density_multiplier,
+        end.provenance.density_multiplier,
+        0.0001,
+        factor,
+    );
+    let (distance_multiplier, legacy_distance_multiplier) = blend_haze_scalar(
+        start.distance_multiplier,
+        end.distance_multiplier,
+        start.provenance.distance_multiplier,
+        end.provenance.distance_multiplier,
+        0.8,
+        factor,
+    );
+    let (density, legacy_density) =
+        blend_haze_scalar(start.density, end.density, start.provenance.density, end.provenance.density, 0.7, factor);
+    let (horizon, legacy_horizon) =
+        blend_haze_scalar(start.horizon, end.horizon, start.provenance.horizon, end.provenance.horizon, 0.19, factor);
     HazeState {
-        ambient: blend_array(start.ambient, end.ambient, factor),
-        blue_density: blend_array(start.blue_density, end.blue_density, factor),
-        blue_horizon: blend_array(start.blue_horizon, end.blue_horizon, factor),
-        density_multiplier: lerp(start.density_multiplier, end.density_multiplier, factor),
-        distance_multiplier: lerp(start.distance_multiplier, end.distance_multiplier, factor),
-        density: lerp(start.density, end.density, factor),
-        horizon: lerp(start.horizon, end.horizon, factor),
+        ambient,
+        blue_density,
+        blue_horizon,
+        density_multiplier,
+        distance_multiplier,
+        density,
+        horizon,
+        provenance: HazeProvenance {
+            ambient: legacy_ambient,
+            blue_density: legacy_blue_density,
+            blue_horizon: legacy_blue_horizon,
+            density_multiplier: legacy_density_multiplier,
+            distance_multiplier: legacy_distance_multiplier,
+            density: legacy_density,
+            horizon: legacy_horizon,
+        },
     }
+}
+
+fn blend_haze_color(
+    start: [f32; 3],
+    end: [f32; 3],
+    start_legacy: bool,
+    end_legacy: bool,
+    default: [f32; 3],
+    factor: f32,
+) -> ([f32; 3], bool) {
+    let value = match (start_legacy, end_legacy) {
+        (true, true) | (false, false) => blend_array(start, end, factor),
+        (false, true) => blend_array(default, end, factor),
+        (true, false) => blend_array(start, default, factor),
+    };
+    (value, start_legacy || end_legacy)
+}
+
+fn blend_haze_scalar(start: f32, end: f32, start_legacy: bool, end_legacy: bool, default: f32, factor: f32) -> (f32, bool) {
+    let value = match (start_legacy, end_legacy) {
+        (true, true) | (false, false) => lerp(start, end, factor),
+        (false, true) => lerp(default, end, factor),
+        (true, false) => lerp(start, default, factor),
+    };
+    (value, start_legacy || end_legacy)
 }
 
 fn blend_water(start: &WaterState, end: &WaterState, factor: f32) -> WaterState {
@@ -650,6 +753,159 @@ fn blend_water(start: &WaterState, end: &WaterState, factor: f32) -> WaterState 
         scale_above: lerp(start.scale_above, end.scale_above, factor),
         scale_below: lerp(start.scale_below, end.scale_below, factor),
         waves: [blend_array(start.waves[0], end.waves[0], factor), blend_array(start.waves[1], end.waves[1], factor)],
+    }
+}
+
+pub(super) fn blend_sky_property(output: &mut SkyState, from: &SkyState, to: &SkyState, property: &Sky, factor: f32) {
+    let blended = blend_sky(from, to, factor);
+    if property.sun.rotation.is_some() {
+        output.sun.rotation = blended.sun.rotation;
+        output.sun_direction = blended.sun_direction;
+    }
+    if !matches!(&property.sun.texture, TextureRef::Absent) {
+        output.sun.texture = blended.sun.texture;
+    }
+    if property.sun.scale.is_some() {
+        output.sun.scale = blended.sun.scale;
+    }
+    if property.moon.rotation.is_some() {
+        output.moon.rotation = blended.moon.rotation;
+        output.moon_direction = blended.moon_direction;
+    }
+    if !matches!(&property.moon.texture, TextureRef::Absent) {
+        output.moon.texture = blended.moon.texture;
+    }
+    if property.moon.scale.is_some() {
+        output.moon.scale = blended.moon.scale;
+    }
+    if property.sunlight.is_some() {
+        output.sunlight = blended.sunlight;
+    }
+    if property.moon_brightness.is_some() {
+        output.moon_brightness = blended.moon_brightness;
+    }
+    if property.star_brightness.is_some() {
+        output.star_brightness = blended.star_brightness;
+    }
+    if property.reflection_probe_ambiance.is_some() {
+        output.reflection_probe_ambiance = blended.reflection_probe_ambiance;
+    }
+    if property.clouds.color.is_some() {
+        output.clouds.color = blended.clouds.color;
+    }
+    for (index, value) in property.clouds.density.iter().enumerate() {
+        if value.is_some() {
+            output.clouds.density[index] = blended.clouds.density[index];
+        }
+    }
+    if property.clouds.scale.is_some() {
+        output.clouds.scale = blended.clouds.scale;
+    }
+    if property.clouds.scroll_rate.is_some() {
+        output.clouds.scroll_rate = blended.clouds.scroll_rate;
+    }
+    if property.clouds.shadow.is_some() {
+        output.clouds.shadow = blended.clouds.shadow;
+    }
+    if property.clouds.variance.is_some() {
+        output.clouds.variance = blended.clouds.variance;
+    }
+    if !matches!(&property.clouds.texture, TextureRef::Absent) {
+        output.clouds.texture = blended.clouds.texture;
+    }
+    if property.haze.ambient.is_some() {
+        output.haze.ambient = blended.haze.ambient;
+        output.haze.provenance.ambient = blended.haze.provenance.ambient;
+    }
+    if property.haze.blue_density.is_some() {
+        output.haze.blue_density = blended.haze.blue_density;
+        output.haze.provenance.blue_density = blended.haze.provenance.blue_density;
+    }
+    if property.haze.blue_horizon.is_some() {
+        output.haze.blue_horizon = blended.haze.blue_horizon;
+        output.haze.provenance.blue_horizon = blended.haze.provenance.blue_horizon;
+    }
+    if property.haze.density_multiplier.is_some() {
+        output.haze.density_multiplier = blended.haze.density_multiplier;
+        output.haze.provenance.density_multiplier = blended.haze.provenance.density_multiplier;
+    }
+    if property.haze.distance_multiplier.is_some() {
+        output.haze.distance_multiplier = blended.haze.distance_multiplier;
+        output.haze.provenance.distance_multiplier = blended.haze.provenance.distance_multiplier;
+    }
+    if property.haze.density.is_some() {
+        output.haze.density = blended.haze.density;
+        output.haze.provenance.density = blended.haze.provenance.density;
+    }
+    if property.haze.horizon.is_some() {
+        output.haze.horizon = blended.haze.horizon;
+        output.haze.provenance.horizon = blended.haze.provenance.horizon;
+    }
+    if property.gamma.is_some() {
+        output.gamma = blended.gamma;
+    }
+    if property.glow.is_some() {
+        output.glow = blended.glow;
+    }
+    if property.max_y.is_some() {
+        output.max_y = blended.max_y;
+    }
+    if !matches!(&property.bloom, TextureRef::Absent) {
+        output.bloom = blended.bloom;
+    }
+    if !matches!(&property.rainbow, TextureRef::Absent) {
+        output.rainbow = blended.rainbow;
+    }
+    if !matches!(&property.halo, TextureRef::Absent) {
+        output.halo = blended.halo;
+    }
+    if property.atmosphere.moisture.is_some() {
+        output.moisture = blended.moisture;
+    }
+    if property.atmosphere.droplet_radius.is_some() {
+        output.droplet_radius = blended.droplet_radius;
+    }
+    if property.atmosphere.ice.is_some() {
+        output.ice = blended.ice;
+    }
+}
+
+pub(super) fn blend_water_property(output: &mut WaterState, from: &WaterState, to: &WaterState, property: &Water, factor: f32) {
+    let blended = blend_water(from, to, factor);
+    if property.fog_color.is_some() {
+        output.fog_color = blended.fog_color;
+    }
+    if property.fog_density.is_some() {
+        output.fog_density = blended.fog_density;
+    }
+    if property.underwater_fog.is_some() {
+        output.underwater_fog = blended.underwater_fog;
+    }
+    if property.blur.is_some() {
+        output.blur = blended.blur;
+    }
+    if property.fresnel_offset.is_some() {
+        output.fresnel_offset = blended.fresnel_offset;
+    }
+    if property.fresnel_scale.is_some() {
+        output.fresnel_scale = blended.fresnel_scale;
+    }
+    if !matches!(&property.normal_map, TextureRef::Absent) {
+        output.normal_map = blended.normal_map;
+    }
+    if property.normal_scale.is_some() {
+        output.normal_scale = blended.normal_scale;
+    }
+    if property.scale_above.is_some() {
+        output.scale_above = blended.scale_above;
+    }
+    if property.scale_below.is_some() {
+        output.scale_below = blended.scale_below;
+    }
+    for (index, value) in property.waves.iter().enumerate() {
+        if value.is_some() {
+            output.waves[index] = blended.waves[index];
+        }
     }
 }
 

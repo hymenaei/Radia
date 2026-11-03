@@ -47,7 +47,7 @@ fn live_region_texture_changes_release_old_demands_and_request_replacements() {
     let old_tickets: Vec<_> = std::iter::from_fn(|| demand.event())
         .filter_map(|change| match change {
             AssetChange::Request(request) => Some(request.ticket),
-            AssetChange::Release(_) | AssetChange::UpdateImportance { .. } => None,
+            AssetChange::Release(_) | AssetChange::UpdateImportance { .. } | AssetChange::UpdatePriority { .. } => None,
         })
         .collect();
     assert_eq!(old_tickets.len(), 4);
@@ -67,6 +67,7 @@ fn live_region_texture_changes_release_old_demands_and_request_replacements() {
             }
             AssetChange::Release(_) => released += 1,
             AssetChange::UpdateImportance { .. } => panic!("replacement texture requests use a new ticket"),
+            AssetChange::UpdatePriority { .. } => panic!("replacement texture requests use a new ticket"),
         }
     }
     assert_eq!(requested, 4);
@@ -89,7 +90,7 @@ fn missing_and_failed_details_keep_the_neutral_fallback_for_each_layer() {
     let tickets: Vec<_> = std::iter::from_fn(|| demand.event())
         .filter_map(|change| match change {
             AssetChange::Request(request) => Some(request.ticket),
-            AssetChange::Release(_) | AssetChange::UpdateImportance { .. } => None,
+            AssetChange::Release(_) | AssetChange::UpdateImportance { .. } | AssetChange::UpdatePriority { .. } => None,
         })
         .collect();
     assert_eq!(tickets.len(), 4);

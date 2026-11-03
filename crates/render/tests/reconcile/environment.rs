@@ -6,6 +6,41 @@ use super::support::{
 use render::environment::Schedule;
 
 #[test]
+fn unrepresentable_transition_leaves_no_pending_work() {
+    let world = world();
+    let region = Region::new(1);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    settle(&mut scene, &mut view, &world, &mut now);
+
+    let rejected = ExperienceId::new(Uuid::from_u128(801)).unwrap();
+    let rejected_asset = AssetId::new(rejected.uuid());
+    assert_eq!(
+        scene.push_environment_at(
+            region,
+            EnvironmentPush::Full { experience: rejected, asset: rejected_asset, transition: Duration::MAX },
+            now,
+        ),
+        Err(render::scene::EnvironmentPushError::Invalid),
+    );
+
+    let accepted = ExperienceId::new(Uuid::from_u128(802)).unwrap();
+    let accepted_asset = AssetId::new(accepted.uuid());
+    let long_transition = Duration::from_secs(31_536_000);
+    assert!(now.checked_add(long_transition).is_some());
+    scene
+        .push_environment_at(
+            region,
+            EnvironmentPush::Full { experience: accepted, asset: accepted_asset, transition: long_transition },
+            now,
+        )
+        .unwrap();
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(work.requested.len(), 1);
+    assert_eq!(work.requested[0].request, assets::Request::Environment(accepted_asset));
+}
+
+#[test]
 fn parcel_environment_precedes_region_and_inherit_falls_through() {
     let mut world = world();
     let region = Region::new(1);

@@ -231,6 +231,7 @@ fn settle_scene(world: &world::World, scene: &mut Reconciler, view: &mut SceneVi
         match scene.poll(now) {
             ReconcileStep::Asset(AssetChange::Request(request)) => requests.push(request),
             ReconcileStep::Asset(AssetChange::Release(_)) => {}
+            ReconcileStep::Asset(AssetChange::UpdateImportance { .. } | AssetChange::UpdatePriority { .. }) => {}
             ReconcileStep::Read(job) => {
                 let result = match job.query() {
                     ReadQuery::Barrier => Ok(ReadReply::Barrier(world.read_barrier())),

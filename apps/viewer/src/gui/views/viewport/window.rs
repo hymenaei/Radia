@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     fmt,
-    sync::{Arc, mpsc},
+    sync::{Arc, Weak, mpsc},
     time::{Duration, Instant},
 };
 
@@ -117,6 +117,7 @@ pub(super) struct SceneWindow {
     cursor: PhysicalPosition<f64>,
     modifiers: ModifiersState,
     drag: Option<DragState>,
+    environment_label: Option<(scene::EnvironmentChoice, Weak<crate::inventory::environments::EnvironmentMenu>, String)>,
 }
 
 impl SceneWindow {
@@ -197,6 +198,7 @@ impl SceneWindow {
             cursor: PhysicalPosition::new(0.0, 0.0),
             modifiers: ModifiersState::empty(),
             drag: None,
+            environment_label: None,
         })
     }
 
@@ -610,8 +612,16 @@ impl SceneWindow {
                             let crate::inventory::environments::EnvironmentItems::Ready(items) = feed.environment_items() else {
                                 return None;
                             };
+                            if let Some((choice, previous, label)) = &self.environment_label
+                                && choice == &selected_environment
+                                && previous.upgrade().is_some_and(|previous| Arc::ptr_eq(&previous, &items))
+                            {
+                                return Some(label.clone());
+                            }
                             let key = ItemKey::new(InventoryOwner::new(*owner_id), ItemId::new(*item_id));
-                            items.label(key).map(str::to_owned)
+                            let label = items.label(key)?;
+                            self.environment_label = Some((selected_environment.clone(), Arc::downgrade(&items), label.clone()));
+                            Some(label)
                         })
                         .unwrap_or_else(|| "Saved environment".into()),
                 };
@@ -644,7 +654,8 @@ impl SceneWindow {
                                                 asset_id: item.asset_id,
                                             });
                                             ui.add_enabled_ui(!item.asset_id.uuid().is_nil(), |ui| {
-                                                ui.selectable_value(&mut selected_environment, choice, &*item.label);
+                                                let label = item.label();
+                                                ui.selectable_value(&mut selected_environment, choice, &label);
                                             });
                                         }
                                     });

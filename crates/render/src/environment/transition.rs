@@ -4,7 +4,7 @@ use super::{Evaluated, blend_sky, blend_water};
 
 const ALTITUDE_TRANSITION: Duration = Duration::from_secs(5);
 const FRAME_CADENCE: Duration = Duration::from_millis(16);
-const CYCLE_STEPS: f64 = 240.0;
+const CYCLE_REDRAW_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 pub struct Transition {
@@ -21,6 +21,10 @@ struct Blend {
 }
 
 impl Transition {
+    pub(super) fn is_blending(&self) -> bool {
+        self.blend.is_some()
+    }
+
     pub fn update(&mut self, identity: u64, target: Evaluated, duration: Duration, now: Instant) -> (Evaluated, Option<Instant>) {
         let Some(previous) = self.output.as_ref() else {
             self.identity = Some(identity);
@@ -33,11 +37,9 @@ impl Transition {
         let identity_changed = self.identity != Some(identity);
         let track_changed = self.sky_track != target.sky_track;
         if identity_changed || track_changed {
-            self.blend = Some(Blend {
-                from: previous.clone(),
-                started: now,
-                duration: if track_changed && !identity_changed { ALTITUDE_TRANSITION } else { duration },
-            });
+            let duration = if track_changed && !identity_changed { ALTITUDE_TRANSITION } else { duration };
+            let duration = if now.checked_add(duration).is_some() { duration } else { Duration::ZERO };
+            self.blend = Some(Blend { from: previous.clone(), started: now, duration });
             self.identity = Some(identity);
             self.sky_track = target.sky_track;
         }
@@ -85,9 +87,9 @@ fn blend_evaluated(start: &Evaluated, end: &Evaluated, factor: f32) -> Evaluated
 }
 
 fn next_cycle_redraw(value: &Evaluated, now: Instant) -> Option<Instant> {
-    let seconds = value.cycle_length? / CYCLE_STEPS;
-    if !seconds.is_finite() || seconds <= 0.0 {
+    let cycle_length = value.cycle_length?;
+    if !cycle_length.is_finite() || cycle_length <= 0.0 {
         return None;
     }
-    now.checked_add(Duration::from_secs_f64(seconds))
+    now.checked_add(CYCLE_REDRAW_INTERVAL)
 }

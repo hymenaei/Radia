@@ -6,7 +6,7 @@ use wgpu::{
     BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferBindingType, BufferDescriptor, BufferUsages,
     ColorTargetState, ColorWrites, CompareFunction, DepthStencilState, Device, FragmentState, MultisampleState, PipelineLayoutDescriptor,
     PrimitiveState, Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, SamplerBindingType, ShaderModuleDescriptor, ShaderSource,
-    ShaderStages, TextureFormat, TextureSampleType, TextureViewDimension, VertexState,
+    ShaderStages, TextureFormat, TextureSampleType, TextureView, TextureViewDimension, VertexState,
 };
 
 use super::atmosphere::{ATMOSPHERE_FLOATS, atmosphere_values};
@@ -44,6 +44,7 @@ pub(crate) struct Sky {
     star_binding: BindGroup,
     star_buffer_binding: BindGroup,
     star_texture_binding: BindGroup,
+    clamp_sampler: wgpu::Sampler,
     active: bool,
     sun_textures: TexturePair,
     moon_textures: TexturePair,
@@ -74,6 +75,16 @@ impl Sky {
                 ty: BindingType::Buffer { ty: BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                 count: None,
             }],
+        });
+        let clamp_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Celestial texture sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
         });
         let texture_layout = sky_texture_layout(device);
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -219,7 +230,7 @@ impl Sky {
         let star_values = stars();
         let mut star_bytes = Vec::with_capacity(STAR_COUNT * 8 * 4);
         for star in star_values {
-            for value in star.direction_intensity.into_iter().chain(star.color) {
+            for value in star.direction.into_iter().chain(star.color) {
                 star_bytes.extend_from_slice(&value.to_le_bytes());
             }
         }
@@ -234,8 +245,8 @@ impl Sky {
             entries: &[BindGroupEntry { binding: 0, resource: star_buffer.as_entire_binding() }],
         });
         let texture_keys = [None; 12];
-        let texture_binding = sky_texture_binding(device, &texture_layout, textures, texture_keys);
-        let star_texture_binding = textures.pair_binding(device, None, None);
+        let texture_binding = sky_texture_binding(device, &texture_layout, textures, texture_keys, &clamp_sampler);
+        let star_texture_binding = texture_pair_binding(device, textures, None, None, &clamp_sampler);
         Self {
             sky,
             cloud,
@@ -252,6 +263,7 @@ impl Sky {
             star_binding,
             star_buffer_binding,
             star_texture_binding,
+            clamp_sampler,
             active: false,
             sun_textures: TexturePair::default(),
             moon_textures: TexturePair::default(),
@@ -298,9 +310,9 @@ impl Sky {
         }
         let states = keys.map(|key| textures.view_state(key));
         if keys != self.texture_keys || states != self.texture_states {
-            self.texture_binding = sky_texture_binding(device, &self.texture_layout, textures, keys);
+            self.texture_binding = sky_texture_binding(device, &self.texture_layout, textures, keys, &self.clamp_sampler);
             let bloom = pair_keys(bloom_textures);
-            self.star_texture_binding = textures.pair_binding(device, bloom[0], bloom[1]);
+            self.star_texture_binding = texture_pair_binding(device, textures, bloom[0], bloom[1], &self.clamp_sampler);
             self.texture_keys = keys;
             self.texture_states = states;
         }
@@ -418,7 +430,7 @@ fn pair_keys(pair: TexturePair) -> [Option<TextureKey>; 2] {
 }
 
 fn sky_texture_layout(device: &Device) -> BindGroupLayout {
-    let mut entries = Vec::with_capacity(13);
+    let mut entries = Vec::with_capacity(14);
     for binding in 0..12 {
         entries.push(BindGroupLayoutEntry {
             binding,
@@ -437,16 +449,75 @@ fn sky_texture_layout(device: &Device) -> BindGroupLayout {
         ty: BindingType::Sampler(SamplerBindingType::Filtering),
         count: None,
     });
+    entries.push(BindGroupLayoutEntry {
+        binding: 13,
+        visibility: ShaderStages::FRAGMENT,
+        ty: BindingType::Sampler(SamplerBindingType::Filtering),
+        count: None,
+    });
     device.create_bind_group_layout(&BindGroupLayoutDescriptor { label: Some("Sky textures"), entries: &entries })
 }
 
-fn sky_texture_binding(device: &Device, layout: &BindGroupLayout, textures: &Textures, keys: [Option<TextureKey>; 12]) -> BindGroup {
-    let mut entries = Vec::with_capacity(13);
-    for (binding, key) in keys.into_iter().enumerate() {
-        entries.push(BindGroupEntry { binding: binding as u32, resource: BindingResource::TextureView(textures.view(key)) });
+fn sky_texture_binding(
+    device: &Device,
+    layout: &BindGroupLayout,
+    textures: &Textures,
+    keys: [Option<TextureKey>; 12],
+    celestial_sampler: &wgpu::Sampler,
+) -> BindGroup {
+    let views = std::array::from_fn(|binding| {
+        let key = keys[binding];
+        sky_texture_view(binding, textures.view(key), textures.raw_view(key))
+    });
+    sky_texture_binding_for_views(device, layout, views, &textures.default_sampler, celestial_sampler)
+}
+
+fn sky_texture_binding_for_views(
+    device: &Device,
+    layout: &BindGroupLayout,
+    views: [&TextureView; 12],
+    environment_sampler: &wgpu::Sampler,
+    celestial_sampler: &wgpu::Sampler,
+) -> BindGroup {
+    let mut entries = Vec::with_capacity(14);
+    for (binding, view) in views.into_iter().enumerate() {
+        entries.push(BindGroupEntry { binding: binding as u32, resource: BindingResource::TextureView(view) });
     }
-    entries.push(BindGroupEntry { binding: 12, resource: BindingResource::Sampler(&textures.default_sampler) });
+    entries.push(BindGroupEntry { binding: 12, resource: BindingResource::Sampler(environment_sampler) });
+    entries.push(BindGroupEntry { binding: 13, resource: BindingResource::Sampler(celestial_sampler) });
     device.create_bind_group(&BindGroupDescriptor { label: Some("Sky textures"), layout, entries: &entries })
+}
+
+fn sky_texture_view<'a>(binding: usize, color: &'a TextureView, raw: &'a TextureView) -> &'a TextureView {
+    if matches!(binding, 4 | 5) { raw } else { color }
+}
+
+fn texture_pair_binding(
+    device: &Device,
+    textures: &Textures,
+    first: Option<TextureKey>,
+    second: Option<TextureKey>,
+    sampler: &wgpu::Sampler,
+) -> BindGroup {
+    texture_pair_binding_for_views(device, &textures.pair_layout, textures.view(first), textures.view(second), sampler)
+}
+
+fn texture_pair_binding_for_views(
+    device: &Device,
+    layout: &BindGroupLayout,
+    first: &TextureView,
+    second: &TextureView,
+    sampler: &wgpu::Sampler,
+) -> BindGroup {
+    device.create_bind_group(&BindGroupDescriptor {
+        label: Some("Clamped texture pair"),
+        layout,
+        entries: &[
+            BindGroupEntry { binding: 0, resource: BindingResource::TextureView(first) },
+            BindGroupEntry { binding: 1, resource: BindingResource::TextureView(second) },
+            BindGroupEntry { binding: 2, resource: BindingResource::Sampler(sampler) },
+        ],
+    })
 }
 
 fn resident(key: Option<TextureKey>) -> f32 {
@@ -509,3 +580,7 @@ fn append<const N: usize>(target: &mut [f32; UNIFORM_FLOATS], offset: &mut usize
         *offset += N;
     }
 }
+
+#[cfg(test)]
+#[path = "sky_tests.rs"]
+mod tests;

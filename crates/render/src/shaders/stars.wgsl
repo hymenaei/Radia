@@ -5,7 +5,7 @@ struct StarUniform {
 }
 
 struct Star {
-    direction_intensity: vec4<f32>,
+    direction: vec4<f32>,
     color_size: vec4<f32>,
 }
 
@@ -23,12 +23,6 @@ struct StarVertex {
 @group(2) @binding(1) var bloom_next_image: texture_2d<f32>;
 @group(2) @binding(2) var bloom_sampler: sampler;
 
-fn linear_to_srgb(color: vec3<f32>) -> vec3<f32> {
-    let low = color * 12.92;
-    let high = 1.055 * pow(max(color, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
-    return select(high, low, color <= vec3<f32>(0.0031308));
-}
-
 @vertex fn vertex(@builtin(vertex_index) vertex_index: u32, @builtin(instance_index) star_index: u32) -> StarVertex {
     let star = star_field[star_index];
     let corners = array(
@@ -40,7 +34,7 @@ fn linear_to_srgb(color: vec3<f32>) -> vec3<f32> {
         vec2<f32>(0.0, 0.0),
     );
     let corner = corners[vertex_index];
-    let direction = star.direction_intensity.xyz;
+    let direction = star.direction.xyz;
     let angle = state.time.y;
     let rotated = vec3<f32>(
         direction.x * cos(angle) - direction.y * sin(angle),
@@ -61,18 +55,18 @@ fn linear_to_srgb(color: vec3<f32>) -> vec3<f32> {
     output.position = vec4<f32>(clip.xy, 0.0, clip.w);
     output.uv = corner;
     output.color = star.color_size.xyz;
-    output.alpha = state.viewport_alpha_blend.z * star.direction_intensity.w;
+    output.alpha = state.viewport_alpha_blend.z;
     output.screen_position = position.xy * state.time.x;
     return output;
 }
 
-@fragment fn fragment(input: StarVertex) -> @location(0) vec4<f32> {
-    let sample_current = textureSample(bloom_image, bloom_sampler, input.uv);
-    let sample_next = textureSample(bloom_next_image, bloom_sampler, input.uv);
-    let current = vec4<f32>(linear_to_srgb(sample_current.rgb), sample_current.a);
-    let next = vec4<f32>(linear_to_srgb(sample_next.rgb), sample_next.a);
-    let bloom = mix(current, next, state.viewport_alpha_blend.w);
+fn star_color(input: StarVertex) -> vec4<f32> {
+    let bloom = textureSample(bloom_image, bloom_sampler, input.uv);
     let twinkle = abs(fract(input.screen_position.x + input.screen_position.y));
     let alpha = smoothstep(0.0, 0.9, input.alpha) * 32.0 * twinkle * bloom.a;
     return vec4<f32>(bloom.rgb * input.color, alpha);
+}
+
+@fragment fn fragment(input: StarVertex) -> @location(0) vec4<f32> {
+    return star_color(input);
 }

@@ -26,7 +26,7 @@ pub(crate) const INSTANCE_BYTES: usize = 192;
 pub(crate) const VERTEX_BYTES: usize = 32;
 const CAMERA_BYTES: usize = 128;
 const ATMOSPHERE_BYTES: usize = ATMOSPHERE_FLOATS * 4;
-const WATER_BYTES: usize = 32 * 4;
+const WATER_BYTES: usize = 36 * 4;
 pub(crate) const CAMERA_NEAR_PLANE: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -95,7 +95,7 @@ impl SurfacePipelines {
             entries: &[
                 uniform_entry(0, ShaderStages::VERTEX_FRAGMENT),
                 uniform_entry(1, ShaderStages::FRAGMENT),
-                uniform_entry(2, ShaderStages::FRAGMENT),
+                uniform_entry(2, ShaderStages::VERTEX_FRAGMENT),
                 texture_entry(3),
                 texture_entry(4),
                 BindGroupLayoutEntry {
@@ -232,7 +232,7 @@ impl SurfacePipelines {
         let region_water = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Some("Region water"),
             layout: Some(&plain_layout),
-            vertex: VertexState { entry_point: Some("vertex"), ..descriptor.vertex.clone() },
+            vertex: VertexState { entry_point: Some("region_water_vertex"), ..descriptor.vertex.clone() },
             fragment: Some(FragmentState {
                 entry_point: Some("region_water_fragment"),
                 ..descriptor.fragment.clone().expect("scene fragment")
@@ -314,6 +314,7 @@ impl SurfacePipelines {
         textures: &Textures,
         queue: &Queue,
         camera_position: DVec3,
+        camera_relative_position: DVec3,
         environment: Option<&Evaluated>,
         normal_map: TexturePair,
         water_height: Option<f64>,
@@ -325,6 +326,7 @@ impl SurfacePipelines {
         let region_water_values = water_surface_values(
             environment,
             camera_position,
+            camera_relative_position,
             water_height,
             scroll,
             normal_map.factor,
@@ -342,8 +344,8 @@ impl SurfacePipelines {
                     BindGroupEntry { binding: 0, resource: BindingResource::Buffer(self.camera.as_entire_buffer_binding()) },
                     BindGroupEntry { binding: 1, resource: BindingResource::Buffer(self.atmosphere.as_entire_buffer_binding()) },
                     BindGroupEntry { binding: 2, resource: BindingResource::Buffer(self.region_water_uniform.as_entire_buffer_binding()) },
-                    BindGroupEntry { binding: 3, resource: BindingResource::TextureView(textures.water_view(normal_map.current)) },
-                    BindGroupEntry { binding: 4, resource: BindingResource::TextureView(textures.water_view(normal_map.next)) },
+                    BindGroupEntry { binding: 3, resource: BindingResource::TextureView(textures.raw_view(normal_map.current)) },
+                    BindGroupEntry { binding: 4, resource: BindingResource::TextureView(textures.raw_view(normal_map.next)) },
                     BindGroupEntry { binding: 5, resource: BindingResource::Sampler(&textures.water_sampler) },
                 ],
             });

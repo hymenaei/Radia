@@ -26,6 +26,7 @@ pub use environment::{
     EnvironmentChoice, EnvironmentPreset, EnvironmentProperty, EnvironmentPush, EnvironmentPushError, ExperienceProperty,
     ExperienceSetting, LocalChoice, LocalEnvironment, ViewerEnvironment,
 };
+pub(crate) use environment::{PropertyChange, PropertyKind, PropertyValue};
 pub use mesh::{Detail, DrawnMeshKey, MeshBuildError, MeshId, SharedMesh};
 pub use mesh_cache::SculptMeshKey;
 pub use mesh_cache::{MeshKey, PreparedMesh};

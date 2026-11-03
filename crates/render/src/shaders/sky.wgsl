@@ -33,6 +33,7 @@ struct SkyUniform {
 @group(1) @binding(10) var halo_image: texture_2d<f32>;
 @group(1) @binding(11) var halo_next_image: texture_2d<f32>;
 @group(1) @binding(12) var environment_sampler: sampler;
+@group(1) @binding(13) var celestial_sampler: sampler;
 
 struct SkyRay {
     @builtin(position) position: vec4<f32>,
@@ -76,8 +77,8 @@ fn rainbow_color(optical_dot: f32) -> vec3<f32> {
     vertical = clamp(vertical, 0.0, 0.25) + interior;
     let horizontal = (sky.optics.y - 5.0) / 1024.0 + 0.5;
     let uv = vec2<f32>(horizontal, vertical);
-    let first = linear_to_srgb(textureSample(rainbow_image, environment_sampler, uv).rgb);
-    let second = linear_to_srgb(textureSample(rainbow_next_image, environment_sampler, uv).rgb);
+    let first = textureSample(rainbow_image, environment_sampler, uv).rgb;
+    let second = textureSample(rainbow_next_image, environment_sampler, uv).rgb;
     return pow(max(mix(first, second, sky.cloud_flags.z), vec3<f32>(0.0)), vec3<f32>(1.8)) * sky.optics.x;
 }
 
@@ -88,8 +89,8 @@ fn halo_color(optical_dot: f32) -> vec3<f32> {
     let dot_value = clamp(optical_dot, 0.1, 1.0);
     let vertical = sqrt(clamp(1.0 - dot_value * dot_value, 0.0, 1.0));
     let uv = vec2<f32>(0.0, vertical);
-    let first = linear_to_srgb(textureSample(halo_image, environment_sampler, uv).rgb);
-    let second = linear_to_srgb(textureSample(halo_next_image, environment_sampler, uv).rgb);
+    let first = textureSample(halo_image, environment_sampler, uv).rgb;
+    let second = textureSample(halo_next_image, environment_sampler, uv).rgb;
     return mix(first, second, sky.cloud_flags.w) * sky.optics.z;
 }
 
@@ -189,29 +190,21 @@ fn body_fragment_color(direction: vec3<f32>, body: vec4<f32>, right: vec3<f32>, 
         discard;
     }
     let uv = uv_and_visible.xy;
-    var current = textureSample(sun_image, environment_sampler, uv);
-    var next = textureSample(sun_next_image, environment_sampler, uv);
-    if !is_sun {
-        current = textureSample(moon_image, environment_sampler, uv);
-        next = textureSample(moon_next_image, environment_sampler, uv);
-    }
     if is_sun {
+        let current = textureSample(sun_image, celestial_sampler, uv);
+        let next = textureSample(sun_next_image, celestial_sampler, uv);
         let textured = max(sky.texture_flags.x, sky.texture_flags.y) > 0.5;
         if !textured {
             discard;
         }
-        let texture_color = mix(vec4<f32>(linear_to_srgb(current.rgb), current.a), vec4<f32>(linear_to_srgb(next.rgb), next.a), sky.blends.x);
+        let texture_color = mix(current, next, sky.blends.x);
         return texture_color;
     }
     let textured = max(sky.texture_flags.z, sky.texture_flags.w) > 0.5;
     if !textured {
         discard;
     }
-    let texture_color = mix(
-        vec4<f32>(linear_to_srgb(current.rgb), current.a),
-        vec4<f32>(linear_to_srgb(next.rgb), next.a),
-        sky.blends.y,
-    );
+    let texture_color = textureSample(moon_image, celestial_sampler, uv);
     if texture_color.a <= 2.0 / 255.0 {
         discard;
     }

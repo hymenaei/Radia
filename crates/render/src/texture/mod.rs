@@ -236,7 +236,7 @@ struct TerrainBinding {
 struct GpuTexture {
     texture: Texture,
     view: TextureView,
-    water_view: TextureView,
+    raw_view: TextureView,
     bindings: HashMap<Sampler, BindGroup>,
     charge: GpuCharge,
 }
@@ -324,7 +324,7 @@ pub(crate) struct Textures {
     pub(crate) water_sampler: wgpu::Sampler,
     fallback: BindGroup,
     fallback_view: TextureView,
-    fallback_water_view: TextureView,
+    fallback_raw_view: TextureView,
     mip_layout: BindGroupLayout,
     mip_pipeline: RenderPipeline,
     pub(crate) uploaded: usize,
@@ -502,7 +502,7 @@ impl Textures {
             ..Default::default()
         });
         let fallback_view = texture.create_view(&TextureViewDescriptor::default());
-        let fallback_water_view = texture.create_view(&TextureViewDescriptor {
+        let fallback_raw_view = texture.create_view(&TextureViewDescriptor {
             format: Some(raw_channel_view_format(TextureFormat::Rgba8UnormSrgb)),
             ..Default::default()
         });
@@ -578,7 +578,7 @@ impl Textures {
             water_sampler,
             fallback,
             fallback_view,
-            fallback_water_view,
+            fallback_raw_view,
             mip_layout,
             mip_pipeline,
             uploaded: 0,
@@ -867,16 +867,16 @@ impl Textures {
         .unwrap_or(&self.fallback_view)
     }
 
-    pub(crate) fn water_view(&self, key: Option<TextureKey>) -> &TextureView {
+    pub(crate) fn raw_view(&self, key: Option<TextureKey>) -> &TextureView {
         key.and_then(|key| {
             let entry = self.entries.get(&key.id)?;
             let gpu = match &entry.state {
                 TextureUploadState::Ready(gpu) => gpu,
                 _ => entry.fallback.as_ref()?,
             };
-            Some(&gpu.water_view)
+            Some(&gpu.raw_view)
         })
-        .unwrap_or(&self.fallback_water_view)
+        .unwrap_or(&self.fallback_raw_view)
     }
 
     pub(crate) fn view_state(&self, key: Option<TextureKey>) -> Option<TextureViewState> {
@@ -886,10 +886,6 @@ impl Textures {
             ready: matches!(&entry.state, TextureUploadState::Ready(_)),
             fallback: entry.fallback.is_some(),
         }))
-    }
-
-    pub(crate) fn pair_binding(&self, device: &Device, first: Option<TextureKey>, second: Option<TextureKey>) -> BindGroup {
-        self.pair_binding_with_sampler(device, first, second, &self.default_sampler, false)
     }
 
     pub(crate) fn water_pair_binding(&self, device: &Device, first: Option<TextureKey>, second: Option<TextureKey>) -> BindGroup {
@@ -904,8 +900,8 @@ impl Textures {
         sampler: &wgpu::Sampler,
         raw_channels: bool,
     ) -> BindGroup {
-        let first_view = if raw_channels { self.water_view(first) } else { self.view(first) };
-        let second_view = if raw_channels { self.water_view(second) } else { self.view(second) };
+        let first_view = if raw_channels { self.raw_view(first) } else { self.view(first) };
+        let second_view = if raw_channels { self.raw_view(second) } else { self.view(second) };
         device.create_bind_group(&BindGroupDescriptor {
             label: Some("Texture pair"),
             layout: &self.pair_layout,

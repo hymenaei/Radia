@@ -259,7 +259,7 @@ struct Lease {
     counter: Arc<Counter>,
     maintenance: Arc<AtomicBool>,
     size: Option<TextureSize>,
-    priority: Priority,
+    priority: AtomicBool,
     importance: AtomicU16,
     _cache_protection: Option<storage::Protection>,
     _texture: Option<TextureHandle>,
@@ -270,6 +270,12 @@ impl Drop for Lease {
         self.counter.count.fetch_sub(1, Ordering::AcqRel);
         self.counter.wake.send_replace(());
         self.maintenance.store(true, Ordering::Release);
+    }
+}
+
+impl Lease {
+    fn priority(&self) -> Priority {
+        if self.priority.load(Ordering::Acquire) { Priority::Visible } else { Priority::Background }
     }
 }
 
@@ -293,6 +299,12 @@ impl Demand {
 
     pub fn update_importance(&self, importance: u16) {
         self._lease.importance.store(importance, Ordering::Release);
+        self._lease.maintenance.store(true, Ordering::Release);
+        self._lease.counter.wake.send_replace(());
+    }
+
+    pub fn update_priority(&self, priority: Priority) {
+        self._lease.priority.store(priority == Priority::Visible, Ordering::Release);
         self._lease.maintenance.store(true, Ordering::Release);
         self._lease.counter.wake.send_replace(());
     }
@@ -389,7 +401,7 @@ impl AssetEntry {
             .values()
             .flat_map(|view| &view.leases)
             .filter_map(Weak::upgrade)
-            .map(|lease| lease.priority)
+            .map(|lease| lease.priority())
             .max()
             .unwrap_or(Priority::Background)
     }
@@ -874,7 +886,7 @@ impl Store {
             counter: Arc::clone(&view.counter),
             maintenance: Arc::clone(&self.maintenance_dirty),
             size: request.size(),
-            priority,
+            priority: AtomicBool::new(priority == Priority::Visible),
             importance: AtomicU16::new(importance),
             _cache_protection: cache_protection,
             _texture: texture,
@@ -899,7 +911,7 @@ impl Store {
                 view.leases.retain(|weak| {
                     let Some(lease) = weak.upgrade() else { return false };
                     desired = desired.max(lease.size);
-                    priority = priority.max(lease.priority);
+                    priority = priority.max(lease.priority());
                     importance = importance.max(lease.importance.load(Ordering::Acquire));
                     true
                 });

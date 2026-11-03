@@ -1,21 +1,20 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
-use ::inventory::{AssetType, CategoryKey, InventoryOwner, InventorySnapshot, Item, ItemKey};
+use ::inventory::{AssetType, CategoryKey, InventoryOwner, InventorySnapshot, InventoryType, Item, ItemKey};
 
 const SETTINGS_SUBTYPE_MASK: u32 = 0xff;
 const MAX_ENVIRONMENT_LABEL_CHARS: usize = 128;
 
-#[derive(Clone)]
 pub(crate) struct EnvironmentMenu {
     items: Arc<[EnvironmentMenuItem]>,
-    indices: HashMap<ItemKey, usize>,
 }
 
-#[derive(Clone)]
 pub(crate) struct EnvironmentMenuItem {
     pub(crate) key: ItemKey,
     pub(crate) asset_id: utils::AssetId,
-    pub(crate) label: Arc<str>,
+    name: Arc<str>,
+    kind: EnvironmentSettingKind,
+    library: bool,
 }
 
 impl EnvironmentMenu {
@@ -23,8 +22,14 @@ impl EnvironmentMenu {
         &self.items
     }
 
-    pub(crate) fn label(&self, key: ItemKey) -> Option<&str> {
-        self.indices.get(&key).and_then(|index| self.items.get(*index)).map(|item| &*item.label)
+    pub(crate) fn label(&self, key: ItemKey) -> Option<String> {
+        self.items.iter().find(|item| item.key == key).map(EnvironmentMenuItem::label)
+    }
+}
+
+impl EnvironmentMenuItem {
+    pub(crate) fn label(&self) -> String {
+        environment_setting_label(&self.name, self.kind, self.library)
     }
 }
 
@@ -40,7 +45,6 @@ enum EnvironmentSettingKind {
     Sky,
     Water,
     DayCycle,
-    Other,
 }
 
 impl EnvironmentSettingKind {
@@ -49,42 +53,74 @@ impl EnvironmentSettingKind {
             Self::Sky => "Sky",
             Self::Water => "Water",
             Self::DayCycle => "Day cycle",
-            Self::Other => "Settings",
         }
     }
 }
 
-pub(crate) fn environment_items(snapshot: InventorySnapshot) -> EnvironmentMenu {
+pub(crate) fn environment_items(snapshot: InventorySnapshot, previous: Option<Arc<EnvironmentMenu>>) -> Arc<EnvironmentMenu> {
     let library_owner = snapshot.roots().library().map(CategoryKey::owner);
+    if let Some(previous) = previous.as_ref().filter(|menu| menu.matches(&snapshot, library_owner)) {
+        return Arc::clone(previous);
+    }
     let mut items = snapshot
-        .items_of_asset_type(AssetType::Settings)
-        .map(|item| EnvironmentMenuItem {
-            key: item.key,
-            asset_id: item.asset_id,
-            label: Arc::from(environment_setting_label(item, library_owner)),
+        .items()
+        .filter_map(|item| {
+            let kind = environment_setting_kind(item)?;
+            Some(EnvironmentMenuItem {
+                key: item.key,
+                asset_id: item.asset_id,
+                name: Arc::clone(&item.name),
+                kind,
+                library: library_owner == Some(item.key.owner()),
+            })
         })
         .collect::<Vec<_>>();
-    items.sort_unstable_by(|left, right| (left.label.as_ref(), left.key).cmp(&(right.label.as_ref(), right.key)));
-    let indices = items.iter().enumerate().map(|(index, item)| (item.key, index)).collect();
-    EnvironmentMenu { items: Arc::from(items), indices }
+    items.sort_unstable_by(|left, right| {
+        visible_name(&left.name)
+            .cmp(visible_name(&right.name))
+            .then_with(|| (left.kind.label(), left.library, left.key).cmp(&(right.kind.label(), right.library, right.key)))
+    });
+    Arc::new(EnvironmentMenu { items: Arc::from(items) })
 }
 
-fn environment_setting_kind(flags: u32) -> EnvironmentSettingKind {
-    match flags & SETTINGS_SUBTYPE_MASK {
-        0 => EnvironmentSettingKind::Sky,
-        1 => EnvironmentSettingKind::Water,
-        2 => EnvironmentSettingKind::DayCycle,
-        _ => EnvironmentSettingKind::Other,
+impl EnvironmentMenu {
+    fn matches(&self, snapshot: &InventorySnapshot, library_owner: Option<InventoryOwner>) -> bool {
+        if snapshot.items().filter(|item| environment_setting_kind(item).is_some()).count() != self.items.len() {
+            return false;
+        }
+        self.items.iter().all(|row| {
+            snapshot.item(row.key).is_some_and(|item| {
+                item.asset_id == row.asset_id
+                    && item.name.as_ref() == row.name.as_ref()
+                    && environment_setting_kind(item) == Some(row.kind)
+                    && (library_owner == Some(item.key.owner())) == row.library
+            })
+        })
     }
 }
 
-pub(crate) fn environment_setting_label(item: &Item, library_owner: Option<InventoryOwner>) -> String {
-    let mut name = item.name.chars().filter(|character| !character.is_control()).take(MAX_ENVIRONMENT_LABEL_CHARS).collect::<String>();
+fn environment_setting_kind(item: &Item) -> Option<EnvironmentSettingKind> {
+    if item.asset_type != AssetType::Settings || item.inventory_type != InventoryType::Settings {
+        return None;
+    }
+    match item.flags & SETTINGS_SUBTYPE_MASK {
+        0 => Some(EnvironmentSettingKind::Sky),
+        1 => Some(EnvironmentSettingKind::Water),
+        2 => Some(EnvironmentSettingKind::DayCycle),
+        _ => None,
+    }
+}
+
+fn visible_name(name: &str) -> impl Iterator<Item = char> + '_ {
+    name.chars().filter(|character| !character.is_control()).take(MAX_ENVIRONMENT_LABEL_CHARS)
+}
+
+fn environment_setting_label(name: &str, kind: EnvironmentSettingKind, library: bool) -> String {
+    let mut name = name.chars().filter(|character| !character.is_control()).take(MAX_ENVIRONMENT_LABEL_CHARS).collect::<String>();
     if name.is_empty() {
         name.push_str("Unnamed setting");
     }
-    let kind = environment_setting_kind(item.flags).label();
-    if library_owner == Some(item.key.owner()) { format!("{name} ({kind}, Library)") } else { format!("{name} ({kind})") }
+    if library { format!("{name} ({}, Library)", kind.label()) } else { format!("{name} ({})", kind.label()) }
 }
 
 #[cfg(test)]
@@ -101,31 +137,70 @@ mod tests {
     use super::environment_items;
 
     #[test]
-    fn environment_items_cover_personal_and_library_settings() {
+    fn menu_filters_supported_settings() {
         let (mut inventory, personal) = model();
         let library = inventory.roots().library().expect("library root").owner();
-        for (owner, id, name, flags) in
-            [(personal, 3, "Sky\nPreset", 0), (library, 4, "Water", 0x4000_0101), (personal, 5, "Cycle", 2), (library, 6, "Other", 255)]
-        {
+        for (owner, id, name, flags) in [(personal, 3, "Sky\nPreset", 0), (library, 4, "Water", 0x4000_0101), (personal, 5, "Cycle", 2)] {
             let mut setting = item(owner, id, if owner == personal { 1 } else { 2 }, name, AssetType::Settings, InventoryType::Settings);
             setting.flags = flags;
             inventory.upsert_item(setting).expect("settings item");
         }
-        inventory.upsert_item(item(personal, 7, 1, "Not settings", AssetType::Notecard, InventoryType::Notecard)).expect("notecard");
+        let mut unsupported = item(personal, 6, 1, "Other", AssetType::Settings, InventoryType::Settings);
+        unsupported.flags = 255;
+        inventory.upsert_item(unsupported).expect("unsupported subtype");
+        inventory
+            .upsert_item(item(personal, 7, 1, "Wrong inventory type", AssetType::Settings, InventoryType::Notecard))
+            .expect("mismatched inventory type");
+        inventory.upsert_item(item(personal, 8, 1, "Not settings", AssetType::Notecard, InventoryType::Notecard)).expect("notecard");
 
-        let menu = environment_items(inventory.snapshot());
+        let menu = environment_items(inventory.snapshot(), None);
         let items = menu.items();
 
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 3);
         assert_eq!(
-            items.iter().map(|item| item.label.as_ref()).collect::<Vec<_>>(),
-            ["Cycle (Day cycle)", "Other (Settings, Library)", "SkyPreset (Sky)", "Water (Water, Library)",]
+            items.iter().map(|item| item.label()).collect::<Vec<_>>(),
+            ["Cycle (Day cycle)", "SkyPreset (Sky)", "Water (Water, Library)",]
         );
-        assert_eq!(menu.label(items[2].key), Some("SkyPreset (Sky)"));
+        assert_eq!(menu.label(items[1].key).as_deref(), Some("SkyPreset (Sky)"));
         assert!(items.iter().any(|item| item.key.owner() == library));
+    }
 
-        inventory.upsert_item(item(personal, 8, 1, "Later", AssetType::Settings, InventoryType::Settings)).expect("later setting");
-        assert_eq!(environment_items(inventory.snapshot()).items().len(), 5);
+    #[test]
+    fn menu_orders_displayed_names() {
+        let (mut inventory, personal) = model();
+        for (id, name) in [(3, "a\u{1}z"), (4, "a0")] {
+            inventory.upsert_item(item(personal, id, 1, name, AssetType::Settings, InventoryType::Settings)).unwrap();
+        }
+        let menu = environment_items(inventory.snapshot(), None);
+        assert_eq!(menu.items().iter().map(|row| row.label()).collect::<Vec<_>>(), ["a0 (Sky)", "az (Sky)"]);
+    }
+
+    #[test]
+    fn unchanged_menu_reuses_rows() {
+        let (mut inventory, personal) = model();
+        inventory.upsert_item(item(personal, 3, 1, "Sky", AssetType::Settings, InventoryType::Settings)).expect("settings item");
+        let first = environment_items(inventory.snapshot(), None);
+        inventory.upsert_item(item(personal, 4, 1, "Notecard", AssetType::Notecard, InventoryType::Notecard)).expect("notecard");
+        let second = environment_items(inventory.snapshot(), Some(Arc::clone(&first)));
+        assert!(Arc::ptr_eq(&first, &second));
+        inventory.upsert_item(item(personal, 5, 1, "Cycle", AssetType::Settings, InventoryType::Settings)).expect("new setting");
+        let third = environment_items(inventory.snapshot(), Some(second));
+        assert_eq!(third.items().len(), 2);
+        assert!(!Arc::ptr_eq(&first, &third));
+    }
+
+    #[test]
+    fn large_menu_reuses_unchanged_rows() {
+        let (mut inventory, personal) = model();
+        for id in 10_u128..10_010 {
+            inventory.upsert_item(item(personal, id, 1, "Setting", AssetType::Settings, InventoryType::Settings)).expect("settings item");
+        }
+        let first = environment_items(inventory.snapshot(), None);
+        inventory.upsert_item(item(personal, 20_000, 1, "Notecard", AssetType::Notecard, InventoryType::Notecard)).expect("notecard");
+        let second = environment_items(inventory.snapshot(), Some(Arc::clone(&first)));
+        assert_eq!(first.items().len(), 10_000);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first.items()[0].name, &inventory.snapshot().item(first.items()[0].key).unwrap().name));
     }
 
     fn model() -> (Inventory, InventoryOwner) {

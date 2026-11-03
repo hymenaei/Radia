@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     mem::size_of,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use assets::{Content, Environment, EnvironmentDescription, EnvironmentSettings, Failure, Priority, Request, Sky, Status, Water};
@@ -15,6 +15,7 @@ use crate::scene::{AssetChange, AssetRequest, AssetTicket, Budget, budget::Lease
 const MAX_PENDING: usize = 64;
 const MAX_PROPERTIES: usize = 56;
 const MAX_PROPERTY_BYTES: usize = 2048;
+const MAX_PROPERTY_CHANGES: usize = MAX_PROPERTIES * 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EnvironmentPreset {
@@ -121,11 +122,15 @@ impl ExperienceSetting {
     pub fn region(&self) -> Region {
         self.0.region
     }
+    pub(crate) fn sequence(&self) -> u64 {
+        self.0.sequence
+    }
 }
 
 struct Setting {
     region: Region,
     experience: ExperienceId,
+    sequence: u64,
     environment: Environment,
     transition: Duration,
     _lease: Lease,
@@ -147,6 +152,12 @@ impl ExperienceProperty {
     pub fn region(&self) -> Region {
         self.0.region
     }
+    pub(crate) fn value(&self) -> &PropertyValue {
+        &self.0.value
+    }
+    pub(crate) fn sequence(&self) -> u64 {
+        self.0.sequence
+    }
 }
 
 struct Property {
@@ -154,7 +165,32 @@ struct Property {
     experience: ExperienceId,
     source: Arc<[u8]>,
     transition: Duration,
+    sequence: u64,
+    value: PropertyValue,
     _lease: Lease,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum PropertyKind {
+    Sky,
+    Water,
+}
+
+#[derive(Clone)]
+pub(crate) enum PropertyValue {
+    Sky(Arc<Sky>),
+    Water(Arc<Water>),
+}
+
+#[derive(Clone)]
+pub(crate) struct PropertyChange {
+    pub(crate) sequence: u64,
+    pub(crate) kind: PropertyKind,
+    pub(crate) name: String,
+    pub(crate) previous: Option<ExperienceProperty>,
+    pub(crate) target: Option<ExperienceProperty>,
+    pub(crate) started: Instant,
+    pub(crate) duration: Duration,
 }
 
 #[derive(Clone, Default)]
@@ -167,36 +203,41 @@ struct State {
     local: Option<LocalEnvironment>,
     selected: EnvironmentChoice,
     local_error: Option<Failure>,
-    clear_transition: Option<Duration>,
 }
 
 #[derive(Clone)]
-pub struct LocalEnvironment(Arc<LocalSetting>);
+pub struct LocalEnvironment {
+    setting: Arc<LocalSetting>,
+    region: Region,
+}
 
 impl LocalEnvironment {
     pub fn choice(&self) -> &LocalChoice {
-        self.0.choice()
+        self.setting.choice()
     }
     pub fn environment(&self) -> &EnvironmentDescription {
-        self.0.environment()
+        self.setting.environment()
     }
     pub fn region(&self) -> Region {
-        self.0.region()
+        self.region
+    }
+    fn with_region(&self, region: Region) -> Self {
+        Self { setting: Arc::clone(&self.setting), region }
     }
 }
 
 enum LocalSetting {
-    Sky { choice: LocalChoice, environment: Environment, region: Region, _lease: Lease },
-    Water { choice: LocalChoice, environment: Environment, region: Region, _lease: Lease },
-    DayCycle { choice: LocalChoice, environment: Environment, region: Region, _lease: Lease },
+    Sky { choice: LocalChoice, environment: Environment, _lease: Lease },
+    Water { choice: LocalChoice, environment: Environment, _lease: Lease },
+    DayCycle { choice: LocalChoice, environment: Environment, _lease: Lease },
 }
 
 impl LocalSetting {
-    fn new(choice: LocalChoice, environment: Environment, region: Region, lease: Lease) -> Self {
+    fn new(choice: LocalChoice, environment: Environment, lease: Lease) -> Self {
         match &environment.settings {
-            EnvironmentSettings::Sky(_) => Self::Sky { choice, environment, region, _lease: lease },
-            EnvironmentSettings::Water(_) => Self::Water { choice, environment, region, _lease: lease },
-            EnvironmentSettings::DayCycle(_) => Self::DayCycle { choice, environment, region, _lease: lease },
+            EnvironmentSettings::Sky(_) => Self::Sky { choice, environment, _lease: lease },
+            EnvironmentSettings::Water(_) => Self::Water { choice, environment, _lease: lease },
+            EnvironmentSettings::DayCycle(_) => Self::DayCycle { choice, environment, _lease: lease },
         }
     }
 
@@ -209,12 +250,6 @@ impl LocalSetting {
     fn environment(&self) -> &EnvironmentDescription {
         match self {
             Self::Sky { environment, .. } | Self::Water { environment, .. } | Self::DayCycle { environment, .. } => environment,
-        }
-    }
-
-    fn region(&self) -> Region {
-        match self {
-            Self::Sky { region, .. } | Self::Water { region, .. } | Self::DayCycle { region, .. } => *region,
         }
     }
 }
@@ -253,8 +288,20 @@ impl ViewerEnvironment {
     pub fn water_overrides(&self) -> Option<&Water> {
         self.0.water_overrides.as_ref()
     }
+    pub(crate) fn sky_overrides_for_region(&self, region: Region) -> Option<&Sky> {
+        self.0.sky_overrides_by_region.get(&region)
+    }
+    pub(crate) fn water_overrides_for_region(&self, region: Region) -> Option<&Water> {
+        self.0.water_overrides_by_region.get(&region)
+    }
+    pub(crate) fn property_changes(&self) -> &VecDeque<PropertyChange> {
+        &self.0.property_changes
+    }
     pub fn clear_transition(&self) -> Duration {
-        self.0.state.clear_transition.unwrap_or(Duration::ZERO)
+        self.0.clear_transition.map_or(Duration::ZERO, |(_, duration)| duration)
+    }
+    pub(crate) fn clear_transition_for_region(&self, region: Region) -> Option<Duration> {
+        self.0.clear_transition.filter(|(affected, _)| *affected == region).map(|(_, duration)| duration)
     }
     pub fn version(&self) -> u64 {
         self.0.version
@@ -267,10 +314,8 @@ impl ViewerEnvironment {
             .into_iter()
             .chain(sky)
             .chain(water)
-            .chain(self.0.state.sky_properties.values().map(ExperienceProperty::transition))
-            .chain(self.0.state.water_properties.values().map(ExperienceProperty::transition))
             .max()
-            .or(self.0.state.clear_transition)
+            .or(self.0.clear_transition.map(|(_, duration)| duration))
     }
     pub fn transition_for_region(&self, region: Region) -> Option<Duration> {
         let transitions = self
@@ -279,19 +324,8 @@ impl ViewerEnvironment {
             .map(ExperienceSetting::transition)
             .into_iter()
             .chain(self.sky().filter(|setting| setting.region() == region).map(ExperienceSetting::transition))
-            .chain(self.water().filter(|setting| setting.region() == region).map(ExperienceSetting::transition))
-            .chain(self.0.state.sky_properties.values().filter(|property| property.region() == region).map(ExperienceProperty::transition))
-            .chain(
-                self.0.state.water_properties.values().filter(|property| property.region() == region).map(ExperienceProperty::transition),
-            );
-        transitions.max().or_else(|| {
-            (self.sky().is_none()
-                && self.water().is_none()
-                && self.0.state.sky_properties.is_empty()
-                && self.0.state.water_properties.is_empty())
-            .then_some(self.0.state.clear_transition)
-            .flatten()
-        })
+            .chain(self.water().filter(|setting| setting.region() == region).map(ExperienceSetting::transition));
+        transitions.max()
     }
 }
 
@@ -299,6 +333,10 @@ struct Snapshot {
     state: State,
     sky_overrides: Option<Sky>,
     water_overrides: Option<Water>,
+    sky_overrides_by_region: BTreeMap<Region, Sky>,
+    water_overrides_by_region: BTreeMap<Region, Water>,
+    property_changes: VecDeque<PropertyChange>,
+    clear_transition: Option<(Region, Duration)>,
     version: u64,
     _lease: Lease,
 }
@@ -328,6 +366,8 @@ pub(in crate::scene) struct ViewerEnvironments {
     local_region: Option<Region>,
     events: VecDeque<AssetChange>,
     version: u64,
+    setting_sequence: u64,
+    property_sequence: u64,
 }
 
 impl ViewerEnvironments {
@@ -340,6 +380,8 @@ impl ViewerEnvironments {
             local_region: None,
             events: VecDeque::new(),
             version: 0,
+            setting_sequence: 0,
+            property_sequence: 0,
         }
     }
 
@@ -376,6 +418,13 @@ impl ViewerEnvironments {
         let pending_matches = local_choice
             .is_some_and(|choice| self.local_pending.as_ref().is_some_and(|pending| pending.choice == *choice && pending.region == region));
         if state.selected == choice && (local_choice.is_none() || current_local_matches || pending_matches) {
+            if current_local_matches
+                && let Some(local) = state.local.as_ref()
+                && local.region() != region
+            {
+                state.local = Some(local.with_region(region));
+                self.store(state)?;
+            }
             self.local_region = Some(region);
             self.route_local();
             return Ok(());
@@ -441,7 +490,15 @@ impl ViewerEnvironments {
         }
     }
 
-    pub(in crate::scene) fn push(&mut self, region: Region, push: EnvironmentPush) -> Result<(), EnvironmentPushError> {
+    pub(in crate::scene) fn push_at(&mut self, region: Region, push: EnvironmentPush, now: Instant) -> Result<(), EnvironmentPushError> {
+        let transition = match &push {
+            EnvironmentPush::Clear { transition, .. }
+            | EnvironmentPush::Full { transition, .. }
+            | EnvironmentPush::Partial { transition, .. } => *transition,
+        };
+        if now.checked_add(transition).is_none() {
+            return Err(EnvironmentPushError::Invalid);
+        }
         match push {
             EnvironmentPush::Full { experience, asset, transition } => {
                 if asset.uuid().is_nil() {
@@ -463,6 +520,8 @@ impl ViewerEnvironments {
             }
             EnvironmentPush::Clear { experience, transition } => {
                 let mut state = self.state();
+                let mut property_changes = self.property_changes(now);
+                let mut property_sequence = self.property_sequence;
                 if state.day.as_ref().is_some_and(|setting| experience.is_none_or(|id| id == setting.experience())) {
                     state.day = None;
                 }
@@ -472,10 +531,26 @@ impl ViewerEnvironments {
                 if state.water.as_ref().is_some_and(|setting| experience.is_none_or(|id| id == setting.experience())) {
                     state.water = None;
                 }
-                state.sky_properties.retain(|_, property| experience.is_some_and(|id| id != property.experience()));
-                state.water_properties.retain(|_, property| experience.is_some_and(|id| id != property.experience()));
-                state.clear_transition = Some(transition);
-                self.store(state)?;
+                clear_properties(
+                    &mut state.sky_properties,
+                    PropertyKind::Sky,
+                    experience,
+                    transition,
+                    now,
+                    &mut property_changes,
+                    &mut property_sequence,
+                )?;
+                clear_properties(
+                    &mut state.water_properties,
+                    PropertyKind::Water,
+                    experience,
+                    transition,
+                    now,
+                    &mut property_changes,
+                    &mut property_sequence,
+                )?;
+                self.store_with_clear_transition(state, Some((region, transition)), property_changes)?;
+                self.property_sequence = property_sequence;
                 self.pending.retain(|pending| {
                     if experience.is_none_or(|id| id == pending.experience) {
                         self.events.push_back(AssetChange::Release(pending.ticket));
@@ -498,9 +573,32 @@ impl ViewerEnvironments {
                 Water::from_properties(water.iter().map(|property| (property.name.as_str(), property.source.as_ref())))
                     .map_err(|_| EnvironmentPushError::Invalid)?;
                 let mut state = self.state();
-                self.properties(&mut state.sky_properties, sky, region, experience, transition)?;
-                self.properties(&mut state.water_properties, water, region, experience, transition)?;
-                self.store(state)?;
+                let mut property_changes = self.property_changes(now);
+                let mut property_sequence = self.property_sequence;
+                self.properties(
+                    &mut state.sky_properties,
+                    sky,
+                    PropertyKind::Sky,
+                    region,
+                    experience,
+                    transition,
+                    now,
+                    &mut property_changes,
+                    &mut property_sequence,
+                )?;
+                self.properties(
+                    &mut state.water_properties,
+                    water,
+                    PropertyKind::Water,
+                    region,
+                    experience,
+                    transition,
+                    now,
+                    &mut property_changes,
+                    &mut property_sequence,
+                )?;
+                self.store_with_clear_transition(state, None, property_changes)?;
+                self.property_sequence = property_sequence;
             }
         }
         Ok(())
@@ -536,9 +634,11 @@ impl ViewerEnvironments {
             if let Some(Ok(environment)) = &pending.result {
                 let mut state = self.state();
                 let Some(lease) = self.budget.reserve(size_of::<Setting>() + 32) else { break };
+                let sequence = self.setting_sequence.checked_add(1).expect("environment setting sequence exhausted");
                 let setting = ExperienceSetting(Arc::new(Setting {
                     region: pending.region,
                     experience: pending.experience,
+                    sequence,
                     environment: environment.clone(),
                     transition: pending.transition,
                     _lease: lease,
@@ -555,6 +655,7 @@ impl ViewerEnvironments {
                 if self.store(state).is_err() {
                     break;
                 }
+                self.setting_sequence = sequence;
             }
             let pending = self.pending.pop_front().expect("completed environment push");
             self.events.push_back(AssetChange::Release(pending.ticket));
@@ -571,7 +672,7 @@ impl ViewerEnvironments {
         match result {
             Ok(environment) => {
                 let Some(lease) = self.budget.reserve(size_of::<LocalSetting>() + 32) else { return };
-                state.local = Some(LocalEnvironment(Arc::new(LocalSetting::new(choice.clone(), environment, region, lease))));
+                state.local = Some(LocalEnvironment { setting: Arc::new(LocalSetting::new(choice.clone(), environment, lease)), region });
                 state.selected = EnvironmentChoice::Local(choice);
             }
             Err(error) => {
@@ -592,31 +693,67 @@ impl ViewerEnvironments {
     }
 
     fn store(&mut self, state: State) -> Result<(), EnvironmentPushError> {
+        let property_changes = self.property_changes(Instant::now());
+        self.store_with_clear_transition(state, None, property_changes)
+    }
+
+    fn store_with_clear_transition(
+        &mut self,
+        state: State,
+        clear_transition: Option<(Region, Duration)>,
+        property_changes: VecDeque<PropertyChange>,
+    ) -> Result<(), EnvironmentPushError> {
         let sky_overrides = overrides_sky(&state.sky_properties)?;
         let water_overrides = overrides_water(&state.water_properties)?;
+        let sky_overrides_by_region = overrides_sky_by_region(&state.sky_properties)?;
+        let water_overrides_by_region = overrides_water_by_region(&state.water_properties)?;
         let bytes = size_of::<Snapshot>()
             + 32
             + sky_overrides.as_ref().map_or(0, |sky| sky.retained_bytes().saturating_sub(size_of::<Sky>()))
+            + sky_overrides_by_region.values().map(Sky::retained_bytes).sum::<usize>()
+            + water_overrides_by_region.len() * size_of::<Water>()
             + state
                 .sky_properties
                 .keys()
                 .chain(state.water_properties.keys())
                 .map(|key| key.capacity() + size_of::<ExperienceProperty>() + 128)
-                .sum::<usize>();
+                .sum::<usize>()
+            + property_changes.iter().map(|change| size_of::<PropertyChange>() + change.name.capacity() + 32).sum::<usize>();
         let lease = self.budget.reserve(bytes).ok_or(EnvironmentPushError::Capacity)?;
         let version = self.version.checked_add(1).expect("viewer environment version exhausted");
-        self.current = Some(ViewerEnvironment(Arc::new(Snapshot { state, sky_overrides, water_overrides, version, _lease: lease })));
+        self.current = Some(ViewerEnvironment(Arc::new(Snapshot {
+            state,
+            sky_overrides,
+            water_overrides,
+            sky_overrides_by_region,
+            water_overrides_by_region,
+            property_changes,
+            clear_transition,
+            version,
+            _lease: lease,
+        })));
         self.version = version;
         Ok(())
+    }
+
+    fn property_changes(&self, now: Instant) -> VecDeque<PropertyChange> {
+        let mut changes = self.current.as_ref().map_or_else(VecDeque::new, |current| current.0.property_changes.clone());
+        changes
+            .retain(|change| change.duration > Duration::ZERO && change.started.checked_add(change.duration).is_some_and(|end| now < end));
+        changes
     }
 
     fn properties(
         &self,
         target: &mut BTreeMap<String, ExperienceProperty>,
         properties: Vec<EnvironmentProperty>,
+        kind: PropertyKind,
         region: Region,
         experience: ExperienceId,
         transition: Duration,
+        now: Instant,
+        changes: &mut VecDeque<PropertyChange>,
+        sequence: &mut u64,
     ) -> Result<(), EnvironmentPushError> {
         if properties.len() > MAX_PROPERTIES {
             return Err(EnvironmentPushError::Capacity);
@@ -634,10 +771,28 @@ impl ViewerEnvironments {
             }
             let bytes = size_of::<Property>() + property.source.len() + 32;
             let lease = self.budget.reserve(bytes).ok_or(EnvironmentPushError::Capacity)?;
-            target.insert(
-                property.name,
-                ExperienceProperty(Arc::new(Property { region, experience, source: property.source, transition, _lease: lease })),
-            );
+            let value = match kind {
+                PropertyKind::Sky => PropertyValue::Sky(Arc::new(
+                    Sky::from_properties([(property.name.as_str(), property.source.as_ref())])
+                        .map_err(|_| EnvironmentPushError::Invalid)?,
+                )),
+                PropertyKind::Water => PropertyValue::Water(Arc::new(
+                    Water::from_properties([(property.name.as_str(), property.source.as_ref())])
+                        .map_err(|_| EnvironmentPushError::Invalid)?,
+                )),
+            };
+            *sequence = sequence.checked_add(1).expect("environment property sequence exhausted");
+            let next = ExperienceProperty(Arc::new(Property {
+                region,
+                experience,
+                source: property.source,
+                transition,
+                sequence: *sequence,
+                value,
+                _lease: lease,
+            }));
+            let previous = target.insert(property.name.clone(), next.clone());
+            push_property_change(changes, kind, property.name, previous, Some(next), now, transition, sequence)?;
         }
         Ok(())
     }
@@ -659,6 +814,72 @@ fn overrides_water(properties: &BTreeMap<String, ExperienceProperty>) -> Result<
     Water::from_properties(properties.iter().map(|(name, property)| (name.as_str(), property.source())))
         .map(Some)
         .map_err(|_| EnvironmentPushError::Invalid)
+}
+
+fn overrides_sky_by_region(properties: &BTreeMap<String, ExperienceProperty>) -> Result<BTreeMap<Region, Sky>, EnvironmentPushError> {
+    let mut groups: BTreeMap<Region, Vec<(&str, &[u8])>> = BTreeMap::new();
+    for (name, property) in properties {
+        groups.entry(property.region()).or_default().push((name.as_str(), property.source()));
+    }
+    groups
+        .into_iter()
+        .map(|(region, properties)| Sky::from_properties(properties).map(|sky| (region, sky)).map_err(|_| EnvironmentPushError::Invalid))
+        .collect()
+}
+
+fn overrides_water_by_region(properties: &BTreeMap<String, ExperienceProperty>) -> Result<BTreeMap<Region, Water>, EnvironmentPushError> {
+    let mut groups: BTreeMap<Region, Vec<(&str, &[u8])>> = BTreeMap::new();
+    for (name, property) in properties {
+        groups.entry(property.region()).or_default().push((name.as_str(), property.source()));
+    }
+    groups
+        .into_iter()
+        .map(|(region, properties)| {
+            Water::from_properties(properties).map(|water| (region, water)).map_err(|_| EnvironmentPushError::Invalid)
+        })
+        .collect()
+}
+
+fn push_property_change(
+    changes: &mut VecDeque<PropertyChange>,
+    kind: PropertyKind,
+    name: String,
+    previous: Option<ExperienceProperty>,
+    target: Option<ExperienceProperty>,
+    started: Instant,
+    duration: Duration,
+    sequence: &mut u64,
+) -> Result<(), EnvironmentPushError> {
+    if changes.len() >= MAX_PROPERTY_CHANGES {
+        return Err(EnvironmentPushError::Capacity);
+    }
+    changes.push_back(PropertyChange { sequence: *sequence, kind, name, previous, target, started, duration });
+    Ok(())
+}
+
+fn clear_properties(
+    properties: &mut BTreeMap<String, ExperienceProperty>,
+    kind: PropertyKind,
+    experience: Option<ExperienceId>,
+    duration: Duration,
+    started: Instant,
+    changes: &mut VecDeque<PropertyChange>,
+    sequence: &mut u64,
+) -> Result<(), EnvironmentPushError> {
+    let names = properties
+        .iter()
+        .filter(|(_, property)| experience.is_none_or(|experience| experience == property.experience()))
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    if changes.len().saturating_add(names.len()) > MAX_PROPERTY_CHANGES {
+        return Err(EnvironmentPushError::Capacity);
+    }
+    for name in names {
+        let Some(previous) = properties.remove(&name) else { continue };
+        *sequence = sequence.checked_add(1).expect("environment property sequence exhausted");
+        push_property_change(changes, kind, name, Some(previous), None, started, duration, sequence)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -690,5 +911,18 @@ mod tests {
         assert!(matches!(manager.event(), Some(AssetChange::Release(ticket)) if ticket == first.ticket));
         let second = requested(&mut manager, EnvironmentPreset::Sunset);
         assert_ne!(first.ticket, second.ticket);
+    }
+
+    #[test]
+    fn clear_duration_presence_tracks_snapshots() {
+        let mut manager = ViewerEnvironments::new(Budget::default());
+        let region = Region::new(1);
+        manager.push_at(region, EnvironmentPush::Clear { experience: None, transition: Duration::ZERO }, Instant::now()).unwrap();
+        let cleared = manager.current().expect("clear snapshot");
+        assert_eq!(cleared.clear_transition_for_region(region), Some(Duration::ZERO));
+        assert_eq!(cleared.clear_transition_for_region(Region::new(2)), None);
+        let state = manager.state();
+        manager.store(state).unwrap();
+        assert_eq!(manager.current().expect("ordinary snapshot").clear_transition_for_region(region), None);
     }
 }

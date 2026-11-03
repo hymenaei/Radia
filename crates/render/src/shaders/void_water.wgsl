@@ -36,7 +36,7 @@ struct VoidWaterOutput {
     let true_intersection = direction * distance;
     let direction_eye = (void_water.view * vec4<f32>(direction, 0.0)).xyz;
     let view_distance = distance * -direction_eye.z;
-    let coordinates = water_coordinates(true_intersection, void_water.surface);
+    let coordinates = water_coordinates_at(true_intersection, void_water.surface);
     let big_dx = dpdx(coordinates.big);
     let big_dy = dpdy(coordinates.big);
     let first_dx = dpdx(coordinates.first);

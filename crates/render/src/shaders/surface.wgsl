@@ -40,6 +40,7 @@ struct Output {
     @location(3) relative_position: vec3<f32>,
     @location(4) uv: vec2<f32>,
     @location(5) @interpolate(flat) params: vec4<f32>,
+    @location(6) camera_relative_position: vec3<f32>,
 }
 fn transform(v: Input) -> Output {
     var out: Output;
@@ -50,6 +51,7 @@ fn transform(v: Input) -> Output {
     out.normal = (camera.view * vec4<f32>(normal, 0.0)).xyz;
     out.position_view = (camera.view * position).xyz;
     out.relative_position = position.xyz;
+    out.camera_relative_position = position.xyz - surface_water.camera_relative.xyz;
     out.color = v.color;
     var uv = v.uv;
     if v.params.w == 1.0 {
@@ -72,6 +74,12 @@ fn transform(v: Input) -> Output {
     return transform(v);
 }
 
+@vertex fn region_water_vertex(v: Input) -> Output {
+    var out = transform(v);
+    out.uv = water_sweep_point(out.camera_relative_position.xy, surface_water);
+    return out;
+}
+
 struct RegionWater {
     @location(0) color: vec4<f32>,
     @builtin(frag_depth) depth: f32,
@@ -84,7 +92,7 @@ struct Surface {
 
 @fragment fn region_water_fragment(v: Output) -> RegionWater {
     let clip = camera.projection * vec4<f32>(v.relative_position, 1.0);
-    let coordinates = water_coordinates(v.relative_position, surface_water);
+    let coordinates = water_coordinates_from_point(v.uv, surface_water);
     let big_dx = dpdx(coordinates.big);
     let big_dy = dpdy(coordinates.big);
     let first_dx = dpdx(coordinates.first);
@@ -123,7 +131,7 @@ struct Surface {
     let normal_eye = safe_normalize(v.normal);
     let tangent_eye = (camera.view * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz;
     let color = shade_water(
-        v.relative_position,
+        v.camera_relative_position,
         v.position_view,
         light_direction_eye,
         light_norm_eye,

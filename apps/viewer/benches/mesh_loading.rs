@@ -218,6 +218,9 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
                 ReconcileStep::Asset(AssetChange::UpdateImportance { ticket, importance }) => {
                     demands.get(&ticket).expect("importance update has an active demand")._demand.update_importance(importance);
                 }
+                ReconcileStep::Asset(AssetChange::UpdatePriority { ticket, priority }) => {
+                    demands.get(&ticket).expect("priority update has an active demand")._demand.update_priority(priority);
+                }
                 ReconcileStep::Read(job) => {
                     let response = read_world(&fixture.world, &job);
                     fixture.scene.complete_read(job, response, Instant::now());

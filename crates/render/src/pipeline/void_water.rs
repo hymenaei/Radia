@@ -18,7 +18,7 @@ use crate::{
 use super::TexturePair;
 
 const VOID_WATER_REGION_FLOATS: usize = MAX_REGIONS * 4;
-const VOID_WATER_UNIFORM_FLOATS: usize = 32 + 36 + ATMOSPHERE_FLOATS + VOID_WATER_REGION_FLOATS;
+const VOID_WATER_UNIFORM_FLOATS: usize = 32 + 4 + 36 + ATMOSPHERE_FLOATS + VOID_WATER_REGION_FLOATS;
 const VOID_WATER_UNIFORM_BYTES: usize = VOID_WATER_UNIFORM_FLOATS * 4;
 
 pub(crate) struct VoidWater {
@@ -144,7 +144,7 @@ impl VoidWater {
         append(
             &mut values,
             &mut offset,
-            water_surface_values(environment, camera.position(), height, scroll, normal_map.factor, normal_present),
+            water_surface_values(environment, camera.position(), math::DVec3::ZERO, height, scroll, normal_map.factor, normal_present),
         );
         append(&mut values, &mut offset, atmosphere_values(environment));
         for region in region_water_bounds {
@@ -170,11 +170,14 @@ impl VoidWater {
 
 fn relative_water_height(height: Option<f64>, camera_z: f64) -> Option<f32> {
     let height = height? - camera_z;
-    if !height.is_finite() || height == 0.0 || height.abs() >= f64::from(f32::MAX) / 16.0 {
+    if !height.is_finite() || height.abs() >= f64::from(f32::MAX) / 16.0 {
         return None;
     }
     let height = height as f32;
-    (height.is_finite() && height != 0.0).then_some(height)
+    if !height.is_finite() {
+        return None;
+    }
+    Some(if height == 0.0 { CAMERA_NEAR_PLANE.copysign(if height.is_sign_negative() { -1.0 } else { 1.0 }) } else { height })
 }
 
 fn append<const N: usize>(target: &mut [f32; VOID_WATER_UNIFORM_FLOATS], offset: &mut usize, values: [f32; N]) {
@@ -195,7 +198,9 @@ mod tests {
     fn relative_height_keeps_both_sides() {
         assert_eq!(relative_water_height(Some(25.0), 10.0), Some(15.0));
         assert_eq!(relative_water_height(Some(5.0), 10.0), Some(-5.0));
-        assert_eq!(relative_water_height(Some(10.0), 10.0), None);
+        assert_eq!(relative_water_height(Some(10.0), 10.0), Some(CAMERA_NEAR_PLANE));
+        assert_eq!(relative_water_height(Some(f64::MIN_POSITIVE), 0.0), Some(CAMERA_NEAR_PLANE));
+        assert_eq!(relative_water_height(Some(-f64::MIN_POSITIVE), 0.0), Some(-CAMERA_NEAR_PLANE));
         assert_eq!(relative_water_height(None, 10.0), None);
     }
 

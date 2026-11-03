@@ -1,9 +1,9 @@
 use test_support::texture::GRAY_4096_J2C;
 
 use super::support::{
-    AssetChange, AssetId, Budget, Duration, EnvironmentAssignment, EnvironmentProperty, EnvironmentPush, EnvironmentScope,
-    EnvironmentSource, ExperienceId, Instant, ReconcileStep, Reconciler, Region, RegionInfo, Request, Uuid, prepared_asset,
-    settle_materials, source, world,
+    AssetChange, AssetId, BTreeSet, Budget, Duration, EnvironmentAssignment, EnvironmentChoice, EnvironmentProperty, EnvironmentPush,
+    EnvironmentScope, EnvironmentSource, ExperienceId, Instant, LocalChoice, Priority, ReconcileStep, Reconciler, Region, RegionInfo,
+    Request, Uuid, prepared_asset, settle_materials, source, world,
 };
 
 #[test]
@@ -101,6 +101,94 @@ fn replacement_and_region_retirement_retain_environment_texture_tickets_until_cl
     }
     assert!(released.contains(&first_request.ticket));
     assert!(released.contains(&second_request.ticket));
+}
+
+#[test]
+fn active_texture_priority_reuses_ticket() {
+    let mut world = world();
+    let region = Region::new(1);
+    let target = world.environment_target(region, EnvironmentScope::Region).unwrap();
+    let id = AssetId::new(Uuid::from_u128(208));
+    let _ = world
+        .observe_environment(target, source(1, 1), assignment(EnvironmentSource::Inline(sky_with_sun(id).into_bytes().into()), 1))
+        .unwrap();
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.notify_world_change();
+    let background = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let request = background
+        .requested
+        .iter()
+        .find(|request| matches!(request.request, Request::Texture { id: requested, .. } if requested == id))
+        .copied()
+        .expect("prefetched texture demand");
+    assert_eq!(request.priority, Priority::Background);
+
+    scene.set_active_environment_textures(Some(region), [id].into_iter().collect());
+    let visible = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(visible.priority_updates, [(request.ticket, Priority::Visible)]);
+    assert!(visible.requested.is_empty() && visible.released.is_empty());
+
+    scene.set_active_environment_textures(None, BTreeSet::new());
+    let prefetched = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(prefetched.priority_updates, [(request.ticket, Priority::Background)]);
+    assert!(prefetched.requested.is_empty() && prefetched.released.is_empty());
+}
+
+#[test]
+fn local_texture_tracks_region() {
+    let world = world();
+    let first_region = Region::new(1);
+    let second_region = Region::new(2);
+    let texture = AssetId::new(Uuid::from_u128(209));
+    let environment = AssetId::new(Uuid::from_u128(210));
+    let choice = EnvironmentChoice::Local(LocalChoice::Inventory {
+        owner_id: Uuid::from_u128(1),
+        item_id: Uuid::from_u128(2),
+        asset_id: environment,
+    });
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+    scene.set_local_environment(choice.clone(), first_region).unwrap();
+    let initial = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let environment_request = initial
+        .requested
+        .iter()
+        .find(|request| request.request == Request::Environment(environment))
+        .copied()
+        .expect("local environment request");
+    scene.complete_asset(environment_request.ticket, prepared_asset(environment_request.request, sky_with_sun(texture).into_bytes()));
+    let loaded = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let first_texture = loaded
+        .requested
+        .iter()
+        .find(|request| matches!(request.request, Request::Texture { id, .. } if id == texture))
+        .copied()
+        .expect("local texture request");
+    assert_eq!(first_texture.region, first_region);
+
+    scene.set_local_environment(choice.clone(), second_region).unwrap();
+    let crossing = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(crossing.released.contains(&first_texture.ticket));
+    let second_texture = crossing
+        .requested
+        .iter()
+        .find(|request| matches!(request.request, Request::Texture { id, .. } if id == texture))
+        .copied()
+        .expect("texture is requested on the current route");
+    assert_eq!(second_texture.region, second_region);
+    assert_ne!(second_texture.ticket, first_texture.ticket);
+    scene.complete_asset(first_texture.ticket, prepared_asset(first_texture.request, test_support::texture::GRAY_4096_J2C.to_vec()));
+    assert!(view.environment_texture(texture).is_none());
+    scene.complete_asset(second_texture.ticket, prepared_asset(second_texture.request, test_support::texture::GRAY_4096_J2C.to_vec()));
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(view.environment_texture(texture).map(|handle| handle.asset()), Some(texture));
+
+    scene.set_local_environment(choice, first_region).unwrap();
+    let ready_route = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(ready_route.requested.iter().all(|request| !matches!(request.request, Request::Texture { id, .. } if id == texture)));
+    assert_eq!(view.environment_texture(texture).map(|handle| handle.asset()), Some(texture));
 }
 
 #[test]

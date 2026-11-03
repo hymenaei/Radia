@@ -46,7 +46,7 @@ impl Textures {
             let charge = GpuCharge::new(self.memory.clone(), self.cap_bytes.clone(), &descriptor);
             let texture = device.create_texture(&descriptor);
             let view = texture.create_view(&TextureViewDescriptor::default());
-            let water_view =
+            let raw_view =
                 texture.create_view(&TextureViewDescriptor { format: Some(raw_channel_view_format(format)), ..Default::default() });
             self.entries.insert(
                 id,
@@ -59,7 +59,7 @@ impl Textures {
                     evicted: false,
                     geometry: entry.geometry,
                     state: TextureUploadState::Uploading {
-                        gpu: GpuTexture { texture, view, water_view, bindings: HashMap::new(), charge },
+                        gpu: GpuTexture { texture, view, raw_view, bindings: HashMap::new(), charge },
                         pixels,
                         row: 0,
                         mip: 0,

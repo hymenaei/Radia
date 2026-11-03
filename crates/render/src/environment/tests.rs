@@ -4,7 +4,7 @@ use assets::{Budget, Content, Environment, EnvironmentDescription, EnvironmentSe
 use utils::AssetId;
 use uuid::Uuid;
 
-use super::{Evaluated, Schedule, Sources, Transition, evaluate};
+use super::{Evaluated, HazeProvenance, Schedule, Sources, Transition, blend_haze, default_haze, evaluate};
 
 const CYCLE: &[u8] = br#"<?llsd/notation?>
 {'type':'daycycle','frames':{
@@ -44,6 +44,10 @@ const GREEN_SKY: &[u8] = br#"<?llsd/notation?>
 {'type':'sky','sunlight_color':[r0,r1,r0]}
 "#;
 
+const YELLOW_SKY: &[u8] = br#"<?llsd/notation?>
+{'type':'sky','sunlight_color':[r1,r1,r0]}
+"#;
+
 const HAZE_SKY: &[u8] = br#"<?llsd/notation?>
 {'type':'sky','ambient':[r0.1,r0.2,r0.3],'blue_density':[r0.11,r0.12,r0.13],
  'blue_horizon':[r0.2,r0.3,r0.4],'density_multiplier':r0.15,
@@ -52,8 +56,35 @@ const HAZE_SKY: &[u8] = br#"<?llsd/notation?>
   'distance_multiplier':r0.25,'haze_density':r0.35}}
 "#;
 
+const HIGH_TRACK_ONLY: &[u8] = br#"<?llsd/notation?>
+{'type':'daycycle','frames':{'water':{'type':'water'},'sky':{'type':'sky','sunlight_color':[r1,r0,r0]}},
+ 'tracks':[[{'key_keyframe':r0,'key_name':'water'}],[],[],[],[{'key_keyframe':r0,'key_name':'sky'}]]}
+"#;
+
+const MIXED_HAZE_CYCLE: &[u8] = br#"<?llsd/notation?>
+{'type':'daycycle','frames':{
+ 'water':{'type':'water'},
+ 'a':{'type':'sky','haze_density':r0.4,'density_multiplier':r0.4,'legacy_haze':{'haze_density':r0.4}},
+ 'b':{'type':'sky','haze_density':r0.2,'density_multiplier':r0.2,'legacy_haze':{'density_multiplier':r0.2}}},
+ 'tracks':[[{'key_keyframe':r0,'key_name':'water'}],
+  [{'key_keyframe':r0,'key_name':'a'},{'key_keyframe':r0.5,'key_name':'b'}]]}
+"#;
+
+const CLOUD_SHADOW_CYCLE: &[u8] = br#"<?llsd/notation?>
+{'type':'daycycle','frames':{
+ 'water':{'type':'water'},
+ 'a':{'type':'sky','cloud_id':u00000000-0000-0000-0000-000000000000,'cloud_shadow':r0.8},
+ 'b':{'type':'sky','cloud_id':u00000000-0000-0000-0000-000000000001,'cloud_shadow':r0.2}},
+ 'tracks':[[{'key_keyframe':r0,'key_name':'water'}],
+  [{'key_keyframe':r0,'key_name':'a'},{'key_keyframe':r0.5,'key_name':'b'}]]}
+"#;
+
 const BLUE_WATER: &[u8] = br#"<?llsd/notation?>
 {'type':'water','water_fog_density':r7,'normal_map':u00000000-0000-0000-0000-000000000000}
+"#;
+
+const NIL_BLOOM_SKY: &[u8] = br#"<?llsd/notation?>
+{'type':'sky','bloom_id':u00000000-0000-0000-0000-000000000000}
 "#;
 
 const SKY_OVERRIDE: &[u8] = br#"<?llsd/notation?>
@@ -85,6 +116,7 @@ fn sources<'a>(base: Option<&'a EnvironmentDescription>) -> Sources<'a> {
         experience_water: None,
         sky_override: None,
         water_override: None,
+        local: None,
     }
 }
 
@@ -98,6 +130,7 @@ fn evaluated(environment: &Environment, utc: f64, altitude: f64, schedule: Sched
             experience_water: None,
             sky_override: None,
             water_override: None,
+            local: None,
         },
         utc,
         altitude,
@@ -181,6 +214,14 @@ fn altitude_tracks_fallback() {
 }
 
 #[test]
+fn altitude_never_selects_higher_tracks() {
+    let day = environment(HIGH_TRACK_ONLY);
+    let result = evaluated(&day, 0.0, 0.0, Schedule { altitudes: [0.0; 3], ..Schedule::default() });
+    assert_eq!(result.sky_track, None);
+    assert_eq!(result.sky.sunlight, super::sky_defaults(0.0).sunlight);
+}
+
+#[test]
 fn source_precedence_overrides() {
     let base = environment(CYCLE);
     let day = environment(GREEN_DAY);
@@ -195,6 +236,7 @@ fn source_precedence_overrides() {
             experience_water: None,
             sky_override: None,
             water_override: None,
+            local: None,
         },
         0.0,
         0.0,
@@ -210,6 +252,7 @@ fn source_precedence_overrides() {
             experience_water: None,
             sky_override: None,
             water_override: None,
+            local: None,
         },
         0.0,
         0.0,
@@ -225,13 +268,31 @@ fn source_precedence_overrides() {
             experience_water: Some(&water),
             sky_override: None,
             water_override: None,
+            local: None,
         },
         0.0,
         0.0,
     );
     assert_eq!(explicit_water.sky.sunlight, [0.0, 1.0, 0.0]);
     assert_eq!(explicit_water.water.fog_density, 7.0);
-    assert_eq!(explicit_water.water.normal_map.current, None);
+    assert_eq!(explicit_water.water.normal_map.current, super::DEFAULT_WATER_NORMAL_MAP);
+}
+
+#[test]
+fn local_sky_overrides_experience_and_shared_sources() {
+    let region = environment(GREEN_SKY);
+    let parcel = environment(YELLOW_SKY);
+    let experience = environment(RED_SKY);
+    let local = environment(BLUE_SKY);
+    let EnvironmentSettings::Sky(local) = &local.settings else { panic!("sky setting expected") };
+    let retained_water = super::water_defaults(0.0);
+    for (source_name, base) in [("region", &region), ("parcel", &parcel)] {
+        let mut input = sources(Some(base));
+        input.experience_sky = Some(&experience);
+        input.local = Some(super::Local::Sky { sky: local, water: &retained_water });
+        let result = evaluate(&input, 0.0, 0.0);
+        assert_eq!(result.sky.sunlight, [0.0, 0.0, 1.0], "local sky takes priority over {source_name} and experience settings");
+    }
 }
 
 #[test]
@@ -250,7 +311,14 @@ fn property_overrides_are_partial() {
     assert_eq!(result.sky.star_brightness, 250.0);
     assert_eq!(result.sky.moon.texture.current, None);
     assert_eq!(result.water.fog_density, 7.0);
-    assert_eq!(result.water.normal_map.current, None);
+    assert_eq!(result.water.normal_map.current, super::DEFAULT_WATER_NORMAL_MAP);
+}
+
+#[test]
+fn nil_bloom_uses_default_texture() {
+    let sky = environment(NIL_BLOOM_SKY);
+    let result = evaluated(&sky, 0.0, 0.0, Schedule::default());
+    assert_eq!(result.sky.bloom.current, super::DEFAULT_BLOOM_TEXTURE);
 }
 
 #[test]
@@ -258,7 +326,7 @@ fn defaults_match_viewer() {
     let result = evaluate(&sources(None), 0.0, 0.0);
     assert_eq!(result.sky.clouds.color, [0.4099, 0.4099, 0.4099]);
     assert_eq!(result.sky.sun.texture.current, None);
-    assert_eq!(result.sky.moon.texture.current, Some(AssetId::new(Uuid::from_u128(0xd07f6eedb96a47cdb51d400ad4a1c428))));
+    assert_eq!(result.sky.moon.texture.current, super::DEFAULT_MOON_TEXTURE);
     assert_eq!(result.water.fog_density, 2.0);
     assert_eq!(result.water.normal_scale, [1.75; 3]);
     assert_eq!(result.sky.haze.ambient, [0.25; 3]);
@@ -266,7 +334,7 @@ fn defaults_match_viewer() {
 }
 
 #[test]
-fn haze_fields_prefer_legacy_then_top_level_then_default() {
+fn haze_provenance_precedence() {
     let sky = environment(HAZE_SKY);
     let result = evaluated(&sky, 0.0, 0.0, Schedule::default());
     assert_eq!(result.sky.haze.ambient, [0.8, 0.7, 0.6]);
@@ -276,6 +344,21 @@ fn haze_fields_prefer_legacy_then_top_level_then_default() {
     close(result.sky.haze.distance_multiplier, 0.25);
     close(result.sky.haze.density, 0.35);
     close(result.sky.haze.horizon, 0.19);
+}
+
+#[test]
+fn haze_blending_uses_each_field_provenance() {
+    let day = environment(MIXED_HAZE_CYCLE);
+    let result = evaluated(&day, 3_600.0, 0.0, Schedule { day_offset: 0.0, ..Schedule::default() });
+    close(result.sky.haze.density, 0.55);
+    close(result.sky.haze.density_multiplier, 0.10005);
+}
+
+#[test]
+fn cloud_shadow_matches_missing_texture_blend() {
+    let day = environment(CLOUD_SHADOW_CYCLE);
+    let result = evaluated(&day, 3_600.0, 0.0, Schedule { day_offset: 0.0, ..Schedule::default() });
+    close(result.sky.clouds.shadow, 0.3);
 }
 
 #[test]
@@ -334,6 +417,19 @@ fn transition_progresses_and_paces() {
 }
 
 #[test]
+fn unrepresentable_transition_completes_immediately() {
+    let red = environment(RED_SKY);
+    let blue = environment(BLUE_SKY);
+    let now = Instant::now();
+    let mut transition = Transition::default();
+    transition.update(1, evaluated(&red, 0.0, 0.0, Schedule::default()), Duration::ZERO, now);
+    let (output, deadline) =
+        transition.update(2, evaluated(&blue, 0.0, 0.0, Schedule::default()), Duration::MAX, now + Duration::from_millis(1));
+    assert_eq!(output.sky.sunlight, [0.0, 0.0, 1.0]);
+    assert_eq!(deadline, None);
+}
+
+#[test]
 fn identity_change_restarts_from_output() {
     let red = environment(RED_SKY);
     let green = environment(GREEN_SKY);
@@ -352,12 +448,12 @@ fn identity_change_restarts_from_output() {
 }
 
 #[test]
-fn cycle_uses_coarse_redraw() {
+fn cycle_redraw_is_bounded() {
     let day = environment(CYCLE);
     let now = Instant::now();
     let mut transition = Transition::default();
     let (_, next) = transition.update(1, evaluated(&day, 0.0, 0.0, Schedule::default()), Duration::ZERO, now);
-    assert_eq!(next, now.checked_add(Duration::from_secs(60)));
+    assert_eq!(next, now.checked_add(Duration::from_secs(1)));
 }
 
 #[test]
@@ -381,4 +477,26 @@ fn altitude_change_uses_viewer_duration() {
     assert_eq!(middle.sky_track, Some(4));
     assert_eq!(middle.sky.sunlight, [0.5, 0.0, 0.5]);
     assert_eq!(next, Some(now + Duration::from_millis(2516)));
+}
+
+#[test]
+fn fallback_haze_preserves_legacy_density() {
+    let start = default_haze();
+    let mut end = start.clone();
+    end.density = 0.4;
+    end.provenance.density = false;
+    let blended = blend_haze(&start, &end, 0.5);
+    assert_eq!(blended.density, 0.7);
+}
+
+#[test]
+fn aggregate_haze_prioritizes_ambient() {
+    let mut start = default_haze();
+    start.provenance = HazeProvenance::default();
+    start.ambient = [0.8; 3];
+    let mut end = start.clone();
+    end.provenance.density = true;
+    end.ambient = [0.4; 3];
+    let blended = blend_haze(&start, &end, 0.5);
+    assert_eq!(blended.ambient, [0.325; 3]);
 }

@@ -576,7 +576,7 @@ impl GeometryRenderer {
                 appearance,
                 scale,
                 invert_normals: flags.invert,
-                shading: ShadingMode::Studio,
+                shading: ShadingMode::Surface,
                 terrain: None,
                 terrain_textures: None,
             },
@@ -596,7 +596,7 @@ impl GeometryRenderer {
             replacement: None,
             transform: instance_base(transform.pose.position, transform.pose.rotation, scale, flags.invert, self.cache.origin),
             pickable: true,
-            shading: ShadingMode::Studio,
+            shading: ShadingMode::Surface,
             terrain_textures: None,
             terrain_composition: None,
             surface_kind: None,
@@ -612,7 +612,7 @@ impl GeometryRenderer {
         let PreparedMesh::Ready(mesh) = &surface.mesh else { return None };
         let id = surface_item_id(surface.region, surface.kind);
         let (scale, rotation, pickable, shading) = match surface.kind {
-            SurfaceKind::Water => (Vec3::ONE, Quat::IDENTITY, false, ShadingMode::Water),
+            SurfaceKind::RegionWater => (Vec3::ONE, Quat::IDENTITY, false, ShadingMode::RegionWater),
             SurfaceKind::Terrain(_) => (Vec3::ONE, Quat::IDENTITY, true, ShadingMode::Terrain),
         };
         let terrain_textures = (shading == ShadingMode::Terrain)
@@ -873,7 +873,7 @@ fn animated_face_indices(object: &Object, faces: &[CachedFace]) -> Vec<usize> {
 
 fn surface_item_id(region: Region, kind: SurfaceKind) -> ItemId {
     match kind {
-        SurfaceKind::Water => (0, u128::from(region.get()), 0),
+        SurfaceKind::RegionWater => (0, u128::from(region.get()), 0),
         SurfaceKind::Terrain(patch) => {
             let (x, y) = patch.coordinates();
             (1, u128::from(region.get()), u16::from(y) * 16 + u16::from(x))

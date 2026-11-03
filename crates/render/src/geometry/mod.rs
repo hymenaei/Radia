@@ -17,8 +17,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assets::TextureId;
-use math::motion::RegionBounds;
+use assets::{TextureHandle, TextureId};
+use math::{Vec4, motion::RegionBounds};
 use uuid::Uuid;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, Device, Extent3d, Queue, RenderPass, Texture, TextureDescriptor, TextureDimension,
@@ -32,10 +32,10 @@ use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
 use self::items::ItemIndex;
 use self::mesh::GpuMesh;
 use self::storage::Storage;
-use crate::scene::{AgentPose, Camera, MeshId, ViewVersion};
+use crate::scene::{AgentPose, Camera, MAX_REGIONS, MeshId, ViewVersion};
 use crate::{
-    pipeline::{SurfacePipelines, Water},
-    texture::{TextureCompletion, TextureJob, TextureState, Textures},
+    pipeline::{Sky, SurfacePipelines, VoidWater},
+    texture::{GeometryTextureState, TextureCompletion, TextureJob, TextureState, Textures},
 };
 
 pub use pick::PickError;
@@ -147,9 +147,9 @@ impl Drop for FrameLease {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ShadingMode {
-    Studio,
+    Surface,
     Terrain,
-    Water,
+    RegionWater,
 }
 
 struct Depth {
@@ -165,28 +165,29 @@ struct FramePreparationKey {
     camera: Camera,
     agent_pose: Option<AgentPose>,
     size: [u32; 2],
-    water_height: Option<f64>,
 }
 
 struct FramePreparation {
     key: FramePreparationKey,
     textures: TextureState,
+    geometry_textures: GeometryTextureState,
     meshes: MeshState,
     more_meshes: bool,
     animation_deadline: Option<Instant>,
 }
 
 impl FramePreparation {
-    fn needs_frame(&self, textures: TextureState, meshes: MeshState, now: Instant) -> bool {
+    fn needs_frame(&self, textures: TextureState, geometry_textures: GeometryTextureState, meshes: MeshState, now: Instant) -> bool {
         self.animation_deadline.is_some_and(|deadline| deadline <= now)
             || self.more_meshes
             || self.textures != textures
+            || self.geometry_textures != geometry_textures
             || self.meshes != meshes
     }
 
-    fn reusable(&self, key: &FramePreparationKey, textures: TextureState, meshes: MeshState, now: Instant) -> bool {
+    fn reusable(&self, key: &FramePreparationKey, geometry_textures: GeometryTextureState, meshes: MeshState, now: Instant) -> bool {
         self.key == *key
-            && self.textures == textures
+            && self.geometry_textures == geometry_textures
             && self.meshes == meshes
             && !self.more_meshes
             && self.animation_deadline.is_none_or(|deadline| deadline > now)
@@ -206,9 +207,15 @@ pub(crate) struct GeometryRenderer {
     queue: Queue,
     memory: Arc<Accounting>,
     pipelines: SurfacePipelines,
-    water: Water,
+    void_water: VoidWater,
+    sky: Sky,
     textures: Textures,
     requested_textures: HashSet<TextureId>,
+    visible_textures: HashSet<TextureId>,
+    visible_texture_requests: Vec<TextureHandle>,
+    region_water_bounds: [Vec4; MAX_REGIONS],
+    region_water_ids: [u128; MAX_REGIONS],
+    region_water_count: usize,
     instances: Buffer,
     indirect: Buffer,
     indirect_first_instance: bool,
@@ -242,18 +249,25 @@ impl GeometryRenderer {
     }
 
     pub(crate) fn needs_frame(&self, now: Instant) -> bool {
-        self.prepared.as_ref().is_some_and(|prepared| prepared.needs_frame(self.textures.state(), self.memory.mesh_state(), now))
-            || self.motion_redraw
+        self.prepared.as_ref().is_some_and(|prepared| {
+            prepared.needs_frame(self.textures.state(), self.textures.geometry_state(), self.memory.mesh_state(), now)
+        }) || self.motion_redraw
             || self.textures.uploading()
     }
 
     pub(crate) fn animation_deadline(&self) -> Option<Instant> {
         self.prepared.as_ref().and_then(|prepared| prepared.animation_deadline)
     }
+
+    pub(crate) fn texture_revision(&self) -> u64 {
+        self.textures.state().revision
+    }
     pub(crate) fn new(device: &Device, queue: &Queue, format: TextureFormat) -> Self {
         static MEMORY: OnceLock<Arc<Accounting>> = OnceLock::new();
         let textures = Textures::new(device, queue);
-        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout);
+        let pipelines = SurfacePipelines::new(device, format, &textures.layout, &textures.terrain_layout, &textures);
+        let void_water = VoidWater::new(device, format, &textures);
+        let sky = Sky::new(device, format, &textures);
         let indirect_bytes = MAX_FACE_INSTANCES * INDIRECT_DRAW_BYTES;
         Self {
             queue: queue.clone(),
@@ -261,7 +275,13 @@ impl GeometryRenderer {
             pipelines,
             textures,
             requested_textures: HashSet::new(),
-            water: Water::new(device, format),
+            visible_textures: HashSet::new(),
+            visible_texture_requests: Vec::new(),
+            region_water_bounds: [Vec4::ZERO; MAX_REGIONS],
+            region_water_ids: [0; MAX_REGIONS],
+            region_water_count: 0,
+            void_water,
+            sky,
             instances: buffer(device, "Face instances", INSTANCE_BUFFER_BYTES, BufferUsages::VERTEX),
             indirect: buffer(device, "Scene indexed draws", indirect_bytes, BufferUsages::INDIRECT),
             indirect_first_instance: device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
@@ -310,7 +330,7 @@ impl GeometryRenderer {
                 sample_count: 1,
                 dimension: TextureDimension::D2,
                 format: TextureFormat::Depth32Float,
-                usage: TextureUsages::RENDER_ATTACHMENT,
+                usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             let view = texture.create_view(&TextureViewDescriptor::default());
@@ -351,6 +371,8 @@ impl GeometryRenderer {
             }
         }
         self.draw_list.clear();
+        self.visible_textures.clear();
+        self.visible_texture_requests.clear();
         self.stats.instances = 0;
         self.stats.draw_calls = 0;
         self.stats.draw_commands = 0;
@@ -385,7 +407,8 @@ impl GeometryRenderer {
         self.textures.set_soft_cap(mib);
     }
     pub(crate) fn draw(&self, pass: &mut RenderPass<'_>) {
-        self.water.draw(pass);
+        self.sky.draw(pass);
+        self.void_water.draw(pass);
         let mut pipeline = None;
         let mut texture = None;
         let mut terrain = None;
@@ -482,3 +505,9 @@ mod tests {
         assert_eq!(memory.depth.load(Ordering::Acquire), 0);
     }
 }
+
+#[cfg(test)]
+mod water_distance_tests;
+
+#[cfg(test)]
+mod surface_pipeline_tests;

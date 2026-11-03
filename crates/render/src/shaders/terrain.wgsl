@@ -27,7 +27,7 @@ struct TerrainOutput {
     return out;
 }
 
-@fragment fn terrain_fragment(v: TerrainOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+@fragment fn terrain_fragment(v: TerrainOutput, @builtin(front_facing) front: bool) -> Surface {
     let c0 = textureSample(detail_0, detail_sampler, v.uv);
     let c1 = textureSample(detail_1, detail_sampler, v.uv);
     let c2 = textureSample(detail_2, detail_sampler, v.uv);
@@ -36,5 +36,23 @@ struct TerrainOutput {
     let alpha2 = textureSample(alpha_ramp, alpha_sampler, vec2<f32>(v.composition - 2.0, 0.0)).r;
     let alpha_final = textureSample(alpha_ramp, alpha_sampler, vec2<f32>(v.composition - 1.0, 0.0)).r;
     let albedo = mix(mix(c3, c2, alpha2), mix(c1, c0, alpha1), alpha_final);
-    return vec4<f32>(shade_surface(v.position_view, v.normal, albedo.rgb, v.params.x, front), 1.0);
+    var normal_eye = safe_normalize(v.normal);
+    if !front {
+        normal_eye = -normal_eye;
+    }
+    let light_direction_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_direction.xyz, 0.0)).xyz;
+    let light_norm_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_norm.xyz, 0.0)).xyz;
+    let color = shade_surface(
+        albedo.rgb,
+        v.position_view,
+        normal_eye,
+        light_direction_eye,
+        light_norm_eye,
+        v.params.x == 1.0,
+        surface_atmosphere.atmosphere,
+    );
+    var output: Surface;
+    output.color = vec4<f32>(color, 1.0);
+    output.depth = max(v.position.z, 0.00000001);
+    return output;
 }

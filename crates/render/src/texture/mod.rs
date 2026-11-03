@@ -35,6 +35,30 @@ const MAX_JOBS: usize = 2;
 const FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(10);
 const TERRAIN_ALPHA_RAMP_WIDTH: u32 = 256;
 pub(crate) const TERRAIN_ALPHA_RAMP: &[u8; 256] = include_bytes!("../terrain_alpha_ramp.r8");
+const RGBA8_VIEW_FORMATS: [TextureFormat; 1] = [TextureFormat::Rgba8Unorm];
+const BC1_VIEW_FORMATS: [TextureFormat; 1] = [TextureFormat::Bc1RgbaUnorm];
+const BC3_VIEW_FORMATS: [TextureFormat; 1] = [TextureFormat::Bc3RgbaUnorm];
+const BC7_VIEW_FORMATS: [TextureFormat; 1] = [TextureFormat::Bc7RgbaUnorm];
+
+fn raw_channel_view_format(format: TextureFormat) -> TextureFormat {
+    match format {
+        TextureFormat::Rgba8UnormSrgb => TextureFormat::Rgba8Unorm,
+        TextureFormat::Bc1RgbaUnormSrgb => TextureFormat::Bc1RgbaUnorm,
+        TextureFormat::Bc3RgbaUnormSrgb => TextureFormat::Bc3RgbaUnorm,
+        TextureFormat::Bc7RgbaUnormSrgb => TextureFormat::Bc7RgbaUnorm,
+        format => format,
+    }
+}
+
+fn raw_channel_view_formats(format: TextureFormat) -> &'static [TextureFormat] {
+    match format {
+        TextureFormat::Rgba8UnormSrgb => &RGBA8_VIEW_FORMATS,
+        TextureFormat::Bc1RgbaUnormSrgb => &BC1_VIEW_FORMATS,
+        TextureFormat::Bc3RgbaUnormSrgb => &BC3_VIEW_FORMATS,
+        TextureFormat::Bc7RgbaUnormSrgb => &BC7_VIEW_FORMATS,
+        _ => &[],
+    }
+}
 
 #[derive(Default)]
 struct Accounting {
@@ -212,6 +236,7 @@ struct TerrainBinding {
 struct GpuTexture {
     texture: Texture,
     view: TextureView,
+    raw_view: TextureView,
     bindings: HashMap<Sampler, BindGroup>,
     charge: GpuCharge,
 }
@@ -236,6 +261,7 @@ struct TextureEntry {
     revision: u64,
     state_revision: u64,
     evicted: bool,
+    geometry: bool,
     state: TextureUploadState,
     fallback: Option<GpuTexture>,
 }
@@ -249,8 +275,25 @@ pub(crate) struct TextureState {
     pub(crate) cap: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TextureViewState {
+    revision: u64,
+    ready: bool,
+    fallback: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GeometryTextureState(pub(crate) u64);
+
+#[derive(Clone, Copy)]
+pub(crate) enum TextureUsage {
+    Environment,
+    Geometry,
+}
+
 pub(crate) struct Textures {
     revision: u64,
+    geometry_revision: u64,
     queue: Queue,
     memory: Arc<Accounting>,
     conversion_failures: u64,
@@ -269,7 +312,6 @@ pub(crate) struct Textures {
     pixels: Vec<UploadPixels>,
     pub(crate) layout: BindGroupLayout,
     pub(crate) terrain_layout: BindGroupLayout,
-    fallback: BindGroup,
     terrain_fallback: TextureView,
     terrain_sampler: wgpu::Sampler,
     _terrain_alpha_ramp: Texture,
@@ -277,6 +319,12 @@ pub(crate) struct Textures {
     terrain_alpha_ramp_sampler: wgpu::Sampler,
     terrain_bindings: HashMap<Region, TerrainBinding>,
     changed_ids: HashSet<TextureId>,
+    pub(crate) pair_layout: BindGroupLayout,
+    pub(crate) default_sampler: wgpu::Sampler,
+    pub(crate) water_sampler: wgpu::Sampler,
+    fallback: BindGroup,
+    fallback_view: TextureView,
+    fallback_raw_view: TextureView,
     mip_layout: BindGroupLayout,
     mip_pipeline: RenderPipeline,
     pub(crate) uploaded: usize,
@@ -345,6 +393,48 @@ impl Textures {
         });
         let terrain_layout = device
             .create_bind_group_layout(&BindGroupLayoutDescriptor { label: Some("Terrain detail textures"), entries: &terrain_entries });
+        let pair_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Texture pair"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let default_sampler = make_sampler(device, Sampler::default());
+        let water_sampler = device.create_sampler(&SamplerDescriptor {
+            address_mode_u: AddressMode::Repeat,
+            address_mode_v: AddressMode::Repeat,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: MipmapFilterMode::Linear,
+            lod_max_clamp: 32.0,
+            anisotropy_clamp: 16,
+            ..Default::default()
+        });
         let texture = device.create_texture(&TextureDescriptor {
             label: Some("Neutral image"),
             size: Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -353,7 +443,7 @@ impl Textures {
             dimension: TextureDimension::D2,
             format: TextureFormat::Rgba8UnormSrgb,
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-            view_formats: &[],
+            view_formats: raw_channel_view_formats(TextureFormat::Rgba8UnormSrgb),
         });
         queue.write_texture(
             texture.as_image_copy(),
@@ -361,7 +451,6 @@ impl Textures {
             TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
             Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
-        let fallback = binding(device, &layout, &texture.create_view(&TextureViewDescriptor::default()), Sampler::default());
         let neutral = device.create_texture(&TextureDescriptor {
             label: Some("Neutral terrain detail"),
             size: Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -412,6 +501,12 @@ impl Textures {
             mipmap_filter: MipmapFilterMode::Nearest,
             ..Default::default()
         });
+        let fallback_view = texture.create_view(&TextureViewDescriptor::default());
+        let fallback_raw_view = texture.create_view(&TextureViewDescriptor {
+            format: Some(raw_channel_view_format(TextureFormat::Rgba8UnormSrgb)),
+            ..Default::default()
+        });
+        let fallback = binding_with_sampler(device, &layout, &fallback_view, &default_sampler);
         let mip_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Mipmap source"),
             entries: &[BindGroupLayoutEntry {
@@ -426,7 +521,7 @@ impl Textures {
             }],
         });
         let shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Color mipmaps"),
+            label: Some("Raw channel mipmaps"),
             source: ShaderSource::Wgsl(include_str!("../shaders/mipmap.wgsl").into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -445,13 +540,14 @@ impl Textures {
                 module: &shader,
                 entry_point: Some("fragment"),
                 compilation_options: Default::default(),
-                targets: &[Some(ColorTargetState { format: TextureFormat::Rgba8UnormSrgb, blend: None, write_mask: ColorWrites::ALL })],
+                targets: &[Some(ColorTargetState { format: TextureFormat::Rgba8Unorm, blend: None, write_mask: ColorWrites::ALL })],
             }),
             multiview_mask: None,
             cache: None,
         });
         Self {
             revision: 0,
+            geometry_revision: 0,
             queue: queue.clone(),
             memory: MEMORY.get_or_init(|| Arc::new(Accounting::default())).clone(),
             conversion_failures: 0,
@@ -470,7 +566,6 @@ impl Textures {
             pixels: Vec::new(),
             layout,
             terrain_layout,
-            fallback,
             terrain_fallback,
             terrain_sampler,
             _terrain_alpha_ramp: terrain_alpha_ramp,
@@ -478,6 +573,12 @@ impl Textures {
             terrain_alpha_ramp_sampler,
             terrain_bindings: HashMap::new(),
             changed_ids: HashSet::new(),
+            pair_layout,
+            default_sampler,
+            water_sampler,
+            fallback,
+            fallback_view,
+            fallback_raw_view,
             mip_layout,
             mip_pipeline,
             uploaded: 0,
@@ -485,6 +586,20 @@ impl Textures {
     }
 
     pub(crate) fn request(&mut self, texture: &TextureHandle, epoch: u64, priority: Priority) {
+        self.request_with_usage(texture, epoch, priority, TextureUsage::Geometry);
+    }
+
+    pub(crate) fn request_environment(&mut self, texture: &TextureHandle, epoch: u64) {
+        self.request_with_usage(texture, epoch, Priority::Visible, TextureUsage::Environment);
+    }
+
+    pub(crate) fn touch(&mut self, id: TextureId, epoch: u64) {
+        if let Some(entry) = self.entries.get_mut(&id) {
+            entry.used = epoch;
+        }
+    }
+
+    fn request_with_usage(&mut self, texture: &TextureHandle, epoch: u64, priority: Priority, usage: TextureUsage) {
         let Some(info) = texture.info() else { return };
         let events = texture.events();
         if !self.events.iter().any(|registered| registered.same_source(&events)) {
@@ -497,13 +612,19 @@ impl Textures {
             revision: info.revision,
             state_revision: 0,
             evicted: false,
+            geometry: false,
             state: TextureUploadState::Dormant,
             fallback: None,
         });
+        let geometry_added = matches!(usage, TextureUsage::Geometry) && !entry.geometry;
+        entry.geometry |= matches!(usage, TextureUsage::Geometry);
         if priority == Priority::Visible {
             entry.used = epoch;
         }
         if entry.revision == info.revision && !matches!(entry.state, TextureUploadState::Dormant) {
+            if geometry_added {
+                self.changed(id);
+            }
             return;
         }
         if entry.evicted && priority == Priority::Background {
@@ -734,6 +855,64 @@ impl Textures {
         .unwrap_or(&self.fallback)
     }
 
+    pub(crate) fn view(&self, key: Option<TextureKey>) -> &TextureView {
+        key.and_then(|key| {
+            let entry = self.entries.get(&key.id)?;
+            let gpu = match &entry.state {
+                TextureUploadState::Ready(gpu) => gpu,
+                _ => entry.fallback.as_ref()?,
+            };
+            Some(&gpu.view)
+        })
+        .unwrap_or(&self.fallback_view)
+    }
+
+    pub(crate) fn raw_view(&self, key: Option<TextureKey>) -> &TextureView {
+        key.and_then(|key| {
+            let entry = self.entries.get(&key.id)?;
+            let gpu = match &entry.state {
+                TextureUploadState::Ready(gpu) => gpu,
+                _ => entry.fallback.as_ref()?,
+            };
+            Some(&gpu.raw_view)
+        })
+        .unwrap_or(&self.fallback_raw_view)
+    }
+
+    pub(crate) fn view_state(&self, key: Option<TextureKey>) -> Option<TextureViewState> {
+        let key = key?;
+        Some(self.entries.get(&key.id).map_or(TextureViewState::default(), |entry| TextureViewState {
+            revision: entry.revision,
+            ready: matches!(&entry.state, TextureUploadState::Ready(_)),
+            fallback: entry.fallback.is_some(),
+        }))
+    }
+
+    pub(crate) fn water_pair_binding(&self, device: &Device, first: Option<TextureKey>, second: Option<TextureKey>) -> BindGroup {
+        self.pair_binding_with_sampler(device, first, second, &self.water_sampler, true)
+    }
+
+    fn pair_binding_with_sampler(
+        &self,
+        device: &Device,
+        first: Option<TextureKey>,
+        second: Option<TextureKey>,
+        sampler: &wgpu::Sampler,
+        raw_channels: bool,
+    ) -> BindGroup {
+        let first_view = if raw_channels { self.raw_view(first) } else { self.view(first) };
+        let second_view = if raw_channels { self.raw_view(second) } else { self.view(second) };
+        device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Texture pair"),
+            layout: &self.pair_layout,
+            entries: &[
+                BindGroupEntry { binding: 0, resource: BindingResource::TextureView(first_view) },
+                BindGroupEntry { binding: 1, resource: BindingResource::TextureView(second_view) },
+                BindGroupEntry { binding: 2, resource: BindingResource::Sampler(sampler) },
+            ],
+        })
+    }
+
     pub(crate) fn failure(&self) -> Option<Failure> {
         self.entries.values().find_map(|entry| match entry.state {
             TextureUploadState::Failed(failure) => Some(failure),
@@ -754,6 +933,13 @@ impl Textures {
             entry.state_revision = entry.state_revision.checked_add(1).expect("texture entry state space exhausted");
         }
         self.changed_ids.insert(id);
+        if self.entries.get(&id).is_some_and(|entry| entry.geometry) {
+            self.geometry_revision = self.geometry_revision.checked_add(1).expect("geometry texture state space exhausted");
+        }
+    }
+
+    pub(crate) fn geometry_state(&self) -> GeometryTextureState {
+        GeometryTextureState(self.geometry_revision)
     }
     pub(crate) fn state(&self) -> TextureState {
         TextureState {
@@ -863,6 +1049,22 @@ fn allocation_bytes(descriptor: &TextureDescriptor<'_>) -> Option<usize> {
 }
 
 fn binding(device: &Device, layout: &BindGroupLayout, view: &TextureView, settings: Sampler) -> BindGroup {
+    let sampler = make_sampler(device, settings);
+    binding_with_sampler(device, layout, view, &sampler)
+}
+
+fn binding_with_sampler(device: &Device, layout: &BindGroupLayout, view: &TextureView, sampler: &wgpu::Sampler) -> BindGroup {
+    device.create_bind_group(&BindGroupDescriptor {
+        label: Some("Scene image"),
+        layout,
+        entries: &[
+            BindGroupEntry { binding: 0, resource: BindingResource::TextureView(view) },
+            BindGroupEntry { binding: 1, resource: BindingResource::Sampler(sampler) },
+        ],
+    })
+}
+
+fn make_sampler(device: &Device, settings: Sampler) -> wgpu::Sampler {
     let address = |wrap| match wrap {
         Wrap::ClampToEdge => AddressMode::ClampToEdge,
         Wrap::MirroredRepeat => AddressMode::MirrorRepeat,
@@ -876,7 +1078,7 @@ fn binding(device: &Device, layout: &BindGroupLayout, view: &TextureView, settin
         Some(MinFilter::NearestMipmapLinear) => (FilterMode::Nearest, FilterMode::Linear, true),
         Some(MinFilter::LinearMipmapLinear) | None => (FilterMode::Linear, FilterMode::Linear, true),
     };
-    let sampler = device.create_sampler(&SamplerDescriptor {
+    device.create_sampler(&SamplerDescriptor {
         address_mode_u: address(settings.wrap_s),
         address_mode_v: address(settings.wrap_t),
         mag_filter: if settings.mag_filter == Some(Filter::Nearest) { FilterMode::Nearest } else { FilterMode::Linear },
@@ -884,14 +1086,6 @@ fn binding(device: &Device, layout: &BindGroupLayout, view: &TextureView, settin
         mipmap_filter: if mipmap_filter == FilterMode::Nearest { MipmapFilterMode::Nearest } else { MipmapFilterMode::Linear },
         lod_max_clamp: if mipmaps { 32.0 } else { 0.0 },
         ..Default::default()
-    });
-    device.create_bind_group(&BindGroupDescriptor {
-        label: Some("Scene image"),
-        layout,
-        entries: &[
-            BindGroupEntry { binding: 0, resource: BindingResource::TextureView(view) },
-            BindGroupEntry { binding: 1, resource: BindingResource::Sampler(&sampler) },
-        ],
     })
 }
 
@@ -957,6 +1151,18 @@ mod tests {
         assert_eq!(allocation_bytes(&array), Some(1020));
         array.sample_count = 4;
         assert_eq!(allocation_bytes(&array), Some(4080));
+    }
+
+    #[test]
+    fn normal_maps_use_raw_channel_views() {
+        for (srgb, raw) in [
+            (TextureFormat::Rgba8UnormSrgb, TextureFormat::Rgba8Unorm),
+            (TextureFormat::Bc1RgbaUnormSrgb, TextureFormat::Bc1RgbaUnorm),
+            (TextureFormat::Bc3RgbaUnormSrgb, TextureFormat::Bc3RgbaUnorm),
+            (TextureFormat::Bc7RgbaUnormSrgb, TextureFormat::Bc7RgbaUnorm),
+        ] {
+            assert_eq!(raw_channel_view_format(srgb), raw);
+        }
     }
 
     #[test]

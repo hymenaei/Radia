@@ -8,8 +8,9 @@ pub(super) use assets::{FetchResponse, Priority, Request, mesh::Mesh};
 pub(super) use math::{DVec3, Quat, Vec3};
 pub(super) use proptest::prelude::{ProptestConfig, prop, prop_assert_eq, proptest};
 pub(super) use render::scene::{
-    AssetChange, AssetRequest, AssetTicket, Budget, Camera, Detail, DrawnMeshKey, EnvironmentProperty, EnvironmentPush, MeshJob, Placement,
-    PreparedMesh, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, RecoveryReason, SceneView, Status, SurfaceKind,
+    AssetChange, AssetRequest, AssetTicket, Budget, Camera, Detail, DrawnMeshKey, EnvironmentChoice, EnvironmentProperty, EnvironmentPush,
+    LocalChoice, MeshJob, Placement, PreparedMesh, ReadFailure, ReadJob, ReadQuery, ReadReply, ReconcileStep, Reconciler, RecoveryReason,
+    SceneView, Status, SurfaceKind,
 };
 pub(super) use utils::{AssetId, ExperienceId};
 pub(super) use uuid::Uuid;
@@ -98,7 +99,12 @@ pub(super) fn settle(scene: &mut Reconciler, view: &mut SceneView, world: &World
 
 pub(super) fn settle_work(scene: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> (usize, usize) {
     let work = settle_materials(scene, view, world, now);
-    assert!(work.requested.is_empty(), "geometry fixture unexpectedly requested assets");
+    assert!(
+        work.requested.iter().all(|request| {
+            request.priority == Priority::Background && matches!(&request.request, Request::Texture { size, .. } if size.edge() == 128)
+        }),
+        "geometry fixture unexpectedly requested non-baseline assets"
+    );
     (work.reads, work.builds)
 }
 
@@ -109,6 +115,7 @@ pub(super) struct AssetWork {
     pub(super) requested: Vec<AssetRequest>,
     pub(super) released: Vec<AssetTicket>,
     pub(super) importance_updates: Vec<(AssetTicket, u16)>,
+    pub(super) priority_updates: Vec<(AssetTicket, Priority)>,
 }
 
 pub(super) fn settle_materials(scene: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> AssetWork {
@@ -120,6 +127,7 @@ pub(super) fn settle_materials(scene: &mut Reconciler, view: &mut SceneView, wor
             ReconcileStep::Asset(AssetChange::UpdateImportance { ticket, importance }) => {
                 work.importance_updates.push((ticket, importance))
             }
+            ReconcileStep::Asset(AssetChange::UpdatePriority { ticket, priority }) => work.priority_updates.push((ticket, priority)),
             ReconcileStep::Read(job) => {
                 work.reads += 1;
                 let result = reply(world, &job);

@@ -1760,6 +1760,20 @@ fn waiting_data_cancels_cleanly() {
 }
 
 #[test]
+fn demand_priority_updates_in_place() {
+    let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(Budget::default());
+    let request = Request::new(Resource { id: resource(901).id, kind: Kind::PbrMaterial });
+    let demand = store.request(route, request, Priority::Background, now).unwrap();
+    let input = next_fetch(&mut store, now).complete(Ok(Vec::with_capacity(1024))).expect("small response remains queued");
+    assert_eq!(store.priority(&input), Priority::Background);
+    demand.update_priority(Priority::Visible);
+    assert_eq!(store.priority(&input), Priority::Visible);
+    demand.update_priority(Priority::Background);
+    assert_eq!(store.priority(&input), Priority::Background);
+    assert!(!input.is_cancelled());
+}
+
+#[test]
 fn dropped_jobs_wake_sessions() {
     let budget = Budget::default();
     let StoreHarness { now, mut store, route, .. } = StoreHarness::with_budget(budget.clone());

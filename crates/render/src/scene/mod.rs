@@ -3,6 +3,7 @@ mod budget;
 mod camera;
 mod dependencies;
 mod environment;
+mod environment_textures;
 mod mesh;
 mod mesh_cache;
 mod model;
@@ -22,8 +23,10 @@ pub use asset_demand::{AssetChange, AssetRequest, AssetTicket};
 pub use budget::{Budget, MEMORY_BYTES};
 pub use camera::{Camera, CameraError};
 pub use environment::{
-    EnvironmentProperty, EnvironmentPush, EnvironmentPushError, ExperienceProperty, ExperienceSetting, ViewerEnvironment,
+    EnvironmentChoice, EnvironmentPreset, EnvironmentProperty, EnvironmentPush, EnvironmentPushError, ExperienceProperty,
+    ExperienceSetting, LocalChoice, LocalEnvironment, ViewerEnvironment,
 };
+pub(crate) use environment::{PropertyChange, PropertyKind, PropertyValue};
 pub use mesh::{Detail, DrawnMeshKey, MeshBuildError, MeshId, SharedMesh};
 pub use mesh_cache::SculptMeshKey;
 pub use mesh_cache::{MeshKey, PreparedMesh};

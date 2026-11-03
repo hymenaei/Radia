@@ -6,6 +6,8 @@ use std::{
     time::Instant,
 };
 
+use assets::TextureHandle;
+use utils::AssetId;
 use world::{Entity, Region, WorldRevision};
 
 use super::{Batch, Change, MeshChange, Mirror, SceneLifetime, Status};
@@ -42,7 +44,11 @@ impl SceneChanges {
                 Change::Retire(region) => changes.retired.push(*region),
                 Change::Surface(surface) => changes.surfaces.push((surface.region, surface.kind)),
                 Change::RemoveSurface(region, kind) => changes.surfaces.push((*region, *kind)),
-                Change::ViewerEnvironment(_) | Change::Environment(..) | Change::Water(..) | Change::Patch(..) => {}
+                Change::ViewerEnvironment(_)
+                | Change::Environment(..)
+                | Change::EnvironmentTexture(..)
+                | Change::Water(..)
+                | Change::Patch(..) => {}
             }
         }
         changes
@@ -93,6 +99,7 @@ impl Eq for ViewVersion {}
 pub struct SceneView {
     session: SceneLifetime,
     sequence: u64,
+    geometry_sequence: u64,
     revision: Option<WorldRevision>,
     status: Status,
     mirror: Mirror,
@@ -112,6 +119,7 @@ impl SceneView {
         Self {
             session,
             sequence: 0,
+            geometry_sequence: 0,
             revision: None,
             status: Status::Loading,
             mirror: Mirror::default(),
@@ -130,6 +138,7 @@ impl SceneView {
         if self.sequence.checked_add(1) != Some(batch.sequence) {
             return Err(ApplyError::OutOfOrder);
         }
+        let geometry_changed = batch.replace || batch.changes.iter().any(change_affects_geometry);
         let mut changes = SceneChanges::from_batch(&batch);
         if !batch.replace {
             for change in &batch.changes {
@@ -154,6 +163,9 @@ impl SceneView {
             self.mirror.apply_at(change, now);
         }
         self.sequence = batch.sequence;
+        if geometry_changed {
+            self.geometry_sequence = self.geometry_sequence.checked_add(1).expect("scene geometry version space exhausted");
+        }
         if batch.replace {
             self.replacement_sequence = Some(self.sequence);
         }
@@ -175,6 +187,9 @@ impl SceneView {
     }
     pub fn version(&self) -> ViewVersion {
         ViewVersion { session: self.session.clone(), sequence: self.sequence, status: self.status() }
+    }
+    pub(crate) fn geometry_version(&self) -> ViewVersion {
+        ViewVersion { session: self.session.clone(), sequence: self.geometry_sequence, status: self.status() }
     }
     pub fn revision(&self) -> Option<WorldRevision> {
         self.revision
@@ -218,6 +233,9 @@ impl SceneView {
     pub fn environment(&self, region: Region) -> Option<&RegionEnvironment> {
         if self.session.is_active() { self.mirror.environments.get(&region) } else { None }
     }
+    pub fn environment_texture(&self, id: AssetId) -> Option<&TextureHandle> {
+        if self.session.is_active() { self.mirror.environment_textures.get(&id) } else { None }
+    }
     pub fn patches(&self) -> impl Iterator<Item = (Region, &Patch)> {
         self.mirror.patches.iter().filter(|_| self.session.is_active()).map(|((region, _), patch)| (*region, patch))
     }
@@ -253,6 +271,21 @@ impl SceneView {
         let history = self.change_history.iter().filter(move |(current, _)| *current > sequence).map(|(_, changes)| changes);
         Some(marker.into_iter().chain(history))
     }
+}
+
+fn change_affects_geometry(change: &Change) -> bool {
+    matches!(
+        change,
+        Change::Object(_)
+            | Change::Mesh(_)
+            | Change::Material(_)
+            | Change::Remove(_)
+            | Change::Region(_)
+            | Change::Retire(_)
+            | Change::Patch(..)
+            | Change::Surface(_)
+            | Change::RemoveSurface(..)
+    )
 }
 
 #[cfg(test)]

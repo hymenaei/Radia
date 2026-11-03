@@ -8,7 +8,7 @@ use std::{
 use egui::{Context, DragValue, Slider, ViewportId};
 use futures::executor::block_on;
 use render::scene;
-use render::{CompressionQuality, Overlay, Renderer, Retirement, TextureCompletion};
+use render::{CompressionQuality, FrameInput, Overlay, Renderer, Retirement, TextureCompletion};
 use tracing::Instrument;
 #[cfg(target_os = "linux")]
 use winit::platform::startup_notify::{EventLoopExtStartupNotify, WindowAttributesExtStartupNotify, reset_activation_token_env};
@@ -22,6 +22,7 @@ use winit::{
 
 use super::{
     FRAME_INTERVAL, InputCapture, SharedWindowState,
+    environment::{EnvironmentControls, sky_frame_deadline, water_frame_deadline},
     timing::{FrameTimes, next_frame_deadline, redraw_interval, refresh_interval},
 };
 use crate::{
@@ -90,6 +91,9 @@ pub(super) struct SceneWindow {
     egui: Context,
     platform: egui_winit::State,
     next_ui: Option<Instant>,
+    next_environment: Option<Instant>,
+    next_sky: Option<Instant>,
+    next_water: Option<Instant>,
     window: Arc<Window>,
     generation: u64,
     frame_times: FrameTimes,
@@ -112,6 +116,7 @@ pub(super) struct SceneWindow {
     cursor: PhysicalPosition<f64>,
     modifiers: ModifiersState,
     drag: Option<DragState>,
+    environment_controls: EnvironmentControls,
 }
 
 impl SceneWindow {
@@ -167,6 +172,9 @@ impl SceneWindow {
             egui,
             platform,
             next_ui: None,
+            next_environment: None,
+            next_sky: None,
+            next_water: None,
             window,
             generation,
             frame_times: FrameTimes::default(),
@@ -189,6 +197,7 @@ impl SceneWindow {
             cursor: PhysicalPosition::new(0.0, 0.0),
             modifiers: ModifiersState::empty(),
             drag: None,
+            environment_controls: EnvironmentControls::default(),
         })
     }
 
@@ -318,6 +327,9 @@ impl SceneWindow {
             && generation == self.generation
         {
             self.feed = Some(feed);
+            self.next_environment = None;
+            self.next_sky = None;
+            self.next_water = None;
             self.dirty = true;
         }
         if let Some(feed) = &mut self.feed {
@@ -505,6 +517,12 @@ impl SceneWindow {
         if !self.ensure_renderer(now)? {
             return Ok(DrawActions::default());
         }
+        if let Some(feed) = &mut self.feed {
+            feed.update_environment(now);
+            self.next_environment = feed.next_environment();
+        } else {
+            self.next_environment = None;
+        }
         self.complete_texture_jobs();
         let debug_ui = self.draw_debug_ui(now);
         Ok(self.submit_frame(observation, agent_pose, now, debug_ui))
@@ -571,7 +589,7 @@ impl SceneWindow {
                         camera.lod_factor = 1.0;
                     }
                 }
-                ui.label(format!("Camera: {}", self.camera_mode.label()));
+                ui.label(format!("Camera: {} (V)", self.camera_mode.label()));
                 if let Some(times) = &frame_times {
                     ui.label(format!(
                         "Frametime: p50 {:.2} ms, p95 {:.2} ms",
@@ -581,6 +599,7 @@ impl SceneWindow {
                 } else {
                     ui.label("Frametime: no samples");
                 }
+                self.environment_controls.draw(ui, self.feed.as_ref());
                 ui.label(format!(
                     "Draw submissions: {}, indexed commands: {}, instances: {}",
                     stats.draw_calls, stats.draw_commands, stats.instances
@@ -722,11 +741,17 @@ impl SceneWindow {
         }
         let scene = self.feed.as_ref().zip(observation).map(|(feed, camera)| (&feed.view, camera));
         let avatar_pose = self.feed.as_ref().zip(agent_pose).map(|(feed, pose)| scene::AgentPose::new(feed.agent_id(), pose));
-        let water_height = self.feed.as_ref().and_then(|feed| feed.water_height);
+        let frame_input = self.feed.as_ref().map_or_else(FrameInput::default, |feed| FrameInput {
+            water_height: feed.water_height,
+            environment: feed.evaluated(),
+            cloud_scroll: feed.cloud_scroll(),
+            animation_time: feed.animation_time(),
+            water_scroll: feed.water_scroll(),
+        });
         let result = {
             let renderer = self.renderer.as_mut().expect("renderer ensured before frame submission");
             renderer.set_texture_soft_cap(self.texture_soft_cap);
-            renderer.draw(ui.overlay, scene, avatar_pose, water_height, || self.window.pre_present_notify())
+            renderer.draw(ui.overlay, scene, avatar_pose, frame_input, || self.window.pre_present_notify())
         };
         self.dispatch_texture_jobs();
         let completed = Instant::now();
@@ -749,8 +774,21 @@ impl SceneWindow {
                     } else {
                         self.next_frame = completed;
                     }
+                    self.next_sky = sky_frame_deadline(
+                        observation,
+                        self.feed.as_ref().is_some_and(|feed| feed.clouds_animate() || feed.stars_animate()),
+                        Instant::now(),
+                    );
+                    self.next_water = water_frame_deadline(
+                        observation,
+                        self.feed.as_ref().and_then(|feed| feed.water_height),
+                        self.feed.as_ref().is_some_and(SceneFeed::water_animate),
+                        Instant::now(),
+                    );
                 } else {
                     self.next_frame = next_frame_deadline(scheduled_deadline, completed, self.frame_interval);
+                    self.next_sky = None;
+                    self.next_water = None;
                 }
                 let first_frame = presented && !self.ready;
                 self.ready |= presented;
@@ -836,6 +874,18 @@ impl SceneWindow {
         let display_interval = display_refresh_interval(&self.window);
         self.frame_interval = redraw_interval(display_interval, self.focused, self.controls.active() || self.stop_clear_pending);
         let now = Instant::now();
+        if deadline_passed(self.next_environment, now) {
+            self.next_environment = None;
+            self.dirty = true;
+        }
+        if deadline_passed(self.next_sky, now) {
+            self.next_sky = None;
+            self.dirty = true;
+        }
+        if deadline_passed(self.next_water, now) {
+            self.next_water = None;
+            self.dirty = true;
+        }
         if self.next_ui.is_some_and(|at| now >= at) {
             self.next_ui = None;
             self.dirty = true;
@@ -846,10 +896,21 @@ impl SceneWindow {
         } else {
             let redraw = (self.dirty && can_redraw).then_some(self.next_frame.max(now + Duration::from_millis(1)));
             let poll = pending.then_some(now + self.frame_interval);
-            event_loop.set_control_flow(match redraw.into_iter().chain(poll).chain(self.animation_redraw_at).chain(self.next_ui).min() {
-                Some(at) => ControlFlow::WaitUntil(at),
-                None => ControlFlow::Wait,
-            });
+            event_loop.set_control_flow(
+                match redraw
+                    .into_iter()
+                    .chain(poll)
+                    .chain(self.animation_redraw_at)
+                    .chain(self.next_ui)
+                    .chain(self.next_environment)
+                    .chain(self.next_sky)
+                    .chain(self.next_water)
+                    .min()
+                {
+                    Some(at) => ControlFlow::WaitUntil(at),
+                    None => ControlFlow::Wait,
+                },
+            );
         }
     }
 
@@ -858,6 +919,10 @@ impl SceneWindow {
             self.retired = Some(renderer.retire());
         }
     }
+}
+
+fn deadline_passed(deadline: Option<Instant>, now: Instant) -> bool {
+    deadline.is_some_and(|deadline| now >= deadline)
 }
 
 impl Drop for SceneWindow {
@@ -925,6 +990,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
+    use super::deadline_passed;
     use super::{PresentationRecovery, RECOVERY_DELAY, RecoveryAttempt, SceneWindowError};
 
     #[test]
@@ -966,5 +1032,14 @@ mod tests {
         let error = SceneWindowError::Renderer(render::Error::UnsupportedSurface);
         let source = Error::source(&error).expect("renderer creation error must retain its source");
         assert!(source.downcast_ref::<render::Error>().is_some());
+    }
+
+    #[test]
+    fn environment_deadline_only_invalidates_after_it_passes() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_millis(16);
+        assert!(!deadline_passed(Some(deadline), now));
+        assert!(deadline_passed(Some(deadline), deadline));
+        assert!(!deadline_passed(None, now));
     }
 }

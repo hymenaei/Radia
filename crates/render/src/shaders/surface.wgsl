@@ -1,11 +1,18 @@
 struct Camera {
     projection: mat4x4<f32>,
     view: mat4x4<f32>,
-    light: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var image: texture_2d<f32>;
 @group(1) @binding(1) var image_sampler: sampler;
+struct SurfaceAtmosphere {
+    atmosphere: Atmosphere,
+}
+@group(0) @binding(1) var<uniform> surface_atmosphere: SurfaceAtmosphere;
+@group(0) @binding(2) var<uniform> surface_water: WaterSurface;
+@group(0) @binding(3) var water_normal_image: texture_2d<f32>;
+@group(0) @binding(4) var water_normal_next_image: texture_2d<f32>;
+@group(0) @binding(5) var water_normal_sampler: sampler;
 
 struct Input {
     @location(0) position: vec3<f32>,
@@ -33,6 +40,7 @@ struct Output {
     @location(3) relative_position: vec3<f32>,
     @location(4) uv: vec2<f32>,
     @location(5) @interpolate(flat) params: vec4<f32>,
+    @location(6) camera_relative_position: vec3<f32>,
 }
 fn transform(v: Input) -> Output {
     var out: Output;
@@ -43,6 +51,7 @@ fn transform(v: Input) -> Output {
     out.normal = (camera.view * vec4<f32>(normal, 0.0)).xyz;
     out.position_view = (camera.view * position).xyz;
     out.relative_position = position.xyz;
+    out.camera_relative_position = position.xyz - surface_water.camera_relative.xyz;
     out.color = v.color;
     var uv = v.uv;
     if v.params.w == 1.0 {
@@ -65,40 +74,103 @@ fn transform(v: Input) -> Output {
     return transform(v);
 }
 
-@vertex fn water_vertex(v: Input) -> Output {
+@vertex fn region_water_vertex(v: Input) -> Output {
     var out = transform(v);
-    out.position.z = max(out.position.z, 0.0);
+    out.uv = water_sweep_point(out.camera_relative_position.xy, surface_water);
     return out;
 }
 
-struct Water {
+struct RegionWater {
     @location(0) color: vec4<f32>,
     @builtin(frag_depth) depth: f32,
 }
 
-@fragment fn water_fragment(v: Output) -> Water {
-    let clip = camera.projection * vec4<f32>(v.relative_position, 1.0);
-    var water: Water;
-    water.color = vec4<f32>(v.color.rgb, 1.0);
-    water.depth = clamp(clip.z / clip.w, 0.0, 1.0);
-    return water;
-}
-fn shade_surface(position_view: vec3<f32>, normal_view: vec3<f32>, color: vec3<f32>, fullbright: f32, front: bool) -> vec3<f32> {
-    let eye = normalize(-position_view);
-    var normal = normalize(normal_view);
-    if !front {
-        normal = -normal;
-    }
-    let key = max(dot(normal, camera.light.xyz), 0.0);
-    let halfway = normalize(camera.light.xyz + eye);
-    let specular = pow(max(dot(normal, halfway), 0.0), 48.0) * 0.25;
-    let lit = color * (0.15 + 0.85 * key) + vec3<f32>(specular);
-    return mix(lit, color, fullbright);
+struct Surface {
+    @location(0) color: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
 }
 
-@fragment fn fragment(v: Output, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+@fragment fn region_water_fragment(v: Output) -> RegionWater {
+    let clip = camera.projection * vec4<f32>(v.relative_position, 1.0);
+    let coordinates = water_coordinates_from_point(v.uv, surface_water);
+    let big_dx = dpdx(coordinates.big);
+    let big_dy = dpdy(coordinates.big);
+    let first_dx = dpdx(coordinates.first);
+    let first_dy = dpdy(coordinates.first);
+    let second_dx = dpdx(coordinates.second);
+    let second_dy = dpdy(coordinates.second);
+    let wave1 = select(
+        blend_normal(
+            textureSampleGrad(water_normal_image, water_normal_sampler, coordinates.big, big_dx, big_dy).xyz,
+            textureSampleGrad(water_normal_next_image, water_normal_sampler, coordinates.big, big_dx, big_dy).xyz,
+            surface_water.fresnel.z,
+        ),
+        vec3<f32>(0.0, 0.0, 1.0),
+        surface_water.fresnel.w < 0.5,
+    );
+    let wave2 = select(
+        blend_normal(
+            textureSampleGrad(water_normal_image, water_normal_sampler, coordinates.first, first_dx, first_dy).xyz,
+            textureSampleGrad(water_normal_next_image, water_normal_sampler, coordinates.first, first_dx, first_dy).xyz,
+            surface_water.fresnel.z,
+        ),
+        vec3<f32>(0.0, 0.0, 1.0),
+        surface_water.fresnel.w < 0.5,
+    );
+    let wave3 = select(
+        blend_normal(
+            textureSampleGrad(water_normal_image, water_normal_sampler, coordinates.second, second_dx, second_dy).xyz,
+            textureSampleGrad(water_normal_next_image, water_normal_sampler, coordinates.second, second_dx, second_dy).xyz,
+            surface_water.fresnel.z,
+        ),
+        vec3<f32>(0.0, 0.0, 1.0),
+        surface_water.fresnel.w < 0.5,
+    );
+    let light_direction_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_direction.xyz, 0.0)).xyz;
+    let light_norm_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_norm.xyz, 0.0)).xyz;
+    let normal_eye = safe_normalize(v.normal);
+    let tangent_eye = (camera.view * vec4<f32>(1.0, 0.0, 0.0, 0.0)).xyz;
+    let color = shade_water(
+        v.camera_relative_position,
+        v.position_view,
+        light_direction_eye,
+        light_norm_eye,
+        normal_eye,
+        tangent_eye,
+        camera.view,
+        wave1,
+        wave2,
+        wave3,
+        surface_water,
+        surface_atmosphere.atmosphere,
+    );
+    var water: RegionWater;
+    water.color = color;
+    water.depth = max(clamp(clip.z / clip.w, 0.0, 1.0), 0.00000001);
+    return water;
+}
+
+@fragment fn fragment(v: Output, @builtin(front_facing) front: bool) -> Surface {
     let color = textureSample(image, image_sampler, v.uv) * v.color;
     if v.params.y == 1.0 && color.a < v.params.z { discard; }
     let alpha = select(1.0, clamp(color.a, 0.0, 1.0), v.params.y == 2.0);
-    return vec4<f32>(shade_surface(v.position_view, v.normal, color.rgb, v.params.x, front), alpha);
+    var normal_eye = safe_normalize(v.normal);
+    if !front {
+        normal_eye = -normal_eye;
+    }
+    let light_direction_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_direction.xyz, 0.0)).xyz;
+    let light_norm_eye = (camera.view * vec4<f32>(surface_atmosphere.atmosphere.light_norm.xyz, 0.0)).xyz;
+    let fogged = shade_surface(
+        color.rgb,
+        v.position_view,
+        normal_eye,
+        light_direction_eye,
+        light_norm_eye,
+        v.params.x == 1.0,
+        surface_atmosphere.atmosphere,
+    );
+    var output: Surface;
+    output.color = vec4<f32>(fogged, alpha);
+    output.depth = max(v.position.z, 0.00000001);
+    return output;
 }

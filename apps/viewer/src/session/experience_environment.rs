@@ -2,7 +2,7 @@ use std::{
     error::Error,
     fmt::{self, Display},
     sync::{Arc, Mutex, PoisonError},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use llsd::{Limits, Map, Value, binary, notation, xml};
@@ -15,6 +15,7 @@ use world::Region;
 
 pub(crate) struct EnvironmentCommand {
     pub(crate) region: Region,
+    pub(crate) received_at: Instant,
     pub(crate) push: EnvironmentPush,
 }
 
@@ -53,7 +54,7 @@ impl EnvironmentSender {
 
     pub(crate) fn clear_region(&self, region: Region) -> Result<(), EnvironmentQueueError> {
         let push = EnvironmentPush::Clear { experience: None, transition: Duration::ZERO };
-        self.try_send(EnvironmentCommand { region, push })
+        self.try_send(EnvironmentCommand { region, received_at: Instant::now(), push })
     }
 
     pub(crate) fn publish(
@@ -62,9 +63,10 @@ impl EnvironmentSender {
         agent: Uuid,
         region: Region,
         simulator: network::SimulatorId,
+        received_at: Instant,
     ) -> Result<(), EnvironmentQueueError> {
-        match decode(message, agent) {
-            Ok(Some(push)) => self.try_send(EnvironmentCommand { region, push }),
+        match decode_at(message, agent, received_at) {
+            Ok(Some(push)) => self.try_send(EnvironmentCommand { region, received_at, push }),
             Ok(None) => Ok(()),
             Err(_) => {
                 tracing::debug!(simulator = simulator.get(), region = region.get(), "invalid experience environment push");
@@ -91,7 +93,12 @@ impl EnvironmentInbox {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct InvalidPush;
 
+#[cfg(test)]
 pub(super) fn decode(message: &Message, agent: Uuid) -> Result<Option<EnvironmentPush>, InvalidPush> {
+    decode_at(message, agent, Instant::now())
+}
+
+fn decode_at(message: &Message, agent: Uuid, received_at: Instant) -> Result<Option<EnvironmentPush>, InvalidPush> {
     let Message::GenericMessage(message) = message else { return Ok(None) };
     let method = message.method_data.method.as_slice();
     if method.strip_suffix(&[0]).unwrap_or(method) != b"PushExpEnvironment" {
@@ -140,7 +147,7 @@ pub(super) fn decode(message: &Message, agent: Uuid) -> Result<Option<Environmen
     };
     let transition = Duration::try_from_secs_f64(seconds.max(0.0)).map_err(|_| InvalidPush)?;
     let experience = ExperienceId::new(message.method_data.invoice.unwrap_or_else(Uuid::nil));
-    match action.as_str() {
+    let push = match action.as_str() {
         "ClearEnvironment" => Ok(Some(EnvironmentPush::Clear { experience, transition })),
         "PushFullEnvironment" => {
             let experience = experience.ok_or(InvalidPush)?;
@@ -165,7 +172,18 @@ pub(super) fn decode(message: &Message, agent: Uuid) -> Result<Option<Environmen
             Ok(Some(EnvironmentPush::Partial { experience, sky: properties(sky)?, water: properties(water)?, transition }))
         }
         _ => Err(InvalidPush),
+    }?;
+    if let Some(push) = &push {
+        let transition = match push {
+            EnvironmentPush::Clear { transition, .. }
+            | EnvironmentPush::Full { transition, .. }
+            | EnvironmentPush::Partial { transition, .. } => *transition,
+        };
+        if received_at.checked_add(transition).is_none() {
+            return Err(InvalidPush);
+        }
     }
+    Ok(push)
 }
 
 fn properties(value: Option<&Value>) -> Result<Vec<EnvironmentProperty>, InvalidPush> {
@@ -235,6 +253,34 @@ mod tests {
             ));
         }
         assert!(decode(&message(agent, experience, "{'action':'PushPartialEnvironment'}"), agent).unwrap().is_none());
+    }
+
+    #[test]
+    fn long_transition_is_preserved() {
+        let agent = Uuid::from_u128(1);
+        let body = "{'action':'PushPartialEnvironment','action_data':{'settings':{'sky':{'gamma':r1.4}},'transition_time':i31536000}}";
+        let Some(EnvironmentPush::Partial { transition, .. }) = decode(&message(agent, Uuid::from_u128(2), body), agent).unwrap() else {
+            panic!("partial push missing")
+        };
+        assert_eq!(transition, Duration::from_secs(31_536_000));
+    }
+
+    #[test]
+    fn unrepresentable_transition_is_not_published() {
+        let agent = Uuid::from_u128(1);
+        let experience = Uuid::from_u128(2);
+        let seconds = 18_446_744_073_709_549_568.0f64;
+        let body = "{'action':'PushPartialEnvironment','action_data':{'settings':{'sky':{'gamma':r1.4}},'transition_time':r18446744073709549568.0}}";
+        let message = message(agent, experience, body);
+        let received_at = Instant::now();
+        let transition = Duration::try_from_secs_f64(seconds).unwrap();
+        assert!(received_at.checked_add(transition).is_none());
+        assert!(decode(&message, agent).is_err());
+
+        let (sender, inbox) = EnvironmentInbox::channel();
+        sender.publish(&message, agent, Region::new(1), network::SimulatorId::new(1), received_at).unwrap();
+        let mut receiver = inbox.take().unwrap();
+        assert!(matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }
 
     #[test]

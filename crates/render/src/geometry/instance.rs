@@ -58,7 +58,7 @@ pub(super) fn is_visible(
     let radius = ((bounds.max.as_dvec3() - bounds.min.as_dvec3()) * 0.5 * scale.as_dvec3()).length();
     if !offset.is_finite()
         || !radius.is_finite()
-        || (shading == ShadingMode::Studio && offset.length() - radius > camera.draw_distance())
+        || (shading == ShadingMode::Surface && offset.length() - radius > camera.draw_distance())
         || offset.abs().max_element() + radius > f64::from(f32::MAX) / 16.0
     {
         return false;
@@ -72,7 +72,7 @@ pub(super) fn is_visible(
 
 #[cfg(test)]
 mod tests {
-    use math::Mat4;
+    use math::{Mat3, Mat4};
 
     use super::*;
     use crate::geometry::fixtures;
@@ -94,6 +94,29 @@ mod tests {
         );
         assert_eq!(bytes.len(), 192, "GPU instance stride");
     }
+    #[test]
+    fn nonuniform_normals_upload() {
+        let rotation = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let scale = Vec3::new(2.0, 3.0, 4.0);
+        let bytes = instance_base(DVec3::ZERO, rotation, scale, false, DVec3::ZERO);
+        let column = |index: usize| {
+            let start = 64 + index * 16;
+            Vec3::new(
+                f32::from_le_bytes(bytes[start..start + 4].try_into().expect("normal x")),
+                f32::from_le_bytes(bytes[start + 4..start + 8].try_into().expect("normal y")),
+                f32::from_le_bytes(bytes[start + 8..start + 12].try_into().expect("normal z")),
+            )
+        };
+        let normal = Mat3::from_cols(column(0), column(1), column(2));
+        assert!(normal.x_axis.distance(Vec3::Y) < 1e-6);
+        assert!(normal.y_axis.distance(Vec3::new(-2.0 / 3.0, 0.0, 0.0)) < 1e-6);
+        assert!(normal.z_axis.distance(Vec3::Z * 0.5) < 1e-6);
+        let local_normal = Vec3::new(1.0, 1.0, 0.0).normalize();
+        let local_tangent = Vec3::new(1.0, -1.0, 0.0);
+        let world_normal = normal * local_normal;
+        let world_tangent = rotation * (scale * local_tangent);
+        assert!(world_normal.dot(world_tangent).abs() < 1e-5);
+    }
 
     #[test]
     fn terrain_visibility_ignores_draw_distance_but_objects_do_not() {
@@ -105,11 +128,11 @@ mod tests {
         let far = camera.with_quality(512.0, 1.0).expect("far draw distance");
         let frustum = Frustum::from_clip_matrix(Mat4::from_scale(Vec3::splat(0.001)));
         let position = DVec3::new(100.0, 0.0, 0.0);
-        for shading in [ShadingMode::Terrain, ShadingMode::Water] {
+        for shading in [ShadingMode::Terrain, ShadingMode::RegionWater] {
             assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), shading, close, &frustum));
             assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), shading, far, &frustum));
         }
-        assert!(!is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Studio, close, &frustum));
-        assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Studio, far, &frustum));
+        assert!(!is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Surface, close, &frustum));
+        assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Surface, far, &frustum));
     }
 }

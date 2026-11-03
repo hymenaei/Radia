@@ -1,4 +1,6 @@
 mod edits;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub(crate) mod environments;
 pub mod favorite_store;
 pub mod favorites;
 mod fetch;

@@ -1,5 +1,5 @@
+mod region_water;
 mod terrain;
-mod water;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,7 +22,7 @@ type Key = (SurfaceKind, Region);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub enum SurfaceKind {
-    Water,
+    RegionWater,
     Terrain(TerrainPatchId),
 }
 
@@ -37,7 +37,7 @@ pub struct Surface {
 
 enum Input {
     Terrain(Terrain),
-    Water(f32),
+    RegionWater(f32),
 }
 
 pub(in crate::scene) struct SurfaceJob {
@@ -54,7 +54,7 @@ impl SurfaceJob {
             Input::Terrain(tiles) => {
                 tiles.mesh(&self.cancelled).map(|(mesh, composition)| BuiltSurface { mesh, composition: Some(composition) })
             }
-            Input::Water(height) => water::mesh(*height).map(|mesh| BuiltSurface { mesh, composition: None }),
+            Input::RegionWater(height) => region_water::mesh(*height).map(|mesh| BuiltSurface { mesh, composition: None }),
         };
         SurfaceCompletion { key: self.key, position: self.position, result, work: self.work, cancelled: self.cancelled }
     }
@@ -122,8 +122,8 @@ impl SurfaceJobs {
             self.invalidate((SurfaceKind::Terrain(patch), region));
         }
     }
-    pub(in crate::scene) fn water(&mut self, region: Region) {
-        self.invalidate((SurfaceKind::Water, region));
+    pub(in crate::scene) fn region_water(&mut self, region: Region) {
+        self.invalidate((SurfaceKind::RegionWater, region));
     }
 
     pub(in crate::scene) fn terrain_settings(&mut self, mirror: &Mirror, region: Region) {
@@ -140,7 +140,7 @@ impl SurfaceJobs {
         }
         for (&region, height) in &mirror.water {
             if height.is_some() {
-                self.water(region);
+                self.region_water(region);
             }
         }
     }
@@ -189,12 +189,12 @@ impl SurfaceJobs {
                 }
                 (origin + DVec3::new(f64::from(x) * 16.0, f64::from(y) * 16.0, 0.0), Input::Terrain(tiles))
             }
-            SurfaceKind::Water => {
+            SurfaceKind::RegionWater => {
                 let Some(height) = mirror.water.get(&key.1).copied().flatten() else {
                     self.dirty.remove(&key);
                     return SurfaceStep::Remove(key.1, key.0);
                 };
-                (origin, Input::Water(height))
+                (origin, Input::RegionWater(height))
             }
         };
         let Some(work) = self.budget.mesh_work() else { return SurfaceStep::Waiting };

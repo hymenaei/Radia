@@ -255,6 +255,7 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
         agent_id,
         agent: None,
         water_height: None,
+        environment: ActiveEnvironment::default(),
         camera: watch::channel(None).0,
         movement: watch::channel(None).0,
         agent_motion,
@@ -268,6 +269,13 @@ async fn motion_sample_seeds_follow_camera_before_the_avatar_resolves() {
             dead_reckoning
         },
         last_movement: None,
+        environment_selection: watch::channel(EnvironmentSelection {
+            choice: EnvironmentChoice::default(),
+            agent_region: None,
+            active_textures: BTreeSet::new(),
+        })
+        .0,
+        environment_items: watch::channel(EnvironmentItems::Loading).1,
         incoming,
         _cancel: cancel,
     };
@@ -324,6 +332,7 @@ async fn terrain_clamp_respects_parenting() {
         agent_id: agent,
         agent: None,
         water_height: None,
+        environment: ActiveEnvironment::default(),
         camera,
         movement: watch::channel(None).0,
         agent_motion,
@@ -333,6 +342,13 @@ async fn terrain_clamp_respects_parenting() {
         motion_active: HashMap::new(),
         dead_reckoning: DeadReckoning::default(),
         last_movement: None,
+        environment_selection: watch::channel(EnvironmentSelection {
+            choice: EnvironmentChoice::default(),
+            agent_region: None,
+            active_textures: BTreeSet::new(),
+        })
+        .0,
+        environment_items: watch::channel(EnvironmentItems::Loading).1,
         incoming,
         _cancel: cancel,
     };
@@ -438,7 +454,13 @@ async fn pending_asset_preserves_scene() {
     let (_pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
     let mut feed = SceneFeed::start(
-        SceneSources { reader: reads.reader(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
+        SceneSources {
+            reader: reads.reader(),
+            environments,
+            assets: assets.handle(),
+            motion_circuits: watch::channel(Vec::new()).1,
+            inventory_updates: watch::channel(None).1,
+        },
         Uuid::from_u128(2),
         watch::channel(None).0,
         watch::channel(None).0,
@@ -497,7 +519,13 @@ async fn stalled_publication_preserves_intake() {
     let (pushes, environments) = crate::session::EnvironmentInbox::channel();
     let (_agent_motion_sender, agent_motion) = watch::channel(None);
     let mut feed = SceneFeed::start(
-        SceneSources { reader: reader.clone(), environments, assets: assets.handle(), motion_circuits: watch::channel(Vec::new()).1 },
+        SceneSources {
+            reader: reader.clone(),
+            environments,
+            assets: assets.handle(),
+            motion_circuits: watch::channel(Vec::new()).1,
+            inventory_updates: watch::channel(None).1,
+        },
         Uuid::from_u128(1),
         watch::channel(None).0,
         watch::channel(None).0,
@@ -554,13 +582,14 @@ async fn stalled_publication_preserves_intake() {
     assert!(barrier.unwrap().revision > initial);
     assert!(world.revision() > initial);
     let experience = ExperienceId::new(Uuid::from_u128(44)).unwrap();
+    let received_at = std::time::Instant::now() - Duration::from_secs(2);
     let push = EnvironmentPush::Partial {
         experience,
         sky: vec![EnvironmentProperty { name: "gamma".into(), source: b"r1.4".as_slice().into() }],
         water: Vec::new(),
-        transition: Duration::ZERO,
+        transition: Duration::from_secs(10),
     };
-    assert!(pushes.try_send(crate::session::EnvironmentCommand { region, push }).is_ok());
+    assert!(pushes.try_send(crate::session::EnvironmentCommand { region, received_at, push }).is_ok());
     feed.view.apply(batch).unwrap();
     assert_eq!(feed.view.object_count(), 1);
     {
@@ -587,6 +616,10 @@ async fn stalled_publication_preserves_intake() {
             futures::select_biased! { _ = receiving => {}, _ = serving => unreachable!() }
         }
     }
+    let mut active = render::environment::ActiveEnvironment::default();
+    assert!(active.update(&feed.view, Some((region, 0.0)), std::time::UNIX_EPOCH, received_at + Duration::from_secs(2),));
+    assert!((active.evaluated().unwrap().sky.gamma - 1.08).abs() < 0.00001);
+
     service.finish();
     assert!(feed.incoming.recv().await.is_none());
     assert_eq!(feed.view.status(), Status::Closed);

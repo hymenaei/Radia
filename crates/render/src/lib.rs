@@ -11,6 +11,6 @@ mod texture;
 #[doc(hidden)]
 pub use benchmark::GeometryPrepare;
 pub use geometry::{OmissionReason, PickError, Stats};
-pub use renderer::{Error, Overlay, Progress, Renderer, Retirement};
+pub use renderer::{Error, FrameInput, Overlay, Progress, Renderer, Retirement};
 pub use texture::CompressionQuality;
 pub use texture::{TextureCompletion, TextureJob};

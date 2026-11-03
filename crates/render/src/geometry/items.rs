@@ -9,7 +9,7 @@ use super::instance::parameter_part;
 use super::{ShadingMode, TRANSFORM_BYTES};
 use crate::{
     material::{FaceMaterial, FaceParams},
-    pipeline::{COLOR, Pipeline},
+    pipeline::Pipeline,
     scene::{Camera, Object, SharedMesh, SurfaceKind},
 };
 
@@ -177,13 +177,8 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
         match shading {
             ShadingMode::Terrain => {
                 params.color = [0.18, 0.23, 0.13, 1.0];
-                params.params[0] = 1.0;
             }
-            ShadingMode::Water => {
-                params.color = COLOR.to_array();
-                params.params[0] = 1.0;
-            }
-            ShadingMode::Studio => {}
+            ShadingMode::RegionWater | ShadingMode::Surface => {}
         }
         if params.blend && params.color[3] <= 0.0 {
             continue;
@@ -191,8 +186,8 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
         let texture = material.and_then(|material| material.base_color_texture.as_ref()).and_then(|binding| binding.image()).cloned();
         let pipeline = match shading {
             ShadingMode::Terrain => Pipeline::Terrain,
-            ShadingMode::Water => Pipeline::Water,
-            ShadingMode::Studio => surface_pipeline(params.blend, params.double_sided, scale, invert_normals),
+            ShadingMode::RegionWater => Pipeline::RegionWater,
+            ShadingMode::Surface => surface_pipeline(params.blend, params.double_sided, scale, invert_normals),
         };
         let key = DrawKey { mesh: mesh.id(), start: face.indices.start, end: face.indices.end, pipeline, texture: params.texture, terrain };
         let Some(group) = draw_list.intern_face(key, texture.as_ref(), terrain_textures) else { continue };
@@ -289,7 +284,7 @@ mod tests {
                     appearance: object.detail().surface_appearance.as_ref(),
                     scale,
                     invert_normals: invert,
-                    shading: ShadingMode::Studio,
+                    shading: ShadingMode::Surface,
                     terrain: None,
                     terrain_textures: None,
                 },

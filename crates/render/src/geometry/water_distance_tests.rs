@@ -373,7 +373,7 @@ fn water_base_color_skips_extra_atmosphere_haze() {
                 include_str!("../shaders/atmosphere.wgsl"),
                 include_str!("../shaders/water.wgsl"),
                 r#"
-@group(0) @binding(0) var<storage, read_write> output: array<vec4<f32>, 2>;
+@group(0) @binding(0) var<storage, read_write> output: array<vec4<f32>, 3>;
 
 fn shade_probe(density: f32) -> vec4<f32> {
     var water: WaterSurface;
@@ -426,6 +426,10 @@ fn shade_probe(density: f32) -> vec4<f32> {
 fn run_water_probe() {
     output[0] = shade_probe(0.0);
     output[1] = shade_probe(0.1);
+    var fog: WaterFog;
+    fog.color = vec4<f32>(0.1, 0.2, 0.3, 1.0);
+    fog.parameters = vec4<f32>(0.0, 3.333333, -100.0, 1.0);
+    output[2] = water_fog_view(vec3<f32>(0.0, 0.0, 10000.0), vec3<f32>(0.0, 0.0, 1.0), fog);
 }
 "#,
             )
@@ -460,13 +464,13 @@ fn run_water_probe() {
     });
     let output = device.create_buffer(&BufferDescriptor {
         label: Some("Water atmosphere regression output"),
-        size: 8 * 4,
+        size: 12 * 4,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     let readback = device.create_buffer(&BufferDescriptor {
         label: Some("Water atmosphere regression readback"),
-        size: 8 * 4,
+        size: 12 * 4,
         usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -482,7 +486,7 @@ fn run_water_probe() {
         pass.set_bind_group(0, &binding, &[]);
         pass.dispatch_workgroups(1, 1, 1);
     }
-    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 8 * 4);
+    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 12 * 4);
     queue.submit([encoder.finish()]);
     let (send, receive) = mpsc::channel();
     readback.slice(..).map_async(MapMode::Read, move |result| {
@@ -493,6 +497,7 @@ fn run_water_probe() {
     let mapped = readback.slice(..).get_mapped_range().expect("readback range is mapped");
     let values = mapped.as_chunks::<4>().0.iter().map(|bytes| f32::from_le_bytes(*bytes)).collect::<Vec<_>>();
     assert!(values[0] > 0.88, "water keeps the punctual specular term: {values:?}");
+    assert_eq!(&values[8..12], &[0.0, 0.0, 0.0, 1.0], "zero-density water has no fog and full transmission");
     let attenuation = (-0.2_f32).exp();
     let base_color = (values[4] - attenuation * values[0]) / (1.0 - attenuation);
     assert!((base_color - 0.88).abs() < 0.001, "atmosphere attenuation applies to punctual light only: {values:?}");

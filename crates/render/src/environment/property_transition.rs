@@ -40,6 +40,9 @@ impl Tween {
     }
 
     fn factor(&self, now: Instant) -> f32 {
+        if self.duration == Duration::ZERO {
+            return 1.0;
+        }
         (now.saturating_duration_since(self.started).as_secs_f64() / self.duration.as_secs_f64()).clamp(0.0, 1.0) as f32
     }
 
@@ -106,7 +109,7 @@ impl PropertyTransitions {
                 continue;
             }
             self.seen.insert(key.clone(), change.sequence);
-            self.update_change(&key, change, previous, target, base, now);
+            self.update_change(&key, change, previous, target, base);
         }
 
         let mut current = BTreeMap::new();
@@ -188,7 +191,6 @@ impl PropertyTransitions {
         previous: Option<&ExperienceProperty>,
         target: Option<&ExperienceProperty>,
         base: &Evaluated,
-        now: Instant,
     ) {
         let affected = target.or(previous).map(ExperienceProperty::value).cloned();
         let Some(affected) = affected else { return };
@@ -200,11 +202,7 @@ impl PropertyTransitions {
             .unwrap_or_else(|| state_for(base, &affected));
         let target = target.map(|property| property.value().clone());
         let tween = Tween { sequence: change.sequence, affected, from, target, started: change.started, duration: change.duration };
-        if tween.active(now) {
-            self.active.insert(key.clone(), tween);
-        } else {
-            self.active.remove(key);
-        }
+        self.active.insert(key.clone(), tween);
     }
 }
 

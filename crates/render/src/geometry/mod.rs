@@ -508,3 +508,6 @@ mod tests {
 
 #[cfg(test)]
 mod water_distance_tests;
+
+#[cfg(test)]
+mod surface_pipeline_tests;

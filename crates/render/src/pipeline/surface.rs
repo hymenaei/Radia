@@ -210,7 +210,7 @@ impl SurfacePipelines {
             primitive: PrimitiveState { cull_mode: None, ..descriptor.primitive },
             ..descriptor.clone()
         });
-        let blended_targets = [Some(ColorTargetState { format, blend: Some(BlendState::ALPHA_BLENDING), write_mask: ColorWrites::ALL })];
+        let blended_targets = [Some(ColorTargetState { format, blend: Some(BlendState::ALPHA_BLENDING), write_mask: ColorWrites::COLOR })];
         let blended = RenderPipelineDescriptor {
             label: Some("Blended scene faces"),
             depth_stencil: Some(DepthStencilState {

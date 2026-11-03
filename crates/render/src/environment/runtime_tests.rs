@@ -868,6 +868,80 @@ fn earlier_short_property_finishes_first() {
 }
 
 #[test]
+fn delayed_replay_preserves_replacement_start() {
+    for republish in [false, true] {
+        let world = world();
+        let region = Region::new(1);
+        let (mut scene, mut view) = Reconciler::new(Budget::default());
+        settle(&mut scene, &mut view, &world);
+        let started = Instant::now();
+        let experience = ExperienceId::new(Uuid::from_u128(1704)).unwrap();
+        push_sky_property_at(&mut scene, region, experience, "sunlight_color", b"[r1,r0,r0]", Duration::from_secs(10), started);
+        push_sky_property_at(
+            &mut scene,
+            region,
+            experience,
+            "sunlight_color",
+            b"[r0,r0,r1]",
+            Duration::from_secs(10),
+            started + Duration::from_secs(5),
+        );
+        if republish {
+            push_sky_property_at(
+                &mut scene,
+                region,
+                experience,
+                "moon_brightness",
+                b"r0.8",
+                Duration::ZERO,
+                started + Duration::from_secs(10),
+            );
+        }
+        settle(&mut scene, &mut view, &world);
+        let defaults = default_evaluated();
+        let midpoint = std::array::from_fn(|index| (defaults.sky.sunlight[index] + [1.0, 0.0, 0.0][index]) * 0.5);
+        let mut active = ActiveEnvironment::default();
+        active.update(&view, Some((region, 0.0)), UNIX_EPOCH, started + Duration::from_secs(10));
+        assert_color(active.evaluated().unwrap().sky.sunlight, midpoint, [0.0, 0.0, 1.0], 0.5);
+    }
+}
+
+#[test]
+fn completed_replacements_break_old_tweens() {
+    for middle_duration in [Duration::ZERO, Duration::from_secs(2)] {
+        let world = world();
+        let region = Region::new(1);
+        let (mut scene, mut view) = Reconciler::new(Budget::default());
+        settle(&mut scene, &mut view, &world);
+        let started = Instant::now();
+        let experience = ExperienceId::new(Uuid::from_u128(1705)).unwrap();
+        push_sky_property_at(&mut scene, region, experience, "sunlight_color", b"[r1,r0,r0]", Duration::from_secs(10), started);
+        push_sky_property_at(
+            &mut scene,
+            region,
+            experience,
+            "sunlight_color",
+            b"[r0,r0,r1]",
+            middle_duration,
+            started + Duration::from_secs(5),
+        );
+        push_sky_property_at(
+            &mut scene,
+            region,
+            experience,
+            "sunlight_color",
+            b"[r0,r1,r0]",
+            Duration::from_secs(10),
+            started + Duration::from_secs(8),
+        );
+        settle(&mut scene, &mut view, &world);
+        let mut active = ActiveEnvironment::default();
+        active.update(&view, Some((region, 0.0)), UNIX_EPOCH, started + Duration::from_secs(9));
+        assert_color(active.evaluated().unwrap().sky.sunlight, [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 0.1);
+    }
+}
+
+#[test]
 fn same_key_replacement_starts_at_current_value() {
     let world = world();
     let region = Region::new(1);

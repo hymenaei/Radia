@@ -83,6 +83,9 @@ fn water_fog_view(position_eye: vec3<f32>, plane_normal_eye: vec3<f32>, water: W
     }
     let length_in_water = max(length(position_eye - intersection), 0.1);
     let density = water.parameters.x;
+    if density == 0.0 {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
     let modifier = water.parameters.y;
     let t1 = -density * pow(0.98, modifier * e0);
     let t2 = density + modifier * es;

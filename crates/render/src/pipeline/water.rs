@@ -63,11 +63,11 @@ pub(crate) fn water_surface_values(
 
 pub(crate) fn modified_water_fog_density(density: f32, modifier: f32, underwater: bool) -> f32 {
     if !underwater || modifier <= 0.0 {
-        return density;
+        return density.max(0.0);
     }
     let modifier = modifier.clamp(0.0, 10.0);
     let density = if density < 0.0 && modifier != modifier.round() { 1.0 } else { density };
-    density.powf(modifier).clamp(-f32::MAX, f32::MAX)
+    density.powf(modifier).clamp(0.0, f32::MAX)
 }
 
 pub(crate) fn water_fog_values(environment: Option<&Evaluated>, camera_position: DVec3, water_height: Option<f64>) -> [f32; 8] {
@@ -157,7 +157,9 @@ mod tests {
         assert_eq!(modified_water_fog_density(2.0, 11.0, true), 1024.0);
         assert_eq!(modified_water_fog_density(2.0, -1.0, true), 2.0);
         assert_eq!(modified_water_fog_density(f32::MAX, 2.0, true), f32::MAX);
-        assert_eq!(modified_water_fog_density(-f32::MAX, 3.0, true), -f32::MAX);
+        assert_eq!(modified_water_fog_density(-f32::MAX, 3.0, true), 0.0);
+        assert_eq!(modified_water_fog_density(-f32::MAX, 3.0, false), 0.0);
+        assert_eq!(modified_water_fog_density(-2.0, 0.0, true), 0.0);
     }
 
     #[test]

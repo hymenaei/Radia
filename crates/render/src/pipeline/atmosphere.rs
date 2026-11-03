@@ -95,7 +95,11 @@ fn legacy_ambient_irradiance(ambient: [f32; 3], cloud_shadow: f32) -> f32 {
 
 pub(crate) fn sky_hdr_scale(environment: Option<&Evaluated>) -> f32 {
     let Some(environment) = environment else { return 1.0 };
-    if environment.sky.reflection_probe_ambiance.is_some_and(|ambiance| ambiance > 0.0) { environment.sky.gamma.sqrt() * 2.0 } else { 1.0 }
+    if environment.sky.reflection_probe_ambiance.is_some_and(|ambiance| ambiance > 0.0) {
+        environment.sky.gamma.max(0.0).sqrt() * 2.0
+    } else {
+        1.0
+    }
 }
 
 #[cfg(test)]
@@ -199,5 +203,8 @@ mod tests {
         hdr.sky.reflection_probe_ambiance = Some(0.5);
         assert_eq!(atmosphere_values(Some(&hdr))[23], 1.0);
         assert_eq!(atmosphere_values(Some(&hdr))[30], 2.0);
+        hdr.sky.gamma = -1.0;
+        assert!(atmosphere_values(Some(&hdr)).into_iter().all(f32::is_finite));
+        assert_eq!(sky_hdr_scale(Some(&hdr)), 0.0);
     }
 }

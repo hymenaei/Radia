@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     mem::size_of,
     sync::Arc,
     time::{Duration, Instant},
@@ -738,8 +738,24 @@ impl ViewerEnvironments {
 
     fn property_changes(&self, now: Instant) -> VecDeque<PropertyChange> {
         let mut changes = self.current.as_ref().map_or_else(VecDeque::new, |current| current.0.property_changes.clone());
-        changes
-            .retain(|change| change.duration > Duration::ZERO && change.started.checked_add(change.duration).is_some_and(|end| now < end));
+        let mut dependent_starts = BTreeMap::new();
+        let mut retained = BTreeSet::new();
+        for change in changes.iter().rev() {
+            let key = (change.kind, change.name.as_str());
+            let dependent = dependent_starts.get(&key).copied();
+            let needed_at = match dependent {
+                Some(Some(started)) => started,
+                Some(None) => continue,
+                None => now,
+            };
+            let active_at_start =
+                change.duration > Duration::ZERO && change.started.checked_add(change.duration).is_some_and(|end| needed_at < end);
+            if dependent.is_some() || active_at_start {
+                retained.insert(change.sequence);
+            }
+            dependent_starts.insert(key, active_at_start.then_some(change.started));
+        }
+        changes.retain(|change| retained.contains(&change.sequence));
         changes
     }
 

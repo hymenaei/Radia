@@ -468,6 +468,7 @@ struct AssetSubscriptions {
     demands: HashMap<AssetTicket, assets::Demand>,
     pending_importance: HashMap<AssetTicket, u16>,
     pending_priority: HashMap<AssetTicket, assets::Priority>,
+    pending_size: HashMap<AssetTicket, assets::TextureSize>,
 }
 
 impl AssetSubscriptions {
@@ -479,6 +480,7 @@ impl AssetSubscriptions {
             demands: HashMap::new(),
             pending_importance: HashMap::new(),
             pending_priority: HashMap::new(),
+            pending_size: HashMap::new(),
         }
     }
 
@@ -501,6 +503,7 @@ impl AssetSubscriptions {
                 self.demands.remove(&ticket);
                 self.pending_importance.remove(&ticket);
                 self.pending_priority.remove(&ticket);
+                self.pending_size.remove(&ticket);
             }
             AssetChange::UpdateImportance { ticket, importance } => {
                 if let Some(demand) = self.demands.get(&ticket) {
@@ -514,6 +517,13 @@ impl AssetSubscriptions {
                     demand.update_priority(priority);
                 } else {
                     self.pending_priority.insert(ticket, priority);
+                }
+            }
+            AssetChange::UpdateSize { ticket, size } => {
+                if let Some(demand) = self.demands.get(&ticket) {
+                    demand.update_size(size);
+                } else {
+                    self.pending_size.insert(ticket, size);
                 }
             }
         }
@@ -540,9 +550,13 @@ impl AssetSubscriptions {
             self.demands.remove(&ticket);
             self.pending_importance.remove(&ticket);
             self.pending_priority.remove(&ticket);
+            self.pending_size.remove(&ticket);
             return;
         }
         if let Some(mut demand) = demand {
+            if let Some(size) = self.pending_size.remove(&ticket) {
+                demand.update_size(size);
+            }
             if let Some(importance) = self.pending_importance.remove(&ticket) {
                 demand.update_importance(importance);
             }
@@ -559,6 +573,7 @@ impl AssetSubscriptions {
             self.demands.remove(&ticket);
             self.pending_importance.remove(&ticket);
             self.pending_priority.remove(&ticket);
+            self.pending_size.remove(&ticket);
         }
     }
 }

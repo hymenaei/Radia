@@ -425,6 +425,44 @@ async fn terrain_clamp_respects_parenting() {
 }
 
 #[tokio::test]
+async fn pending_texture_size_wins_before_acquisition() {
+    let region = Region::new(1);
+    let id = AssetId::new(Uuid::from_u128(101));
+    let (mut scene, _) = Reconciler::new(Budget::default());
+    scene.set_active_environment_textures(Some(region), BTreeSet::from([id]));
+    let request = match scene.poll(Instant::now()) {
+        ReconcileStep::Asset(AssetChange::Request(request)) => request,
+        _ => panic!("environment texture request is queued"),
+    };
+    let ticket = request.ticket;
+    let coordinator = AssetCoordinator::new(Handle::current(), pending(), None);
+    let mut subscriptions = AssetSubscriptions::new(coordinator.handle());
+    subscriptions.apply_change(AssetChange::Request(request));
+    subscriptions.apply_change(AssetChange::UpdateSize { ticket, size: assets::TextureSize::new(256) });
+    subscriptions.apply_change(AssetChange::UpdateSize { ticket, size: assets::TextureSize::new(512) });
+
+    let mut store = assets::Store::new(assets::Budget::default());
+    let route = store.register_route().expect("asset route");
+    let now = Instant::now();
+    let demand =
+        store.request_with_importance(route, request.request, request.priority, request.importance, now).expect("initial texture demand");
+    subscriptions.resume(ticket, false, Some(demand));
+    let assets::LoadJob::Fetch(fetch) = store.next_job(now).expect("texture fetch") else { panic!("texture demand fetches") };
+    let input = fetch.complete(Ok(test_support::texture::GRAY_4096_J2C.to_vec())).expect("fixture response fits");
+    let completion = store.start_decode(input).expect("decode admission").run();
+    store.complete(completion, now);
+
+    let assets::Status::Ready(assets::Content::Texture(texture)) = subscriptions.demands[&ticket].status() else {
+        panic!("texture demand becomes ready")
+    };
+    assert_eq!(texture.info().expect("decoded image info").size, [512; 2]);
+
+    drop(subscriptions);
+    store.close();
+    coordinator.stop().await;
+}
+
+#[tokio::test]
 async fn pending_asset_preserves_scene() {
     let mut world = world();
     let region = Region::new(1);

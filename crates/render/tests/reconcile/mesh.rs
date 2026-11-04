@@ -494,6 +494,282 @@ fn camera_sweep_releases_unneeded_lods() {
 }
 
 #[test]
+fn background_drop_retains_pending_lod() {
+    let asset = AssetId::new(Uuid::from_u128(793));
+    let bytes = test_support::mesh::asset(&[0, 1, 2, 3], 1);
+    let mut world = world();
+    add_mesh(&mut world, 1, asset, 2.0);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(high_camera());
+
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let header = request_header(&work.requested);
+    scene.complete_asset(header.ticket, prepared_asset(header.request, bytes.clone()));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let high = request_lod(&work.requested, assets::mesh::MeshLod::High);
+    let lowest = request_lod(&work.requested, assets::mesh::MeshLod::Lowest);
+    scene.complete_asset(lowest.ticket, prepared_asset(lowest.request, bytes.clone()));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(!work.released.contains(&high.ticket));
+    assert_eq!(asset_lod(view.objects().next().unwrap()), Some((asset, assets::mesh::MeshLod::Lowest)));
+
+    let background = Camera::new(DVec3::ZERO, Vec3::NEG_X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap();
+    scene.set_camera(background);
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.requested.is_empty());
+    assert!(!work.released.contains(&high.ticket), "visibility loss keeps the pending desired LOD ticket");
+    assert!(work.priority_updates.contains(&(high.ticket, Priority::Background)));
+
+    scene.set_camera(high_camera());
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.requested.is_empty(), "visibility return promotes the existing ticket without refetching");
+    assert!(!work.released.contains(&high.ticket));
+    assert!(work.priority_updates.contains(&(high.ticket, Priority::Visible)));
+
+    scene.complete_asset(high.ticket, prepared_asset(high.request, bytes));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&high.ticket));
+    assert_eq!(asset_lod(view.objects().next().unwrap()), Some((asset, assets::mesh::MeshLod::High)));
+}
+
+#[test]
+fn failed_lods_do_not_restart() {
+    for visible in [true, false] {
+        let asset = AssetId::new(Uuid::from_u128(810));
+        let bytes = test_support::mesh::asset(&[0, 1, 2, 3], 1);
+        let mut world = world();
+        add_mesh(&mut world, 1, asset, 2.0);
+        let (mut scene, mut view) = Reconciler::new(Budget::default());
+        let mut now = Instant::now();
+        let camera =
+            if visible { high_camera() } else { Camera::new(DVec3::ZERO, Vec3::NEG_X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap() };
+        scene.set_camera(camera);
+        let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+        let header = request_header(&work.requested);
+        scene.complete_asset(header.ticket, prepared_asset(header.request, bytes));
+        let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+        let lod = if visible { assets::mesh::MeshLod::High } else { assets::mesh::MeshLod::Lowest };
+        let request = request_lod(&work.requested, lod);
+        scene.complete_asset(request.ticket, assets::Status::Failed { failure: assets::Failure::NotFound, retry_at: None });
+        let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+        assert!(work.requested.is_empty(), "failure must not recreate a {lod:?} request");
+        assert!(!work.released.contains(&request.ticket));
+        scene.set_camera(camera);
+        let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+        assert!(work.requested.is_empty(), "rescans preserve terminal failure");
+    }
+}
+
+#[test]
+fn desired_change_releases_pending_lod() {
+    let asset = AssetId::new(Uuid::from_u128(798));
+    let bytes = test_support::mesh::asset(&[0, 1, 2, 3], 1);
+    let mut world = world();
+    add_mesh(&mut world, 1, asset, 2.0);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(high_camera());
+
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let header = request_header(&work.requested);
+    scene.complete_asset(header.ticket, prepared_asset(header.request, bytes.clone()));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let high = request_lod(&work.requested, assets::mesh::MeshLod::High);
+    let lowest = request_lod(&work.requested, assets::mesh::MeshLod::Lowest);
+    scene.complete_asset(lowest.ticket, prepared_asset(lowest.request, bytes));
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+
+    let background = Camera::new(DVec3::new(-8.0, 0.0, 0.0), Vec3::NEG_X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap();
+    scene.set_camera(background);
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.requested.is_empty(), "a background user does not start the new medium LOD");
+    assert!(work.released.contains(&high.ticket), "a changed desired LOD releases the stale High ticket");
+    assert_eq!(asset_lod(view.objects().next().unwrap()), Some((asset, assets::mesh::MeshLod::Lowest)));
+}
+
+#[test]
+fn background_mesh_requests_lowest() {
+    let asset = AssetId::new(Uuid::from_u128(794));
+    let bytes = test_support::mesh::asset(&[0, 1, 2, 3], 1);
+    let mut world = world();
+    add_mesh(&mut world, 1, asset, 2.0);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    let background = Camera::new(DVec3::ZERO, Vec3::NEG_X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap();
+    scene.set_camera(background);
+
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let header = request_header(&work.requested);
+    assert_eq!(header.priority, Priority::Background);
+    scene.complete_asset(header.ticket, prepared_asset(header.request, bytes));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(work.requested.len(), 1);
+    let lowest = request_lod(&work.requested, assets::mesh::MeshLod::Lowest);
+    assert_eq!(lowest.priority, Priority::Background);
+}
+
+#[test]
+fn removal_releases_pending_lod() {
+    let asset = AssetId::new(Uuid::from_u128(795));
+    let bytes = test_support::mesh::asset(&[0, 1, 2, 3], 1);
+    let mut world = world();
+    add_mesh(&mut world, 1, asset, 2.0);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(high_camera());
+
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let header = request_header(&work.requested);
+    scene.complete_asset(header.ticket, prepared_asset(header.request, bytes.clone()));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let high = request_lod(&work.requested, assets::mesh::MeshLod::High);
+    let lowest = request_lod(&work.requested, assets::mesh::MeshLod::Lowest);
+    scene.complete_asset(lowest.ticket, prepared_asset(lowest.request, bytes));
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+
+    let background = Camera::new(DVec3::ZERO, Vec3::NEG_X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap();
+    scene.set_camera(background);
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(!work.released.contains(&high.ticket));
+
+    let _ = world.remove_object(source(1, 12), NonZeroU32::new(1).unwrap()).unwrap();
+    scene.notify_world_change();
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&high.ticket));
+    assert_eq!(view.object_count(), 0);
+}
+
+#[test]
+fn failed_retained_lod_releases_to_fallback() {
+    let asset = AssetId::new(Uuid::from_u128(796));
+    let bytes = test_support::mesh::asset(&[0, 1, 2, 3], 1);
+    let mut world = world();
+    add_mesh(&mut world, 1, asset, 2.0);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(high_camera());
+
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let header = request_header(&work.requested);
+    scene.complete_asset(header.ticket, prepared_asset(header.request, bytes.clone()));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let high = request_lod(&work.requested, assets::mesh::MeshLod::High);
+    let lowest = request_lod(&work.requested, assets::mesh::MeshLod::Lowest);
+    scene.complete_asset(lowest.ticket, prepared_asset(lowest.request, bytes));
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+
+    let background = Camera::new(DVec3::ZERO, Vec3::NEG_X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap();
+    scene.set_camera(background);
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(!work.released.contains(&high.ticket));
+    assert!(work.priority_updates.contains(&(high.ticket, Priority::Background)));
+
+    scene.complete_asset(high.ticket, assets::Status::Failed { failure: assets::Failure::NotFound, retry_at: None });
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.requested.is_empty());
+    assert!(work.released.contains(&high.ticket), "terminal failure releases the retained request");
+    assert_eq!(asset_lod(view.objects().next().unwrap()), Some((asset, assets::mesh::MeshLod::Lowest)));
+
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.requested.is_empty(), "a settled failure does not restart the failed background LOD");
+    assert_eq!(asset_lod(view.objects().next().unwrap()), Some((asset, assets::mesh::MeshLod::Lowest)));
+}
+
+#[test]
+fn shared_background_keeps_lowest_only() {
+    let asset = AssetId::new(Uuid::from_u128(797));
+    let bytes = test_support::mesh::asset(&[0, 1, 2, 3], 1);
+    let mut world = world();
+    add_mesh(&mut world, 1, asset, 2.0);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(high_camera());
+
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let header = request_header(&work.requested);
+    scene.complete_asset(header.ticket, prepared_asset(header.request, bytes));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let high = request_lod(&work.requested, assets::mesh::MeshLod::High);
+    let lowest = request_lod(&work.requested, assets::mesh::MeshLod::Lowest);
+    assert_eq!(work.requested.len(), 2, "the visible target owns one deduplicated High and Lowest request");
+
+    add_mesh(&mut world, 2, asset, -2.0);
+    scene.notify_world_change();
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.requested.is_empty(), "the background target joins the existing Lowest ticket");
+    assert!(work.released.is_empty());
+
+    let _ = world.remove_object(source(1, 12), NonZeroU32::new(1).unwrap()).unwrap();
+    scene.notify_world_change();
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&high.ticket), "the background user's demand does not keep another user's High request");
+    assert!(!work.released.contains(&lowest.ticket), "the shared Lowest request remains needed");
+    assert!(work.priority_updates.contains(&(lowest.ticket, Priority::Background)));
+
+    scene.complete_asset(lowest.ticket, prepared_asset(lowest.request, test_support::mesh::asset(&[0, 1, 2, 3], 1)));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(work.released.contains(&lowest.ticket));
+    assert_eq!(asset_lod(view.objects().next().unwrap()), Some((asset, assets::mesh::MeshLod::Lowest)));
+}
+
+#[test]
+fn shared_mesh_hysteresis() {
+    let asset = AssetId::new(Uuid::from_u128(720));
+    let bytes = test_support::mesh::asset(&[0, 1, 2, 3], 1);
+    let mut world = world();
+    add_mesh(&mut world, 1, asset, 4.0);
+    add_mesh(&mut world, 2, asset, 2.0);
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    let camera_at = |x| Camera::new(DVec3::new(x, 0.0, 0.0), Vec3::X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap();
+    scene.set_camera(camera_at(0.60));
+
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let header = request_header(&work.requested);
+    scene.complete_asset(header.ticket, prepared_asset(header.request, bytes.clone()));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let high = request_lod(&work.requested, assets::mesh::MeshLod::High);
+    let medium = request_lod(&work.requested, assets::mesh::MeshLod::Medium);
+    scene.complete_asset(high.ticket, prepared_asset(high.request, bytes.clone()));
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+    let target = view.objects().find(|object| object.detail().summary.id.as_u128() == 1).unwrap();
+    assert_eq!(asset_lod(target), Some((asset, assets::mesh::MeshLod::High)));
+
+    scene.set_camera(camera_at(0.61));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(!work.released.contains(&medium.ticket), "the desired medium LOD stays requested while High is only a published fallback");
+    let target = view.objects().find(|object| object.detail().summary.id.as_u128() == 1).unwrap();
+    assert_eq!(asset_lod(target), Some((asset, assets::mesh::MeshLod::High)));
+
+    scene.complete_asset(medium.ticket, prepared_asset(medium.request, bytes.clone()));
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+    let target = view.objects().find(|object| object.detail().summary.id.as_u128() == 1).unwrap();
+    assert_eq!(asset_lod(target), Some((asset, assets::mesh::MeshLod::Medium)));
+
+    for x in [0.60, 0.61, 0.60, 0.61] {
+        scene.set_camera(camera_at(x));
+        let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+        assert!(work.requested.is_empty());
+        let target = view.objects().find(|object| object.detail().summary.id.as_u128() == 1).unwrap();
+        assert_eq!(asset_lod(target), Some((asset, assets::mesh::MeshLod::Medium)));
+    }
+
+    scene.set_camera(camera_at(2.0));
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+    let target = view.objects().find(|object| object.detail().summary.id.as_u128() == 1).unwrap();
+    assert_eq!(asset_lod(target), Some((asset, assets::mesh::MeshLod::High)));
+
+    scene.set_camera(camera_at(-1.0));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let medium = request_lod(&work.requested, assets::mesh::MeshLod::Medium);
+    scene.complete_asset(medium.ticket, prepared_asset(medium.request, bytes));
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+    let target = view.objects().find(|object| object.detail().summary.id.as_u128() == 1).unwrap();
+    assert_eq!(asset_lod(target), Some((asset, assets::mesh::MeshLod::Medium)));
+}
+
+#[test]
 fn camera_change_refines_distinct_meshes() {
     const OBJECTS: u32 = 64;
 
@@ -718,23 +994,36 @@ fn removing_mesh_during_header_fetch_ignores_late_completion() {
 }
 
 #[test]
-fn leaving_region_releases_mesh_fetch_and_ignores_late_completion() {
+fn region_leave_releases_pending_lod() {
     let asset = AssetId::new(Uuid::from_u128(715));
     let mut world = world();
-    add_mesh(&mut world, 1, asset, 10.0);
+    add_mesh(&mut world, 1, asset, 2.0);
     let (mut scene, mut view) = Reconciler::new(Budget::default());
     let mut now = Instant::now();
-    scene.set_camera(camera(0.0));
+    scene.set_camera(high_camera());
 
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     let header = request_header(&work.requested);
+    scene.complete_asset(header.ticket, prepared_asset(header.request, test_support::mesh::asset(&[0, 1, 2, 3], 1)));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let high = request_lod(&work.requested, assets::mesh::MeshLod::High);
+    let lowest = request_lod(&work.requested, assets::mesh::MeshLod::Lowest);
+    scene.complete_asset(lowest.ticket, prepared_asset(lowest.request, test_support::mesh::asset(&[0, 1, 2, 3], 1)));
+    settle_materials(&mut scene, &mut view, &world, &mut now);
+
+    let background = Camera::new(DVec3::ZERO, Vec3::NEG_X, std::f64::consts::FRAC_PI_3, [1000, 1000]).unwrap();
+    scene.set_camera(background);
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(!work.released.contains(&high.ticket));
+    assert!(work.priority_updates.contains(&(high.ticket, Priority::Background)));
+
     let _ = world.retire_region(world::Region::new(1)).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert!(work.released.contains(&header.ticket));
+    assert!(work.released.contains(&high.ticket));
     assert_eq!(view.object_count(), 0);
 
-    scene.complete_asset(header.ticket, prepared_asset(header.request, test_support::mesh::asset(&[0, 1, 2, 3], 1)));
+    scene.complete_asset(high.ticket, prepared_asset(high.request, test_support::mesh::asset(&[0, 1, 2, 3], 1)));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(work.requested.is_empty());
     assert_eq!(view.object_count(), 0);

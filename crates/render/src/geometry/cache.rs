@@ -5,17 +5,19 @@ use std::{
     time::Instant,
 };
 
-use math::{Frustum, Quat, Vec3};
+use math::{Quat, Vec3};
 use world::{Entity, Region};
 
-use super::instance::{instance_base, is_visible, parameter_part};
+use super::instance::{instance_base, parameter_part};
 use super::items::{
     CachedFace, CachedFaceContext, CachedItem, CachedReplacement, ItemId, ItemIndex, ItemSlab, MeshInfo, cached_faces, draw_priority,
     mesh_info, object_draw_scale, same_surface_geometry,
 };
+use super::visibility::{VisibilityBands, WorldSphere};
 use super::{GeometryRenderer, MeshState, ShadingMode};
 use crate::scene::{
-    Camera, MeshId, Object, Placement, PreparedMesh, SceneView, SharedMesh, Surface, SurfaceKind, ViewVersion, texture_animation,
+    Camera, DrawnMeshKey, MeshId, Object, Placement, PreparedMesh, SceneView, SharedMesh, Surface, SurfaceKind, ViewVersion,
+    texture_animation,
 };
 
 #[derive(Default)]
@@ -25,13 +27,20 @@ pub(super) struct FrameCache {
     pub(super) objects: HashMap<Entity, ItemIndex>,
     pub(super) replacements: BTreeSet<ItemIndex>,
     pub(super) mesh_info: HashMap<MeshId, Arc<MeshInfo>>,
+    item_order: Vec<ItemIndex>,
+    item_order_dirty: bool,
     pub(super) candidates: Vec<ItemIndex>,
     pub(super) next_candidates: Vec<ItemIndex>,
     pub(super) replacement_visible: HashSet<ItemIndex>,
     pub(super) next_replacement_visible: HashSet<ItemIndex>,
+    pub(super) preparation_candidates: Vec<ItemIndex>,
+    pub(super) next_preparation_candidates: Vec<ItemIndex>,
+    pub(super) preparation_replacements: HashSet<ItemIndex>,
+    pub(super) next_preparation_replacements: HashSet<ItemIndex>,
     pub(super) visible: Vec<ItemIndex>,
     pub(super) next_visible: Vec<ItemIndex>,
     pub(super) mesh_ids: Vec<MeshId>,
+    pub(super) preparation_mesh_ids: Vec<MeshId>,
     pub(super) mesh_set: HashSet<MeshId>,
     pub(super) mesh_priorities: HashMap<MeshId, (f64, f64)>,
     pub(super) mesh_ready: HashSet<MeshId>,
@@ -72,6 +81,7 @@ impl FrameCache {
         }
         let index = self.items.insert(item)?;
         self.item_indices.insert(id, index);
+        self.item_order_dirty = true;
         Some(index)
     }
 
@@ -81,15 +91,51 @@ impl FrameCache {
         self.replacements.remove(&index);
         self.replacement_visible.remove(&index);
         self.next_replacement_visible.remove(&index);
+        self.candidates.retain(|candidate| *candidate != index);
+        self.next_candidates.retain(|candidate| *candidate != index);
+        self.preparation_candidates.retain(|candidate| *candidate != index);
+        self.next_preparation_candidates.retain(|candidate| *candidate != index);
+        self.preparation_replacements.remove(&index);
+        self.next_preparation_replacements.remove(&index);
+        self.item_order_dirty = true;
         Some(item)
+    }
+
+    pub(super) fn promote_replacement(&mut self, index: ItemIndex) -> Option<CachedItem> {
+        let item = self.items.get_mut(index)?;
+        let replacement = item.replacement.take()?;
+        let previous = std::mem::replace(item, replacement.item);
+        self.replacements.remove(&index);
+        self.replacement_visible.remove(&index);
+        self.next_replacement_visible.remove(&index);
+        Some(previous)
     }
 
     pub(super) fn clear_items(&mut self) {
         self.items.clear();
         self.item_indices.clear();
+        self.item_order.clear();
+        self.item_order_dirty = true;
         self.replacements.clear();
         self.replacement_visible.clear();
         self.next_replacement_visible.clear();
+        self.candidates.clear();
+        self.next_candidates.clear();
+        self.preparation_candidates.clear();
+        self.next_preparation_candidates.clear();
+        self.preparation_mesh_ids.clear();
+        self.preparation_replacements.clear();
+        self.next_preparation_replacements.clear();
+    }
+
+    fn rebuild_item_order(&mut self) {
+        if !self.item_order_dirty {
+            return;
+        }
+        self.item_order.clear();
+        self.item_order.extend(self.items.iter().map(|(index, _)| index));
+        self.item_order.sort_unstable_by_key(|index| self.items.get(*index).map(|item| item.id));
+        self.item_order_dirty = false;
     }
 }
 
@@ -129,6 +175,7 @@ impl GeometryRenderer {
             self.cache.changed_surfaces.clear();
             self.cache.retired_regions.clear();
             self.cache.mesh_ids.clear();
+            self.cache.preparation_mesh_ids.clear();
             self.cache.mesh_representatives.clear();
             self.cache.mesh_compositions.clear();
             self.cache.mesh_priorities.clear();
@@ -204,6 +251,7 @@ impl GeometryRenderer {
                 if !removed.is_empty() {
                     update.full_visibility = true;
                     update.layout_changed = true;
+                    update.mesh_dirty = true;
                 }
                 for (index, entity) in removed {
                     self.remove_item(index);
@@ -268,6 +316,7 @@ impl GeometryRenderer {
                 self.cache.objects.remove(&entity);
                 update.full_visibility = true;
                 update.layout_changed = true;
+                update.mesh_dirty = true;
             }
             return;
         };
@@ -279,6 +328,7 @@ impl GeometryRenderer {
                 self.cache.objects.remove(&entity);
                 update.full_visibility = true;
                 update.layout_changed = true;
+                update.mesh_dirty = true;
             }
             return;
         };
@@ -290,6 +340,7 @@ impl GeometryRenderer {
                 self.cache.objects.remove(&entity);
                 update.full_visibility = true;
                 update.layout_changed = true;
+                update.mesh_dirty = true;
             }
             return;
         };
@@ -357,19 +408,32 @@ impl GeometryRenderer {
             if let Some(index) = old_index {
                 self.remove_item(index);
                 self.cache.animated_items.remove(&index);
+                update.mesh_dirty = true;
             }
             self.cache.objects.remove(&entity);
             update.full_visibility = true;
             update.layout_changed = true;
             return;
         };
+        let previous_asset = old_index
+            .and_then(|index| self.cache.items.get(index))
+            .and_then(|cached| cached.source.as_ref())
+            .and_then(Object::mesh)
+            .and_then(|(key, _)| match key {
+                DrawnMeshKey::Asset { asset, .. } => Some(asset),
+                DrawnMeshKey::Prim(_) => None,
+            });
+        let current_asset = object.mesh().and_then(|(key, _)| match key {
+            DrawnMeshKey::Asset { asset, .. } => Some(asset),
+            DrawnMeshKey::Prim(_) => None,
+        });
+        let asset_replaced = current_asset.is_some() && current_asset != previous_asset;
         if let Some(index) = old_index
-            && previous_mesh != Some(item.mesh.id())
-            && !self.meshes.contains_key(&item.mesh.id())
+            && (asset_replaced || previous_mesh != Some(item.mesh.id()) && !self.meshes.contains_key(&item.mesh.id()))
         {
             self.discard_replacement(index);
             if let Some(cached) = self.cache.items.get_mut(index) {
-                cached.replacement = Some(Box::new(CachedReplacement { item, retry_state: None }));
+                cached.replacement = Some(Box::new(CachedReplacement { item }));
                 self.cache.replacements.insert(index);
             }
             self.update_held_object_pose(index, transform, update);
@@ -437,66 +501,10 @@ impl GeometryRenderer {
         }
     }
 
-    fn replacement(&self, index: ItemIndex) -> Option<&CachedReplacement> {
-        self.cache.items.get(index)?.replacement.as_deref()
-    }
-
-    pub(super) fn replacement_groups(&self) -> HashMap<MeshId, Vec<ItemIndex>> {
-        let mut groups = HashMap::<MeshId, Vec<ItemIndex>>::new();
-        for index in &self.cache.replacements {
-            if let Some(replacement) = self.replacement(*index) {
-                groups.entry(replacement.item.mesh.id()).or_default().push(*index);
-            }
-        }
-        groups
-    }
-
-    pub(super) fn set_replacement_retry_state(&mut self, indices: &[ItemIndex], state: MeshState) {
-        for index in indices {
-            if let Some(replacement) = self.cache.items.get_mut(*index).and_then(|item| item.replacement.as_mut()) {
-                replacement.retry_state = Some(state);
-            }
-        }
-    }
-
-    pub(super) fn replacement_retry_state(&self, indices: &[ItemIndex]) -> Option<MeshState> {
-        indices.iter().find_map(|index| self.replacement(*index)?.retry_state)
-    }
-
-    pub(super) fn has_ready_replacement(&self) -> bool {
-        self.cache
-            .replacements
-            .iter()
-            .any(|index| self.replacement(*index).is_some_and(|replacement| self.meshes.contains_key(&replacement.item.mesh.id())))
-    }
-
-    pub(super) fn promote_ready_replacements(&mut self, update: &mut CacheUpdate) -> bool {
-        let indices = self
-            .cache
-            .replacements
-            .iter()
-            .copied()
-            .filter(|index| self.replacement(*index).is_some_and(|replacement| self.meshes.contains_key(&replacement.item.mesh.id())))
-            .collect::<Vec<_>>();
-        self.promote_replacements(indices, update)
-    }
-
-    pub(super) fn drop_blocked_fallbacks(&mut self, indices: &[ItemIndex], update: &mut CacheUpdate) -> Vec<MeshId> {
-        let previous_meshes =
-            indices.iter().filter_map(|index| self.cache.items.get(*index).map(|item| item.mesh.id())).collect::<Vec<_>>();
-        if self.promote_replacements(indices.to_vec(), update) { previous_meshes } else { Vec::new() }
-    }
-
-    fn promote_replacements(&mut self, indices: Vec<ItemIndex>, update: &mut CacheUpdate) -> bool {
+    pub(super) fn promote_replacements(&mut self, indices: Vec<ItemIndex>, update: &mut CacheUpdate) -> bool {
         let mut changed = false;
         for index in indices {
-            let replacement = self.cache.items.get_mut(index).and_then(|item| item.replacement.take()).map(|replacement| *replacement);
-            let Some(replacement) = replacement else { continue };
-            self.cache.replacements.remove(&index);
-            self.cache.replacement_visible.remove(&index);
-            self.cache.next_replacement_visible.remove(&index);
-            let Some(item) = self.cache.items.get_mut(index) else { continue };
-            let previous = std::mem::replace(item, replacement.item);
+            let Some(previous) = self.cache.promote_replacement(index) else { continue };
             self.draw_list.release_faces(&previous.faces);
             self.cache.animated_items.remove(&index);
             if self.cache.items.get(index).is_some_and(|item| !item.animated_faces.is_empty()) {
@@ -543,14 +551,14 @@ impl GeometryRenderer {
             }
             self.cache.insert_item(item);
             update.layout_changed = true;
-            if old_index.is_none() {
-                update.full_visibility = true;
-            }
+            update.full_visibility = true;
+            update.mesh_dirty = true;
         } else if let Some(index) = old_index {
             self.remove_item(index);
             update.items_updated += 1;
             update.full_visibility = true;
             update.layout_changed = true;
+            update.mesh_dirty = true;
         }
     }
 
@@ -684,19 +692,37 @@ impl GeometryRenderer {
         Some(item)
     }
 
-    pub(super) fn rebuild_candidates(&mut self, camera: Camera, projection: math::Mat4) -> (bool, bool) {
+    pub(super) fn rebuild_candidates(&mut self, camera: Camera, projection: math::Mat4, size: [u32; 2]) -> (bool, bool, bool) {
+        self.cache.rebuild_item_order();
         self.cache.next_candidates.clear();
         self.cache.next_replacement_visible.clear();
-        let frustum = Frustum::from_clip_matrix(projection);
-        for (index, item) in self.cache.items.iter() {
-            if self.is_item_visible(item, camera, &frustum) {
+        self.cache.next_preparation_candidates.clear();
+        self.cache.next_preparation_replacements.clear();
+        let bands = VisibilityBands::new(projection, size);
+        for index in self.cache.item_order.iter().copied() {
+            let Some(item) = self.cache.items.get(index) else { continue };
+            let sphere = WorldSphere::new(item.position, item.rotation, item.scale, item.info.bounds, camera);
+            let was_candidate = contains_id(&self.cache.candidates, &self.cache.items, item.id);
+            let candidate_frustum = if was_candidate { &bands.retained } else { &bands.strict };
+            if sphere.is_some_and(|sphere| sphere.visible(item.shading, camera, candidate_frustum)) {
                 self.cache.next_candidates.push(index);
             }
-            if item.replacement.as_ref().is_some_and(|replacement| self.is_item_visible(&replacement.item, camera, &frustum)) {
-                self.cache.next_replacement_visible.insert(index);
+            if sphere.is_some_and(|sphere| sphere.visible(item.shading, camera, &bands.preparation)) {
+                self.cache.next_preparation_candidates.push(index);
+            }
+            if let Some(replacement) = item.replacement.as_ref() {
+                let replacement = &replacement.item;
+                let sphere =
+                    WorldSphere::new(replacement.position, replacement.rotation, replacement.scale, replacement.info.bounds, camera);
+                let frustum = if self.cache.replacement_visible.contains(&index) { &bands.retained } else { &bands.strict };
+                if sphere.is_some_and(|sphere| sphere.visible(replacement.shading, camera, frustum)) {
+                    self.cache.next_replacement_visible.insert(index);
+                }
+                if sphere.is_some_and(|sphere| sphere.visible(replacement.shading, camera, &bands.preparation)) {
+                    self.cache.next_preparation_replacements.insert(index);
+                }
             }
         }
-        self.cache.next_candidates.sort_unstable_by_key(|index| self.cache.items.get(*index).map(|item| item.id));
         let candidates_changed = self.cache.candidates != self.cache.next_candidates;
         if candidates_changed {
             std::mem::swap(&mut self.cache.candidates, &mut self.cache.next_candidates);
@@ -705,21 +731,48 @@ impl GeometryRenderer {
         if replacements_changed {
             std::mem::swap(&mut self.cache.replacement_visible, &mut self.cache.next_replacement_visible);
         }
+        let preparation_changed = self.cache.preparation_candidates != self.cache.next_preparation_candidates
+            || self.cache.preparation_replacements != self.cache.next_preparation_replacements;
+        if preparation_changed {
+            std::mem::swap(&mut self.cache.preparation_candidates, &mut self.cache.next_preparation_candidates);
+            std::mem::swap(&mut self.cache.preparation_replacements, &mut self.cache.next_preparation_replacements);
+        }
         self.cache.next_candidates.clear();
         self.cache.next_replacement_visible.clear();
-        (candidates_changed, replacements_changed)
+        self.cache.next_preparation_candidates.clear();
+        self.cache.next_preparation_replacements.clear();
+        (candidates_changed, replacements_changed, preparation_changed)
     }
 
-    pub(super) fn update_candidates(&mut self, camera: Camera, projection: math::Mat4, ids: &[ItemIndex]) -> (bool, bool) {
-        let frustum = Frustum::from_clip_matrix(projection);
+    pub(super) fn update_candidates(
+        &mut self,
+        camera: Camera,
+        projection: math::Mat4,
+        size: [u32; 2],
+        ids: &[ItemIndex],
+    ) -> (bool, bool, bool) {
+        let bands = VisibilityBands::new(projection, size);
         let mut candidates_changed = false;
         let mut replacements_changed = false;
+        let mut preparation_changed = false;
         for item_index in ids {
             let Some(item) = self.cache.items.get(*item_index) else { continue };
-            let visible = self.is_item_visible(item, camera, &frustum);
-            let replacement_visible =
-                item.replacement.as_ref().is_some_and(|replacement| self.is_item_visible(&replacement.item, camera, &frustum));
             let id = item.id;
+            let sphere = WorldSphere::new(item.position, item.rotation, item.scale, item.info.bounds, camera);
+            let was_candidate = contains_id(&self.cache.candidates, &self.cache.items, id);
+            let candidate_frustum = if was_candidate { &bands.retained } else { &bands.strict };
+            let visible = sphere.is_some_and(|sphere| sphere.visible(item.shading, camera, candidate_frustum));
+            let preparation_visible = sphere.is_some_and(|sphere| sphere.visible(item.shading, camera, &bands.preparation));
+            let (replacement_visible, preparation_replacement_visible) = item.replacement.as_ref().map_or((false, false), |replacement| {
+                let replacement = &replacement.item;
+                let sphere =
+                    WorldSphere::new(replacement.position, replacement.rotation, replacement.scale, replacement.info.bounds, camera);
+                let frustum = if self.cache.replacement_visible.contains(item_index) { &bands.retained } else { &bands.strict };
+                (
+                    sphere.is_some_and(|sphere| sphere.visible(replacement.shading, camera, frustum)),
+                    sphere.is_some_and(|sphere| sphere.visible(replacement.shading, camera, &bands.preparation)),
+                )
+            });
             let was_replacement_visible = self.cache.replacement_visible.contains(item_index);
             if replacement_visible != was_replacement_visible {
                 if replacement_visible {
@@ -729,31 +782,24 @@ impl GeometryRenderer {
                 }
                 replacements_changed = true;
             }
-            let position = self
-                .cache
-                .candidates
-                .binary_search_by(|candidate| self.cache.items.get(*candidate).map_or(Ordering::Less, |item| item.id.cmp(&id)));
-            match position {
-                Ok(index) if !visible => {
-                    self.cache.candidates.remove(index);
-                    candidates_changed = true;
+            candidates_changed |= update_membership(&mut self.cache.candidates, &self.cache.items, id, *item_index, visible);
+            preparation_changed |=
+                update_membership(&mut self.cache.preparation_candidates, &self.cache.items, id, *item_index, preparation_visible);
+            if preparation_replacement_visible != self.cache.preparation_replacements.contains(item_index) {
+                if preparation_replacement_visible {
+                    self.cache.preparation_replacements.insert(*item_index);
+                } else {
+                    self.cache.preparation_replacements.remove(item_index);
                 }
-                Err(position) if visible => {
-                    self.cache.candidates.insert(position, *item_index);
-                    candidates_changed = true;
-                }
-                _ => {}
+                preparation_changed = true;
             }
         }
-        (candidates_changed, replacements_changed)
-    }
-
-    fn is_item_visible(&self, item: &CachedItem, camera: Camera, frustum: &Frustum) -> bool {
-        is_visible(item.position, item.rotation, item.scale, item.info.bounds, item.shading, camera, frustum)
+        (candidates_changed, replacements_changed, preparation_changed)
     }
 
     pub(super) fn rebuild_visible_meshes(&mut self, camera: Camera) -> bool {
         self.cache.mesh_ids.clear();
+        self.cache.preparation_mesh_ids.clear();
         self.cache.mesh_set.clear();
         self.cache.mesh_representatives.clear();
         self.cache.mesh_compositions.clear();
@@ -774,46 +820,75 @@ impl GeometryRenderer {
                     self.meshes.contains_key(&replacement.mesh.id()),
                 )
             });
-            missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, self.meshes.contains_key(&mesh.id()));
+            missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, self.meshes.contains_key(&mesh.id()), false);
             if let Some((mesh, composition, priority, resident)) = replacement {
-                missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, resident);
+                missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, resident, false);
             }
         }
         if !self.cache.replacement_visible.is_empty() {
-            let replacements = self
-                .cache
-                .replacement_visible
-                .iter()
-                .filter_map(|index| {
-                    let item = self.cache.items.get(*index)?;
-                    let replacement = &item.replacement.as_ref()?.item;
-                    Some((replacement.mesh.clone(), replacement.terrain_composition.clone(), draw_priority(replacement, camera)))
-                })
-                .collect::<Vec<_>>();
-            for (mesh, composition, priority) in replacements {
-                missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, self.meshes.contains_key(&mesh.id()));
+            let mut replacements = self.cache.replacement_visible.iter().copied().collect::<Vec<_>>();
+            replacements.sort_unstable_by_key(|index| self.cache.items.get(*index).map(|item| item.id));
+            for index in replacements {
+                let Some(replacement) = self.cache.items.get(index).and_then(|item| item.replacement.as_ref()) else { continue };
+                let replacement = &replacement.item;
+                let mesh = replacement.mesh.clone();
+                let composition = replacement.terrain_composition.clone();
+                let priority = draw_priority(replacement, camera);
+                missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, self.meshes.contains_key(&mesh.id()), false);
             }
         }
+        let preparation = self.cache.preparation_candidates.clone();
+        for index in preparation {
+            let Some((mesh, composition, priority, resident)) = self.cache.items.get(index).map(|item| {
+                (
+                    item.mesh.clone(),
+                    item.terrain_composition.clone(),
+                    draw_priority(item, camera),
+                    self.meshes.contains_key(&item.mesh.id()),
+                )
+            }) else {
+                continue;
+            };
+            missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, resident, true);
+        }
+        let mut preparation_replacements = self.cache.preparation_replacements.iter().copied().collect::<Vec<_>>();
+        preparation_replacements.sort_unstable_by_key(|index| self.cache.items.get(*index).map(|item| item.id));
+        for index in preparation_replacements {
+            let Some((mesh, composition, priority, resident)) =
+                self.cache.items.get(index).and_then(|item| item.replacement.as_ref()).map(|replacement| {
+                    let item = &replacement.item;
+                    (
+                        item.mesh.clone(),
+                        item.terrain_composition.clone(),
+                        draw_priority(item, camera),
+                        self.meshes.contains_key(&item.mesh.id()),
+                    )
+                })
+            else {
+                continue;
+            };
+            missing |= add_mesh_demand(&mut self.cache, &mesh, composition, priority, resident, true);
+        }
+        let priorities = &self.cache.mesh_priorities;
         self.cache.mesh_ids.sort_by(|a, b| {
             let resident = self.meshes.contains_key(b).cmp(&self.meshes.contains_key(a));
             if resident != std::cmp::Ordering::Equal {
                 return resident;
             }
-            let a_priority = self.cache.mesh_priorities[a];
-            let b_priority = self.cache.mesh_priorities[b];
+            let a_priority = priorities[a];
+            let b_priority = priorities[b];
+            b_priority.0.total_cmp(&a_priority.0).then_with(|| a_priority.1.total_cmp(&b_priority.1))
+        });
+        self.cache.preparation_mesh_ids.sort_by(|a, b| {
+            let resident = self.meshes.contains_key(b).cmp(&self.meshes.contains_key(a));
+            if resident != std::cmp::Ordering::Equal {
+                return resident;
+            }
+            let a_priority = priorities[a];
+            let b_priority = priorities[b];
             b_priority.0.total_cmp(&a_priority.0).then_with(|| a_priority.1.total_cmp(&b_priority.1))
         });
         missing
-    }
-
-    pub(super) fn forget_mesh_demand(&mut self, mesh_id: MeshId) {
-        self.cache.mesh_ids.retain(|candidate| *candidate != mesh_id);
-        self.cache.mesh_set.remove(&mesh_id);
-        self.cache.mesh_priorities.remove(&mesh_id);
-        self.cache.mesh_ready.remove(&mesh_id);
-        self.cache.mesh_representatives.remove(&mesh_id);
-        self.cache.mesh_compositions.remove(&mesh_id);
-        self.pending_meshes.remove(&mesh_id);
     }
 }
 
@@ -823,10 +898,15 @@ fn add_mesh_demand(
     composition: Option<Arc<[f32]>>,
     priority: (f64, f64),
     resident: bool,
+    preparation: bool,
 ) -> bool {
     let mesh_id = mesh.id();
     if cache.mesh_set.insert(mesh_id) {
-        cache.mesh_ids.push(mesh_id);
+        if preparation {
+            cache.preparation_mesh_ids.push(mesh_id);
+        } else {
+            cache.mesh_ids.push(mesh_id);
+        }
         cache.mesh_representatives.insert(mesh_id, mesh.clone());
         cache.mesh_compositions.insert(mesh_id, composition);
         cache.mesh_priorities.insert(mesh_id, priority);
@@ -838,6 +918,24 @@ fn add_mesh_demand(
             *current = priority;
         }
         false
+    }
+}
+
+fn contains_id(indices: &[ItemIndex], items: &ItemSlab, id: ItemId) -> bool {
+    indices.binary_search_by(|index| items.get(*index).map_or(Ordering::Less, |item| item.id.cmp(&id))).is_ok()
+}
+
+fn update_membership(indices: &mut Vec<ItemIndex>, items: &ItemSlab, id: ItemId, index: ItemIndex, visible: bool) -> bool {
+    match indices.binary_search_by(|candidate| items.get(*candidate).map_or(Ordering::Less, |item| item.id.cmp(&id))) {
+        Ok(position) if !visible => {
+            indices.remove(position);
+            true
+        }
+        Err(position) if visible => {
+            indices.insert(position, index);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -880,3 +978,7 @@ fn surface_item_id(region: Region, kind: SurfaceKind) -> ItemId {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cache_tests.rs"]
+mod tests;

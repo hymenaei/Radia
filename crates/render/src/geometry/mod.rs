@@ -1,5 +1,6 @@
 mod cache;
 mod draw_list;
+mod first_appearance;
 mod frame;
 mod instance;
 mod items;
@@ -7,6 +8,7 @@ mod mesh;
 mod pick;
 mod storage;
 mod texture_bindings;
+mod visibility;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -29,6 +31,7 @@ use world::{Entity, WorldTransform};
 
 use self::cache::FrameCache;
 use self::draw_list::{DrawList, INDIRECT_DRAW_BYTES, MAX_FACE_INSTANCES};
+use self::first_appearance::FirstAppearances;
 use self::items::ItemIndex;
 use self::mesh::GpuMesh;
 use self::storage::Storage;
@@ -173,12 +176,12 @@ struct FramePreparation {
     geometry_textures: GeometryTextureState,
     meshes: MeshState,
     more_meshes: bool,
-    animation_deadline: Option<Instant>,
+    redraw_deadline: Option<Instant>,
 }
 
 impl FramePreparation {
     fn needs_frame(&self, textures: TextureState, geometry_textures: GeometryTextureState, meshes: MeshState, now: Instant) -> bool {
-        self.animation_deadline.is_some_and(|deadline| deadline <= now)
+        self.redraw_deadline.is_some_and(|deadline| deadline <= now)
             || self.more_meshes
             || self.textures != textures
             || self.geometry_textures != geometry_textures
@@ -190,7 +193,7 @@ impl FramePreparation {
             && self.geometry_textures == geometry_textures
             && self.meshes == meshes
             && !self.more_meshes
-            && self.animation_deadline.is_none_or(|deadline| deadline > now)
+            && self.redraw_deadline.is_none_or(|deadline| deadline > now)
     }
 }
 
@@ -225,6 +228,7 @@ pub(crate) struct GeometryRenderer {
     retired: Vec<GpuMesh>,
     cache: FrameCache,
     draw_list: DrawList,
+    first_appearances: FirstAppearances,
     pending_meshes: HashSet<MeshId>,
     pending_textures: HashSet<TextureId>,
     draw_report: Option<Instant>,
@@ -255,8 +259,8 @@ impl GeometryRenderer {
             || self.textures.uploading()
     }
 
-    pub(crate) fn animation_deadline(&self) -> Option<Instant> {
-        self.prepared.as_ref().and_then(|prepared| prepared.animation_deadline)
+    pub(crate) fn redraw_deadline(&self) -> Option<Instant> {
+        self.prepared.as_ref().and_then(|prepared| prepared.redraw_deadline)
     }
 
     pub(crate) fn texture_revision(&self) -> u64 {
@@ -291,6 +295,7 @@ impl GeometryRenderer {
             retired: Vec::new(),
             cache: FrameCache::default(),
             draw_list: DrawList::default(),
+            first_appearances: FirstAppearances::default(),
             pending_meshes: HashSet::new(),
             pending_textures: HashSet::new(),
             draw_report: None,
@@ -349,9 +354,14 @@ impl GeometryRenderer {
         self.cache.camera = None;
         self.cache.candidates.clear();
         self.cache.next_candidates.clear();
+        self.cache.preparation_candidates.clear();
+        self.cache.next_preparation_candidates.clear();
+        self.cache.preparation_replacements.clear();
+        self.cache.next_preparation_replacements.clear();
         self.cache.visible.clear();
         self.cache.next_visible.clear();
         self.cache.mesh_ids.clear();
+        self.cache.preparation_mesh_ids.clear();
         self.cache.mesh_set.clear();
         self.cache.mesh_representatives.clear();
         self.cache.mesh_compositions.clear();

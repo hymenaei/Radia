@@ -15,6 +15,10 @@ pub(crate) struct FaceParams {
 }
 
 impl FaceParams {
+    pub(crate) fn is_visible(&self) -> bool {
+        !(self.blend && self.color[3] <= 0.0)
+    }
+
     pub(crate) fn new(face: Option<&FaceMaterial>) -> Self {
         Self::with_texture_entry_transform(face, None)
     }

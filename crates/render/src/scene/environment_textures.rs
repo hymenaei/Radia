@@ -363,7 +363,10 @@ mod tests {
                     | Request::MeshHeader(_)
                     | Request::MeshLod(_) => None,
                 },
-                AssetChange::Release(_) | AssetChange::UpdateImportance { .. } | AssetChange::UpdatePriority { .. } => None,
+                AssetChange::Release(_)
+                | AssetChange::UpdateImportance { .. }
+                | AssetChange::UpdatePriority { .. }
+                | AssetChange::UpdateSize { .. } => None,
             })
             .collect()
     }
@@ -404,7 +407,7 @@ mod tests {
             AssetChange::UpdatePriority { ticket, .. } => {
                 assert!(issued.contains(&ticket));
             }
-            AssetChange::UpdateImportance { .. } => unreachable!(),
+            AssetChange::UpdateImportance { .. } | AssetChange::UpdateSize { .. } => unreachable!(),
         };
         for value in 1..4096 {
             manager.update(&BTreeMap::new(), None, &BTreeMap::from([(asset(value), Region::new(1))]));

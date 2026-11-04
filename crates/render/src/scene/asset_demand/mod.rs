@@ -10,12 +10,12 @@ use std::{
 };
 
 use assets::{Content, Failure, Kind, MaterialDescription, Priority, Request, Resource, Status, TextureRef, TextureSize, mesh::MeshLod};
-use math::DVec3;
+use math::{DVec3, UvTransform};
 use utils::AssetId;
 use uuid::Uuid;
 use world::{Entity, FaceAppearance, Region};
 
-use crate::material::{self, AssetState, FaceMaterial, Resolution};
+use crate::material::{self, AssetState, FaceMaterial, FaceParams, Resolution};
 use crate::scene::{Budget, Camera, MAX_OBJECTS, Object, Placement, budget::Lease, model::Mirror};
 
 use self::mesh::{MeshAssets, MeshResolution};
@@ -51,6 +51,7 @@ pub enum AssetChange {
     Release(AssetTicket),
     UpdateImportance { ticket: AssetTicket, importance: u16 },
     UpdatePriority { ticket: AssetTicket, priority: Priority },
+    UpdateSize { ticket: AssetTicket, size: TextureSize },
 }
 
 #[derive(Clone)]
@@ -372,30 +373,19 @@ impl AssetDemand {
         let size_changed = key.unit == AssetUnit::Whole && key.resource.kind == Kind::Texture && entry.size != size;
         let priority_changed = entry.priority != priority;
         let importance_changed = entry.importance != importance;
-        if !size_changed && !priority_changed && !importance_changed {
-            return;
+        if size_changed {
+            entry.size = size;
+            entry.request = request_with_size(entry.request, size);
+            self.events.push_back(AssetChange::UpdateSize { ticket: entry.ticket, size });
         }
-        if !size_changed && !priority_changed && importance_changed {
+        if priority_changed {
+            entry.priority = priority;
+            self.events.push_back(AssetChange::UpdatePriority { ticket: entry.ticket, priority });
+        }
+        if importance_changed {
             entry.importance = importance;
             self.events.push_back(AssetChange::UpdateImportance { ticket: entry.ticket, importance });
-            return;
         }
-        if self.tickets.remove(&entry.ticket).is_some() {
-            self.events.push_back(AssetChange::Release(entry.ticket));
-        }
-        entry.size = size;
-        entry.priority = priority;
-        entry.importance = importance;
-        entry.request = request_with_size(entry.request, size);
-        entry.ticket = AssetTicket::new();
-        self.tickets.insert(entry.ticket, key);
-        self.events.push_back(AssetChange::Request(AssetRequest {
-            ticket: entry.ticket,
-            region: key.region,
-            request: entry.request,
-            priority,
-            importance,
-        }));
     }
 
     fn resolve_terrain(&mut self, camera: Camera, mirror: &Mirror, region: Region) {
@@ -409,7 +399,8 @@ impl AssetDemand {
         };
         let textures = *settings.detail_textures();
         let previous = self.terrain_targets.get(&region).map(|target| target.size);
-        let (size, priority) = data.summary().info.resolved_origin().map_or((TextureSize::new(128), Priority::Background), |origin| {
+        let background_size = previous.unwrap_or(TextureSize::new(128));
+        let (size, priority) = data.summary().info.resolved_origin().map_or((background_size, Priority::Background), |origin| {
             let center = origin + DVec3::new(128.0, 128.0, 0.0);
             let priority = if camera.importance(center, 181.0).is_some() { Priority::Visible } else { Priority::Background };
             let size = if priority == Priority::Visible {
@@ -418,7 +409,7 @@ impl AssetDemand {
                     DVec3::new(position.x.clamp(origin.x, origin.x + 256.0), position.y.clamp(origin.y, origin.y + 256.0), origin.z);
                 camera.texture_size(closest, 16.0, previous)
             } else {
-                TextureSize::new(128)
+                background_size
             };
             (size, priority)
         });
@@ -514,20 +505,37 @@ impl AssetDemand {
             }
         }
         let mut changes = Vec::new();
+        let mut prefer_scan = true;
         let mut entries = identities.range((self.cursor.map_or(Unbounded, Excluded), Unbounded));
-        for _ in 0..128 {
-            let entity = if let Some((_, entity)) = self.dirty.pop_first() {
-                entity
-            } else if self.scan {
+        let mut processed = 0;
+        while processed < 128 {
+            let has_dirty = !self.dirty.is_empty();
+            let take_scan = match (has_dirty, self.scan) {
+                (true, true) => {
+                    let take_scan = prefer_scan;
+                    prefer_scan = !prefer_scan;
+                    take_scan
+                }
+                (true, false) => false,
+                (false, true) => true,
+                (false, false) => break,
+            };
+            let entity = if take_scan {
                 let Some((id, entity)) = entries.next() else {
                     self.scan = false;
-                    break;
+                    continue;
                 };
                 self.cursor = Some(*id);
+                if self.dirty.get(id) == Some(entity) {
+                    self.dirty.remove(id);
+                }
                 *entity
+            } else if let Some((_, entity)) = self.dirty.pop_first() {
+                entity
             } else {
-                break;
+                continue;
             };
+            processed += 1;
             if let Some(object) = mirror.objects.get(&entity)
                 && let Some(change) = self.resolve_object_materials(camera, object)
             {
@@ -543,6 +551,15 @@ impl AssetDemand {
             self.targets.get(&entity).map_or((0, None, None, Vec::new()), |target| {
                 (target.faces, Some(target.size), target.asset, target.keys.iter().copied().collect())
             });
+        let previous_texture_sizes: HashMap<_, _> = previous_keys
+            .iter()
+            .filter_map(|key| {
+                if key.unit != AssetUnit::Whole || key.resource.kind != Kind::Texture {
+                    return None;
+                }
+                self.entries.get(key)?.users.get(&AssetUser::Object(entity)).map(|demand| (key.resource.id, demand.size))
+            })
+            .collect();
         let mesh_asset = match object.geometry() {
             crate::scene::Geometry::Mesh(asset) => Some(asset),
             _ => None,
@@ -571,11 +588,10 @@ impl AssetDemand {
                 self.deferred = true;
             }
         }
-        let priority =
-            if interested && (mesh_asset.is_some() || object.mesh_matches_geometry()) { Priority::Visible } else { Priority::Background };
+        let priority = if interested { Priority::Visible } else { Priority::Background };
         let region = object.detail().summary.address.region();
         let size = match object.placement() {
-            _ if priority == Priority::Background => TextureSize::new(32),
+            _ if priority == Priority::Background => previous_size.unwrap_or(TextureSize::new(32)),
             Placement::Ready(transform) => camera.texture_size(transform.pose.position, transform.scale.as_dvec3().length(), previous_size),
             _ => TextureSize::new(32),
         };
@@ -612,7 +628,7 @@ impl AssetDemand {
         }
         let mut faces = Vec::with_capacity(count);
         for slot in slots {
-            faces.push(self.face(object, region, slot, size, priority, &mut keys));
+            faces.push(self.face(object, region, slot, size, &previous_texture_sizes, priority, &mut keys));
         }
         let old = self.targets.remove(&entity);
         self.faces = self.faces.saturating_sub(previous_faces).saturating_add(count);
@@ -662,36 +678,49 @@ impl AssetDemand {
             crate::scene::DrawnMeshKey::Asset { asset: current, lod } if current == asset => Some(lod),
             _ => None,
         });
+        let previous_desired = self.meshes.previous_desired(asset, object.detail().summary.entity);
         let Placement::Ready(transform) = object.placement() else {
-            self.meshes.set_user_lods(asset, object.detail().summary.entity, [None; 2], current);
+            self.meshes.set_user_lods(asset, object.detail().summary.entity, None, [None; 2], current);
             return MeshResolution::Waiting;
         };
-        let Some(desired) = camera.mesh_lod(transform.pose.position, transform.scale) else {
-            self.meshes.set_user_lods(asset, object.detail().summary.entity, [None; 2], current);
+        let Some(desired) = camera.mesh_lod(transform.pose.position, transform.scale, previous_desired) else {
+            self.meshes.set_user_lods(asset, object.detail().summary.entity, None, [None; 2], current);
             return MeshResolution::Waiting;
         };
         let region = object.detail().summary.address.region();
         self.deferred |= self.meshes.retry_pending(asset, &self.budget);
-        let mut plan = self.meshes.request_plan(asset, desired, current, priority);
+        let entity = object.detail().summary.entity;
+        let mut plan = self.meshes.request_plan(asset, entity, desired, current, priority);
         if plan.needs_header {
             let (resolution, content) =
                 self.observe(object.detail().summary.entity, region, Request::MeshHeader(asset), size, priority, importance, keys);
             if let Some(Content::MeshHeader(header)) = content {
                 self.meshes.set_header(asset, header);
             } else if matches!(resolution, Resolution::Failed(_)) {
-                self.meshes.set_user_lods(asset, object.detail().summary.entity, [None; 2], None);
+                self.meshes.set_user_lods(asset, object.detail().summary.entity, Some(desired), [None; 2], None);
                 return MeshResolution::Failed;
             }
-            plan = self.meshes.request_plan(asset, desired, current, priority);
+            plan = self.meshes.request_plan(asset, entity, desired, current, priority);
             if plan.needs_header {
-                self.meshes.set_user_lods(asset, object.detail().summary.entity, plan.retained, current);
+                self.meshes.set_user_lods(asset, object.detail().summary.entity, Some(desired), plan.retained, current);
                 return MeshResolution::Waiting;
             }
         }
         let mut failed = false;
         for request in plan.requests {
             let (resolution, content) = self.observe(object.detail().summary.entity, region, request, size, priority, importance, keys);
-            failed |= matches!(resolution, Resolution::Failed(_));
+            let request_failed = matches!(resolution, Resolution::Failed(_));
+            failed |= request_failed;
+            if request_failed
+                && priority == Priority::Background
+                && let Request::MeshLod(block) = request
+                && block.lod() != MeshLod::Lowest
+            {
+                plan.retained = plan.retained.map(|lod| lod.filter(|retained| *retained != block.lod()));
+                let key = asset_key(region, request);
+                keys.remove(&key);
+                self.release(AssetUser::Object(entity), key);
+            }
             if let Some(Content::Mesh(content)) = content {
                 let update = self.meshes.set_lod(asset, content, &self.budget);
                 self.deferred |= update.deferred;
@@ -706,7 +735,7 @@ impl AssetDemand {
             MeshResolution::Waiting => current,
             _ => None,
         };
-        self.meshes.set_user_lods(asset, object.detail().summary.entity, plan.retained, published);
+        self.meshes.set_user_lods(asset, object.detail().summary.entity, Some(desired), plan.retained, published);
         resolution
     }
 
@@ -769,6 +798,7 @@ impl AssetDemand {
         region: Region,
         slot: u8,
         size: TextureSize,
+        previous_texture_sizes: &HashMap<AssetId, TextureSize>,
         priority: Priority,
         keys: &mut HashSet<AssetKey>,
     ) -> FaceMaterial {
@@ -810,10 +840,19 @@ impl AssetDemand {
         let (material, alpha) = material::resolve(authored, legacy, pbr, overrides);
         let mut face = FaceMaterial { slot, material, legacy_state, pbr_state, alpha, base_color_texture: None };
         if let TextureRef::Asset(id) = material.base_color_texture().source {
-            let scale = face.material.base_color_texture().transform.scale;
-            let repeats = f64::from(scale[0].abs().min(scale[1].abs())).max(1.0 / 64.0);
+            let repeats = match face.material {
+                MaterialDescription::Pbr(_) => pbr_texture_repeats(&face, authored.transform),
+                MaterialDescription::Legacy(_) => {
+                    let scale = face.material.base_color_texture().transform.scale;
+                    f64::from(scale[0].abs().min(scale[1].abs()))
+                }
+            }
+            .max(1.0 / 64.0);
             let size = if priority == Priority::Background {
-                TextureSize::new(32)
+                previous_texture_sizes
+                    .get(&id)
+                    .copied()
+                    .unwrap_or_else(|| TextureSize::new((f64::from(TextureSize::new(32).edge()) / repeats).ceil() as u32))
             } else {
                 TextureSize::new((f64::from(size.edge()) / repeats).ceil() as u32)
             };
@@ -826,6 +865,16 @@ impl AssetDemand {
         }
         face
     }
+}
+
+fn pbr_texture_repeats(face: &FaceMaterial, texture_entry: UvTransform) -> f64 {
+    let uv = FaceParams::with_texture_entry_transform(Some(face), Some(texture_entry)).uv;
+    let [a, b, c, d] = [uv[0][0], uv[0][1], uv[1][0], uv[1][1]].map(f64::from);
+    let squared_sum = a * a + b * b + c * c + d * d;
+    let determinant = (a * d - b * c).abs();
+    let discriminant = (squared_sum * squared_sum - 4.0 * determinant * determinant).max(0.0).sqrt();
+    let largest = (0.5 * (squared_sum + discriminant)).sqrt();
+    if largest > 0.0 { determinant / largest } else { 0.0 }
 }
 
 fn asset_key(region: Region, request: Request) -> AssetKey {

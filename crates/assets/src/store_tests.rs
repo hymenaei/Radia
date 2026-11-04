@@ -1413,19 +1413,24 @@ fn failed_refinement_keeps_image() {
 fn obsolete_detail_keeps_current_image() {
     let StoreHarness { now, mut store, route, .. } = StoreHarness::new();
     let id = resource(1).id;
-    let high_request = Request::Texture { id, size: TextureSize::new(512) };
-    let low = store.request(route, Request::Texture { id, size: TextureSize::new(32) }, Priority::Visible, now).unwrap();
-    let high = store.request(route, high_request, Priority::Visible, now).unwrap();
+    let demand = store.request(route, Request::Texture { id, size: TextureSize::new(512) }, Priority::Visible, now).unwrap();
     let job = fetch(&mut store, now, GRAY_4096_J2C.to_vec());
     let job = store.start_decode(job).expect("decode admission");
     store.complete(job.run(), now);
-    assert_eq!(ready(&low).size(), [512; 2]);
-    drop(high);
+
+    let Status::Ready(Content::Texture(handle)) = demand.status() else { panic!("high detail becomes ready") };
+    assert_eq!(handle.info().expect("decoded image info").size, [512; 2]);
+    demand.update_size(TextureSize::new(32));
+    store.maintain(now);
     let reducing = cached(&mut store, now);
     let reducing = store.start_decode(reducing).expect("decode admission");
-    let _high = store.request(route, high_request, Priority::Visible, now).unwrap();
+    demand.update_size(TextureSize::new(512));
+    store.maintain(now);
+    assert!(!reducing.is_cancelled(), "resizing preserves decode work while demand remains active");
     store.complete(reducing.run(), now);
-    assert_eq!(ready(&low).size(), [512; 2], "obsolete reduction cannot replace the still-needed detail");
+    let Status::Ready(Content::Texture(current)) = demand.status() else { panic!("obsolete reduction keeps high detail ready") };
+    assert_eq!(current.info().expect("retained image info").size, [512; 2], "obsolete reduction cannot replace current detail");
+    assert_eq!(current, handle, "detail changes keep the same texture handle");
     assert!(store.next_job(now).is_none());
 }
 
@@ -1771,6 +1776,115 @@ fn demand_priority_updates_in_place() {
     demand.update_priority(Priority::Background);
     assert_eq!(store.priority(&input), Priority::Background);
     assert!(!input.is_cancelled());
+}
+
+#[test]
+fn resize_preserves_pending_fetch() {
+    let StoreHarness { now, mut store, route, .. } = StoreHarness::new();
+    let id = resource(902).id;
+    let low = store.request(route, Request::Texture { id, size: TextureSize::new(64) }, Priority::Visible, now).unwrap();
+    let high = store.request(route, Request::Texture { id, size: TextureSize::new(128) }, Priority::Visible, now).unwrap();
+    let handle = low._lease._texture.as_ref().expect("texture lease owns a handle").clone();
+    assert_eq!(high._lease._texture.as_ref(), Some(&handle));
+    let fetch = next_fetch(&mut store, now);
+    assert_eq!(fetch.job.size, TextureSize::new(128));
+
+    low.update_size(TextureSize::new(256));
+    store.maintain(now);
+    let key = LoadKey { resource: Resource { id, kind: Kind::Texture }, unit: CacheUnit::Whole };
+    let entry = store.entries.get(&key).expect("resized demand remains registered");
+    assert_eq!(entry.target, Some(TextureSize::new(256)));
+    assert_eq!(entry.request, Request::Texture { id, size: TextureSize::new(256) });
+    assert_eq!(entry.texture(), Some(handle));
+    assert!(!fetch.is_cancelled(), "a target resize must preserve a usable in-flight fetch");
+    assert!(store.next_job(now).is_none(), "resizing must not schedule a second fetch");
+
+    drop(low);
+    store.maintain(now);
+    assert_eq!(store.entries.get(&key).expect("remaining demand stays registered").target, Some(TextureSize::new(128)));
+    assert!(!fetch.is_cancelled(), "the remaining lease still needs the shared fetch");
+    drop(high);
+    store.maintain(now);
+    assert!(fetch.is_cancelled(), "releasing the final lease cancels the fetch");
+    drop(fetch);
+    store.maintain(now);
+    assert_eq!(store.running_other_fetches, 0);
+}
+
+#[test]
+fn obsolete_decode_refines_after_resize() {
+    let StoreHarness { now, mut store, route, .. } = StoreHarness::new();
+    let id = resource(903).id;
+    let demand = store.request(route, Request::Texture { id, size: TextureSize::new(64) }, Priority::Visible, now).unwrap();
+    let handle = demand._lease._texture.as_ref().expect("texture lease owns a handle").clone();
+    let input = fetch(&mut store, now, GRAY_4096_J2C.to_vec());
+    let decoding = store.start_decode(input).expect("decode admission");
+
+    demand.update_size(TextureSize::new(512));
+    store.maintain(now);
+    assert!(!decoding.is_cancelled(), "a target resize does not cancel in-progress decode work");
+    store.complete(decoding.run(), now);
+    let Status::Ready(Content::Texture(low_detail)) = demand.status() else { panic!("obsolete decode remains usable") };
+    assert_eq!(low_detail.info().expect("decoded image info").size, [64; 2]);
+    assert_eq!(low_detail, handle);
+
+    let input = cached(&mut store, now);
+    assert_eq!(input.job.size, TextureSize::new(512), "the follow-up decode uses the current target");
+    let refined = store.start_decode(input).expect("refinement decode admission").run();
+    store.complete(refined, now);
+    let Status::Ready(Content::Texture(refined)) = demand.status() else { panic!("refined texture becomes ready") };
+    assert_eq!(refined.info().expect("refined image info").size, [512; 2]);
+    assert_eq!(refined, handle, "refinement updates the existing texture handle");
+    assert!(store.next_job(now).is_none());
+}
+
+#[test]
+fn cold_resize_renews_retry_budget() {
+    for (fail_decode, reach_deadline) in [(false, false), (true, false), (false, true), (true, true)] {
+        let StoreHarness { mut now, mut store, route, .. } = StoreHarness::new();
+        let started = now;
+        let id = resource(905).id;
+        let demand = store.request(route, Request::Texture { id, size: TextureSize::new(64) }, Priority::Visible, now).unwrap();
+        for _ in 1..MAX_ATTEMPTS {
+            let fetch = next_fetch(&mut store, now);
+            store.complete(fetch.complete_response(Err(Failure::Transient { retry_after: Duration::ZERO })).unwrap_err().into(), now);
+            let Status::Failed { retry_at: Some(retry), .. } = demand.status() else { panic!("transient fetch schedules a retry") };
+            now = retry;
+        }
+        let input = fetch(&mut store, now, GRAY_4096_J2C.to_vec());
+        let decode = store.start_decode(input).expect("final attempt decode admission");
+        demand.update_size(TextureSize::new(512));
+        if reach_deadline {
+            now = started + DEMAND_DEADLINE;
+        }
+        store.maintain(now);
+        assert!(!decode.is_cancelled(), "a new target renews the cold demand deadline");
+        let completion = if fail_decode { decode.fail(Failure::MemoryPressure) } else { decode.run() };
+        store.complete(completion, now);
+        let next = store.next_job(now).expect("latest target has a fresh retry budget");
+        let input = match next {
+            LoadJob::Decode(input) => input,
+            LoadJob::Fetch(fetch) => fetch.complete_response(Ok(FetchResponse::Full(GRAY_4096_J2C.to_vec()))).unwrap(),
+            LoadJob::ReadCache(_) => panic!("fixture has no disk cache"),
+        };
+        let refined = store.start_decode(input).expect("latest target decode admission").run();
+        store.complete(refined, now);
+        assert_eq!(ready(&demand).size(), [512; 2]);
+        assert!(store.next_job(now).is_none());
+    }
+}
+
+#[test]
+fn non_texture_size_stays_absent() {
+    let StoreHarness { now, mut store, route, .. } = StoreHarness::new();
+    let request = Request::PbrMaterial(AssetId::new(Uuid::from_u128(904)));
+    let demand = store.request(route, request, Priority::Visible, now).unwrap();
+
+    demand.update_size(TextureSize::new(512));
+    store.maintain(now);
+
+    let key = LoadKey { resource: request.resource(), unit: request.unit() };
+    assert_eq!(store.entries.get(&key).expect("material demand remains registered").target, None);
 }
 
 #[test]

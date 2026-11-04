@@ -258,7 +258,7 @@ struct Counter {
 struct Lease {
     counter: Arc<Counter>,
     maintenance: Arc<AtomicBool>,
-    size: Option<TextureSize>,
+    size: AtomicU16,
     priority: AtomicBool,
     importance: AtomicU16,
     _cache_protection: Option<storage::Protection>,
@@ -274,6 +274,11 @@ impl Drop for Lease {
 }
 
 impl Lease {
+    fn size(&self) -> Option<TextureSize> {
+        let edge = self.size.load(Ordering::Acquire);
+        (edge != 0).then(|| TextureSize::new(u32::from(edge)))
+    }
+
     fn priority(&self) -> Priority {
         if self.priority.load(Ordering::Acquire) { Priority::Visible } else { Priority::Background }
     }
@@ -307,6 +312,14 @@ impl Demand {
         self._lease.priority.store(priority == Priority::Visible, Ordering::Release);
         self._lease.maintenance.store(true, Ordering::Release);
         self._lease.counter.wake.send_replace(());
+    }
+
+    pub fn update_size(&self, size: TextureSize) {
+        let size = size.edge() as u16;
+        if self._lease.size.try_update(Ordering::AcqRel, Ordering::Acquire, |current| (current != 0).then_some(size)).is_ok() {
+            self._lease.maintenance.store(true, Ordering::Release);
+            self._lease.counter.wake.send_replace(());
+        }
     }
 }
 
@@ -406,7 +419,7 @@ impl AssetEntry {
             .unwrap_or(Priority::Background)
     }
     fn requested_size(&self) -> Option<TextureSize> {
-        self.views.values().flat_map(|view| &view.leases).filter_map(Weak::upgrade).filter_map(|lease| lease.size).max()
+        self.views.values().flat_map(|view| &view.leases).filter_map(Weak::upgrade).filter_map(|lease| lease.size()).max()
     }
 
     fn has_active_demand(&self) -> bool {
@@ -885,7 +898,7 @@ impl Store {
         let lease = Arc::new(Lease {
             counter: Arc::clone(&view.counter),
             maintenance: Arc::clone(&self.maintenance_dirty),
-            size: request.size(),
+            size: AtomicU16::new(request.size().map_or(0, |size| size.edge() as u16)),
             priority: AtomicBool::new(priority == Priority::Visible),
             importance: AtomicU16::new(importance),
             _cache_protection: cache_protection,
@@ -910,7 +923,7 @@ impl Store {
             for view in entry.views.values_mut() {
                 view.leases.retain(|weak| {
                     let Some(lease) = weak.upgrade() else { return false };
-                    desired = desired.max(lease.size);
+                    desired = desired.max(lease.size());
                     priority = priority.max(lease.priority());
                     importance = importance.max(lease.importance.load(Ordering::Acquire));
                     true
@@ -927,10 +940,13 @@ impl Store {
             entry.importance = importance;
             if entry.target != desired {
                 entry.target = desired;
-                if ready.is_some() {
-                    for view in entry.views.values_mut() {
-                        view.restart(now);
-                    }
+                if let Some(size) = desired
+                    && let Request::Texture { id, .. } = entry.request
+                {
+                    entry.request = Request::Texture { id, size };
+                }
+                for view in entry.views.values_mut() {
+                    view.restart(now);
                 }
                 if !matches!(entry.phase, LoadPhase::Running { .. }) {
                     entry.phase = LoadPhase::Queued;

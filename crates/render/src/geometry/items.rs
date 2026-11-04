@@ -65,7 +65,6 @@ pub(super) struct CachedItem {
 
 pub(super) struct CachedReplacement {
     pub(super) item: CachedItem,
-    pub(super) retry_state: Option<super::MeshState>,
 }
 
 #[derive(Default)]
@@ -180,7 +179,7 @@ pub(super) fn cached_faces(context: CachedFaceContext<'_>, draw_list: &mut DrawL
             }
             ShadingMode::RegionWater | ShadingMode::Surface => {}
         }
-        if params.blend && params.color[3] <= 0.0 {
+        if !params.is_visible() {
             continue;
         }
         let texture = material.and_then(|material| material.base_color_texture.as_ref()).and_then(|binding| binding.image()).cloned();

@@ -221,6 +221,13 @@ async fn run_measurement(cache: Arc<AssetCache>, mesh_assets: Arc<HashMap<Uuid, 
                 ReconcileStep::Asset(AssetChange::UpdatePriority { ticket, priority }) => {
                     demands.get(&ticket).expect("priority update has an active demand")._demand.update_priority(priority);
                 }
+                ReconcileStep::Asset(AssetChange::UpdateSize { ticket, size }) => {
+                    let demand = demands.get_mut(&ticket).expect("size update has an active demand");
+                    demand._demand.update_size(size);
+                    if let Request::Texture { id, .. } = demand.request {
+                        demand.request = Request::Texture { id, size };
+                    }
+                }
                 ReconcileStep::Read(job) => {
                     let response = read_world(&fixture.world, &job);
                     fixture.scene.complete_read(job, response, Instant::now());

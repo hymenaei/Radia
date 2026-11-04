@@ -1,6 +1,7 @@
 use std::assert_matches;
 
 use assets::{TextureHandle, TextureSize};
+use math::UvTransform;
 use render::material::{AlphaBehavior, FaceMaterial, Resolution};
 use test_support::texture::{GRAY_4096_J2C, RGBA_J2C};
 use world::{
@@ -28,6 +29,58 @@ fn material_asset(id: AssetId) -> assets::Status {
     envelope.extend_from_slice(json.as_bytes());
     envelope.push(b'}');
     prepared_asset(Request::PbrMaterial(id), envelope)
+}
+
+fn material_asset_with_transform(id: AssetId, transform: UvTransform) -> assets::Status {
+    let json = r#"{"asset":{"version":"2.0"},
+        "images":[{"uri":"00000000-0000-0000-0000-000000000064"}],
+        "textures":[{"source":0}],
+        "materials":[{"pbrMetallicRoughness":{"baseColorTexture":{"index":0,
+            "extensions":{"KHR_texture_transform":{"offset":[__OFFSET_X__,__OFFSET_Y__],
+                "scale":[__SCALE_X__,__SCALE_Y__],"rotation":__ROTATION__}}}}}]}
+    "#
+    .replace("__OFFSET_X__", &transform.offset[0].to_string())
+    .replace("__OFFSET_Y__", &transform.offset[1].to_string())
+    .replace("__SCALE_X__", &transform.scale[0].to_string())
+    .replace("__SCALE_Y__", &transform.scale[1].to_string())
+    .replace("__ROTATION__", &transform.rotation.to_string());
+    let mut envelope = b"{\0\0\0\x03k\0\0\0\x07versions\0\0\0\x031.1k\0\0\0\x04types\0\0\0\x08GLTF 2.0k\0\0\0\x04datas".to_vec();
+    envelope.extend((json.len() as u32).to_be_bytes());
+    envelope.extend_from_slice(json.as_bytes());
+    envelope.push(b'}');
+    prepared_asset(Request::PbrMaterial(id), envelope)
+}
+
+fn pbr_texture_size(material_transform: UvTransform, face_transform: UvTransform) -> TextureSize {
+    let mut world = world();
+    add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
+    let material_id = AssetId::new(Uuid::from_u128(9));
+    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    patch.surface_appearance =
+        Some(SurfaceAppearance::new(FaceAppearance { transform: face_transform, ..FaceAppearance::default() }, Vec::new()).unwrap());
+    patch.pbr_materials = Some(PbrMaterialAssignments::new(vec![(0, material_id)]).unwrap());
+    let _ = world.patch_object(patch).unwrap();
+
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(camera(0.0));
+    let work = settle_materials(&mut scene, &mut view, &world, &mut now);
+    let material = work
+        .requested
+        .iter()
+        .find(|request| matches!(request.request, Request::PbrMaterial(id) if id == material_id))
+        .copied()
+        .expect("PBR material is requested");
+    scene.complete_asset(material.ticket, material_asset_with_transform(material_id, material_transform));
+
+    settle_materials(&mut scene, &mut view, &world, &mut now)
+        .requested
+        .into_iter()
+        .find_map(|request| match request.request {
+            Request::Texture { id, size } if id == AssetId::new(Uuid::from_u128(100)) => Some(size),
+            _ => None,
+        })
+        .expect("PBR base color texture is requested")
 }
 
 #[test]
@@ -70,12 +123,10 @@ fn unseen_objects_get_baselines() {
     settle_materials(&mut scene, &mut view, &world, &mut now);
     scene.set_camera(Camera::new(DVec3::ZERO, -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    let current = work
-        .requested
-        .iter()
-        .find(|request| request.priority == Priority::Visible && request.request.resource().id.uuid() == Uuid::from_u128(101))
-        .unwrap();
-    assert_ne!(current.ticket, baseline.ticket);
+    assert!(work.requested.is_empty());
+    assert!(work.released.is_empty());
+    assert!(work.priority_updates.contains(&(baseline.ticket, Priority::Visible)));
+    assert!(work.size_updates.iter().any(|(ticket, size)| *ticket == baseline.ticket && size.edge() > 32));
     let object = view.objects().find(|object| object.detail().summary.id == Uuid::from_u128(1)).unwrap();
     assert!(object.mesh().is_some());
     assert!(
@@ -109,12 +160,17 @@ fn terrain_demand_refines_when_region_origin_arrives() {
         .unwrap();
     scene.notify_world_change();
     let refined = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(refined.released.len(), 4, "the four background tickets are superseded by refined demand");
-    assert_eq!(refined.requested.len(), 4);
-    assert!(refined.requested.iter().all(|request| {
-        let Request::Texture { size, .. } = request.request else { return false };
-        request.priority == Priority::Visible && size.edge() > 128
-    }));
+    assert!(refined.released.is_empty(), "size refinement keeps the existing leases");
+    assert!(refined.requested.is_empty(), "size refinement does not reacquire the textures");
+    assert_eq!(refined.size_updates.len(), 4);
+    assert!(
+        refined
+            .size_updates
+            .iter()
+            .all(|(ticket, size)| { baseline.requested.iter().any(|request| request.ticket == *ticket) && size.edge() > 128 })
+    );
+    assert_eq!(refined.priority_updates.len(), 4);
+    assert!(refined.priority_updates.iter().all(|(_, priority)| *priority == Priority::Visible));
 }
 
 #[test]
@@ -138,13 +194,127 @@ fn view_bounds_control_texture_priority() {
     let baseline = first.requested.last().unwrap();
     assert_eq!(baseline.priority, Priority::Background, "off-screen objects cannot compete with visible textures");
     assert_eq!(baseline.request, Request::Texture { id: AssetId::new(Uuid::from_u128(101)), size: TextureSize::new(32) });
-    scene.set_camera(Camera::new(DVec3::ZERO, Vec3::X, std::f64::consts::FRAC_PI_2, [2000, 1000]).unwrap());
+    let wide_camera = Camera::new(DVec3::ZERO, Vec3::X, std::f64::consts::FRAC_PI_2, [2000, 1000]).unwrap();
+    scene.set_camera(wide_camera);
     let wide = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert!(wide.released.contains(&baseline.ticket));
-    assert_eq!(wide.requested.last().unwrap().priority, Priority::Visible, "viewport changes refresh the actual visible demand");
+    assert!(wide.released.is_empty());
+    assert!(wide.requested.is_empty());
+    assert_eq!(wide.priority_updates, [(baseline.ticket, Priority::Visible)]);
+    let visible_size = *wide.size_updates.iter().find_map(|(ticket, size)| (*ticket == baseline.ticket).then_some(size)).unwrap();
+    assert!(visible_size.edge() > 32);
+    let visible_ticket = baseline.ticket;
     scene.set_camera(camera(0.0));
     let narrow = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(narrow.requested.last().unwrap().priority, Priority::Background, "leaving the view preserves baseline coverage");
+    assert!(narrow.requested.is_empty(), "leaving the view must not reload the retained texture");
+    assert!(narrow.released.is_empty(), "leaving the view must not replace the retained texture ticket");
+    assert_eq!(narrow.priority_updates, [(visible_ticket, Priority::Background)]);
+    assert!(narrow.size_updates.is_empty(), "background priority retains the current texture size");
+    scene.set_camera(wide_camera);
+    let returned = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(returned.requested.is_empty(), "returning to view must reuse the retained texture request");
+    assert!(returned.released.is_empty(), "returning to view must not reload the retained texture");
+    assert_eq!(returned.priority_updates, [(visible_ticket, Priority::Visible)]);
+    assert!(returned.size_updates.is_empty(), "returning to view at the same distance keeps the retained texture size");
+
+    let far_camera = Camera::new(DVec3::new(-300.0, 0.0, 0.0), Vec3::X, std::f64::consts::FRAC_PI_2, [2000, 1000]).unwrap();
+    scene.set_camera(far_camera);
+    let farther = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(farther.released.is_empty());
+    assert!(farther.requested.is_empty());
+    assert!(farther.priority_updates.is_empty());
+    let farther_size = *farther.size_updates.iter().find_map(|(ticket, size)| (*ticket == visible_ticket).then_some(size)).unwrap();
+    assert!(farther_size.edge() < visible_size.edge(), "visible demand may coarsen after the camera moves far enough away");
+
+    let _ = world.remove_object(source(1, 3), NonZeroU32::new(1).unwrap()).unwrap();
+    scene.notify_world_change();
+    let killed = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(killed.released, [visible_ticket], "object removal releases its retained texture demand");
+    assert!(killed.requested.is_empty());
+}
+
+#[test]
+fn background_pbr_texture_keeps_uv_adjusted_size() {
+    let mut world = world();
+    add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
+    let material_id = AssetId::new(Uuid::from_u128(9));
+    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    patch.surface_appearance = Some(
+        SurfaceAppearance::new(
+            FaceAppearance { transform: UvTransform { offset: [0.0; 2], scale: [0.1, 0.15], rotation: 0.0 }, ..FaceAppearance::default() },
+            Vec::new(),
+        )
+        .unwrap(),
+    );
+    patch.pbr_materials = Some(PbrMaterialAssignments::new(vec![(0, material_id)]).unwrap());
+    let _ = world.patch_object(patch).unwrap();
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(camera(0.0));
+
+    let material = settle_materials(&mut scene, &mut view, &world, &mut now)
+        .requested
+        .into_iter()
+        .find(|request| matches!(request.request, Request::PbrMaterial(id) if id == material_id))
+        .expect("PBR material is requested");
+    scene.complete_asset(
+        material.ticket,
+        material_asset_with_transform(material_id, UvTransform { offset: [0.0; 2], scale: [4.0, 3.0], rotation: 0.0 }),
+    );
+    let visible = settle_materials(&mut scene, &mut view, &world, &mut now)
+        .requested
+        .into_iter()
+        .find(|request| matches!(request.request, Request::Texture { id, .. } if id == AssetId::new(Uuid::from_u128(100))))
+        .expect("PBR base color texture is requested");
+    let Request::Texture { size, .. } = visible.request else { panic!("expected PBR texture request") };
+    assert!(size.edge() > 32, "the visible texture demand includes the composed UV transform");
+
+    scene.set_camera(Camera::new(DVec3::ZERO, -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());
+    let background = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(background.requested.is_empty(), "background priority retains the UV-adjusted texture size");
+    assert!(background.released.is_empty(), "background priority does not replace the UV-adjusted texture request");
+    assert!(background.priority_updates.contains(&(visible.ticket, Priority::Background)));
+    assert!(background.size_updates.is_empty());
+
+    scene.set_camera(Camera::new(DVec3::new(1.0, 0.0, 0.0), -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());
+    let rescanned = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(rescanned.requested.is_empty(), "a background rescan does not apply UV scaling to its previous result again");
+    assert!(rescanned.released.is_empty(), "a background rescan keeps the active texture ticket");
+    assert!(rescanned.size_updates.is_empty());
+}
+
+#[test]
+fn background_texture_change_uses_new_asset_baseline() {
+    let mut world = world();
+    add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
+    let first_id = AssetId::new(Uuid::from_u128(101));
+    let next_id = AssetId::new(Uuid::from_u128(102));
+    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    patch.surface_appearance =
+        Some(SurfaceAppearance::new(FaceAppearance { texture: Some(first_id), ..FaceAppearance::default() }, Vec::new()).unwrap());
+    let _ = world.patch_object(patch).unwrap();
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(camera(0.0));
+    let visible = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
+    let Request::Texture { size, .. } = visible.request else { panic!("expected visible texture request") };
+    assert!(size.edge() > 32);
+
+    scene.set_camera(Camera::new(DVec3::ZERO, -Vec3::X, std::f64::consts::FRAC_PI_2, [1000, 1000]).unwrap());
+    let background = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert!(background.requested.is_empty());
+    assert!(background.released.is_empty());
+    assert!(background.size_updates.is_empty());
+
+    let mut patch = ObjectPatch::new(source(1, 3), NonZeroU32::new(1).unwrap());
+    patch.surface_appearance =
+        Some(SurfaceAppearance::new(FaceAppearance { texture: Some(next_id), ..FaceAppearance::default() }, Vec::new()).unwrap());
+    let _ = world.patch_object(patch).unwrap();
+    scene.notify_world_change();
+    let changed = settle_materials(&mut scene, &mut view, &world, &mut now);
+    assert_eq!(changed.released, [visible.ticket], "the old texture asset is released after the face changes");
+    assert_eq!(changed.requested.len(), 1);
+    assert_eq!(changed.requested[0].priority, Priority::Background);
+    assert_eq!(changed.requested[0].request, Request::Texture { id: next_id, size: TextureSize::new(32) });
 }
 
 #[test]
@@ -168,20 +338,20 @@ fn shared_textures_follow_camera() {
     let first = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
     assert_eq!(first.request, Request::Texture { id: AssetId::new(Uuid::from_u128(100)), size: TextureSize::new(128) });
     let ready = prepared_asset(first.request, GRAY_4096_J2C.to_vec());
-    scene.complete_asset(first.ticket, ready.clone());
+    scene.complete_asset(first.ticket, ready);
     settle_materials(&mut scene, &mut view, &world, &mut now);
     assert!(view.objects().all(|obj| { obj.materials().unwrap().iter().all(|face| color_image(face).info().unwrap().size == [128; 2]) }));
     let _ = world.remove_object(source(1, 10), NonZeroU32::new(1).unwrap()).unwrap();
     scene.notify_world_change();
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(work.released, [first.ticket]);
-    assert_eq!(work.requested.len(), 1, "removing the nearest user lowers shared demand");
-    let low = work.requested[0];
-    assert_eq!(low.request, Request::Texture { id: AssetId::new(Uuid::from_u128(100)), size: TextureSize::new(32) });
-    scene.complete_asset(low.ticket, assets::Status::Decoding);
+    assert!(work.released.is_empty());
+    assert!(work.requested.is_empty(), "lower shared demand keeps its current ticket");
+    assert_eq!(work.size_updates, [(first.ticket, TextureSize::new(32))]);
+    let resized = Request::Texture { id: AssetId::new(Uuid::from_u128(100)), size: TextureSize::new(32) };
+    scene.complete_asset(first.ticket, assets::Status::Decoding);
     settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_eq!(color_image(&view.objects().next().unwrap().materials().unwrap()[0]).info().unwrap().size, [128; 2]);
-    scene.complete_asset(low.ticket, assets::Status::Failed { failure: assets::Failure::Deadline, retry_at: None });
+    scene.complete_asset(first.ticket, assets::Status::Failed { failure: assets::Failure::Deadline, retry_at: None });
     settle_materials(&mut scene, &mut view, &world, &mut now);
     let face = &view.objects().next().unwrap().materials().unwrap()[0];
     assert_eq!(
@@ -196,28 +366,62 @@ fn shared_textures_follow_camera() {
     );
     assert_eq!(face.base_color_texture.as_ref().unwrap().state().resolution, Resolution::Failed(assets::Failure::Deadline));
     let version = view.version();
-    scene.complete_asset(low.ticket, prepared_asset(low.request, GRAY_4096_J2C.to_vec()));
+    scene.complete_asset(first.ticket, prepared_asset(resized, GRAY_4096_J2C.to_vec()));
     settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_ne!(view.version(), version, "a new discard level invalidates prepared rendering");
     assert_eq!(color_image(&view.objects().next().unwrap().materials().unwrap()[0]).info().unwrap().size, [32; 2]);
-    scene.complete_asset(first.ticket, ready);
-    settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(
-        color_image(&view.objects().next().unwrap().materials().unwrap()[0]).info().unwrap().size,
-        [32; 2],
-        "stale quality cannot replace current imagery"
-    );
     scene.set_camera(camera(99.0));
     let work = settle_materials(&mut scene, &mut view, &world, &mut now);
-    assert_eq!(work.requested.len(), 1);
-    let Request::Texture { size, .. } = work.requested[0].request else { panic!("expected texture demand") };
+    assert!(work.requested.is_empty());
+    assert!(work.released.is_empty());
+    let size = *work.size_updates.iter().find_map(|(ticket, size)| (*ticket == first.ticket).then_some(size)).unwrap();
     assert!(size.edge() >= 1024, "approaching a face requests more detail");
     let version = view.version();
-    let request = work.requested[0];
-    scene.complete_asset(request.ticket, prepared_asset(request.request, GRAY_4096_J2C.to_vec()));
+    let request = Request::Texture { id: AssetId::new(Uuid::from_u128(100)), size };
+    scene.complete_asset(first.ticket, prepared_asset(request, GRAY_4096_J2C.to_vec()));
     settle_materials(&mut scene, &mut view, &world, &mut now);
     assert_ne!(view.version(), version, "ready-to-ready image replacement must publish its new detail");
     assert_eq!(color_image(&view.objects().next().unwrap().materials().unwrap()[0]).info().unwrap().size, [size.edge(); 2]);
+}
+
+#[test]
+fn pbr_texture_demand_tracks_magnification() {
+    let size = pbr_texture_size(
+        UvTransform { offset: [0.25, -0.5], scale: [4.0, 3.0], rotation: 0.6 },
+        UvTransform { offset: [-0.2, 0.35], scale: [0.1, 0.15], rotation: -0.4 },
+    );
+
+    assert!(size.edge() > TextureSize::new(128).edge(), "composed magnification needs more detail than the camera baseline");
+}
+
+#[test]
+fn pbr_texture_demand_tracks_repeats() {
+    let size = pbr_texture_size(
+        UvTransform { offset: [0.25, -0.5], scale: [0.5, 0.4], rotation: 0.6 },
+        UvTransform { offset: [-0.2, 0.35], scale: [8.0, 6.0], rotation: -0.4 },
+    );
+
+    assert!(size.edge() < TextureSize::new(128).edge(), "composed repeats need less detail than the camera baseline");
+}
+
+#[test]
+fn legacy_texture_demand_is_unchanged() {
+    let mut world = world();
+    add(&mut world, 1, 1, ParentUpdate::Root, 10.0, 1);
+    let texture = AssetId::new(Uuid::from_u128(100));
+    let transform = UvTransform { offset: [0.25, -0.5], scale: [0.5, 2.0], rotation: 0.6 };
+    let mut patch = ObjectPatch::new(source(1, 2), NonZeroU32::new(1).unwrap());
+    patch.surface_appearance = Some(
+        SurfaceAppearance::new(FaceAppearance { texture: Some(texture), transform, ..FaceAppearance::default() }, Vec::new()).unwrap(),
+    );
+    let _ = world.patch_object(patch).unwrap();
+    let (mut scene, mut view) = Reconciler::new(Budget::default());
+    let mut now = Instant::now();
+    scene.set_camera(camera(0.0));
+
+    let request = settle_materials(&mut scene, &mut view, &world, &mut now).requested[0];
+
+    assert_eq!(request.request, Request::Texture { id: texture, size: TextureSize::new(256) });
 }
 
 #[test]

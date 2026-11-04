@@ -100,8 +100,10 @@ impl Camera {
     }
 
     pub fn ray(self, cursor: [f64; 2], viewport: [u32; 2]) -> DVec3 {
-        let forward = self.direction().as_dvec3();
-        let right = forward.cross(DVec3::Z).normalize_or(DVec3::X);
+        let direction = self.direction();
+        let forward = direction.as_dvec3().normalize();
+        let world_up = if direction.dot(Vec3::Z).abs() > 0.999 { DVec3::Y } else { DVec3::Z };
+        let right = forward.cross(world_up).normalize();
         let up = right.cross(forward);
         let height = f64::from(viewport[1]);
         let tangent = (self.vertical_fov * 0.5).tan();
@@ -185,7 +187,7 @@ impl Camera {
         Some(detail_from_index(index))
     }
 
-    pub(in crate::scene) fn mesh_lod(self, center: DVec3, scale: Vec3) -> Option<MeshLod> {
+    pub(in crate::scene) fn mesh_lod(self, center: DVec3, scale: Vec3, previous: Option<MeshLod>) -> Option<MeshLod> {
         if !center.is_finite() || !scale.is_finite() {
             return None;
         }
@@ -207,15 +209,36 @@ impl Camera {
         }
         distance *= std::f32::consts::PI / 3.0;
         let distance = round_hundredth(distance);
+        if distance == 0.0 {
+            return Some(MeshLod::High);
+        }
         let radius = round_hundredth(radius);
         let lod_factor = lod_factor * (std::f32::consts::PI / 3.0) / self.vertical_fov as f32;
-        let tangent = round_hundredth(lod_factor * radius / distance);
-        Some(match tangent {
-            value if value <= 0.03 => MeshLod::Lowest,
-            value if value <= 0.06 => MeshLod::Low,
-            value if value <= 0.24 => MeshLod::Medium,
-            _ => MeshLod::High,
-        })
+        let tangent = lod_factor * radius / distance;
+        if let Some(previous) = previous {
+            const THRESHOLDS: [f32; 3] = [0.03, 0.06, 0.24];
+            let mut index = previous.index();
+            while index < THRESHOLDS.len() && tangent >= THRESHOLDS[index] * 1.2 {
+                index += 1;
+            }
+            while index > 0 && tangent < THRESHOLDS[index - 1] * 0.8 {
+                index -= 1;
+            }
+            Some(match index {
+                0 => MeshLod::Lowest,
+                1 => MeshLod::Low,
+                2 => MeshLod::Medium,
+                _ => MeshLod::High,
+            })
+        } else {
+            let tangent = round_hundredth(tangent);
+            Some(match tangent {
+                value if value <= 0.03 => MeshLod::Lowest,
+                value if value <= 0.06 => MeshLod::Low,
+                value if value <= 0.24 => MeshLod::Medium,
+                _ => MeshLod::High,
+            })
+        }
     }
 }
 
@@ -267,21 +290,50 @@ mod tests {
     fn mesh_lod_uses_viewer_thresholds() {
         let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 3.0, [1000, 1000]).unwrap();
         let scale = Vec3::ONE;
-        assert_eq!(camera.mesh_lod(DVec3::X * 50.0, scale), Some(MeshLod::Lowest));
-        assert_eq!(camera.mesh_lod(DVec3::X * 20.0, scale), Some(MeshLod::Low));
-        assert_eq!(camera.mesh_lod(DVec3::X * 10.0, scale), Some(MeshLod::Medium));
-        assert_eq!(camera.mesh_lod(DVec3::X * 2.0, scale), Some(MeshLod::High));
-        assert_eq!(camera.mesh_lod(DVec3::X * 900.0, scale), None);
+        assert_eq!(camera.mesh_lod(DVec3::X * 50.0, scale, None), Some(MeshLod::Lowest));
+        assert_eq!(camera.mesh_lod(DVec3::X * 20.0, scale, None), Some(MeshLod::Low));
+        assert_eq!(camera.mesh_lod(DVec3::X * 10.0, scale, None), Some(MeshLod::Medium));
+        assert_eq!(camera.mesh_lod(DVec3::X * 2.0, scale, None), Some(MeshLod::High));
+        assert_eq!(camera.mesh_lod(DVec3::X * 900.0, scale, None), None);
+        assert_eq!(camera.mesh_lod(DVec3::X * 900.0, scale, Some(MeshLod::Medium)), None);
         let zoomed = Camera::new(DVec3::ZERO, Vec3::X, PI / 2.0, [1000, 1000]).unwrap();
-        assert_eq!(zoomed.mesh_lod(DVec3::X * 20.0, scale), Some(MeshLod::Lowest));
-        assert_eq!(camera.mesh_lod(DVec3::X * 20.0, Vec3::new(-1.0, 1.0, 1.0)), Some(MeshLod::Low));
+        assert_eq!(zoomed.mesh_lod(DVec3::X * 20.0, scale, None), Some(MeshLod::Lowest));
+        assert_eq!(camera.mesh_lod(DVec3::X * 20.0, Vec3::new(-1.0, 1.0, 1.0), None), Some(MeshLod::Low));
     }
 
     #[test]
     fn mesh_lod_matches_viewer_mesh_scale_bias_and_close_ramp() {
         let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 3.0, [1000, 1000]).unwrap();
-        assert_eq!(camera.mesh_lod(DVec3::X * 20.0, Vec3::ONE), Some(MeshLod::Low));
-        assert_eq!(camera.mesh_lod(DVec3::X * 1.5, Vec3::splat(0.1)), Some(MeshLod::Medium));
+        assert_eq!(camera.mesh_lod(DVec3::X * 20.0, Vec3::ONE, None), Some(MeshLod::Low));
+        assert_eq!(camera.mesh_lod(DVec3::X * 1.5, Vec3::splat(0.1), None), Some(MeshLod::Medium));
+    }
+
+    #[test]
+    fn mesh_lod_hysteresis_cutoffs() {
+        let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 3.0, [1000, 1000]).unwrap();
+        let center = DVec3::X * 10.0;
+        let lod = |radius: f32, previous| camera.mesh_lod(center, Vec3::new(radius * 2.0, 0.0, 0.0), previous);
+        let cases = [
+            (MeshLod::Lowest, MeshLod::Low, 0.03, 0.37, 0.38, 0.25, 0.26),
+            (MeshLod::Low, MeshLod::Medium, 0.06, 0.75, 0.76, 0.50, 0.51),
+            (MeshLod::Medium, MeshLod::High, 0.24, 3.01, 3.02, 2.00, 2.02),
+        ];
+
+        assert_eq!(lod(2.56, None), Some(MeshLod::Medium));
+        for (lower, upper, threshold, refine_below, refine_above, coarsen_below, coarsen_above) in cases {
+            assert_eq!(lod(refine_below, Some(lower)), Some(lower), "refine below cutoff {threshold}");
+            assert_eq!(lod(refine_above, Some(lower)), Some(upper), "refine above cutoff {threshold}");
+            assert_eq!(lod(coarsen_below, Some(upper)), Some(lower), "coarsen below cutoff {threshold}");
+            assert_eq!(lod(coarsen_above, Some(upper)), Some(upper), "coarsen above cutoff {threshold}");
+        }
+    }
+
+    #[test]
+    fn tiny_close_mesh_refines() {
+        let camera = Camera::new(DVec3::ZERO, Vec3::X, PI / 3.0, [1000, 1000]).unwrap();
+        for previous in [None, Some(MeshLod::Lowest), Some(MeshLod::Medium)] {
+            assert_eq!(camera.mesh_lod(DVec3::ZERO, Vec3::splat(1e-4), previous), Some(MeshLod::High));
+        }
     }
 
     #[test]
@@ -312,6 +364,9 @@ mod tests {
             assert_eq!(camera.detail(DVec3::X, radius, None), None);
         }
         assert_eq!(camera.detail(DVec3::NAN, 1.0, None), None);
+        for (center, scale) in [(DVec3::NAN, Vec3::ONE), (DVec3::X, Vec3::ZERO), (DVec3::X, Vec3::splat(f32::NAN))] {
+            assert_eq!(camera.mesh_lod(center, scale, Some(MeshLod::Medium)), None);
+        }
     }
 
     #[test]
@@ -366,5 +421,33 @@ mod tests {
         assert!(camera.ray([0.0, 50.0], [200, 100]).distance(expected) < 1e-12);
         let expected = (DVec3::X + DVec3::Z).normalize();
         assert!(camera.ray([100.0, 0.0], [200, 100]).distance(expected) < 1e-12);
+    }
+
+    #[test]
+    fn ray_matches_projection() {
+        let viewport = [320, 180];
+        let below_threshold = 0.998_f32;
+        let above_threshold = 0.9995_f32;
+        let directions = [
+            Vec3::Z,
+            -Vec3::Z,
+            Vec3::new((1.0 - below_threshold * below_threshold).sqrt(), 0.0, below_threshold),
+            Vec3::new((1.0 - below_threshold * below_threshold).sqrt(), 0.0, -below_threshold),
+            Vec3::new((1.0 - above_threshold * above_threshold).sqrt(), 0.0, above_threshold),
+            Vec3::new((1.0 - above_threshold * above_threshold).sqrt(), 0.0, -above_threshold),
+        ];
+
+        for direction in directions {
+            let camera = Camera::new(DVec3::ZERO, direction, PI / 2.0, viewport).unwrap();
+            let projection = crate::pipeline::projection(camera, viewport);
+            for cursor in [[23.0, 31.0], [281.0, 149.0]] {
+                let point = camera.ray(cursor, viewport).as_vec3() * 10.0;
+                let ndc = projection.project_point3(point);
+                let projected = [f64::from((ndc.x + 1.0) * 0.5 * viewport[0] as f32), f64::from((1.0 - ndc.y) * 0.5 * viewport[1] as f32)];
+
+                assert!((projected[0] - cursor[0]).abs() < 0.05, "{direction:?} projected x {projected:?}");
+                assert!((projected[1] - cursor[1]).abs() < 0.05, "{direction:?} projected y {projected:?}");
+            }
+        }
     }
 }

@@ -116,6 +116,7 @@ pub(super) struct AssetWork {
     pub(super) released: Vec<AssetTicket>,
     pub(super) importance_updates: Vec<(AssetTicket, u16)>,
     pub(super) priority_updates: Vec<(AssetTicket, Priority)>,
+    pub(super) size_updates: Vec<(AssetTicket, assets::TextureSize)>,
 }
 
 pub(super) fn settle_materials(scene: &mut Reconciler, view: &mut SceneView, world: &World, now: &mut Instant) -> AssetWork {
@@ -128,6 +129,7 @@ pub(super) fn settle_materials(scene: &mut Reconciler, view: &mut SceneView, wor
                 work.importance_updates.push((ticket, importance))
             }
             ReconcileStep::Asset(AssetChange::UpdatePriority { ticket, priority }) => work.priority_updates.push((ticket, priority)),
+            ReconcileStep::Asset(AssetChange::UpdateSize { ticket, size }) => work.size_updates.push((ticket, size)),
             ReconcileStep::Read(job) => {
                 work.reads += 1;
                 let result = reply(world, &job);

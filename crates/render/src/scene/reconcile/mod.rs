@@ -151,6 +151,7 @@ impl Reconciler {
             world: WorldSync::new(0, None),
             state: SceneState::default(),
             preparation: Preparation {
+                build_due: false,
                 meshes: MeshPlanner::new(budget.clone()),
                 assets: AssetDemand::new(budget.clone()),
                 environments: RegionEnvironmentResolver::new(budget.clone()),
@@ -458,6 +459,7 @@ struct SceneState {
 }
 
 struct Preparation {
+    build_due: bool,
     meshes: MeshPlanner,
     assets: AssetDemand,
     environments: RegionEnvironmentResolver,
@@ -469,6 +471,7 @@ struct Preparation {
 
 impl Preparation {
     fn reset(&mut self, budget: Budget) {
+        self.build_due = false;
         self.meshes.reset(budget.clone());
         self.assets.reset();
         self.environments.reset();

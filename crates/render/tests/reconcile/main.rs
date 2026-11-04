@@ -1,5 +1,6 @@
 mod environment;
 mod environment_textures;
+mod latency;
 mod materials;
 mod mesh;
 mod publication;

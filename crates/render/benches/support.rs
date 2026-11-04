@@ -311,7 +311,12 @@ pub fn first_full_view_batch(world: &World, expected_objects: usize) {
                 reconciler.complete_mesh(job.run());
             }
             ReconcileStep::Asset(AssetChange::Request(_)) => asset_requests += 1,
-            ReconcileStep::Asset(AssetChange::Release(_) | AssetChange::UpdateImportance { .. } | AssetChange::UpdatePriority { .. }) => {}
+            ReconcileStep::Asset(
+                AssetChange::Release(_)
+                | AssetChange::UpdateImportance { .. }
+                | AssetChange::UpdatePriority { .. }
+                | AssetChange::UpdateSize { .. },
+            ) => {}
             ReconcileStep::Continue => {}
             ReconcileStep::Wait(until) => now = until,
             ReconcileStep::Idle if view.object_count() == expected_objects => {
@@ -609,7 +614,9 @@ fn mesh_asset_work(reconciler: &mut Reconciler, view: &mut SceneView, world: &Wo
         match reconciler.poll(*now) {
             ReconcileStep::Asset(AssetChange::Request(request)) => work.requested.push(request),
             ReconcileStep::Asset(AssetChange::Release(ticket)) => work.released.push(ticket),
-            ReconcileStep::Asset(AssetChange::UpdateImportance { .. } | AssetChange::UpdatePriority { .. }) => {}
+            ReconcileStep::Asset(
+                AssetChange::UpdateImportance { .. } | AssetChange::UpdatePriority { .. } | AssetChange::UpdateSize { .. },
+            ) => {}
             ReconcileStep::Read(job) => {
                 let reply = reply(world, &job);
                 reconciler.complete_read(job, reply, *now);

@@ -108,7 +108,7 @@ impl Renderer {
             return Err(Error::DeviceLost);
         }
         let now = Instant::now();
-        let redraw_at = self.geometry.animation_deadline().filter(|deadline| *deadline > now);
+        let redraw_at = self.geometry.redraw_deadline().filter(|deadline| *deadline > now);
         Ok(Progress {
             redraw: self.geometry.needs_frame(now) || self.postprocess.needs_frame(),
             pending: !status.is_queue_empty(),

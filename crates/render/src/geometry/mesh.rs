@@ -11,7 +11,14 @@ pub(super) struct GpuMesh {
 }
 
 impl GeometryRenderer {
-    pub(super) fn upload_mesh(&mut self, device: &Device, shared: &SharedMesh, composition: Option<&[f32]>, uploaded: &mut usize) -> bool {
+    pub(super) fn upload_mesh(
+        &mut self,
+        device: &Device,
+        shared: &SharedMesh,
+        composition: Option<&[f32]>,
+        uploaded: &mut usize,
+        allow_eviction: bool,
+    ) -> bool {
         let key = shared.id();
         if let Some(mesh) = self.meshes.get_mut(&key) {
             mesh.used = self.epoch;
@@ -31,13 +38,17 @@ impl GeometryRenderer {
         else {
             return false;
         };
-        if *uploaded >= MAX_MESH_UPLOADS || (*uploaded > 0 && bytes > UPLOAD_BYTES.saturating_sub(self.stats.uploaded_bytes)) {
+        if *uploaded >= MAX_MESH_UPLOADS
+            || (bytes > UPLOAD_BYTES.saturating_sub(self.stats.uploaded_bytes) && (*uploaded > 0 || !allow_eviction))
+        {
             return false;
         }
         let Some(allocation) =
             self.storage.allocate(device, mesh.vertices().len(), mesh.indices().len(), composition.is_some(), &self.memory)
         else {
-            self.retire_mesh();
+            if allow_eviction {
+                self.retire_mesh();
+            }
             self.mesh_budget_blocked.insert(key);
             return false;
         };
@@ -76,15 +87,6 @@ impl GeometryRenderer {
             return false;
         };
         self.retired.push(self.meshes.remove(&old).expect("selected resident"));
-        true
-    }
-
-    pub(super) fn retire_mesh_id(&mut self, mesh_id: crate::scene::MeshId) -> bool {
-        if self.retired.len() == 4 {
-            return false;
-        }
-        let Some(mesh) = self.meshes.remove(&mesh_id) else { return false };
-        self.retired.push(mesh);
         true
     }
 }

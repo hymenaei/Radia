@@ -1,7 +1,7 @@
-use math::{Bounds, DVec3, Frustum, Mat4, Quat, Vec3, normal_matrix};
+use math::{DVec3, Mat4, Quat, Vec3, normal_matrix};
 
-use super::{ShadingMode, TRANSFORM_BYTES};
-use crate::{material::FaceParams, pipeline::INSTANCE_BYTES, scene::Camera};
+use super::TRANSFORM_BYTES;
+use crate::{material::FaceParams, pipeline::INSTANCE_BYTES};
 
 pub(super) const PARAMETER_BYTES: usize = INSTANCE_BYTES - TRANSFORM_BYTES;
 
@@ -44,38 +44,11 @@ pub(super) fn parameter_part(params: &FaceParams, scale: Vec3) -> [u8; PARAMETER
     bytes
 }
 
-pub(super) fn is_visible(
-    position: DVec3,
-    rotation: Quat,
-    scale: Vec3,
-    bounds: Bounds,
-    shading: ShadingMode,
-    camera: Camera,
-    frustum: &Frustum,
-) -> bool {
-    let center = (bounds.min.as_dvec3() + bounds.max.as_dvec3()) * 0.5 * scale.as_dvec3();
-    let offset = position - camera.position() + (rotation * center.as_vec3()).as_dvec3();
-    let radius = ((bounds.max.as_dvec3() - bounds.min.as_dvec3()) * 0.5 * scale.as_dvec3()).length();
-    if !offset.is_finite()
-        || !radius.is_finite()
-        || (shading == ShadingMode::Surface && offset.length() - radius > camera.draw_distance())
-        || offset.abs().max_element() + radius > f64::from(f32::MAX) / 16.0
-    {
-        return false;
-    }
-    let relative = position - camera.position();
-    if !relative.is_finite() || relative.abs().max_element() > f64::from(f32::MAX) || !rotation.is_finite() || !scale.recip().is_finite() {
-        return false;
-    }
-    frustum.intersects_sphere(offset, radius)
-}
-
 #[cfg(test)]
 mod tests {
-    use math::{Mat3, Mat4};
+    use math::Mat3;
 
     use super::*;
-    use crate::geometry::fixtures;
 
     #[test]
     fn instance_attributes_match_shader() {
@@ -116,23 +89,5 @@ mod tests {
         let world_normal = normal * local_normal;
         let world_tangent = rotation * (scale * local_tangent);
         assert!(world_normal.dot(world_tangent).abs() < 1e-5);
-    }
-
-    #[test]
-    fn terrain_visibility_ignores_draw_distance_but_objects_do_not() {
-        let (_scene, view, _) = fixtures::scene(255);
-        let object = view.objects().next().expect("fixture object");
-        let (_, mesh) = object.mesh().expect("fixture mesh");
-        let camera = Camera::new(DVec3::ZERO, Vec3::X, 1.0, [1000, 1000]).expect("fixture camera");
-        let close = camera.with_quality(64.0, 1.0).expect("close draw distance");
-        let far = camera.with_quality(512.0, 1.0).expect("far draw distance");
-        let frustum = Frustum::from_clip_matrix(Mat4::from_scale(Vec3::splat(0.001)));
-        let position = DVec3::new(100.0, 0.0, 0.0);
-        for shading in [ShadingMode::Terrain, ShadingMode::RegionWater] {
-            assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), shading, close, &frustum));
-            assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), shading, far, &frustum));
-        }
-        assert!(!is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Surface, close, &frustum));
-        assert!(is_visible(position, Quat::IDENTITY, Vec3::ONE, mesh.mesh().bounds(), ShadingMode::Surface, far, &frustum));
     }
 }

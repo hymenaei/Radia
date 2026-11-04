@@ -195,6 +195,8 @@ Storage's insertion benchmarks start each sample with 50,000 existing entries an
 - `cargo profile`: viewer profiling build with Tracy.
 - `cargo flamegraph`: requires a configured profiler backend; WSL2 may restrict Linux `perf`.
 
+For object geometry evidence, Alt-click a visible face in the viewer. The normal focus action also writes one `geometry pick` record to the session JSON log under `target/logs`. A hit records object identity, the actual cached mesh counts and bounds, its source LOD key, submitted face counts, and GPU allocation ranges. When a replacement is pending, its source publication is recorded separately from the mesh being drawn. Misses and pick-limit outcomes do not identify an object. Capture the same object before and after refinement to distinguish geometry changes from unchanged geometry with different materials. The record does not contain the scene planner's desired LOD or request status.
+
 ## Dependencies
 
 ```bash

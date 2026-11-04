@@ -1,3 +1,5 @@
+use std::mem;
+
 use super::{
     Change, DeliveryState, Duration, Instant, MAX_OBJECT_DETAIL_BATCH_ITEMS, MeshChange, MeshJob, POLL_DELAY, READ_QUANTUM, ReadQuery,
     ReconcileStep, Reconciler, RecoveryReason, Status, SurfaceStep, WORK, Work,
@@ -27,9 +29,6 @@ impl Reconciler {
         if let Some(event) = self.viewer.event() {
             return ReconcileStep::Asset(event);
         }
-        if let Some(event) = self.preparation.assets.event() {
-            return ReconcileStep::Asset(event);
-        }
         self.preparation.environments.retry_ready(now);
         if let Some(start) = self.preparation.environments.start(self.world.epoch, self.session.clone()) {
             return match start {
@@ -56,6 +55,10 @@ impl Reconciler {
                     self.begin_recovery(RecoveryReason::InvalidReply, now);
                 }
             }
+        }
+        if blocked && let Some(event) = self.preparation.assets.event() {
+            self.preparation.build_due = true;
+            return ReconcileStep::Asset(event);
         }
         if !blocked && self.publication.viewer_version != self.viewer.version() {
             self.publication.viewer_version = self.viewer.version();
@@ -115,42 +118,37 @@ impl Reconciler {
             }
         }
         if !blocked {
-            let changes = self.preparation.meshes.step(&self.state.mirror, &self.state.identities);
-            if !changes.is_empty() {
-                for change in &changes {
-                    self.state.mirror.apply_mesh(change);
-                    let entity = match change {
-                        MeshChange::Set(entity, ..) | MeshChange::Clear(entity, _) => entity,
-                    };
-                    if let Some(object) = self.state.mirror.objects.get(entity) {
-                        self.preparation.assets.invalidate(object);
-                    }
-                }
-                let changes = changes.into_iter().map(Change::Mesh).collect();
-                return ReconcileStep::Publish(self.batch_at(
-                    false,
-                    changes,
-                    self.publication.published_revision,
-                    self.publication.published_status,
-                ));
-            }
-            if let Some(job) = self.preparation.meshes.start() {
+            if mem::take(&mut self.preparation.build_due)
+                && let Some(job) = self.preparation.meshes.start()
+            {
                 return ReconcileStep::Build(job);
             }
-            let changes = self.preparation.assets.step(&self.state.mirror, &self.state.identities);
-            let terrain = self.preparation.assets.take_terrain_changes();
-            if !changes.is_empty() || !terrain.is_empty() {
-                let mut published = Vec::with_capacity(changes.len() + terrain.len());
-                for change in changes {
-                    self.state.mirror.apply(Change::Material(change.clone()));
-                    published.push(Change::Material(change));
+            let mesh_changes = self.preparation.meshes.step(&self.state.mirror, &self.state.identities);
+            let mut published = Vec::with_capacity(mesh_changes.len());
+            for change in mesh_changes {
+                self.state.mirror.apply_mesh(&change);
+                let entity = match &change {
+                    MeshChange::Set(entity, ..) | MeshChange::Clear(entity, _) => entity,
+                };
+                if let Some(object) = self.state.mirror.objects.get(entity) {
+                    self.preparation.assets.invalidate(object);
                 }
-                for region in terrain {
-                    let Some(old) = self.state.mirror.regions.get(&region).cloned() else { continue };
-                    let updated = old.with_terrain_textures(self.preparation.assets.terrain_textures(region));
-                    self.state.mirror.apply(Change::Region(updated.clone()));
-                    published.push(Change::Region(updated));
-                }
+                published.push(Change::Mesh(change));
+            }
+            let material_changes = self.preparation.assets.step(&self.state.mirror, &self.state.identities);
+            let terrain_changes = self.preparation.assets.take_terrain_changes();
+            published.reserve(material_changes.len() + terrain_changes.len());
+            for change in material_changes {
+                self.state.mirror.apply(Change::Material(change.clone()));
+                published.push(Change::Material(change));
+            }
+            for region in terrain_changes {
+                let Some(old) = self.state.mirror.regions.get(&region).cloned() else { continue };
+                let updated = old.with_terrain_textures(self.preparation.assets.terrain_textures(region));
+                self.state.mirror.apply(Change::Region(updated.clone()));
+                published.push(Change::Region(updated));
+            }
+            if !published.is_empty() {
                 return ReconcileStep::Publish(self.batch_at(
                     false,
                     published,
@@ -159,7 +157,11 @@ impl Reconciler {
                 ));
             }
             if let Some(event) = self.preparation.assets.event() {
+                self.preparation.build_due = true;
                 return ReconcileStep::Asset(event);
+            }
+            if let Some(job) = self.preparation.meshes.start() {
+                return ReconcileStep::Build(job);
             }
         }
         if self.world.reading.is_some() {

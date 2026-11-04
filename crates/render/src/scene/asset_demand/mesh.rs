@@ -24,6 +24,7 @@ struct MeshRecord {
 
 #[derive(Default)]
 struct MeshUser {
+    previous_desired: Option<MeshLod>,
     requested: [Option<MeshLod>; 2],
     published: Option<MeshLod>,
 }
@@ -132,10 +133,22 @@ impl MeshAssets {
         true
     }
 
-    pub(super) fn set_user_lods(&mut self, asset: AssetId, entity: Entity, requested: [Option<MeshLod>; 2], published: Option<MeshLod>) {
+    pub(super) fn previous_desired(&self, asset: AssetId, entity: Entity) -> Option<MeshLod> {
+        self.records.get(&asset).and_then(|record| record.users.get(&entity)).and_then(|user| user.previous_desired)
+    }
+
+    pub(super) fn set_user_lods(
+        &mut self,
+        asset: AssetId,
+        entity: Entity,
+        desired: Option<MeshLod>,
+        requested: [Option<MeshLod>; 2],
+        published: Option<MeshLod>,
+    ) {
         let Some(record) = self.records.get_mut(&asset) else { return };
         let changed = if let Some(user) = record.users.get_mut(&entity) {
             let previous = retained_lods(user);
+            user.previous_desired = desired.or(user.previous_desired);
             user.requested = requested;
             user.published = published;
             Some((previous, retained_lods(user)))
@@ -230,7 +243,14 @@ impl MeshAssets {
         deferred
     }
 
-    pub(super) fn request_plan(&self, asset: AssetId, desired: MeshLod, current: Option<MeshLod>, priority: Priority) -> MeshRequestPlan {
+    pub(super) fn request_plan(
+        &self,
+        asset: AssetId,
+        entity: Entity,
+        desired: MeshLod,
+        current: Option<MeshLod>,
+        priority: Priority,
+    ) -> MeshRequestPlan {
         let Some(record) = self.records.get(&asset) else {
             return MeshRequestPlan { needs_header: true, requests: Vec::new(), retained: [None; 2] };
         };
@@ -238,8 +258,16 @@ impl MeshAssets {
             return MeshRequestPlan { needs_header: true, requests: Vec::new(), retained: [None; 2] };
         };
         let visible = priority == Priority::Visible;
+        let retained_pending_desired = !visible
+            && state_pending(record, desired)
+            && record
+                .users
+                .get(&entity)
+                .is_some_and(|user| user.previous_desired == Some(desired) && user.requested.contains(&Some(desired)));
         let selected = if visible {
             selected_lod(record, header, asset, desired)
+        } else if retained_pending_desired {
+            Some(desired)
         } else if header.lod(asset, MeshLod::Lowest).is_ok() && !matches!(record.lods[MeshLod::Lowest.index()], LodContent::Unavailable) {
             Some(MeshLod::Lowest)
         } else {

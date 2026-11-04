@@ -71,7 +71,14 @@ impl Textures {
         let mut mip_work = 0;
         let mut mip_passes = 0;
         let mut ready = Vec::new();
-        for (id, entry) in &mut self.entries {
+        let mut uploading: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| matches!(&entry.state, TextureUploadState::Uploading { .. }).then_some((entry.used != epoch, *id)))
+            .collect();
+        uploading.sort_unstable();
+        for (_, id) in uploading {
+            let entry = self.entries.get_mut(&id).expect("uploading entry collected");
             let TextureUploadState::Uploading { gpu, pixels, row, mip } = &mut entry.state else { continue };
             let [width, height] = pixels.size;
             while *mip < mip_count(pixels.size) {
@@ -160,7 +167,7 @@ impl Textures {
                 mip_passes += 1;
             }
             if *mip == mip_count(pixels.size) {
-                ready.push(*id);
+                ready.push(id);
             }
         }
         for id in ready {
@@ -192,7 +199,7 @@ impl Textures {
 
 #[cfg(test)]
 mod tests {
-    use assets::{Failure, Priority, TextureHandle};
+    use assets::{Failure, Priority, TextureHandle, TextureId};
     use std::sync::atomic::Ordering;
     use wgpu::{Queue, TextureFormat};
 
@@ -203,25 +210,8 @@ mod tests {
     use futures::executor::block_on;
     use test_support::texture::{GRAY_4096_J2C, RGB_J2C, RGBA_J2C};
 
-    fn submit(textures: &mut Textures, device: &Device, queue: &Queue, epoch: u64) {
-        let mut encoder = device.create_command_encoder(&Default::default());
-        textures.upload(device, &mut encoder, epoch);
-        queue.submit([encoder.finish()]);
-        textures.submitted(queue);
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
-    }
-
-    fn upload(textures: &mut Textures, device: &Device, queue: &Queue, texture: &TextureHandle, epoch: u64) {
-        textures.request(texture, epoch, Priority::Visible);
-        let job = textures.next_conversion_job().expect("texture upload requested");
-        textures.complete(job.run(CompressionQuality::Fast));
-        submit(textures, device, queue, epoch);
-    }
-
-    #[test]
-    #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored ignored-only gpu_texture_lifetimes"]
-    fn gpu_texture_lifetimes() {
-        let (device, queue) = block_on(async {
+    fn vulkan_device() -> (Device, Queue) {
+        block_on(async {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::VULKAN,
                 ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -234,7 +224,34 @@ mod tests {
                 })
                 .await
                 .unwrap()
-        });
+        })
+    }
+
+    fn submit(textures: &mut Textures, device: &Device, queue: &Queue, epoch: u64) {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        textures.upload(device, &mut encoder, epoch);
+        queue.submit([encoder.finish()]);
+        textures.submitted(queue);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
+    }
+
+    fn upload_row(textures: &Textures, id: TextureId) -> u32 {
+        let Some(entry) = textures.entries.get(&id) else { panic!("upload entry remains active") };
+        let TextureUploadState::Uploading { row, .. } = &entry.state else { panic!("upload entry remains active") };
+        *row
+    }
+
+    fn upload(textures: &mut Textures, device: &Device, queue: &Queue, texture: &TextureHandle, epoch: u64) {
+        textures.request(texture, epoch, Priority::Visible);
+        let job = textures.next_conversion_job().expect("texture upload requested");
+        textures.complete(job.run(CompressionQuality::Fast));
+        submit(textures, device, queue, epoch);
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored ignored-only gpu_texture_lifetimes"]
+    fn gpu_texture_lifetimes() {
+        let (device, queue) = vulkan_device();
         let mut textures = Textures::new(&device, &queue);
         let handles: Vec<_> = (1..=8).map(|id| loaded(id, true)).collect();
         for texture in &handles {
@@ -361,5 +378,54 @@ mod tests {
         recreated.release_resources();
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
         assert_eq!((recreated.count(), recreated.bytes()), (0, 0));
+    }
+
+    #[test]
+    #[ignore = "requires a Vulkan adapter; run explicitly with cargo nextest run -p render --run-ignored only -E 'test(upload_prioritizes_visible)'"]
+    fn upload_prioritizes_visible() {
+        let (device, queue) = vulkan_device();
+        let mut textures = Textures::new(&device, &queue);
+        textures.bcn = false;
+        let handles = [loaded_fixture(115, GRAY_4096_J2C), loaded_fixture(116, GRAY_4096_J2C)];
+        assert!(handles.iter().all(|texture| texture.info().unwrap().size == [2048; 2]));
+        for texture in &handles {
+            textures.request(texture, 1, Priority::Background);
+            let job = textures.next_conversion_job().expect("background texture requested");
+            textures.complete(job.run(CompressionQuality::Fast));
+        }
+
+        submit(&mut textures, &device, &queue, 1);
+        let active: Vec<_> = textures
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| matches!(&entry.state, TextureUploadState::Uploading { .. }).then_some(*id))
+            .collect();
+        let [earlier, later] = active.as_slice() else { panic!("two large uploads remain active") };
+        let (earlier, later) = (*earlier, *later);
+        let mut initial_rows = [upload_row(&textures, earlier), upload_row(&textures, later)];
+        initial_rows.sort_unstable();
+        assert_eq!(initial_rows, [0, 512], "the first large texture consumes the full 4 MiB frame allowance");
+
+        textures.touch(later, 2);
+        let earlier_before = upload_row(&textures, earlier);
+        let later_before = upload_row(&textures, later);
+        submit(&mut textures, &device, &queue, 2);
+        assert_eq!(upload_row(&textures, later), later_before + 512, "current visible use receives the next frame allowance");
+        assert_eq!(
+            upload_row(&textures, earlier),
+            earlier_before,
+            "the earlier background upload gets no bytes after the allowance is spent"
+        );
+
+        let (lower, higher) = if earlier < later { (earlier, later) } else { (later, earlier) };
+        let lower_before = upload_row(&textures, lower);
+        let higher_before = upload_row(&textures, higher);
+        submit(&mut textures, &device, &queue, 3);
+        assert_eq!(upload_row(&textures, lower), lower_before + 512, "background uploads use ID order");
+        assert_eq!(upload_row(&textures, higher), higher_before);
+
+        drop(handles);
+        textures.release_resources();
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
     }
 }
